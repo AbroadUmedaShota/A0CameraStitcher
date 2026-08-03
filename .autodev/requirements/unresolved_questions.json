@@ -1,0 +1,12 @@
+{
+  "schema_version": "autodev.unresolved-questions.v1",
+  "requirements_version": "1.0.0",
+  "generated_at": "2026-08-03",
+  "questions": [
+    {"id":"HG-0001","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"A0 output acceptance criteria are undefined.","requested_decision":"Choose representative originals and required DPI, pixel dimensions, crop allowance, alignment tolerance, color-difference tolerance, and seam visibility criteria.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023"]},
+    {"id":"HG-0002","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"Physical rig and optical configuration are undefined.","requested_decision":"Confirm left-right or top-bottom placement, lens model, focal length, working distance, overlap, camera orientation, and lighting.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0010","WI-0020"]},
+    {"id":"HG-0003","reason_category":"ops","reason_severity":"important-decision","required_role":"engineer-admin","summary":"Hardware and development toolchain are not ready.","requested_decision":"Assign the two D750 bodies and target PC, then approve installation of .NET 10 SDK, C++ Build Tools, and CMake.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0001","WI-0010","WI-0011","WI-0012","WI-0013","WI-0014"]},
+    {"id":"HG-0004","reason_category":"spec","reason_severity":"important-decision","required_role":"product-owner","summary":"Camera transport cannot be selected until Phase 0 evidence exists.","requested_decision":"Approve GO-WPD, GO-SEQUENTIAL, REVISE-TRANSPORT, or STOP after reviewing the Phase 0 report.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0030","WI-0031","WI-0032","WI-0033","WI-0034","WI-0035"]},
+    {"id":"HG-0005","reason_category":"risk","reason_severity":"important-decision","required_role":"product-owner","summary":"License and redistribution terms for any Nikon-specific material are not approved.","requested_decision":"Before productization, approve the use and redistribution boundary for any officially obtained Nikon SDK or protocol material.","blocking_scope":"release","blocking_work_item_ids":["WI-0040"]}
+  ]
+}

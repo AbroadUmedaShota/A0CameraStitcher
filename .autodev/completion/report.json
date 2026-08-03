@@ -1,0 +1,1 @@
+{"schema_version":"autodev.completion-report.v1","evaluated_at":null,"completion_state":"not-started","blocking_gaps":["Phase 0 not started","open human gates"],"degraded_gaps":[],"remaining_human_actions":["HG-0001","HG-0002","HG-0003","HG-0004","HG-0005"],"evidence_summary":{"requirements_verified":0,"requirements_total":24}}

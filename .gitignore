@@ -1,0 +1,52 @@
+# Build outputs
+bin/
+obj/
+out/
+build/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Native dependencies and caches
+.tools/
+vcpkg_installed/
+CMakeFiles/
+CMakeCache.txt
+
+# Camera SDKs and licensed binaries
+vendor/nikon-sdk/
+**/nikon-sdk/
+*.dll
+*.lib
+*.pdb
+
+# Captures and generated images
+captures/
+samples/private/
+artifacts/
+*.nef
+*.nrw
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+!docs/assets/*.png
+!samples/public/README.md
+
+# Local state and secrets
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# AutoDev runtime-only output
+.autodev/runs/*
+!.autodev/runs/.gitkeep
+.autodev/execution/*
+!.autodev/execution/.gitkeep

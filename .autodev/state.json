@@ -1,0 +1,61 @@
+{
+  "schema_version": "autodev.state.v1",
+  "repo": {
+    "id": "AbroadUmedaShota/A0CameraStitcher",
+    "default_branch": "main"
+  },
+  "controller": {
+    "last_run_id": null,
+    "last_run_at": null,
+    "consecutive_failed_runs": 0
+  },
+  "lifecycle": "bootstrap-paused",
+  "governance": {
+    "mode": "waiting-human",
+    "pause_reason": "Phase 0 hardware, output-quality, and local toolchain gates are unresolved.",
+    "degraded_reasons": [
+      "dotnet SDK not installed",
+      "CMake not installed",
+      "C++ compiler not detected",
+      "D750 dual-camera hardware test not yet run"
+    ],
+    "human_gates": ["HG-0001", "HG-0002", "HG-0003", "HG-0004", "HG-0005"],
+    "wait_reason": {
+      "category": "requirements",
+      "severity": "important-decision",
+      "summary": "A0 output criteria, physical rig, and Phase 0 hardware readiness require requester decisions.",
+      "required_role": "product-owner",
+      "requested_decision": "Confirm the output-quality target and rig/test-hardware conditions, then authorize Phase 0.",
+      "blocking_scope": "milestone",
+      "blocking_work_item_ids": ["WI-0010", "WI-0011", "WI-0012", "WI-0013", "WI-0014"],
+      "impact_if_unresolved": "Documentation remains usable, but hardware implementation and transport selection stay paused."
+    }
+  },
+  "requirements": {
+    "source_hash": null,
+    "normalized_version": "1.0.0",
+    "last_ingested_at": "2026-08-03"
+  },
+  "plan": {
+    "plan_version": "1.0.0",
+    "last_planned_at": "2026-08-03"
+  },
+  "queue": {
+    "state": "draft-items-present",
+    "active_issue": null
+  },
+  "execution": {
+    "state": "idle",
+    "current_work_item_id": null,
+    "current_branch": null,
+    "current_pr": null
+  },
+  "completion": {
+    "state": "not-started",
+    "coverage": {
+      "mvp_requirements_total": 24,
+      "mvp_requirements_verified": 0
+    },
+    "last_judged_at": null
+  }
+}

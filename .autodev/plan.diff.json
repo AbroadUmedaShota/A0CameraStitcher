@@ -1,0 +1,11 @@
+{
+  "schema_version": "autodev.plan-diff.v1",
+  "plan_version": "1.0.0",
+  "base_plan_version": null,
+  "generated_at": "2026-08-03",
+  "summary": "Initial MVP delivery plan generated from normalized requirements.",
+  "added_milestones": ["M0","M1","M2","M3","M4"],
+  "added_work_items": 21,
+  "changed_work_items": [],
+  "removed_work_items": []
+}

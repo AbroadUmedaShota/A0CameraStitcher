@@ -1,0 +1,65 @@
+schema_version: autodev.config.v1
+repo:
+  owner: AbroadUmedaShota
+  name: A0CameraStitcher
+  default_branch: main
+requirements:
+  source_globs:
+    - docs/**/*.md
+automation:
+  enabled: false
+  cadence_minutes: 30
+  max_promotions_per_run: 1
+  max_active_issues: 1
+  promote_and_execute_same_run: false
+  require_human_for_final_done: true
+  request_types:
+    - requirements-submit
+    - ux-review
+    - spec-decision
+    - release-decision
+github:
+  labels:
+    managed: autodev:managed
+    active: autodev:active
+    blocked: autodev:blocked
+    human_gate: autodev:human-gate
+    ux_review: autodev:ux-review
+    spec_decision: autodev:spec-decision
+    safety_stop: autodev:safety-stop
+    release_gate: autodev:release-gate
+    done: autodev:done
+  branch_prefix: autodev/
+  pr_title_prefix: "[autodev]"
+verification:
+  commands:
+    - pwsh -NoLogo -NoProfile -File .autodev/scripts/Invoke-AutoDevHeartbeat.ps1 -CheckOnly
+  hardware_plan: docs/PHASE0_TEST_PLAN.md
+notifications:
+  channels:
+    github: true
+    codex_inbox: true
+    teams: false
+    email: false
+  notify_on:
+    waiting_human:
+      categories: [requirements, ux, spec, release]
+    safety_stop: true
+    mvp_complete: true
+    release_candidate: true
+    done: true
+  suppress_on: [planning, implementing, verifying, pr-open, waiting-for-backlog]
+human_gate_policy:
+  categories: [requirements, ux, spec, ops, release, risk]
+  severities: [normal-review, important-decision, safety-stop]
+  required_roles: [requester, ux-reviewer, product-owner, engineer-admin]
+merge_policy:
+  auto_merge_allowed: [S0, S1]
+  require_human_if: [ux_review_required, open_human_gate, protected_path_changed, safety_class_ge_S2]
+safety:
+  auto_promote_allowed: [S0, S1]
+  protected_paths:
+    - docs/PRODUCT_REQUIREMENTS.md
+    - docs/PHASE0_TEST_PLAN.md
+    - .autodev/requirements/unresolved_questions.json
+  require_human_for: [hardware, camera-settings, proprietary-sdk, auth, permissions, secrets, billing, release]

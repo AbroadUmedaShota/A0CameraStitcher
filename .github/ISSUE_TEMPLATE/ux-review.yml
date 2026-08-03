@@ -1,0 +1,23 @@
+name: UX review
+description: Request an operator-flow or wording decision
+title: "[ux-review] "
+labels: ["autodev:human-gate", "autodev:ux-review"]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow under review
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Requested decision
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or evidence
+    validations:
+      required: false

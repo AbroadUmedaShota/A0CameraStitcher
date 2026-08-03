@@ -1,0 +1,25 @@
+name: Requirements submit
+description: Submit or change a product requirement
+title: "[requirements] "
+labels: ["autodev:human-gate"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Business need
+      description: Describe the operator problem and expected outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: Describe what can be observed to prove the requirement.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and out of scope
+    validations:
+      required: false

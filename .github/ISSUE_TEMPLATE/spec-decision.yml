@@ -1,0 +1,23 @@
+name: Specification decision
+description: Record a technical or product specification gate
+title: "[spec-decision] "
+labels: ["autodev:human-gate", "autodev:spec-decision"]
+body:
+  - type: textarea
+    id: options
+    attributes:
+      label: Options and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision requested
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact if unresolved
+    validations:
+      required: true

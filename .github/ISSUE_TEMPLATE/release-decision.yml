@@ -1,0 +1,24 @@
+name: Release decision
+description: Request final MVP release approval
+title: "[release-decision] "
+labels: ["autodev:human-gate", "autodev:release-gate"]
+body:
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+    validations:
+      required: true
+  - type: checkboxes
+    id: approvals
+    attributes:
+      label: Required checks
+      options:
+        - label: Phase 0 transport decision is approved
+          required: true
+        - label: Quality thresholds are met
+          required: true
+        - label: Durability and reconnect tests passed
+          required: true
+        - label: License and redistribution review is approved
+          required: true
