@@ -1,33 +1,11 @@
 {
   "schema_version": "autodev.bootstrap-report.v1",
-  "generated_at": "2026-08-03",
-  "mode": "bootstrap-paused",
-  "repo_ready": false,
-  "created": [
-    ".autodev/config.yaml",
-    ".autodev/state.json",
-    ".autodev/requirements/normalized.json",
-    ".autodev/requirements/unresolved_questions.json",
-    ".autodev/requirements/source_index.json",
-    ".autodev/plan.json",
-    ".autodev/plan.graph.json",
-    ".autodev/plan.diff.json",
-    ".github/ISSUE_TEMPLATE/*",
-    ".github/pull_request_template.md"
-  ],
-  "repaired": [],
-  "readiness_gaps": [
-    "Phase 0 has not been authorized",
-    "two Nikon D750 cameras and the target rig have not been checked",
-    "A0 output resolution and quality thresholds are unresolved",
-    ".NET 10 SDK is not installed on the current PC",
-    "CMake and a C++ compiler are not detected",
-    "no active heartbeat is allowed while bootstrap is paused"
-  ],
-  "next_safe_subsystems": [
-    "requirements-ingest",
-    "app-delivery-planner",
-    "github-autodev-bootstrap"
-  ],
-  "blocking_signal": "phase0-hardware-quality-and-toolchain-gates-open"
+  "generated_at": "2026-08-04",
+  "mode": "phase0a-wpd-validation",
+  "repo_ready": true,
+  "created": ["CMakeLists.txt","src/phase0/*","tests/phase0_tests.cpp","docs/PHASE0_READINESS.md"],
+  "repaired": ["D750 requirements replaced by D810 requirements","parallel WPD plan replaced by exclusive sequential Nikon SDK plan","Phase 0 split into one-camera and two-camera gates",".NET moved to M3"],
+  "readiness_gaps": ["CAM-A ten-capture repetition, reconnect persistence, and Phase 0A recovery tests remain","a second D810 is required for Phase 0B","A0 output and final rig criteria remain gated until M2"],
+  "next_safe_subsystems": ["WPD single-camera repetition","WPD reconnect and recovery tests","SDK-independent contract tests"],
+  "blocking_signal": null
 }

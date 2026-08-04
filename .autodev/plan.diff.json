@@ -1,11 +1,14 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "1.0.0",
-  "base_plan_version": null,
-  "generated_at": "2026-08-03",
-  "summary": "Initial MVP delivery plan generated from normalized requirements.",
-  "added_milestones": ["M0","M1","M2","M3","M4"],
-  "added_work_items": 21,
-  "changed_work_items": [],
-  "removed_work_items": []
+  "plan_version": "2.0.0",
+  "base_plan_version": "1.0.0",
+  "generated_at": "2026-08-04",
+  "summary": "Breaking rebaseline from D750 parallel WPD planning to D810 exclusive sequential Nikon SDK Phase 0, split for one-camera and two-camera hardware availability.",
+  "added_milestones": ["M1A","M1B"],
+  "changed_milestones": ["M0","M2","M3","M4"],
+  "removed_milestones": ["M1"],
+  "added_work_items": ["WI-0003","WI-0004","WI-0016","WI-0017","WI-0018","WI-0024"],
+  "changed_work_items": ["WI-0001","WI-0002","WI-0010","WI-0011","WI-0012","WI-0013","WI-0014","WI-0015","WI-0020","WI-0021","WI-0022","WI-0023","WI-0030","WI-0031","WI-0032","WI-0033","WI-0034","WI-0035","WI-0040","WI-0041","WI-0042"],
+  "removed_work_items": [],
+  "breaking_changes": ["camera model D750 to D810","parallel dispatch to exclusive sequential capture","WPD first to Nikon SDK first",".NET removed from Phase 0","Phase 0 split by one and two camera availability"]
 }

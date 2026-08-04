@@ -1,66 +1,10 @@
 {
   "schema_version": "autodev.human-gates.v1",
-  "updated_at": "2026-08-03",
+  "updated_at": "2026-08-04",
   "gates": [
-    {
-      "id": "HG-0001",
-      "category": "requirements",
-      "severity": "important-decision",
-      "required_role": "product-owner",
-      "summary": "A0出力の解像度・DPI・クロップ・許容継ぎ目が未確定",
-      "requested_decision": "代表原稿と、必要DPI、最終ピクセル寸法、クロップ許容、位置ずれ・色差・継ぎ目の合格値を決めてください。",
-      "blocking_scope": "milestone",
-      "blocking_work_item_ids": ["WI-0020", "WI-0021", "WI-0022", "WI-0023"],
-      "channels": ["github", "codex_inbox"],
-      "status": "open"
-    },
-    {
-      "id": "HG-0002",
-      "category": "requirements",
-      "severity": "important-decision",
-      "required_role": "product-owner",
-      "summary": "固定リグの向き・レンズ・焦点距離・撮影距離・照明条件が未確定",
-      "requested_decision": "D750を左右または上下のどちらに配置するか、使用レンズ、焦点距離、原稿までの距離、照明を確定してください。",
-      "blocking_scope": "milestone",
-      "blocking_work_item_ids": ["WI-0010", "WI-0020"],
-      "channels": ["github", "codex_inbox"],
-      "status": "open"
-    },
-    {
-      "id": "HG-0003",
-      "category": "ops",
-      "severity": "important-decision",
-      "required_role": "engineer-admin",
-      "summary": "Phase 0実機とWindows開発環境が未準備",
-      "requested_decision": "D750 2台、USB構成、検証PCを指定し、.NET 10 SDK、C++ Build Tools、CMakeの導入を承認してください。",
-      "blocking_scope": "milestone",
-      "blocking_work_item_ids": ["WI-0001", "WI-0010", "WI-0011", "WI-0012", "WI-0013", "WI-0014"],
-      "channels": ["github", "codex_inbox"],
-      "status": "open"
-    },
-    {
-      "id": "HG-0004",
-      "category": "spec",
-      "severity": "important-decision",
-      "required_role": "product-owner",
-      "summary": "USBカメラ制御方式はPhase 0結果後に選択する",
-      "requested_decision": "Phase 0証拠を確認し、GO-WPD、GO-SEQUENTIAL、REVISE-TRANSPORT、STOPのいずれかを承認してください。",
-      "blocking_scope": "milestone",
-      "blocking_work_item_ids": ["WI-0030", "WI-0031", "WI-0032", "WI-0033", "WI-0034", "WI-0035"],
-      "channels": ["github", "codex_inbox"],
-      "status": "open"
-    },
-    {
-      "id": "HG-0005",
-      "category": "risk",
-      "severity": "important-decision",
-      "required_role": "product-owner",
-      "summary": "Nikon固有PTP資料・SDK・再配布物の利用条件が未確認",
-      "requested_decision": "製品化前に正規取得資料のライセンス条件、利用範囲、再配布可否を確認し、採用経路を承認してください。",
-      "blocking_scope": "release",
-      "blocking_work_item_ids": ["WI-0040"],
-      "channels": ["github", "codex_inbox"],
-      "status": "open"
-    }
+    {"id":"HG-0001","category":"requirements","severity":"important-decision","required_role":"product-owner","summary":"D810二台のA0出力品質基準が未確定","requested_decision":"M2の光学成立性計算後に代表原稿、向き、実効DPI、pixels、crop、位置ずれ、色差、seam、総p95を承認してください。","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"channels":["github","codex_inbox"],"status":"open"},
+    {"id":"HG-0002","category":"requirements","severity":"important-decision","required_role":"product-owner","summary":"D810最終リグと光学構成が未確定","requested_decision":"M2前に配置、向き、lens、焦点距離、撮影距離、重複、露出・focus・WB、照明、A0 chartを承認してください。","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"channels":["github","codex_inbox"],"status":"open"},
+    {"id":"HG-0003B","category":"ops","severity":"important-decision","required_role":"engineer-admin","summary":"Phase 0B用の二台目D810が未準備","requested_decision":"二台目D810を準備し、CAM-B、10件、100件、切断、電源断、再起動、順序・port交換試験を承認してください。","blocking_scope":"work-item","blocking_work_item_ids":["WI-0014","WI-0015","WI-0016","WI-0017"],"channels":["codex_inbox"],"status":"open"},
+    {"id":"HG-0005","category":"risk","severity":"important-decision","required_role":"product-owner","summary":"Nikon SDK・OpenCV等の製品再配布条件が未承認","requested_decision":"packaging前にinstallerとnative dependenciesの再配布範囲を承認してください。","blocking_scope":"release","blocking_work_item_ids":["WI-0040"],"channels":["github","codex_inbox"],"status":"open"}
   ]
 }

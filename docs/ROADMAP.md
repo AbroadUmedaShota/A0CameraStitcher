@@ -1,64 +1,59 @@
 # MVPロードマップ
 
-## M0: 準備
+## M0: D810/SDK準備
 
-- 要件・設計・Phase 0試験計画を承認する。
-- .NET 10 SDK、C++ Build Tools、CMakeを準備する。
-- D750 2台、レンズ、USB構成、固定リグ、テストチャートを用意する。
-- 出力DPI・画質基準・撮影範囲を確定する。
+- D810二台、Nikon SDK優先、排他的順次撮影へ要件を再基準化する。
+- MSVC x64とCMakeを検証する。.NET 10はM3まで保留する。
+- SDK使用許諾を本人が確認し、正規取得物をリポジトリ外へ配置する。
+- Phase 0 CLI、fake transport、transaction・証拠契約を実装する。
 
-完了条件: 必要機材・品質基準・開発環境が揃い、Phase 0を開始できる。
+完了条件: SDK未接続でも全自動テストが通り、本人同意後に実SDKadapterを接続できる。
 
-## M1: USB二台制御 Phase 0
+## M1A: D810一台 Phase 0
 
-- WPD能力プローブ
-- 1台撮影・転送
-- 二台同時認識、撮影命令、直列転送
-- 永続IDによる左右固定
-- 100回連続試験、USB再接続試験
-- transport decision gate
+- SDK列挙と匿名別名`CAM-A`
+- 10回連続撮影、JPEG回収、原子的保存、SHA-256
+- USB切断、電源断、アプリ再起動からの復旧
+- SDK不成立時の匿名化報告
 
-完了条件: `PHASE0_TEST_PLAN.md` の判定が承認される。
+完了条件: `PHASE0_TEST_PLAN.md` のPhase 0Aが合格、またはSDK不成立証拠が確定する。
 
-## M2: オフライン合成PoC
+## M1B: D810二台 Phase 0
 
-- 権利確認済み左右JPEG fixture
-- カメラ別歪み補正
-- 平面ホモグラフィと固定ワープ
-- 残差補正
-- 露出・色差補正
-- シーム、multi-band blending、クロップ
-- 品質指標と処理時間計測
+- 二台目`CAM-B`と接続順・ポート非依存の割当て
+- `CAM-A → CAM-B`順次transaction 10件
+- 100件連続、全異常系、匿名化レポート
+- `GO-SDK-SEQUENTIAL` / `REVISE-WPD` / `STOP`
 
-完了条件: 承認済みA0相当チャートで合意済み画質基準を満たす。
+完了条件: Phase 0判定をproduct ownerが承認する。二台目が揃うまでは`WAITING-HARDWARE`。
+
+## M2: D810オフライン合成PoC
+
+- 7360×4912を基に150/180/200 DPIの光学成立性を計算
+- 権利確認済みA0人工チャートと品質オラクル
+- カメラ別歪み補正、固定平面warp、残差補正
+- 露出・色差補正、seam、multi-band blending、crop
+- 品質指標、拒否動作、処理時間計測
+
+完了条件: `HG-0001`、`HG-0002`承認済み条件を満たす。
 
 ## M3: 撮影・合成統合MVP
 
-- WPFメイン画面
-- 左右Camera Agent
-- CaptureCoordinatorとトランザクション保存
-- リグプロファイル
-- 自動合成、再合成、出力
-- 部分失敗・切断復旧
+- .NET 10 / WPFアプリ
+- 単一C++ Camera AgentとNamed Pipe
+- 排他的順次撮影、durable transaction、原画像保持
+- 自動合成、再合成、部分失敗・切断復旧
 
-完了条件: 1操作で撮影から合成結果まで完了し、失敗時も原画像が保持される。
+完了条件: 1操作で順次撮影から合成結果まで完了し、失敗時も原画像が保持される。
 
 ## M4: 受入・配布
 
-- 受入原稿セットで画質・性能試験
-- 100回耐久、USB異常系、容量不足試験
-- ログ収集と診断手順
-- インストーラ
-- ライセンスと再配布物確認
-- 操作手順書
+- 統合100件試験、USB異常系、容量不足、クリーンPC導入
+- installer、診断手順、操作手順
+- Nikon SDKとOpenCVの利用・再配布条件確認
 
-完了条件: product ownerのMVP受入判定を得る。
+完了条件: product ownerがMVPリリースを承認する。
 
 ## MVP後
 
-- TIFF/16-bit出力
-- NEF/RAW
-- Live View
-- GPU高速化
-- 遠景パノラマ
-- 三台以上のカメラ
+- TIFF/16-bit、NEF/RAW、Live View、GPU、遠景パノラマ、三台以上

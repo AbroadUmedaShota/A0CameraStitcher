@@ -17,8 +17,8 @@
 
 ## Current lifecycle
 
-`bootstrap-paused`
+`phase0a-wpd-validation`
 
-The repository is ready for requirements and planning work, but not for autonomous implementation. Activation remains blocked until the A0 output criteria, physical rig, local toolchain, and Phase 0 camera transport experiment are resolved.
+The requester accepted the Nikon SDK license and later approved `REVISE-WPD` after the SDK and official sample both failed to publish a PC-transfer SDRAM Item. The explicit WPD adapter inventories one D810 as anonymous `CAM-A` and completed hardware run `run-1785826415773-1`, preserving a verified 7360x4912 JPEG on the PC without deleting the camera-side object. Phase 0A repetition and fault tests remain open; Phase 0B remains blocked until a second D810 is available.
 
 No recurring heartbeat, generated Issue, implementation branch, or pull request is active at bootstrap time.

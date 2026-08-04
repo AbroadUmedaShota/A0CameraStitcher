@@ -2,93 +2,118 @@
 
 ## 目的
 
-完成アプリの前に、Windows 11 x64とNikon D750 2台をUSB接続した構成が、製品化候補として成立するかを判定する。
+完成アプリの前に、Windows 11 x64とNikon D810をUSB接続し、正規取得したNikon Camera Remote SDKで一台ずつ排他的に撮影・JPEG回収できるかを判定する。
 
-## 前提機材
+## 開始条件
 
-- Nikon D750 2台（ファームウェアバージョンを記録）
-- 同一型番レンズ2本（焦点距離・フォーカス・VRを固定）
-- USBケーブル2本
-- Windows 11 x64検証PC
-- 可能なら別USBルート。使用ポートとハブ構成を記録
-- 固定された静止テストチャート
-- 十分な連続照明
+- Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
+- Phase 0B前: `HG-0003B`（二台目D810と二台試験許可）が解消済み。
+- `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
+- Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
-## テスト段階
+## Phase 0共通撮影プロファイル
 
-### P0-1: 環境とデバイス列挙
+- JPEG Fine L、FX
+- 固定露出、Auto ISO無効
+- manual focus、固定white balance、VR無効
+- single frame、bracketing無効
+- 権利確認済みの固定静止チャート
+- 実行前のカメラ設定値、firmware、USBポート・ハブ構成を記録
 
-- OS、USBコントローラ、カメラファームウェアを記録する。
-- WPDデバイス一覧からD750を2台検出する。
-- モデル、PnP Device ID、Persistent Unique ID、取得可能プロパティを記録する。
-- 再接続後も左右割当てに使える識別子を決める。
+## Phase 0A: 一台先行
 
-合格: 2台を同時に区別でき、再接続後も同一個体へ対応付けられる。
+### P0-A1: SDKとD810列挙
 
-### P0-2: 1台撮影
+- SDK版、OS、MSVC、CMakeを記録する。
+- D810一台を列挙し、実識別子をローカルで`CAM-A`へ対応付ける。
+- 取得可能なcapabilityとfirmwareを匿名化して記録する。
+- 切断・再接続後も`CAM-A`を復元する。
 
-- 標準WPD撮影コマンドの対応可否を確認する。
-- JPEG Fineを撮影し、新規画像オブジェクトを検出する。
-- PCへ転送し、JPEGとして開けることを確認する。
-- タイムアウトとキャンセル動作を記録する。
+合格: D810を安定して`CAM-A`として識別でき、実識別子がcommit対象へ出ない。
 
-合格: 1台で撮影からJPEG保存まで10回連続成功する。または、標準WPD非対応を再現可能な証拠とともに確定する。
+### P0-A2: 単体撮影・回収
 
-### P0-3: 二台撮影
+- セッション開始前に画像Object/eventの基準点を記録する。
+- 撮影命令後に唯一の新規JPEGを検出し、PCへ転送する。
+- `.partial`保存、JPEG検証、サイズ・SHA-256、原子的renameを確認する。
+- 10回連続で自動再試行なしに実行する。
 
-- 2つのカメラセッションを同時に開く。
-- 専用スレッドから撮影命令を発行する。
-- 左右の画像到着順に依存せず、同じトランザクションへ対応付ける。
-- 初期版は画像転送を直列化する。
+合格: 10/10で撮影・回収・JPEG検証・ハッシュ確定が成功する。
 
-合格: 誤ペアなく10トランザクションを回収し、命令発行差と画像到着差を記録できる。
+### P0-A3: 単体異常系
 
-### P0-4: 安定性
+- idle中のUSB切断・再接続
+- active transaction中のUSB切断
+- active transaction中の電源断
+- アプリ再起動後の新規transaction
 
-- 100回連続撮影
-- 左右それぞれのUSB切断・再接続
-- 片側電源断
-- PCアプリ再起動
-- カメラ接続順の入替え
-- 別USBポートへの差替え
+合格: 失敗transactionが`FailedPartial`で確定し、取得済み画像を保持し、復旧後の新規transactionが成功する。
 
-合格目標:
+## SDK不成立判定
 
-- 誤ペア 0件
-- 原画像消失 0件
-- 回復不能停止 0件
-- 失敗時に原因と対象トランザクションを特定可能
+次のいずれかでSDK経路を停止する。
 
-### P0-5: 判定
+1. D810を列挙できない。
+2. 撮影命令を実行できない。
+3. 新規JPEGを一意に検出または転送できない。
+4. P0-A2が10/10を満たさない。
+5. 文書化された再接続手順で復帰できない。
 
-次のいずれかを選択する。
+OS、SDK版、firmware、エラー、再現手順、匿名化ログをまとめ、product ownerがWPD切替を承認するまでWPD調査・実装を開始しない。
 
-1. `GO-WPD`: WPD/PTP二台制御でMVPへ進む。
-2. `GO-SEQUENTIAL`: 二台同時オープン不可だが、安全な順次セッションで要件を満たせる。
-3. `REVISE-TRANSPORT`: 正規取得資料に基づく別のUSB制御方式を検討する。
-4. `STOP`: USBのみでは必要な運用を満たせず、製品計画を再検討する。
+## Phase 0B: 二台順次撮影
 
-この判定は実機ログと100回試験結果を添えて、product ownerが承認する。
+### P0-B1: 二台識別
 
-## 記録する指標
+- 二台目を`CAM-B`として登録する。
+- 接続順変更3回、各カメラのUSBポート交換後も別名が維持されることを確認する。
 
-- Capture command start/return time per camera
-- Image object detected time per camera
-- Download start/completed time per camera
-- Dispatch skew
-- Object arrival skew
-- Transfer duration
-- Total transaction duration
-- Error code/category
-- Reconnect duration
+### P0-B2: 順次二台transaction
 
-これらは実シャッター開口時刻を示さない。
+- `CAM-A`を開き、撮影・回収・保存・closeを完了する。
+- 次に`CAM-B`を開き、同じ処理を完了する。
+- 両方が確定した場合だけ`Paired`、`Complete`とする。
+- 10件を自動再試行なしで実行する。
+
+合格: 10/10 transaction、CAM-A/B各10枚、誤ペア・消失・曖昧画像採用0件。
+
+### P0-B3: 100件安定性
+
+- 二台transactionを100件連続で実行する。
+- transactionごとに両ファイルのサイズ、SHA-256、各状態・時刻を記録する。
+- p50、p95、maxを集計するが、Phase 0の合否には使用しない。
+
+合格:
+
+- transaction 100/100
+- CAM-A撮影・回収 100/100
+- CAM-B撮影・回収 100/100
+- 初回試行失敗、自動再試行、誤ペア、原画像消失、曖昧画像の自動採用、回復不能停止が各0件
+
+### P0-B4: 二台異常系
+
+通常100件とは別に次を実行する。
+
+- CAM-A/Bそれぞれのactive中USB切断と電源断を各1回
+- CAM-A保存後、CAM-B開始前のアプリ終了を1回
+- 接続順変更3回
+- CAM-A/BのUSBポート交換を各1回
+
+合格: 対象transactionを失敗確定し、取得済み原画像と曖昧画像を保持し、復旧後の新規transactionが成功する。
+
+## P0判定
+
+1. `GO-SDK-SEQUENTIAL`: Phase 0A/Bの全条件を満たした。
+2. `REVISE-WPD`: SDK不成立証拠をproduct ownerが確認し、WPD一台試験への切替を承認した。
+3. `STOP`: USBのみでは必要な運用を満たせないとproduct ownerが判断した。
+
+この判定は匿名化レポートを添えてproduct ownerが承認し、ADRへ反映する。
 
 ## コミット禁止データ
 
-- 実カメラの完全なシリアル番号
-- Nikon SDKアーカイブとライセンス対象バイナリ
+- 実カメラの完全なシリアル・SDK識別子
+- Nikon SDKアーカイブ、DLL、LIB、ヘッダー、仕様資料
 - 顧客原稿、個人情報、機密画像
-- 大容量の実写JPEG/NEF
+- 実写JPEG/NEFとrawイベントログ
 
-公開可能な合成テスト画像は、権利確認済みの人工チャートのみ `samples/public` に追加する。
+権利確認済み人工チャートだけを `samples/public` の許可範囲へ追加できる。

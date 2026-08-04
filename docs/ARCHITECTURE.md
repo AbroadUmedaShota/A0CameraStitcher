@@ -2,63 +2,81 @@
 
 ## 設計方針
 
-MVPは「Windowsアプリ」「カメラ制御エージェント」「画像合成エンジン」を分離する。最初から全体を作らず、Phase 0でUSB制御の成立性を確認してから統合へ進む。
+MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画像合成エンジン」を分離する。Phase 0は.NETへ依存しないC++20コンソールとして、D810用Nikon Camera Remote SDKの順次制御を検証する。
 
 ```text
 ┌────────────────────────────────────────────┐
-│ A0CameraStitcher.App (.NET 10 / WPF)      │
+│ A0CameraStitcher.App (.NET 10 / WPF, M3)  │
 │ UI / CaptureCoordinator / Session / Store │
 └───────────────────┬────────────────────────┘
                     │ Named Pipe
-          ┌─────────┴─────────┐
-          │                   │
-┌─────────▼─────────┐ ┌───────▼───────────┐
-│ CameraAgent.Left  │ │ CameraAgent.Right │
-│ C++ / WPD / PTP   │ │ C++ / WPD / PTP   │
-└─────────┬─────────┘ └───────┬───────────┘
-          │ USB               │ USB
-      Nikon D750 L        Nikon D750 R
+┌───────────────────▼────────────────────────┐
+│ CameraAgent (C++20, one active session)    │
+│ CAM-A capture/download -> close            │
+│ CAM-B capture/download -> close            │
+└───────────────────┬────────────────────────┘
+                    │ Nikon Remote SDK / USB
+              Nikon D810 A / B
 
 ┌────────────────────────────────────────────┐
-│ StitchEngine (C++20 / OpenCV)              │
+│ StitchEngine (C++20 / OpenCV, M2)         │
 │ calibration / warp / color / seam / blend │
 └────────────────────────────────────────────┘
 ```
 
-## カメラ制御
+## Phase 0ツール
 
-### Phase 0の順序
+`A0CameraStitcher.Phase0.exe` は次の境界を持つ。
 
-1. WPDでD750を2台列挙し、取得可能な機能・プロパティ・永続IDを記録する。
-2. 標準 `WPD_COMMAND_STILL_IMAGE_CAPTURE_INITIATE` の対応可否を1台で確認する。
-3. 標準機能が不足する場合、承認済みの公開資料または正規取得したSDK資料の範囲でPTP vendor extensionを調査する。
-4. 二台へ撮影命令を発行し、ObjectAdded相当の検出と画像回収を検証する。
-5. 100回連続撮影とUSB再接続を検証する。
+- `ICameraTransport`: 列挙、セッション開始、基準点取得、撮影、JPEG取得、セッション終了。
+- `CaptureCoordinator`: 単一進行トランザクションと`CAM-A → CAM-B`の状態遷移。
+- `EvidenceWriter`: 原画像の原子的保存、SHA-256、JSONLイベント、匿名化レポート。
+- `NikonSdkTransport`: 正規取得したD810用SDKをリポジトリ外から読み込むadapter。
+- `WpdTransport`: 承認済みfallback。Windows Portable Device APIで撮影前後のJPEG Object差分を検出し、カメラ側を削除せずPCへ取得するadapter。
+- `FakeCameraTransport`: SDK不要のtransaction・失敗系テスト用。
 
-標準WPDがD750の撮影を公開しない可能性がある。これは不具合ではなく、ドライバ能力として判定する。
+SDK APIは、本人同意後に正規取得したlocal資料と公式sampleで確認した範囲だけをadapterへ反映する。SDK binaryは配置元から動的loadし、copy・link・再配布しない。
 
-### プロセス分離
-
-カメラごとに専用プロセスとCOMスレッドを持つ。これはNikon SDKの制限回避ではなく、WPD/PTP処理の障害分離と再接続単位の明確化が目的である。
-
-### 撮影トランザクション
+## 撮影トランザクション
 
 ```text
-Create transaction
-  -> validate both cameras and rig profile
-  -> arm left and right agents
-  -> dispatch capture commands concurrently
-  -> detect left and right image objects
-  -> transfer left image
-  -> transfer right image
-  -> atomically persist originals and metadata
-  -> run stitch engine
-  -> persist output and quality metrics
+Idle
+ -> CaptureA: open CAM-A / baseline / capture / exactly-one JPEG
+ -> PersistA: .partial / validate / SHA-256 / atomic rename / close
+ -> CaptureB: open CAM-B / baseline / capture / exactly-one JPEG
+ -> PersistB: .partial / validate / SHA-256 / atomic rename / close
+ -> Paired
+ -> Complete
 ```
+
+どの段階でもtimeout、切断、複数候補、既存・遅延画像を検出した場合は`FailedPartial`へ遷移する。自動再試行・同一トランザクションの再開・曖昧画像の自動帰属は行わない。取得済み原画像と曖昧画像は削除しない。
+
+画像帰属は、active Source sessionで撮影前`Children`をbaseline化し、撮影開始後かつon-card完了を示す`CaptureComplete(data=1)`より前に現れた新規Itemだけを候補とする。完了後のItem、消失したItem、完了通知なし、候補0件・複数件は採用しない。完了後500msは追加eventを監視し、遅延候補を検出する。
+
+camera aliasは列挙順で決めず、local identity mapから解決する。現在のidentity候補はSDK Source IDをhash化したものであり、再接続・port変更後の永続性はNikon資料で保証されていない。Phase 0A/B実測に合格するまで暫定方式とする。
+
+## timeout初期値
+
+- SDK open: 10秒
+- image event: 15秒
+- JPEG download: 60秒
+- SDK close: 10秒
+- 二台トランザクションwatchdog: 180秒
+
+timeoutは安全停止値であり、Phase 0性能合否値ではない。すべて実行レポートへ記録する。
+
+## 保存
+
+- ローカル実識別子対応表: `%LOCALAPPDATA%\A0CameraStitcher\phase0\camera-map.json`
+- raw証拠: `artifacts/phase0/<run-id>/`
+- 曖昧画像: `artifacts/phase0/quarantine/<run-id>/<transaction-id>/<alias>/`
+- commit可能レポート: `docs/evidence/phase0/<run-id>/report.md`、`summary.json`、`transaction-events.jsonl`
+
+実識別子はローカル対応表だけに保存し、ログ・レポート・fixtureでは`CAM-A`、`CAM-B`へ置換する。JPEGは`.partial`へ保存し、JPEG構造・サイズ・SHA-256確認後に`original.jpg`へ原子的にrenameする。
 
 ## 合成処理
 
-MVPは平面原稿に限定し、Planar Homographyと固定キャリブレーションを使用する。
+M2はD810の7360×4912 JPEGを前提に、150/180/200 DPI候補の光学成立性を計算してから、Planar Homographyと固定キャリブレーションを使用する。
 
 ```text
 JPEG decode
@@ -73,25 +91,15 @@ JPEG decode
  -> JPEG export
 ```
 
-撮影ごとに自由なホモグラフィを再推定すると誤対応で大きく変形するため、残差補正量に上限を設ける。
+撮影ごとに自由なホモグラフィを再推定せず、残差補正量に上限を設ける。
 
-## 保存
+## 技術スタック
 
-- `CaptureTransaction`: ID、開始・終了、リグ、結果、エラー
-- `CapturedFrame`: 左右、カメラ別名、時刻、パス、サイズ、ハッシュ
-- `StitchResult`: 出力パス、処理時間、品質値、警告
-- `RigProfile`: 左右識別子、内部パラメータ、変換、シーム、クロップ
+- Phase 0: C++20 / CMake / CTest / Nikon D810 Camera Remote SDK
+- M2画像処理: C++20 / OpenCV
+- M3 UI・調整: .NET 10 / WPF
+- M3 IPC: Named Pipe
+- メタデータ: SQLite候補
+- ログ: JSONLおよび構造化ログ
 
-メタデータはSQLite候補、画像本体はファイルシステムへ保存する。実カメラシリアルはログ表示時にマスクし、コミット可能なテストデータでは架空IDを使用する。
-
-## 技術スタック候補
-
-- UI・調整: .NET 10 / WPF
-- カメラ制御: C++20 / Windows WPD・PTP
-- 画像処理: C++20 / OpenCV
-- IPC: Named Pipe
-- メタデータ: SQLite
-- ログ: Serilogまたは同等の構造化ログ
-- ビルド: CMake + dotnet CLI
-
-採用はPhase 0後にADRで確定する。
+2026-08-04、SDKと公式sampleの双方でSDRAM Itemが生成されない証拠を確認し、product ownerが`REVISE-WPD`を承認した。WPD adapterは明示的な`--transport wpd`としてSDK adapterと分離し、カメラ側Objectの削除を行わない。

@@ -3,6 +3,7 @@ bin/
 obj/
 out/
 build/
+build-*/
 .vs/
 .idea/
 *.user

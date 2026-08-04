@@ -1,19 +1,19 @@
 {
   "schema_version": "autodev.source-index.v1",
-  "requirements_version": "1.0.0",
-  "generated_at": "2026-08-03",
+  "requirements_version": "2.0.0",
+  "generated_at": "2026-08-04",
   "sources": [
-    {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","CON-001","CON-002","CON-003"]},
-    {"path":"docs/REFERENCE_CONVERSATION.md","kind":"normalized-reference-summary","requirement_ids":["CON-001","CON-002","CON-003"]},
-    {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","NFR-REL-001","NFR-OBS-001"]},
-    {"path":"docs/ARCHITECTURE.md","kind":"candidate-architecture","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-DATA-001","FR-DATA-002","CON-003"]},
-    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["CON-001","CON-002","CON-003"]}
+    {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"]},
+    {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-DATA-001","FR-DATA-002","NFR-REL-001","NFR-OBS-001","CON-003","CON-004"]},
+    {"path":"docs/ARCHITECTURE.md","kind":"candidate-architecture","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-DATA-001","FR-DATA-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","CON-003","CON-004"]},
+    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","CON-001","CON-002","CON-003","CON-004"]},
+    {"path":"docs/REFERENCE_CONVERSATION.md","kind":"superseded-reference-history","requirement_ids":[]}
   ],
   "external_references": [
-    {"url":"https://sdk.nikonimaging.com/information/en/","use":"Nikon SDK limitations and multi-camera FAQ"},
-    {"url":"https://sdk.nikonimaging.com/apply/","use":"D750 SDK availability and license-entry point"},
-    {"url":"https://nij.nikon.com/products/lineup/slr/d750/spec.html","use":"D750 maximum image dimensions"},
-    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-command-still-image-capture-initiate-command","use":"WPD still-image capture command model"},
-    {"url":"https://dotnet.microsoft.com/en-us/platform/support/policy","use":".NET 10 LTS status"}
+    {"url":"https://sdk.nikonimaging.com/apply/","use":"D810 Camera Remote SDK availability and license entry"},
+    {"url":"https://sdk.nikonimaging.com/apply/guide","use":"SDK application and human license acceptance flow"},
+    {"url":"https://sdk.nikonimaging.com/information/en/","use":"Nikon SDK support and limitations"},
+    {"url":"https://nij.nikon.com/products/lineup/slr/d810/spec.html","use":"D810 maximum 7360x4912 JPEG dimensions"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-command-still-image-capture-initiate-command","use":"Approved fallback investigation reference only"}
   ]
 }

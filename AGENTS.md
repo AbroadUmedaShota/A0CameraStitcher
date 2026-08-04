@@ -3,7 +3,7 @@
 ## Scope
 
 - This repository is for the A0 Camera Stitcher only.
-- Preserve the USB-only, fixed-rig, static planar-original MVP boundary unless a human decision changes it.
+- Preserve the USB-only, Nikon D810 x2, fixed-rig, static planar-original MVP boundary unless a human decision changes it.
 - Do not present actual shutter synchronization as guaranteed.
 
 ## Sources Of Truth
@@ -24,10 +24,13 @@ Chat summaries are source material, not current specification. Unresolved busine
 ## Development
 
 - Windows 11 x64 is the target platform.
-- Use .NET 10 for the application layer after the toolchain gate is cleared.
-- Treat WPD/PTP support on the D750 as an empirical Phase 0 question.
+- Use C++20/CMake for Phase 0 and .NET 10 for the application layer from M3 onward.
+- Treat Nikon D810 Camera Remote SDK exclusive sequential control as the primary Phase 0 path.
+- Do not implement WPD/PTP fallback until SDK failure evidence is approved by the product owner.
 - Do not reverse engineer or redistribute proprietary material without approval.
-- Start with JPEG Fine. RAW/NEF, live view, GPU acceleration, and hardware shutter synchronization are deferred.
+- Start with FX JPEG Fine L. RAW/NEF, live view, GPU acceleration, and hardware shutter synchronization are deferred.
+- Never open more than one Nikon SDK camera session or more than one capture transaction at a time.
+- Do not automatically retry or reassign ambiguous/late images; preserve them for diagnosis and start a new transaction.
 
 ## Verification
 
