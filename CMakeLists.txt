@@ -45,8 +45,10 @@ if(NIKON_D810_SDK_ROOT)
 endif()
 
 add_library(a0_phase0_core
+    src/phase0/cli_safety.cpp
     src/phase0/phase0.cpp
     src/phase0/fake_camera_transport.cpp
+    src/phase0/hardware_process_lease.cpp
     src/phase0/nikon_sdk_transport.cpp
     src/phase0/wpd_transport.cpp
 )
@@ -77,6 +79,34 @@ if(MSVC)
     target_compile_options(A0CameraStitcher.Phase0 PRIVATE /W4 /permissive- /EHsc)
 endif()
 
+add_library(a0_m2_optical
+    src/m2/optical_planner.cpp
+)
+target_include_directories(a0_m2_optical PUBLIC src/m2/include)
+if(MSVC)
+    target_compile_options(a0_m2_optical PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_optical PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(a0_m2_setup
+    src/m2/setup_assessment.cpp
+)
+target_include_directories(a0_m2_setup PUBLIC src/m2/include)
+if(MSVC)
+    target_compile_options(a0_m2_setup PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_setup PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(A0CameraStitcher.OpticalPlanner src/m2/main.cpp)
+target_link_libraries(A0CameraStitcher.OpticalPlanner PRIVATE a0_m2_optical)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.OpticalPlanner PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.OpticalPlanner PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(a0_phase0_tests tests/phase0_tests.cpp)
@@ -85,4 +115,36 @@ if(BUILD_TESTING)
         target_compile_options(a0_phase0_tests PRIVATE /W4 /permissive- /EHsc)
     endif()
     add_test(NAME phase0_contracts COMMAND a0_phase0_tests)
+
+    add_executable(a0_phase0_cli_safety_tests tests/phase0_cli_safety_tests.cpp)
+    target_link_libraries(a0_phase0_cli_safety_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_phase0_cli_safety_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_phase0_cli_safety_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME phase0_cli_safety_contracts COMMAND a0_phase0_cli_safety_tests)
+
+    add_executable(a0_m2_tests tests/m2_tests.cpp)
+    target_link_libraries(a0_m2_tests PRIVATE a0_m2_optical)
+    if(MSVC)
+        target_compile_options(a0_m2_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_m2_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_optical_contracts COMMAND a0_m2_tests)
+
+    add_executable(m2_setup_assessment_contracts tests/setup_assessment_tests.cpp)
+    target_link_libraries(m2_setup_assessment_contracts PRIVATE a0_m2_setup)
+    if(MSVC)
+        target_compile_options(m2_setup_assessment_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_setup_assessment_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_setup_assessment_contracts COMMAND m2_setup_assessment_contracts)
+
+    find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_test(
+        NAME m2_pregate_assets
+        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-M2PreGateAssets.ps1")
 endif()

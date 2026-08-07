@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/m3/Foundation/A0CameraStitcher.M3.Foundation.csproj" />
+  <Project Path="src/m3/OperatorShell/A0CameraStitcher.M3.OperatorShell.csproj" />
+  <Project Path="tests/m3/FoundationTests/A0CameraStitcher.M3.FoundationTests.csproj" />
+</Solution>

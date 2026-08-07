@@ -1,0 +1,204 @@
+<Window x:Class="A0CameraStitcher.M3.OperatorShell.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="A0 Camera Stitcher — SIMULATED / 実機未接続"
+        AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"
+        Width="1280"
+        Height="860"
+        MinWidth="1040"
+        MinHeight="720"
+        Background="#FFF3F5F7"
+        FontFamily="Yu Gothic UI">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Padding="20,14"
+                Background="#FFC62828"
+                AutomationProperties.Name="SIMULATED 実機未接続 常設警告">
+            <DockPanel LastChildFill="True">
+                <Border DockPanel.Dock="Right" Margin="20,0,0,0" Padding="12,6" Background="#33FFFFFF" CornerRadius="4">
+                    <TextBlock Text="{Binding ActivityText}" Foreground="White" FontWeight="SemiBold" />
+                </Border>
+                <StackPanel>
+                    <TextBlock Text="{Binding BannerText}" FontSize="26" FontWeight="Bold" Foreground="White" />
+                    <TextBlock Text="デモ専用画面です。実カメラ、Nikon SDK、WPDへ接続しません。"
+                               Margin="0,3,0,0" Foreground="White" FontSize="14" />
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="18" />
+                    <ColumnDefinition Width="2*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <Border Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="16" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="カメラ状態" FontSize="20" FontWeight="SemiBold" />
+                                <Border Margin="0,12,0,8" Padding="12" Background="#FFF3F5F7" CornerRadius="4">
+                                    <StackPanel>
+                                        <TextBlock Text="CAM-A" FontSize="16" FontWeight="Bold" />
+                                        <TextBlock Text="{Binding CameraAStatus}" Margin="0,4,0,0"
+                                                   AutomationProperties.Name="CAM-A simulated status" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="12" Background="#FFF3F5F7" CornerRadius="4">
+                                    <StackPanel>
+                                        <TextBlock Text="CAM-B" FontSize="16" FontWeight="Bold" />
+                                        <TextBlock Text="{Binding CameraBStatus}" Margin="0,4,0,0"
+                                                   AutomationProperties.Name="CAM-B simulated status" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="2">
+                                <DockPanel>
+                                    <TextBlock Text="Live View" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                    <ComboBox DockPanel.Dock="Right"
+                                              Width="110"
+                                              ItemsSource="{Binding CameraAliases}"
+                                              SelectedItem="{Binding SelectedCamera}"
+                                              AutomationProperties.Name="Simulated Live View camera selection" />
+                                </DockPanel>
+                                <Border Height="210" Margin="0,12,0,0" Padding="18"
+                                        Background="#FF20242A" BorderBrush="#FFFFB300" BorderThickness="3" CornerRadius="4"
+                                        AutomationProperties.Name="Simulated Live View placeholder 非実画像">
+                                    <TextBlock Text="{Binding LiveViewPlaceholder}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               TextAlignment="Center" Foreground="White" FontSize="17" FontWeight="SemiBold" />
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Margin="0,16,0,0" Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
+                        <StackPanel>
+                            <DockPanel>
+                                <TextBlock Text="Transaction進捗（SIMULATED）" FontSize="20" FontWeight="SemiBold" />
+                                <TextBlock DockPanel.Dock="Right" Text="{Binding DisplayedState}" FontSize="18" FontWeight="Bold"
+                                           AutomationProperties.Name="Displayed simulated workflow state" />
+                            </DockPanel>
+                            <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,14,0,0">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Rows="1" Columns="7" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="0,0,7,0" Padding="8" MinHeight="82"
+                                                Background="{Binding Background}"
+                                                BorderBrush="{Binding BorderBrush}" BorderThickness="2" CornerRadius="4">
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextAlignment="Center" Foreground="{Binding Foreground}" />
+                                                <TextBlock Text="{Binding StatusText}" Margin="0,5,0,0" TextAlignment="Center" Foreground="{Binding Foreground}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Margin="0,16,0,0" Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
+                        <StackPanel>
+                            <TextBlock Text="デモ操作" FontSize="20" FontWeight="SemiBold" />
+                            <TextBlock Margin="0,5,0,12" Foreground="#FF4A5560"
+                                       Text="すべてFoundationのsimulated serviceを呼びます。実機撮影や自動再試行は行いません。" />
+                            <WrapPanel>
+                                <Button Content="正常完了を実行" Command="{Binding RunSuccessCommand}"
+                                        AutomationProperties.Name="Run simulated success scenario" />
+                                <Button Content="CAM-A失敗を実行" Command="{Binding RunFailCaptureACommand}"
+                                        AutomationProperties.Name="Run simulated CAM-A failure scenario" />
+                                <Button Content="CAM-B失敗を実行" Command="{Binding RunFailCaptureBCommand}"
+                                        AutomationProperties.Name="Run simulated CAM-B failure scenario" />
+                                <Button Content="CAM-A保存後クラッシュ" Command="{Binding RunCrashAfterPersistACommand}"
+                                        AutomationProperties.Name="Run simulated crash after PersistA" />
+                                <Button Content="起動時回復を再検査" Command="{Binding RecoverCommand}"
+                                        AutomationProperties.Name="Recover incomplete simulated transactions" />
+                            </WrapPanel>
+
+                            <Separator Margin="0,6,0,12" />
+                            <TextBlock Text="表示stateプレビュー（transaction非実行）" FontWeight="SemiBold" />
+                            <DockPanel Margin="0,8,0,0" LastChildFill="False">
+                                <ComboBox Width="190" Margin="0,0,8,8"
+                                          ItemsSource="{Binding PreviewStates}"
+                                          SelectedItem="{Binding SelectedPreviewState}"
+                                          AutomationProperties.Name="Select simulated state preview" />
+                                <Button Content="表示へ反映" Command="{Binding ApplyPreviewCommand}"
+                                        AutomationProperties.Name="Apply simulated state preview without transaction" />
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2">
+                    <Border Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
+                        <StackPanel>
+                            <TextBlock Text="最後のSIMULATED結果" FontSize="20" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding RunStatus}" Margin="0,10,0,16" FontWeight="SemiBold"
+                                       AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Simulated run status" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="130" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Scenario" FontWeight="SemiBold" Margin="0,0,8,8" />
+                                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastScenario}" Margin="0,0,0,8" />
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Transaction ID" FontWeight="SemiBold" Margin="0,0,8,8" />
+                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LastTransactionId}" Margin="0,0,0,8" />
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="結果state" FontWeight="SemiBold" Margin="0,0,8,8" />
+                                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding LastResultState}" Margin="0,0,0,8" />
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="保持原画像" FontWeight="SemiBold" Margin="0,0,8,8" />
+                                <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RetainedOriginals}" Margin="0,0,0,8" />
+                                <TextBlock Grid.Row="4" Grid.Column="0" Text="終了理由" FontWeight="SemiBold" Margin="0,0,8,0" />
+                                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding TerminalReason}" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Margin="0,16,0,0" Padding="16" Background="#FFFFF3E0" BorderBrush="#FFF57C00" BorderThickness="2" CornerRadius="6"
+                            AutomationProperties.Name="No automatic retry warning">
+                        <StackPanel>
+                            <TextBlock Text="警告 / NO AUTO RETRY" FontSize="18" FontWeight="Bold" Foreground="#FFE65100" />
+                            <TextBlock Text="{Binding WarningMessage}" Margin="0,8,0,0" Foreground="#FF5D4037"
+                                       AutomationProperties.LiveSetting="Assertive" />
+                            <TextBlock Margin="0,12,0,0" FontWeight="SemiBold"
+                                       Text="自動再試行回数: 0回（固定）&#x0a;プレビューは原画像・合成入力ではありません。" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Margin="0,16,0,0" Padding="16" Background="#FFE8EAF6" BorderBrush="#FF5C6BC0" BorderThickness="1" CornerRadius="6">
+                        <StackPanel>
+                            <TextBlock Text="このshellがしないこと" FontSize="18" FontWeight="SemiBold" />
+                            <TextBlock Margin="0,8,0,0"
+                                       Text="• D810や他の実カメラの列挙・制御&#x0a;• Nikon SDK / WPD / USB API呼出し&#x0a;• Live View実画像の表示・保存&#x0a;• FailedPartial transactionの再開&#x0a;• 実機合格・A0品質合格の判定" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Window>

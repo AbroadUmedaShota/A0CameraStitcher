@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "phase0.hybrid-capture-summary.v1",
+  "timestamp": "2026-08-05T07:27:32.601Z",
+  "runId": "run-1785914842210-1",
+  "cameraAlias": "CAM-A",
+  "requested": 1,
+  "attempted": 1,
+  "completed": 0,
+  "failures": 1,
+  "terminalState": "FailedPartial",
+  "lastState": "FailedPartial",
+  "pc_original_canonical": true,
+  "camera_card_transient": true,
+  "camera_card_delete_attempted": false,
+  "automatic_retry": false,
+  "exclusive_camera_control_confirmed": true
+}

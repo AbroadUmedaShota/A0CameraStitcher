@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "phase0.wpd-mtp-trace-summary.v1",
+  "runId": "run-1785908732670-1",
+  "cameraAlias": "CAM-A",
+  "model": "Nikon D810",
+  "firmware": "V1.14",
+  "captureCommandSent": true,
+  "wpdCommandTargetPolicy": "functional",
+  "functionalObjectCount": 1,
+  "validObjectIdsOptionPresent": false,
+  "compatibleTargetCount": 1,
+  "mtpOperation": {
+    "decimal": 4110,
+    "hex": "0x100E",
+    "name": "InitiateCapture",
+    "parameterCount": 2,
+    "storageId": 0,
+    "objectFormatCode": 0
+  },
+  "mtpResponse": {
+    "decimal": 8194,
+    "hex": "0x2002",
+    "name": "GeneralError"
+  },
+  "requestTimestampUtc": "2026-08-05T05:45:37.2023318Z",
+  "responseTimestampUtc": "2026-08-05T05:45:41.6554571Z",
+  "responseElapsedMs": 4453.125,
+  "wpdSendCommandHresult": "0x00000000",
+  "wpdCommonHresult": "0x80004005",
+  "standardObjectAddedEventCount": 0,
+  "newJpegCandidateCount": 0,
+  "terminalState": "FailedPartial",
+  "errorCategory": "uncertain_dispatch_no_object",
+  "automaticRetry": false,
+  "rawTraceCommitted": false,
+  "realIdentifiersIncluded": false
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "phase0.summary.v1",
+  "runId": "run-1785897041881-1",
+  "cameraModel": "Nikon D810",
+  "sdkVersion": "windows-wpd-1;command-target=omit",
+  "transactionCount": 1,
+  "completeCount": 0,
+  "failedCount": 1
+}

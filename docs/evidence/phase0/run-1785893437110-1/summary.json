@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "phase0.summary.v1",
+  "runId": "run-1785893437110-1",
+  "cameraModel": "Nikon D810",
+  "sdkVersion": "D810-SDK-live-view+WPD-capture",
+  "transactionCount": 1,
+  "completeCount": 0,
+  "failedCount": 1
+}

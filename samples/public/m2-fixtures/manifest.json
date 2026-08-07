@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "m2.synthetic-stitch-manifest.v1",
+  "approvalState": "test-only",
+  "qualityDecision": "not-evaluated",
+  "rights": "wholly-synthetic-generated-values",
+  "fixtures": [
+    { "file": "pair-perfect.json", "id": "pair-perfect", "overlapWidthPixels": 4, "rawOverlapMeanAbsoluteError": 0, "rawOverlapMaxAbsoluteError": 0 },
+    { "file": "pair-damaged-luma-offset.json", "id": "pair-damaged-luma-offset", "overlapWidthPixels": 4, "rawOverlapMeanAbsoluteError": 10, "rawOverlapMaxAbsoluteError": 10 },
+    { "file": "pair-damaged-source-shift.json", "id": "pair-damaged-source-shift", "overlapWidthPixels": 4, "rawOverlapMeanAbsoluteError": 12, "rawOverlapMaxAbsoluteError": 15 }
+  ]
+}

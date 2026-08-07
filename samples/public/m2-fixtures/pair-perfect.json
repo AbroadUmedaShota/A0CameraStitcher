@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "m2.synthetic-pixel-pair.v1",
+  "id": "pair-perfect",
+  "simulation": true,
+  "marker": "Synthetic",
+  "approvalState": "test-only",
+  "qualityDecision": "not-evaluated",
+  "rights": "wholly-synthetic-generated-values",
+  "canvas": { "widthPixels": 12, "heightPixels": 4 },
+  "placement": { "camA": { "x": 0, "y": 0 }, "camB": { "x": 4, "y": 0 } },
+  "sources": {
+    "camA": { "widthPixels": 8, "heightPixels": 4, "pixels": [[0,1,4,9,16,25,36,49],[20,21,24,29,36,45,56,69],[40,41,44,49,56,65,76,89],[60,61,64,69,76,85,96,109]] },
+    "camB": { "widthPixels": 8, "heightPixels": 4, "pixels": [[16,25,36,49,64,81,100,121],[36,45,56,69,84,101,120,141],[56,65,76,89,104,121,140,161],[76,85,96,109,124,141,160,181]] }
+  },
+  "injectedDamage": null,
+  "expectedMetrics": { "canvasWidthPixels": 12, "canvasHeightPixels": 4, "overlapWidthPixels": 4, "rawOverlapMeanAbsoluteError": 0, "rawOverlapMaxAbsoluteError": 0 }
+}

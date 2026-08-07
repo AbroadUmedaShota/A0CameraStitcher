@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "phase0.live-view-handoff-summary.v1",
+  "runId": "run-1785893437110-1",
+  "cameraAlias": "CAM-A",
+  "requestedHandoffs": 10,
+  "attemptedHandoffs": 1,
+  "completeHandoffs": 0,
+  "failures": 1,
+  "terminalState": "FailedPartial",
+  "lastHandoffState": "CaptureFailedResumeSkipped",
+  "lastErrorCategory": "capture_command_failed",
+  "crossTransportBinding": "single-connected-body-only",
+  "previewFramesPersisted": false
+}

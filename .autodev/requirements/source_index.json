@@ -1,12 +1,14 @@
 {
   "schema_version": "autodev.source-index.v1",
-  "requirements_version": "2.0.0",
-  "generated_at": "2026-08-04",
+  "requirements_version": "2.5.0",
+  "generated_at": "2026-08-07",
   "sources": [
-    {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"]},
-    {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-DATA-001","FR-DATA-002","NFR-REL-001","NFR-OBS-001","CON-003","CON-004"]},
-    {"path":"docs/ARCHITECTURE.md","kind":"candidate-architecture","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-DATA-001","FR-DATA-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","CON-003","CON-004"]},
-    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","CON-001","CON-002","CON-003","CON-004"]},
+    {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"]},
+    {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","NFR-REL-001","NFR-OBS-001","CON-003","CON-004"]},
+    {"path":"docs/ARCHITECTURE.md","kind":"candidate-architecture","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","NFR-OBS-001","CON-003","CON-004"]},
+    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-STI-003","FR-STI-005","FR-STI-006","CON-001","CON-002","CON-003","CON-004"]},
+    {"path":"docs/M2_PRE_GATE.md","kind":"software-only-verification-boundary","requirement_ids":["FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006"]},
+    {"path":"docs/FEATURE_VERIFICATION_PLAN.md","kind":"verification-contract","requirement_ids":["FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-003"]},
     {"path":"docs/REFERENCE_CONVERSATION.md","kind":"superseded-reference-history","requirement_ids":[]}
   ],
   "external_references": [
@@ -14,6 +16,12 @@
     {"url":"https://sdk.nikonimaging.com/apply/guide","use":"SDK application and human license acceptance flow"},
     {"url":"https://sdk.nikonimaging.com/information/en/","use":"Nikon SDK support and limitations"},
     {"url":"https://nij.nikon.com/products/lineup/slr/d810/spec.html","use":"D810 maximum 7360x4912 JPEG dimensions"},
-    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-command-still-image-capture-initiate-command","use":"Approved fallback investigation reference only"}
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-command-still-image-capture-initiate-command","use":"Historical standard WPD capture command failure reference; not used by the approved hybrid path"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/enumerating-content","use":"WPD object enumeration for pre-capture baseline and post-SDK difference detection"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/api/portabledeviceapi/nf-portabledeviceapi-iportabledeviceresources-getstream","use":"WPD JPEG resource readback to the canonical PC original"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/object-properties","use":"WPD_OBJECT_DATE_CREATED availability characterization; hardware evidence rejects it as a causal key"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/device-properties","use":"WPD_DEVICE_DATETIME characterization; hardware evidence rejects it as an attribution predicate"},
+    {"url":"https://learn.microsoft.com/en-us/previous-versions/ms739522(v=vs.85)","use":"Standard WPD exact-object deletion API and per-object result contract"},
+    {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/delete-object-options","use":"Non-recursive WPD deletion option required by the single-object spool contract"}
   ]
 }

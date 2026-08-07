@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-05T07:27:22.211Z","runId":"run-1785914842210-1","state":"CameraProfile","cameraAlias":"CAM-A","model":"Nikon D810","firmware":"unknown"}
+{"timestamp":"2026-08-05T07:27:22.212Z","runId":"run-1785914842210-1","transactionId":"hybrid-tx-1785914842212","state":"HybridWpdBaselineOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-08-05T07:27:32.597Z","runId":"run-1785914842210-1","transactionId":"hybrid-tx-1785914842212","state":"HybridFailed","cameraAlias":"CAM-A","errorDetail":"WPD baseline did not stabilize across a device-clock tick before SDK capture"}
+{"timestamp":"2026-08-05T07:27:32.597Z","runId":"run-1785914842210-1","transactionId":"hybrid-tx-1785914842212","state":"FailedPartial","durationMs":10385,"errorCategory":"baseline_timeout","errorDetail":"WPD baseline did not stabilize across a device-clock tick before SDK capture"}

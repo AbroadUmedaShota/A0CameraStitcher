@@ -2,12 +2,12 @@
 
 ## 目的
 
-完成アプリの前に、Windows 11 x64とNikon D810をUSB接続し、正規取得したNikon Camera Remote SDKで一台ずつ排他的に撮影・JPEG回収できるかを判定する。
+完成アプリの前に、Windows 11 x64とNikon D810をUSB接続し、PC原本を安全に確定できる経路を判定する。attempted hybridのdatetime cutoffはRejectedである。`HG-0008`は2026-08-06に承認済みであり、single-slot spool経路を実装・実機評価する。
 
 ## 開始条件
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
-- Phase 0B前: `HG-0003B`（二台目D810と二台試験許可）が解消済み。
+- Phase 0B前: `HG-0003B`（二台目D810と二台試験許可）の解消が必要。2026-08-07現在はopenであり、Phase 0Bは開始しない。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
@@ -19,26 +19,36 @@
 - single frame、bracketing無効
 - 権利確認済みの固定静止チャート
 - 実行前のカメラ設定値、firmware、USBポート・ハブ構成を記録
+- 実SDK/WPDへ触れるCLIは同じinteractive Windows logon sessionで共有するnamed OS leaseを一件だけ取得し、別processが保持中ならcamera open前に失敗する。別user session／serviceからの実機操作はMVP運用外とする。
+- 旧`capture-single`、`capture-pair`、`stability`はfake-onlyとし、実SDK/WPD撮影に使用しない。
+- pairとhybridのtransaction全体に180秒watchdogを適用し、期限切れ後は成功状態、次のtransport、canonical rename、deleteへ進まない。`.partial`または期限前に確定済みのPC原本は保持し、安全なsession closeだけは期限後も試行できる。
 
 ## Phase 0A: 一台先行
 
 ### P0-A1: SDKとD810列挙
 
 - SDK版、OS、MSVC、CMakeを記録する。
-- D810一台を列挙し、実識別子をローカルで`CAM-A`へ対応付ける。
+- 物理的にD810一台だけを接続し、SDKとWPDの両方で列挙したlocal identityを同じ`CAM-A`へ対応付ける。
 - 取得可能なcapabilityとfirmwareを匿名化して記録する。
-- 切断・再接続後も`CAM-A`を復元する。
+- Phase 0Aでは記録済み電源再投入によるPnP再列挙後も`CAM-A`を復元する。物理cableの抜き差し、接続順変更、USB port交換はP0-B1で別途検証する。
 
 合格: D810を安定して`CAM-A`として識別でき、実識別子がcommit対象へ出ない。
 
-### P0-A2: 単体撮影・回収
+2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を`CAM-A`として確認した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)は、SDK/WPD双方のlocal identity mapが記録済みarrivalより前から存在し、再列挙後も変更されず、両transportが一台のD810を`CAM-A`へ復元したことを記録する。実識別子とmap hashはcommit対象へ含めていない。以上により、一台構成のP0-A1は合格とする。CAM-B、接続順変更、port交換はP0-B1で別途検証する。
 
-- セッション開始前に画像Object/eventの基準点を記録する。
-- 撮影命令後に唯一の新規JPEGを検出し、PCへ転送する。
-- `.partial`保存、JPEG検証、サイズ・SHA-256、原子的renameを確認する。
-- 10回連続で自動再試行なしに実行する。
+2026-08-07の設定read-only [run-1786040075194-1](evidence/phase0/run-1786040075194-1/report.md)は、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を匿名記録した。FileTypeはnot-advertisedだったが、CompressionLevelとImageSizeは取得できた。撮影設定write、capture、Live View開始、WPD、deleteは行わず、sessionを閉じた。MAID session確立時のcontrol-plane callback登録とModuleModeは既存`CapSet`を使い得るため、設定read-onlyは「撮影設定capabilityを書き換えない」という意味である。native command-trace自動試験とfocus値の意味確定が未完了のため、設定比較項目はPartialとする。
 
-合格: 10/10で撮影・回収・JPEG検証・ハッシュ確定が成功する。
+### P0-A2: one-shot hybrid単体撮影・回収
+
+- attempted hybridは`run-1785914842210-1`でbaseline timeoutとなり、SDK open/capture前に`FailedPartial`となった。device datetime cutoffは3/3 WPD session closeを記録した`run-1785917005306-1`によりRejectedである。
+- 承認済み試験は、専用empty/cleared cardをsingle-slot spoolとして、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、SDK exactly-one capture、WPD唯一のexact JPEG object recovery、PC `.partial`、JPEG・size検証、SHA-256、atomic `original.jpg`確定、再読込検証、今回objectだけのdelete、全payload 0件のempty-after確認を行う。
+- existing cardのbulk delete/format、vendor operation、retryは禁止する。
+- baseline、SDK capture、recoveryの各失敗、候補0件・複数件・遅延・曖昧画像、JPEG/size検証、download、persist、delete、empty-after確認の失敗は`FailedPartial`にする。削除はせず、PC原本が確定済みなら保持し、自動再試行しない。
+- まずone-shotを1回だけ証明し、その合格後に10回連続を自動再試行なしに実行する。
+
+現在判定: `HG-0008`は2026-08-06に承認済みでsoftware contractは実装済み。ただし[run-1786014841232-1](evidence/phase0/run-1786014841232-1/report.md)が撮影前に90 payload objectを検出し、SDK/shutter/delete/retry 0で安全停止した。read-only [run-1786015997366-1](evidence/phase0/run-1786015997366-1/report.md)と[run-1786017282044-1](evidence/phase0/run-1786017282044-1/report.md)も全payload 90件、WPD close 1/1、capture/delete/vendor operation 0件を確認した。同じ空spool阻害条件が3回連続したため、M1Aは専用empty cardへの交換または操作者によるbackup・手動clear待ちとしてブロック判定する。解消後に新規one-shotを開始する。合格条件はone-shot proof 1/1後、10/10でsingle-slot spoolのSDK one capture、WPD exact-one recovery、PC原本の再読込検証までの確定、single-object delete、全payload empty-after確認が成功すること。
+
+標準WPD失敗は履歴として保持する。attempted hybrid [run-1785914842210-1](evidence/phase0/run-1785914842210-1/report.md)はbaseline timeout、SDK open/capture 0、`FailedPartial`、retry/delete 0である。read-only [run-1785917005306-1](evidence/phase0/run-1785917005306-1/report.md)は3/3 WPD session closeを記録しつつclock cutoffを支持しない。P0-A2は承認済みspool経路の実機one-shotから開始し、A3/A4はその後に進める。いずれの合格証拠も未取得である。
 
 ### P0-A3: 単体異常系
 
@@ -47,31 +57,49 @@
 - active transaction中の電源断
 - アプリ再起動後の新規transaction
 
-合格: 失敗transactionが`FailedPartial`で確定し、取得済み画像を保持し、復旧後の新規transactionが成功する。
+active transactionのUSB切断・電源断は`hybrid-fault-single`で実行する。empty-before確認、SDK one capture、SDK full close後かつWPD recovery open前に匿名operator gateを出す。操作者が指定異常を発生させてcontinue markerを作成した後、WPD open失敗を同一runの`FailedPartial`として確定する。この経路はPC original未確定のためdelete 0、自動retry 0とし、残ったcard objectを自動帰属・自動削除しない。復旧後にread-only `spool-status`を実行し、必要なら操作者が画像をbackupして手動clearした後、別run IDの新規one-shotだけを許可する。アプリ再起動は正常終了した別processから新規transactionを開始する試験とし、active processの強制終了やM3のdurable transactionをPhase 0へ拡張しない。
 
-## SDK不成立判定
+合格: USB切断・電源断はそれぞれ、operator gate後のWPD `open_failed`、`FailedPartial`、PC original 0、delete 0、retry 0を匿名summaryへ記録する。復旧後はread-only spool確認を経て別run IDの新規transactionが成功する。アプリ再起動後も別processの新規transactionが成功する。
+
+### P0-A4: 一台選択式Live Viewとhybrid handoff
+
+- Phase 0Aでは物理D810を一台だけ接続し、二台目は接続しない。これによりSDKとWPDが同じ実機を指す条件を固定する。
+- `CAM-A`だけをSDK Live Viewで開始し、プレビュー画像を10 frame取得する。プレビューは`artifacts`の診断用途に限り、原画像・合成入力・transaction JPEG候補にしない。
+- `live-view --duration-seconds 300`で5分間継続し、有効JPEG frame数、停止、SDK closeを匿名summaryへ記録する。
+- Live View停止、SDK session close、WPD baseline/full close、SDK one card capture/full close、WPD recovery（capture commandなし）、PC JPEG保存、SDK Live View再開を一連のhandoffとして実行する。
+- 自動handoffを1回以上実行し、SDK/WPDが重複せず各closeが次のopen前に完了したtraceを確認する。
+- WPD recovery timeout、Live View再開hang、SDK close timeoutは失敗として記録し、自動再試行やプレビュー画像の流用を行わない。
+- `handoff-summary.json`へ要求数、試行数、完了数、失敗数、最後のhandoff状態・error category、`Complete`または`FailedPartial`を保存する。実識別子とpreview frameは含めない。
+
+Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evidence/phase0/run-1785917554163-1/report.md)は5分04秒で2,424 frameを取得し、停止、SDK session close、preview非保存を確認した。続く別プロセスの[run-1785917887961-1](evidence/phase0/run-1785917887961-1/report.md)も1 frame取得、停止、close、preview非保存に成功し、最終`run-1785917904556-1`はLive View `off`とSDK session closeを確認した。ただしこれらは承認済みspool handoffの合格証拠ではない。10回連続handoffは未実施のため、P0-A4全体はPartial/Hardware Pendingとする。
+
+合格: 10回連続で、SDK Live View停止・close後だけhybrid transactionを開始し、PC JPEG保存後に選択中の一台Live Viewを再開できる。失敗時はtransactionと診断を保持し、新規操作でのみ再開する。
+
+## SDK単独PC転送経路の不成立判定（判定済み）
 
 次のいずれかでSDK経路を停止する。
 
 1. D810を列挙できない。
 2. 撮影命令を実行できない。
-3. 新規JPEGを一意に検出または転送できない。
-4. P0-A2が10/10を満たさない。
+3. `SaveMedia=SDRAM`または`Card + SDRAM`でPC転送用Itemを一意に検出または転送できない。
+4. SDK adapterと公式sampleの双方でPC転送用Itemが生成されない。
 5. 文書化された再接続手順で復帰できない。
 
-OS、SDK版、firmware、エラー、再現手順、匿名化ログをまとめ、product ownerがWPD切替を承認するまでWPD調査・実装を開始しない。
+上記のSDK SDRAM不成立と標準WPD失敗を踏まえ、product ownerはone-shot hybridを承認した。SDKは一回のcard captureに、WPDはbaseline/recoveryに限定し、sessionを重複させない。
 
 ## Phase 0B: 二台順次撮影
 
 ### P0-B1: 二台識別
 
-- 二台目を`CAM-B`として登録する。
+- 一台ずつ物理接続した状態でSDK/WPD双方のidentityを同じaliasへ登録し、一台目を`CAM-A`、二台目を`CAM-B`としてcross-transport bindingする。
+- binding後に二台を接続し、SDKとWPDの両方で各aliasが一意に解決できることを確認する。binding登録機能が完成するまで二台接続時のLive View handoffは実行しない。
+- 各aliasを選択して、Live View停止・SDK close後のhybrid transactionが同じ物理D810のシャッターとPC原本になることを一回ずつ確認する。
 - 接続順変更3回、各カメラのUSBポート交換後も別名が維持されることを確認する。
 
 ### P0-B2: 順次二台transaction
 
-- `CAM-A`を開き、撮影・回収・保存・closeを完了する。
-- 次に`CAM-B`を開き、同じ処理を完了する。
+- `CAM-A`でWPD baseline/close、SDK one card capture/close、WPD recovery、PC保存を完了する。
+- 次に`CAM-B`で同じhybrid処理を完了する。
 - 両方が確定した場合だけ`Paired`、`Complete`とする。
 - 10件を自動再試行なしで実行する。
 
@@ -103,11 +131,13 @@ OS、SDK版、firmware、エラー、再現手順、匿名化ログをまとめ�
 
 ## P0判定
 
-1. `GO-SDK-SEQUENTIAL`: Phase 0A/Bの全条件を満たした。
-2. `REVISE-WPD`: SDK不成立証拠をproduct ownerが確認し、WPD一台試験への切替を承認した。
+1. `GO-HYBRID-SEQUENTIAL`: Phase 0A/Bの全条件とLive View handoff条件を満たした。
+2. `REVISE-WPD`: SDK不成立証拠をproduct ownerが確認し、WPD一台試験への切替を承認した（2026-08-04解消済み）。
 3. `STOP`: USBのみでは必要な運用を満たせないとproduct ownerが判断した。
 
 この判定は匿名化レポートを添えてproduct ownerが承認し、ADRへ反映する。
+
+`REVISE-WPD`は2026-08-04の履歴判断である。attempted hybridはRejectedであり、2026-08-06に承認されたsingle-slot spoolがP0-A2の一回証明、10/10、A3、A4へ進む経路である。
 
 ## コミット禁止データ
 

@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/rig-profile.schema.json",
+  "title": "A0 Camera Stitcher rig profile",
+  "description": "Shape and type contract for a human-approved D810 two-camera rig profile. Draft profiles intentionally keep unapproved values null. Cross-field ordering, assessment-time expiry, and supported-version trust are enforced by the production profile validator and setup assessment, not by JSON Schema alone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "cameraModel",
+    "cameraSlots",
+    "layout",
+    "optics",
+    "calibration",
+    "correctionEnvelope",
+    "qualityContract"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.1.0" },
+    "status": { "enum": ["draft", "approved"] },
+    "cameraModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manufacturer", "model", "sensorWidthPixels", "sensorHeightPixels"],
+      "properties": {
+        "manufacturer": { "const": "Nikon" },
+        "model": { "const": "D810" },
+        "sensorWidthPixels": { "const": 7360 },
+        "sensorHeightPixels": { "const": 4912 }
+      }
+    },
+    "cameraSlots": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "rotationDegrees"],
+        "properties": {
+          "alias": { "enum": ["CAM-A", "CAM-B"] },
+          "rotationDegrees": { "type": ["integer", "null"], "enum": [null, 0, 90, 180, 270] },
+          "physicalIdentity": { "type": "null", "description": "Never store a serial number or transport identity in this public fixture." }
+        }
+      },
+      "allOf": [
+        { "contains": { "type": "object", "properties": { "alias": { "const": "CAM-A" } }, "required": ["alias"] } },
+        { "contains": { "type": "object", "properties": { "alias": { "const": "CAM-B" } }, "required": ["alias"] } }
+      ]
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["orientation", "cameraOrder", "overlapPercent", "crop"],
+      "properties": {
+        "orientation": { "type": ["string", "null"], "enum": [null, "landscape", "portrait"] },
+        "cameraOrder": { "type": ["string", "null"], "enum": [null, "CAM-A-left-CAM-B-right", "CAM-A-top-CAM-B-bottom"] },
+        "overlapPercent": { "type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100 },
+        "crop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["leftPercent", "topPercent", "rightPercent", "bottomPercent"],
+          "properties": {
+            "leftPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "topPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "rightPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "bottomPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "optics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["focalLengthMm", "cameraToOriginalMm", "targetDpi"],
+      "properties": {
+        "focalLengthMm": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "cameraToOriginalMm": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "targetDpi": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "homography", "measuredAt", "provenanceId", "validUntil"],
+      "properties": {
+        "method": { "type": ["string", "null"], "enum": [null, "planar-homography"] },
+        "homography": {
+          "type": ["array", "null"],
+          "minItems": 9,
+          "maxItems": 9,
+          "items": { "type": "number" }
+        },
+        "measuredAt": { "type": ["string", "null"], "format": "date-time" },
+        "provenanceId": { "type": ["string", "null"], "minLength": 1 },
+        "validUntil": { "type": ["string", "null"], "format": "date-time", "description": "Runtime validation must require validUntil > measuredAt and validUntil > assessment time." }
+      }
+    },
+    "correctionEnvelope": {
+      "type": "object",
+      "description": "Runtime validation must require targetMax <= autoCorrectionMax for every metric.",
+      "additionalProperties": false,
+      "required": ["minimumOverlapPercent", "registrationErrorPixels", "rotationErrorDegrees", "scaleDifferencePercent", "exposureDifferenceEv", "colorDeltaE"],
+      "properties": {
+        "minimumOverlapPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "registrationErrorPixels": {
+          "type": "object", "additionalProperties": false, "required": ["targetMax", "autoCorrectionMax"],
+          "properties": { "targetMax": { "type": ["number", "null"], "minimum": 0 }, "autoCorrectionMax": { "type": ["number", "null"], "minimum": 0 } }
+        },
+        "rotationErrorDegrees": {
+          "type": "object", "additionalProperties": false, "required": ["targetMax", "autoCorrectionMax"],
+          "properties": { "targetMax": { "type": ["number", "null"], "minimum": 0 }, "autoCorrectionMax": { "type": ["number", "null"], "minimum": 0 } }
+        },
+        "scaleDifferencePercent": {
+          "type": "object", "additionalProperties": false, "required": ["targetMax", "autoCorrectionMax"],
+          "properties": { "targetMax": { "type": ["number", "null"], "minimum": 0 }, "autoCorrectionMax": { "type": ["number", "null"], "minimum": 0 } }
+        },
+        "exposureDifferenceEv": {
+          "type": "object", "additionalProperties": false, "required": ["targetMax", "autoCorrectionMax"],
+          "properties": { "targetMax": { "type": ["number", "null"], "minimum": 0 }, "autoCorrectionMax": { "type": ["number", "null"], "minimum": 0 } }
+        },
+        "colorDeltaE": {
+          "type": "object", "additionalProperties": false, "required": ["targetMax", "autoCorrectionMax"],
+          "properties": { "targetMax": { "type": ["number", "null"], "minimum": 0 }, "autoCorrectionMax": { "type": ["number", "null"], "minimum": 0 } }
+        }
+      }
+    },
+    "qualityContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seamErrorPixelsMax", "registrationErrorPixelsMax", "colorDeltaEMax", "notes"],
+      "properties": {
+        "seamErrorPixelsMax": { "type": ["number", "null"], "minimum": 0 },
+        "registrationErrorPixelsMax": { "type": ["number", "null"], "minimum": 0 },
+        "colorDeltaEMax": { "type": ["number", "null"], "minimum": 0 },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "draft" } }, "required": ["status"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "cameraSlots": { "type": "array", "items": { "type": "object", "properties": { "rotationDegrees": { "const": null }, "physicalIdentity": { "const": null } } } },
+          "layout": {
+            "type": "object",
+            "properties": {
+              "orientation": { "const": null },
+              "cameraOrder": { "const": null },
+              "overlapPercent": { "const": null },
+              "crop": { "type": "object", "properties": { "leftPercent": { "const": null }, "topPercent": { "const": null }, "rightPercent": { "const": null }, "bottomPercent": { "const": null } } }
+            }
+          },
+          "optics": { "type": "object", "properties": { "focalLengthMm": { "const": null }, "cameraToOriginalMm": { "const": null }, "targetDpi": { "const": null } } },
+          "calibration": { "type": "object", "properties": { "method": { "const": null }, "homography": { "const": null }, "measuredAt": { "const": null }, "provenanceId": { "const": null }, "validUntil": { "const": null } } },
+          "correctionEnvelope": {
+            "type": "object",
+            "properties": {
+              "minimumOverlapPercent": { "const": null },
+              "registrationErrorPixels": { "type": "object", "properties": { "targetMax": { "const": null }, "autoCorrectionMax": { "const": null } } },
+              "rotationErrorDegrees": { "type": "object", "properties": { "targetMax": { "const": null }, "autoCorrectionMax": { "const": null } } },
+              "scaleDifferencePercent": { "type": "object", "properties": { "targetMax": { "const": null }, "autoCorrectionMax": { "const": null } } },
+              "exposureDifferenceEv": { "type": "object", "properties": { "targetMax": { "const": null }, "autoCorrectionMax": { "const": null } } },
+              "colorDeltaE": { "type": "object", "properties": { "targetMax": { "const": null }, "autoCorrectionMax": { "const": null } } }
+            }
+          },
+          "qualityContract": { "type": "object", "properties": { "seamErrorPixelsMax": { "const": null }, "registrationErrorPixelsMax": { "const": null }, "colorDeltaEMax": { "const": null } } }
+        }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "approved" } }, "required": ["status"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "cameraSlots": { "type": "array", "items": { "type": "object", "properties": { "rotationDegrees": { "type": "integer", "enum": [0, 90, 180, 270] }, "physicalIdentity": { "const": null } } } },
+          "layout": {
+            "type": "object",
+            "properties": {
+              "orientation": { "type": "string", "enum": ["landscape", "portrait"] },
+              "cameraOrder": { "type": "string", "enum": ["CAM-A-left-CAM-B-right", "CAM-A-top-CAM-B-bottom"] },
+              "overlapPercent": { "type": "number", "minimum": 0, "exclusiveMaximum": 100 },
+              "crop": { "type": "object", "properties": { "leftPercent": { "type": "number" }, "topPercent": { "type": "number" }, "rightPercent": { "type": "number" }, "bottomPercent": { "type": "number" } } }
+            }
+          },
+          "optics": { "type": "object", "properties": { "focalLengthMm": { "type": "number", "exclusiveMinimum": 0 }, "cameraToOriginalMm": { "type": "number", "exclusiveMinimum": 0 }, "targetDpi": { "type": "integer", "minimum": 1 } } },
+          "calibration": { "type": "object", "properties": { "method": { "const": "planar-homography" }, "homography": { "type": "array", "minItems": 9, "maxItems": 9 }, "measuredAt": { "type": "string", "format": "date-time" }, "provenanceId": { "type": "string", "minLength": 1 }, "validUntil": { "type": "string", "format": "date-time" } } },
+          "correctionEnvelope": {
+            "type": "object",
+            "properties": {
+              "minimumOverlapPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+              "registrationErrorPixels": { "type": "object", "properties": { "targetMax": { "type": "number", "minimum": 0 }, "autoCorrectionMax": { "type": "number", "minimum": 0 } } },
+              "rotationErrorDegrees": { "type": "object", "properties": { "targetMax": { "type": "number", "minimum": 0 }, "autoCorrectionMax": { "type": "number", "minimum": 0 } } },
+              "scaleDifferencePercent": { "type": "object", "properties": { "targetMax": { "type": "number", "minimum": 0 }, "autoCorrectionMax": { "type": "number", "minimum": 0 } } },
+              "exposureDifferenceEv": { "type": "object", "properties": { "targetMax": { "type": "number", "minimum": 0 }, "autoCorrectionMax": { "type": "number", "minimum": 0 } } },
+              "colorDeltaE": { "type": "object", "properties": { "targetMax": { "type": "number", "minimum": 0 }, "autoCorrectionMax": { "type": "number", "minimum": 0 } } }
+            }
+          },
+          "qualityContract": { "type": "object", "properties": { "seamErrorPixelsMax": { "type": "number", "minimum": 0 }, "registrationErrorPixelsMax": { "type": "number", "minimum": 0 }, "colorDeltaEMax": { "type": "number", "minimum": 0 } } }
+        }
+      }
+    }
+  ]
+}

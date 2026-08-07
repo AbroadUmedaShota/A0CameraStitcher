@@ -1,1 +1,261 @@
-{"schema_version":"autodev.evidence-matrix.v1","requirements_version":"2.0.0","items":[]}
+{
+  "schema_version": "autodev.evidence-matrix.v1",
+  "requirements_version": "2.5.0",
+  "evaluated_at": "2026-08-07T03:25:51+09:00",
+  "items": [
+    {
+      "requirement_id": "FR-CAP-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0010", "WI-0011", "WI-0014"],
+      "evidence": ["docs/evidence/phase0/run-1785917466375-1/identity-continuity-summary.json"],
+      "confirmed_scope": "One physical D810 was restored as CAM-A by both SDK and WPD after the recorded power cycle without committed real identity.",
+      "remaining_gap": "CAM-B enumeration and dual-camera distinction require the second D810."
+    },
+    {
+      "requirement_id": "FR-CAP-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0011", "WI-0014"],
+      "evidence": ["docs/evidence/phase0/run-1785917466375-1/identity-continuity-summary.json"],
+      "confirmed_scope": "The one-body CAM-A local SDK and WPD mappings survived a recorded power cycle and PnP re-enumeration.",
+      "remaining_gap": "Physical cable and port changes, connection-order independence, CAM-B, and explicit same-body dual binding remain untested."
+    },
+    {
+      "requirement_id": "FR-CAP-003",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0012", "WI-0015"],
+      "evidence": ["tests/phase0_tests.cpp", "docs/evidence/phase0/run-1786014841232-1/hybrid-capture-summary.json"],
+      "confirmed_scope": "Fake contracts implement the approved empty-before, SDK one capture, WPD recovery, PC verification, exact delete, and empty-after ordering; a real preflight failed closed before SDK open when the spool was not empty.",
+      "remaining_gap": "No approved one-shot hardware transaction, 10 one-camera transactions, or sequential CAM-A/B transaction has completed."
+    },
+    {
+      "requirement_id": "FR-CAP-004",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0012", "WI-0015"],
+      "evidence": ["tests/phase0_tests.cpp", "docs/evidence/phase0/run-1786017282044-1/wpd-spool-status-summary.json"],
+      "confirmed_scope": "Software rejects non-empty spools and zero, multiple, late, invalid, or unattributed candidates without retry or deletion; the real read-only spool count was recorded anonymously.",
+      "remaining_gap": "Exact-one WPD recovery and post-PC exact-object cleanup are not proven with the dedicated empty card."
+    },
+    {
+      "requirement_id": "FR-CAP-005",
+      "status": "partial",
+      "work_item_ids": ["WI-0005", "WI-0006", "WI-0012"],
+      "evidence": ["tests/phase0_cli_safety_tests.cpp", "tests/phase0_tests.cpp"],
+      "confirmed_scope": "Legacy direct hardware capture is rejected, real-camera CLI commands require a named OS lease within one interactive Windows logon session, a child process proves contention and release, and fake contracts prevent SDK/WPD session overlap.",
+      "remaining_gap": "Two independent real-camera CLI commands and the full hardware handoff have not been exercised together; other user sessions and services are outside the MVP operating contract."
+    },
+    {
+      "requirement_id": "FR-CAP-006",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0006", "WI-0013", "WI-0017"],
+      "evidence": ["tests/phase0_tests.cpp", "tests/phase0_cli_safety_tests.cpp"],
+      "confirmed_scope": "Fake timeout, ambiguity, transport failure, close failure, watchdog, and no-retry paths end FailedPartial while retaining available evidence.",
+      "remaining_gap": "Physical USB disconnect, power-off, restart, and two-camera fault evidence remain deferred."
+    },
+    {
+      "requirement_id": "FR-LV-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0005", "WI-0019", "WI-0033"],
+      "evidence": ["docs/evidence/phase0/run-1785917554163-1/live-view-summary.json", "docs/evidence/phase0/run-1785917887961-1/live-view-summary.json", "docs/evidence/phase0/run-1785917904556-1/sdk-status-summary.json"],
+      "confirmed_scope": "CAM-A Live View ran for 304347 ms and 2424 frames, stopped and closed cleanly without preview persistence, then restarted from a fresh process and ended off.",
+      "remaining_gap": "Product UI control and CAM-B selection are not verified."
+    },
+    {
+      "requirement_id": "FR-LV-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0005", "WI-0019", "WI-0031"],
+      "evidence": ["tests/phase0_tests.cpp", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json"],
+      "confirmed_scope": "Fake contracts gate WPD after Live View stop and SDK close, skip resume on capture failure, and preserve the PC original on resume failure.",
+      "remaining_gap": "Ten approved single-slot hardware handoffs are not executed."
+    },
+    {
+      "requirement_id": "FR-STI-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0020A", "WI-0022A", "WI-0022"],
+      "evidence": ["docs/schemas/rig-profile.schema.json", "samples/public/rig-profile.draft.example.json"],
+      "confirmed_scope": "The versioned draft rig profile has typed camera and lens-calibration fields without invented approved values.",
+      "remaining_gap": "No D810 lens calibration has been measured or approved."
+    },
+    {
+      "requirement_id": "FR-STI-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0020A", "WI-0022A", "WI-0022"],
+      "evidence": ["tests/m2_tests.cpp", "docs/schemas/rig-profile.schema.json"],
+      "confirmed_scope": "Optical planning and schema contracts represent overlap, transform, seam, crop, provenance, and validity without selecting final values.",
+      "remaining_gap": "No fixed two-camera transform, overlap, seam, or crop profile has been calibrated."
+    },
+    {
+      "requirement_id": "FR-STI-003",
+      "status": "partial",
+      "work_item_ids": ["WI-0021A", "WI-0022B", "WI-0022C", "WI-0023", "WI-0034"],
+      "evidence": ["tests/setup_assessment_tests.cpp", "docs/schemas/rig-profile.schema.json"],
+      "confirmed_scope": "Pure C++ contracts distinguish target and automatic-correction limits, reject over-limit values, remain deterministic, and do not mutate input profiles.",
+      "remaining_gap": "WI-0022C has not yet generated measurements from synthetic images or applied a bounded correction proposal."
+    },
+    {
+      "requirement_id": "FR-STI-004",
+      "status": "unverified",
+      "work_item_ids": ["WI-0021A", "WI-0022C", "WI-0023"],
+      "evidence": ["samples/public/m2-fixtures/fixture-manifest.json"],
+      "confirmed_scope": "Rights-cleared synthetic fixtures and expected damaged cases exist.",
+      "remaining_gap": "No exposure, color, seam, blend, or crop implementation has produced a stitched image."
+    },
+    {
+      "requirement_id": "FR-STI-005",
+      "status": "partial",
+      "work_item_ids": ["WI-0021A", "WI-0022B", "WI-0022C", "WI-0024"],
+      "evidence": ["tests/setup_assessment_tests.cpp", "scripts/Test-M2PreGateAssets.ps1"],
+      "confirmed_scope": "Software contracts reject declared hard blockers and automatic-correction-limit exceedance without clamping to success or mutating a profile.",
+      "remaining_gap": "Approved image-quality thresholds, corrected-image metrics, physical guidance, and real A0 chart rejection evidence are unavailable."
+    },
+    {
+      "requirement_id": "FR-STI-006",
+      "status": "partial",
+      "work_item_ids": ["WI-0010A", "WI-0022A", "WI-0022B", "WI-0022C", "WI-0022", "WI-0033"],
+      "evidence": ["tests/setup_assessment_tests.cpp", "docs/schemas/rig-profile.schema.json", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json"],
+      "confirmed_scope": "Profile trust and the three setup outcomes are validated without hard-coded product thresholds; CAM-A principal settings are read as values or explicit unavailable states.",
+      "remaining_gap": "Native setting command trace, image measurement, approved profile loading, two-body comparison, and physical setup guidance remain."
+    },
+    {
+      "requirement_id": "FR-DATA-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0012", "WI-0013", "WI-0032"],
+      "evidence": ["tests/phase0_tests.cpp", "tests/m3/FoundationTests/Program.cs"],
+      "confirmed_scope": "Fake native and simulated .NET contracts retain partial originals, use no automatic retry, and guard exact cleanup behind canonical PC verification.",
+      "remaining_gap": "No approved real one-shot PC original has been persisted and reread from the dedicated spool path."
+    },
+    {
+      "requirement_id": "FR-DATA-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0012", "WI-0030A", "WI-0032"],
+      "evidence": ["tests/phase0_tests.cpp", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json"],
+      "confirmed_scope": "Atomic anonymous summaries and JSONL transaction evidence cover IDs, states, sizes, hashes, terminal results, and controlled errors in software contracts.",
+      "remaining_gap": "Complete two-image real transaction and stitch records are unavailable."
+    },
+    {
+      "requirement_id": "FR-EXP-001",
+      "status": "unverified",
+      "work_item_ids": ["WI-0023", "WI-0034"],
+      "evidence": [],
+      "confirmed_scope": "No product stitched-JPEG export is claimed.",
+      "remaining_gap": "The stitch pipeline and destination-folder export are not implemented."
+    },
+    {
+      "requirement_id": "FR-UI-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0033A", "WI-0033"],
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "tests/m3/FoundationTests/Program.cs"],
+      "confirmed_scope": "The simulated WPF shell displays connection, progress, results, and explicit simulation markers.",
+      "remaining_gap": "Real camera readiness, rig profile, and correction readiness are not connected."
+    },
+    {
+      "requirement_id": "FR-UI-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0033A", "WI-0033"],
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "scripts/Test-M3Simulated.ps1"],
+      "confirmed_scope": "Simulated capture, progress, result, and alert workflows exist with no real device action.",
+      "remaining_gap": "Setup, calibration, physical guidance, restitch, and real save-location workflows are not implemented."
+    },
+    {
+      "requirement_id": "FR-UI-003",
+      "status": "partial",
+      "work_item_ids": ["WI-0033A", "WI-0033"],
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md"],
+      "confirmed_scope": "The simulated shell preserves a visible preview and no-auto-retry boundary.",
+      "remaining_gap": "Real selected-camera Live View start, stop, target, connection, and resume-failure UI are not integrated."
+    },
+    {
+      "requirement_id": "NFR-PLAT-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0002", "WI-0030A", "WI-0041"],
+      "evidence": ["CMakeLists.txt", "A0CameraStitcher.M3.slnx"],
+      "confirmed_scope": "Native C++ and simulated .NET components build and test on the target Windows x64 development PC.",
+      "remaining_gap": "Clean-PC install, smoke, and supported deployment packaging remain."
+    },
+    {
+      "requirement_id": "NFR-PERF-001",
+      "status": "unverified",
+      "work_item_ids": ["WI-0020A", "WI-0021", "WI-0024", "WI-0035"],
+      "evidence": [],
+      "confirmed_scope": "The ten-second value remains a provisional target only.",
+      "remaining_gap": "No real capture-to-stitched-JPEG p50, p95, or max timing exists."
+    },
+    {
+      "requirement_id": "NFR-REL-001",
+      "status": "unverified",
+      "work_item_ids": ["WI-0016", "WI-0035"],
+      "evidence": [],
+      "confirmed_scope": "No two-camera stability result is claimed.",
+      "remaining_gap": "The required 100 of 100 real paired transactions await the second D810 and completed Phase 0B path."
+    },
+    {
+      "requirement_id": "NFR-OBS-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0004", "WI-0006", "WI-0010A", "WI-0013", "WI-0019", "WI-0016", "WI-0017", "WI-0024"],
+      "evidence": ["docs/evidence/phase0/run-1785917005306-1/report.md", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json", "docs/evidence/phase0/run-1786014841232-1/report.md", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json"],
+      "confirmed_scope": "Anonymous WPD, Live View, spool, safety, and setting evidence is persisted without raw identities or images; software contracts cover controlled failure states.",
+      "remaining_gap": "Real exact-object capture, fault, handoff, profile/correction, paired, stitch, and final timing evidence remain incomplete."
+    },
+    {
+      "requirement_id": "NFR-SEC-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0011", "WI-0035", "WI-0040"],
+      "evidence": ["docs/evidence/phase0/run-1785917466375-1/identity-continuity-summary.json", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json"],
+      "confirmed_scope": "Committed Phase 0 evidence excludes real camera identities, raw map hashes, SDK material, real originals, and preview frames.",
+      "remaining_gap": "A full release dependency, storage, telemetry, and redaction audit remains open."
+    },
+    {
+      "requirement_id": "NFR-MEM-001",
+      "status": "unverified",
+      "work_item_ids": ["WI-0024", "WI-0035"],
+      "evidence": [],
+      "confirmed_scope": "No product memory ceiling is claimed.",
+      "remaining_gap": "Peak memory on 16 GB and 32 GB target configurations has not been measured."
+    },
+    {
+      "requirement_id": "CON-001",
+      "status": "partial",
+      "work_item_ids": ["WI-0001", "WI-0018"],
+      "evidence": ["docs/evidence/phase0/run-1785917466375-1/identity-continuity-summary.json"],
+      "confirmed_scope": "The connected body and all current contracts target Nikon D810; one D810 is evidenced.",
+      "remaining_gap": "The required second D810 is not available."
+    },
+    {
+      "requirement_id": "CON-002",
+      "status": "partial",
+      "work_item_ids": ["WI-0018", "WI-0042"],
+      "evidence": ["docs/PRODUCT_REQUIREMENTS.md", "docs/ARCHITECTURE.md"],
+      "confirmed_scope": "Architecture and state transitions use sequential software control and make no shutter-synchronization guarantee.",
+      "remaining_gap": "Final two-camera acceptance and user documentation have not been reviewed."
+    },
+    {
+      "requirement_id": "CON-003",
+      "status": "partial",
+      "work_item_ids": ["WI-0001", "WI-0005", "WI-0006", "WI-0010A", "WI-0018"],
+      "evidence": ["tests/phase0_tests.cpp", "tests/phase0_cli_safety_tests.cpp", "docs/evidence/phase0/run-1786014841232-1/hybrid-capture-summary.json"],
+      "confirmed_scope": "Rejected datetime attribution remains disabled; direct hardware capture is closed; fake contracts enforce empty spool, exact cleanup, no vendor operation, no retry, and exclusive sessions.",
+      "remaining_gap": "The approved single-slot hardware sequence and two-body binding are not proven end to end."
+    },
+    {
+      "requirement_id": "CON-004",
+      "status": "partial",
+      "work_item_ids": ["WI-0003", "WI-0010", "WI-0010A", "WI-0040"],
+      "evidence": ["scripts/Test-Phase0Readiness.ps1", "docs/PHASE0_READINESS.md"],
+      "confirmed_scope": "Licensed Nikon material is loaded from ignored local tooling and is absent from committed evidence.",
+      "remaining_gap": "Product redistribution for Nikon SDK, OpenCV, and other native dependencies awaits HG-0005."
+    },
+    {
+      "requirement_id": "CON-005",
+      "status": "partial",
+      "work_item_ids": ["WI-0042"],
+      "evidence": ["docs/PRODUCT_REQUIREMENTS.md", "docs/ROADMAP.md"],
+      "confirmed_scope": "Requirements and roadmap exclude motion, handheld, close-range 3D, real-time video, and unrelated panorama modes.",
+      "remaining_gap": "Final product acceptance must confirm no out-of-scope behavior was introduced."
+    }
+  ],
+  "summary": {
+    "mvp_requirements_total": 31,
+    "mvp_requirements_verified": 0,
+    "partial_requirements_recorded": 26,
+    "unverified_requirements_recorded": 5
+  }
+}

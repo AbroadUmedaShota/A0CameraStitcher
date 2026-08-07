@@ -4,14 +4,18 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <iomanip>
+#include <iterator>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -20,34 +24,78 @@ namespace {
 
 std::string JsonEscape(std::string_view value) {
     std::ostringstream stream;
-    for (const char ch : value) {
+    constexpr char kHex[] = "0123456789ABCDEF";
+    for (const unsigned char ch : value) {
         switch (ch) {
         case '\\': stream << "\\\\"; break;
         case '"': stream << "\\\""; break;
         case '\n': stream << "\\n"; break;
         case '\r': stream << "\\r"; break;
         case '\t': stream << "\\t"; break;
-        default: stream << ch; break;
+        default:
+            if (ch < 0x20U || ch >= 0x7FU) {
+                stream << "\\u00" << kHex[(ch >> 4U) & 0x0FU] << kHex[ch & 0x0FU];
+            } else {
+                stream << static_cast<char>(ch);
+            }
         }
     }
     return stream.str();
 }
 
+std::string ControlledErrorDetail(std::string_view value) {
+    std::string result;
+    result.reserve(std::min<std::size_t>(value.size(), 512));
+    for (const unsigned char ch : value) {
+        if (ch < 0x20 || ch == 0x7f) continue;
+        if (result.size() == 512) break;
+        result.push_back(static_cast<char>(ch));
+    }
+    return result;
+}
+
 std::string JsonUnescape(std::string_view value) {
     std::string result;
-    bool escaped = false;
-    for (const char ch : value) {
-        if (!escaped && ch == '\\') { escaped = true; continue; }
-        if (escaped) {
-            switch (ch) {
-            case 'n': result.push_back('\n'); break;
-            case 'r': result.push_back('\r'); break;
-            case 't': result.push_back('\t'); break;
-            default: result.push_back(ch); break;
+    const auto hex_value = [](char character) -> unsigned int {
+        if (character >= '0' && character <= '9') return static_cast<unsigned int>(character - '0');
+        if (character >= 'A' && character <= 'F') return static_cast<unsigned int>(character - 'A' + 10);
+        if (character >= 'a' && character <= 'f') return static_cast<unsigned int>(character - 'a' + 10);
+        throw std::runtime_error("local camera map contains an invalid JSON escape");
+    };
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const char character = value[index];
+        if (character != '\\') {
+            result.push_back(character);
+            continue;
+        }
+        if (++index >= value.size()) {
+            throw std::runtime_error("local camera map contains a truncated JSON escape");
+        }
+        switch (value[index]) {
+        case '\\': result.push_back('\\'); break;
+        case '"': result.push_back('"'); break;
+        case '/': result.push_back('/'); break;
+        case 'b': result.push_back('\b'); break;
+        case 'f': result.push_back('\f'); break;
+        case 'n': result.push_back('\n'); break;
+        case 'r': result.push_back('\r'); break;
+        case 't': result.push_back('\t'); break;
+        case 'u': {
+            if (index + 4 >= value.size()) {
+                throw std::runtime_error("local camera map contains a truncated Unicode escape");
             }
-            escaped = false;
-        } else {
-            result.push_back(ch);
+            unsigned int code_unit = 0;
+            for (int digit = 0; digit < 4; ++digit) {
+                code_unit = (code_unit << 4U) | hex_value(value[++index]);
+            }
+            if (code_unit > 0xFFU) {
+                throw std::runtime_error("local camera map contains an unsupported Unicode escape");
+            }
+            result.push_back(static_cast<char>(code_unit));
+            break;
+        }
+        default:
+            throw std::runtime_error("local camera map contains an unsupported JSON escape");
         }
     }
     return result;
@@ -111,6 +159,85 @@ TransportError::TransportError(std::string category, std::string message)
     : std::runtime_error(std::move(message)), category_(std::move(category)) {}
 
 const std::string& TransportError::Category() const noexcept { return category_; }
+
+UncertainDispatchError::UncertainDispatchError(
+    std::string category, std::string message, std::vector<ImageCandidate> candidates)
+    : std::runtime_error(std::move(message)), category_(std::move(category)), candidates_(std::move(candidates)) {}
+const std::string& UncertainDispatchError::Category() const noexcept { return category_; }
+const std::vector<ImageCandidate>& UncertainDispatchError::Candidates() const noexcept { return candidates_; }
+
+OperatorGate::OperatorGate(
+    fs::path artifacts_root,
+    std::string safe_name,
+    std::chrono::seconds timeout,
+    std::string scenario,
+    std::string stage)
+    : gate_directory_(std::move(artifacts_root) / "operator-gates" / safe_name),
+      ready_path_(gate_directory_ / "ready.json"),
+      continue_path_(gate_directory_ / "continue"),
+      safe_name_(std::move(safe_name)),
+      scenario_(std::move(scenario)),
+      stage_(std::move(stage)),
+      timeout_(timeout) {
+    if (!IsSafeName(safe_name_)) {
+        throw TransportError("operator_gate_invalid_name", "operator gate name must match [A-Za-z0-9_-] and be 1-64 characters");
+    }
+    if (timeout_ <= std::chrono::seconds::zero() || timeout_ > std::chrono::hours(1)) {
+        throw TransportError("operator_gate_invalid_timeout", "operator gate timeout must be between 1 and 3600 seconds");
+    }
+    if ((!scenario_.empty() && !IsSafeName(scenario_)) || (!stage_.empty() && !IsSafeName(stage_))) {
+        throw TransportError("operator_gate_invalid_metadata", "operator gate scenario and stage must use safe names");
+    }
+}
+
+bool OperatorGate::IsSafeName(std::string_view value) noexcept {
+    if (value.empty() || value.size() > 64) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+        return std::isalnum(character) || character == '_' || character == '-';
+    });
+}
+
+const fs::path& OperatorGate::ReadyPath() const noexcept { return ready_path_; }
+
+fs::path OperatorGate::AwaitContinue(std::ostream& output) {
+    if (armed_) throw TransportError("operator_gate_reused", "operator gate cannot be reused");
+    armed_ = true;
+    std::error_code error;
+    fs::create_directories(gate_directory_.parent_path(), error);
+    if (error) throw TransportError("operator_gate_create_failed", "cannot create operator gate parent directory");
+    if (!fs::create_directory(gate_directory_, error) || error) {
+        throw TransportError("operator_gate_exists", "operator gate directory already exists");
+    }
+    const fs::path partial = gate_directory_ / "ready.json.partial";
+    std::ofstream ready(partial, std::ios::binary | std::ios::out);
+    if (!ready) throw TransportError("operator_gate_create_failed", "cannot create operator gate ready artifact");
+    ready << "{\n"
+          << "  \"schemaVersion\": \"phase0.operator-gate.v2\",\n"
+          << "  \"gateName\": \"" << safe_name_ << "\",\n";
+    if (!scenario_.empty()) ready << "  \"scenario\": \"" << scenario_ << "\",\n";
+    if (!stage_.empty()) ready << "  \"stage\": \"" << stage_ << "\",\n";
+    ready << "  \"status\": \"ready\"\n"
+          << "}\n";
+    ready.close();
+    if (!ready) throw TransportError("operator_gate_create_failed", "cannot persist operator gate ready artifact");
+    fs::rename(partial, ready_path_, error);
+    if (error) throw TransportError("operator_gate_create_failed", "cannot atomically publish operator gate ready artifact");
+
+    output << "OPERATOR GATE READY: create marker 'continue' at " << continue_path_.string() << '\n' << std::flush;
+    const auto deadline = std::chrono::steady_clock::now() + timeout_;
+    while (std::chrono::steady_clock::now() < deadline) {
+        error.clear();
+        const bool marker_exists = fs::exists(continue_path_, error);
+        if (error) throw TransportError("operator_gate_wait_failed", "cannot inspect operator gate continue marker");
+        if (marker_exists) {
+            const bool marker_is_file = fs::is_regular_file(continue_path_, error);
+            if (error) throw TransportError("operator_gate_wait_failed", "cannot inspect operator gate continue marker");
+            if (marker_is_file) return continue_path_;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    throw TransportError("operator_gate_timeout", "operator gate continue marker was not received before timeout");
+}
 
 IdentityMap::IdentityMap(fs::path path) : path_(std::move(path)) { Load(); }
 
@@ -177,11 +304,13 @@ void EvidenceWriter::AppendEvent(std::string_view json_line) {
     output << json_line << '\n';
 }
 
-void EvidenceWriter::RecordState(std::string_view transaction_id, std::string_view state, std::string_view camera_alias) {
+void EvidenceWriter::RecordState(std::string_view transaction_id, std::string_view state, std::string_view camera_alias,
+                                 std::string_view error_detail) {
     std::ostringstream event;
     event << "{\"timestamp\":\"" << NowIso8601() << "\",\"runId\":\"" << JsonEscape(run_id_)
           << "\",\"transactionId\":\"" << JsonEscape(transaction_id) << "\",\"state\":\"" << JsonEscape(state) << "\"";
     if (!camera_alias.empty()) event << ",\"cameraAlias\":\"" << JsonEscape(camera_alias) << "\"";
+    if (!error_detail.empty()) event << ",\"errorDetail\":\"" << JsonEscape(error_detail) << "\"";
     event << '}';
     AppendEvent(event.str());
 }
@@ -195,9 +324,21 @@ void EvidenceWriter::RecordCamera(std::string_view camera_alias, std::string_vie
 }
 
 FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id, std::string_view camera_alias,
-                                                 const std::vector<ImageCandidate>& candidates) {
+                                                 const std::vector<ImageCandidate>& candidates,
+                                                 std::optional<std::chrono::steady_clock::time_point> transaction_deadline,
+                                                 const std::function<void()>& before_atomic_rename) {
     FrameEvidence frame;
     frame.camera_alias = std::string(camera_alias);
+    const auto deadline_expired = [&] {
+        return transaction_deadline && std::chrono::steady_clock::now() >= *transaction_deadline;
+    };
+    const auto watchdog_failure = [&](const fs::path& diagnostic_path) {
+        frame.path = diagnostic_path;
+        frame.error_category = "transaction_watchdog";
+        frame.error_detail = "capture transaction watchdog expired before canonical PC original completion";
+        RecordState(transaction_id, "PcOriginalPersistWatchdogExpired", camera_alias, frame.error_detail);
+        return frame;
+    };
     if (candidates.size() != 1 || !candidates.front().attributable || !IsValidJpeg(candidates.front().bytes)) {
         frame.error_category = candidates.empty() ? "no_candidate" :
             (candidates.size() > 1 ? "ambiguous_candidates" :
@@ -211,21 +352,75 @@ FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id,
         RecordState(transaction_id, "Quarantined", camera_alias);
         return frame;
     }
+    if (deadline_expired()) {
+        const fs::path quarantine = artifacts_root_ / "quarantine" / run_id_ /
+            std::string(transaction_id) / std::string(camera_alias);
+        WriteBytesExclusive(quarantine / ("watchdog_" + SanitizeFileName(candidates.front().source_name) + ".bin"),
+            candidates.front().bytes);
+        return watchdog_failure(quarantine);
+    }
     const fs::path directory = run_root_ / std::string(transaction_id) / std::string(camera_alias);
     const fs::path partial = directory / "original.jpg.partial";
     const fs::path final = directory / "original.jpg";
     frame.bytes = candidates.front().bytes.size();
     frame.sha256 = Sha256Hex(candidates.front().bytes);
     WriteBytesExclusive(partial, candidates.front().bytes);
+    if (deadline_expired()) return watchdog_failure(partial);
     if (fs::exists(final)) throw std::runtime_error("refusing to overwrite an original JPEG");
+    if (before_atomic_rename) before_atomic_rename();
+    if (deadline_expired()) return watchdog_failure(partial);
     fs::rename(partial, final);
-    frame.success = true;
     frame.path = final;
+    if (deadline_expired()) return watchdog_failure(final);
+    std::error_code size_error;
+    const auto persisted_size = fs::file_size(final, size_error);
+    std::ifstream persisted_stream(final, std::ios::binary);
+    const std::vector<unsigned char> persisted_bytes{
+        std::istreambuf_iterator<char>(persisted_stream),
+        std::istreambuf_iterator<char>()};
+    if (size_error || persisted_stream.bad() || persisted_size != frame.bytes ||
+        persisted_bytes.size() != frame.bytes || !IsValidJpeg(persisted_bytes) ||
+        Sha256Hex(persisted_bytes) != frame.sha256) {
+        frame.error_category = "pc_original_verification_failed";
+        RecordState(transaction_id, "PcOriginalVerificationFailed", camera_alias);
+        return frame;
+    }
+    if (deadline_expired()) return watchdog_failure(final);
+    frame.success = true;
     std::ostringstream event;
     event << "{\"timestamp\":\"" << NowIso8601() << "\",\"runId\":\"" << JsonEscape(run_id_)
           << "\",\"transactionId\":\"" << JsonEscape(transaction_id) << "\",\"state\":\"Persisted\",\"cameraAlias\":\""
           << JsonEscape(camera_alias) << "\",\"bytes\":" << frame.bytes << ",\"sha256\":\"" << frame.sha256 << "\"}";
     AppendEvent(event.str());
+    return frame;
+}
+
+FrameEvidence EvidenceWriter::QuarantineUnconfirmed(
+    std::string_view transaction_id, std::string_view camera_alias,
+    const std::vector<ImageCandidate>& candidates, std::string_view command_detail) {
+    FrameEvidence frame;
+    frame.camera_alias = std::string(camera_alias);
+    const fs::path quarantine = artifacts_root_ / "quarantine" / run_id_ /
+        std::string(transaction_id) / std::string(camera_alias);
+    frame.path = quarantine;
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        const auto& candidate = candidates[index];
+        const auto bytes = candidate.bytes.size();
+        const auto sha256 = Sha256Hex(candidate.bytes);
+        WriteBytesExclusive(quarantine / (std::to_string(index) + "_" + SanitizeFileName(candidate.source_name) + ".bin"), candidate.bytes);
+        std::ostringstream event;
+        event << "{\"timestamp\":\"" << NowIso8601() << "\",\"runId\":\"" << JsonEscape(run_id_)
+              << "\",\"transactionId\":\"" << JsonEscape(transaction_id)
+              << "\",\"state\":\"UnconfirmedCandidateQuarantined\",\"cameraAlias\":\""
+              << JsonEscape(camera_alias) << "\",\"candidateIndex\":" << index
+              << ",\"bytes\":" << bytes << ",\"sha256\":\"" << sha256 << "\"}";
+        AppendEvent(event.str());
+        if (candidates.size() == 1) {
+            frame.bytes = bytes;
+            frame.sha256 = sha256;
+        }
+    }
+    RecordState(transaction_id, "UnconfirmedDispatchQuarantined", camera_alias, command_detail);
     return frame;
 }
 
@@ -237,6 +432,7 @@ void EvidenceWriter::RecordResult(const TransactionResult& result) {
           << "\",\"transactionId\":\"" << JsonEscape(result.transaction_id) << "\",\"state\":\""
           << JsonEscape(result.terminal_state) << "\",\"durationMs\":" << result.duration.count();
     if (!result.error_category.empty()) event << ",\"errorCategory\":\"" << JsonEscape(result.error_category) << "\"";
+    if (!result.error_detail.empty()) event << ",\"errorDetail\":\"" << JsonEscape(result.error_detail) << "\"";
     event << '}';
     AppendEvent(event.str());
     std::ofstream summary(run_root_ / "summary.json", std::ios::trunc);
@@ -251,26 +447,98 @@ const std::string& EvidenceWriter::RunId() const noexcept { return run_id_; }
 const fs::path& EvidenceWriter::RunRoot() const noexcept { return run_root_; }
 
 void EvidenceWriter::GenerateRedactedReport(const fs::path& report_root) const {
-    const fs::path source = run_root_ / "summary.json";
-    const fs::path events_source = run_root_ / "events.jsonl";
-    if (!fs::exists(source) || !fs::exists(events_source)) throw std::runtime_error("run evidence does not exist");
+    const std::array<std::pair<fs::path, fs::path>, 10> candidates{{
+        {run_root_ / "summary.json", "summary.json"},
+        {run_root_ / "sdk-status-summary.json", "sdk-status-summary.json"},
+        {run_root_ / "wpd-status-summary.json", "wpd-status-summary.json"},
+        {run_root_ / "wpd-spool-status-summary.json", "wpd-spool-status-summary.json"},
+        {run_root_ / "wpd-correlation-summary.json", "wpd-correlation-summary.json"},
+        {run_root_ / "events.jsonl", "transaction-events.jsonl"},
+        {run_root_ / "handoff-summary.json", "handoff-summary.json"},
+        {run_root_ / "live-view-summary.json", "live-view-summary.json"},
+        {run_root_ / "hybrid-capture-summary.json", "hybrid-capture-summary.json"},
+        {run_root_ / "hybrid-fault-summary.json", "hybrid-fault-summary.json"},
+    }};
+    std::vector<std::pair<fs::path, fs::path>> included;
+    for (const auto& candidate : candidates) {
+        if (fs::exists(candidate.first)) included.push_back(candidate);
+    }
+    const bool has_summary = std::ranges::any_of(included, [](const auto& item) {
+        return item.second.filename() != "transaction-events.jsonl";
+    });
+    if (!has_summary) throw std::runtime_error("run evidence does not contain an anonymous summary");
+
     const fs::path destination = report_root / run_id_;
-    fs::create_directories(destination);
-    const fs::path summary_target = destination / "summary.json";
-    const fs::path events_target = destination / "transaction-events.jsonl";
-    const fs::path report_target = destination / "report.md";
-    if (fs::exists(summary_target) || fs::exists(events_target) || fs::exists(report_target)) {
+    const fs::path partial = report_root / (run_id_ + ".partial");
+    if (fs::exists(destination) || fs::exists(partial)) {
         throw std::runtime_error("refusing to overwrite redacted report");
     }
-    fs::copy_file(source, summary_target);
-    fs::copy_file(events_source, events_target);
-    std::ofstream report(report_target);
-    if (!report) throw std::runtime_error("cannot write redacted report");
-    report << "# Phase 0 report: " << run_id_ << "\n\n- Camera model: Nikon D810\n"
-           << "- SDK version and counts: see `summary.json`\n"
-           << "- Redacted camera profiles, transaction IDs, aliases, state timestamps, sizes, hashes, and error classes: see `transaction-events.jsonl`\n"
-           << "- Raw images and unrestricted diagnostics: local ignored artifacts only\n"
-           << "- Real camera identifiers: excluded\n";
+    fs::create_directories(report_root);
+    try {
+        if (!fs::create_directory(partial)) {
+            throw std::runtime_error("cannot create redacted report partial directory");
+        }
+        const fs::path report_target = partial / "report.md";
+        for (const auto& item : included) {
+            fs::copy_file(item.first, partial / item.second);
+        }
+        std::ofstream report(report_target);
+        if (!report) throw std::runtime_error("cannot write redacted report");
+        report << "# Phase 0 report: " << run_id_ << "\n\n- Camera model: Nikon D810\n"
+               << "- Anonymous run summaries: see the included `*-summary.json` or `summary.json` files\n"
+               << "- Redacted camera profiles, transaction IDs, aliases, state timestamps, sizes, hashes, and error classes, when available: see `transaction-events.jsonl`\n"
+               << "- Raw images and unrestricted diagnostics: local ignored artifacts only\n"
+               << "- Real camera identifiers: excluded\n";
+        report.close();
+        if (!report) throw std::runtime_error("cannot finalize redacted report");
+        fs::rename(partial, destination);
+    } catch (...) {
+        std::error_code cleanup_error;
+        fs::remove_all(partial, cleanup_error);
+        throw;
+    }
+}
+
+fs::path PersistHybridCaptureSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const HybridCaptureRunSummary& result) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path output = run_root / "hybrid-capture-summary.json";
+    const fs::path partial = run_root / "hybrid-capture-summary.json.partial";
+    fs::create_directories(run_root);
+    std::ofstream stream(partial, std::ios::binary | std::ios::trunc);
+    if (!stream) throw std::runtime_error("cannot write hybrid capture summary");
+    stream << "{\n  \"schemaVersion\": \"phase0.hybrid-capture-summary.v3\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"requested\": " << result.requested << ",\n"
+           << "  \"attempted\": " << result.attempted << ",\n"
+           << "  \"completed\": " << result.completed << ",\n"
+           << "  \"failures\": " << result.failures << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(result.terminal_state) << "\",\n"
+           << "  \"lastState\": \"" << JsonEscape(result.last_state) << "\",\n"
+           << "  \"pc_original_canonical\": " << (result.pc_original_canonical ? "true" : "false") << ",\n"
+           << "  \"camera_card_transient\": " << (result.camera_card_transient ? "true" : "false") << ",\n"
+           << "  \"spoolEmptyBeforeCount\": " << result.spool_empty_before_count << ",\n"
+           << "  \"cameraCardDeleteAttemptedCount\": " << result.camera_card_delete_attempted_count << ",\n"
+           << "  \"cameraCardDeleteSucceededCount\": " << result.camera_card_delete_succeeded_count << ",\n"
+           << "  \"spoolEmptyAfterCount\": " << result.spool_empty_after_count << ",\n"
+           << "  \"automatic_retry\": " << (result.automatic_retry ? "true" : "false") << ",\n"
+           << "  \"exclusive_camera_control_confirmed\": "
+           << (result.exclusive_camera_control_confirmed ? "true" : "false") << ",\n"
+           << "  \"dedicatedSpoolScopeConfirmed\": "
+           << (result.dedicated_spool_scope_confirmed ? "true" : "false") << ",\n"
+           << "  \"exactObjectDeleteConfirmed\": "
+           << (result.exact_object_delete_confirmed ? "true" : "false") << ",\n"
+           << "  \"cleanupObjectIdIncluded\": false,\n"
+           << "  \"vendorOperationExecuted\": false\n}\n";
+    stream.close();
+    if (!stream) throw std::runtime_error("cannot finalize hybrid capture summary");
+    fs::rename(partial, output);
+    return output;
 }
 
 CaptureCoordinator::CaptureCoordinator(ICameraTransport& transport, EvidenceWriter& evidence, Timeouts timeouts)
@@ -287,34 +555,56 @@ FrameEvidence CaptureCoordinator::CaptureOne(std::string_view transaction_id, st
     FrameEvidence frame;
     frame.camera_alias = std::string(alias);
     bool opened = false;
+    const auto ensure_active = [&] {
+        if (transaction_deadline && std::chrono::steady_clock::now() >= *transaction_deadline) {
+            throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
+        }
+    };
     const auto budget = [&](std::chrono::seconds configured) {
         if (!transaction_deadline) return configured;
-        const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-            *transaction_deadline - std::chrono::steady_clock::now());
+        const auto remaining_duration = *transaction_deadline - std::chrono::steady_clock::now();
+        if (remaining_duration <= std::chrono::steady_clock::duration::zero()) {
+            throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(remaining_duration);
         if (remaining <= std::chrono::seconds::zero()) {
             throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
         }
         return std::min(configured, remaining);
     };
     try {
+        ensure_active();
         evidence_.RecordState(transaction_id, capture_state, alias);
         transport_.Open(stable_identity, budget(timeouts_.open));
         opened = true;
+        ensure_active();
         const auto baseline = transport_.Baseline(budget(timeouts_.open));
+        ensure_active();
         const auto capture_budget = transaction_deadline
-            ? budget(timeouts_.pair_watchdog)
+            ? budget(timeouts_.transaction_watchdog)
             : timeouts_.image_event + timeouts_.download;
         const auto candidates = transport_.CaptureAndDownload(
             baseline, budget(timeouts_.image_event), budget(timeouts_.download), capture_budget);
+        ensure_active();
         evidence_.RecordState(transaction_id, persist_state, alias);
-        frame = evidence_.PersistExactlyOne(transaction_id, alias, candidates);
+        frame = evidence_.PersistExactlyOne(transaction_id, alias, candidates, transaction_deadline);
+        ensure_active();
         opened = false;
         transport_.Close(budget(timeouts_.close));
+        ensure_active();
+        return frame;
+    } catch (const UncertainDispatchError& error) {
+        if (opened) { opened = false; try { transport_.Close(timeouts_.close); } catch (...) {} }
+        frame = evidence_.QuarantineUnconfirmed(transaction_id, alias, error.Candidates(), ControlledErrorDetail(error.what()));
+        frame.error_category = error.Category();
+        frame.error_detail = ControlledErrorDetail(error.what());
+        evidence_.RecordState(transaction_id, "UncertainDispatchFailed", alias, frame.error_detail);
         return frame;
     } catch (const TransportError& error) {
         if (opened) { opened = false; try { transport_.Close(timeouts_.close); } catch (...) {} }
         frame.error_category = error.Category();
-        evidence_.RecordState(transaction_id, "TransportError", alias);
+        frame.error_detail = ControlledErrorDetail(error.what());
+        evidence_.RecordState(transaction_id, "TransportError", alias, frame.error_detail);
         return frame;
     } catch (const std::exception&) {
         if (opened) { opened = false; try { transport_.Close(timeouts_.close); } catch (...) {} }
@@ -340,6 +630,7 @@ TransactionResult CaptureCoordinator::CaptureSingle(std::string_view alias, std:
     result.frames.push_back(CaptureOne(result.transaction_id, alias, stable_identity, "CaptureA", "PersistA"));
     result.terminal_state = FrameCompleted(result.frames.front()) ? "Complete" : "FailedPartial";
     if (!FrameCompleted(result.frames.front())) result.error_category = result.frames.front().error_category;
+    if (!FrameCompleted(result.frames.front())) result.error_detail = result.frames.front().error_detail;
     result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     evidence_.RecordResult(result);
     return result;
@@ -351,7 +642,7 @@ TransactionResult CaptureCoordinator::CapturePair(std::string_view cam_a_identit
     result.run_id = evidence_.RunId();
     result.transaction_id = NextTransactionId();
     const auto started = std::chrono::steady_clock::now();
-    const auto deadline = started + timeouts_.pair_watchdog;
+    const auto deadline = started + timeouts_.transaction_watchdog;
     evidence_.RecordState(result.transaction_id, "Idle");
     result.frames.push_back(CaptureOne(
         result.transaction_id, "CAM-A", cam_a_identity, "CaptureA", "PersistA", deadline));
@@ -366,11 +657,798 @@ TransactionResult CaptureCoordinator::CapturePair(std::string_view cam_a_identit
     } else {
         result.terminal_state = "FailedPartial";
         result.error_category = watchdog_expired ? "transaction_watchdog" : result.frames.back().error_category;
+        result.error_detail = watchdog_expired ? ControlledErrorDetail("capture transaction watchdog expired")
+            : result.frames.back().error_detail;
         if (watchdog_expired) evidence_.RecordState(result.transaction_id, "WatchdogExpired");
     }
     result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     evidence_.RecordResult(result);
     return result;
+}
+
+TransactionResult ExecuteHybridCaptureOnce(
+    ICameraTransport& wpd_session,
+    IPostCardObservationTransport& wpd,
+    ICameraTransport& sdk_session,
+    ICardCaptureTransport& sdk,
+    EvidenceWriter& evidence,
+    std::string_view camera_alias,
+    std::string_view wpd_identity,
+    std::string_view sdk_identity,
+    Timeouts timeouts,
+    const std::function<void()>& before_wpd_recovery,
+    const std::function<void()>& before_pc_original_rename) {
+    TransactionResult result;
+    result.run_id = evidence.RunId();
+    result.transaction_id = "hybrid-tx-" + std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + timeouts.transaction_watchdog;
+    std::string token;
+    bool wpd_open = false;
+    bool sdk_open = false;
+    const auto fail = [&](std::string category, std::string detail) {
+        result.terminal_state = "FailedPartial";
+        result.error_category = std::move(category);
+        result.error_detail = ControlledErrorDetail(detail);
+        if (result.frames.empty()) {
+            result.frames.push_back({false, std::string(camera_alias), {}, {}, 0,
+                result.error_category, result.error_detail});
+        }
+        evidence.RecordState(result.transaction_id, "HybridFailed", camera_alias, result.error_detail);
+    };
+    const auto budget = [&](std::chrono::seconds configured) {
+        const auto remaining_duration = deadline - std::chrono::steady_clock::now();
+        if (remaining_duration <= std::chrono::steady_clock::duration::zero()) {
+            throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(remaining_duration);
+        if (remaining <= std::chrono::seconds::zero()) {
+            throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
+        }
+        return std::min(configured, remaining);
+    };
+    const auto ensure_active = [&] {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
+        }
+    };
+    try {
+        ensure_active();
+        evidence.RecordState(result.transaction_id, "HybridWpdBaselineOpen", camera_alias);
+        wpd_session.Open(wpd_identity, budget(timeouts.open));
+        wpd_open = true;
+        ensure_active();
+        token = wpd.BeginPostCardObservation(budget(timeouts.open));
+        ensure_active();
+        result.spool_empty_before_capture = true;
+        evidence.RecordState(result.transaction_id, "HybridSpoolEmptyBefore", camera_alias);
+        wpd_open = false;
+        wpd_session.Close(budget(timeouts.close));
+        ensure_active();
+
+        evidence.RecordState(result.transaction_id, "HybridSdkCardCapture", camera_alias);
+        sdk_session.Open(sdk_identity, budget(timeouts.open));
+        sdk_open = true;
+        ensure_active();
+        sdk.CaptureToCard(
+            budget(timeouts.image_event),
+            budget(timeouts.image_event + timeouts.download));
+        // A failed close is terminal: opening WPD afterwards could overlap a
+        // still-owned SDK session.
+        if (std::chrono::steady_clock::now() >= deadline) {
+            sdk_open = false;
+            try { sdk_session.Close(timeouts.close); } catch (...) {}
+            throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
+        }
+        sdk_open = false;
+        sdk_session.Close(budget(timeouts.close));
+        ensure_active();
+
+        if (before_wpd_recovery) {
+            evidence.RecordState(result.transaction_id, "HybridOperatorGateBeforeWpdRecovery", camera_alias);
+            before_wpd_recovery();
+            ensure_active();
+            evidence.RecordState(result.transaction_id, "HybridOperatorGateContinued", camera_alias);
+        }
+
+        ensure_active();
+        evidence.RecordState(result.transaction_id, "HybridWpdObserveOpen", camera_alias);
+        wpd_session.Open(wpd_identity, budget(timeouts.open));
+        wpd_open = true;
+        ensure_active();
+        const auto candidates = wpd.ObserveAndDownloadPostCardCapture(
+            token,
+            budget(timeouts.image_event),
+            budget(timeouts.download),
+            budget(timeouts.image_event + timeouts.download));
+        token.clear();
+        ensure_active();
+        evidence.RecordState(result.transaction_id, "HybridRecoveredExactlyOneCandidate", camera_alias);
+        evidence.RecordState(result.transaction_id, "HybridPersistPcOriginal", camera_alias);
+        result.frames.push_back(evidence.PersistExactlyOne(
+            result.transaction_id, camera_alias, candidates, deadline, before_pc_original_rename));
+        ensure_active();
+        if (!FrameCompleted(result.frames.front())) {
+            throw TransportError(
+                result.frames.front().error_category.empty()
+                    ? "pc_original_persistence_failed"
+                    : result.frames.front().error_category,
+                "recovered JPEG did not become a verified canonical PC original");
+        }
+        ensure_active();
+        evidence.RecordState(result.transaction_id, "HybridPcOriginalVerified", camera_alias);
+        if (candidates.size() != 1 || candidates.front().cleanup_token.empty()) {
+            throw TransportError(
+                "cleanup_token_missing",
+                "the recovered JPEG has no in-memory exact-object cleanup capability");
+        }
+        ensure_active();
+        result.camera_card_delete_attempted = true;
+        evidence.RecordState(result.transaction_id, "HybridCameraObjectDeleteStarted", camera_alias);
+        wpd.DeleteRecoveredObject(candidates.front().cleanup_token, budget(timeouts.close));
+        result.camera_card_delete_succeeded = true;
+        ensure_active();
+        evidence.RecordState(result.transaction_id, "HybridCameraObjectDeleted", camera_alias);
+        wpd.VerifyJpegSpoolEmpty(budget(timeouts.open));
+        ensure_active();
+        result.spool_empty_after_cleanup = true;
+        evidence.RecordState(result.transaction_id, "HybridSpoolEmptyAfter", camera_alias);
+        wpd_open = false;
+        wpd_session.Close(budget(timeouts.close));
+        ensure_active();
+        result.terminal_state = "Complete";
+    } catch (const TransportError& error) {
+        if (sdk_open) { try { sdk_session.Close(timeouts.close); } catch (...) {} }
+        if (wpd_open) { try { wpd_session.Close(timeouts.close); } catch (...) {} }
+        if (!token.empty()) wpd.AbandonPostCardObservation(token);
+        fail(error.Category(), error.what());
+    } catch (const std::exception& error) {
+        if (sdk_open) { try { sdk_session.Close(timeouts.close); } catch (...) {} }
+        if (wpd_open) { try { wpd_session.Close(timeouts.close); } catch (...) {} }
+        if (!token.empty()) wpd.AbandonPostCardObservation(token);
+        fail("transport_exception", error.what());
+    }
+    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    evidence.RecordResult(result);
+    return result;
+}
+
+fs::path PersistSdkStatusSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const CameraInfo& camera,
+    const SdkCameraStatus& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "sdk-status-summary.json";
+    const fs::path partial = run_root / "sdk-status-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite an SDK status summary");
+    }
+
+    const auto validate_setting = [](const SdkCameraStatus::SettingCapability& setting) {
+        const bool cap_type_valid = setting.cap_type == "enum" || setting.cap_type == "unsigned" ||
+            setting.cap_type == "unsupported";
+        const bool value_type_valid = setting.value_type == "unsigned" || setting.value_type == "packed-string" ||
+            setting.value_type == "string" || setting.value_type == "unsupported";
+        const bool probe_state_valid = setting.probe_state == "available" ||
+            setting.probe_state == "not-advertised" || setting.probe_state == "get-not-supported" ||
+            setting.probe_state == "unsupported-type" || setting.probe_state == "get-array-not-supported" ||
+            setting.probe_state == "invalid-shape" || setting.probe_state == "read-error";
+        if (!cap_type_valid || !value_type_valid || !probe_state_valid ||
+            (setting.available != (setting.probe_state == "available"))) {
+            throw std::runtime_error("SDK setting capability has an invalid probe state");
+        }
+        if ((setting.probe_state == "not-advertised" || setting.probe_state == "unsupported-type") &&
+            setting.cap_type != "unsupported") {
+            throw std::runtime_error("unavailable SDK setting capability has an inconsistent capability type");
+        }
+        if ((setting.probe_state == "get-array-not-supported" || setting.probe_state == "invalid-shape") &&
+            setting.cap_type != "enum") {
+            throw std::runtime_error("enum SDK setting capability has an inconsistent capability type");
+        }
+        if ((setting.probe_state == "get-not-supported" || setting.probe_state == "read-error") &&
+            setting.cap_type != "enum" && setting.cap_type != "unsigned") {
+            throw std::runtime_error("advertised SDK setting capability has an inconsistent capability type");
+        }
+        if (!setting.available) {
+            if (setting.current_value || setting.current_index || setting.current_label ||
+                !setting.numeric_values.empty() || !setting.string_values.empty()) {
+                throw std::runtime_error("unavailable SDK setting capability must not include a value");
+            }
+            return;
+        }
+        if (setting.value_type == "unsigned") {
+            if (!setting.current_value || setting.current_label || !setting.string_values.empty()) {
+                throw std::runtime_error("available unsigned SDK setting capability has inconsistent values");
+            }
+            if (setting.cap_type == "unsigned" && (setting.current_index || !setting.numeric_values.empty())) {
+                throw std::runtime_error("available unsigned SDK setting capability has inconsistent values");
+            }
+            if (setting.cap_type == "enum" && (!setting.current_index || setting.numeric_values.empty() || setting.numeric_values.size() > 256 ||
+                !setting.current_index || *setting.current_index >= setting.numeric_values.size() ||
+                setting.numeric_values[*setting.current_index] != *setting.current_value)) {
+                throw std::runtime_error("available enum SDK setting capability has inconsistent values");
+            }
+            if (setting.cap_type != "unsigned" && setting.cap_type != "enum") {
+                throw std::runtime_error("available unsigned SDK setting capability has an inconsistent capability type");
+            }
+            return;
+        }
+        if (setting.cap_type != "enum" || setting.value_type == "unsupported" || setting.current_value ||
+            !setting.current_index || !setting.current_label || !setting.numeric_values.empty() ||
+            setting.string_values.empty() || setting.string_values.size() > 256 ||
+            *setting.current_index >= setting.string_values.size() ||
+            setting.string_values[*setting.current_index] != *setting.current_label) {
+            throw std::runtime_error("available string SDK setting capability has inconsistent values");
+        }
+    };
+    validate_setting(status.file_type);
+    validate_setting(status.compression_level);
+    validate_setting(status.image_size);
+    validate_setting(status.exposure_mode);
+    validate_setting(status.shutter_speed);
+    validate_setting(status.aperture);
+    validate_setting(status.sensitivity);
+    validate_setting(status.wb_mode);
+    validate_setting(status.focus_mode);
+
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create SDK status summary");
+    const auto write_setting = [&output](std::string_view name,
+                                         const SdkCameraStatus::SettingCapability& setting,
+                                         bool trailing_comma) {
+        output << "  \"" << name << "\": {\"available\": "
+               << (setting.available ? "true" : "false")
+               << ", \"capType\": \"" << JsonEscape(setting.cap_type)
+               << "\", \"probeState\": \"" << JsonEscape(setting.probe_state)
+               << "\", \"valueType\": \"" << JsonEscape(setting.value_type) << "\", \"currentValue\": ";
+        if (setting.current_value) output << *setting.current_value;
+        else output << "null";
+        output << ", \"currentIndex\": ";
+        if (setting.current_index) output << *setting.current_index;
+        else output << "null";
+        output << ", \"currentLabel\": ";
+        if (setting.current_label) output << "\"" << JsonEscape(*setting.current_label) << "\"";
+        else output << "null";
+        output << ", \"numericValues\": [";
+        for (std::size_t index = 0; index < setting.numeric_values.size(); ++index) {
+            if (index != 0) output << ", ";
+            output << setting.numeric_values[index];
+        }
+        output << "], \"stringValues\": [";
+        for (std::size_t index = 0; index < setting.string_values.size(); ++index) {
+            if (index != 0) output << ", ";
+            output << "\"" << JsonEscape(setting.string_values[index]) << "\"";
+        }
+        output << "]}" << (trailing_comma ? ",\n" : "\n");
+    };
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.sdk-status-summary.v4\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"model\": \"" << JsonEscape(camera.model) << "\",\n"
+           << "  \"firmware\": \"" << JsonEscape(status.firmware) << "\",\n"
+           << "  \"shootingMode\": \"" << JsonEscape(camera.shooting_mode) << "\",\n"
+           << "  \"liveViewStatus\": \"" << JsonEscape(status.live_view_status) << "\",\n"
+           << "  \"liveViewStatusAvailable\": " << (status.live_view_status_available ? "true" : "false") << ",\n"
+           << "  \"liveViewSelector\": \"" << JsonEscape(status.live_view_selector) << "\",\n"
+           << "  \"liveViewSelectorAvailable\": " << (status.live_view_selector_available ? "true" : "false") << ",\n"
+           << "  \"liveViewProhibitMask\": ";
+    if (status.live_view_prohibit_mask) output << *status.live_view_prohibit_mask;
+    else output << "null";
+    output << ",\n"
+           << "  \"liveViewProhibitAvailable\": " << (status.live_view_prohibit_mask ? "true" : "false") << ",\n";
+    write_setting("fileType", status.file_type, true);
+    write_setting("compressionLevel", status.compression_level, true);
+    write_setting("imageSize", status.image_size, true);
+    write_setting("exposureMode", status.exposure_mode, true);
+    write_setting("shutterSpeed", status.shutter_speed, true);
+    write_setting("aperture", status.aperture, true);
+    write_setting("sensitivity", status.sensitivity, true);
+    write_setting("wbMode", status.wb_mode, true);
+    write_setting("focusMode", status.focus_mode, true);
+    output << "  \"cameraSettingReadOnlyProbe\": true,\n"
+           << "  \"cameraSettingWriteAttempted\": false,\n"
+           << "  \"sdkControlPlaneCallbackRegistrationMayUseCapSet\": true,\n"
+           << "  \"cameraSettingsChanged\": false,\n"
+           << "  \"liveViewStarted\": false,\n"
+           << "  \"sdkSessionClosed\": true,\n"
+           << "  \"realIdentifiersPrinted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist SDK status summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
+fs::path PersistWpdStatusSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const CameraInfo& camera,
+    const WpdStatusSummary& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "wpd-status-summary.json";
+    const fs::path partial = run_root / "wpd-status-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a WPD status summary");
+    }
+
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create WPD status summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.wpd-status-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"model\": \"" << JsonEscape(camera.model) << "\",\n"
+           << "  \"firmware\": \"" << JsonEscape(camera.firmware) << "\",\n"
+           << "  \"shootingMode\": \"" << JsonEscape(camera.shooting_mode) << "\",\n"
+           << "  \"targetValidationState\": \"" << JsonEscape(status.target_validation_state) << "\",\n"
+           << "  \"commandOptionsHRESULT\": \"" << JsonEscape(status.command_options_hresult) << "\",\n"
+           << "  \"optionValueHRESULT\": \"" << JsonEscape(status.option_value_hresult) << "\",\n"
+           << "  \"functionalObjectCount\": " << status.functional_object_count << ",\n"
+           << "  \"validObjectIdsOptionPresent\": " << (status.valid_object_ids_option_present ? "true" : "false") << ",\n"
+           << "  \"validObjectIdCount\": " << status.valid_object_id_count << ",\n"
+           << "  \"compatibleTargetCount\": " << status.compatible_target_count << ",\n"
+           << "  \"selectedTarget\": " << (status.selected_target ? "true" : "false") << ",\n"
+           << "  \"vendorOpcodeValidationState\": \"" << JsonEscape(status.vendor_opcode_validation_state) << "\",\n"
+           << "  \"supportedCommandsHRESULT\": \"" << JsonEscape(status.supported_commands_hresult) << "\",\n"
+           << "  \"vendorOpcodeQuerySendHRESULT\": \"" << JsonEscape(status.vendor_opcode_query_send_hresult) << "\",\n"
+           << "  \"vendorOpcodeQueryCommonHRESULT\": \"" << JsonEscape(status.vendor_opcode_query_common_hresult) << "\",\n"
+           << "  \"wpdStillImageCaptureCommandAdvertised\": " << (status.wpd_still_image_capture_command_advertised ? "true" : "false") << ",\n"
+           << "  \"vendorOpcodeQueryAdvertised\": " << (status.vendor_opcode_query_advertised ? "true" : "false") << ",\n"
+           << "  \"vendorOpcodeCollectionAvailable\": " << (status.vendor_opcode_collection_available ? "true" : "false") << ",\n"
+           << "  \"vendorOpcodeItemCount\": " << status.vendor_opcode_item_count << ",\n"
+           << "  \"vendorOpcodeUniqueCount\": " << status.vendor_opcode_unique_count << ",\n"
+           << "  \"vendorCapture9207Advertised\": " << (status.vendor_capture_9207_advertised ? "true" : "false") << ",\n"
+           << "  \"standardOpcode100eAdvertisementAvailable\": " << (status.standard_opcode_100e_advertisement_available ? "true" : "false") << ",\n"
+           << "  \"standardOpcode100eAdvertisementState\": \"" << JsonEscape(status.standard_opcode_100e_advertisement_state) << "\",\n"
+           << "  \"wpdRequestedAccess\": \"" << JsonEscape(status.requested_access) << "\",\n"
+           << "  \"readOnlyAccess\": " << (status.read_only_access ? "true" : "false") << ",\n"
+           << "  \"nonMutatingProbe\": true,\n"
+           << "  \"readOnlyCommandSent\": " << (status.read_only_command_sent ? "true" : "false") << ",\n"
+           << "  \"captureCommandSent\": false,\n"
+           << "  \"vendorOperationExecuted\": false,\n"
+           << "  \"realIdentifiersPrinted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist WPD status summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
+fs::path PersistWpdSpoolStatusSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const WpdSpoolStatusSummary& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "wpd-spool-status-summary.json";
+    const fs::path partial = run_root / "wpd-spool-status-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a WPD spool status summary");
+    }
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create WPD spool status summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.wpd-spool-status-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"payloadObjectCount\": " << status.payload_object_count << ",\n"
+           << "  \"spoolState\": \""
+           << (status.terminal_state == "Complete"
+                   ? (status.payload_object_count == 0 ? "EMPTY" : "NON_EMPTY")
+                   : "UNKNOWN")
+           << "\",\n"
+           << "  \"readOnlyObservation\": " << (status.read_only_observation ? "true" : "false") << ",\n"
+           << "  \"captureCommandSent\": " << (status.capture_command_sent ? "true" : "false") << ",\n"
+           << "  \"vendorOperationExecuted\": " << (status.vendor_operation_executed ? "true" : "false") << ",\n"
+           << "  \"cameraSettingsChanged\": " << (status.camera_settings_changed ? "true" : "false") << ",\n"
+           << "  \"cameraObjectDeleteAttempted\": " << (status.camera_object_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"wpdSessionsClosed\": " << status.wpd_sessions_closed << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(status.terminal_state) << "\",\n"
+           << "  \"failedStage\": \"" << JsonEscape(status.failed_stage) << "\",\n"
+           << "  \"objectIdentifiersIncluded\": false,\n"
+           << "  \"objectNamesIncluded\": false,\n"
+           << "  \"realIdentifiersPrinted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist WPD spool status summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
+fs::path PersistWpdCorrelationSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const WpdCorrelationRunSummary& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "wpd-correlation-summary.json";
+    const fs::path partial = run_root / "wpd-correlation-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a WPD correlation summary");
+    }
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create WPD correlation summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.wpd-correlation-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"sampleCount\": " << status.sample_count << ",\n"
+           << "  \"deviceDatetimeAvailableCount\": " << status.device_datetime_available_count << ",\n"
+           << "  \"reopenAdvanceCount\": " << status.reopen_advance_count << ",\n"
+           << "  \"reopenEqualCount\": " << status.reopen_equal_count << ",\n"
+           << "  \"reopenRegressCount\": " << status.reopen_regress_count << ",\n"
+           << "  \"jpegCount\": " << status.jpeg_count << ",\n"
+           << "  \"datedJpegCount\": " << status.dated_jpeg_count << ",\n"
+           << "  \"latestDateLessThanDeviceCount\": " << status.latest_date_less_than_device_count << ",\n"
+           << "  \"latestDateEqualDeviceCount\": " << status.latest_date_equal_device_count << ",\n"
+           << "  \"latestDateGreaterThanDeviceCount\": " << status.latest_date_greater_than_device_count << ",\n"
+           << "  \"readOnlyObservation\": " << (status.read_only_observation ? "true" : "false") << ",\n"
+           << "  \"captureCommandSent\": " << (status.capture_command_sent ? "true" : "false") << ",\n"
+           << "  \"vendorOperationExecuted\": " << (status.vendor_operation_executed ? "true" : "false") << ",\n"
+           << "  \"cameraSettingsChanged\": " << (status.camera_settings_changed ? "true" : "false") << ",\n"
+           << "  \"cameraObjectDeleteAttempted\": " << (status.camera_object_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"wpdSessionsClosed\": " << status.wpd_sessions_closed << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(status.terminal_state) << "\",\n"
+           << "  \"failedStage\": \"" << JsonEscape(status.failed_stage) << "\",\n"
+           << "  \"failedSample\": " << status.failed_sample << ",\n"
+           << "  \"realIdentifiersPrinted\": false\n}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist WPD correlation summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
+fs::path PersistHybridFaultSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const HybridFaultRunSummary& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "hybrid-fault-summary.json";
+    const fs::path partial = run_root / "hybrid-fault-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a hybrid fault summary");
+    }
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create hybrid fault summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.hybrid-fault-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"scenario\": \"" << JsonEscape(status.scenario) << "\",\n"
+           << "  \"gateStage\": \"" << JsonEscape(status.gate_stage) << "\",\n"
+           << "  \"transactionState\": \"" << JsonEscape(status.transaction_state) << "\",\n"
+           << "  \"errorCategory\": \"" << JsonEscape(status.error_category) << "\",\n"
+           << "  \"acceptanceState\": \"" << JsonEscape(status.acceptance_state) << "\",\n"
+           << "  \"spoolEmptyBeforeCapture\": " << (status.spool_empty_before_capture ? "true" : "false") << ",\n"
+           << "  \"pcOriginalPersisted\": " << (status.pc_original_persisted ? "true" : "false") << ",\n"
+           << "  \"cameraObjectDeleteAttempted\": " << (status.camera_object_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"automaticRetry\": " << (status.automatic_retry ? "true" : "false") << ",\n"
+           << "  \"recoveryRequiresNewTransaction\": " << (status.recovery_requires_new_transaction ? "true" : "false") << ",\n"
+           << "  \"objectIdentifiersIncluded\": false,\n"
+           << "  \"realIdentifiersPrinted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist hybrid fault summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
+std::optional<std::string> ValidateWpdCorrelationArguments(
+    std::string_view command,
+    bool samples_explicit,
+    bool interval_explicit,
+    int samples,
+    int interval_ms) noexcept {
+    if (command != "wpd-correlation-status") {
+        if (samples_explicit || interval_explicit) {
+            return "--samples and --sample-interval-ms are valid only for wpd-correlation-status";
+        }
+        return std::nullopt;
+    }
+    if (samples < 1 || samples > 10) return "samples must be between 1 and 10";
+    if (interval_ms < 0 || interval_ms > 60000) return "sample-interval-ms must be between 0 and 60000";
+    return std::nullopt;
+}
+
+std::optional<std::string> ValidateHybridCaptureArguments(
+    std::string_view command,
+    int count,
+    bool exclusive_camera_control_confirmed,
+    bool dedicated_spool_scope_confirmed,
+    bool exact_object_delete_confirmed) noexcept {
+    const bool hybrid_command = command == "hybrid-capture-single" || command == "live-view-handoff" ||
+        command == "hybrid-fault-single";
+    if (!hybrid_command) {
+        if (exclusive_camera_control_confirmed || dedicated_spool_scope_confirmed || exact_object_delete_confirmed) {
+            return "hybrid safety confirmations are valid only for an approved hybrid command";
+        }
+        return std::nullopt;
+    }
+    if (command == "hybrid-capture-single" && count != 1 && count != 10) {
+        return "hybrid-capture-single count must be 1 or 10";
+    }
+    if (command == "hybrid-fault-single" && count != 1) {
+        return "hybrid-fault-single count must be 1";
+    }
+    if (command == "live-view-handoff" && count != 10) {
+        return "live-view-handoff requires --count 10";
+    }
+    if (!exclusive_camera_control_confirmed) {
+        return "hybrid operation requires --exclusive-camera-control-confirmed";
+    }
+    if (!dedicated_spool_scope_confirmed) {
+        return "hybrid operation requires --dedicated-spool-scope-confirmed";
+    }
+    if (!exact_object_delete_confirmed) {
+        return "hybrid operation requires --exact-object-delete-confirmed";
+    }
+    return std::nullopt;
+}
+
+WpdCorrelationRunSummary ExecuteWpdCorrelationSamples(
+    ICorrelationObservationTransport& transport,
+    std::string_view stable_identity,
+    int samples,
+    int interval_ms) {
+    WpdCorrelationRunSummary summary;
+    for (int index = 0; index < samples; ++index) {
+        try {
+            transport.OpenReadOnlyObservation(stable_identity, std::chrono::seconds(10));
+        } catch (...) {
+            summary.terminal_state = "Failed";
+            summary.failed_stage = "open";
+            summary.failed_sample = index + 1;
+            return summary;
+        }
+        WpdCorrelationSample sample;
+        try {
+            sample = transport.ReadCorrelationSample();
+        } catch (...) {
+            try {
+                transport.Close(std::chrono::seconds(10));
+                ++summary.wpd_sessions_closed;
+            } catch (...) {
+                summary.terminal_state = "Failed";
+                summary.failed_stage = "close_after_read_failure";
+                summary.failed_sample = index + 1;
+                return summary;
+            }
+            summary.terminal_state = "Failed";
+            summary.failed_stage = "read";
+            summary.failed_sample = index + 1;
+            return summary;
+        }
+        try {
+            transport.Close(std::chrono::seconds(10));
+            ++summary.wpd_sessions_closed;
+        } catch (...) {
+            summary.terminal_state = "Failed";
+            summary.failed_stage = "close";
+            summary.failed_sample = index + 1;
+            return summary;
+        }
+        ++summary.sample_count;
+        summary.device_datetime_available_count += sample.device_datetime_available ? 1 : 0;
+        summary.reopen_advance_count += sample.reopen_datetime_advanced ? 1 : 0;
+        summary.reopen_equal_count += sample.reopen_datetime_equal ? 1 : 0;
+        summary.reopen_regress_count += sample.reopen_datetime_regressed ? 1 : 0;
+        summary.jpeg_count += sample.jpeg_count;
+        summary.dated_jpeg_count += sample.dated_jpeg_count;
+        summary.latest_date_less_than_device_count += sample.latest_date_less_than_device;
+        summary.latest_date_equal_device_count += sample.latest_date_equal_device;
+        summary.latest_date_greater_than_device_count += sample.latest_date_greater_than_device;
+        if (index + 1 < samples) std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+    summary.terminal_state = "Complete";
+    return summary;
+}
+
+LiveViewProbeResult AcquireLiveViewFrames(
+    ILiveViewTransport& transport,
+    std::string_view stable_identity,
+    int frames,
+    int interval_ms,
+    int duration_seconds) {
+    if (stable_identity.empty()) throw std::invalid_argument("live view identity is empty");
+    if (frames < 1) throw std::invalid_argument("live view frames must be positive");
+    if (interval_ms < 0) throw std::invalid_argument("live view interval must not be negative");
+    if (duration_seconds < 0) throw std::invalid_argument("live view duration must not be negative");
+
+    const auto started = std::chrono::steady_clock::now();
+    LiveViewProbeResult result;
+    bool session_open = false;
+    bool live_view_started = false;
+    bool stop_attempted = false;
+    bool close_attempted = false;
+    try {
+        transport.OpenLiveView(stable_identity, std::chrono::seconds(10));
+        session_open = true;
+        transport.StartLiveView(std::chrono::seconds(10));
+        live_view_started = true;
+        const auto duration_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration_seconds);
+        while ((duration_seconds > 0 &&
+                   (result.frames == 0 || std::chrono::steady_clock::now() < duration_deadline)) ||
+               (duration_seconds == 0 && result.frames < frames)) {
+            result.last_frame = transport.ReadLiveViewFrame(std::chrono::seconds(10));
+            if (!IsValidJpeg(result.last_frame)) {
+                throw TransportError("live_view_invalid_frame", "live view returned an invalid JPEG");
+            }
+            ++result.frames;
+            const bool more_frames = duration_seconds > 0
+                ? std::chrono::steady_clock::now() < duration_deadline
+                : result.frames < frames;
+            if (more_frames && interval_ms > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            }
+        }
+
+        stop_attempted = true;
+        transport.StopLiveView(std::chrono::seconds(10));
+        live_view_started = false;
+        close_attempted = true;
+        transport.Close(std::chrono::seconds(10));
+        session_open = false;
+    } catch (...) {
+        // Cleanup operations are attempted at most once. A failed stop or close is
+        // terminal for this handoff and is never retried automatically.
+        if (live_view_started && !stop_attempted) {
+            stop_attempted = true;
+            try { transport.StopLiveView(std::chrono::seconds(3)); } catch (...) {}
+        }
+        if (session_open && !close_attempted) {
+            close_attempted = true;
+            try { transport.Close(std::chrono::seconds(3)); } catch (...) {}
+        }
+        throw;
+    }
+
+    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    return result;
+}
+
+LiveViewHandoffResult ExecuteLiveViewHandoffOnce(
+    ILiveViewTransport& live_view_transport,
+    std::string_view live_view_identity,
+    const std::function<TransactionResult()>& capture_once,
+    EvidenceWriter& evidence,
+    std::string_view handoff_id,
+    std::string_view camera_alias,
+    int frames,
+    int interval_ms,
+    std::chrono::milliseconds resume_delay) {
+    LiveViewHandoffResult result;
+    evidence.RecordState(handoff_id, "LiveViewStarting", camera_alias);
+    try {
+        result.before = AcquireLiveViewFrames(
+            live_view_transport, live_view_identity, frames, interval_ms);
+    } catch (const TransportError& error) {
+        result.terminal_state = "FailedBeforeCapture";
+        result.error_category = error.Category();
+        result.error_detail = ControlledErrorDetail(error.what());
+        evidence.RecordState(handoff_id, "LiveViewHandoffFailedBeforeCapture", camera_alias, result.error_detail);
+        return result;
+    } catch (const std::exception&) {
+        result.terminal_state = "FailedBeforeCapture";
+        result.error_category = "live_view_exception";
+        evidence.RecordState(handoff_id, "LiveViewHandoffFailedBeforeCapture", camera_alias);
+        return result;
+    }
+    evidence.RecordState(handoff_id, "LiveViewFrameReady", camera_alias);
+    evidence.RecordState(handoff_id, "SdkClosed", camera_alias);
+
+    result.wpd_capture_started = true;
+    evidence.RecordState(handoff_id, "HybridCaptureStarting", camera_alias);
+    try {
+        result.capture = capture_once();
+    } catch (const TransportError& error) {
+        result.terminal_state = "CaptureFailedResumeSkipped";
+        result.error_category = error.Category();
+        evidence.RecordState(handoff_id, "LiveViewResumeSkippedAfterCaptureFailure", camera_alias);
+        return result;
+    } catch (const std::exception&) {
+        result.terminal_state = "CaptureFailedResumeSkipped";
+        result.error_category = "capture_exception";
+        evidence.RecordState(handoff_id, "LiveViewResumeSkippedAfterCaptureFailure", camera_alias);
+        return result;
+    }
+    if (result.capture.terminal_state != "Complete") {
+        result.terminal_state = "CaptureFailedResumeSkipped";
+        result.error_category = result.capture.error_category.empty()
+            ? "wpd_capture_failed"
+            : result.capture.error_category;
+        result.error_detail = result.capture.error_detail;
+        evidence.RecordState(handoff_id, "LiveViewResumeSkippedAfterCaptureFailure", camera_alias, result.error_detail);
+        return result;
+    }
+
+    result.wpd_capture_complete = true;
+    result.resume_attempted = true;
+    evidence.RecordState(handoff_id, "LiveViewResuming", camera_alias);
+    if (resume_delay > std::chrono::milliseconds::zero()) {
+        std::this_thread::sleep_for(resume_delay);
+    }
+    try {
+        result.after = AcquireLiveViewFrames(
+            live_view_transport, live_view_identity, frames, interval_ms);
+    } catch (const TransportError& error) {
+        result.terminal_state = "CaptureCompleteLiveViewResumeFailed";
+        result.error_category = error.Category();
+        result.error_detail = ControlledErrorDetail(error.what());
+        evidence.RecordState(handoff_id, "LiveViewResumeFailedAfterCapture", camera_alias, result.error_detail);
+        return result;
+    } catch (const std::exception&) {
+        result.terminal_state = "CaptureCompleteLiveViewResumeFailed";
+        result.error_category = "live_view_resume_exception";
+        evidence.RecordState(handoff_id, "LiveViewResumeFailedAfterCapture", camera_alias);
+        return result;
+    }
+
+    result.terminal_state = "Complete";
+    evidence.RecordState(handoff_id, "LiveViewResumed", camera_alias);
+    return result;
+}
+
+fs::path PersistLiveViewHandoffSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    std::string_view camera_alias,
+    const LiveViewHandoffRunSummary& result) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    fs::create_directories(run_root);
+    const fs::path summary = run_root / "handoff-summary.json";
+    const fs::path partial = run_root / "handoff-summary.json.partial";
+    if (fs::exists(partial)) {
+        throw std::runtime_error("handoff summary partial exists; inspect before continuing");
+    }
+    std::ofstream output(partial, std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create handoff summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.live-view-handoff-summary.v2\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
+           << "  \"requestedHandoffs\": " << result.requested << ",\n"
+           << "  \"attemptedHandoffs\": " << result.attempted << ",\n"
+           << "  \"completeHandoffs\": " << result.completed << ",\n"
+           << "  \"failures\": " << result.failures << ",\n"
+           << "  \"spoolEmptyBeforeCount\": " << result.spool_empty_before_count << ",\n"
+           << "  \"cameraCardDeleteAttemptedCount\": " << result.camera_card_delete_attempted_count << ",\n"
+           << "  \"cameraCardDeleteSucceededCount\": " << result.camera_card_delete_succeeded_count << ",\n"
+           << "  \"spoolEmptyAfterCount\": " << result.spool_empty_after_count << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(result.terminal_state) << "\",\n"
+           << "  \"lastHandoffState\": \"" << JsonEscape(result.last_handoff_state) << "\",\n"
+           << "  \"lastErrorCategory\": \"" << JsonEscape(result.last_error_category) << "\",\n"
+           << "  \"lastErrorDetail\": \"" << JsonEscape(result.last_error_detail) << "\",\n"
+           << "  \"crossTransportBinding\": \"single-connected-body-only\",\n"
+           << "  \"cleanupObjectIdIncluded\": false,\n"
+           << "  \"vendorOperationExecuted\": false,\n"
+           << "  \"previewFramesPersisted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist handoff summary");
+    if (!MoveFileExW(
+            partial.c_str(), summary.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        throw std::runtime_error(
+            "cannot replace handoff summary, Windows error " + std::to_string(GetLastError()));
+    }
+    return summary;
 }
 
 std::string NewRunId() {
@@ -387,6 +1465,35 @@ fs::path DefaultIdentityMapPath() {
 
 bool IsValidJpeg(const std::vector<unsigned char>& bytes) {
     return bytes.size() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[bytes.size() - 2] == 0xFF && bytes.back() == 0xD9;
+}
+
+std::vector<unsigned char> ExtractD810LiveViewJpeg(const std::vector<unsigned char>& frame_with_header) {
+    constexpr std::size_t header_size = 384;
+    if (frame_with_header.size() <= header_size) {
+        throw TransportError("live_view_invalid_frame", "D810 live view frame is shorter than its header");
+    }
+    const auto payload_begin = frame_with_header.begin() + header_size;
+    constexpr std::array<unsigned char, 2> soi_marker{0xFF, 0xD8};
+    constexpr std::array<unsigned char, 2> eoi_marker{0xFF, 0xD9};
+    const auto soi = std::search(payload_begin, frame_with_header.end(),
+        soi_marker.begin(), soi_marker.end());
+    const auto eoi = soi == frame_with_header.end() ? frame_with_header.end() : std::search(soi + 2, frame_with_header.end(),
+        eoi_marker.begin(), eoi_marker.end());
+    if (soi == frame_with_header.end() || eoi == frame_with_header.end() || eoi < soi) {
+        std::ostringstream message;
+        message << "D810 live view payload has no complete JPEG markers (arrayBytes="
+                << frame_with_header.size() << ')';
+        throw TransportError("live_view_invalid_frame", message.str());
+    }
+    if (soi != payload_begin) {
+        std::ostringstream message;
+        message << "D810 live view JPEG starts at unexpected offset "
+                << std::distance(frame_with_header.begin(), soi);
+        throw TransportError("live_view_invalid_frame", message.str());
+    }
+    std::vector<unsigned char> jpeg(soi, eoi + 2);
+    if (!IsValidJpeg(jpeg)) throw TransportError("live_view_invalid_frame", "D810 live view JPEG validation failed");
+    return jpeg;
 }
 
 std::string Sha256Hex(const std::vector<unsigned char>& bytes) {
@@ -409,6 +1516,26 @@ std::string Sha256Hex(const std::vector<unsigned char>& bytes) {
     std::ostringstream stream;
     for (const auto byte : digest) stream << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
     return stream.str();
+}
+
+std::optional<std::vector<std::string>> ParsePackedStringLabels(
+    const std::vector<unsigned char>& bytes,
+    std::size_t maximum_labels,
+    std::size_t maximum_bytes) {
+    if (bytes.empty() || bytes.size() > maximum_bytes) return std::nullopt;
+    std::vector<std::string> labels;
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto terminator = std::find(bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.end(), 0U);
+        if (terminator == bytes.end() || terminator == bytes.begin() + static_cast<std::ptrdiff_t>(offset) ||
+            labels.size() >= maximum_labels) {
+            return std::nullopt;
+        }
+        labels.emplace_back(reinterpret_cast<const char*>(bytes.data() + offset),
+            static_cast<std::size_t>(terminator - (bytes.begin() + static_cast<std::ptrdiff_t>(offset))));
+        offset = static_cast<std::size_t>(terminator - bytes.begin()) + 1;
+    }
+    return labels;
 }
 
 } // namespace a0::phase0

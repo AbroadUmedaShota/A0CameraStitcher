@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.1.0",
+  "status": "draft",
+  "cameraModel": {
+    "manufacturer": "Nikon",
+    "model": "D810",
+    "sensorWidthPixels": 7360,
+    "sensorHeightPixels": 4912
+  },
+  "cameraSlots": [
+    { "alias": "CAM-A", "rotationDegrees": null, "physicalIdentity": null },
+    { "alias": "CAM-B", "rotationDegrees": null, "physicalIdentity": null }
+  ],
+  "layout": {
+    "orientation": null,
+    "cameraOrder": null,
+    "overlapPercent": null,
+    "crop": {
+      "leftPercent": null,
+      "topPercent": null,
+      "rightPercent": null,
+      "bottomPercent": null
+    }
+  },
+  "optics": {
+    "focalLengthMm": null,
+    "cameraToOriginalMm": null,
+    "targetDpi": null
+  },
+  "calibration": {
+    "method": null,
+    "homography": null,
+    "measuredAt": null,
+    "provenanceId": null,
+    "validUntil": null
+  },
+  "correctionEnvelope": {
+    "minimumOverlapPercent": null,
+    "registrationErrorPixels": { "targetMax": null, "autoCorrectionMax": null },
+    "rotationErrorDegrees": { "targetMax": null, "autoCorrectionMax": null },
+    "scaleDifferencePercent": { "targetMax": null, "autoCorrectionMax": null },
+    "exposureDifferenceEv": { "targetMax": null, "autoCorrectionMax": null },
+    "colorDeltaE": { "targetMax": null, "autoCorrectionMax": null }
+  },
+  "qualityContract": {
+    "seamErrorPixelsMax": null,
+    "registrationErrorPixelsMax": null,
+    "colorDeltaEMax": null,
+    "notes": "Approval is required before entering optical, calibration, or quality values."
+  }
+}

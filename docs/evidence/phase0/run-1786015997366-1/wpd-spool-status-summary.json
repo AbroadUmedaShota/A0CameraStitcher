@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "phase0.wpd-spool-status-summary.v1",
+  "timestamp": "2026-08-06T11:33:17.534Z",
+  "runId": "run-1786015997366-1",
+  "cameraAlias": "CAM-A",
+  "payloadObjectCount": 90,
+  "spoolState": "NON_EMPTY",
+  "readOnlyObservation": true,
+  "captureCommandSent": false,
+  "vendorOperationExecuted": false,
+  "cameraSettingsChanged": false,
+  "cameraObjectDeleteAttempted": false,
+  "wpdSessionsClosed": 1,
+  "terminalState": "Complete",
+  "failedStage": "",
+  "objectIdentifiersIncluded": false,
+  "objectNamesIncluded": false,
+  "realIdentifiersPrinted": false
+}

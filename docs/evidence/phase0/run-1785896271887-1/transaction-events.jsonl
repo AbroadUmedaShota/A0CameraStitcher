@@ -1,0 +1,5 @@
+{"timestamp":"2026-08-05T02:17:51.888Z","runId":"run-1785896271887-1","state":"CameraProfile","cameraAlias":"CAM-A","model":"Nikon D810","firmware":"unknown"}
+{"timestamp":"2026-08-05T02:17:51.889Z","runId":"run-1785896271887-1","transactionId":"tx-1-1785896271889","state":"Idle"}
+{"timestamp":"2026-08-05T02:17:51.890Z","runId":"run-1785896271887-1","transactionId":"tx-1-1785896271889","state":"CaptureA","cameraAlias":"CAM-A"}
+{"timestamp":"2026-08-05T02:17:59.257Z","runId":"run-1785896271887-1","transactionId":"tx-1-1785896271889","state":"TransportError","cameraAlias":"CAM-A","errorDetail":"WPD capture command failed; SendCommand HRESULT=0x00000000; command HRESULT=0x80004005"}
+{"timestamp":"2026-08-05T02:17:59.259Z","runId":"run-1785896271887-1","transactionId":"tx-1-1785896271889","state":"FailedPartial","durationMs":7369,"errorCategory":"capture_command_failed","errorDetail":"WPD capture command failed; SendCommand HRESULT=0x00000000; command HRESULT=0x80004005"}

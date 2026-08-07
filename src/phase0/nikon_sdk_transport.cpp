@@ -16,8 +16,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -35,9 +37,10 @@ namespace {
 
 constexpr auto kAsyncInterval = std::chrono::milliseconds(10);
 constexpr auto kCandidateSettle = std::chrono::milliseconds(500);
-// Phase 0 is a PC-capture path: the camera publishes a transient SDRAM Item,
-// which is acquired and durably persisted by EvidenceWriter.
-constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_SDRAM;
+constexpr std::size_t kMaxLiveViewArrayBytes = 16U * 1024U * 1024U;
+// Hybrid capture writes to the camera card; WPD observes the resulting object
+// only after this SDK session has fully closed.
+constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_Card;
 
 std::mutex g_session_mutex;
 bool g_session_active = false;
@@ -48,6 +51,9 @@ std::string IdentityForSource(ULONG source_id) {
 }
 
 std::string ResultText(NKERROR result) {
+    if (result == kNkMAIDResult_DeviceBusy) return "DeviceBusy(152)";
+    if (result == kNkMAIDResult_NotLiveView) return "NotLiveView(159)";
+    if (result == kNkMAIDResult_BufferNotReady) return "BufferNotReady(129)";
     return std::to_string(static_cast<long long>(result));
 }
 
@@ -147,6 +153,55 @@ public:
     }
 
     void Open(std::string_view stable_identity, std::chrono::seconds timeout) {
+        OpenSource(stable_identity, timeout, true);
+    }
+
+    void OpenLiveView(std::string_view stable_identity, std::chrono::seconds timeout) {
+        OpenSource(stable_identity, timeout, false);
+    }
+
+    SdkCameraStatus ProbeSdkStatus(std::string_view stable_identity, std::chrono::seconds timeout) {
+        OpenSource(stable_identity, timeout, false);
+        try {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            SdkCameraStatus status;
+            status.firmware = Firmware(source_, deadline, "sdk_status_failed");
+
+            if (const auto value = TryGetCurrentValue(
+                    source_, kNkMAIDCapability_LiveViewStatus, deadline, "sdk_status_failed")) {
+                status.live_view_status_available = true;
+                if (*value == kNkMAIDLiveViewStatus_OFF) status.live_view_status = "off";
+                else if (*value == kNkMAIDLiveViewStatus_ON) status.live_view_status = "on";
+            }
+            if (const auto value = TryGetCurrentValue(
+                    source_, kNkMAIDCapability_LiveViewSelector, deadline, "sdk_status_failed")) {
+                status.live_view_selector_available = true;
+                if (*value == kNkMAIDLiveViewSelector_Photo) status.live_view_selector = "photo";
+                else if (*value == kNkMAIDLiveViewSelector_Movie) status.live_view_selector = "movie";
+            }
+            if (const auto value = TryGetCurrentValue(
+                    source_, kNkMAIDCapability_LiveViewProhibit, deadline, "sdk_status_failed")) {
+                status.live_view_prohibit_mask = static_cast<std::uint32_t>(*value);
+            }
+            status.file_type = ReadSettingCapability(source_, kNkMAIDCapability_FileType, deadline);
+            status.compression_level = ReadSettingCapability(source_, kNkMAIDCapability_CompressionLevel, deadline);
+            status.image_size = ReadSettingCapability(source_, kNkMAIDCapability_ImageSize, deadline);
+            status.exposure_mode = ReadSettingCapability(source_, kNkMAIDCapability_ExposureMode, deadline);
+            status.shutter_speed = ReadSettingCapability(source_, kNkMAIDCapability_ShutterSpeed, deadline);
+            status.aperture = ReadSettingCapability(source_, kNkMAIDCapability_Aperture, deadline);
+            status.sensitivity = ReadSettingCapability(source_, kNkMAIDCapability_Sensitivity, deadline);
+            status.wb_mode = ReadSettingCapability(source_, kNkMAIDCapability_WBMode, deadline);
+            status.focus_mode = ReadSettingCapability(source_, kNkMAIDCapability_FocusMode, deadline);
+
+            Close(timeout);
+            return status;
+        } catch (...) {
+            try { Close(timeout); } catch (...) {}
+            throw;
+        }
+    }
+
+    void OpenSource(std::string_view stable_identity, std::chrono::seconds timeout, bool capture_session) {
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
         try {
@@ -184,13 +239,17 @@ public:
             SetEventCallback(source_, deadline, "open_failed");
             RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
                 0, deadline, "open_failed");
-            original_save_media_ = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
-            SetUnsigned(source_, kNkMAIDCapability_SaveMedia, kDesiredSaveMedia, deadline, "save_media_mismatch");
-            const ULONG verified = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
-            if (verified != kDesiredSaveMedia) {
-                throw TransportError("save_media_mismatch", "SDRAM capture destination did not persist");
+            if (capture_session) {
+                original_save_media_ = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
+                SetUnsigned(source_, kNkMAIDCapability_SaveMedia, kDesiredSaveMedia, deadline, "save_media_mismatch");
+                const ULONG verified = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
+                if (verified != kDesiredSaveMedia) {
+                    throw TransportError("save_media_mismatch", "card capture destination did not persist");
+                }
             }
             session_open_ = true;
+            capture_session_ = capture_session;
+            live_view_session_ = !capture_session;
         } catch (...) {
             CleanupNoThrow();
             throw;
@@ -198,7 +257,7 @@ public:
     }
 
     std::string Baseline(std::chrono::seconds timeout) {
-        RequireOpen();
+        RequireCaptureSession();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         const auto children = Children(source_, deadline, "baseline_failed");
         baseline_.clear();
@@ -217,7 +276,7 @@ public:
         std::chrono::seconds image_event_timeout,
         std::chrono::seconds download_timeout,
         std::chrono::seconds transaction_timeout) {
-        RequireOpen();
+        RequireCaptureSession();
         if (baseline != baseline_token_ || baseline_token_.empty()) {
             throw TransportError("baseline_mismatch", "capture baseline token is not current");
         }
@@ -283,10 +342,139 @@ public:
         return candidates;
     }
 
+    void CaptureToCard(std::chrono::seconds image_event_timeout,
+                       std::chrono::seconds transaction_timeout) {
+        RequireCaptureSession();
+        const auto overall_deadline = std::chrono::steady_clock::now() + transaction_timeout;
+        const auto event_deadline = std::min(std::chrono::steady_clock::now() + image_event_timeout, overall_deadline);
+        capture_complete_ = false;
+        add_child_in_card_ = false;
+        StartProcess(source_, kNkMAIDCapability_Capture, event_deadline, "capture_command_failed");
+        while (std::chrono::steady_clock::now() < event_deadline) {
+            Pump(source_, "image_event_failed");
+            if (capture_complete_ && add_child_in_card_) break;
+            std::this_thread::sleep_for(kAsyncInterval);
+        }
+        if (std::chrono::steady_clock::now() >= overall_deadline) {
+            throw TransportError("transaction_watchdog", "card capture transaction watchdog expired");
+        }
+        if (!capture_complete_) {
+            throw TransportError("image_event_timeout", "card CaptureComplete was not observed");
+        }
+        if (!add_child_in_card_) {
+            throw TransportError("image_event_timeout", "SDK did not publish AddChildInCard for the card capture");
+        }
+    }
+
+    void StartLiveView(std::chrono::seconds timeout) {
+        RequireLiveViewSession();
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const ULONG prohibit = GetUnsigned(
+            source_, kNkMAIDCapability_LiveViewProhibit, deadline, "live_view_prohibited");
+        if (prohibit != 0) {
+            std::ostringstream message;
+            message << "D810 live view is prohibited by camera state: 0x"
+                    << std::hex << std::uppercase << prohibit;
+            throw TransportError("live_view_prohibited", message.str());
+        }
+
+        const ULONG current = GetUnsigned(
+            source_, kNkMAIDCapability_LiveViewStatus, deadline, "live_view_start_failed");
+        if (current != kNkMAIDLiveViewStatus_OFF) {
+            SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+                kNkMAIDLiveViewStatus_OFF, deadline, "live_view_recovery_failed");
+            if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus, deadline,
+                    "live_view_recovery_failed") != kNkMAIDLiveViewStatus_OFF) {
+                throw TransportError("live_view_recovery_failed", "existing live view state could not be stopped");
+            }
+        }
+
+        SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+            kNkMAIDLiveViewStatus_ON, deadline, "live_view_start_failed");
+        live_view_started_ = true;
+        live_view_stop_attempted_ = false;
+        if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus, deadline,
+                "live_view_start_failed") != kNkMAIDLiveViewStatus_ON) {
+            throw TransportError("live_view_start_failed", "D810 did not enter live view mode");
+        }
+        // D810 changes the available Source operations after entering live view.
+        // Refresh the capability table before asking for the first frame.
+        EnumerateCapabilities(source_, deadline, "live_view_start_failed");
+    }
+
+    std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) {
+        RequireLiveViewSession();
+        if (!live_view_started_) {
+            throw TransportError("live_view_not_started", "live view frame requested before start");
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const auto* capability = Capability(source_, kNkMAIDCapability_GetLiveViewImage);
+        if (capability == nullptr || capability->ulType != kNkMAIDCapType_Array ||
+            !Supports(source_, kNkMAIDCapability_GetLiveViewImage, kNkMAIDCapOperation_Get) ||
+            !Supports(source_, kNkMAIDCapability_GetLiveViewImage, kNkMAIDCapOperation_GetArray)) {
+            std::ostringstream message;
+            message << "D810 live view image capability is unavailable";
+            if (capability != nullptr) {
+                message << " (type=" << capability->ulType
+                        << ", operations=0x" << std::hex << std::uppercase
+                        << capability->ulOperations << ')';
+            }
+            throw TransportError("live_view_unavailable", message.str());
+        }
+
+        NkMAIDArray frame{};
+        RunCompleted(source_, kNkMAIDCommand_CapGet, kNkMAIDCapability_GetLiveViewImage,
+            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(&frame), deadline,
+            "live_view_frame_failed");
+        const std::size_t elements = static_cast<std::size_t>(frame.ulElements);
+        const std::size_t physical_bytes = static_cast<std::size_t>(frame.wPhysicalBytes);
+        if (elements == 0 || physical_bytes == 0 ||
+            elements > std::numeric_limits<std::size_t>::max() / physical_bytes ||
+            elements * physical_bytes > kMaxLiveViewArrayBytes) {
+            throw TransportError("live_view_invalid_frame", "D810 returned an invalid live view array size");
+        }
+        std::vector<unsigned char> raw(elements * physical_bytes);
+        frame.pData = raw.data();
+        RunCompleted(source_, kNkMAIDCommand_CapGetArray, kNkMAIDCapability_GetLiveViewImage,
+            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(&frame), deadline,
+            "live_view_frame_failed");
+        return ExtractD810LiveViewJpeg(raw);
+    }
+
+    void StopLiveView(std::chrono::seconds timeout) {
+        RequireLiveViewSession();
+        if (live_view_stop_attempted_) {
+            throw TransportError("live_view_stop_already_attempted", "live view stop is not automatically retried");
+        }
+        live_view_stop_attempted_ = true;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+            kNkMAIDLiveViewStatus_OFF, deadline, "live_view_stop_failed");
+        if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus, deadline,
+                "live_view_stop_failed") != kNkMAIDLiveViewStatus_OFF) {
+            throw TransportError("live_view_stop_failed", "D810 did not leave live view mode");
+        }
+        live_view_started_ = false;
+    }
+
     void Close(std::chrono::seconds timeout) {
         if (!claimed_) return;
         std::optional<TransportError> pending_error;
         const auto deadline = std::chrono::steady_clock::now() + timeout;
+        if (source_.opened && live_view_session_ && live_view_started_ && !live_view_stop_attempted_) {
+            try {
+                live_view_stop_attempted_ = true;
+                SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+                    kNkMAIDLiveViewStatus_OFF, deadline, "live_view_stop_failed");
+                if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus, deadline,
+                        "live_view_stop_failed") != kNkMAIDLiveViewStatus_OFF) {
+                    throw TransportError("live_view_stop_failed", "D810 did not leave live view mode before close");
+                }
+                live_view_started_ = false;
+            } catch (const TransportError& error) {
+                pending_error.emplace(error.Category(), error.what());
+            }
+        }
         if (source_.opened && original_save_media_) {
             try {
                 SetUnsigned(source_, kNkMAIDCapability_SaveMedia, *original_save_media_, deadline, "save_media_restore_failed");
@@ -326,6 +514,16 @@ private:
 
     void RequireOpen() const {
         if (!session_open_ || !source_.opened) throw TransportError("session_not_open", "Nikon source is not open");
+    }
+
+    void RequireCaptureSession() const {
+        RequireOpen();
+        if (!capture_session_) throw TransportError("session_mode_mismatch", "Nikon session is not a capture session");
+    }
+
+    void RequireLiveViewSession() const {
+        RequireOpen();
+        if (!live_view_session_) throw TransportError("session_mode_mismatch", "Nikon session is not a live view session");
     }
 
     NKERROR Call(LPNkMAIDObject object, ULONG command, ULONG parameter, ULONG data_type,
@@ -404,6 +602,180 @@ private:
         return value;
     }
 
+    std::optional<ULONG> TryGetCurrentValue(
+        MaidObject& object,
+        ULONG id,
+        std::chrono::steady_clock::time_point deadline,
+        std::string_view category) {
+        const auto* cap = Capability(object, id);
+        if (cap == nullptr || !Supports(object, id, kNkMAIDCapOperation_Get)) {
+            return std::nullopt;
+        }
+        if (cap->ulType == kNkMAIDCapType_Unsigned) {
+            return GetUnsigned(object, id, deadline, category);
+        }
+        if (cap->ulType != kNkMAIDCapType_Enum ||
+            !Supports(object, id, kNkMAIDCapOperation_GetArray)) {
+            return std::nullopt;
+        }
+
+        NkMAIDEnum values{};
+        RunCompleted(object, kNkMAIDCommand_CapGet, id,
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
+        constexpr ULONG kMaximumStatusEnumElements = 256;
+        if (values.ulElements == 0 || values.ulElements > kMaximumStatusEnumElements ||
+            values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) {
+            throw TransportError(std::string(category), "SDK status enum has an invalid shape");
+        }
+        std::vector<ULONG> items(values.ulElements);
+        values.pData = items.data();
+        RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
+        if (values.ulValue >= items.size()) {
+            throw TransportError(std::string(category), "SDK status enum has an invalid current index");
+        }
+        return items[values.ulValue];
+    }
+
+    SdkCameraStatus::SettingCapability ReadSettingCapability(
+        MaidObject& object,
+        ULONG id,
+        std::chrono::steady_clock::time_point deadline) {
+        SdkCameraStatus::SettingCapability result;
+        const auto* cap = Capability(object, id);
+        if (cap == nullptr) return result;
+        if (cap->ulType == kNkMAIDCapType_Unsigned) result.cap_type = "unsigned";
+        else if (cap->ulType == kNkMAIDCapType_Enum) result.cap_type = "enum";
+        else {
+            result.probe_state = "unsupported-type";
+            return result;
+        }
+        if (!Supports(object, id, kNkMAIDCapOperation_Get)) {
+            result.probe_state = "get-not-supported";
+            return result;
+        }
+        try {
+            if (cap->ulType == kNkMAIDCapType_Unsigned) {
+                result.available = true;
+                result.probe_state = "available";
+                result.value_type = "unsigned";
+                result.current_value = static_cast<std::uint32_t>(
+                    GetUnsigned(object, id, deadline, "sdk_status_failed"));
+                return result;
+            }
+            if (!Supports(object, id, kNkMAIDCapOperation_GetArray)) {
+                result.probe_state = "get-array-not-supported";
+                return result;
+            }
+
+            NkMAIDEnum values{};
+            RunCompleted(object, kNkMAIDCommand_CapGet, id,
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+            constexpr ULONG kMaximumStatusEnumElements = 256;
+            // Bound untrusted packed SDK data to 64 KiB to avoid a malformed
+            // device response forcing an unbounded allocation during status read.
+            constexpr ULONG kMaximumPackedStringBytes = 64U * 1024U;
+            if (values.ulElements == 0) {
+                result.probe_state = "invalid-shape";
+                return result;
+            }
+            if (values.ulType == kNkMAIDArrayType_Unsigned) {
+                if (values.ulElements > kMaximumStatusEnumElements ||
+                    values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) {
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                std::vector<ULONG> items(values.ulElements);
+                values.pData = items.data();
+                RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
+                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+                if (values.ulValue >= items.size()) {
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                result.available = true;
+                result.probe_state = "available";
+                result.value_type = "unsigned";
+                result.current_index = static_cast<std::uint32_t>(values.ulValue);
+                result.current_value = static_cast<std::uint32_t>(items[values.ulValue]);
+                result.numeric_values.reserve(items.size());
+                for (const ULONG item : items) result.numeric_values.push_back(static_cast<std::uint32_t>(item));
+                return result;
+            }
+            if (values.ulType == kNkMAIDArrayType_PackedString) {
+                if (values.wPhysicalBytes != 1 || values.ulElements > kMaximumPackedStringBytes) {
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                std::vector<unsigned char> bytes(values.ulElements);
+                values.pData = bytes.data();
+                RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
+                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+                const auto labels = ParsePackedStringLabels(
+                    bytes, kMaximumStatusEnumElements, kMaximumPackedStringBytes);
+                if (!labels) {
+                    result = {};
+                    result.cap_type = "enum";
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                result.string_values = *labels;
+                if (values.ulValue >= result.string_values.size()) {
+                    result = {};
+                    result.cap_type = "enum";
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                result.available = true;
+                result.probe_state = "available";
+                result.value_type = "packed-string";
+                result.current_index = static_cast<std::uint32_t>(values.ulValue);
+                result.current_label = result.string_values[values.ulValue];
+                return result;
+            }
+            if (values.ulType != kNkMAIDArrayType_String || values.ulElements > kMaximumStatusEnumElements ||
+                values.wPhysicalBytes != static_cast<SWORD>(sizeof(NkMAIDString))) {
+                result.probe_state = "invalid-shape";
+                return result;
+            }
+            std::vector<NkMAIDString> items(values.ulElements);
+            values.pData = items.data();
+            RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+            for (const NkMAIDString& item : items) {
+                const char* const begin = reinterpret_cast<const char*>(item.str);
+                const char* const end = begin + sizeof(item.str);
+                const char* const terminator = std::find(begin, end, '\0');
+                if (terminator == end) {
+                    result = {};
+                    result.cap_type = "enum";
+                    result.probe_state = "invalid-shape";
+                    return result;
+                }
+                result.string_values.emplace_back(begin, static_cast<std::size_t>(terminator - begin));
+            }
+            if (values.ulValue >= result.string_values.size()) {
+                result = {};
+                result.cap_type = "enum";
+                result.probe_state = "invalid-shape";
+                return result;
+            }
+            result.available = true;
+            result.probe_state = "available";
+            result.value_type = "string";
+            result.current_index = static_cast<std::uint32_t>(values.ulValue);
+            result.current_label = result.string_values[values.ulValue];
+        } catch (...) {
+            // Status probing is fail-closed per setting and keeps error details
+            // out of anonymous evidence.
+            result = {};
+            if (cap->ulType == kNkMAIDCapType_Unsigned) result.cap_type = "unsigned";
+            else if (cap->ulType == kNkMAIDCapType_Enum) result.cap_type = "enum";
+            result.probe_state = "read-error";
+        }
+        return result;
+    }
+
     void SetUnsigned(MaidObject& object, ULONG id, ULONG value,
                      std::chrono::steady_clock::time_point deadline, std::string_view category) {
         const auto* cap = Capability(object, id);
@@ -437,19 +809,22 @@ private:
         return ids;
     }
 
-    std::string Firmware(MaidObject& source, std::chrono::steady_clock::time_point deadline) {
+    std::string Firmware(
+        MaidObject& source,
+        std::chrono::steady_clock::time_point deadline,
+        std::string_view category) {
         const auto* cap = Capability(source, kNkMAIDCapability_Firmware);
         if (cap == nullptr || !Supports(source, kNkMAIDCapability_Firmware, kNkMAIDCapOperation_Get)) return "unknown";
         if (cap->ulType == kNkMAIDCapType_String) {
             NkMAIDString value{};
             RunCompleted(source, kNkMAIDCommand_CapGet, kNkMAIDCapability_Firmware,
-                kNkMAIDDataType_StringPtr, reinterpret_cast<NKPARAM>(&value), deadline, "inventory_failed");
+                kNkMAIDDataType_StringPtr, reinterpret_cast<NKPARAM>(&value), deadline, category);
             return reinterpret_cast<const char*>(value.str);
         }
         if (cap->ulType == kNkMAIDCapType_Unsigned) {
             std::ostringstream text;
             text << "0x" << std::hex << std::uppercase
-                 << GetUnsigned(source, kNkMAIDCapability_Firmware, deadline, "inventory_failed");
+                 << GetUnsigned(source, kNkMAIDCapability_Firmware, deadline, category);
             return text.str();
         }
         return "unknown";
@@ -590,7 +965,7 @@ private:
                 EnumerateCapabilities(source, deadline, "inventory_failed");
                 const ULONG type = GetUnsigned(source, kNkMAIDCapability_CameraType, deadline, "inventory_failed");
                 if (type == kNkMAIDCameraType_D810) {
-                    cameras.push_back({"Nikon D810", Firmware(source, deadline), ShootingMode(source, deadline), IdentityForSource(id)});
+                    cameras.push_back({"Nikon D810", Firmware(source, deadline, "inventory_failed"), ShootingMode(source, deadline), IdentityForSource(id)});
                 }
             } catch (...) {
                 CloseObjectNoThrow(source);
@@ -728,6 +1103,10 @@ private:
         }
         UnloadModule();
         session_open_ = false;
+        capture_session_ = false;
+        live_view_session_ = false;
+        live_view_started_ = false;
+        live_view_stop_attempted_ = false;
         original_save_media_.reset();
     }
 
@@ -756,6 +1135,18 @@ private:
     }
 
     void CleanupNoThrow() noexcept {
+        if (source_.opened && live_view_session_ && live_view_started_ && !live_view_stop_attempted_) {
+            try {
+                live_view_stop_attempted_ = true;
+                SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+                    kNkMAIDLiveViewStatus_OFF,
+                    std::chrono::steady_clock::now() + std::chrono::seconds(2),
+                    "live_view_stop_failed");
+            } catch (...) {
+                // Emergency cleanup must still close the SDK object and release the process lock.
+            }
+            live_view_started_ = false;
+        }
         if (source_.opened && original_save_media_) {
             try {
                 SetUnsigned(source_, kNkMAIDCapability_SaveMedia, *original_save_media_,
@@ -770,6 +1161,10 @@ private:
         CloseObjectNoThrow(module_);
         UnloadModule();
         session_open_ = false;
+        capture_session_ = false;
+        live_view_session_ = false;
+        live_view_started_ = false;
+        live_view_stop_attempted_ = false;
         original_save_media_.reset();
         module_sources_.clear();
         baseline_.clear();
@@ -834,6 +1229,10 @@ private:
     ULONG source_id_{0};
     bool claimed_{false};
     bool session_open_{false};
+    bool capture_session_{false};
+    bool live_view_session_{false};
+    bool live_view_started_{false};
+    bool live_view_stop_attempted_{false};
     bool capture_complete_{false};
     bool add_child_in_card_{false};
     std::optional<ULONG> original_save_media_;
@@ -853,9 +1252,22 @@ NikonSdkTransport::NikonSdkTransport() : impl_(std::make_unique<Impl>()) {}
 NikonSdkTransport::~NikonSdkTransport() = default;
 std::string NikonSdkTransport::SdkVersion() const { return impl_->SdkVersion(); }
 std::vector<CameraInfo> NikonSdkTransport::Enumerate() { return impl_->Enumerate(); }
+SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(
+    std::string_view stable_identity,
+    std::chrono::seconds timeout) {
+    return impl_->ProbeSdkStatus(stable_identity, timeout);
+}
 void NikonSdkTransport::Open(std::string_view stable_identity, std::chrono::seconds timeout) {
     impl_->Open(stable_identity, timeout);
 }
+void NikonSdkTransport::OpenLiveView(std::string_view stable_identity, std::chrono::seconds timeout) {
+    impl_->OpenLiveView(stable_identity, timeout);
+}
+void NikonSdkTransport::StartLiveView(std::chrono::seconds timeout) { impl_->StartLiveView(timeout); }
+std::vector<unsigned char> NikonSdkTransport::ReadLiveViewFrame(std::chrono::seconds timeout) {
+    return impl_->ReadLiveViewFrame(timeout);
+}
+void NikonSdkTransport::StopLiveView(std::chrono::seconds timeout) { impl_->StopLiveView(timeout); }
 std::string NikonSdkTransport::Baseline(std::chrono::seconds timeout) { return impl_->Baseline(timeout); }
 std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
     std::string_view baseline,
@@ -863,6 +1275,10 @@ std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
     std::chrono::seconds download_timeout,
     std::chrono::seconds transaction_timeout) {
     return impl_->CaptureAndDownload(baseline, image_event_timeout, download_timeout, transaction_timeout);
+}
+void NikonSdkTransport::CaptureToCard(std::chrono::seconds image_event_timeout,
+                                      std::chrono::seconds transaction_timeout) {
+    impl_->CaptureToCard(image_event_timeout, transaction_timeout);
 }
 void NikonSdkTransport::Close(std::chrono::seconds timeout) { impl_->Close(timeout); }
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept {
@@ -889,10 +1305,16 @@ NikonSdkTransport::NikonSdkTransport() : impl_(std::make_unique<Impl>()) {}
 NikonSdkTransport::~NikonSdkTransport() = default;
 std::string NikonSdkTransport::SdkVersion() const { return "not-linked-license-gated"; }
 std::vector<CameraInfo> NikonSdkTransport::Enumerate() { ThrowGated(); }
+SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::Open(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }
+std::vector<unsigned char> NikonSdkTransport::ReadLiveViewFrame(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::StopLiveView(std::chrono::seconds) { ThrowGated(); }
 std::string NikonSdkTransport::Baseline(std::chrono::seconds) { ThrowGated(); }
 std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
     std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::CaptureToCard(std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::Close(std::chrono::seconds) { ThrowGated(); }
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept { return false; }
 

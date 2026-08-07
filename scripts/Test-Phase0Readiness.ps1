@@ -53,6 +53,9 @@ $d810Nodes = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-
 $requiredBodies = if ($Stage -eq 'Dual') { 2 } else { 1 }
 $cliReady = $false
 $cliExit = $null
+$sdkInventoryReady = $false
+$sdkInventoryExit = $null
+$sdkCameraCount = 0
 if ($cliPresent -and $sdkRootReady) {
     $previousSdkRoot = $env:NIKON_D810_SDK_ROOT
     try {
@@ -60,6 +63,16 @@ if ($cliPresent -and $sdkRootReady) {
         & $phase0Exe preflight --stage $Stage.ToLowerInvariant()
         $cliExit = $LASTEXITCODE
         $cliReady = $cliExit -eq 0
+        if ($cliReady) {
+            $inventoryOutput = @(& $phase0Exe inventory --transport sdk 2>&1)
+            $sdkInventoryExit = $LASTEXITCODE
+            foreach ($line in $inventoryOutput) {
+                if ($line -match '^CameraCount:\s*(\d+)\s*$') {
+                    $sdkCameraCount = [int]$Matches[1]
+                }
+            }
+            $sdkInventoryReady = $sdkInventoryExit -eq 0 -and $sdkCameraCount -ge $requiredBodies
+        }
     } finally {
         $env:NIKON_D810_SDK_ROOT = $previousSdkRoot
     }
@@ -75,6 +88,8 @@ $checks = [ordered]@{
     SdkRootPresent = $sdkRootReady
     Phase0CliPresent = $cliPresent
     LicensedAdapterPreflight = $cliReady
+    LicensedSdkInventory = $sdkInventoryReady
+    LicensedSdkCameraCount = $sdkCameraCount
     MatchingD810PnpNodes = $d810Nodes.Count
     RequiredCameraBodies = $requiredBodies
 }
@@ -82,11 +97,12 @@ $checks = [ordered]@{
 [pscustomobject]$checks | Format-List
 
 $ready = $checks.WindowsX64 -and $checks.MsvcX64 -and $checks.CMake -and
-    $checks.SdkRootPresent -and $checks.Phase0CliPresent -and $checks.LicensedAdapterPreflight
+    $checks.SdkRootPresent -and $checks.Phase0CliPresent -and $checks.LicensedAdapterPreflight -and
+    $checks.LicensedSdkInventory
 
 if ($ready) {
     Write-Output 'Phase0Preflight: READY'
-    Write-Output 'Run inventory next; physical body count is confirmed by the licensed SDK, not by PnP node count.'
+    Write-Output 'Required physical body count was confirmed by the licensed SDK inventory.'
     exit 0
 }
 

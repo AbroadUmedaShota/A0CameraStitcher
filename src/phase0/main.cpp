@@ -1,17 +1,24 @@
 #include "a0/phase0/fake_camera_transport.hpp"
+#include "a0/phase0/cli_safety.hpp"
+#include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -26,11 +33,30 @@ struct Options {
     std::string scenario;
     std::string run_id;
     int count{1};
-    std::string transport{"sdk"};
+    int frames{30};
+    int interval_ms{100};
+    int duration_seconds{0};
+    int correlation_samples{3};
+    int correlation_interval_ms{1500};
+    bool correlation_samples_explicit{false};
+    bool correlation_interval_explicit{false};
+    bool save_last_frame{false};
+    bool exclusive_camera_control_confirmed{false};
+    bool dedicated_spool_scope_confirmed{false};
+    bool exact_object_delete_confirmed{false};
+    std::string transport;
+    WpdCommandTargetPolicy wpd_command_target{WpdCommandTargetPolicy::functional};
+    WpdStatusAccess wpd_status_access{WpdStatusAccess::read_only};
+    bool wpd_status_access_explicit{false};
+    std::optional<std::string> operator_gate;
+    int operator_gate_timeout_seconds{300};
     fs::path artifacts{"artifacts/phase0"};
     fs::path reports{"docs/evidence/phase0"};
     fs::path camera_map{DefaultIdentityMapPath()};
 };
+
+fs::path WpdIdentityMapPath(const Options& options);
+CameraInfo ResolveCamera(ICameraTransport& transport, const fs::path& camera_map, std::string_view alias);
 
 std::optional<std::string> EnvironmentValue(const char* name) {
     char* buffer = nullptr;
@@ -41,14 +67,47 @@ std::optional<std::string> EnvironmentValue(const char* name) {
     return value;
 }
 
+std::string EscapeCliValue(std::string_view value) {
+    std::ostringstream escaped;
+    constexpr char kHex[] = "0123456789ABCDEF";
+    for (const unsigned char character : value) {
+        switch (character) {
+        case '\\': escaped << "\\\\"; break;
+        case '"': escaped << "\\\""; break;
+        case '\n': escaped << "\\n"; break;
+        case '\r': escaped << "\\r"; break;
+        case '\t': escaped << "\\t"; break;
+        default:
+            if (character < 0x20U || character >= 0x7FU) {
+                escaped << "\\u00" << kHex[(character >> 4U) & 0x0FU] << kHex[character & 0x0FU];
+            } else {
+                escaped << static_cast<char>(character);
+            }
+        }
+    }
+    return escaped.str();
+}
+
 void Usage() {
     std::cout
         << "A0CameraStitcher.Phase0 commands:\n"
         << "  preflight --stage single|dual\n"
-        << "  inventory [--transport sdk|wpd|fake]\n"
-        << "  capture-single --alias CAM-A --count 10 [--transport sdk|wpd|fake]\n"
-        << "  capture-pair --count 10 [--transport sdk|wpd|fake]\n"
-        << "  stability --count 100 [--transport sdk|wpd|fake]\n"
+        << "  inventory [--transport sdk|wpd|fake] [--wpd-command-target functional|omit] (default: wpd, functional)\n"
+        << "  sdk-status --alias CAM-A (read-only; does not start Live View or change camera settings)\n"
+        << "  wpd-status --alias CAM-A [--wpd-status-access read-only|read-write] (query-only; does not capture or execute a vendor operation)\n"
+        << "  spool-status --alias CAM-A (read-only aggregate; counts all camera payload objects without capture or deletion)\n"
+        << "  wpd-correlation-status --alias CAM-A [--samples 3] [--sample-interval-ms 1500] (read-only close/reopen observation)\n"
+        << "  live-view --alias CAM-A [--frames 30 | --duration-seconds 300] [--interval-ms 100] [--save-last-frame]\n"
+        << "  live-view-handoff --alias CAM-A --count 10 [--frames 1] [--wpd-command-target functional|omit]\n"
+        << "    --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --exact-object-delete-confirmed\n"
+        << "  hybrid-capture-single --alias CAM-A --count 1|10 --exclusive-camera-control-confirmed\n"
+        << "    --dedicated-spool-scope-confirmed --exact-object-delete-confirmed\n"
+        << "    (one physical D810; dedicated empty card; no physical/external shutter during the active transaction)\n"
+        << "  hybrid-fault-single --alias CAM-A --scenario usb-disconnect|power-off --operator-gate <safe-name>\n"
+        << "    --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --exact-object-delete-confirmed\n"
+        << "  capture-single --alias CAM-A --count 10 --transport fake (contract harness only; real hardware is rejected)\n"
+        << "  capture-pair --count 10 --transport fake (contract harness only; real hardware is rejected)\n"
+        << "  stability --count 100 --transport fake (contract harness only; real hardware is rejected)\n"
         << "  fault-test --scenario no-candidate|ambiguous|late-candidate|invalid-jpeg|open-failure|capture-failure --transport fake\n"
         << "  report --run-id <id>\n";
 }
@@ -66,20 +125,127 @@ Options Parse(int argc, char** argv) {
         if (arg == "--stage") options.stage = require_value();
         else if (arg == "--alias") options.alias = require_value();
         else if (arg == "--count") options.count = std::stoi(require_value());
+        else if (arg == "--frames") options.frames = std::stoi(require_value());
+        else if (arg == "--interval-ms") options.interval_ms = std::stoi(require_value());
+        else if (arg == "--duration-seconds") options.duration_seconds = std::stoi(require_value());
+        else if (arg == "--samples") { options.correlation_samples = std::stoi(require_value()); options.correlation_samples_explicit = true; }
+        else if (arg == "--sample-interval-ms") { options.correlation_interval_ms = std::stoi(require_value()); options.correlation_interval_explicit = true; }
+        else if (arg == "--save-last-frame") options.save_last_frame = true;
+        else if (arg == "--exclusive-camera-control-confirmed") options.exclusive_camera_control_confirmed = true;
+        else if (arg == "--dedicated-spool-scope-confirmed") options.dedicated_spool_scope_confirmed = true;
+        else if (arg == "--exact-object-delete-confirmed") options.exact_object_delete_confirmed = true;
         else if (arg == "--scenario") options.scenario = require_value();
         else if (arg == "--run-id") options.run_id = require_value();
         else if (arg == "--transport") options.transport = require_value();
+        else if (arg == "--wpd-command-target") {
+            const auto value = require_value();
+            if (value == "functional") options.wpd_command_target = WpdCommandTargetPolicy::functional;
+            else if (value == "omit") options.wpd_command_target = WpdCommandTargetPolicy::omit;
+            else throw std::runtime_error("wpd-command-target must be functional or omit");
+        }
+        else if (arg == "--wpd-status-access") {
+            const auto value = require_value();
+            if (value == "read-only") options.wpd_status_access = WpdStatusAccess::read_only;
+            else if (value == "read-write") options.wpd_status_access = WpdStatusAccess::read_write;
+            else throw std::runtime_error("wpd-status-access must be read-only or read-write");
+            options.wpd_status_access_explicit = true;
+        }
+        else if (arg == "--operator-gate") options.operator_gate = require_value();
+        else if (arg == "--operator-gate-timeout-seconds") options.operator_gate_timeout_seconds = std::stoi(require_value());
         else if (arg == "--artifacts") options.artifacts = require_value();
         else if (arg == "--reports") options.reports = require_value();
         else if (arg == "--camera-map") options.camera_map = require_value();
         else throw std::runtime_error("unknown option: " + arg);
     }
     if (options.count < 1) throw std::runtime_error("count must be positive");
+    if (const auto hybrid_error = ValidateHybridCaptureArguments(
+            options.command,
+            options.count,
+            options.exclusive_camera_control_confirmed,
+            options.dedicated_spool_scope_confirmed,
+            options.exact_object_delete_confirmed)) {
+        throw std::runtime_error(*hybrid_error);
+    }
+    if (options.frames < 1) throw std::runtime_error("frames must be positive");
+    if (options.interval_ms < 0) throw std::runtime_error("interval-ms must not be negative");
+    if (options.duration_seconds < 0) throw std::runtime_error("duration-seconds must not be negative");
+    if (const auto correlation_error = ValidateWpdCorrelationArguments(
+            options.command, options.correlation_samples_explicit, options.correlation_interval_explicit,
+            options.correlation_samples, options.correlation_interval_ms)) {
+        throw std::runtime_error(*correlation_error);
+    }
+    if (options.transport.empty()) {
+        options.transport = options.command == "capture-single" || options.command == "capture-pair" ||
+                options.command == "stability" || options.command == "fault-test"
+            ? "fake"
+            : options.command == "live-view" || options.command == "live-view-handoff" ||
+                options.command == "sdk-status" || options.command == "hybrid-capture-single" ||
+                options.command == "hybrid-fault-single"
+            ? "sdk"
+            : "wpd";
+    }
     if (options.alias != "CAM-A" && options.alias != "CAM-B") throw std::runtime_error("alias must be CAM-A or CAM-B");
     if (options.transport != "sdk" && options.transport != "wpd" && options.transport != "fake") {
         throw std::runtime_error("transport must be sdk, wpd, or fake");
     }
+    if (const auto direct_capture_error = ValidateDirectCaptureSafety(
+            options.command, options.transport, options.operator_gate.has_value())) {
+        throw std::runtime_error(*direct_capture_error);
+    }
+    if (options.wpd_status_access_explicit && options.command != "wpd-status") {
+        throw std::runtime_error("wpd-status-access is valid only for wpd-status");
+    }
+    if (options.operator_gate) {
+        const bool hybrid_fault_gate = options.command == "hybrid-fault-single" &&
+            options.transport == "sdk" && options.count == 1;
+        if (!hybrid_fault_gate) {
+            throw std::runtime_error("operator gate requires hybrid-fault-single");
+        }
+        if (!OperatorGate::IsSafeName(*options.operator_gate)) {
+            throw std::runtime_error("operator gate name must match [A-Za-z0-9_-] and be 1-64 characters");
+        }
+        if (options.operator_gate_timeout_seconds < 1 || options.operator_gate_timeout_seconds > 3600) {
+            throw std::runtime_error("operator gate timeout must be between 1 and 3600 seconds");
+        }
+    }
+    if (options.command == "hybrid-fault-single") {
+        if (!options.operator_gate) throw std::runtime_error("hybrid-fault-single requires --operator-gate");
+        if (options.scenario != "usb-disconnect" && options.scenario != "power-off") {
+            throw std::runtime_error("hybrid-fault-single scenario must be usb-disconnect or power-off");
+        }
+    }
     return options;
+}
+
+int RunWpdCorrelationStatus(const Options& options) {
+    if (options.transport != "wpd") throw std::runtime_error("wpd-correlation-status requires --transport wpd");
+    const std::string run_id = NewRunId();
+    WpdTransport transport;
+    WpdCorrelationRunSummary summary;
+    try {
+        const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+        summary = ExecuteWpdCorrelationSamples(
+            transport, camera.stable_identity, options.correlation_samples, options.correlation_interval_ms);
+    } catch (...) {
+        summary.terminal_state = "Failed";
+        summary.failed_stage = "resolve_camera";
+    }
+    const auto path = PersistWpdCorrelationSummary(options.artifacts, run_id, options.alias, summary);
+    EvidenceWriter evidence(options.artifacts, run_id, transport.SdkVersion());
+    evidence.GenerateRedactedReport(options.reports);
+    std::cout << "RunId: " << run_id << "\nSampleCount: " << summary.sample_count
+              << "\nDeviceDatetimeAvailableCount: " << summary.device_datetime_available_count
+              << "\nReopenAdvanceCount: " << summary.reopen_advance_count
+              << "\nReopenEqualCount: " << summary.reopen_equal_count
+              << "\nReopenRegressCount: " << summary.reopen_regress_count
+              << "\nJpegCount: " << summary.jpeg_count
+              << "\nDatedJpegCount: " << summary.dated_jpeg_count
+              << "\nWpdSessionsClosed: " << summary.wpd_sessions_closed
+              << "\nTerminalState: " << summary.terminal_state
+              << "\nFailedStage: " << summary.failed_stage
+              << "\nSummaryPath: " << path.string()
+              << "\nReadOnlyObservation: true\nCaptureCommandSent: false\nVendorOperationExecuted: false\n";
+    return summary.terminal_state == "Complete" ? 0 : 5;
 }
 
 FakeFailureMode ParseFailure(std::string_view scenario) {
@@ -94,12 +260,23 @@ FakeFailureMode ParseFailure(std::string_view scenario) {
 
 std::unique_ptr<ICameraTransport> MakeTransport(const Options& options) {
     if (options.transport == "fake") return std::make_unique<FakeCameraTransport>();
-    if (options.transport == "wpd") return std::make_unique<WpdTransport>();
+    if (options.transport == "wpd") return std::make_unique<WpdTransport>(options.wpd_command_target);
     return std::make_unique<NikonSdkTransport>();
 }
 
 fs::path IdentityMapPath(const Options& options) {
     if (options.transport != "wpd" || options.camera_map != DefaultIdentityMapPath()) return options.camera_map;
+    auto path = options.camera_map;
+    path.replace_filename("camera-map-wpd.json");
+    return path;
+}
+
+fs::path WpdIdentityMapPath(const Options& options) {
+    if (options.camera_map != DefaultIdentityMapPath()) {
+        auto path = options.camera_map;
+        path.replace_filename(path.stem().string() + "-wpd" + path.extension().string());
+        return path;
+    }
     auto path = options.camera_map;
     path.replace_filename("camera-map-wpd.json");
     return path;
@@ -133,10 +310,515 @@ int Inventory(const Options& options) {
     return cameras.empty() ? 3 : 0;
 }
 
+CameraInfo ResolveCamera(
+    const std::vector<CameraInfo>& cameras,
+    const fs::path& camera_map,
+    std::string_view alias) {
+    IdentityMap identity_map(camera_map);
+    std::optional<CameraInfo> selected;
+    for (const auto& camera : cameras) {
+        const auto existing_alias = identity_map.FindAlias(camera.stable_identity);
+        const std::string resolved_alias = existing_alias
+            ? *existing_alias
+            : identity_map.AssignNext(camera.stable_identity);
+        if (resolved_alias == alias) {
+            if (selected) throw std::runtime_error("multiple cameras resolved to the requested alias");
+            selected = camera;
+        }
+    }
+    if (!selected) throw std::runtime_error("requested camera alias is not available");
+    return *selected;
+}
+
+CameraInfo ResolveCamera(
+    ICameraTransport& transport,
+    const fs::path& camera_map,
+    std::string_view alias) {
+    return ResolveCamera(transport.Enumerate(), camera_map, alias);
+}
+
+int RunSdkStatus(const Options& options) {
+    if (options.transport != "sdk") throw std::runtime_error("sdk-status requires --transport sdk");
+    NikonSdkTransport transport;
+    const auto camera = ResolveCamera(transport, options.camera_map, options.alias);
+    auto status = transport.ProbeSdkStatus(camera.stable_identity, std::chrono::seconds(10));
+    if (status.firmware == "unknown" && camera.firmware != "unknown") status.firmware = camera.firmware;
+
+    const std::string run_id = NewRunId();
+    const auto summary = PersistSdkStatusSummary(options.artifacts, run_id, options.alias, camera, status);
+    EvidenceWriter evidence(options.artifacts, run_id, transport.SdkVersion());
+    evidence.GenerateRedactedReport(options.reports);
+
+    const auto write_setting = [](std::string_view name, const SdkCameraStatus::SettingCapability& setting) {
+        std::cout << '\n' << name << "Available: " << (setting.available ? "true" : "false")
+                  << '\n' << name << "CapType: " << setting.cap_type
+                  << '\n' << name << "ProbeState: " << setting.probe_state
+                  << '\n' << name << "ValueType: " << setting.value_type
+                  << '\n' << name << "CurrentValue: ";
+        if (setting.current_value) std::cout << *setting.current_value;
+        else std::cout << "unknown";
+        std::cout << '\n' << name << "CurrentIndex: ";
+        if (setting.current_index) std::cout << *setting.current_index;
+        else std::cout << "unknown";
+        std::cout << '\n' << name << "CurrentLabel: ";
+        if (setting.current_label) std::cout << EscapeCliValue(*setting.current_label);
+        else std::cout << "unknown";
+        std::cout << '\n' << name << "NumericValues:";
+        for (const std::uint32_t value : setting.numeric_values) std::cout << ' ' << value;
+        std::cout << '\n' << name << "StringValues:";
+        for (const std::string& value : setting.string_values) std::cout << ' ' << EscapeCliValue(value);
+    };
+    std::cout << "RunId: " << run_id
+              << "\nCameraAlias: " << options.alias
+              << "\nModel: " << camera.model
+              << "\nFirmware: " << status.firmware
+              << "\nShootingMode: " << camera.shooting_mode
+              << "\nLiveViewStatus: " << status.live_view_status
+              << "\nLiveViewStatusAvailable: " << (status.live_view_status_available ? "true" : "false")
+              << "\nLiveViewSelector: " << status.live_view_selector
+              << "\nLiveViewSelectorAvailable: " << (status.live_view_selector_available ? "true" : "false")
+              << "\nLiveViewProhibitMask: ";
+    if (status.live_view_prohibit_mask) {
+        std::cout << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+                  << *status.live_view_prohibit_mask << std::dec;
+    } else {
+        std::cout << "unknown";
+    }
+    std::cout << "\nLiveViewProhibitAvailable: " << (status.live_view_prohibit_mask ? "true" : "false")
+              << "\nCameraSettingReadOnlyProbe: true"
+              << "\nCameraSettingWriteAttempted: false"
+              << "\nSdkControlPlaneCallbackRegistrationMayUseCapSet: true"
+              << "\nCameraSettingsChanged: false"
+              << "\nLiveViewStarted: false"
+              << "\nSdkSessionClosed: true"
+              << "\nRealIdentifiersPrinted: false"
+              << "\nSummaryPath: " << summary.string();
+    write_setting("FileType", status.file_type);
+    write_setting("CompressionLevel", status.compression_level);
+    write_setting("ImageSize", status.image_size);
+    write_setting("ExposureMode", status.exposure_mode);
+    write_setting("ShutterSpeed", status.shutter_speed);
+    write_setting("Aperture", status.aperture);
+    write_setting("Sensitivity", status.sensitivity);
+    write_setting("WBMode", status.wb_mode);
+    write_setting("FocusMode", status.focus_mode);
+    std::cout << '\n';
+    return 0;
+}
+
+int RunWpdStatus(const Options& options) {
+    if (options.transport != "wpd") throw std::runtime_error("wpd-status requires --transport wpd");
+    WpdTransport transport(options.wpd_command_target);
+    const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+    const auto target = transport.ProbeCaptureTarget(camera.stable_identity);
+    const auto vendor = transport.ProbeVendorOpcodes(camera.stable_identity, options.wpd_status_access);
+    const auto run_id = NewRunId();
+    const WpdStatusSummary status{
+        target.validation_state,
+        target.command_options_hresult,
+        target.option_value_hresult,
+        target.functional_object_count,
+        target.valid_object_id_count,
+        target.compatible_target_count,
+        target.valid_object_ids_option_present,
+        target.selected_target,
+        vendor.validation_state,
+        vendor.supported_commands_hresult,
+        vendor.query_send_hresult,
+        vendor.query_common_hresult,
+        vendor.wpd_still_image_capture_command_advertised,
+        vendor.vendor_opcode_query_advertised,
+        vendor.read_only_command_sent,
+        vendor.vendor_opcode_collection_available,
+        vendor.vendor_opcode_item_count,
+        vendor.vendor_opcode_unique_count,
+        vendor.vendor_capture_9207_advertised,
+        vendor.standard_opcode_100e_advertisement_available,
+        vendor.standard_opcode_100e_advertisement_state,
+        vendor.requested_access,
+        vendor.read_only_access,
+    };
+    const auto summary = PersistWpdStatusSummary(options.artifacts, run_id, options.alias, camera, status);
+    EvidenceWriter evidence(options.artifacts, run_id, transport.SdkVersion());
+    evidence.GenerateRedactedReport(options.reports);
+    std::cout << "RunId: " << run_id
+              << "\nCameraAlias: " << options.alias
+              << "\nModel: " << camera.model
+              << "\nFirmware: " << camera.firmware
+              << "\nTargetValidationState: " << target.validation_state
+              << "\nCommandOptionsHRESULT: " << target.command_options_hresult
+              << "\nOptionValueHRESULT: " << target.option_value_hresult
+              << "\nFunctionalObjectCount: " << target.functional_object_count
+              << "\nValidObjectIdsOptionPresent: " << (target.valid_object_ids_option_present ? "true" : "false")
+              << "\nValidObjectIdCount: " << target.valid_object_id_count
+              << "\nCompatibleTargetCount: " << target.compatible_target_count
+              << "\nSelectedTarget: " << (target.selected_target ? "true" : "false")
+              << "\nVendorOpcodeValidationState: " << vendor.validation_state
+              << "\nSupportedCommandsHRESULT: " << vendor.supported_commands_hresult
+              << "\nWpdStillImageCaptureCommandAdvertised: " << (vendor.wpd_still_image_capture_command_advertised ? "true" : "false")
+              << "\nVendorOpcodeQueryAdvertised: " << (vendor.vendor_opcode_query_advertised ? "true" : "false")
+              << "\nVendorOpcodeQuerySendHRESULT: " << vendor.query_send_hresult
+              << "\nVendorOpcodeQueryCommonHRESULT: " << vendor.query_common_hresult
+              << "\nVendorOpcodeCollectionAvailable: " << (vendor.vendor_opcode_collection_available ? "true" : "false")
+              << "\nVendorOpcodeItemCount: " << vendor.vendor_opcode_item_count
+              << "\nVendorOpcodeUniqueCount: " << vendor.vendor_opcode_unique_count
+              << "\nVendorCapture9207Advertised: " << (vendor.vendor_capture_9207_advertised ? "true" : "false")
+              << "\nStandardOpcode100eAdvertisementAvailable: "
+              << (vendor.standard_opcode_100e_advertisement_available ? "true" : "false")
+              << "\nStandardOpcode100eAdvertisementState: " << vendor.standard_opcode_100e_advertisement_state
+              << "\nWpdRequestedAccess: " << vendor.requested_access
+              << "\nReadOnlyAccess: " << (vendor.read_only_access ? "true" : "false")
+              << "\nNonMutatingProbe: true"
+              << "\nReadOnlyCommandSent: " << (vendor.read_only_command_sent ? "true" : "false")
+              << "\nCaptureCommandSent: false"
+              << "\nVendorOperationExecuted: false"
+              << "\nRealIdentifiersPrinted: false"
+              << "\nSummaryPath: " << summary.string() << '\n';
+    return target.selected_target && vendor.vendor_opcode_collection_available ? 0 : 4;
+}
+
+int RunSpoolStatus(const Options& options) {
+    if (options.transport != "wpd") throw std::runtime_error("spool-status requires --transport wpd");
+    const std::string run_id = NewRunId();
+    WpdTransport transport(options.wpd_command_target);
+    WpdSpoolStatusSummary status;
+    try {
+        const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+        status.payload_object_count = transport.InspectSpoolPayloadCount(
+            camera.stable_identity, std::chrono::seconds(10));
+        status.wpd_sessions_closed = 1;
+        status.terminal_state = "Complete";
+    } catch (const TransportError& error) {
+        status.terminal_state = "Failed";
+        status.failed_stage = error.Category();
+    } catch (const std::exception&) {
+        status.terminal_state = "Failed";
+        status.failed_stage = "resolve_or_inspect";
+    }
+    const auto summary = PersistWpdSpoolStatusSummary(
+        options.artifacts, run_id, options.alias, status);
+    EvidenceWriter evidence(options.artifacts, run_id, transport.SdkVersion());
+    evidence.GenerateRedactedReport(options.reports);
+    std::cout << "RunId: " << run_id
+              << "\nCameraAlias: " << options.alias
+              << "\nPayloadObjectCount: " << status.payload_object_count
+              << "\nSpoolState: "
+              << (status.terminal_state == "Complete"
+                      ? (status.payload_object_count == 0 ? "EMPTY" : "NON_EMPTY")
+                      : "UNKNOWN")
+              << "\nReadOnlyObservation: true"
+              << "\nCaptureCommandSent: false"
+              << "\nCameraObjectDeleteAttempted: false"
+              << "\nVendorOperationExecuted: false"
+              << "\nWpdSessionsClosed: " << status.wpd_sessions_closed
+              << "\nTerminalState: " << status.terminal_state
+              << "\nFailedStage: " << status.failed_stage
+              << "\nRealIdentifiersPrinted: false"
+              << "\nSummaryPath: " << summary.string() << '\n';
+    return status.terminal_state == "Complete" ? 0 : 5;
+}
+
+fs::path PersistLastPreview(
+    const Options& options,
+    std::string_view run_id,
+    const std::vector<unsigned char>& frame) {
+    const fs::path directory = options.artifacts / std::string(run_id) / "live-view" / options.alias;
+    fs::create_directories(directory);
+    const fs::path partial = directory / "last.jpg.partial";
+    const fs::path final = directory / "last.jpg";
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create live view preview artifact");
+    output.write(reinterpret_cast<const char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist live view preview artifact");
+    if (fs::exists(final)) throw std::runtime_error("refusing to overwrite a live view preview artifact");
+    fs::rename(partial, final);
+    return final;
+}
+
+fs::path PersistLiveViewSummary(
+    const Options& options,
+    std::string_view run_id,
+    const LiveViewProbeResult& result,
+    bool preview_persisted) {
+    const fs::path run_root = options.artifacts / std::string(run_id);
+    fs::create_directories(run_root);
+    const fs::path summary = run_root / "live-view-summary.json";
+    std::ofstream output(summary, std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create live view summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.live-view-summary.v1\",\n"
+           << "  \"runId\": \"" << run_id << "\",\n"
+           << "  \"cameraAlias\": \"" << options.alias << "\",\n"
+           << "  \"frames\": " << result.frames << ",\n"
+           << "  \"lastFrameBytes\": " << result.last_frame.size() << ",\n"
+           << "  \"durationMs\": " << result.duration.count() << ",\n"
+           << "  \"liveViewStopped\": true,\n"
+           << "  \"sdkSessionClosed\": true,\n"
+           << "  \"previewFramePersisted\": " << (preview_persisted ? "true" : "false") << "\n"
+           << "}\n";
+    if (!output) throw std::runtime_error("cannot persist live view summary");
+    return summary;
+}
+
+int RunLiveView(const Options& options) {
+    if (options.transport != "sdk") throw std::runtime_error("live-view requires --transport sdk");
+    NikonSdkTransport transport;
+    const auto camera = ResolveCamera(transport, options.camera_map, options.alias);
+    const std::string run_id = NewRunId();
+    const auto result = AcquireLiveViewFrames(
+        transport, camera.stable_identity, options.frames, options.interval_ms, options.duration_seconds);
+
+    std::optional<fs::path> saved;
+    if (options.save_last_frame) saved = PersistLastPreview(options, run_id, result.last_frame);
+    const auto summary = PersistLiveViewSummary(options, run_id, result, saved.has_value());
+    std::cout << "RunId: " << run_id
+              << "\nCameraAlias: " << options.alias
+              << "\nFrames: " << result.frames
+              << "\nLastFrameBytes: " << result.last_frame.size()
+              << "\nDurationMs: " << result.duration.count()
+              << "\nLiveViewStopped: true\nSdkSessionClosed: true"
+              << "\nSummaryPath: " << summary.string() << '\n';
+    if (saved) std::cout << "LastFramePath: " << saved->string() << '\n';
+    return 0;
+}
+
+int RunLiveViewHandoff(const Options& options) {
+    if (options.transport != "sdk") throw std::runtime_error("live-view-handoff uses SDK plus WPD and does not accept another transport");
+
+    NikonSdkTransport sdk;
+    WpdTransport wpd(options.wpd_command_target);
+    const auto sdk_cameras = sdk.Enumerate();
+    const auto wpd_cameras = wpd.Enumerate();
+    if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1) {
+        throw TransportError(
+            "cross_transport_binding_required",
+            "live-view-handoff currently requires exactly one physical D810 connected and exactly one SDK/WPD projection; disconnect every other D810 until dual-camera cross-transport binding is registered");
+    }
+    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
+    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const std::string run_id = NewRunId();
+    EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
+    evidence.RecordCamera(options.alias, sdk_camera.firmware);
+    LiveViewHandoffRunSummary summary;
+    summary.requested = options.count;
+    auto summary_path = PersistLiveViewHandoffSummary(options.artifacts, run_id, options.alias, summary);
+
+    for (int index = 0; index < options.count; ++index) {
+        ++summary.attempted;
+        summary_path = PersistLiveViewHandoffSummary(options.artifacts, run_id, options.alias, summary);
+        const std::string handoff_id = "handoff-" + std::to_string(index + 1);
+        const auto capture_once = [&] {
+            return ExecuteHybridCaptureOnce(
+                wpd,
+                wpd,
+                sdk,
+                sdk,
+                evidence,
+                options.alias,
+                wpd_camera.stable_identity,
+                sdk_camera.stable_identity,
+                {});
+        };
+        const auto result = ExecuteLiveViewHandoffOnce(
+            sdk,
+            sdk_camera.stable_identity,
+            capture_once,
+            evidence,
+            handoff_id,
+            options.alias,
+            options.frames,
+            options.interval_ms);
+        summary.spool_empty_before_count += result.capture.spool_empty_before_capture ? 1 : 0;
+        summary.camera_card_delete_attempted_count += result.capture.camera_card_delete_attempted ? 1 : 0;
+        summary.camera_card_delete_succeeded_count += result.capture.camera_card_delete_succeeded ? 1 : 0;
+        summary.spool_empty_after_count += result.capture.spool_empty_after_cleanup ? 1 : 0;
+        summary.last_handoff_state = result.terminal_state;
+        summary.last_error_category = result.error_category;
+        summary.last_error_detail = result.error_detail;
+
+        if (result.terminal_state == "Complete") {
+            ++summary.completed;
+            summary.terminal_state = summary.completed == summary.requested ? "Complete" : "InProgress";
+            summary_path = PersistLiveViewHandoffSummary(options.artifacts, run_id, options.alias, summary);
+            std::cout << "Handoff " << index + 1
+                      << ": beforeBytes=" << result.before.last_frame.size()
+                      << " capture=" << result.capture.terminal_state
+                      << " afterBytes=" << result.after.last_frame.size() << '\n';
+        } else {
+            ++summary.failures;
+            summary.terminal_state = "FailedPartial";
+            summary_path = PersistLiveViewHandoffSummary(options.artifacts, run_id, options.alias, summary);
+            std::cerr << "Handoff " << index + 1
+                      << " failed: state=" << result.terminal_state
+                      << " category=" << result.error_category
+                      << " detail=" << result.error_detail
+                      << " capture=" << (result.capture.terminal_state.empty()
+                              ? "NotStarted"
+                              : result.capture.terminal_state)
+                      << " resume=" << (result.resume_attempted ? "Attempted" : "Skipped") << '\n';
+            break;
+        }
+    }
+
+    if (summary.completed == summary.requested && summary.failures == 0) {
+        summary.terminal_state = "Complete";
+    } else if (summary.terminal_state != "FailedPartial") {
+        summary.terminal_state = "FailedPartial";
+    }
+    summary_path = PersistLiveViewHandoffSummary(options.artifacts, run_id, options.alias, summary);
+
+    std::cout << "RunId: " << run_id
+              << "\nRequestedHandoffs: " << options.count
+              << "\nAttemptedHandoffs: " << summary.attempted
+              << "\nCompleteHandoffs: " << summary.completed
+              << "\nFailures: " << summary.failures
+              << "\nSpoolEmptyBefore: " << summary.spool_empty_before_count
+              << "\nCameraCardDeleteAttempted: " << summary.camera_card_delete_attempted_count
+              << "\nCameraCardDeleteSucceeded: " << summary.camera_card_delete_succeeded_count
+              << "\nSpoolEmptyAfter: " << summary.spool_empty_after_count
+              << "\nTerminalState: " << summary.terminal_state
+              << "\nSummaryPath: " << summary_path.string()
+              << "\nPreviewFramesPersisted: false\n";
+    return summary.terminal_state == "Complete" ? 0 : 5;
+}
+
+int RunHybridCapture(const Options& options) {
+    if (options.transport != "sdk") throw std::runtime_error("hybrid-capture-single does not accept --transport");
+    NikonSdkTransport sdk;
+    WpdTransport wpd(options.wpd_command_target);
+    const auto sdk_cameras = sdk.Enumerate();
+    const auto wpd_cameras = wpd.Enumerate();
+    if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1) {
+        throw std::runtime_error("hybrid capture requires exactly one physical D810 in both SDK and WPD inventories");
+    }
+    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
+    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const std::string run_id = NewRunId();
+    EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion());
+    evidence.RecordCamera(options.alias, sdk_camera.firmware);
+    HybridCaptureRunSummary summary;
+    summary.requested = options.count;
+    summary.exclusive_camera_control_confirmed = options.exclusive_camera_control_confirmed;
+    summary.dedicated_spool_scope_confirmed = options.dedicated_spool_scope_confirmed;
+    summary.exact_object_delete_confirmed = options.exact_object_delete_confirmed;
+    for (int index = 0; index < options.count; ++index) {
+        ++summary.attempted;
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, options.alias,
+            wpd_camera.stable_identity, sdk_camera.stable_identity, {});
+        summary.spool_empty_before_count += result.spool_empty_before_capture ? 1 : 0;
+        summary.camera_card_delete_attempted_count += result.camera_card_delete_attempted ? 1 : 0;
+        summary.camera_card_delete_succeeded_count += result.camera_card_delete_succeeded ? 1 : 0;
+        summary.spool_empty_after_count += result.spool_empty_after_cleanup ? 1 : 0;
+        summary.last_state = result.terminal_state;
+        if (result.terminal_state == "Complete") {
+            ++summary.completed;
+        } else {
+            ++summary.failures;
+            summary.terminal_state = "FailedPartial";
+            break;
+        }
+    }
+    if (summary.completed == summary.requested && summary.failures == 0) summary.terminal_state = "Complete";
+    const auto path = PersistHybridCaptureSummary(options.artifacts, run_id, options.alias, summary);
+    evidence.GenerateRedactedReport(options.reports);
+    std::cout << "RunId: " << run_id << "\nRequested: " << summary.requested
+              << "\nAttempted: " << summary.attempted << "\nCompleted: " << summary.completed
+              << "\nFailures: " << summary.failures
+              << "\nSpoolEmptyBefore: " << summary.spool_empty_before_count
+              << "\nCameraCardDeleteAttempted: " << summary.camera_card_delete_attempted_count
+              << "\nCameraCardDeleteSucceeded: " << summary.camera_card_delete_succeeded_count
+              << "\nSpoolEmptyAfter: " << summary.spool_empty_after_count
+              << "\nTerminalState: " << summary.terminal_state
+              << "\nSummaryPath: " << path.string() << "\n";
+    return summary.terminal_state == "Complete" ? 0 : 5;
+}
+
+int RunHybridFaultSingle(const Options& options) {
+    if (options.transport != "sdk") throw std::runtime_error("hybrid-fault-single does not accept --transport");
+    NikonSdkTransport sdk;
+    WpdTransport wpd(options.wpd_command_target);
+    const auto sdk_cameras = sdk.Enumerate();
+    const auto wpd_cameras = wpd.Enumerate();
+    if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1) {
+        throw std::runtime_error("hybrid fault test requires exactly one physical D810 in both SDK and WPD inventories");
+    }
+    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
+    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const std::string run_id = NewRunId();
+    EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
+    evidence.RecordCamera(options.alias, sdk_camera.firmware);
+    constexpr std::string_view gate_stage = "after_sdk_close_before_wpd_recovery";
+    OperatorGate gate(
+        evidence.RunRoot(), *options.operator_gate,
+        std::chrono::seconds(options.operator_gate_timeout_seconds),
+        options.scenario, std::string(gate_stage));
+    std::cout << "FaultScenario: " << options.scenario
+              << "\nFaultAction: "
+              << (options.scenario == "usb-disconnect"
+                      ? "disconnect the D810 USB cable"
+                      : "turn the D810 power off")
+              << " after the operator gate becomes ready; then create the continue marker.\n";
+    const auto result = ExecuteHybridCaptureOnce(
+        wpd, wpd, sdk, sdk, evidence, options.alias,
+        wpd_camera.stable_identity, sdk_camera.stable_identity, {},
+        [&] { static_cast<void>(gate.AwaitContinue(std::cout)); });
+
+    HybridCaptureRunSummary capture_summary;
+    capture_summary.requested = 1;
+    capture_summary.attempted = 1;
+    capture_summary.completed = result.terminal_state == "Complete" ? 1 : 0;
+    capture_summary.failures = result.terminal_state == "Complete" ? 0 : 1;
+    capture_summary.terminal_state = result.terminal_state;
+    capture_summary.last_state = result.terminal_state;
+    capture_summary.spool_empty_before_count = result.spool_empty_before_capture ? 1 : 0;
+    capture_summary.camera_card_delete_attempted_count = result.camera_card_delete_attempted ? 1 : 0;
+    capture_summary.camera_card_delete_succeeded_count = result.camera_card_delete_succeeded ? 1 : 0;
+    capture_summary.spool_empty_after_count = result.spool_empty_after_cleanup ? 1 : 0;
+    capture_summary.exclusive_camera_control_confirmed = options.exclusive_camera_control_confirmed;
+    capture_summary.dedicated_spool_scope_confirmed = options.dedicated_spool_scope_confirmed;
+    capture_summary.exact_object_delete_confirmed = options.exact_object_delete_confirmed;
+    (void)PersistHybridCaptureSummary(options.artifacts, run_id, options.alias, capture_summary);
+
+    HybridFaultRunSummary fault_summary;
+    fault_summary.scenario = options.scenario;
+    fault_summary.gate_stage = std::string(gate_stage);
+    fault_summary.transaction_state = result.terminal_state;
+    fault_summary.error_category = result.error_category;
+    fault_summary.spool_empty_before_capture = result.spool_empty_before_capture;
+    fault_summary.pc_original_persisted = !result.frames.empty() && result.frames.front().success;
+    fault_summary.camera_object_delete_attempted = result.camera_card_delete_attempted;
+    const bool expected_failure = result.terminal_state == "FailedPartial" &&
+        result.error_category == "open_failed" && result.spool_empty_before_capture &&
+        !fault_summary.pc_original_persisted && !result.camera_card_delete_attempted;
+    fault_summary.acceptance_state = expected_failure ? "Pass" : "Fail";
+    const auto path = PersistHybridFaultSummary(options.artifacts, run_id, options.alias, fault_summary);
+    evidence.GenerateRedactedReport(options.reports);
+    std::cout << "RunId: " << run_id
+              << "\nTransactionState: " << result.terminal_state
+              << "\nErrorCategory: " << result.error_category
+              << "\nPcOriginalPersisted: " << (fault_summary.pc_original_persisted ? "true" : "false")
+              << "\nCameraObjectDeleteAttempted: " << (result.camera_card_delete_attempted ? "true" : "false")
+              << "\nAutomaticRetry: false"
+              << "\nRecoveryRequiresNewTransaction: true"
+              << "\nAcceptanceState: " << fault_summary.acceptance_state
+              << "\nSummaryPath: " << path.string() << '\n';
+    return expected_failure ? 0 : 5;
+}
+
 int RunCapture(const Options& options, FakeFailureMode failure = FakeFailureMode::none) {
     std::unique_ptr<ICameraTransport> transport;
     if (options.transport == "fake") transport = std::make_unique<FakeCameraTransport>(failure);
-    else if (options.transport == "wpd") transport = std::make_unique<WpdTransport>();
+    else if (options.transport == "wpd") {
+        WpdTransport::BeforeCommandCallback before_command;
+        if (options.operator_gate) {
+            auto gate = std::make_shared<OperatorGate>(
+                options.artifacts, *options.operator_gate, std::chrono::seconds(options.operator_gate_timeout_seconds));
+            before_command = [gate] { static_cast<void>(gate->AwaitContinue(std::cout)); };
+        }
+        transport = std::make_unique<WpdTransport>(options.wpd_command_target, std::move(before_command));
+    }
     else transport = std::make_unique<NikonSdkTransport>();
     const auto cameras = transport->Enumerate();
     const std::size_t required = options.command == "capture-single" || options.command == "fault-test" ? 1U : 2U;
@@ -175,15 +857,23 @@ int RunCapture(const Options& options, FakeFailureMode failure = FakeFailureMode
     }
     CaptureCoordinator coordinator(*transport, evidence);
     int failures = 0;
+    int attempted_transactions = 0;
     for (int index = 0; index < options.count; ++index) {
+        ++attempted_transactions;
         const auto result = required == 1
             ? coordinator.CaptureSingle(options.alias, cameras_by_alias.at(options.alias).stable_identity)
             : coordinator.CapturePair(
                 cameras_by_alias.at("CAM-A").stable_identity,
                 cameras_by_alias.at("CAM-B").stable_identity);
-        if (result.terminal_state != "Complete") ++failures;
+        if (result.terminal_state != "Complete") {
+            ++failures;
+            break;
+        }
     }
-    std::cout << "RunId: " << run_id << "\nTransactions: " << options.count << "\nFailures: " << failures << '\n';
+    std::cout << "RunId: " << run_id
+              << "\nRequestedTransactions: " << options.count
+              << "\nAttemptedTransactions: " << attempted_transactions
+              << "\nFailures: " << failures << '\n';
     return failures == 0 ? 0 : 4;
 }
 
@@ -200,8 +890,24 @@ int GenerateReport(const Options& options) {
 int main(int argc, char** argv) {
     try {
         const Options options = Parse(argc, argv);
+        std::optional<HardwareProcessLease> hardware_lease;
+        if (RequiresHardwareProcessLease(options.command, options.transport)) {
+            hardware_lease.emplace();
+            if (hardware_lease->RecoveredAbandonedOwner()) {
+                std::cerr << "Phase0 warning: recovered an abandoned camera-control lease; "
+                             "the selected command must still perform its normal fail-closed checks\n";
+            }
+        }
         if (options.command == "preflight") return Preflight(options);
         if (options.command == "inventory") return Inventory(options);
+        if (options.command == "sdk-status") return RunSdkStatus(options);
+        if (options.command == "wpd-status") return RunWpdStatus(options);
+        if (options.command == "spool-status") return RunSpoolStatus(options);
+        if (options.command == "wpd-correlation-status") return RunWpdCorrelationStatus(options);
+        if (options.command == "live-view") return RunLiveView(options);
+        if (options.command == "live-view-handoff") return RunLiveViewHandoff(options);
+        if (options.command == "hybrid-capture-single") return RunHybridCapture(options);
+        if (options.command == "hybrid-fault-single") return RunHybridFaultSingle(options);
         if (options.command == "capture-single" || options.command == "capture-pair" || options.command == "stability") return RunCapture(options);
         if (options.command == "fault-test") {
             if (options.transport != "fake") throw std::runtime_error("fault-test requires --transport fake");
@@ -210,6 +916,10 @@ int main(int argc, char** argv) {
         if (options.command == "report") return GenerateReport(options);
         Usage();
         return 1;
+    } catch (const TransportError& error) {
+        std::cerr << "Phase0 transport error [" << error.Category() << "]: " << error.what() << '\n';
+        Usage();
+        return 3;
     } catch (const std::exception& error) {
         std::cerr << "Phase0 error: " << error.what() << '\n';
         Usage();

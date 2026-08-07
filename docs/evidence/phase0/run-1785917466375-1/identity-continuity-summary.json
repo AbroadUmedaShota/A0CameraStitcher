@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "phase0.identity-continuity-summary.v1",
+  "runId": "run-1785917466375-1",
+  "cameraAlias": "CAM-A",
+  "cameraModel": "Nikon D810",
+  "recordedPowerCycleArrival": "2026-08-05T14:38:22+09:00",
+  "powerCycleAfterRequestObserved": true,
+  "sdkMapPredatesRecordedArrival": true,
+  "wpdMapPredatesRecordedArrival": true,
+  "sdkMapUnchangedAcrossPostArrivalInventory": true,
+  "wpdMapUnchangedAcrossPostArrivalInventory": true,
+  "sdkInventoryReturnedCamA": true,
+  "wpdInventoryReturnedCamA": true,
+  "sdkCameraCount": 1,
+  "wpdCameraCount": 1,
+  "sdkSessionClosed": true,
+  "cameraSettingsChanged": false,
+  "rawMapHashesIncluded": false,
+  "realIdentifiersPrinted": false,
+  "terminalState": "Complete"
+}

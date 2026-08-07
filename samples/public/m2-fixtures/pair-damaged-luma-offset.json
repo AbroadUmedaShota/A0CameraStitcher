@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "m2.synthetic-pixel-pair.v1",
+  "id": "pair-damaged-luma-offset",
+  "simulation": true,
+  "marker": "Synthetic",
+  "approvalState": "test-only",
+  "qualityDecision": "not-evaluated",
+  "rights": "wholly-synthetic-generated-values",
+  "canvas": { "widthPixels": 12, "heightPixels": 4 },
+  "placement": { "camA": { "x": 0, "y": 0 }, "camB": { "x": 4, "y": 0 } },
+  "sources": {
+    "camA": { "widthPixels": 8, "heightPixels": 4, "pixels": [[0,1,4,9,16,25,36,49],[20,21,24,29,36,45,56,69],[40,41,44,49,56,65,76,89],[60,61,64,69,76,85,96,109]] },
+    "camB": { "widthPixels": 8, "heightPixels": 4, "pixels": [[26,35,46,59,74,91,110,131],[46,55,66,79,94,111,130,151],[66,75,86,99,114,131,150,171],[86,95,106,119,134,151,170,191]] }
+  },
+  "injectedDamage": { "kind": "luma-offset", "value": 10 },
+  "expectedMetrics": { "canvasWidthPixels": 12, "canvasHeightPixels": 4, "overlapWidthPixels": 4, "rawOverlapMeanAbsoluteError": 10, "rawOverlapMaxAbsoluteError": 10 }
+}

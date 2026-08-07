@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "phase0.wpd-correlation-summary.v1",
+  "timestamp": "2026-08-05T07:41:35.622Z",
+  "runId": "run-1785915695600-1",
+  "cameraAlias": "CAM-A",
+  "sampleCount": 3,
+  "deviceDatetimeAvailableCount": 3,
+  "reopenAdvanceCount": 0,
+  "reopenEqualCount": 2,
+  "reopenRegressCount": 0,
+  "jpegCount": 240,
+  "datedJpegCount": 240,
+  "latestDateLessThanDeviceCount": 0,
+  "latestDateEqualDeviceCount": 0,
+  "latestDateGreaterThanDeviceCount": 3,
+  "readOnlyObservation": true,
+  "captureCommandSent": false,
+  "vendorOperationExecuted": false,
+  "cameraSettingsChanged": false,
+  "cameraObjectDeleteAttempted": false,
+  "realIdentifiersPrinted": false
+}

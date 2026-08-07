@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-06T11:14:01.236Z","runId":"run-1786014841232-1","state":"CameraProfile","cameraAlias":"CAM-A","model":"Nikon D810","firmware":"unknown"}
+{"timestamp":"2026-08-06T11:14:01.239Z","runId":"run-1786014841232-1","transactionId":"hybrid-tx-1786014841239","state":"HybridWpdBaselineOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-08-06T11:14:12.045Z","runId":"run-1786014841232-1","transactionId":"hybrid-tx-1786014841239","state":"HybridFailed","cameraAlias":"CAM-A","errorDetail":"dedicated WPD spool contains camera payload objects; object-count=90"}
+{"timestamp":"2026-08-06T11:14:12.047Z","runId":"run-1786014841232-1","transactionId":"hybrid-tx-1786014841239","state":"FailedPartial","durationMs":10808,"errorCategory":"spool_not_empty","errorDetail":"dedicated WPD spool contains camera payload objects; object-count=90"}

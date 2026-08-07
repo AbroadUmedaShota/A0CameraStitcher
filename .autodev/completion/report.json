@@ -1,1 +1,82 @@
-{"schema_version":"autodev.completion-report.v1","evaluated_at":"2026-08-04","completion_state":"in-progress","blocking_gaps":["Phase 0A ten-capture and recovery evidence incomplete","second D810 unavailable for Phase 0B","open M2 and release gates"],"degraded_gaps":["one WPD capture and PC JPEG persistence succeeded; repetition and fault coverage remain incomplete"],"remaining_human_actions":["HG-0001","HG-0002","HG-0003B","HG-0005"],"evidence_summary":{"requirements_verified":0,"requirements_total":27}}
+{
+  "schema_version": "autodev.completion-report.v1",
+  "evaluated_at": "2026-08-07T04:33:03+09:00",
+  "completion_state": "in-progress",
+  "automatable_gaps": [
+    "WI-0010A must add a traceable native SDK boundary proving the setting readback does not issue photographic-setting writes, capture, Live View start, WPD calls, or deletion",
+    "WI-0022C must generate deterministic synthetic shift, rotation, scale, exposure, and color measurements and connect them to profile-bounded correction or rejection",
+    "Phase 0 evidence, CLI, transaction, and test-support responsibilities should be split incrementally under characterization tests; this refactor is not an MVP acceptance substitute"
+  ],
+  "blocking_gaps": [
+    "the M1A hardware-capture lane is paused at the operator's request after three checks ending with read-only run-1786017282044-1 found the same 90 protected payload objects; do not repeat the check until a physical state change is reported, then require an explicit resume for one-shot hardware proof",
+    "10 of 10, Phase 0A capture-path fault recovery, and ten hybrid handoffs remain incomplete",
+    "second D810 and same-body SDK/WPD alias binding are unavailable for Phase 0B",
+    "HG-0001 and HG-0002 block final M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
+    "real Camera Agent integration, acceptance, redistribution, and release remain open"
+  ],
+  "degraded_gaps": [
+    "standard WPD capture returned MTP 0x2002 without a new JPEG",
+    "guarded hybrid run-1785914842210-1 failed closed before SDK open because the WPD device clock did not advance",
+    "read-only run-1785917005306-1 disproved WPD device datetime as a causal attribution predicate after 3 of 3 session closes",
+    "vendor 0x9207, existing-card cleanup, recursive or bulk deletion, formatting, deletion before canonical PC verification, and cleanup retry remain unauthorized"
+  ],
+  "verified_hardware_evidence": [
+    "P0-A1 passed for the one-body configuration: run-1785917466375-1 records post-power-cycle CAM-A restoration through both SDK and WPD while excluding real identity and map hashes",
+    "standalone CAM-A Live View passed for 304347 ms and 2424 frames in run-1785917554163-1 with stop, SDK close, and no preview persistence",
+    "fresh-process Live View run-1785917887961-1 acquired one frame and closed cleanly; final run-1785917904556-1 confirmed Live View off and the SDK session closed",
+    "2026-08-07 read-only SDK status run-1786036259996-1 resolved CAM-A with Live View off, prohibit mask zero, no setting change, and a closed session",
+    "2026-08-07 Live View run-1786036360495-1 acquired 45 frames, stopped and closed without preview persistence; run-1786036417032-1 confirmed a fresh-process off state",
+    "2026-08-07 read-only WPD status run-1786036293601-1 selected one compatible target and failed closed on an access-denied vendor query with capture and vendor operation both zero",
+    "2026-08-07 CAM-A setting-readback run-1786040075194-1 recorded SDK-returned JPEG Fine, L 7360x4912, S, 1/6 second, aperture 8, ISO 64, WB Preset 1, and opaque focus value 1; FileType was not advertised, photographic-setting write/capture/Live View/WPD/delete were absent, control-plane CapSet possibility was disclosed, and the SDK session closed",
+    "single-slot spool preflight run-1786014841232-1 detected 90 payload objects and ended FailedPartial with SDK open, shutter, PC save, delete, vendor operation, and retry all zero",
+    "read-only spool-status run-1786015997366-1 reconfirmed 90 payload objects, closed WPD 1 of 1, and issued no capture, delete, or vendor operation",
+    "third blocked-audit run-1786017282044-1 again found 90 payload objects, closed WPD 1 of 1, and issued no capture, delete, or vendor operation"
+  ],
+  "verified_software_evidence": [
+    "2026-08-07T04:33:03+09:00 fresh SDK-enabled and SDK-less Debug native builds succeeded with the hybrid safeguards, read-only WPD correlation diagnostic, setup assessment, CLI safety boundary, and operator-session-wide lease; both CTest configurations passed 5/5",
+    "legacy capture-single, capture-pair, and stability commands reject SDK/WPD before camera open; every approved real-camera CLI command is classified for one named OS lease; a child-process contract proves contention and release within one interactive Windows logon session; pair/hybrid zero-budget, mid-SDK-capture overrun, and pre-canonical-rename overrun fail as transaction_watchdog without forbidden WPD recovery, canonical rename, success state, or deletion",
+    "HG-0008 exact-object software contracts pass: all payload types block empty-spool preflight, one in-memory cleanup capability names one object, PC persistence is reread-verified before non-recursive deletion, empty-after is required, and failures preserve any canonical PC original without retry",
+    "read-only spool-status publishes only aggregate payload count and safety flags; object IDs, names, and real identifiers remain excluded",
+    "hybrid fault harness gates after SDK capture and close but before WPD recovery, and fake contracts prove WPD reopen failure becomes FailedPartial with no PC original, delete, or retry",
+    "hybrid capture and fault commands resolve the requested alias independently through SDK and WPD maps; a real one-camera CAM-B check was rejected before capture and the independent revise-loop review passed",
+    "the hybrid failure stopped before SDK open, saved no original, attempted no delete, and did not retry",
+    "the correlation diagnostic performed three read-only full close/reopen samples with 3 of 3 successful closes and without capture, vendor operation, setting change, deletion, raw dates, or real identifiers",
+    "controlled TransportError detail propagates into transaction and handoff evidence without generic exception disclosure",
+    "WPD vendor-opcode query is isolated from capture/vendor-operation execution and publishes atomic anonymous evidence",
+    "Live View and handoff summaries can be exported as anonymous reports",
+    "single readiness passed with one licensed SDK camera; dual readiness correctly blocked at one of two bodies",
+    "M2P optical math, paired synthetic and damaged metric oracles, rig-profile positive/negative schema validation, and immutability checks passed independent review",
+    "rig-profile schema 1.1 validates shape/type and keeps draft values null; runtime contracts validate supported version, provenance, time ordering, assessment-time expiry, and correction-envelope ordering",
+    "SDK-enabled and SDK-less native CTest each passed 5 of 5; the setup-assessment contract covers structured profile status/version/provenance/time trust, ready, ready-auto-correction, physical-adjustment-required, hard blockers, invalid values, boundary equality, determinism, and input immutability",
+    "SDK status summary v4 handles unsigned, packed-string, and fixed-string setting values with bounded parsing, explicit probe states, photographic-setting-write versus SDK control-plane disclosure, ASCII-safe JSON and CLI escaping, atomic persistence, redaction, and fail-closed serializer validation; independent review passed and native command-trace coverage remains open",
+    "M3P .NET 10 Release solution built with zero warnings; simulated protocol, real Named Pipe roundtrip, durable transaction, no-retry, cross-process ownership, and restart contracts passed 8/8",
+    "visibly simulated WPF operator shell validation passed; no real camera integration is claimed"
+  ],
+  "remaining_human_actions": ["HG-0001", "HG-0002", "HG-0003B", "HG-0005"],
+  "environment_ready_handoff": {
+    "reason_category": "hardware-data-safety",
+    "requested_action": "Hardware capture work is paused at the operator's request. When ready, replace the connected card with a dedicated empty card, or manually back up and clear its 90 existing payload objects, then reconnect the D810.",
+    "impact_if_unresolved": "WI-0012 one-shot, 10 of 10, WI-0013 fault recovery, and WI-0019 capture handoffs remain deferred; software-only and one-camera non-destructive verification may continue, and no existing object will be deleted by the tool.",
+    "resume_signal": "Tell Codex that the dedicated card is empty and reconnected and that hardware capture testing may resume."
+  },
+  "resolved_gate": {
+    "gate_id": "HG-0008",
+    "resolved_at": "2026-08-06",
+    "approved_scope": "Use a dedicated empty or manually cleared card and delete only the just-recovered exact object after .partial, JPEG and size validation, SHA-256, atomic original.jpg rename, and reread verification.",
+    "remaining_hardware_action": "Replace the card with a dedicated empty card or manually back up and clear the 90 existing payload objects, then execute one new hardware transaction before 10 of 10.",
+    "still_prohibited": [
+      "deleting any existing card content",
+      "bulk deletion or card formatting",
+      "deletion before canonical PC persistence",
+      "recursive deletion",
+      "vendor operation 0x9207",
+      "automatic retry"
+    ]
+  },
+  "evidence_summary": {
+    "requirements_verified": 0,
+    "requirements_total": 31,
+    "partial_requirements_recorded": 26,
+    "unverified_requirements_recorded": 5
+  }
+}

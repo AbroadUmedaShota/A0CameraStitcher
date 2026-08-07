@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "phase0.sdk-status-summary.v1",
+  "timestamp": "2026-08-05T03:27:48.572Z",
+  "runId": "run-1785900468570-1",
+  "cameraAlias": "CAM-A",
+  "model": "Nikon D810",
+  "firmware": "unknown",
+  "shootingMode": "S",
+  "liveViewStatus": "off",
+  "liveViewStatusAvailable": true,
+  "liveViewSelector": "unknown",
+  "liveViewSelectorAvailable": false,
+  "liveViewProhibitMask": 0,
+  "liveViewProhibitAvailable": true,
+  "readOnlyProbe": true,
+  "cameraSettingsChanged": false,
+  "liveViewStarted": false,
+  "sdkSessionClosed": true,
+  "realIdentifiersPrinted": false
+}
