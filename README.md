@@ -59,6 +59,8 @@ build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 
 
 一台の設定read-only診断 [run-1786040075194-1](docs/evidence/phase0/run-1786040075194-1/report.md)では、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を取得しました。FileTypeはnot-advertisedです。撮影設定write、capture、Live View開始、WPD、deleteは行わずSDK sessionを閉じました。MAID control-plane callback登録は既存`CapSet`を使い得るため、証拠上で撮影設定writeと区別しています。native command-trace testとfocus値の意味確定が残るため、この検証はPartialです。
 
+2026-08-07の一台再検証でも、[設定read-only](docs/evidence/phase0/run-1786077278290-1/report.md)、[10 frame Live View](docs/evidence/phase0/run-1786077291889-1/report.md)、[終了後OFF確認](docs/evidence/phase0/run-1786077302493-1/report.md)に合格しました。実撮影、WPD、card確認、deleteは実行していません。
+
 Nikon SDKは本人同意済みで、`.tools/nikon/d810-remote-sdk`へローカル隔離配置し、CMake変数`NIKON_D810_SDK_ROOT`で参照します。SDK配布物、実カメラ識別子、実写画像はcommitしません。
 
 ## M2 pre-gate CLI

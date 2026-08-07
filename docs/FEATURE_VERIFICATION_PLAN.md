@@ -30,10 +30,11 @@
 | V-SET-002 | 補正安全境界 | draft、unsupported version、provenance欠落、期限切れ、時刻順序不整合、画角不足、設定不整合、重複不足、上限超過をfail closed | 実機不要 | Pass 2026-08-07、全hard blocker contract |
 | V-SET-003 | 補正契約の純粋性 | 入力profile不変、閾値既定値なし、invalid値拒否、決定性 | 実機不要 | Pass 2026-08-07、境界・invalid・immutability contract |
 | V-SET-004 | synthetic画像補正 | known shift/rotation/scale/exposure/color差を測定し、上限内だけ補正 | 実機不要/OpenCV | `HG-0001/0002`を確定しないpre-gateとして後続 |
-| V-M3P-001 | simulated app | IPC、永続transaction、crash/restart、画面上のSimulated表示 | 実機不要/.NET 10 | Pass 2026-08-07、Release build警告0・検証script合格 |
-| V-1CAM-001 | CAM-A接続状態 | SDK statusが一台を解決し、Live View状態等を取得後session close | D810一台、読取専用 | Pass `run-1786036259996-1`、設定変更0・session close |
+| V-M3P-001 | simulated app | IPC、永続transaction、crash/restart、画面上のSimulated表示 | 実機不要/.NET 10 | Pass 2026-08-07、Release build警告0・Foundation 11/11・検証script合格 |
+| V-M3P-002 | operator workflow | 起動同意、全readiness blocker、Ready/補正範囲内、active時全操作ロック、失敗別結果、別job再合成、明示保存、新規撮影準備 | 実機不要/.NET 10 | Pass 2026-08-07、contract・static shell・Windows UI Automationで連続二回Invoke時transaction一件、明示保存一件、Ready復帰。screen reader/keyboard/focusはPartial |
+| V-1CAM-001 | CAM-A接続状態 | SDK statusが一台を解決し、Live View状態等を取得後session close | D810一台、読取専用 | Pass、2026-08-07に`run-1786077278290-1`で再確認。設定変更0・Live View開始0・session close |
 | V-1CAM-001W | CAM-A WPD状態 | functional targetを一意に選択し、capture/vendor operationを送らない | D810一台、読取専用 | Partial `run-1786036293601-1`、target選択成功、vendor queryはread-only権限拒否、変更操作0 |
-| V-1CAM-002 | 一台Live View | frame取得、stop、SDK close、preview非保存 | D810一台、SDK一時操作 | Pass `run-1786036360495-1`、45 frame、stop/close、preview保存0。終了後`run-1786036417032-1`でOFF確認 |
+| V-1CAM-002 | 一台Live View | frame取得、stop、SDK close、preview非保存 | D810一台、SDK一時操作 | Pass、長時間`run-1786036360495-1`に加え、2026-08-07の`run-1786077291889-1`で10 frame・stop/close・preview保存0、直後`run-1786077302493-1`でOFF再確認 |
 | V-1CAM-003 | カメラ設定比較用情報 | JPEG Fine L、露出、ISO、WB、focus等を撮影設定へ書き込まず取得 | D810一台、設定read-only | Partial `run-1786040075194-1`。JPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1を取得。focusはopaque値1、FileTypeはnot-advertised。SDK control-plane callback登録は既存`CapSet`を使い得るが撮影設定write・capture・Live View開始・WPD・deleteは0。native command-trace testは未実装 |
 | V-1CAM-004 | 一台レンズ校正案内 | target検出、レンズ歪み候補、profile provenance | D810一台、校正chart | `HG-0001/0002`の数値承認前は候補・Partialのみ |
 | V-CARD-001 | one-shot回収 | empty-before、SDK一回撮影、WPD回収、PC原本、exact delete、empty-after | 専用空カード | 操作者が保留中のためDeferred |

@@ -62,7 +62,7 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 - fake CAM-A/Bによるdurable transaction、片側失敗、crash/restart
 - 全画面に`SIMULATED / 実機未接続`と`NO AUTO RETRY`を表示するWPF shell
 
-実装状態: Release build警告0、Foundation契約8/8、一括shell検証、独立レビューがsoftware-only合格。実C++ Camera Agent、D810、WPD/SDK、実JPEG、MVP合格とは分離する。
+実装状態: Release build警告0、Foundation契約11/11、一括shell検証がsoftware-only合格。起動同意、readinessと操作可否、設置三状態、共通結果、失敗復旧、保守タブを実装した。実WPF accessibility walkthrough、実C++ Camera Agent、D810、WPD/SDK、実JPEG、MVP合格とは分離する。
 
 ## M1A: D810一台・物理撮影 Phase 0
 

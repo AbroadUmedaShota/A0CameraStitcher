@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "phase0.live-view-summary.v1",
+  "runId": "run-1786077291889-1",
+  "cameraAlias": "CAM-A",
+  "frames": 10,
+  "lastFrameBytes": 16397,
+  "durationMs": 5488,
+  "liveViewStopped": true,
+  "sdkSessionClosed": true,
+  "previewFramePersisted": false
+}

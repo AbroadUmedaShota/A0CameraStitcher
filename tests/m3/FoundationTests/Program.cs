@@ -12,6 +12,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("WPF-facing service boundary stays simulated", WorkflowServiceBoundaryAsync),
     ("cross-coordinator ownership prevents duplicate capture", CrossCoordinatorOwnershipAsync),
     ("partial artifact restart terminates without capture", PartialArtifactRecoveryAsync),
+    ("operator readiness requires safety and classifies correction", OperatorReadinessClassificationAsync),
+    ("operator readiness exposes every blocking reason", OperatorReadinessBlockersAsync),
+    ("operator action availability locks active workflows", OperatorActionAvailabilityAsync),
 };
 
 var failures = new List<string>();
@@ -31,6 +34,88 @@ foreach (var test in tests)
 
 Console.WriteLine($"Foundation tests: {tests.Length - failures.Count}/{tests.Length} passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static Task OperatorReadinessClassificationAsync()
+{
+    var today = new DateOnly(2026, 8, 7);
+    var withoutAck = CreateReadySnapshot(safetyAcknowledged: false);
+    Check.Equal(OperatorUiState.AwaitingSafetyAck, OperatorReadinessEvaluator.GetReadyState(withoutAck, today));
+    Check.False(
+        OperatorReadinessEvaluator.Evaluate(withoutAck, OperatorUiState.AwaitingSafetyAck, today, false, false).Capture.Allowed,
+        "Capture must remain blocked before the startup-session acknowledgment.");
+
+    var readyWithCorrection = CreateReadySnapshot(safetyAcknowledged: true);
+    Check.Equal(OperatorUiState.ReadyWithCorrection, OperatorReadinessEvaluator.GetReadyState(readyWithCorrection, today));
+    var notices = OperatorReadinessEvaluator.BuildNotices(readyWithCorrection, today);
+    Check.True(notices.Any(notice => notice.Code == "AutomaticCorrectionPlanned"), "Planned correction must stay visible.");
+    Check.True(notices.Any(notice => notice.Code == "PreviewIsNotOriginal"), "Preview provenance must stay visible.");
+    Check.True(
+        OperatorReadinessEvaluator.Evaluate(readyWithCorrection, OperatorUiState.ReadyWithCorrection, today, false, false).Capture.Allowed,
+        "In-range correction must allow one-click capture without another dialog.");
+    return Task.CompletedTask;
+}
+
+static Task OperatorReadinessBlockersAsync()
+{
+    var today = new DateOnly(2026, 8, 7);
+    var snapshot = CreateReadySnapshot(safetyAcknowledged: true) with
+    {
+        Cameras =
+        [
+            new CameraReadiness("CAM-A", false, false, false, false),
+            new CameraReadiness("CAM-B", true, false, false, false),
+        ],
+        Profile = new RigProfileReadiness("RIG-TEST", "1", today.AddDays(-1), false, false),
+        Setup = new SetupAssessment(SetupAssessmentStatus.PhysicalAdjustmentRequired, "adjust", [], ["left"]),
+        OutputDirectoryValid = false,
+        HasActiveTransaction = true,
+        CameraStateRequiresInspection = true,
+    };
+    var codes = OperatorReadinessEvaluator.BuildNotices(snapshot, today).Select(notice => notice.Code).ToHashSet(StringComparer.Ordinal);
+    foreach (var code in new[] { "CameraMissing", "IdentityUnbound", "SettingsMismatch", "CardNotKnownEmpty", "ProfileInvalid", "PhysicalAdjustmentRequired", "OutputInvalid", "ActiveTransaction", "CameraInspectionRequired" })
+    {
+        Check.True(codes.Contains(code), $"Missing blocker code {code}.");
+    }
+    Check.Equal(OperatorUiState.NotReady, OperatorReadinessEvaluator.GetReadyState(snapshot, today));
+    return Task.CompletedTask;
+}
+
+static Task OperatorActionAvailabilityAsync()
+{
+    var today = new DateOnly(2026, 8, 7);
+    var active = CreateReadySnapshot(safetyAcknowledged: true) with { HasActiveTransaction = true };
+    var availability = OperatorReadinessEvaluator.Evaluate(active, OperatorUiState.Capturing, today, true, true);
+    Check.False(availability.Capture.Allowed, "Double capture must be blocked.");
+    Check.False(availability.LiveView.Allowed, "Live View changes must be blocked during capture.");
+    Check.False(availability.Export.Allowed, "Export must be blocked during capture.");
+    Check.False(availability.Restitch.Allowed, "Restitch must be blocked during capture.");
+    Check.False(availability.PrepareNewCapture.Allowed, "Readiness reset must be blocked during capture.");
+    Check.False(availability.OpenMaintenance.Allowed, "Maintenance must be blocked during capture.");
+
+    var review = CreateReadySnapshot(safetyAcknowledged: true);
+    availability = OperatorReadinessEvaluator.Evaluate(review, OperatorUiState.Review, today, true, true);
+    Check.True(availability.Export.Allowed, "A reviewed stitch result must be explicitly exportable.");
+    Check.True(availability.Restitch.Allowed, "Two retained originals must allow a separate restitch job.");
+    Check.True(availability.PrepareNewCapture.Allowed, "A completed outcome must allow read-only preparation.");
+    return Task.CompletedTask;
+}
+
+static ReadinessSnapshot CreateReadySnapshot(bool safetyAcknowledged) => new()
+{
+    SafetyAcknowledged = safetyAcknowledged,
+    Cameras =
+    [
+        new CameraReadiness("CAM-A", true, true, true, true),
+        new CameraReadiness("CAM-B", true, true, true, true),
+    ],
+    Profile = new RigProfileReadiness("RIG-TEST", "1", new DateOnly(2027, 1, 1), true, true),
+    Setup = new SetupAssessment(SetupAssessmentStatus.ReadyWithCorrection, "within bounds", ["rotation -0.2"], []),
+    OutputDirectory = "simulated-output",
+    OutputDirectoryValid = true,
+    HasActiveTransaction = false,
+    CameraStateRequiresInspection = false,
+    Notices = [],
+};
 
 static Task ProtocolSerializationAndRejectionAsync()
 {

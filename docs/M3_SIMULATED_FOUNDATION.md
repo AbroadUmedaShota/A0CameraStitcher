@@ -10,7 +10,7 @@
 
 - `A0CameraStitcher.M3.Foundation`: domain、versioned JSON protocol、Named Pipe fake agent、durable fake transaction。
 - `A0CameraStitcher.M3.FoundationTests`: 外部test packageを使わない自己完結契約試験。
-- `A0CameraStitcher.M3.OperatorShell`: 常時`SIMULATED / 実機未接続`を表示するWPF shell。
+- `A0CameraStitcher.M3.OperatorShell`: 常時`SIMULATED / 実機未接続`を表示し、起動同意、readiness、操作可否、結果確認、保守タブを検証するWPF shell。
 
 Named Pipe request/responseは`schemaVersion: a0.camera-agent.simulated.v1`、`simulation: true`、`marker: Simulated`を必須とする。未知version、falseのsimulation、異なるmarker、未知operation、不正payloadを拒否する。fake agentが返すのはstatus、匿名`CAM-A/B` inventory、非実画像preview placeholderだけである。
 
@@ -27,7 +27,13 @@ Idle -> CaptureA -> PersistA -> CaptureB -> PersistB -> Complete
 - 未完journalや残留`.partial`は再起動時に`FailedPartial`へ閉じ、撮影を再実行しない。
 - root単位のOS file lockにより、別service／processからの同時transactionを拒否する。
 
-WPF shellのlocal stateは`%LOCALAPPDATA%\A0CameraStitcher\m3-simulated`へ置く。これはgitignored runtime dataであり、実写や実識別子を含まない。
+WPF shellのlocal stateは`%LOCALAPPDATA%\A0CameraStitcher\m3-simulated`へ置く。これはgitignored runtime dataであり、実写や実識別子を含まない。明示保存デモはJPEGを生成せず、OS一時フォルダ配下へ`.simulated-export.txt`を出力する。
+
+## operator workflow
+
+`ReadinessSnapshot`はcamera、identity、profile、setup、card、保存先、blocker/warningを集約する。`OperatorActionAvailability`が撮影、Live View、保存、再合成、新規撮影準備、保守画面移動の可否と無効理由を一元管理する。撮影・合成・保存結果は`CaptureOutcome`、`StitchOutcome`、`ExportOutcome`として別契約にする。
+
+起動時同意は永続化しない。`Ready`と`ReadyWithCorrection`だけが追加ダイアログなしの撮影を許可し、処理開始後はcommandとaction contractの両方で二重開始を拒否する。詳細な操作順、警告、禁止操作、失敗復旧は`docs/OPERATOR_UI_SPEC.md`を正とする。
 
 ## 実行と検証
 
@@ -38,6 +44,6 @@ pwsh -NoProfile -File .\scripts\Test-M3Simulated.ps1
 dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Debug
 ```
 
-契約試験はprotocol serialization／拒否、実Named Pipe round-trip、順次成功、片側失敗と原本保持、no-retry、crash/restart、別coordinator排他、残留partial回復を検証する。一括scriptはsolution build、8/8 test、WPFのtarget／依存、常設banner、accessibility名、no-auto-retry表示、simulation flag拒否を確認する。
+契約試験はprotocol serialization／拒否、実Named Pipe round-trip、順次成功、片側失敗と原本保持、no-retry、crash/restart、別coordinator排他、残留partial回復に加え、起動同意、補正三状態、全Blocker、active transaction中の操作ロックを検証する。一括scriptはsolution build、11/11 test、WPFのtarget／依存、常設banner、警告とaccessibility live region、no-auto-retry表示、simulation flag拒否を確認する。
 
-WPF shellでは正常、CAM-A失敗、CAM-B失敗、CAM-A保存後の擬似crash、起動時回復を実行できる。任意stateの表示previewもtransaction非実行で確認できる。Live View欄は選択式placeholderで、原画像や合成入力ではない。
+WPF shellでは正常、Live View停止、CAM-A/B撮影、cleanup、合成、Live View再開、CAM-A保存後の擬似crashを診断シナリオとして確認できる。Live View欄は一台選択式placeholderで、原画像や合成入力ではない。Windows UI Automationで連続二回Invoke時のtransaction一件、明示保存一件、新規撮影準備後のReady復帰を確認済み。screen reader、キーボード、focus walkthroughは未実施である。

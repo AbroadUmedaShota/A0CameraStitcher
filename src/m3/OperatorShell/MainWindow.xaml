@@ -3,202 +3,243 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="A0 Camera Stitcher — SIMULATED / 実機未接続"
         AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"
-        Width="1280"
-        Height="860"
-        MinWidth="1040"
-        MinHeight="720"
-        Background="#FFF3F5F7"
-        FontFamily="Yu Gothic UI">
+        Width="1440" Height="920" MinWidth="1120" MinHeight="740"
+        Background="#FFF4F6F8" FontFamily="Yu Gothic UI">
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0"
-                Padding="20,14"
-                Background="#FFC62828"
+        <Border Grid.Row="0" Padding="22,13" Background="#FF7A1B1B"
                 AutomationProperties.Name="SIMULATED 実機未接続 常設警告">
-            <DockPanel LastChildFill="True">
-                <Border DockPanel.Dock="Right" Margin="20,0,0,0" Padding="12,6" Background="#33FFFFFF" CornerRadius="4">
-                    <TextBlock Text="{Binding ActivityText}" Foreground="White" FontWeight="SemiBold" />
-                </Border>
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" HorizontalAlignment="Right">
+                    <TextBlock Text="{Binding OverallStateText}" Foreground="White" FontSize="19" FontWeight="Bold" TextAlignment="Right" />
+                    <TextBlock Text="{Binding ActivityText}" Foreground="#FFFFD7D7" TextAlignment="Right" />
+                </StackPanel>
                 <StackPanel>
-                    <TextBlock Text="{Binding BannerText}" FontSize="26" FontWeight="Bold" Foreground="White" />
-                    <TextBlock Text="デモ専用画面です。実カメラ、Nikon SDK、WPDへ接続しません。"
-                               Margin="0,3,0,0" Foreground="White" FontSize="14" />
+                    <TextBlock Text="{Binding BannerText}" Foreground="White" FontSize="25" FontWeight="Bold" />
+                    <TextBlock Text="実カメラ・Nikon SDK・WPD・USBへ接続しない操作設計検証用です。" Foreground="#FFFFEAEA" />
                 </StackPanel>
             </DockPanel>
         </Border>
 
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <Grid Margin="20">
+        <Border Grid.Row="1" Padding="18,10" Background="White" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1">
+            <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="3*" />
-                    <ColumnDefinition Width="18" />
                     <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-
                 <StackPanel Grid.Column="0">
-                    <Border Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="16" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="カメラ状態" FontSize="20" FontWeight="SemiBold" />
-                                <Border Margin="0,12,0,8" Padding="12" Background="#FFF3F5F7" CornerRadius="4">
-                                    <StackPanel>
-                                        <TextBlock Text="CAM-A" FontSize="16" FontWeight="Bold" />
-                                        <TextBlock Text="{Binding CameraAStatus}" Margin="0,4,0,0"
-                                                   AutomationProperties.Name="CAM-A simulated status" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Padding="12" Background="#FFF3F5F7" CornerRadius="4">
-                                    <StackPanel>
-                                        <TextBlock Text="CAM-B" FontSize="16" FontWeight="Bold" />
-                                        <TextBlock Text="{Binding CameraBStatus}" Margin="0,4,0,0"
-                                                   AutomationProperties.Name="CAM-B simulated status" />
-                                    </StackPanel>
-                                </Border>
-                            </StackPanel>
-
-                            <StackPanel Grid.Column="2">
-                                <DockPanel>
-                                    <TextBlock Text="Live View" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
-                                    <ComboBox DockPanel.Dock="Right"
-                                              Width="110"
-                                              ItemsSource="{Binding CameraAliases}"
-                                              SelectedItem="{Binding SelectedCamera}"
-                                              AutomationProperties.Name="Simulated Live View camera selection" />
-                                </DockPanel>
-                                <Border Height="210" Margin="0,12,0,0" Padding="18"
-                                        Background="#FF20242A" BorderBrush="#FFFFB300" BorderThickness="3" CornerRadius="4"
-                                        AutomationProperties.Name="Simulated Live View placeholder 非実画像">
-                                    <TextBlock Text="{Binding LiveViewPlaceholder}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"
-                                               TextAlignment="Center" Foreground="White" FontSize="17" FontWeight="SemiBold" />
-                                </Border>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-
-                    <Border Margin="0,16,0,0" Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
-                        <StackPanel>
-                            <DockPanel>
-                                <TextBlock Text="Transaction進捗（SIMULATED）" FontSize="20" FontWeight="SemiBold" />
-                                <TextBlock DockPanel.Dock="Right" Text="{Binding DisplayedState}" FontSize="18" FontWeight="Bold"
-                                           AutomationProperties.Name="Displayed simulated workflow state" />
-                            </DockPanel>
-                            <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,14,0,0">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <UniformGrid Rows="1" Columns="7" />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Margin="0,0,7,0" Padding="8" MinHeight="82"
-                                                Background="{Binding Background}"
-                                                BorderBrush="{Binding BorderBrush}" BorderThickness="2" CornerRadius="4">
-                                            <StackPanel VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextAlignment="Center" Foreground="{Binding Foreground}" />
-                                                <TextBlock Text="{Binding StatusText}" Margin="0,5,0,0" TextAlignment="Center" Foreground="{Binding Foreground}" />
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Margin="0,16,0,0" Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
-                        <StackPanel>
-                            <TextBlock Text="デモ操作" FontSize="20" FontWeight="SemiBold" />
-                            <TextBlock Margin="0,5,0,12" Foreground="#FF4A5560"
-                                       Text="すべてFoundationのsimulated serviceを呼びます。実機撮影や自動再試行は行いません。" />
-                            <WrapPanel>
-                                <Button Content="正常完了を実行" Command="{Binding RunSuccessCommand}"
-                                        AutomationProperties.Name="Run simulated success scenario" />
-                                <Button Content="CAM-A失敗を実行" Command="{Binding RunFailCaptureACommand}"
-                                        AutomationProperties.Name="Run simulated CAM-A failure scenario" />
-                                <Button Content="CAM-B失敗を実行" Command="{Binding RunFailCaptureBCommand}"
-                                        AutomationProperties.Name="Run simulated CAM-B failure scenario" />
-                                <Button Content="CAM-A保存後クラッシュ" Command="{Binding RunCrashAfterPersistACommand}"
-                                        AutomationProperties.Name="Run simulated crash after PersistA" />
-                                <Button Content="起動時回復を再検査" Command="{Binding RecoverCommand}"
-                                        AutomationProperties.Name="Recover incomplete simulated transactions" />
-                            </WrapPanel>
-
-                            <Separator Margin="0,6,0,12" />
-                            <TextBlock Text="表示stateプレビュー（transaction非実行）" FontWeight="SemiBold" />
-                            <DockPanel Margin="0,8,0,0" LastChildFill="False">
-                                <ComboBox Width="190" Margin="0,0,8,8"
-                                          ItemsSource="{Binding PreviewStates}"
-                                          SelectedItem="{Binding SelectedPreviewState}"
-                                          AutomationProperties.Name="Select simulated state preview" />
-                                <Button Content="表示へ反映" Command="{Binding ApplyPreviewCommand}"
-                                        AutomationProperties.Name="Apply simulated state preview without transaction" />
-                            </DockPanel>
-                        </StackPanel>
-                    </Border>
+                    <TextBlock Text="排他使用" Foreground="#FF56616B" />
+                    <TextBlock Text="{Binding SafetyAckText}" FontWeight="Bold" />
                 </StackPanel>
-
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="リグプロファイル" Foreground="#FF56616B" />
+                    <TextBlock Text="{Binding ProfileText}" FontWeight="Bold" />
+                </StackPanel>
                 <StackPanel Grid.Column="2">
-                    <Border Padding="16" Background="White" BorderBrush="#FFD8DDE3" BorderThickness="1" CornerRadius="6">
-                        <StackPanel>
-                            <TextBlock Text="最後のSIMULATED結果" FontSize="20" FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding RunStatus}" Margin="0,10,0,16" FontWeight="SemiBold"
-                                       AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Simulated run status" />
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="130" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Scenario" FontWeight="SemiBold" Margin="0,0,8,8" />
-                                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastScenario}" Margin="0,0,0,8" />
-                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Transaction ID" FontWeight="SemiBold" Margin="0,0,8,8" />
-                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LastTransactionId}" Margin="0,0,0,8" />
-                                <TextBlock Grid.Row="2" Grid.Column="0" Text="結果state" FontWeight="SemiBold" Margin="0,0,8,8" />
-                                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding LastResultState}" Margin="0,0,0,8" />
-                                <TextBlock Grid.Row="3" Grid.Column="0" Text="保持原画像" FontWeight="SemiBold" Margin="0,0,8,8" />
-                                <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RetainedOriginals}" Margin="0,0,0,8" />
-                                <TextBlock Grid.Row="4" Grid.Column="0" Text="終了理由" FontWeight="SemiBold" Margin="0,0,8,0" />
-                                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding TerminalReason}" />
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Margin="0,16,0,0" Padding="16" Background="#FFFFF3E0" BorderBrush="#FFF57C00" BorderThickness="2" CornerRadius="6"
-                            AutomationProperties.Name="No automatic retry warning">
-                        <StackPanel>
-                            <TextBlock Text="警告 / NO AUTO RETRY" FontSize="18" FontWeight="Bold" Foreground="#FFE65100" />
-                            <TextBlock Text="{Binding WarningMessage}" Margin="0,8,0,0" Foreground="#FF5D4037"
-                                       AutomationProperties.LiveSetting="Assertive" />
-                            <TextBlock Margin="0,12,0,0" FontWeight="SemiBold"
-                                       Text="自動再試行回数: 0回（固定）&#x0a;プレビューは原画像・合成入力ではありません。" />
-                        </StackPanel>
-                    </Border>
-
-                    <Border Margin="0,16,0,0" Padding="16" Background="#FFE8EAF6" BorderBrush="#FF5C6BC0" BorderThickness="1" CornerRadius="6">
-                        <StackPanel>
-                            <TextBlock Text="このshellがしないこと" FontSize="18" FontWeight="SemiBold" />
-                            <TextBlock Margin="0,8,0,0"
-                                       Text="• D810や他の実カメラの列挙・制御&#x0a;• Nikon SDK / WPD / USB API呼出し&#x0a;• Live View実画像の表示・保存&#x0a;• FailedPartial transactionの再開&#x0a;• 実機合格・A0品質合格の判定" />
-                        </StackPanel>
-                    </Border>
+                    <TextBlock Text="保存先（SIMULATED）" Foreground="#FF56616B" />
+                    <TextBlock Text="{Binding OutputDirectory}" FontWeight="Bold" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <StackPanel Grid.Column="3" Orientation="Horizontal">
+                    <Button Content="同意する" Command="{Binding AcceptSafetyCommand}"
+                            AutomationProperties.Name="物理シャッターと他アプリを使わないことに同意" />
+                    <Button Content="同意しない" Command="{Binding DeclineSafetyCommand}"
+                            AutomationProperties.Name="排他使用へ同意しない" />
                 </StackPanel>
             </Grid>
-        </ScrollViewer>
+        </Border>
+
+        <TabControl Grid.Row="2" Margin="18" Background="Transparent" BorderThickness="0" TabStripPlacement="Left">
+            <TabItem Header="撮影ダッシュボード" AutomationProperties.Name="撮影ダッシュボード">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="18,0,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="7*" />
+                            <ColumnDefinition Width="16" />
+                            <ColumnDefinition Width="4*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <Border Style="{StaticResource CardStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="カメラとLive View" Style="{StaticResource SectionTitleStyle}" />
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="18" />
+                                            <ColumnDefinition Width="1.4*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Style="{StaticResource InsetStyle}">
+                                            <StackPanel>
+                                                <TextBlock Text="CAM-A" FontSize="17" FontWeight="Bold" />
+                                                <TextBlock Text="{Binding CameraAStatus}" Margin="0,6,0,0" AutomationProperties.Name="CAM-A simulated status" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="2" Style="{StaticResource InsetStyle}">
+                                            <StackPanel>
+                                                <TextBlock Text="CAM-B" FontSize="17" FontWeight="Bold" />
+                                                <TextBlock Text="{Binding CameraBStatus}" Margin="0,6,0,0" AutomationProperties.Name="CAM-B simulated status" />
+                                            </StackPanel>
+                                        </Border>
+                                        <StackPanel Grid.Column="4">
+                                            <DockPanel>
+                                                <TextBlock Text="一台選択式 Live View" FontWeight="Bold" VerticalAlignment="Center" />
+                                                <ComboBox DockPanel.Dock="Right" Width="92" ItemsSource="{Binding CameraAliases}" SelectedItem="{Binding SelectedCamera}" IsEnabled="{Binding CanUseLiveView}" />
+                                            </DockPanel>
+                                            <Border Height="150" Margin="0,8,0,8" Padding="12" Background="#FF1D252C" BorderBrush="#FFDB9A16" BorderThickness="2"
+                                                    AutomationProperties.Name="Simulated Live View placeholder 非実画像">
+                                                <TextBlock Text="{Binding LiveViewPlaceholder}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" />
+                                            </Border>
+                                            <Button Content="{Binding LiveViewButtonText}" Command="{Binding ToggleLiveViewCommand}" IsEnabled="{Binding CanUseLiveView}" HorizontalAlignment="Stretch" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                                <StackPanel>
+                                    <DockPanel>
+                                        <TextBlock Text="設置判定" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock DockPanel.Dock="Right" Text="{Binding SetupStatusText}" FontSize="17" FontWeight="Bold" />
+                                    </DockPanel>
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Padding="12" Margin="0,0,6,0" Background="#FFFFF7DF" BorderBrush="#FFD29B1B" BorderThickness="1">
+                                            <StackPanel><TextBlock Text="予定する自動補正" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,4,0,0" /></StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="1" Padding="12" Margin="6,0,0,0" Background="#FFFFE8E8" BorderBrush="#FFC43A3A" BorderThickness="1">
+                                            <StackPanel><TextBlock Text="必要な物理調整" FontWeight="Bold" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel>
+                                        </Border>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="撮影・保存・合成の進捗" Style="{StaticResource SectionTitleStyle}" />
+                                    <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,12,0,0">
+                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" Columns="6" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Margin="0,0,6,0" Padding="7" MinHeight="72" Background="{Binding Background}" BorderBrush="{Binding BorderBrush}" BorderThickness="2">
+                                                    <StackPanel VerticalAlignment="Center"><TextBlock Text="{Binding Label}" FontWeight="Bold" TextAlignment="Center" Foreground="{Binding Foreground}" /><TextBlock Text="{Binding StatusText}" Margin="0,4,0,0" TextAlignment="Center" Foreground="{Binding Foreground}" /></StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <Button Content="2台を撮影する（確認なし）" Command="{Binding CaptureCommand}" IsEnabled="{Binding CanCapture}" Margin="0,14,0,0" Padding="18,12" FontSize="18" FontWeight="Bold" HorizontalAlignment="Stretch" AutomationProperties.Name="確認なしで新しい撮影を一回開始" />
+                                    <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0" Foreground="#FF6C3B00" AutomationProperties.LiveSetting="Polite" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2">
+                            <Border Style="{StaticResource CardStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="結果" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="{Binding StatusMessage}" Margin="0,9,0,12" FontWeight="Bold" AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="撮影と失敗の共通結果" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="110" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="Transaction" FontWeight="Bold" /><TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastTransactionId}" />
+                                        <TextBlock Grid.Row="1" Text="撮影" FontWeight="Bold" /><TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureResult}" />
+                                        <TextBlock Grid.Row="2" Text="保持原画像" FontWeight="Bold" /><TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RetainedOriginals}" />
+                                        <TextBlock Grid.Row="3" Text="合成" FontWeight="Bold" /><TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding StitchResult}" />
+                                        <TextBlock Grid.Row="4" Text="保存" FontWeight="Bold" /><TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding ExportResult}" />
+                                        <TextBlock Grid.Row="5" Text="出力先" FontWeight="Bold" /><TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastExportPath}" />
+                                    </Grid>
+                                    <WrapPanel Margin="0,14,0,0">
+                                        <Button Content="保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}" AutomationProperties.Name="確認済み合成結果を明示保存" />
+                                        <Button Content="再合成（別job）" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}" />
+                                        <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}" AutomationProperties.Name="read-only readiness再検査" />
+                                    </WrapPanel>
+                                    <Expander Header="技術情報（error code・ログ位置）" Margin="0,8,0,0">
+                                        <TextBlock Text="{Binding TechnicalDetail}" Padding="8" Background="#FFF1F3F5" />
+                                    </Expander>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Margin="0,14,0,0" Padding="14" Background="#FFFFE8E8" BorderBrush="#FFB3261E" BorderThickness="2" AutomationProperties.Name="赤 Blocker警告">
+                                <StackPanel><TextBlock Text="赤 / Blocker" FontWeight="Bold" Foreground="#FF8E1712" /><TextBlock Text="{Binding BlockerText}" Margin="0,5,0,0" AutomationProperties.LiveSetting="Assertive" /></StackPanel>
+                            </Border>
+                            <Border Margin="0,10,0,0" Padding="14" Background="#FFFFF4D6" BorderBrush="#FFB77900" BorderThickness="2" AutomationProperties.Name="黄 Caution警告">
+                                <StackPanel><TextBlock Text="黄 / Caution" FontWeight="Bold" Foreground="#FF774E00" /><TextBlock Text="{Binding CautionText}" Margin="0,5,0,0" AutomationProperties.LiveSetting="Polite" /></StackPanel>
+                            </Border>
+                            <Border Margin="0,10,0,0" Padding="14" Background="#FFE8F2FF" BorderBrush="#FF2563A6" BorderThickness="1" AutomationProperties.Name="青 Info情報">
+                                <StackPanel><TextBlock Text="青 / Info" FontWeight="Bold" Foreground="#FF174E87" /><TextBlock Text="{Binding InfoText}" Margin="0,5,0,0" /></StackPanel>
+                            </Border>
+                            <Border Margin="0,10,0,0" Padding="14" Background="#FFF2EDFF" BorderBrush="#FF7157A8" BorderThickness="1" AutomationProperties.Name="No automatic retry warning">
+                                <TextBlock Text="警告 / NO AUTO RETRY / FailedPartialは再開・再試行しません。自動再試行回数は0回固定です。" FontWeight="Bold" />
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="設置・校正" IsEnabled="{Binding CanOpenMaintenance}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="設置・校正（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="承認済みプロファイルの閾値を使い、補正不要・自動補正範囲内・物理調整必要を検証します。プロファイルを自動更新しません。" Margin="0,6,0,12" />
+                                <TextBlock Text="表示シナリオ" FontWeight="Bold" />
+                                <ComboBox ItemsSource="{Binding ReadinessDemoOptions}" SelectedItem="{Binding SelectedReadinessDemo}" Width="260" HorizontalAlignment="Left" Margin="0,6,0,12" />
+                                <Border Padding="14" Background="#FFF1F3F5"><StackPanel><TextBlock Text="{Binding SetupStatusText}" FontSize="18" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,6,0,0" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel></Border>
+                                <Button Content="校正を開始（未実装・human gate待ち）" IsEnabled="False" Margin="0,14,0,0" HorizontalAlignment="Left" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="カメラ設定" IsEnabled="{Binding CanOpenMaintenance}">
+                <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="カメラ設定（read-only）" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="write契約が実機証拠で承認されるまで、設定変更は実装しません。FX / JPEG Fine L / 固定露出 / 固定フォーカス / 固定WB / Auto ISOなし / VRなしを確認対象とします。" Margin="0,8,0,12" />
+                            <DataGrid ItemsSource="{Binding CameraSettingRows}" IsReadOnly="True" AutoGenerateColumns="False" HeadersVisibility="Column" Height="230" CanUserAddRows="False" CanUserDeleteRows="False">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="設定" Binding="{Binding Setting}" Width="120" />
+                                    <DataGridTextColumn Header="要求profile" Binding="{Binding RequiredProfile}" Width="2*" />
+                                    <DataGridTextColumn Header="CAM-A" Binding="{Binding CameraA}" Width="*" />
+                                    <DataGridTextColumn Header="CAM-B" Binding="{Binding CameraB}" Width="*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <Button Content="設定を書き込む（禁止）" IsEnabled="False" Margin="0,12,0,0" HorizontalAlignment="Left" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </TabItem>
+
+            <TabItem Header="保存・診断" IsEnabled="{Binding CanOpenMaintenance}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="保存・診断（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="失敗箇所の表示を確認します。撮影開始条件を満たす場合だけ実行でき、カード削除・format・vendor operation 0x9207は呼びません。" Margin="0,6,0,12" />
+                                <DockPanel LastChildFill="False">
+                                    <ComboBox Width="250" ItemsSource="{Binding DiagnosticScenarios}" SelectedItem="{Binding SelectedDiagnosticScenario}" Margin="0,0,8,8" />
+                                    <Button Content="診断シナリオを実行" Command="{Binding DiagnosticCommand}" IsEnabled="{Binding CanCapture}" />
+                                </DockPanel>
+                                <TextBlock Text="常時禁止: 同一transactionの再開・再試行 / 過去CAM-Bとの自動ペア / SDK・WPD重複 / 同時二台Live View / previewの原画像利用 / bulk delete / format / 0x9207 / PC原本検証前の削除 / active transaction中の変更 / 原画像の上書き・自動削除" Margin="0,10,0,0" FontWeight="Bold" />
+                                <TextBlock Text="{Binding TechnicalDetail}" Margin="0,12,0,0" Padding="12" Background="#FFF1F3F5" />
+                                <TextBlock Text="作成済みtransaction数（連打防止確認）" FontWeight="Bold" Margin="0,12,0,0" /><TextBlock Text="{Binding TransactionStartCount}" FontSize="22" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
     </Grid>
 </Window>

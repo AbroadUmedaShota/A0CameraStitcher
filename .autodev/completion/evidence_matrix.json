@@ -143,25 +143,25 @@
       "requirement_id": "FR-UI-001",
       "status": "partial",
       "work_item_ids": ["WI-0033A", "WI-0033"],
-      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "tests/m3/FoundationTests/Program.cs"],
-      "confirmed_scope": "The simulated WPF shell displays connection, progress, results, and explicit simulation markers.",
-      "remaining_gap": "Real camera readiness, rig profile, and correction readiness are not connected."
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "docs/OPERATOR_UI_SPEC.md", "tests/m3/FoundationTests/Program.cs", "scripts/Test-M3Simulated.ps1"],
+      "confirmed_scope": "The simulated WPF dashboard and pure readiness contract display camera, identity, profile, setup/correction, progress, separated outcomes, and blocker/caution/info states.",
+      "remaining_gap": "Real camera readiness, rig-profile measurements, runtime accessibility walkthrough, and real correction readiness are not connected."
     },
     {
       "requirement_id": "FR-UI-002",
       "status": "partial",
       "work_item_ids": ["WI-0033A", "WI-0033"],
-      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "scripts/Test-M3Simulated.ps1"],
-      "confirmed_scope": "Simulated capture, progress, result, and alert workflows exist with no real device action.",
-      "remaining_gap": "Setup, calibration, physical guidance, restitch, and real save-location workflows are not implemented."
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "docs/OPERATOR_UI_SPEC.md", "tests/m3/FoundationTests/Program.cs", "scripts/Test-M3Simulated.ps1"],
+      "confirmed_scope": "The simulated shell implements startup acknowledgement, one-click capture gating, active-operation locks, setup guidance, maintenance separation, separate-job restitch, explicit simulated export, and read-only new-capture preparation.",
+      "remaining_gap": "Real calibration, Camera Agent capture/stitch/export, screen-reader/keyboard/focus walkthrough, and approved output-folder workflow remain."
     },
     {
       "requirement_id": "FR-UI-003",
       "status": "partial",
       "work_item_ids": ["WI-0033A", "WI-0033"],
-      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md"],
-      "confirmed_scope": "The simulated shell preserves a visible preview and no-auto-retry boundary.",
-      "remaining_gap": "Real selected-camera Live View start, stop, target, connection, and resume-failure UI are not integrated."
+      "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "docs/OPERATOR_UI_SPEC.md", "scripts/Test-M3Simulated.ps1"],
+      "confirmed_scope": "The simulated shell provides one-camera selection, start/stop, non-original provenance, pre-capture stop failure, and post-capture resume-failure/Degraded displays.",
+      "remaining_gap": "Real selected-camera Live View frames, Camera Agent lifecycle, and hardware resume-failure evidence are not integrated."
     },
     {
       "requirement_id": "NFR-PLAT-001",
