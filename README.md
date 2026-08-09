@@ -6,12 +6,15 @@
 
 総合状態は`in-progress`です。ソフトウェア作業と一台の非破壊検証は継続し、Phase 0Aの物理撮影だけを操作者の指示で保留しています。`HG-0008`は2026-08-06に承認され、専用empty/cleared cardをsingle-slot transient spoolに使う実装は完了しました。最初の全payload preflight [run-1786014841232-1](docs/evidence/phase0/run-1786014841232-1/report.md)は90 objectを検出し、SDK open・shutter・保存・delete・retryをすべて0のまま`FailedPartial`で安全停止しました。read-only確認は[run-1786015997366-1](docs/evidence/phase0/run-1786015997366-1/report.md)と[run-1786017282044-1](docs/evidence/phase0/run-1786017282044-1/report.md)の双方で同じpayload 90件でした。物理状態が変わるまで再確認せず、M1Aはempty cardへの交換またはbackup・手動clearの報告と明示再開を待ちます。one-shot、10/10、異常系、handoffの合格証拠は未取得です。
 
+第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、二台順次撮影の安全なsoftware contractは提示可能ですが、現在接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実機二台撮影の受入は未完了です。
+
 PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証を完了した`original.jpg`だけを製品上の正本とします。カメラカードは一過性の転送元で、永続保持を要件にしません。承認済みの専用empty/cleared card single-slot spoolでは、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、その後にjust-recovered WPD objectだけを削除して再びpayload 0件を確認します。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にします。existing cardのbulk delete/format、vendor operation、retryは禁止です。
 
 ## MVPの前提
 
 - 対象: 静止したA0級の平面原稿
-- カメラ: Nikon D810 2台、固定リグ（現在利用可能なのは1台）
+- カメラ: Nikon D810 2台、固定リグ
+- 現在の接続: D810一台。identity-v2で`CAM-B`としてSDK/WPD双方へ登録済み。履歴上V1.14の別個体`CAM-A`の一台接続・登録後に二台同時検証へ進む
 - 接続: Windows 11 x64 PCへUSB接続
 - 制御: WPD baseline/recoveryと、カメラカードへ一回撮影するNikon SDK、および一台選択式SDK Live View
 - 入力: FX JPEG Fine L
@@ -21,6 +24,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 
 ## ドキュメント
 
+- [Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)
 - [現在の開発状況](docs/CURRENT_STATUS.md)
 - [製品要件](docs/PRODUCT_REQUIREMENTS.md)
 - [アーキテクチャ](docs/ARCHITECTURE.md)
@@ -49,13 +53,53 @@ build\Debug\A0CameraStitcher.Phase0.exe live-view --alias CAM-A --duration-secon
 build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 10 --frames 1
 ```
 
+Phase 0Bのidentity登録は、他方のD810を物理的に外して厳密に一台だけ接続した状態で、同じbodyへSDK/WPDの両方を明示登録します。列挙順による自動割当ては二台bindingの証拠にしません。
+
+`inventory`はread-onlyであり、未登録個体を`CAM-A/B`へ自動割当てしません。接続中に未登録個体が一台でもあれば実カメラ操作はfail closedします。通常の登録は、一台だけを接続して`bind-cross-transport-identity`を使います。これは一つのlease内でSDKを完全closeしてからWPDを列挙し、両mapを事前検証後にだけ登録します。`Test-Phase0Readiness.ps1 -Stage Dual`はSDK/WPD双方の全個体が明示binding済みになるまで`READY_FOR_IDENTITY_BINDING`を返します。
+
+```powershell
+build\Debug\A0CameraStitcher.Phase0.exe bind-cross-transport-identity --alias CAM-A --single-camera-connected-confirmed
+# CAM-A/Bを一台ずつ登録後、二台を接続して匿名read-only検証
+build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity
+# identity合格後、二台の専用spoolが双方emptyかread-only確認
+build\Debug\A0CameraStitcher.Phase0.exe verify-dual-spools
+```
+
+CAM-A/BのSDK/WPD binding、二台の専用empty spool、三つの安全確認が揃った後だけ、実機pairを次の順で段階実行します。
+
+```powershell
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 1 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 10 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 100 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+```
+
+`hybrid-capture-pair`は最初に共通のdual identity検証を必ず実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名の事前確認証跡を残し、card accessとcaptureを行わずexit 5で停止します。合格後は各pairを一つの180秒watchdogで管理し、CAM-Aのverified PC originalとexact cleanupが完了した後だけCAM-Bを開始します。A/Bいずれかの失敗で直ちに停止し、自動retryは0です。匿名summaryは全attempted pairの所要時間sample数とnearest-rank p50/p95/maxをmsで保存しますが、Phase 0の合否には使いません。二台は順次撮影であり、実シャッター同期は保証しません。
+
+二台異常系は、両カードをemptyと確認したうえで`hybrid-fault-pair`を使います。`--alias CAM-A|CAM-B`は省略不可です。選択bodyのSDK card captureと完全close後、WPD recovery open前にoperator gateがreadyとなった時だけ指定bodyのUSB切断または電源断を行います。CAM-A異常ではCAM-Bを開始せず、CAM-B異常ではCAM-Aの検証済みPC原本を保持します。いずれも未確定bodyの原本化・削除・自動retryを行わず、新しいrun IDのtransactionを要求します。
+
+```powershell
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-fault-pair --alias CAM-A --scenario usb-disconnect --operator-gate pair_a_usb --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-fault-pair --alias CAM-B --scenario power-off --operator-gate pair_b_power --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+```
+
+CAM-A完了後・CAM-B開始前のプロセス終了試験は`hybrid-interrupt-pair`を使います。CAM-Aのverified PC originalとexact cleanupが完了すると中断専用gateがreadyになります。その時点でPhase 0プロセスを終了し、`continue` markerは作成しません。このgateはmarkerやtimeoutで正常復帰せず、CAM-Bへ進めません。再起動後、開始時に表示されたrun IDで`report --run-id`を実行し、`after-CAM-A-before-CAM-B`、CAM-A原本保持、retry禁止、新規transaction必須を確認します。
+
+```powershell
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-interrupt-pair --operator-gate pair_boundary_exit --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+build\Debug\A0CameraStitcher.Phase0.exe report --run-id <表示されたrun-id>
+```
+
+`report --run-id`はpairのdurable event logから途中停止段階を匿名診断します。進行中の撮影を停止済みと誤判定しないよう、camera sessionを開かないreport処理自体もoperator-session camera-control leaseで直列化します。途中停止・terminal failure・不整合証跡を成功や自動retryへ変換せず、新規transactionを要求します。
+
 `spool-status --alias CAM-A`はread-only WPD sessionを一回だけ開き、folder/functional nodeを除く全payload件数だけを匿名保存して閉じます。Object ID・名前・実識別子は保存せず、capture、vendor operation、settings、deleteは0件です。`wpd-correlation-status --alias CAM-A`はread-onlyでWPD full close/reopenとdevice/object datetimeを診断しますが、clock cutoffは帰属根拠に使いません。
 
 `hybrid-fault-single`は空spoolでone-shotが合格した後だけ使用します。SDK one captureとSDK close後、WPD recovery open前にoperator gateを出し、`usb-disconnect`または`power-off`を一回だけ試験します。異常後は`FailedPartial`、delete/retry 0、新規transactionでのみ復旧する契約です。
 
-旧`capture-single`、`capture-pair`、`stability`はfake contract専用です。`--transport sdk`または`wpd`はcamera sessionを開く前に拒否し、実機経路は確認付き`hybrid-capture-single`だけに限定します。実SDK/WPDへ触れるコマンドはoperator-session-wide named OS leaseを保持するため、同じWindowsログオンsession内の別processとの同時実行もfail closedになります。別ユーザーsessionやserviceからの起動はMVP運用外とし、installer／運用policyで禁止します。
+2026-08-09のoperator判断により、物理的な電源再投入・再起動と実`power-off`復旧subtestはPhase 0の必須合否から除外しました。`power-off` CLIとfake contractは安全回帰用に残します。USB切断、software process再起動、二台identity、接続順・port確認、empty spool、1/10/100 pairはスキップしません。
 
-一台構成の`CAM-A` identity continuityは電源再投入後もSDK/WPD双方で確認済みです。Standalone Live Viewは5分04秒・2,424 frame、停止、SDK close、preview非保存に成功し、別プロセスでの再起動後も1 frame取得と正常終了を確認しました。撮影を含むone-shot、10/10、handoff 10回は承認済みspool経路で今後実施します。
+旧`capture-single`、`capture-pair`、`stability`はfake contract専用です。`--transport sdk`または`wpd`はcamera sessionを開く前に拒否し、実機経路は確認付き`hybrid-capture-single`と`hybrid-capture-pair`だけに限定します。実SDK/WPDへ触れるコマンドはoperator-session-wide named OS leaseを保持するため、同じWindowsログオンsession内の別processとの同時実行もfail closedになります。別ユーザーsessionやserviceからの起動はMVP運用外とし、installer／運用policyで禁止します。
+
+旧`CAM-A` continuity証拠のうちWPD側は履歴として保持しますが、SDK側の結論はephemeral MAID source object IDを使っていたため無効化しました。現在有効なidentity-v2 checkpointは`CAM-B`一台です。Standalone Live Viewは5分04秒・2,424 frame、停止、SDK close、preview非保存に成功し、別プロセスでの再起動後も1 frame取得と正常終了を確認していますが、これはidentity-v2 continuityや二台撮影の証拠には読み替えません。撮影を含むone-shot、10/10、handoff 10回は承認済みspool経路で今後実施します。
 
 一台の設定read-only診断 [run-1786040075194-1](docs/evidence/phase0/run-1786040075194-1/report.md)では、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を取得しました。FileTypeはnot-advertisedです。撮影設定write、capture、Live View開始、WPD、deleteは行わずSDK sessionを閉じました。MAID control-plane callback登録は既存`CapSet`を使い得るため、証拠上で撮影設定writeと区別しています。native command-trace testとfocus値の意味確定が残るため、この検証はPartialです。
 

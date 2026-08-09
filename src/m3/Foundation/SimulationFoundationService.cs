@@ -25,7 +25,10 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
         {
             var coordinator = CreateCoordinator(new DeterministicSimulatedCaptureSource());
             var recovered = await coordinator.InitializeAsync(cancellationToken).ConfigureAwait(false);
-            return recovered.Select(ToWorkflowState).ToArray();
+            return recovered
+                .OrderBy(journal => journal.UpdatedAtUtc)
+                .Select(ToWorkflowState)
+                .ToArray();
         }
         finally
         {
@@ -41,6 +44,15 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
         await _serviceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (scenario == SimulatedWorkflowScenario.FailLiveViewStop)
+            {
+                var failureCoordinator = CreateCoordinator(new DeterministicSimulatedCaptureSource());
+                return ToWorkflowState(
+                    await failureCoordinator.RecordLiveViewStopFailureAsync(
+                        transactionId,
+                        cancellationToken).ConfigureAwait(false));
+            }
+
             var failAlias = scenario switch
             {
                 SimulatedWorkflowScenario.FailCaptureA => "CAM-A",
@@ -84,5 +96,6 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
             IsTerminal = journal.State is SimulatedTransactionState.Complete or SimulatedTransactionState.FailedPartial,
             RetainedOriginalAliases = journal.Originals.Select(original => original.Alias).ToArray(),
             TerminalReason = journal.TerminalReason,
+            AutomaticRetryCount = journal.AutomaticRetryCount,
         };
 }

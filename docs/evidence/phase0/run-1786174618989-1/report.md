@@ -1,0 +1,24 @@
+# Phase 0 hybrid pair software contract
+
+- Run: `run-1786174618989-1`
+- Checked: 2026-08-08 16:36 JST
+- Scope: software-only fake transports; no real pair capture was executed.
+- Added the guarded real-hardware CLI entry `hybrid-capture-pair` for 1, 10, or 100 pairs.
+- Each pair shares one 180-second deadline and runs CAM-A before CAM-B under the operator-session camera-control lease.
+- CAM-A failure prevents CAM-B from starting.
+- CAM-B failure retains CAM-A's verified canonical PC original and performs no automatic retry.
+- CAM-A SDK close failure prevents WPD recovery and every CAM-B operation.
+- CAM-B WPD recovery-open failure retains CAM-A's canonical original, creates no CAM-B original, performs no CAM-B cleanup, and does not retry.
+- Deadline expiry after CAM-A prevents every CAM-B transport open.
+- The shared run aggregator completed 100/100 synthetic pairs (200/200 camera transactions).
+- A separate 100-pair request failed synthetically at pair 6 CAM-B and stopped after six callbacks, retaining six CAM-A and five CAM-B completions without retry.
+- Pair summary schema v2 records attempted-pair duration sample count and nearest-rank p50, p95, and max milliseconds; timing is observational and is not a Phase 0 pass/fail predicate.
+- A deterministic 1..100 ms software oracle produced p50 50 ms, p95 95 ms, and max 100 ms.
+- Anonymous recovery summary v1 reconstructs an interrupted `after-CAM-A-before-CAM-B` state from the durable event log, retains completed originals, prohibits retry, and requires a new transaction.
+- A terminal successful pair is distinguished from an interruption and does not require a recovery transaction.
+- Recovery analysis distinguishes `CAM-A-active`, `after-CAM-A-before-CAM-B`, and `CAM-B-active`; terminal failure requires a new transaction and overlapping pair evidence fails closed as invalid.
+- `report` holds the operator-session camera-control lease, including with an explicit fake transport, so it cannot materialize a false interruption summary while an active hardware run is still appending evidence.
+- Each body requires an explicitly bound SDK/WPD identity and a dedicated empty spool confirmation.
+- Anonymous evidence states that camera-session overlap is disallowed and actual shutter synchronization is not guaranteed.
+- SDK-enabled and SDK-less CTest both passed 5/5; pair CLI negative guards passed 4/4.
+- No real capture, Live View, setting change, card access, deletion, or vendor operation was performed in this run.

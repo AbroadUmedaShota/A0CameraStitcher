@@ -199,7 +199,7 @@ bool OperatorGate::IsSafeName(std::string_view value) noexcept {
 
 const fs::path& OperatorGate::ReadyPath() const noexcept { return ready_path_; }
 
-fs::path OperatorGate::AwaitContinue(std::ostream& output) {
+void OperatorGate::PublishReady(std::ostream& output, std::string_view instruction) {
     if (armed_) throw TransportError("operator_gate_reused", "operator gate cannot be reused");
     armed_ = true;
     std::error_code error;
@@ -223,8 +223,13 @@ fs::path OperatorGate::AwaitContinue(std::ostream& output) {
     fs::rename(partial, ready_path_, error);
     if (error) throw TransportError("operator_gate_create_failed", "cannot atomically publish operator gate ready artifact");
 
-    output << "OPERATOR GATE READY: create marker 'continue' at " << continue_path_.string() << '\n' << std::flush;
+    output << "OPERATOR GATE READY: " << instruction << '\n' << std::flush;
+}
+
+fs::path OperatorGate::AwaitContinue(std::ostream& output) {
+    PublishReady(output, "create marker 'continue' at " + continue_path_.string());
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
+    std::error_code error;
     while (std::chrono::steady_clock::now() < deadline) {
         error.clear();
         const bool marker_exists = fs::exists(continue_path_, error);
@@ -237,6 +242,25 @@ fs::path OperatorGate::AwaitContinue(std::ostream& output) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     throw TransportError("operator_gate_timeout", "operator gate continue marker was not received before timeout");
+}
+
+[[noreturn]] void OperatorGate::AwaitProcessTermination(std::ostream& output) {
+    PublishReady(
+        output,
+        "terminate this Phase 0 process now; do not create a continue marker; CAM-B must not start");
+    const auto deadline = std::chrono::steady_clock::now() + timeout_;
+    std::error_code error;
+    while (std::chrono::steady_clock::now() < deadline) {
+        error.clear();
+        if (fs::exists(continue_path_, error)) {
+            throw TransportError(
+                "operator_interruption_continue_marker",
+                "continue marker is prohibited for a process-termination gate");
+        }
+        if (error) throw TransportError("operator_gate_wait_failed", "cannot inspect operator gate directory");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    throw TransportError("operator_gate_timeout", "process-termination gate timed out; CAM-B remains blocked");
 }
 
 IdentityMap::IdentityMap(fs::path path) : path_(std::move(path)) { Load(); }
@@ -283,14 +307,237 @@ std::optional<std::string> IdentityMap::FindAlias(std::string_view stable_identi
     return std::nullopt;
 }
 
-std::string IdentityMap::AssignNext(std::string_view stable_identity) {
-    if (const auto existing = FindAlias(stable_identity)) return *existing;
-    if (!cam_a_) { cam_a_ = std::string(stable_identity); Save(); return "CAM-A"; }
-    if (!cam_b_) { cam_b_ = std::string(stable_identity); Save(); return "CAM-B"; }
-    throw std::runtime_error("CAM-A and CAM-B are already assigned; manual review required");
+void IdentityMap::ValidateBinding(std::string_view alias, std::string_view stable_identity) const {
+    if (alias != "CAM-A" && alias != "CAM-B") {
+        throw std::runtime_error("camera alias must be CAM-A or CAM-B");
+    }
+    if (stable_identity.empty()) {
+        throw std::runtime_error("camera identity must not be empty");
+    }
+
+    if (const auto existing_alias = FindAlias(stable_identity)) {
+        if (*existing_alias == alias) return;
+        throw std::runtime_error("camera identity is already bound to a different alias");
+    }
+
+    const auto& target = alias == "CAM-A" ? cam_a_ : cam_b_;
+    if (target) {
+        throw std::runtime_error("camera alias is already bound; manual review is required");
+    }
+}
+
+void IdentityMap::Bind(std::string_view alias, std::string_view stable_identity) {
+    ValidateBinding(alias, stable_identity);
+    if (const auto existing_alias = FindAlias(stable_identity); existing_alias && *existing_alias == alias) {
+        return;
+    }
+    auto& target = alias == "CAM-A" ? cam_a_ : cam_b_;
+    target = std::string(stable_identity);
+    Save();
 }
 
 const fs::path& IdentityMap::Path() const noexcept { return path_; }
+
+AnonymousInventorySummary SummarizeInventoryReadOnly(
+    const IdentityMap& map,
+    const std::vector<CameraInfo>& cameras) {
+    AnonymousInventorySummary summary;
+    summary.cameras.reserve(cameras.size());
+    for (const auto& camera : cameras) {
+        AnonymousInventoryEntry entry;
+        if (const auto alias = map.FindAlias(camera.stable_identity)) {
+            entry.alias = *alias;
+            ++summary.bound_camera_count;
+        } else {
+            ++summary.unbound_camera_count;
+        }
+        entry.model = camera.model;
+        entry.firmware = camera.firmware;
+        entry.shooting_mode = camera.shooting_mode;
+        summary.cameras.push_back(std::move(entry));
+    }
+    return summary;
+}
+
+CameraInfo SelectSingleCameraForBinding(const std::vector<CameraInfo>& cameras) {
+    if (cameras.size() != 1) {
+        throw std::runtime_error("identity binding requires exactly one physically connected D810");
+    }
+    if (cameras.front().stable_identity.empty()) {
+        throw std::runtime_error("enumerated camera identity is empty");
+    }
+    return cameras.front();
+}
+
+CrossTransportBindingSelection BindCrossTransportIdentity(
+    IdentityMap& sdk_map,
+    IdentityMap& wpd_map,
+    std::string_view alias,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    if (sdk_map.Path() == wpd_map.Path()) {
+        throw std::runtime_error("SDK and WPD identity maps must use distinct paths");
+    }
+    CrossTransportBindingSelection selection{
+        SelectSingleCameraForBinding(sdk_cameras),
+        SelectSingleCameraForBinding(wpd_cameras)};
+    sdk_map.ValidateBinding(alias, selection.sdk_camera.stable_identity);
+    wpd_map.ValidateBinding(alias, selection.wpd_camera.stable_identity);
+    sdk_map.Bind(alias, selection.sdk_camera.stable_identity);
+    wpd_map.Bind(alias, selection.wpd_camera.stable_identity);
+    return selection;
+}
+
+DualIdentityVerificationSummary VerifyDualIdentityBindings(
+    const IdentityMap& sdk_map,
+    const IdentityMap& wpd_map,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    DualIdentityVerificationSummary result;
+    result.sdk_camera_count = sdk_cameras.size();
+    result.wpd_camera_count = wpd_cameras.size();
+    const auto count_aliases = [](const IdentityMap& map, const std::vector<CameraInfo>& cameras,
+                                  std::size_t& cam_a, std::size_t& cam_b, std::size_t& unbound) {
+        for (const auto& camera : cameras) {
+            const auto alias = map.FindAlias(camera.stable_identity);
+            if (!alias) ++unbound;
+            else if (*alias == "CAM-A") ++cam_a;
+            else if (*alias == "CAM-B") ++cam_b;
+        }
+    };
+    count_aliases(sdk_map, sdk_cameras,
+        result.sdk_cam_a_count, result.sdk_cam_b_count, result.sdk_unbound_count);
+    count_aliases(wpd_map, wpd_cameras,
+        result.wpd_cam_a_count, result.wpd_cam_b_count, result.wpd_unbound_count);
+
+    if (result.sdk_camera_count != 2 || result.wpd_camera_count != 2) {
+        result.failure_category = "camera_count_mismatch";
+    } else if (result.sdk_unbound_count != 0 || result.wpd_unbound_count != 0) {
+        result.failure_category = "unbound_identity";
+    } else if (result.sdk_cam_a_count != 1 || result.sdk_cam_b_count != 1 ||
+               result.wpd_cam_a_count != 1 || result.wpd_cam_b_count != 1) {
+        result.failure_category = "alias_cardinality_mismatch";
+    } else {
+        result.terminal_state = "Ready";
+    }
+    return result;
+}
+
+fs::path PersistDualIdentityVerificationSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    const DualIdentityVerificationSummary& summary) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    fs::create_directories(run_root);
+    const fs::path final = run_root / "dual-identity-verification-summary.json";
+    const fs::path partial = run_root / "dual-identity-verification-summary.json.partial";
+    if (fs::exists(final) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite dual identity verification evidence");
+    }
+    std::ofstream output(partial, std::ios::out | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create dual identity verification evidence");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.dual-identity-verification-summary.v1\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"sdkCameraCount\": " << summary.sdk_camera_count << ",\n"
+           << "  \"sdkCamACount\": " << summary.sdk_cam_a_count << ",\n"
+           << "  \"sdkCamBCount\": " << summary.sdk_cam_b_count << ",\n"
+           << "  \"sdkUnboundCount\": " << summary.sdk_unbound_count << ",\n"
+           << "  \"wpdCameraCount\": " << summary.wpd_camera_count << ",\n"
+           << "  \"wpdCamACount\": " << summary.wpd_cam_a_count << ",\n"
+           << "  \"wpdCamBCount\": " << summary.wpd_cam_b_count << ",\n"
+           << "  \"wpdUnboundCount\": " << summary.wpd_unbound_count << ",\n"
+           << "  \"identityMapsChanged\": " << (summary.identity_maps_changed ? "true" : "false") << ",\n"
+           << "  \"captureCommandSent\": " << (summary.capture_command_sent ? "true" : "false") << ",\n"
+           << "  \"liveViewStarted\": " << (summary.live_view_started ? "true" : "false") << ",\n"
+           << "  \"cameraSettingsChanged\": " << (summary.camera_settings_changed ? "true" : "false") << ",\n"
+           << "  \"cardAccessPerformed\": " << (summary.card_access_performed ? "true" : "false") << ",\n"
+           << "  \"realIdentifiersIncluded\": " << (summary.real_identifiers_included ? "true" : "false") << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(summary.terminal_state) << "\",\n"
+           << "  \"failureCategory\": \"" << JsonEscape(summary.failure_category) << "\"\n"
+           << "}\n";
+    output.flush();
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist dual identity verification evidence");
+    fs::rename(partial, final);
+    return final;
+}
+
+DualSpoolVerificationSummary PrepareDualSpoolVerification(
+    const DualIdentityVerificationSummary& identity) {
+    DualSpoolVerificationSummary result;
+    result.identity = identity;
+    if (identity.terminal_state != "Ready") {
+        result.failure_category = "dual_identity_not_ready";
+        return result;
+    }
+    result.terminal_state = "ReadyForInspection";
+    return result;
+}
+
+void FinalizeDualSpoolVerification(
+    DualSpoolVerificationSummary& summary,
+    std::size_t cam_a_payload_object_count,
+    std::size_t cam_b_payload_object_count) {
+    if (summary.terminal_state != "ReadyForInspection") {
+        throw std::runtime_error("dual spool verification cannot inspect before dual identity is ready");
+    }
+    summary.cam_a_payload_object_count = cam_a_payload_object_count;
+    summary.cam_b_payload_object_count = cam_b_payload_object_count;
+    summary.wpd_sessions_closed = 2;
+    summary.card_inspection_performed = true;
+    if (cam_a_payload_object_count == 0 && cam_b_payload_object_count == 0) {
+        summary.terminal_state = "Ready";
+        summary.failure_category.clear();
+    } else {
+        summary.terminal_state = "Blocked";
+        summary.failure_category = "spool_not_empty";
+    }
+}
+
+fs::path PersistDualSpoolVerificationSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    const DualSpoolVerificationSummary& summary) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    fs::create_directories(run_root);
+    const fs::path final = run_root / "dual-spool-verification-summary.json";
+    const fs::path partial = run_root / "dual-spool-verification-summary.json.partial";
+    if (fs::exists(final) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite dual spool verification evidence");
+    }
+    std::ofstream output(partial, std::ios::out | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create dual spool verification evidence");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.dual-spool-verification-summary.v1\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"sdkCameraCount\": " << summary.identity.sdk_camera_count << ",\n"
+           << "  \"sdkCamACount\": " << summary.identity.sdk_cam_a_count << ",\n"
+           << "  \"sdkCamBCount\": " << summary.identity.sdk_cam_b_count << ",\n"
+           << "  \"sdkUnboundCount\": " << summary.identity.sdk_unbound_count << ",\n"
+           << "  \"wpdCameraCount\": " << summary.identity.wpd_camera_count << ",\n"
+           << "  \"wpdCamACount\": " << summary.identity.wpd_cam_a_count << ",\n"
+           << "  \"wpdCamBCount\": " << summary.identity.wpd_cam_b_count << ",\n"
+           << "  \"wpdUnboundCount\": " << summary.identity.wpd_unbound_count << ",\n"
+           << "  \"camAPayloadObjectCount\": " << summary.cam_a_payload_object_count << ",\n"
+           << "  \"camBPayloadObjectCount\": " << summary.cam_b_payload_object_count << ",\n"
+           << "  \"wpdSessionsClosed\": " << summary.wpd_sessions_closed << ",\n"
+           << "  \"readOnlyObservation\": " << (summary.read_only_observation ? "true" : "false") << ",\n"
+           << "  \"cardInspectionPerformed\": " << (summary.card_inspection_performed ? "true" : "false") << ",\n"
+           << "  \"captureCommandSent\": " << (summary.capture_command_sent ? "true" : "false") << ",\n"
+           << "  \"cameraDeleteAttempted\": " << (summary.camera_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"vendorOperationExecuted\": " << (summary.vendor_operation_executed ? "true" : "false") << ",\n"
+           << "  \"automaticRetry\": " << (summary.automatic_retry ? "true" : "false") << ",\n"
+           << "  \"realIdentifiersIncluded\": " << (summary.real_identifiers_included ? "true" : "false") << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(summary.terminal_state) << "\",\n"
+           << "  \"failureCategory\": \"" << JsonEscape(summary.failure_category) << "\"\n"
+           << "}\n";
+    output.flush();
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist dual spool verification evidence");
+    fs::rename(partial, final);
+    return final;
+}
 
 EvidenceWriter::EvidenceWriter(fs::path artifacts_root, std::string run_id, std::string sdk_version)
     : artifacts_root_(std::move(artifacts_root)), run_root_(artifacts_root_ / run_id),
@@ -447,7 +694,7 @@ const std::string& EvidenceWriter::RunId() const noexcept { return run_id_; }
 const fs::path& EvidenceWriter::RunRoot() const noexcept { return run_root_; }
 
 void EvidenceWriter::GenerateRedactedReport(const fs::path& report_root) const {
-    const std::array<std::pair<fs::path, fs::path>, 10> candidates{{
+    const std::array<std::pair<fs::path, fs::path>, 15> candidates{{
         {run_root_ / "summary.json", "summary.json"},
         {run_root_ / "sdk-status-summary.json", "sdk-status-summary.json"},
         {run_root_ / "wpd-status-summary.json", "wpd-status-summary.json"},
@@ -457,7 +704,12 @@ void EvidenceWriter::GenerateRedactedReport(const fs::path& report_root) const {
         {run_root_ / "handoff-summary.json", "handoff-summary.json"},
         {run_root_ / "live-view-summary.json", "live-view-summary.json"},
         {run_root_ / "hybrid-capture-summary.json", "hybrid-capture-summary.json"},
+        {run_root_ / "hybrid-pair-summary.json", "hybrid-pair-summary.json"},
+        {run_root_ / "hybrid-pair-recovery-summary.json", "hybrid-pair-recovery-summary.json"},
         {run_root_ / "hybrid-fault-summary.json", "hybrid-fault-summary.json"},
+        {run_root_ / "hybrid-pair-fault-summary.json", "hybrid-pair-fault-summary.json"},
+        {run_root_ / "dual-identity-verification-summary.json", "dual-identity-verification-summary.json"},
+        {run_root_ / "dual-spool-verification-summary.json", "dual-spool-verification-summary.json"},
     }};
     std::vector<std::pair<fs::path, fs::path>> included;
     for (const auto& candidate : candidates) {
@@ -537,6 +789,170 @@ fs::path PersistHybridCaptureSummary(
            << "  \"vendorOperationExecuted\": false\n}\n";
     stream.close();
     if (!stream) throw std::runtime_error("cannot finalize hybrid capture summary");
+    fs::rename(partial, output);
+    return output;
+}
+
+fs::path PersistHybridPairSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairRunSummary& result) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path output = run_root / "hybrid-pair-summary.json";
+    const fs::path partial = run_root / "hybrid-pair-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(output) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a hybrid pair summary");
+    }
+    std::ofstream stream(partial, std::ios::binary | std::ios::trunc);
+    if (!stream) throw std::runtime_error("cannot write hybrid pair summary");
+    stream << "{\n  \"schemaVersion\": \"phase0.hybrid-pair-summary.v2\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"requestedPairs\": " << result.requested_pairs << ",\n"
+           << "  \"attemptedPairs\": " << result.attempted_pairs << ",\n"
+           << "  \"completedPairs\": " << result.completed_pairs << ",\n"
+           << "  \"failures\": " << result.failures << ",\n"
+           << "  \"camACompletedCount\": " << result.cam_a_completed_count << ",\n"
+           << "  \"camBCompletedCount\": " << result.cam_b_completed_count << ",\n"
+           << "  \"attemptedCameraTransactions\": " << result.attempted_camera_transactions << ",\n"
+           << "  \"completedCameraTransactions\": " << result.completed_camera_transactions << ",\n"
+           << "  \"spoolEmptyBeforeCount\": " << result.spool_empty_before_count << ",\n"
+           << "  \"cameraCardDeleteAttemptedCount\": " << result.camera_card_delete_attempted_count << ",\n"
+           << "  \"cameraCardDeleteSucceededCount\": " << result.camera_card_delete_succeeded_count << ",\n"
+           << "  \"spoolEmptyAfterCount\": " << result.spool_empty_after_count << ",\n"
+           << "  \"durationSampleCount\": " << result.duration_sample_count << ",\n"
+           << "  \"pairDurationP50Ms\": " << result.pair_duration_p50_ms << ",\n"
+           << "  \"pairDurationP95Ms\": " << result.pair_duration_p95_ms << ",\n"
+           << "  \"pairDurationMaxMs\": " << result.pair_duration_max_ms << ",\n"
+           << "  \"timingUsedForPhase0PassFail\": false,\n"
+           << "  \"terminalState\": \"" << JsonEscape(result.terminal_state) << "\",\n"
+           << "  \"lastPairState\": \"" << JsonEscape(result.last_pair_state) << "\",\n"
+           << "  \"lastErrorCategory\": \"" << JsonEscape(result.last_error_category) << "\",\n"
+           << "  \"lastErrorDetail\": \"" << JsonEscape(result.last_error_detail) << "\",\n"
+           << "  \"captureOrder\": \"CAM-A-then-CAM-B\",\n"
+           << "  \"pairWatchdogSeconds\": " << result.pair_watchdog_seconds << ",\n"
+           << "  \"automaticRetry\": " << (result.automatic_retry ? "true" : "false") << ",\n"
+           << "  \"exclusiveCameraControlConfirmed\": "
+           << (result.exclusive_camera_control_confirmed ? "true" : "false") << ",\n"
+           << "  \"dedicatedSpoolScopeConfirmed\": "
+           << (result.dedicated_spool_scope_confirmed ? "true" : "false") << ",\n"
+           << "  \"dualDedicatedSpoolsConfirmed\": "
+           << (result.dual_dedicated_spools_confirmed ? "true" : "false") << ",\n"
+           << "  \"exactObjectDeleteConfirmed\": "
+           << (result.exact_object_delete_confirmed ? "true" : "false") << ",\n"
+           << "  \"cameraSessionOverlapAllowed\": false,\n"
+           << "  \"actualShutterSynchronizationGuaranteed\": "
+           << (result.actual_shutter_synchronization_guaranteed ? "true" : "false") << ",\n"
+           << "  \"realIdentifiersIncluded\": false,\n"
+           << "  \"cleanupObjectIdIncluded\": false,\n"
+           << "  \"vendorOperationExecuted\": false\n}\n";
+    stream.close();
+    if (!stream) throw std::runtime_error("cannot finalize hybrid pair summary");
+    fs::rename(partial, output);
+    return output;
+}
+
+HybridPairRecoveryStatus AssessHybridPairRecoveryEventLog(const fs::path& event_log) {
+    HybridPairRecoveryStatus status;
+    std::ifstream stream(event_log, std::ios::binary);
+    if (!stream) throw std::runtime_error("cannot read hybrid pair recovery event log");
+
+    std::string active_pair_id;
+    std::string active_stage;
+    std::string line;
+    const auto field = [](std::string_view json, std::string_view name) -> std::string {
+        const std::string prefix = "\"" + std::string(name) + "\":\"";
+        const auto begin = json.find(prefix);
+        if (begin == std::string_view::npos) return {};
+        const auto value_begin = begin + prefix.size();
+        const auto end = json.find('"', value_begin);
+        if (end == std::string_view::npos) return {};
+        return std::string(json.substr(value_begin, end - value_begin));
+    };
+    while (std::getline(stream, line)) {
+        const auto state = field(line, "state");
+        if (!state.starts_with("HybridPair")) continue;
+        const auto pair_id = field(line, "transactionId");
+        if (pair_id.empty() || !pair_id.starts_with("hybrid-pair-")) {
+            status.event_sequence_consistent = false;
+            continue;
+        }
+        if (state == "HybridPairStarted") {
+            ++status.pair_started_count;
+            if (!active_pair_id.empty()) status.event_sequence_consistent = false;
+            active_pair_id = pair_id;
+            active_stage = "CAM-A-active";
+        } else if (pair_id != active_pair_id) {
+            status.event_sequence_consistent = false;
+        } else if (state == "HybridPairCamAComplete") {
+            active_stage = "after-CAM-A-before-CAM-B";
+        } else if (state == "HybridPairCamBStarting") {
+            active_stage = "CAM-B-active";
+        } else if (state == "HybridPairComplete") {
+            ++status.pair_complete_count;
+            active_pair_id.clear();
+            active_stage.clear();
+        } else if (state == "HybridPairFailed") {
+            ++status.pair_failed_count;
+            active_pair_id.clear();
+            active_stage.clear();
+        }
+    }
+    if (stream.bad()) throw std::runtime_error("cannot finish reading hybrid pair recovery event log");
+
+    if (!active_pair_id.empty()) {
+        status.interrupted_pair_detected = true;
+        status.interrupted_stage = active_stage;
+        status.cam_a_complete_before_interruption =
+            active_stage == "after-CAM-A-before-CAM-B" || active_stage == "CAM-B-active";
+    }
+    if (!status.event_sequence_consistent) {
+        status.terminal_state = "EvidenceInvalid";
+    } else if (status.interrupted_pair_detected) {
+        status.terminal_state = "Interrupted";
+    } else if (status.pair_started_count == 0) {
+        status.terminal_state = "NoPairEvents";
+    } else {
+        status.terminal_state = "Terminal";
+    }
+    status.recovery_requires_new_transaction =
+        !status.event_sequence_consistent || status.interrupted_pair_detected || status.pair_failed_count > 0;
+    return status;
+}
+
+fs::path PersistHybridPairRecoverySummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairRecoveryStatus& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path output = run_root / "hybrid-pair-recovery-summary.json";
+    const fs::path partial = run_root / "hybrid-pair-recovery-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(output) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a hybrid pair recovery summary");
+    }
+    std::ofstream stream(partial, std::ios::binary | std::ios::trunc);
+    if (!stream) throw std::runtime_error("cannot write hybrid pair recovery summary");
+    stream << "{\n  \"schemaVersion\": \"phase0.hybrid-pair-recovery-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"pairStartedCount\": " << status.pair_started_count << ",\n"
+           << "  \"pairCompleteCount\": " << status.pair_complete_count << ",\n"
+           << "  \"pairFailedCount\": " << status.pair_failed_count << ",\n"
+           << "  \"interruptedPairDetected\": " << (status.interrupted_pair_detected ? "true" : "false") << ",\n"
+           << "  \"interruptedStage\": \"" << JsonEscape(status.interrupted_stage) << "\",\n"
+           << "  \"camACompleteBeforeInterruption\": "
+           << (status.cam_a_complete_before_interruption ? "true" : "false") << ",\n"
+           << "  \"retainCompletedOriginals\": " << (status.retain_completed_originals ? "true" : "false") << ",\n"
+           << "  \"automaticRetryAllowed\": " << (status.automatic_retry_allowed ? "true" : "false") << ",\n"
+           << "  \"recoveryRequiresNewTransaction\": "
+           << (status.recovery_requires_new_transaction ? "true" : "false") << ",\n"
+           << "  \"eventSequenceConsistent\": " << (status.event_sequence_consistent ? "true" : "false") << ",\n"
+           << "  \"terminalState\": \"" << JsonEscape(status.terminal_state) << "\",\n"
+           << "  \"realIdentifiersIncluded\": false\n}\n";
+    stream.close();
+    if (!stream) throw std::runtime_error("cannot finalize hybrid pair recovery summary");
     fs::rename(partial, output);
     return output;
 }
@@ -677,13 +1093,13 @@ TransactionResult ExecuteHybridCaptureOnce(
     std::string_view sdk_identity,
     Timeouts timeouts,
     const std::function<void()>& before_wpd_recovery,
-    const std::function<void()>& before_pc_original_rename) {
+    const std::function<void()>& before_pc_original_rename,
+    std::optional<std::chrono::steady_clock::time_point> transaction_deadline) {
     TransactionResult result;
     result.run_id = evidence.RunId();
-    result.transaction_id = "hybrid-tx-" + std::to_string(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    result.transaction_id = "hybrid-tx-" + NewRunId().substr(4);
     const auto started = std::chrono::steady_clock::now();
-    const auto deadline = started + timeouts.transaction_watchdog;
+    const auto deadline = transaction_deadline.value_or(started + timeouts.transaction_watchdog);
     std::string token;
     bool wpd_open = false;
     bool sdk_open = false;
@@ -812,6 +1228,139 @@ TransactionResult ExecuteHybridCaptureOnce(
     result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     evidence.RecordResult(result);
     return result;
+}
+
+HybridPairResult ExecuteHybridCapturePair(
+    ICameraTransport& wpd_session,
+    IPostCardObservationTransport& wpd,
+    ICameraTransport& sdk_session,
+    ICardCaptureTransport& sdk,
+    EvidenceWriter& evidence,
+    std::string_view cam_a_wpd_identity,
+    std::string_view cam_a_sdk_identity,
+    std::string_view cam_b_wpd_identity,
+    std::string_view cam_b_sdk_identity,
+    Timeouts timeouts,
+    const std::function<void()>& before_cam_b,
+    const std::function<void()>& before_cam_a_wpd_recovery,
+    const std::function<void()>& before_cam_b_wpd_recovery) {
+    HybridPairResult pair;
+    pair.run_id = evidence.RunId();
+    pair.pair_id = "hybrid-pair-" + NewRunId().substr(4);
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + timeouts.transaction_watchdog;
+    const auto finish = [&] {
+        pair.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+    };
+    const auto fail = [&](std::string category, std::string detail, std::string_view alias) {
+        pair.terminal_state = "FailedPartial";
+        pair.error_category = std::move(category);
+        pair.error_detail = ControlledErrorDetail(detail);
+        evidence.RecordState(pair.pair_id, "HybridPairFailed", alias, pair.error_detail);
+    };
+
+    evidence.RecordState(pair.pair_id, "HybridPairStarted", "CAM-A");
+    pair.cam_a = ExecuteHybridCaptureOnce(
+        wpd_session, wpd, sdk_session, sdk, evidence, "CAM-A",
+        cam_a_wpd_identity, cam_a_sdk_identity, timeouts,
+        before_cam_a_wpd_recovery, {}, deadline);
+    if (pair.cam_a.terminal_state != "Complete") {
+        fail(pair.cam_a.error_category, pair.cam_a.error_detail, "CAM-A");
+        finish();
+        return pair;
+    }
+    evidence.RecordState(pair.pair_id, "HybridPairCamAComplete", "CAM-A");
+
+    try {
+        if (before_cam_b) before_cam_b();
+    } catch (const std::exception& error) {
+        fail("pair_boundary_exception", error.what(), "CAM-B");
+        finish();
+        return pair;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+        fail("transaction_watchdog", "pair transaction watchdog expired before CAM-B", "CAM-B");
+        finish();
+        return pair;
+    }
+
+    pair.cam_b_started = true;
+    evidence.RecordState(pair.pair_id, "HybridPairCamBStarting", "CAM-B");
+    pair.cam_b = ExecuteHybridCaptureOnce(
+        wpd_session, wpd, sdk_session, sdk, evidence, "CAM-B",
+        cam_b_wpd_identity, cam_b_sdk_identity, timeouts,
+        before_cam_b_wpd_recovery, {}, deadline);
+    if (pair.cam_b.terminal_state != "Complete") {
+        fail(pair.cam_b.error_category, pair.cam_b.error_detail, "CAM-B");
+        finish();
+        return pair;
+    }
+
+    pair.terminal_state = "Complete";
+    evidence.RecordState(pair.pair_id, "HybridPairComplete", "CAM-B");
+    finish();
+    return pair;
+}
+
+HybridPairRunSummary ExecuteHybridPairRun(
+    int requested_pairs,
+    const std::function<HybridPairResult()>& capture_pair_once) {
+    if (requested_pairs < 1) throw std::runtime_error("hybrid pair run count must be positive");
+    if (!capture_pair_once) throw std::runtime_error("hybrid pair run requires a capture callback");
+
+    HybridPairRunSummary summary;
+    summary.requested_pairs = requested_pairs;
+    std::vector<std::int64_t> pair_durations_ms;
+    pair_durations_ms.reserve(static_cast<std::size_t>(requested_pairs));
+    const auto accumulate_transaction = [&](const TransactionResult& transaction, std::string_view alias) {
+        if (transaction.transaction_id.empty()) return;
+        ++summary.attempted_camera_transactions;
+        if (transaction.terminal_state == "Complete") {
+            ++summary.completed_camera_transactions;
+            if (alias == "CAM-A") ++summary.cam_a_completed_count;
+            if (alias == "CAM-B") ++summary.cam_b_completed_count;
+        }
+        summary.spool_empty_before_count += transaction.spool_empty_before_capture ? 1 : 0;
+        summary.camera_card_delete_attempted_count += transaction.camera_card_delete_attempted ? 1 : 0;
+        summary.camera_card_delete_succeeded_count += transaction.camera_card_delete_succeeded ? 1 : 0;
+        summary.spool_empty_after_count += transaction.spool_empty_after_cleanup ? 1 : 0;
+    };
+
+    for (int index = 0; index < requested_pairs; ++index) {
+        ++summary.attempted_pairs;
+        const auto pair = capture_pair_once();
+        pair_durations_ms.push_back(std::max<std::int64_t>(0, pair.duration.count()));
+        accumulate_transaction(pair.cam_a, "CAM-A");
+        if (pair.cam_b_started) accumulate_transaction(pair.cam_b, "CAM-B");
+        summary.last_pair_state = pair.terminal_state;
+        summary.last_error_category = pair.error_category;
+        summary.last_error_detail = pair.error_detail;
+        if (pair.terminal_state == "Complete") {
+            ++summary.completed_pairs;
+        } else {
+            ++summary.failures;
+            summary.terminal_state = "FailedPartial";
+            break;
+        }
+    }
+    if (summary.completed_pairs == summary.requested_pairs && summary.failures == 0) {
+        summary.terminal_state = "Complete";
+    } else if (summary.terminal_state != "FailedPartial") {
+        summary.terminal_state = "FailedPartial";
+    }
+    std::sort(pair_durations_ms.begin(), pair_durations_ms.end());
+    summary.duration_sample_count = static_cast<int>(pair_durations_ms.size());
+    if (!pair_durations_ms.empty()) {
+        const auto nearest_rank = [&](int percentile) {
+            const auto rank = (pair_durations_ms.size() * static_cast<std::size_t>(percentile) + 99U) / 100U;
+            return pair_durations_ms[std::max<std::size_t>(1U, rank) - 1U];
+        };
+        summary.pair_duration_p50_ms = nearest_rank(50);
+        summary.pair_duration_p95_ms = nearest_rank(95);
+        summary.pair_duration_max_ms = pair_durations_ms.back();
+    }
+    return summary;
 }
 
 fs::path PersistSdkStatusSummary(
@@ -1149,6 +1698,48 @@ fs::path PersistHybridFaultSummary(
     return summary;
 }
 
+fs::path PersistHybridPairFaultSummary(
+    const fs::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairFaultRunSummary& status) {
+    const fs::path run_root = artifacts_root / std::string(run_id);
+    const fs::path summary = run_root / "hybrid-pair-fault-summary.json";
+    const fs::path partial = run_root / "hybrid-pair-fault-summary.json.partial";
+    fs::create_directories(run_root);
+    if (fs::exists(summary) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a hybrid pair fault summary");
+    }
+    std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("cannot create hybrid pair fault summary");
+    output << "{\n"
+           << "  \"schemaVersion\": \"phase0.hybrid-pair-fault-summary.v1\",\n"
+           << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
+           << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
+           << "  \"faultCameraAlias\": \"" << JsonEscape(status.fault_camera_alias) << "\",\n"
+           << "  \"scenario\": \"" << JsonEscape(status.scenario) << "\",\n"
+           << "  \"gateStage\": \"" << JsonEscape(status.gate_stage) << "\",\n"
+           << "  \"pairState\": \"" << JsonEscape(status.pair_state) << "\",\n"
+           << "  \"errorCategory\": \"" << JsonEscape(status.error_category) << "\",\n"
+           << "  \"acceptanceState\": \"" << JsonEscape(status.acceptance_state) << "\",\n"
+           << "  \"camBStarted\": " << (status.cam_b_started ? "true" : "false") << ",\n"
+           << "  \"camAOriginalPersisted\": " << (status.cam_a_original_persisted ? "true" : "false") << ",\n"
+           << "  \"camBOriginalPersisted\": " << (status.cam_b_original_persisted ? "true" : "false") << ",\n"
+           << "  \"camADeleteAttempted\": " << (status.cam_a_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"camBDeleteAttempted\": " << (status.cam_b_delete_attempted ? "true" : "false") << ",\n"
+           << "  \"automaticRetry\": " << (status.automatic_retry ? "true" : "false") << ",\n"
+           << "  \"recoveryRequiresNewTransaction\": "
+           << (status.recovery_requires_new_transaction ? "true" : "false") << ",\n"
+           << "  \"actualShutterSynchronizationGuaranteed\": "
+           << (status.actual_shutter_synchronization_guaranteed ? "true" : "false") << ",\n"
+           << "  \"objectIdentifiersIncluded\": false,\n"
+           << "  \"realIdentifiersPrinted\": false\n"
+           << "}\n";
+    output.close();
+    if (!output) throw std::runtime_error("cannot persist hybrid pair fault summary");
+    fs::rename(partial, summary);
+    return summary;
+}
+
 std::optional<std::string> ValidateWpdCorrelationArguments(
     std::string_view command,
     bool samples_explicit,
@@ -1171,11 +1762,14 @@ std::optional<std::string> ValidateHybridCaptureArguments(
     int count,
     bool exclusive_camera_control_confirmed,
     bool dedicated_spool_scope_confirmed,
-    bool exact_object_delete_confirmed) noexcept {
-    const bool hybrid_command = command == "hybrid-capture-single" || command == "live-view-handoff" ||
-        command == "hybrid-fault-single";
+    bool exact_object_delete_confirmed,
+    bool dual_dedicated_spools_confirmed) noexcept {
+    const bool hybrid_command = command == "hybrid-capture-single" || command == "hybrid-capture-pair" ||
+        command == "live-view-handoff" || command == "hybrid-fault-single" ||
+        command == "hybrid-fault-pair" || command == "hybrid-interrupt-pair";
     if (!hybrid_command) {
-        if (exclusive_camera_control_confirmed || dedicated_spool_scope_confirmed || exact_object_delete_confirmed) {
+        if (exclusive_camera_control_confirmed || dedicated_spool_scope_confirmed || exact_object_delete_confirmed ||
+            dual_dedicated_spools_confirmed) {
             return "hybrid safety confirmations are valid only for an approved hybrid command";
         }
         return std::nullopt;
@@ -1183,8 +1777,28 @@ std::optional<std::string> ValidateHybridCaptureArguments(
     if (command == "hybrid-capture-single" && count != 1 && count != 10) {
         return "hybrid-capture-single count must be 1 or 10";
     }
+    if (command == "hybrid-capture-pair" && count != 1 && count != 10 && count != 100) {
+        return "hybrid-capture-pair count must be 1, 10, or 100";
+    }
+    if ((command == "hybrid-capture-pair" || command == "hybrid-fault-pair" ||
+         command == "hybrid-interrupt-pair") &&
+        !dual_dedicated_spools_confirmed) {
+        return std::string(command) +
+            " requires --dual-dedicated-spools-confirmed for both physical D810 bodies";
+    }
+    if (command != "hybrid-capture-pair" && command != "hybrid-fault-pair" &&
+        command != "hybrid-interrupt-pair" &&
+        dual_dedicated_spools_confirmed) {
+        return "dual-dedicated-spools-confirmed is valid only for a two-body hybrid command";
+    }
     if (command == "hybrid-fault-single" && count != 1) {
         return "hybrid-fault-single count must be 1";
+    }
+    if (command == "hybrid-fault-pair" && count != 1) {
+        return "hybrid-fault-pair count must be 1";
+    }
+    if (command == "hybrid-interrupt-pair" && count != 1) {
+        return "hybrid-interrupt-pair count must be 1";
     }
     if (command == "live-view-handoff" && count != 10) {
         return "live-view-handoff requires --count 10";

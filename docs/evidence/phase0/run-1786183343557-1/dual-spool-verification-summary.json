@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "phase0.dual-spool-verification-summary.v1",
+  "runId": "run-1786183343557-1",
+  "sdkCameraCount": 1,
+  "sdkCamACount": 0,
+  "sdkCamBCount": 1,
+  "sdkUnboundCount": 0,
+  "wpdCameraCount": 1,
+  "wpdCamACount": 0,
+  "wpdCamBCount": 1,
+  "wpdUnboundCount": 0,
+  "camAPayloadObjectCount": 0,
+  "camBPayloadObjectCount": 0,
+  "wpdSessionsClosed": 0,
+  "readOnlyObservation": true,
+  "captureCommandSent": false,
+  "cameraDeleteAttempted": false,
+  "vendorOperationExecuted": false,
+  "automaticRetry": false,
+  "realIdentifiersIncluded": false,
+  "terminalState": "Blocked",
+  "failureCategory": "dual_identity_not_ready"
+}

@@ -11,6 +11,10 @@
 
 namespace a0::phase0 {
 
+// Derives a local-only WPD identity from the camera-reported serial property.
+// PnP device instance IDs are excluded because they can follow a USB port.
+[[nodiscard]] std::string DeriveWpdStableIdentity(std::string_view device_serial_utf8);
+
 enum class WpdCommandTargetPolicy {
     functional,
     omit,

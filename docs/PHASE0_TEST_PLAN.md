@@ -7,7 +7,7 @@
 ## 開始条件
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
-- Phase 0B前: `HG-0003B`（二台目D810と二台試験許可）の解消が必要。2026-08-07現在はopenであり、Phase 0Bは開始しない。
+- Phase 0B前: `HG-0003B`の解消が必要。2026-08-08にD810 PnP、SDK inventory、WPD inventoryを各2台確認した。17:31 JSTのCAM-A SDK bindingは、物理入替後もCAM-Aへ誤一致したため無効化した。原因のephemeral MAID source IDを排除しSource `Name`/`Interface` identity-v2へ修正、SDK有無各CTest 5/5とCAM-B一台checkpointは合格した。CAM-A SDK v2再登録、別個体、再接続、port交換、二台同時readinessまで実機Phase 0B撮影を開始しない。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
@@ -34,7 +34,7 @@
 
 合格: D810を安定して`CAM-A`として識別でき、実識別子がcommit対象へ出ない。
 
-2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を`CAM-A`として確認した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)は、SDK/WPD双方のlocal identity mapが記録済みarrivalより前から存在し、再列挙後も変更されず、両transportが一台のD810を`CAM-A`へ復元したことを記録する。実識別子とmap hashはcommit対象へ含めていない。以上により、一台構成のP0-A1は合格とする。CAM-B、接続順変更、port交換はP0-B1で別途検証する。
+2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。P0-A1のSDK identity continuityはidentity-v2による再接続・port交換確認までPartialへ戻す。実識別子とmap hashはcommit対象へ含めない。
 
 2026-08-07の設定read-only [run-1786040075194-1](evidence/phase0/run-1786040075194-1/report.md)は、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を匿名記録した。FileTypeはnot-advertisedだったが、CompressionLevelとImageSizeは取得できた。撮影設定write、capture、Live View開始、WPD、deleteは行わず、sessionを閉じた。MAID session確立時のcontrol-plane callback登録とModuleModeは既存`CapSet`を使い得るため、設定read-onlyは「撮影設定capabilityを書き換えない」という意味である。native command-trace自動試験とfocus値の意味確定が未完了のため、設定比較項目はPartialとする。
 
@@ -54,12 +54,12 @@
 
 - idle中のUSB切断・再接続
 - active transaction中のUSB切断
-- active transaction中の電源断
 - アプリ再起動後の新規transaction
+- active transaction中の物理的な電源断・電源再投入: **N/A / Skip**（2026-08-09 operator判断。実行不能のため合否項目から除外）
 
-active transactionのUSB切断・電源断は`hybrid-fault-single`で実行する。empty-before確認、SDK one capture、SDK full close後かつWPD recovery open前に匿名operator gateを出す。操作者が指定異常を発生させてcontinue markerを作成した後、WPD open失敗を同一runの`FailedPartial`として確定する。この経路はPC original未確定のためdelete 0、自動retry 0とし、残ったcard objectを自動帰属・自動削除しない。復旧後にread-only `spool-status`を実行し、必要なら操作者が画像をbackupして手動clearした後、別run IDの新規one-shotだけを許可する。アプリ再起動は正常終了した別processから新規transactionを開始する試験とし、active processの強制終了やM3のdurable transactionをPhase 0へ拡張しない。
+active transactionのUSB切断は`hybrid-fault-single`で実行する。empty-before確認、SDK one capture、SDK full close後かつWPD recovery open前に匿名operator gateを出す。操作者が指定異常を発生させてcontinue markerを作成した後、WPD open失敗を同一runの`FailedPartial`として確定する。この経路はPC original未確定のためdelete 0、自動retry 0とし、残ったcard objectを自動帰属・自動削除しない。復旧後にread-only `spool-status`を実行し、必要なら操作者が画像をbackupして手動clearした後、別run IDの新規one-shotだけを許可する。アプリ再起動は正常終了した別processから新規transactionを開始する試験とし、active processの強制終了やM3のdurable transactionをPhase 0へ拡張しない。`power-off` CLI contractは安全回帰試験として保持するが、実機実行は必須にしない。
 
-合格: USB切断・電源断はそれぞれ、operator gate後のWPD `open_failed`、`FailedPartial`、PC original 0、delete 0、retry 0を匿名summaryへ記録する。復旧後はread-only spool確認を経て別run IDの新規transactionが成功する。アプリ再起動後も別processの新規transactionが成功する。
+合格: USB切断でoperator gate後のWPD `open_failed`、`FailedPartial`、PC original 0、delete 0、retry 0を匿名summaryへ記録する。復旧後はread-only spool確認を経て別run IDの新規transactionが成功する。アプリ再起動後も別processの新規transactionが成功する。物理電源断・再投入には合否を要求しない。
 
 ### P0-A4: 一台選択式Live Viewとhybrid handoff
 
@@ -92,7 +92,10 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 ### P0-B1: 二台識別
 
 - 一台ずつ物理接続した状態でSDK/WPD双方のidentityを同じaliasへ登録し、一台目を`CAM-A`、二台目を`CAM-B`としてcross-transport bindingする。
+- 登録は`bind-cross-transport-identity --alias CAM-A|CAM-B --single-camera-connected-confirmed`を使用する。一つのoperator-session lease内でSDKを列挙・完全close後にWPDを列挙し、両mapの競合を事前検証してから双方へbindingする。厳密に一台ずつ列挙できない場合、既存aliasを置換する場合、同じidentityを別aliasへ登録する場合、SDK/WPD map pathが同一の場合はどちらも変更せず失敗させる。旧`bind-identity --transport`は診断・復旧用の低レベル入口として残すが、通常の二台登録には使わない。
 - binding後に二台を接続し、SDKとWPDの両方で各aliasが一意に解決できることを確認する。binding登録機能が完成するまで二台接続時のLive View handoffは実行しない。
+- 二台接続後は`verify-dual-identity`を実行し、SDK/WPD各2台、各transportのCAM-A/B各1件、unbound 0、map変更0の匿名summaryとexit 0を必須にする。一台状態の`run-1786182987492-1`はSDK/WPD各1を検出して`camera_count_mismatch` / exit 5でfail closedし、撮影関連操作0を証拠化済み。
+- dual identity合格後は`verify-dual-spools`を実行し、CAM-A/Bの全payload object countが各0、read-only WPD session close各1、card inspection 2件、capture/delete/vendor operation/retry 0の匿名summaryとexit 0を必須にする。identity未合格時はcardを開かない。`run-1786183481065-1`は一台状態を`dual_identity_not_ready`としてcard inspection・WPD session・削除各0で拒否した。
 - 各aliasを選択して、Live View停止・SDK close後のhybrid transactionが同じ物理D810のシャッターとPC原本になることを一回ずつ確認する。
 - 接続順変更3回、各カメラのUSBポート交換後も別名が維持されることを確認する。
 
@@ -100,7 +103,10 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 - `CAM-A`でWPD baseline/close、SDK one card capture/close、WPD recovery、PC保存を完了する。
 - 次に`CAM-B`で同じhybrid処理を完了する。
-- 両方が確定した場合だけ`Paired`、`Complete`とする。
+- `hybrid-capture-pair`を`--dual-dedicated-spools-confirmed`を含む全安全確認付きで使用する。コマンド自身も共通dual identity検証を先頭で実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名証跡を残してcard access・capture前にexit 5とする。合格後はpair全体で一つの180秒deadline、operator-session-wide lease、CAM-A→CAM-Bの固定順序を維持する。
+- CAM-Aのverified canonical PC original、exact-object delete、empty-afterが完了した場合だけCAM-Bを開始する。CAM-A失敗時はCAM-Bを開始しない。
+- CAM-B失敗時はCAM-Aの確定済みPC原本を保持し、pairを`FailedPartial`として次pairを開始しない。
+- 両方が確定した場合だけpairを`Complete`とする。順次撮影であり、実シャッター同期は保証しない。
 - 10件を自動再試行なしで実行する。
 
 合格: 10/10 transaction、CAM-A/B各10枚、誤ペア・消失・曖昧画像採用0件。
@@ -122,12 +128,21 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 通常100件とは別に次を実行する。
 
-- CAM-A/Bそれぞれのactive中USB切断と電源断を各1回
-- CAM-A保存後、CAM-B開始前のアプリ終了を1回
+- CAM-A/Bそれぞれのactive中USB切断を各1回
+- CAM-A/Bの物理的な電源断・電源再投入: **N/A / Skip**（2026-08-09 operator判断）
+- `hybrid-interrupt-pair`でCAM-A保存・exact cleanup後、CAM-B開始前の専用gate readyを確認してPhase 0 processを終了する試験を1回。continue markerは作らない
 - 接続順変更3回
 - CAM-A/BのUSBポート交換を各1回
 
 合格: 対象transactionを失敗確定し、取得済み原画像と曖昧画像を保持し、復旧後の新規transactionが成功する。
+
+pair software fault contractは、CAM-A SDK close失敗でWPD recoveryとCAM-Bを開始しないこと、およびCAM-B WPD recovery open失敗でCAM-A原本を保持しCAM-B原本・cleanup・retryを生成しないことに合格済みである。これは実USB切断の代替証拠ではない。物理電源断は人判断により実機合否対象外である。
+
+active中の実USB切断には`hybrid-fault-pair --alias CAM-A|CAM-B --scenario usb-disconnect`を使う。dual identity未Readyではcardを開かず、alias省略、operator gate省略、両専用spool確認省略もcamera open前に拒否する。選択bodyのSDK capture/full close後かつWPD recovery open前のready markerを確認してから指定異常を発生させる。CAM-AではCAM-B未開始、CAM-BではCAM-A verified original保持を必須とし、未確定bodyのdeleteとautomatic retryは0、新run IDを要求する。匿名`hybrid-pair-fault-summary.json`を証拠とする。`power-off` scenarioはsoftware safety contractとして残すが実機実行は任意である。
+
+`report --run-id`はdurable event logにpair開始後のterminal stateがない場合、匿名`hybrid-pair-recovery-summary.json`を生成する。`CAM-A-active`、`after-CAM-A-before-CAM-B`、`CAM-B-active`を区別し、完了済み原本保持、automatic retry禁止、新規transaction必須を記録する。terminal failureも新規transactionを要求し、pair開始が重なる不整合証跡は`EvidenceInvalid`としてfail closedにする。reportはactive hardware evidence writerと競合しないよう、camera sessionを開かなくてもoperator-session camera-control leaseを保持する。software contractは合格済みだが、実プロセス終了と復旧後の新規実機transactionはP0-B4で別途実施する。
+
+`hybrid-interrupt-pair`はdual identity、両専用empty spool、安全確認、operator-session leaseを要求する。CAM-A完了後の中断専用gateはprocess終了以外で正常復帰せず、誤ってcontinue markerを作った場合やtimeoutでもpairをterminal failureとして閉じてCAM-Bを開かない。実process終了時はterminal pair eventがない状態を意図的に残し、再起動後の`report --run-id`だけが匿名recovery summaryを生成する。
 
 ## P0判定
 

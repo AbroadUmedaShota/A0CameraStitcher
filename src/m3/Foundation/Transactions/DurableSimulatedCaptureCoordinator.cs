@@ -78,6 +78,10 @@ public sealed class DurableSimulatedCaptureCoordinator
                 var journal = await LoadJournalAtPathAsync(journalPath, cancellationToken).ConfigureAwait(false);
                 if (IsTerminal(journal.State))
                 {
+                    if (journal.State == SimulatedTransactionState.FailedPartial)
+                    {
+                        recovered.Add(journal);
+                    }
                     continue;
                 }
 
@@ -109,38 +113,41 @@ public sealed class DurableSimulatedCaptureCoordinator
         }
     }
 
-    public async Task<SimulatedTransactionJournal> ExecuteAsync(
+    public async Task<SimulatedTransactionJournal> RecordLiveViewStopFailureAsync(
         Guid transactionId,
-        SimulatedCrashPoint crashPoint = SimulatedCrashPoint.None,
         CancellationToken cancellationToken = default)
     {
-        if (transactionId == Guid.Empty)
-        {
-            throw new ArgumentException("A non-empty transaction ID is required.", nameof(transactionId));
-        }
+        ValidateTransactionId(transactionId);
 
         await _transactionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             using var rootLease = AcquireRootLease();
-            if (File.Exists(GetJournalPath(transactionId)))
-            {
-                throw new InvalidOperationException("An existing transaction cannot be resumed or retried.");
-            }
+            EnsureTransactionCanStart(transactionId);
 
-            if (Directory.Exists(GetTransactionDirectory(transactionId)) &&
-                Directory.EnumerateFileSystemEntries(
-                    GetTransactionDirectory(transactionId),
-                    "*",
-                    SearchOption.AllDirectories).Any())
-            {
-                throw new InvalidOperationException("A transaction with diagnostic remnants cannot be resumed or retried.");
-            }
+            var journal = CreateJournal(transactionId);
+            await SaveJournalAsync(journal, cancellationToken).ConfigureAwait(false);
+            await MarkFailedPartialAsync(journal, "LiveViewStopFailed").ConfigureAwait(false);
+            return journal;
+        }
+        finally
+        {
+            _transactionGate.Release();
+        }
+    }
 
-            if (HasUnresolvedTransaction())
-            {
-                throw new InvalidOperationException("An incomplete transaction must be closed by InitializeAsync before a new transaction starts.");
-            }
+    public async Task<SimulatedTransactionJournal> ExecuteAsync(
+        Guid transactionId,
+        SimulatedCrashPoint crashPoint = SimulatedCrashPoint.None,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTransactionId(transactionId);
+
+        await _transactionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var rootLease = AcquireRootLease();
+            EnsureTransactionCanStart(transactionId);
 
             var journal = CreateJournal(transactionId);
             await SaveJournalAsync(journal, cancellationToken).ConfigureAwait(false);
@@ -409,6 +416,36 @@ public sealed class DurableSimulatedCaptureCoordinator
         }
 
         return false;
+    }
+
+    private void EnsureTransactionCanStart(Guid transactionId)
+    {
+        if (File.Exists(GetJournalPath(transactionId)))
+        {
+            throw new InvalidOperationException("An existing transaction cannot be resumed or retried.");
+        }
+
+        if (Directory.Exists(GetTransactionDirectory(transactionId)) &&
+            Directory.EnumerateFileSystemEntries(
+                GetTransactionDirectory(transactionId),
+                "*",
+                SearchOption.AllDirectories).Any())
+        {
+            throw new InvalidOperationException("A transaction with diagnostic remnants cannot be resumed or retried.");
+        }
+
+        if (HasUnresolvedTransaction())
+        {
+            throw new InvalidOperationException("An incomplete transaction must be closed by InitializeAsync before a new transaction starts.");
+        }
+    }
+
+    private static void ValidateTransactionId(Guid transactionId)
+    {
+        if (transactionId == Guid.Empty)
+        {
+            throw new ArgumentException("A non-empty transaction ID is required.", nameof(transactionId));
+        }
     }
 
     private IEnumerable<string> EnumerateTransactionDirectories()

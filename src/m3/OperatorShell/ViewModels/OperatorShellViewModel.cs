@@ -131,7 +131,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _safetyAcknowledged, value))
             {
                 OnPropertyChanged(nameof(SafetyAckText));
-                RebuildReadiness();
+                RebuildReadiness(preserveOutcomeState: UiState == OperatorUiState.FailedPartial);
             }
         }
     }
@@ -237,7 +237,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 ApplyCaptureResult(recovered[^1]);
                 UiState = OperatorUiState.FailedPartial;
-                StatusMessage = $"未完了transaction {recovered.Count}件をFailedPartialへ確定しました。保持原画像を確認してください。";
+                StatusMessage = $"FailedPartial transaction {recovered.Count}件を検出しました。同じtransactionは再開しません。";
             }
             else
             {
@@ -258,7 +258,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         SafetyAcknowledged = true;
         StatusMessage = "排他使用へ同意しました。readinessを確認しました。";
-        RebuildReadiness();
+        RebuildReadiness(preserveOutcomeState: UiState == OperatorUiState.FailedPartial);
     }
 
     private void DeclineSafety()
@@ -293,11 +293,13 @@ public sealed class OperatorShellViewModel : ObservableObject
             SetStep("liveview", "current");
             if (scenario == "Live View停止失敗")
             {
-                SetStep("liveview", "failure");
-                CaptureResult = "撮影前に失敗（シャッター未実行）";
-                _captureOutcome = new CaptureOutcome(transactionId, SimulatedTransactionState.FailedPartial, [], CaptureResult, "LiveViewStopFailed", DateTimeOffset.Now);
+                var liveViewFailure = await _transactionService.ExecuteAsync(
+                    transactionId,
+                    SimulatedWorkflowScenario.FailLiveViewStop,
+                    _lifetimeToken).ConfigureAwait(true);
+                ApplyCaptureResult(liveViewFailure);
                 UiState = OperatorUiState.FailedPartial;
-                TechnicalDetail = "error code: LiveViewStopFailed / capture calls: 0";
+                TechnicalDetail = $"error code: {liveViewFailure.TerminalReason} / capture calls: 0 / automatic retry count: {liveViewFailure.AutomaticRetryCount}";
                 StatusMessage = "Live Viewを安全に停止できなかったため、シャッターを切らず終了しました。";
                 return;
             }
@@ -454,6 +456,12 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void ApplyProgressFromResult(SimulatedWorkflowState result)
     {
+        if (string.Equals(result.TerminalReason, "LiveViewStopFailed", StringComparison.Ordinal))
+        {
+            SetStep("liveview", "failure");
+            return;
+        }
+
         SetStep("liveview", "completed");
         if (result.RetainedOriginalAliases.Contains("CAM-A"))
         {

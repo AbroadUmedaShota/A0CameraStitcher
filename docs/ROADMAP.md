@@ -11,7 +11,7 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 | オフラインpre-gate M2P | Active | synthetic画像の測定値を上限付き補正判定へ接続 |
 | simulated統合 M3P | software-only完了 | 実Camera Agentとの差分を維持し、実機合格へ読み替えない |
 | 一台・物理撮影 M1A | Operator Deferred | 明示再開とempty spool確認後にone-shot 1/1から開始 |
-| 二台 Phase 0 M1B | Waiting Hardware | 二台目D810と`HG-0003B` |
+| 二台 Phase 0 M1B | Binding In Progress | CAM-B identity-v2 checkpoint済み。pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断CLIを実装し、dual identity未Ready時はcard/capture前停止。fake安全契約合格。CAM-A SDK/WPD v2再登録待ち |
 | 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/0002/0003B/0005`と先行実機証拠 |
 
 現在の詳細は[CURRENT_STATUS.md](CURRENT_STATUS.md)、機能単位の検証キューは[FEATURE_VERIFICATION_PLAN.md](FEATURE_VERIFICATION_PLAN.md)を正本とする。
@@ -22,7 +22,7 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 2. `WI-0022C`: synthetic shift/rotation/scale/exposure/color測定とbounded decisionの接続
 3. M3 simulatedと将来の実Camera Agentとの差分・journal強化
 4. 操作者がカード作業を明示再開した場合だけM1A one-shot
-5. 二台目入手後にM1B
+5. CAM-A/B cross-transport binding後にM1B実機pair
 6. `HG-0001/0002`承認後に実M2、続いてM3/M4
 
 ## M0: D810/SDK安全基盤
@@ -40,7 +40,7 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 
 ## M1N: D810一台・非破壊検証
 
-- `CAM-A`のSDK/WPD匿名inventoryと電源再投入後のPnP identity continuity
+- `CAM-A`のSDK/WPD匿名inventory。物理電源再投入continuityの追加実行は2026-08-09判断でN/A
 - SDK status、Live View状態、JPEG/露出/ISO/WB/focus capabilityのreadback
 - 撮影設定capabilityへのwrite、capture、Live View開始、WPD、deleteがないことをnative command traceで検証
 
@@ -62,14 +62,14 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 - fake CAM-A/Bによるdurable transaction、片側失敗、crash/restart
 - 全画面に`SIMULATED / 実機未接続`と`NO AUTO RETRY`を表示するWPF shell
 
-実装状態: Release build警告0、Foundation契約11/11、一括shell検証がsoftware-only合格。起動同意、readinessと操作可否、設置三状態、共通結果、失敗復旧、保守タブを実装した。実WPF accessibility walkthrough、実C++ Camera Agent、D810、WPD/SDK、実JPEG、MVP合格とは分離する。
+実装状態: Release build警告0、Foundation契約13/13、Operator Shell契約1/1、一括shell検証がsoftware-only合格。起動同意、readinessと操作可否、設置三状態、共通結果、Live View停止前durable failure、失敗復旧、保守タブを実装した。CAM-A→CAM-B simulated pairは100/100合格した。実WPF accessibility walkthrough、実C++ Camera Agent、D810、WPD/SDK、実JPEG、MVP合格とは分離する。
 
 ## M1A: D810一台・物理撮影 Phase 0
 
 - 明示再開後、専用empty/cleared cardでone-shot 1/1
 - 合格後に10/10 capture/recovery/delete/empty-after
 - Live View handoff 10回
-- USB切断、電源断、アプリ再起動からの新規transaction復旧
+- USB切断、software process再起動からの新規transaction復旧（物理power-cycle/power-off復旧は2026-08-09判断でN/A）
 
 現在: 操作者の指示で保留中。接続中cardは最後のread-only証拠で90 payload objectだった。カード交換または手動backup/clearの報告があるまで、`spool-status`を含め再実行しない。
 
@@ -80,7 +80,7 @@ MVP全体は`in-progress`である。空カードが必要なM1Aだけを`Deferr
 - `CAM-A → CAM-B`順次transaction 10件
 - 100/100、二台異常系、最終transport判断
 
-現在: 二台目D810と`HG-0003B`待ち。
+現在: D810 PnP/SDK/WPD各2台、read-only inventory、実機`hybrid-capture-pair` software contractを確認済み。CAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、100組集計、p50/p95/max匿名時間統計、CAM-A後の途中停止recovery診断がSDK有無各CTest 5/5で合格した。旧SDK source-ID mapは無効化してdocumented MAID Source `Name`/`Interface` identity-v2へ修正し、WPDもPnP IDから本体報告serial identity-v2へ強化した。現在はfirmware V1.11個体のCAM-B checkpoint。物理power-cycle/rebootと実power-off復旧はN/A。履歴上V1.14の元CAM-A本体だけへ交換後に別個体判定、CAM-A登録、接続順・port確認、二台readiness、1/10/100 pairへ進む。
 
 ## M2: 実リグ・オフライン合成PoC
 

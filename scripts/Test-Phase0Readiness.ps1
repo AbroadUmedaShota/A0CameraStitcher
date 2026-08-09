@@ -56,6 +56,14 @@ $cliExit = $null
 $sdkInventoryReady = $false
 $sdkInventoryExit = $null
 $sdkCameraCount = 0
+$sdkBoundCameraCount = 0
+$sdkUnboundCameraCount = 0
+$wpdInventoryReady = $false
+$wpdInventoryExit = $null
+$wpdCameraCount = 0
+$wpdBoundCameraCount = 0
+$wpdUnboundCameraCount = 0
+$identityBindingsReady = $false
 if ($cliPresent -and $sdkRootReady) {
     $previousSdkRoot = $env:NIKON_D810_SDK_ROOT
     try {
@@ -69,9 +77,29 @@ if ($cliPresent -and $sdkRootReady) {
             foreach ($line in $inventoryOutput) {
                 if ($line -match '^CameraCount:\s*(\d+)\s*$') {
                     $sdkCameraCount = [int]$Matches[1]
+                } elseif ($line -match '^BoundCameraCount:\s*(\d+)\s*$') {
+                    $sdkBoundCameraCount = [int]$Matches[1]
+                } elseif ($line -match '^UnboundCameraCount:\s*(\d+)\s*$') {
+                    $sdkUnboundCameraCount = [int]$Matches[1]
                 }
             }
-            $sdkInventoryReady = $sdkInventoryExit -eq 0 -and $sdkCameraCount -ge $requiredBodies
+            $sdkInventoryReady = $sdkInventoryExit -eq 0 -and $sdkCameraCount -eq $requiredBodies
+
+            $inventoryOutput = @(& $phase0Exe inventory --transport wpd 2>&1)
+            $wpdInventoryExit = $LASTEXITCODE
+            foreach ($line in $inventoryOutput) {
+                if ($line -match '^CameraCount:\s*(\d+)\s*$') {
+                    $wpdCameraCount = [int]$Matches[1]
+                } elseif ($line -match '^BoundCameraCount:\s*(\d+)\s*$') {
+                    $wpdBoundCameraCount = [int]$Matches[1]
+                } elseif ($line -match '^UnboundCameraCount:\s*(\d+)\s*$') {
+                    $wpdUnboundCameraCount = [int]$Matches[1]
+                }
+            }
+            $wpdInventoryReady = $wpdInventoryExit -eq 0 -and $wpdCameraCount -eq $requiredBodies
+            $identityBindingsReady = $sdkInventoryReady -and $wpdInventoryReady -and
+                $sdkBoundCameraCount -eq $requiredBodies -and $sdkUnboundCameraCount -eq 0 -and
+                $wpdBoundCameraCount -eq $requiredBodies -and $wpdUnboundCameraCount -eq 0
         }
     } finally {
         $env:NIKON_D810_SDK_ROOT = $previousSdkRoot
@@ -90,20 +118,36 @@ $checks = [ordered]@{
     LicensedAdapterPreflight = $cliReady
     LicensedSdkInventory = $sdkInventoryReady
     LicensedSdkCameraCount = $sdkCameraCount
+    LicensedSdkBoundCameraCount = $sdkBoundCameraCount
+    LicensedSdkUnboundCameraCount = $sdkUnboundCameraCount
+    WpdInventory = $wpdInventoryReady
+    WpdCameraCount = $wpdCameraCount
+    WpdBoundCameraCount = $wpdBoundCameraCount
+    WpdUnboundCameraCount = $wpdUnboundCameraCount
+    CrossTransportIdentityBindings = $identityBindingsReady
     MatchingD810PnpNodes = $d810Nodes.Count
     RequiredCameraBodies = $requiredBodies
 }
 
 [pscustomobject]$checks | Format-List
 
-$ready = $checks.WindowsX64 -and $checks.MsvcX64 -and $checks.CMake -and
+$inventoryReady = $checks.WindowsX64 -and $checks.MsvcX64 -and $checks.CMake -and
     $checks.SdkRootPresent -and $checks.Phase0CliPresent -and $checks.LicensedAdapterPreflight -and
-    $checks.LicensedSdkInventory
+    $checks.LicensedSdkInventory -and $checks.WpdInventory -and
+    $checks.MatchingD810PnpNodes -eq $checks.RequiredCameraBodies
+$ready = $inventoryReady -and $checks.CrossTransportIdentityBindings
 
 if ($ready) {
     Write-Output 'Phase0Preflight: READY'
-    Write-Output 'Required physical body count was confirmed by the licensed SDK inventory.'
+    Write-Output 'Required physical body count and explicit SDK/WPD identity bindings were confirmed.'
     exit 0
+}
+
+if ($inventoryReady) {
+    Write-Output 'Phase0Preflight: READY_FOR_IDENTITY_BINDING'
+    Write-Output 'Required bodies were enumerated, but explicit one-body-at-a-time SDK/WPD bindings are incomplete.'
+    Write-Output 'Inventory is read-only and does not assign CAM-A/B from enumeration order.'
+    exit 2
 }
 
 Write-Output 'Phase0Preflight: BLOCKED'

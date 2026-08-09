@@ -15,6 +15,7 @@ function Assert-Condition {
 try {
     $solutionPath = Join-Path $RepositoryRoot 'A0CameraStitcher.M3.slnx'
     $foundationTestExecutable = Join-Path $RepositoryRoot "tests/m3/FoundationTests/bin/$Configuration/net10.0/A0CameraStitcher.M3.FoundationTests.exe"
+    $operatorShellTestExecutable = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.M3.OperatorShellTests.exe"
     $shellProject = Join-Path $RepositoryRoot 'src/m3/OperatorShell/A0CameraStitcher.M3.OperatorShell.csproj'
     $windowPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml'
     $viewModelPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs'
@@ -26,7 +27,12 @@ try {
     Assert-Condition (Test-Path -LiteralPath $foundationTestExecutable -PathType Leaf) 'M3 foundation test executable was not produced by the solution build.'
     $testOutput = & $foundationTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 foundation tests failed: $($testOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 11/11 passed.')) 'M3 foundation test summary is missing or incomplete.'
+    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 13/13 passed.')) 'M3 foundation test summary is missing or incomplete.'
+
+    Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
+    $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
+    Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 1/1 passed.')) 'M3 operator shell test summary is missing or incomplete.'
 
     [xml]$shellProjectXml = Get-Content -Raw -LiteralPath $shellProject
     Assert-Condition ($shellProjectXml.Project.PropertyGroup.TargetFramework -eq 'net10.0-windows') 'Operator shell must target net10.0-windows.'
@@ -47,6 +53,7 @@ try {
     Assert-Condition ($viewModelText.Contains('OperatorActionAvailability')) 'Operator actions must be controlled by one availability contract.'
     Assert-Condition ($viewModelText.Contains('TransactionStartCount++')) 'Capture start count must be observable for duplicate-start validation.'
     Assert-Condition ($viewModelText.Contains('SimulatedWorkflowScenario')) 'Diagnostic capture failures must remain routed through the simulated facade.'
+    Assert-Condition ($viewModelText.Contains('SimulatedWorkflowScenario.FailLiveViewStop')) 'Live View stop failure must remain routed through the durable simulated transaction facade.'
     Assert-Condition ($windowText.Contains('AutomationProperties.LiveSetting="Assertive"')) 'Blocking and result announcements must expose an assertive accessibility live region.'
     Assert-Condition (-not $viewModelText.Contains('DllImport')) 'Operator shell must not invoke native camera APIs.'
 

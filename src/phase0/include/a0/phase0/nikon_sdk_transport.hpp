@@ -6,6 +6,13 @@
 
 namespace a0::phase0 {
 
+// Derives the private SDK-side identity from documented, source-level MAID
+// strings. The returned digest is local-only and must never be committed.
+// Source object IDs are deliberately excluded because they are ephemeral.
+[[nodiscard]] std::string DeriveNikonSdkStableIdentity(
+    std::string_view source_name,
+    std::string_view source_interface);
+
 class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport, public ICardCaptureTransport {
 public:
     NikonSdkTransport();

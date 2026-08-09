@@ -42,8 +42,10 @@ public:
     [[nodiscard]] static bool IsSafeName(std::string_view value) noexcept;
     [[nodiscard]] const std::filesystem::path& ReadyPath() const noexcept;
     [[nodiscard]] std::filesystem::path AwaitContinue(std::ostream& output);
+    [[noreturn]] void AwaitProcessTermination(std::ostream& output);
 
 private:
+    void PublishReady(std::ostream& output, std::string_view instruction);
     std::filesystem::path gate_directory_;
     std::filesystem::path ready_path_;
     std::filesystem::path continue_path_;
@@ -250,7 +252,8 @@ class IdentityMap {
 public:
     explicit IdentityMap(std::filesystem::path path);
     [[nodiscard]] std::optional<std::string> FindAlias(std::string_view stable_identity) const;
-    [[nodiscard]] std::string AssignNext(std::string_view stable_identity);
+    void ValidateBinding(std::string_view alias, std::string_view stable_identity) const;
+    void Bind(std::string_view alias, std::string_view stable_identity);
     [[nodiscard]] const std::filesystem::path& Path() const noexcept;
 
 private:
@@ -260,6 +263,88 @@ private:
     std::optional<std::string> cam_a_;
     std::optional<std::string> cam_b_;
 };
+
+struct AnonymousInventoryEntry {
+    std::string alias{"UNBOUND"};
+    std::string model;
+    std::string firmware;
+    std::string shooting_mode;
+};
+
+struct AnonymousInventorySummary {
+    std::vector<AnonymousInventoryEntry> cameras;
+    std::size_t bound_camera_count{0};
+    std::size_t unbound_camera_count{0};
+};
+
+[[nodiscard]] AnonymousInventorySummary SummarizeInventoryReadOnly(
+    const IdentityMap& map,
+    const std::vector<CameraInfo>& cameras);
+[[nodiscard]] CameraInfo SelectSingleCameraForBinding(const std::vector<CameraInfo>& cameras);
+struct CrossTransportBindingSelection {
+    CameraInfo sdk_camera;
+    CameraInfo wpd_camera;
+};
+[[nodiscard]] CrossTransportBindingSelection BindCrossTransportIdentity(
+    IdentityMap& sdk_map,
+    IdentityMap& wpd_map,
+    std::string_view alias,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras);
+
+struct DualIdentityVerificationSummary {
+    std::size_t sdk_camera_count{};
+    std::size_t sdk_cam_a_count{};
+    std::size_t sdk_cam_b_count{};
+    std::size_t sdk_unbound_count{};
+    std::size_t wpd_camera_count{};
+    std::size_t wpd_cam_a_count{};
+    std::size_t wpd_cam_b_count{};
+    std::size_t wpd_unbound_count{};
+    bool identity_maps_changed{};
+    bool capture_command_sent{};
+    bool live_view_started{};
+    bool camera_settings_changed{};
+    bool card_access_performed{};
+    bool real_identifiers_included{};
+    std::string terminal_state{"Blocked"};
+    std::string failure_category;
+};
+[[nodiscard]] DualIdentityVerificationSummary VerifyDualIdentityBindings(
+    const IdentityMap& sdk_map,
+    const IdentityMap& wpd_map,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras);
+[[nodiscard]] std::filesystem::path PersistDualIdentityVerificationSummary(
+    const std::filesystem::path& artifacts_root,
+    std::string_view run_id,
+    const DualIdentityVerificationSummary& summary);
+
+struct DualSpoolVerificationSummary {
+    DualIdentityVerificationSummary identity;
+    std::size_t cam_a_payload_object_count{};
+    std::size_t cam_b_payload_object_count{};
+    std::size_t wpd_sessions_closed{};
+    bool read_only_observation{true};
+    bool card_inspection_performed{};
+    bool capture_command_sent{};
+    bool camera_delete_attempted{};
+    bool vendor_operation_executed{};
+    bool automatic_retry{};
+    bool real_identifiers_included{};
+    std::string terminal_state{"Blocked"};
+    std::string failure_category;
+};
+[[nodiscard]] DualSpoolVerificationSummary PrepareDualSpoolVerification(
+    const DualIdentityVerificationSummary& identity);
+void FinalizeDualSpoolVerification(
+    DualSpoolVerificationSummary& summary,
+    std::size_t cam_a_payload_object_count,
+    std::size_t cam_b_payload_object_count);
+[[nodiscard]] std::filesystem::path PersistDualSpoolVerificationSummary(
+    const std::filesystem::path& artifacts_root,
+    std::string_view run_id,
+    const DualSpoolVerificationSummary& summary);
 
 struct FrameEvidence {
     bool success{false};
@@ -337,6 +422,63 @@ struct HybridCaptureRunSummary {
     bool exact_object_delete_confirmed{false};
 };
 
+struct HybridPairResult {
+    std::string run_id;
+    std::string pair_id;
+    std::string terminal_state{"FailedPartial"};
+    std::string error_category;
+    std::string error_detail;
+    TransactionResult cam_a;
+    TransactionResult cam_b;
+    bool cam_b_started{false};
+    bool automatic_retry{false};
+    std::chrono::milliseconds duration{0};
+};
+
+struct HybridPairRunSummary {
+    int requested_pairs{0};
+    int attempted_pairs{0};
+    int completed_pairs{0};
+    int failures{0};
+    int cam_a_completed_count{0};
+    int cam_b_completed_count{0};
+    int attempted_camera_transactions{0};
+    int completed_camera_transactions{0};
+    int spool_empty_before_count{0};
+    int camera_card_delete_attempted_count{0};
+    int camera_card_delete_succeeded_count{0};
+    int spool_empty_after_count{0};
+    int duration_sample_count{0};
+    std::int64_t pair_duration_p50_ms{0};
+    std::int64_t pair_duration_p95_ms{0};
+    std::int64_t pair_duration_max_ms{0};
+    std::string terminal_state{"InProgress"};
+    std::string last_pair_state;
+    std::string last_error_category;
+    std::string last_error_detail;
+    bool automatic_retry{false};
+    bool exclusive_camera_control_confirmed{false};
+    bool dedicated_spool_scope_confirmed{false};
+    bool dual_dedicated_spools_confirmed{false};
+    bool exact_object_delete_confirmed{false};
+    bool actual_shutter_synchronization_guaranteed{false};
+    int pair_watchdog_seconds{180};
+};
+
+struct HybridPairRecoveryStatus {
+    int pair_started_count{0};
+    int pair_complete_count{0};
+    int pair_failed_count{0};
+    bool interrupted_pair_detected{false};
+    std::string interrupted_stage;
+    bool cam_a_complete_before_interruption{false};
+    bool retain_completed_originals{true};
+    bool automatic_retry_allowed{false};
+    bool recovery_requires_new_transaction{false};
+    bool event_sequence_consistent{true};
+    std::string terminal_state{"NoPairEvents"};
+};
+
 struct HybridFaultRunSummary {
     std::string scenario;
     std::string gate_stage{"after_sdk_close_before_wpd_recovery"};
@@ -350,12 +492,30 @@ struct HybridFaultRunSummary {
     bool recovery_requires_new_transaction{true};
 };
 
+struct HybridPairFaultRunSummary {
+    std::string scenario;
+    std::string fault_camera_alias;
+    std::string gate_stage{"after_sdk_close_before_wpd_recovery"};
+    std::string pair_state;
+    std::string error_category;
+    std::string acceptance_state{"InProgress"};
+    bool cam_b_started{false};
+    bool cam_a_original_persisted{false};
+    bool cam_b_original_persisted{false};
+    bool cam_a_delete_attempted{false};
+    bool cam_b_delete_attempted{false};
+    bool automatic_retry{false};
+    bool recovery_requires_new_transaction{true};
+    bool actual_shutter_synchronization_guaranteed{false};
+};
+
 [[nodiscard]] std::optional<std::string> ValidateHybridCaptureArguments(
     std::string_view command,
     int count,
     bool exclusive_camera_control_confirmed,
     bool dedicated_spool_scope_confirmed,
-    bool exact_object_delete_confirmed) noexcept;
+    bool exact_object_delete_confirmed,
+    bool dual_dedicated_spools_confirmed = false) noexcept;
 
 [[nodiscard]] std::filesystem::path PersistSdkStatusSummary(
     const std::filesystem::path& artifacts_root,
@@ -384,6 +544,10 @@ struct HybridFaultRunSummary {
     std::string_view run_id,
     std::string_view camera_alias,
     const HybridFaultRunSummary& status);
+[[nodiscard]] std::filesystem::path PersistHybridPairFaultSummary(
+    const std::filesystem::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairFaultRunSummary& status);
 [[nodiscard]] std::optional<std::string> ValidateWpdCorrelationArguments(
     std::string_view command,
     bool samples_explicit,
@@ -477,6 +641,16 @@ private:
     std::string_view run_id,
     std::string_view camera_alias,
     const HybridCaptureRunSummary& result);
+[[nodiscard]] std::filesystem::path PersistHybridPairSummary(
+    const std::filesystem::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairRunSummary& result);
+[[nodiscard]] HybridPairRecoveryStatus AssessHybridPairRecoveryEventLog(
+    const std::filesystem::path& event_log);
+[[nodiscard]] std::filesystem::path PersistHybridPairRecoverySummary(
+    const std::filesystem::path& artifacts_root,
+    std::string_view run_id,
+    const HybridPairRecoveryStatus& status);
 [[nodiscard]] TransactionResult ExecuteHybridCaptureOnce(
     ICameraTransport& wpd_session,
     IPostCardObservationTransport& wpd,
@@ -488,7 +662,25 @@ private:
     std::string_view sdk_identity,
     Timeouts timeouts = {},
     const std::function<void()>& before_wpd_recovery = {},
-    const std::function<void()>& before_pc_original_rename = {});
+    const std::function<void()>& before_pc_original_rename = {},
+    std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt);
+[[nodiscard]] HybridPairResult ExecuteHybridCapturePair(
+    ICameraTransport& wpd_session,
+    IPostCardObservationTransport& wpd,
+    ICameraTransport& sdk_session,
+    ICardCaptureTransport& sdk,
+    EvidenceWriter& evidence,
+    std::string_view cam_a_wpd_identity,
+    std::string_view cam_a_sdk_identity,
+    std::string_view cam_b_wpd_identity,
+    std::string_view cam_b_sdk_identity,
+    Timeouts timeouts = {},
+    const std::function<void()>& before_cam_b = {},
+    const std::function<void()>& before_cam_a_wpd_recovery = {},
+    const std::function<void()>& before_cam_b_wpd_recovery = {});
+[[nodiscard]] HybridPairRunSummary ExecuteHybridPairRun(
+    int requested_pairs,
+    const std::function<HybridPairResult()>& capture_pair_once);
 
 [[nodiscard]] std::string NewRunId();
 [[nodiscard]] std::filesystem::path DefaultIdentityMapPath();

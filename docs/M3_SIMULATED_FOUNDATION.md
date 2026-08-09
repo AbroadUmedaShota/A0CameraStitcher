@@ -44,6 +44,6 @@ pwsh -NoProfile -File .\scripts\Test-M3Simulated.ps1
 dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Debug
 ```
 
-契約試験はprotocol serialization／拒否、実Named Pipe round-trip、順次成功、片側失敗と原本保持、no-retry、crash/restart、別coordinator排他、残留partial回復に加え、起動同意、補正三状態、全Blocker、active transaction中の操作ロックを検証する。一括scriptはsolution build、11/11 test、WPFのtarget／依存、常設banner、警告とaccessibility live region、no-auto-retry表示、simulation flag拒否を確認する。
+契約試験はprotocol serialization／拒否、実Named Pipe round-trip、順次成功、CAM-A→CAM-B 100/100、片側失敗と原本保持、Live View停止前durable failure、no-retry、crash/restart、別coordinator排他、残留partial回復に加え、起動同意、補正三状態、全Blocker、active transaction中の操作ロックを検証する。一括scriptはsolution build、Foundation 13/13、Operator Shell 1/1、WPFのtarget／依存、常設banner、警告とaccessibility live region、no-auto-retry表示、simulation flag拒否を確認する。
 
 WPF shellでは正常、Live View停止、CAM-A/B撮影、cleanup、合成、Live View再開、CAM-A保存後の擬似crashを診断シナリオとして確認できる。Live View欄は一台選択式placeholderで、原画像や合成入力ではない。Windows UI Automationで連続二回Invoke時のtransaction一件、明示保存一件、新規撮影準備後のReady復帰を確認済み。screen reader、キーボード、focus walkthroughは未実施である。

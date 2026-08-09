@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "phase0.dual-identity-verification-summary.v1",
+  "runId": "run-1786184898081-1",
+  "sdkCameraCount": 1,
+  "sdkCamACount": 0,
+  "sdkCamBCount": 1,
+  "sdkUnboundCount": 0,
+  "wpdCameraCount": 1,
+  "wpdCamACount": 0,
+  "wpdCamBCount": 1,
+  "wpdUnboundCount": 0,
+  "identityMapsChanged": false,
+  "captureCommandSent": false,
+  "liveViewStarted": false,
+  "cameraSettingsChanged": false,
+  "cardAccessPerformed": false,
+  "realIdentifiersIncluded": false,
+  "terminalState": "Blocked",
+  "failureCategory": "camera_count_mismatch"
+}

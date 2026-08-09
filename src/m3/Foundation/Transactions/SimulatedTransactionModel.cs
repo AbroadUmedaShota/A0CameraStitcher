@@ -29,6 +29,7 @@ public enum SimulatedCrashPoint
 public enum SimulatedWorkflowScenario
 {
     Success,
+    FailLiveViewStop,
     FailCaptureA,
     FailCaptureB,
     CrashAfterPersistA,
@@ -49,6 +50,8 @@ public sealed record SimulatedWorkflowState
     public required IReadOnlyList<string> RetainedOriginalAliases { get; init; }
 
     public required string? TerminalReason { get; init; }
+
+    public required int AutomaticRetryCount { get; init; }
 }
 
 public interface ISimulatedTransactionService

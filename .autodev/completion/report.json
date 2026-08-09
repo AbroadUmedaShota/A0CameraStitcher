@@ -1,6 +1,6 @@
 {
   "schema_version": "autodev.completion-report.v1",
-  "evaluated_at": "2026-08-07T04:33:03+09:00",
+  "evaluated_at": "2026-08-09T00:00:00+09:00",
   "completion_state": "in-progress",
   "automatable_gaps": [
     "WI-0010A must add a traceable native SDK boundary proving the setting readback does not issue photographic-setting writes, capture, Live View start, WPD calls, or deletion",
@@ -10,7 +10,7 @@
   "blocking_gaps": [
     "the M1A hardware-capture lane is paused at the operator's request after three checks ending with read-only run-1786017282044-1 found the same 90 protected payload objects; do not repeat the check until a physical state change is reported, then require an explicit resume for one-shot hardware proof",
     "10 of 10, Phase 0A capture-path fault recovery, and ten hybrid handoffs remain incomplete",
-    "second D810 and same-body SDK/WPD alias binding are unavailable for Phase 0B",
+    "the former SDK CAM-A binding is invalid because it used an ephemeral MAID source object ID; CAM-B identity-v2 is bound as a one-body checkpoint, but CAM-A SDK v2 rebind, distinct-body, reconnect, port-swap, and dual-camera verification remain incomplete",
     "HG-0001 and HG-0002 block final M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
     "real Camera Agent integration, acceptance, redistribution, and release remain open"
   ],
@@ -21,7 +21,7 @@
     "vendor 0x9207, existing-card cleanup, recursive or bulk deletion, formatting, deletion before canonical PC verification, and cleanup retry remain unauthorized"
   ],
   "verified_hardware_evidence": [
-    "P0-A1 passed for the one-body configuration: run-1785917466375-1 records post-power-cycle CAM-A restoration through both SDK and WPD while excluding real identity and map hashes",
+    "run-1785917466375-1 retains WPD CAM-A continuity evidence, but its SDK continuity conclusion was invalidated on 2026-08-08 because the SDK map used an ephemeral MAID source object ID",
     "standalone CAM-A Live View passed for 304347 ms and 2424 frames in run-1785917554163-1 with stop, SDK close, and no preview persistence",
     "fresh-process Live View run-1785917887961-1 acquired one frame and closed cleanly; final run-1785917904556-1 confirmed Live View off and the SDK session closed",
     "2026-08-07 read-only SDK status run-1786036259996-1 resolved CAM-A with Live View off, prohibit mask zero, no setting change, and a closed session",
@@ -30,7 +30,10 @@
     "2026-08-07 CAM-A setting-readback run-1786040075194-1 recorded SDK-returned JPEG Fine, L 7360x4912, S, 1/6 second, aperture 8, ISO 64, WB Preset 1, and opaque focus value 1; FileType was not advertised, photographic-setting write/capture/Live View/WPD/delete were absent, control-plane CapSet possibility was disclosed, and the SDK session closed",
     "single-slot spool preflight run-1786014841232-1 detected 90 payload objects and ended FailedPartial with SDK open, shutter, PC save, delete, vendor operation, and retry all zero",
     "read-only spool-status run-1786015997366-1 reconfirmed 90 payload objects, closed WPD 1 of 1, and issued no capture, delete, or vendor operation",
-    "third blocked-audit run-1786017282044-1 again found 90 payload objects, closed WPD 1 of 1, and issued no capture, delete, or vendor operation"
+    "third blocked-audit run-1786017282044-1 again found 90 payload objects, closed WPD 1 of 1, and issued no capture, delete, or vendor operation",
+    "2026-08-08 dual binding readiness run-1786173508082-1 superseded run-1786172900488-1, counted exactly two D810 bodies through PnP, licensed SDK, and WPD, reported bound 0 and unbound 2 for both transports, quarantined the prior enumeration-order SDK map without reading identities, and left active maps absent; readiness now requires exact SDK, WPD, and PnP counts and rejects the connected dual state when Single is requested; capture, Live View, settings, and card access were not performed",
+    "2026-08-08 CAM-A binding run-1786177891666-1 was invalidated after a physical body swap made WPD report a new body while SDK falsely restored CAM-A; no capture or camera/card mutation had occurred",
+    "2026-08-08 CAM-B checkpoint run-1786178999538-1 quarantined the defective SDK map without reading it, changed SDK identity to a local-only digest of documented MAID Source Name and Interface with source object ID excluded, passed SDK-enabled and SDK-less CTest 5/5, explicitly bound the one connected CAM-B candidate in SDK/WPD, and reached Single READY; CAM-A swap-back, reconnect, and port-swap validation remain pending"
   ],
   "verified_software_evidence": [
     "2026-08-07T04:33:03+09:00 fresh SDK-enabled and SDK-less Debug native builds succeeded with the hybrid safeguards, read-only WPD correlation diagnostic, setup assessment, CLI safety boundary, and operator-session-wide lease; both CTest configurations passed 5/5",
@@ -44,20 +47,44 @@
     "controlled TransportError detail propagates into transaction and handoff evidence without generic exception disclosure",
     "WPD vendor-opcode query is isolated from capture/vendor-operation execution and publishes atomic anonymous evidence",
     "Live View and handoff summaries can be exported as anonymous reports",
-    "single readiness passed with one licensed SDK camera; dual readiness correctly blocked at one of two bodies",
+    "2026-08-08 SDK-enabled and SDK-less CTest each passed 5/5 after inventory was made read-only and every production auto-assignment call was removed; dual readiness reported two SDK and two WPD bodies but correctly stopped at READY_FOR_IDENTITY_BINDING",
+    "2026-08-08 run-1786182705745-1 added bind-cross-transport-identity: one operator-session lease, exactly one SDK projection fully closed before exactly one WPD projection, both local maps conflict-checked before either bind, and fail-closed contracts for zero/multiple cameras, same map path, missing confirmation, and explicit transport; the existing CAM-B hardware binding completed idempotently with no map change, capture, Live View, setting change, or card access; SDK-enabled and SDK-less CTest passed 5/5",
+    "2026-08-08 verify-dual-identity added durable anonymous proof requiring exactly two SDK and two WPD cameras with CAM-A and CAM-B each resolved once and unbound zero; count, unbound, and alias-cardinality failures stop before camera control; one-body hardware run-1786182987492-1 correctly recorded SDK/WPD count 1 and CAM-B count 1, then exited 5 with camera_count_mismatch and no map or camera/card mutation; SDK-enabled and SDK-less CTest passed 5/5",
+    "2026-08-08 verify-dual-spools added a read-only two-card gate that first requires dual identity Ready, then inspects CAM-A and CAM-B sequentially and permits the pair lane only when both aggregate payload counts are zero; non-empty, identity, and inspection failures do not capture, delete, format, execute vendor operations, or retry; one-body run-1786183481065-1 exited 5 as dual_identity_not_ready with card inspection false and WPD sessions zero; SDK-enabled and SDK-less CTest passed 5/5",
+    "2026-08-08 hybrid-capture-pair now invokes the common exact dual-identity gate before alias resolution, card access, or capture; a blocked attempt persists anonymous dual-identity evidence and exits 5 with no retry; SDK-enabled and SDK-less Release build and CTest passed 5/5; no real pair command was run while only CAM-B was connected",
+    "2026-08-08 hybrid-fault-pair added explicit CAM-A or CAM-B USB-disconnect and power-off gates after the selected body's SDK close and before its WPD recovery; common dual-identity and dual-spool confirmations are mandatory; fake contracts prove CAM-A faults stop before B and CAM-B faults retain A without a B original, B delete, or retry; anonymous pair-fault evidence and report export passed; SDK-enabled and SDK-less Release build and CTest passed 5/5; missing alias and missing dual-spool confirmation were rejected before camera open; real faults remain pending two-body readiness",
+    "2026-08-08 hybrid-interrupt-pair added the real two-body process-exit lane after CAM-A verified original and exact cleanup but before CAM-B; its dedicated gate cannot resume normally and rejects a continue marker or timeout while CAM-B remains unopened; restart report analysis retains CAM-A, prohibits retry, and requires a new transaction; fake gate and pair-boundary contracts passed, SDK-enabled and SDK-less Release build and CTest passed 5/5, and missing gate plus prohibited alias/scenario were rejected before camera open; real process interruption remains pending two-body readiness",
+    "2026-08-08 final read-only dual-identity refresh run-1786184898081-1 still found exactly one SDK and one WPD projection, both CAM-B, with CAM-A zero and unbound zero; it exited 5 as camera_count_mismatch without map mutation, capture, Live View, setting change, card access, or real identifiers; all two-body hardware tests remain blocked until the original CAM-A body is connected and bound",
+    "2026-08-09 operator decision HD-20260809-001 marks physical camera or PC power-cycle/reboot and real power-off recovery subtests N/A for Phase 0 pass/fail; USB disconnect, software-process restart and pair-boundary interruption, connection-order and USB-port checks, dual identity/spools, and 1/10/100 paired captures remain required; power-off CLI and fake safety contracts remain as regression protection",
+    "2026-08-08 run-1786174618989-1 added the guarded hybrid-capture-pair software contract for 1, 10, and 100 pairs: CAM-A then CAM-B under one 180-second pair deadline, A failure prevents B, B failure retains A's canonical original, retry and overlap are zero, dual dedicated spools require confirmation, and actual shutter synchronization is explicitly not guaranteed; pair faults prove CAM-A SDK close failure starts neither WPD recovery nor CAM-B, while CAM-B WPD recovery-open failure retains A without a B original, B cleanup, or retry; the shared aggregator passed 100/100 synthetic pairs and stopped exactly at a synthetic pair-6 CAM-B failure; anonymous summary v2 records attempted-pair nearest-rank p50/p95/max milliseconds as non-gating observations; recovery summary v1 distinguishes CAM-A active, after-A-before-B, and CAM-B active interruptions, preserves completed-original policy, requires a new transaction after interruption or terminal failure, and fails closed on inconsistent evidence; report generation holds the same operator-session lease so it cannot race an active evidence writer; SDK-enabled and SDK-less CTest passed 5/5 and CLI negative guards passed 4/4",
+    "2026-08-09 the third-party Phase 0 showcase packet and non-destructive verifier passed SDK-enabled and SDK-less Release builds and CTest 5/5 in both trees; it validates the curated anonymous software and one-camera evidence, reports SOFTWARE_CONTRACT_READY_HARDWARE_PENDING, explicitly reports real dual capture false and actual shutter synchronization not guaranteed, and executes no camera command",
     "M2P optical math, paired synthetic and damaged metric oracles, rig-profile positive/negative schema validation, and immutability checks passed independent review",
     "rig-profile schema 1.1 validates shape/type and keeps draft values null; runtime contracts validate supported version, provenance, time ordering, assessment-time expiry, and correction-envelope ordering",
     "SDK-enabled and SDK-less native CTest each passed 5 of 5; the setup-assessment contract covers structured profile status/version/provenance/time trust, ready, ready-auto-correction, physical-adjustment-required, hard blockers, invalid values, boundary equality, determinism, and input immutability",
     "SDK status summary v4 handles unsigned, packed-string, and fixed-string setting values with bounded parsing, explicit probe states, photographic-setting-write versus SDK control-plane disclosure, ASCII-safe JSON and CLI escaping, atomic persistence, redaction, and fail-closed serializer validation; independent review passed and native command-trace coverage remains open",
-    "M3P .NET 10 Release solution built with zero warnings; simulated protocol, real Named Pipe roundtrip, durable transaction, no-retry, cross-process ownership, and restart contracts passed 8/8",
+    "M3P .NET 10 Release solution built with zero warnings; Foundation contracts passed 13/13, Operator Shell contracts passed 1/1, and CAM-A to CAM-B durable simulated pairs passed 100/100 with both originals, ordered capture, and zero retry",
     "visibly simulated WPF operator shell validation passed; no real camera integration is claimed"
   ],
   "remaining_human_actions": ["HG-0001", "HG-0002", "HG-0003B", "HG-0005"],
+  "showcase_handoff": {
+    "document": "docs/PHASE0_SHOWCASE.md",
+    "verification_command": "pwsh -NoProfile -File .\\scripts\\Test-Phase0Showcase.ps1",
+    "state": "SOFTWARE_CONTRACT_READY_HARDWARE_PENDING",
+    "real_dual_capture_executed": false,
+    "actual_shutter_synchronization_guaranteed": false,
+    "latest_hardware_state": "ONE_CAM_B_CONNECTED"
+  },
   "environment_ready_handoff": {
     "reason_category": "hardware-data-safety",
     "requested_action": "Hardware capture work is paused at the operator's request. When ready, replace the connected card with a dedicated empty card, or manually back up and clear its 90 existing payload objects, then reconnect the D810.",
     "impact_if_unresolved": "WI-0012 one-shot, 10 of 10, WI-0013 fault recovery, and WI-0019 capture handoffs remain deferred; software-only and one-camera non-destructive verification may continue, and no existing object will be deleted by the tool.",
     "resume_signal": "Tell Codex that the dedicated card is empty and reconnected and that hardware capture testing may resume."
+  },
+  "dual_camera_binding_handoff": {
+    "reason_category": "hardware-identity-safety",
+    "requested_action": "Disconnect the currently bound CAM-B candidate and connect only the original intended CAM-A body, then tell Codex to continue.",
+    "impact_if_unresolved": "The new SDK identity cannot yet prove that CAM-A and CAM-B are distinct or restore CAM-A through identity v2, so dual readiness and all real pair tests remain unavailable.",
+    "resume_signal": "Tell Codex that CAM-B is disconnected and only CAM-A is connected."
   },
   "resolved_gate": {
     "gate_id": "HG-0008",

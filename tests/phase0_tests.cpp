@@ -5,6 +5,7 @@
 #include <portabledevice.h>
 
 #include "a0/phase0/fake_camera_transport.hpp"
+#include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 #include <atomic>
@@ -153,7 +154,7 @@ public:
     void Open(std::string_view identity, std::chrono::seconds) override {
         ++opens;
         order += "Wopen;";
-        if (fail_second_open && opens == 2) {
+        if ((fail_second_open && opens == 2) || (fail_open_number > 0 && opens == fail_open_number)) {
             throw TransportError("open_failed", "configured WPD reopen failure");
         }
         open = true;
@@ -208,6 +209,7 @@ public:
     bool open{false}; bool token_live{false}; int opens{}; int closes{}; int observes{}; int capture_commands{}; int abandons{};
     int spool_empty_before_checks{}; int spool_empty_after_checks{}; int delete_attempts{}; int delete_successes{}; std::string order;
     bool spool_empty_before{true}; bool spool_empty_after{true}; bool delete_fails{false}; bool fail_second_open{false};
+    int fail_open_number{};
     std::string expected_cleanup_token{"cleanup-capability"};
     std::vector<ImageCandidate> candidates{{"private-object-id.jpg", {0xFF, 0xD8, 0x01, 0xFF, 0xD9}, true, "cleanup-capability"}};
     std::string observe_error_category;
@@ -225,14 +227,24 @@ public:
     void Open(std::string_view, std::chrono::seconds) override { ++opens; open = true; order += "Sopen;"; }
     [[nodiscard]] std::string Baseline(std::chrono::seconds) override { return {}; }
     [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownload(std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) override { return {}; }
-    void Close(std::chrono::seconds) override { ++closes; open = false; order += "Sclose;"; if (close_fails_ && closes == 1) throw TransportError("close_failed", "SDK close failed"); }
+    void Close(std::chrono::seconds) override {
+        ++closes;
+        open = false;
+        order += "Sclose;";
+        if ((close_fails_ && closes == 1) || (fail_close_number > 0 && closes == fail_close_number)) {
+            throw TransportError("close_failed", "SDK close failed");
+        }
+    }
     void CaptureToCard(std::chrono::seconds, std::chrono::seconds) override {
         if (!open) throw TransportError("session_not_open", "SDK capture without open");
         ++captures; order += "Scapture;";
         if (capture_delay_ > std::chrono::milliseconds::zero()) std::this_thread::sleep_for(capture_delay_);
-        if (capture_fails_) throw TransportError("image_event_timeout", "configured SDK card-capture failure");
+        if (capture_fails_ || (fail_capture_number > 0 && captures == fail_capture_number)) {
+            throw TransportError("image_event_timeout", "configured SDK card-capture failure");
+        }
     }
-    bool open{false}; int opens{}; int closes{}; int captures{}; std::string order;
+    bool open{false}; int opens{}; int closes{}; int captures{}; int fail_capture_number{}; int fail_close_number{};
+    std::string order;
 private:
     bool close_fails_{};
     bool capture_fails_{};
@@ -950,12 +962,323 @@ void TestIdentityMap() {
     private_a.push_back('\x01');
     private_a.push_back(static_cast<char>(0x80));
     private_a += "-\\-\"";
-    Check(map.AssignNext(private_a) == "CAM-A", "first camera should become CAM-A");
-    Check(map.AssignNext("private-b") == "CAM-B", "second camera should become CAM-B");
+    map.Bind("CAM-A", private_a);
+    map.Bind("CAM-B", "private-b");
     IdentityMap reloaded(root / "camera-map.json");
     Check(reloaded.FindAlias(private_a) == "CAM-A",
         "CAM-A should survive reload after byte-safe JSON escaping");
     Check(reloaded.FindAlias("private-b") == "CAM-B", "CAM-B should survive reload");
+
+    IdentityMap explicit_map(root / "explicit-camera-map.json");
+    explicit_map.Bind("CAM-B", "explicit-private-b");
+    explicit_map.Bind("CAM-B", "explicit-private-b");
+    explicit_map.Bind("CAM-A", "explicit-private-a");
+    IdentityMap explicit_reloaded(root / "explicit-camera-map.json");
+    Check(explicit_reloaded.FindAlias("explicit-private-a") == "CAM-A",
+        "explicit CAM-A binding should survive reload");
+    Check(explicit_reloaded.FindAlias("explicit-private-b") == "CAM-B",
+        "explicit CAM-B binding should survive reload");
+
+    const auto rejected = [&](std::string_view alias, std::string_view identity) {
+        try {
+            explicit_reloaded.Bind(alias, identity);
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    };
+    Check(rejected("CAM-A", "replacement-private-a"), "binding must not replace an existing alias");
+    Check(rejected("CAM-B", "explicit-private-a"), "one identity must not bind to both aliases");
+    Check(rejected("CAM-C", "private-c"), "binding must reject an unsupported alias");
+    Check(rejected("CAM-A", ""), "binding must reject an empty identity");
+
+    const auto cameras = FakeCameraTransport().Enumerate();
+    const auto unbound_map_path = root / "read-only-inventory-map.json";
+    IdentityMap unbound_map(unbound_map_path);
+    const auto unbound_inventory = SummarizeInventoryReadOnly(unbound_map, cameras);
+    Check(unbound_inventory.cameras.size() == 2 && unbound_inventory.bound_camera_count == 0 &&
+              unbound_inventory.unbound_camera_count == 2,
+        "read-only inventory should report both unknown cameras as unbound");
+    Check(unbound_inventory.cameras[0].alias == "UNBOUND" &&
+              unbound_inventory.cameras[1].alias == "UNBOUND",
+        "read-only inventory must not infer aliases from enumeration order");
+    Check(!fs::exists(unbound_map_path), "read-only inventory must not create an identity map");
+
+    IdentityMap bound_inventory_map(root / "bound-inventory-map.json");
+    bound_inventory_map.Bind("CAM-B", cameras[1].stable_identity);
+    bound_inventory_map.Bind("CAM-A", cameras[0].stable_identity);
+    const auto bound_inventory = SummarizeInventoryReadOnly(bound_inventory_map, cameras);
+    Check(bound_inventory.bound_camera_count == 2 && bound_inventory.unbound_camera_count == 0,
+        "read-only inventory should recognize both explicit bindings");
+    Check(bound_inventory.cameras[0].alias == "CAM-A" && bound_inventory.cameras[1].alias == "CAM-B",
+        "read-only inventory should restore explicit aliases independently of registration order");
+    auto reversed_cameras = cameras;
+    std::reverse(reversed_cameras.begin(), reversed_cameras.end());
+    const auto reversed_inventory = SummarizeInventoryReadOnly(bound_inventory_map, reversed_cameras);
+    Check(reversed_inventory.bound_camera_count == 2 && reversed_inventory.unbound_camera_count == 0 &&
+              reversed_inventory.cameras[0].alias == "CAM-B" &&
+              reversed_inventory.cameras[1].alias == "CAM-A",
+        "explicit aliases must follow stable identities after the camera enumeration order reverses");
+
+    Check(SelectSingleCameraForBinding({cameras[0]}).stable_identity == cameras[0].stable_identity,
+        "one enumerated camera should be selectable for explicit binding");
+    const auto selection_rejected = [](const std::vector<CameraInfo>& candidates) {
+        try {
+            (void)SelectSingleCameraForBinding(candidates);
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    };
+    Check(selection_rejected({}), "binding must reject zero enumerated cameras");
+    Check(selection_rejected(cameras), "binding must reject multiple enumerated cameras");
+    fs::remove_all(root);
+}
+
+void TestProcessTerminationGateNeverContinues() {
+    const auto root = NewTestRoot("process-termination-gate");
+    OperatorGate gate(
+        root / "artifacts", "pair_boundary_exit", std::chrono::seconds(2),
+        "app-exit", "after-CAM-A-before-CAM-B");
+    std::ostringstream output;
+    std::thread prohibited_marker([&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!fs::exists(gate.ReadyPath()) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (fs::exists(gate.ReadyPath())) {
+            std::ofstream marker(gate.ReadyPath().parent_path() / "continue", std::ios::out);
+            marker << "prohibited\n";
+        }
+    });
+    try {
+        gate.AwaitProcessTermination(output);
+    } catch (const TransportError& error) {
+        Check(error.Category() == "operator_interruption_continue_marker",
+            "a process-termination gate must reject a continue marker instead of resuming");
+    }
+    prohibited_marker.join();
+    Check(output.str().find("terminate this Phase 0 process now") != std::string::npos &&
+              output.str().find("CAM-B must not start") != std::string::npos,
+        "a process-termination gate must publish an explicit non-resume instruction");
+    const auto ready = ReadAll(gate.ReadyPath());
+    Check(ready.find("\"scenario\": \"app-exit\"") != std::string::npos &&
+              ready.find("\"stage\": \"after-CAM-A-before-CAM-B\"") != std::string::npos,
+        "the interruption ready artifact must identify the pair boundary without camera identities");
+    fs::remove_all(root);
+}
+
+void TestNikonSdkStableIdentityUsesDocumentedSourceStrings() {
+    const auto first = DeriveNikonSdkStableIdentity("D810-body-a", "usb-interface-a");
+    const auto repeated = DeriveNikonSdkStableIdentity("D810-body-a", "usb-interface-a");
+    Check(first == repeated && first.size() == 64,
+        "documented MAID source strings should derive a deterministic private digest");
+    Check(first != DeriveNikonSdkStableIdentity("D810-body-b", "usb-interface-a") &&
+              first != DeriveNikonSdkStableIdentity("D810-body-a", "usb-interface-b"),
+        "both source Name and Interface must participate in SDK identity v2");
+    Check(DeriveNikonSdkStableIdentity("a", "bc") !=
+              DeriveNikonSdkStableIdentity("ab", "c"),
+        "length framing must prevent source identity concatenation ambiguity");
+
+    const auto rejected = [](std::string_view name, std::string_view interface_name) {
+        try {
+            (void)DeriveNikonSdkStableIdentity(name, interface_name);
+            return false;
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+    };
+    Check(rejected("", "interface") && rejected("name", ""),
+        "missing SDK source identity components must fail closed");
+    Check(rejected(std::string(256, 'n'), "interface") &&
+              rejected("name", std::string(256, 'i')),
+        "oversized SDK source identity components must fail closed");
+    Check(rejected(std::string("name\0tail", 9), "interface") &&
+              rejected("name", std::string("interface\0tail", 14)),
+        "embedded NUL bytes in SDK source identity components must fail closed");
+}
+
+void TestWpdStableIdentityUsesCameraSerialNotPnpPath() {
+    const auto first = DeriveWpdStableIdentity("camera-body-a");
+    Check(first == DeriveWpdStableIdentity("camera-body-a") && first.size() == 64,
+        "WPD camera serial should derive a deterministic private digest");
+    Check(first != DeriveWpdStableIdentity("camera-body-b"),
+        "different WPD camera serials must derive different identities");
+    const auto rejected = [](std::string_view serial) {
+        try {
+            (void)DeriveWpdStableIdentity(serial);
+            return false;
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+    };
+    Check(rejected("") && rejected(std::string(513, 's')) &&
+              rejected(std::string("serial\0tail", 11)),
+        "missing, oversized, or embedded-NUL WPD serials must fail closed");
+}
+
+void TestCrossTransportBindingPrevalidatesBothMaps() {
+    const CameraInfo sdk_camera{"Nikon D810", "unknown", "S", "sdk-body-a"};
+    const CameraInfo wpd_camera{"Nikon D810", "1.14", "S", "wpd-body-a"};
+    {
+        const auto root = NewTestRoot("cross-transport-binding-success");
+        IdentityMap sdk_map(root / "sdk.json");
+        IdentityMap wpd_map(root / "wpd.json");
+        const auto selected = BindCrossTransportIdentity(
+            sdk_map, wpd_map, "CAM-A", {sdk_camera}, {wpd_camera});
+        Check(selected.sdk_camera.stable_identity == sdk_camera.stable_identity &&
+                  selected.wpd_camera.stable_identity == wpd_camera.stable_identity &&
+                  sdk_map.FindAlias(sdk_camera.stable_identity) == "CAM-A" &&
+                  wpd_map.FindAlias(wpd_camera.stable_identity) == "CAM-A",
+            "cross-transport binding should register both one-body projections to one explicit alias");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("cross-transport-binding-prevalidation");
+        IdentityMap sdk_map(root / "sdk.json");
+        IdentityMap wpd_map(root / "wpd.json");
+        wpd_map.Bind("CAM-A", "different-wpd-body");
+        bool rejected = false;
+        try {
+            (void)BindCrossTransportIdentity(
+                sdk_map, wpd_map, "CAM-A", {sdk_camera}, {wpd_camera});
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        Check(rejected && !fs::exists(root / "sdk.json") &&
+                  !sdk_map.FindAlias(sdk_camera.stable_identity),
+            "a WPD conflict must be detected before the SDK map is changed");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("cross-transport-binding-count");
+        IdentityMap sdk_map(root / "sdk.json");
+        IdentityMap wpd_map(root / "wpd.json");
+        bool rejected = false;
+        try {
+            (void)BindCrossTransportIdentity(
+                sdk_map, wpd_map, "CAM-A", {}, {wpd_camera});
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        Check(rejected && !fs::exists(root / "sdk.json") && !fs::exists(root / "wpd.json"),
+            "cross-transport binding must reject anything other than one SDK and one WPD projection");
+        fs::remove_all(root);
+    }
+}
+
+void TestDualIdentityVerificationRequiresExactAliasCardinality() {
+    const auto root = NewTestRoot("dual-identity-verification");
+    IdentityMap sdk_map(root / "sdk.json");
+    IdentityMap wpd_map(root / "wpd.json");
+    sdk_map.Bind("CAM-A", "sdk-a");
+    sdk_map.Bind("CAM-B", "sdk-b");
+    wpd_map.Bind("CAM-A", "wpd-a");
+    wpd_map.Bind("CAM-B", "wpd-b");
+    const std::vector<CameraInfo> sdk_cameras{
+        {"Nikon D810", "unknown", "S", "sdk-a"},
+        {"Nikon D810", "unknown", "S", "sdk-b"}};
+    const std::vector<CameraInfo> wpd_cameras{
+        {"Nikon D810", "1.14", "S", "wpd-a"},
+        {"Nikon D810", "1.11", "S", "wpd-b"}};
+
+    const auto ready = VerifyDualIdentityBindings(
+        sdk_map, wpd_map, sdk_cameras, wpd_cameras);
+    Check(ready.terminal_state == "Ready" && ready.failure_category.empty() &&
+              ready.sdk_cam_a_count == 1 && ready.sdk_cam_b_count == 1 &&
+              ready.wpd_cam_a_count == 1 && ready.wpd_cam_b_count == 1 &&
+              ready.sdk_unbound_count == 0 && ready.wpd_unbound_count == 0 &&
+              !ready.identity_maps_changed && !ready.capture_command_sent &&
+              !ready.live_view_started && !ready.camera_settings_changed &&
+              !ready.card_access_performed && !ready.real_identifiers_included,
+        "dual identity verification should require exactly one CAM-A and CAM-B in both transports");
+
+    const auto count_failure = VerifyDualIdentityBindings(
+        sdk_map, wpd_map, {sdk_cameras.front()}, wpd_cameras);
+    Check(count_failure.terminal_state == "Blocked" &&
+              count_failure.failure_category == "camera_count_mismatch",
+        "dual identity verification must reject a transport count other than two");
+
+    auto unbound_wpd = wpd_cameras;
+    unbound_wpd.back().stable_identity = "wpd-unbound";
+    const auto unbound = VerifyDualIdentityBindings(
+        sdk_map, wpd_map, sdk_cameras, unbound_wpd);
+    Check(unbound.terminal_state == "Blocked" &&
+              unbound.failure_category == "unbound_identity" && unbound.wpd_unbound_count == 1,
+        "dual identity verification must reject an unbound body before camera control");
+
+    const auto path = PersistDualIdentityVerificationSummary(
+        root / "artifacts", "run-dual-identity", ready);
+    const auto body = ReadAll(path);
+    Check(body.find("\"terminalState\": \"Ready\"") != std::string::npos &&
+              body.find("\"sdkCamACount\": 1") != std::string::npos &&
+              body.find("\"wpdCamBCount\": 1") != std::string::npos &&
+              body.find("sdk-a") == std::string::npos && body.find("wpd-a") == std::string::npos &&
+              body.find("serial") == std::string::npos,
+        "dual identity evidence must retain only anonymous counts and safety state");
+    EvidenceWriter evidence(root / "artifacts", "run-dual-identity", "test");
+    evidence.GenerateRedactedReport(root / "reports");
+    Check(fs::exists(root / "reports" / "run-dual-identity" /
+              "dual-identity-verification-summary.json"),
+        "redacted report should include dual identity verification evidence");
+    fs::remove_all(root);
+}
+
+void TestDualSpoolVerificationRequiresIdentityAndBothEmptyCards() {
+    const auto root = NewTestRoot("dual-spool-verification");
+    DualIdentityVerificationSummary identity;
+    identity.sdk_camera_count = 2;
+    identity.sdk_cam_a_count = 1;
+    identity.sdk_cam_b_count = 1;
+    identity.wpd_camera_count = 2;
+    identity.wpd_cam_a_count = 1;
+    identity.wpd_cam_b_count = 1;
+    identity.terminal_state = "Ready";
+
+    auto ready = PrepareDualSpoolVerification(identity);
+    Check(ready.terminal_state == "ReadyForInspection" && ready.failure_category.empty(),
+        "dual spool verification should inspect only after exact dual identity readiness");
+    FinalizeDualSpoolVerification(ready, 0, 0);
+    Check(ready.terminal_state == "Ready" && ready.failure_category.empty() &&
+              ready.wpd_sessions_closed == 2 && ready.cam_a_payload_object_count == 0 &&
+              ready.cam_b_payload_object_count == 0 && ready.read_only_observation &&
+              ready.card_inspection_performed &&
+              !ready.capture_command_sent && !ready.camera_delete_attempted &&
+              !ready.vendor_operation_executed && !ready.automatic_retry &&
+              !ready.real_identifiers_included,
+        "both dedicated spools must contain zero payload objects before pair capture");
+
+    auto non_empty = PrepareDualSpoolVerification(identity);
+    FinalizeDualSpoolVerification(non_empty, 0, 1);
+    Check(non_empty.terminal_state == "Blocked" &&
+              non_empty.failure_category == "spool_not_empty" &&
+              non_empty.cam_b_payload_object_count == 1,
+        "one non-empty camera spool must block the whole dual capture lane without deletion");
+
+    auto identity_blocked = identity;
+    identity_blocked.terminal_state = "Blocked";
+    identity_blocked.failure_category = "camera_count_mismatch";
+    const auto not_inspected = PrepareDualSpoolVerification(identity_blocked);
+    Check(not_inspected.terminal_state == "Blocked" &&
+              not_inspected.failure_category == "dual_identity_not_ready" &&
+              not_inspected.wpd_sessions_closed == 0 && !not_inspected.card_inspection_performed,
+        "dual spool verification must perform no card inspection before identity readiness");
+
+    const auto path = PersistDualSpoolVerificationSummary(
+        root / "artifacts", "run-dual-spools", non_empty);
+    const auto body = ReadAll(path);
+    Check(body.find("\"camAPayloadObjectCount\": 0") != std::string::npos &&
+              body.find("\"camBPayloadObjectCount\": 1") != std::string::npos &&
+              body.find("\"cameraDeleteAttempted\": false") != std::string::npos &&
+              body.find("\"cardInspectionPerformed\": true") != std::string::npos &&
+              body.find("\"automaticRetry\": false") != std::string::npos &&
+              body.find("private-") == std::string::npos,
+        "dual spool evidence should be aggregate-only and disclose no private identity");
+    EvidenceWriter evidence(root / "artifacts", "run-dual-spools", "test");
+    evidence.GenerateRedactedReport(root / "reports");
+    Check(fs::exists(root / "reports" / "run-dual-spools" /
+              "dual-spool-verification-summary.json"),
+        "redacted report should include dual spool verification evidence");
     fs::remove_all(root);
 }
 
@@ -1208,6 +1531,465 @@ void TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter() {
     fs::remove_all(root);
 }
 
+void TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry() {
+    const auto root = NewTestRoot("hybrid-pair-success");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-success", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b");
+
+    Check(pair.terminal_state == "Complete" && pair.cam_a.terminal_state == "Complete" &&
+              pair.cam_b_started && pair.cam_b.terminal_state == "Complete",
+        "hybrid pair should complete CAM-A before CAM-B");
+    Check(pair.cam_a.transaction_id != pair.cam_b.transaction_id,
+        "hybrid pair camera transactions must have unique durable IDs");
+    Check(wpd.opens == 4 && wpd.closes == 4 && wpd.observes == 2 &&
+              wpd.capture_commands == 0 && wpd.delete_attempts == 2 && wpd.delete_successes == 2,
+        "hybrid pair should run two sequential WPD baseline/recovery lifecycles without WPD shutter");
+    Check(sdk.opens == 2 && sdk.closes == 2 && sdk.captures == 2 && !sdk.open && !wpd.open,
+        "hybrid pair should run exactly two closed SDK captures without overlap or retry");
+    Check(fs::exists(evidence.RunRoot() / pair.cam_a.transaction_id / "CAM-A" / "original.jpg") &&
+              fs::exists(evidence.RunRoot() / pair.cam_b.transaction_id / "CAM-B" / "original.jpg"),
+        "hybrid pair should preserve one canonical PC original for each camera");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    const auto cam_a_complete = events.find("HybridPairCamAComplete");
+    const auto cam_b_start = events.find("HybridPairCamBStarting");
+    Check(cam_a_complete != std::string::npos && cam_b_start != std::string::npos &&
+              cam_a_complete < cam_b_start,
+        "hybrid pair evidence must order CAM-A completion before CAM-B start");
+
+    HybridPairRunSummary summary;
+    summary.requested_pairs = 1;
+    summary.attempted_pairs = 1;
+    summary.completed_pairs = 1;
+    summary.cam_a_completed_count = 1;
+    summary.cam_b_completed_count = 1;
+    summary.attempted_camera_transactions = 2;
+    summary.completed_camera_transactions = 2;
+    summary.spool_empty_before_count = 2;
+    summary.camera_card_delete_attempted_count = 2;
+    summary.camera_card_delete_succeeded_count = 2;
+    summary.spool_empty_after_count = 2;
+    summary.duration_sample_count = 1;
+    summary.pair_duration_p50_ms = 1250;
+    summary.pair_duration_p95_ms = 1250;
+    summary.pair_duration_max_ms = 1250;
+    summary.terminal_state = "Complete";
+    summary.last_pair_state = pair.terminal_state;
+    summary.exclusive_camera_control_confirmed = true;
+    summary.dedicated_spool_scope_confirmed = true;
+    summary.dual_dedicated_spools_confirmed = true;
+    summary.exact_object_delete_confirmed = true;
+    const auto summary_path = PersistHybridPairSummary(root / "artifacts", evidence.RunId(), summary);
+    evidence.GenerateRedactedReport(root / "reports");
+    const auto body = ReadAll(summary_path);
+    Check(body.find("\"schemaVersion\": \"phase0.hybrid-pair-summary.v2\"") != std::string::npos &&
+              body.find("\"captureOrder\": \"CAM-A-then-CAM-B\"") != std::string::npos &&
+              body.find("\"pairWatchdogSeconds\": 180") != std::string::npos &&
+              body.find("\"durationSampleCount\": 1") != std::string::npos &&
+              body.find("\"pairDurationP50Ms\": 1250") != std::string::npos &&
+              body.find("\"pairDurationP95Ms\": 1250") != std::string::npos &&
+              body.find("\"pairDurationMaxMs\": 1250") != std::string::npos &&
+              body.find("\"timingUsedForPhase0PassFail\": false") != std::string::npos &&
+              body.find("\"automaticRetry\": false") != std::string::npos &&
+              body.find("\"dualDedicatedSpoolsConfirmed\": true") != std::string::npos &&
+              body.find("\"cameraSessionOverlapAllowed\": false") != std::string::npos &&
+              body.find("\"actualShutterSynchronizationGuaranteed\": false") != std::string::npos &&
+              body.find("\"realIdentifiersIncluded\": false") != std::string::npos,
+        "hybrid pair summary must publish ordering, watchdog, exclusivity, retry, sync, and redaction contracts");
+    Check(fs::exists(root / "reports" / evidence.RunId() / "hybrid-pair-summary.json"),
+        "hybrid pair summary should be included in the redacted report");
+    Check(body.find("wpd-a") == std::string::npos && body.find("sdk-a") == std::string::npos &&
+              body.find("wpd-b") == std::string::npos && body.find("sdk-b") == std::string::npos,
+        "hybrid pair summary must exclude transport identities");
+    const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+    Check(recovery.pair_started_count == 1 && recovery.pair_complete_count == 1 &&
+              recovery.pair_failed_count == 0 && !recovery.interrupted_pair_detected &&
+              !recovery.recovery_requires_new_transaction && recovery.event_sequence_consistent &&
+              recovery.terminal_state == "Terminal",
+        "a terminal successful pair should require no recovery transaction");
+    fs::remove_all(root);
+}
+
+void TestHybridPairRecoveryDetectsInterruptionAfterCamA() {
+    const auto root = NewTestRoot("hybrid-pair-recovery-after-a");
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-recovery-after-a", "fake");
+    evidence.RecordState("hybrid-pair-interrupted", "HybridPairStarted", "CAM-A");
+    evidence.RecordState("tx-cam-a", "HybridPcOriginalVerified", "CAM-A");
+    evidence.RecordState("tx-cam-a", "HybridSpoolEmptyAfter", "CAM-A");
+    evidence.RecordState("hybrid-pair-interrupted", "HybridPairCamAComplete", "CAM-A");
+
+    const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+    Check(recovery.pair_started_count == 1 && recovery.pair_complete_count == 0 &&
+              recovery.pair_failed_count == 0 && recovery.interrupted_pair_detected &&
+              recovery.interrupted_stage == "after-CAM-A-before-CAM-B" &&
+              recovery.cam_a_complete_before_interruption && recovery.retain_completed_originals &&
+              !recovery.automatic_retry_allowed && recovery.recovery_requires_new_transaction &&
+              recovery.event_sequence_consistent && recovery.terminal_state == "Interrupted",
+        "recovery analysis should diagnose an app stop after CAM-A and require a new transaction without retry");
+
+    const auto path = PersistHybridPairRecoverySummary(root / "artifacts", evidence.RunId(), recovery);
+    evidence.GenerateRedactedReport(root / "reports");
+    const auto body = ReadAll(path);
+    Check(body.find("\"interruptedPairDetected\": true") != std::string::npos &&
+              body.find("\"interruptedStage\": \"after-CAM-A-before-CAM-B\"") != std::string::npos &&
+              body.find("\"camACompleteBeforeInterruption\": true") != std::string::npos &&
+              body.find("\"retainCompletedOriginals\": true") != std::string::npos &&
+              body.find("\"automaticRetryAllowed\": false") != std::string::npos &&
+              body.find("\"recoveryRequiresNewTransaction\": true") != std::string::npos &&
+              body.find("\"realIdentifiersIncluded\": false") != std::string::npos,
+        "recovery summary should be anonymous and state retention, no-retry, and new-transaction requirements");
+    Check(fs::exists(root / "reports" / evidence.RunId() / "hybrid-pair-recovery-summary.json"),
+        "redacted reports should include the hybrid pair recovery summary");
+    fs::remove_all(root);
+}
+
+void TestHybridPairRecoveryClassifiesActiveStagesAndInvalidEvidence() {
+    {
+        const auto root = NewTestRoot("hybrid-pair-recovery-cam-a-active");
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-recovery-cam-a-active", "fake");
+        evidence.RecordState("hybrid-pair-active-a", "HybridPairStarted", "CAM-A");
+        const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+        Check(recovery.interrupted_pair_detected && recovery.interrupted_stage == "CAM-A-active" &&
+                  !recovery.cam_a_complete_before_interruption && recovery.recovery_requires_new_transaction &&
+                  recovery.event_sequence_consistent && recovery.terminal_state == "Interrupted",
+            "recovery analysis should distinguish interruption during CAM-A from a completed CAM-A");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("hybrid-pair-recovery-cam-b-active");
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-recovery-cam-b-active", "fake");
+        evidence.RecordState("hybrid-pair-active-b", "HybridPairStarted", "CAM-A");
+        evidence.RecordState("hybrid-pair-active-b", "HybridPairCamAComplete", "CAM-A");
+        evidence.RecordState("hybrid-pair-active-b", "HybridPairCamBStarting", "CAM-B");
+        const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+        Check(recovery.interrupted_pair_detected && recovery.interrupted_stage == "CAM-B-active" &&
+                  recovery.cam_a_complete_before_interruption && recovery.recovery_requires_new_transaction &&
+                  recovery.event_sequence_consistent && recovery.terminal_state == "Interrupted",
+            "recovery analysis should retain CAM-A completion when interruption occurs during CAM-B");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("hybrid-pair-recovery-failed-terminal");
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-recovery-failed-terminal", "fake");
+        evidence.RecordState("hybrid-pair-failed", "HybridPairStarted", "CAM-A");
+        evidence.RecordState("hybrid-pair-failed", "HybridPairFailed", "CAM-A");
+        const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+        Check(!recovery.interrupted_pair_detected && recovery.pair_failed_count == 1 &&
+                  recovery.recovery_requires_new_transaction && recovery.event_sequence_consistent &&
+                  recovery.terminal_state == "Terminal",
+            "a terminal failed pair should still require a distinct new transaction");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("hybrid-pair-recovery-invalid-sequence");
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-recovery-invalid-sequence", "fake");
+        evidence.RecordState("hybrid-pair-first", "HybridPairStarted", "CAM-A");
+        evidence.RecordState("hybrid-pair-second", "HybridPairStarted", "CAM-A");
+        const auto recovery = AssessHybridPairRecoveryEventLog(evidence.RunRoot() / "events.jsonl");
+        Check(!recovery.event_sequence_consistent && recovery.recovery_requires_new_transaction &&
+                  recovery.terminal_state == "EvidenceInvalid",
+            "overlapping pair starts must fail closed as invalid recovery evidence");
+        fs::remove_all(root);
+    }
+}
+
+void TestHybridPairStopsBeforeCamBAfterCamAFailure() {
+    const auto root = NewTestRoot("hybrid-pair-a-failure");
+    HybridWpdFake wpd;
+    wpd.spool_empty_before = false;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-a-failure", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b");
+
+    Check(pair.terminal_state == "FailedPartial" && pair.cam_a.terminal_state == "FailedPartial" &&
+              !pair.cam_b_started && pair.cam_b.transaction_id.empty(),
+        "a CAM-A failure must stop the hybrid pair before CAM-B");
+    Check(wpd.opens == 1 && wpd.closes == 1 && wpd.observes == 0 &&
+              wpd.delete_attempts == 0 && sdk.opens == 0 && sdk.captures == 0,
+        "a CAM-A empty-spool failure must not start SDK capture, cleanup, CAM-B, or retry");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamBStarting") == std::string::npos,
+        "CAM-B start evidence must be absent after CAM-A failure");
+    fs::remove_all(root);
+}
+
+void TestHybridPairRetainsCamAWhenCamBFailsWithoutRetry() {
+    const auto root = NewTestRoot("hybrid-pair-b-failure");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    sdk.fail_capture_number = 2;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-b-failure", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b");
+
+    Check(pair.terminal_state == "FailedPartial" && pair.cam_a.terminal_state == "Complete" &&
+              pair.cam_b_started && pair.cam_b.terminal_state == "FailedPartial" &&
+              pair.error_category == "image_event_timeout",
+        "a CAM-B SDK failure should leave the pair FailedPartial after a complete CAM-A");
+    Check(fs::exists(evidence.RunRoot() / pair.cam_a.transaction_id / "CAM-A" / "original.jpg"),
+        "a CAM-B failure must retain CAM-A's verified canonical PC original");
+    Check(sdk.captures == 2 && sdk.opens == 2 && sdk.closes == 2 &&
+              wpd.delete_attempts == 1 && wpd.delete_successes == 1,
+        "a CAM-B failure must not retry either shutter or delete beyond CAM-A's completed cleanup");
+    Check(wpd.spool_empty_before_checks == 2 && wpd.observes == 1 && wpd.abandons == 1,
+        "a CAM-B capture failure should abandon only its observation and never begin B recovery");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamAComplete") != std::string::npos &&
+              events.find("HybridPairCamBStarting") != std::string::npos &&
+              events.find("HybridPairComplete") == std::string::npos,
+        "CAM-B failure evidence must preserve A completion without a false pair success state");
+    fs::remove_all(root);
+}
+
+void TestHybridPairCamASdkCloseFailureStopsBeforeCamB() {
+    const auto root = NewTestRoot("hybrid-pair-a-sdk-close-failure");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    sdk.fail_close_number = 1;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-a-sdk-close-failure", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b");
+
+    Check(pair.terminal_state == "FailedPartial" && pair.cam_a.terminal_state == "FailedPartial" &&
+              pair.error_category == "close_failed" && !pair.cam_b_started && pair.cam_b.transaction_id.empty(),
+        "a CAM-A SDK close failure must stop the pair before every CAM-B operation");
+    Check(sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1 && !sdk.open &&
+              wpd.opens == 1 && wpd.closes == 1 && wpd.observes == 0 && wpd.delete_attempts == 0,
+        "a CAM-A SDK close failure must not open WPD recovery, CAM-B, cleanup, or retry");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamBStarting") == std::string::npos &&
+              events.find("HybridWpdObserveOpen") == std::string::npos,
+        "CAM-A SDK close failure evidence must contain no WPD recovery or CAM-B start state");
+    fs::remove_all(root);
+}
+
+void TestHybridPairCamBWpdRecoveryFailureRetainsCamAWithoutRetry() {
+    const auto root = NewTestRoot("hybrid-pair-b-wpd-recovery-failure");
+    HybridWpdFake wpd;
+    // A baseline/recovery are opens 1/2; B baseline/recovery are opens 3/4.
+    wpd.fail_open_number = 4;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-b-wpd-recovery-failure", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b");
+
+    Check(pair.terminal_state == "FailedPartial" && pair.cam_a.terminal_state == "Complete" &&
+              pair.cam_b_started && pair.cam_b.terminal_state == "FailedPartial" &&
+              pair.error_category == "open_failed",
+        "a CAM-B WPD recovery failure should fail the pair after retaining completed CAM-A");
+    Check(fs::exists(evidence.RunRoot() / pair.cam_a.transaction_id / "CAM-A" / "original.jpg") &&
+              !fs::exists(evidence.RunRoot() / pair.cam_b.transaction_id / "CAM-B" / "original.jpg"),
+        "CAM-B recovery failure must retain CAM-A's canonical original without inventing a CAM-B original");
+    Check(sdk.opens == 2 && sdk.captures == 2 && sdk.closes == 2 &&
+              wpd.opens == 4 && wpd.closes == 3 && wpd.observes == 1 &&
+              wpd.delete_attempts == 1 && wpd.delete_successes == 1,
+        "CAM-B WPD recovery failure must perform no retry or cleanup beyond completed CAM-A");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamAComplete") != std::string::npos &&
+              events.find("HybridPairCamBStarting") != std::string::npos &&
+              events.find("HybridPairComplete") == std::string::npos,
+        "CAM-B recovery failure evidence must retain A completion without false pair completion");
+    fs::remove_all(root);
+}
+
+void TestHybridPairFaultHooksRunAfterEachSdkCloseWithoutRetry() {
+    {
+        const auto root = NewTestRoot("hybrid-pair-cam-a-fault-hook");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-cam-a-fault-hook", sdk.SdkVersion());
+        bool cam_a_gate_called = false;
+        const auto pair = ExecuteHybridCapturePair(
+            wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", {}, {}, [&] {
+                cam_a_gate_called = true;
+                Check(!sdk.open && sdk.captures == 1 && sdk.closes == 1 && !wpd.open,
+                    "CAM-A fault hook must run after its SDK close and before WPD recovery");
+                throw TransportError("injected_disconnect", "synthetic CAM-A disconnect");
+            });
+        Check(cam_a_gate_called && pair.terminal_state == "FailedPartial" &&
+                  pair.error_category == "injected_disconnect" && !pair.cam_b_started &&
+                  sdk.captures == 1 && wpd.observes == 0 && wpd.delete_attempts == 0,
+            "a CAM-A active fault must stop before recovery, cleanup, CAM-B, or retry");
+        const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+        Check(events.find("HybridOperatorGateBeforeWpdRecovery") != std::string::npos &&
+                  events.find("HybridPairCamBStarting") == std::string::npos,
+            "CAM-A fault evidence must contain the gate but no CAM-B start");
+        fs::remove_all(root);
+    }
+    {
+        const auto root = NewTestRoot("hybrid-pair-cam-b-fault-hook");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-cam-b-fault-hook", sdk.SdkVersion());
+        bool cam_b_gate_called = false;
+        const auto pair = ExecuteHybridCapturePair(
+            wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", {}, {}, {}, [&] {
+                cam_b_gate_called = true;
+                Check(!sdk.open && sdk.captures == 2 && sdk.closes == 2 && !wpd.open,
+                    "CAM-B fault hook must run after its SDK close and before WPD recovery");
+                throw TransportError("injected_power_off", "synthetic CAM-B power off");
+            });
+        Check(cam_b_gate_called && pair.terminal_state == "FailedPartial" &&
+                  pair.cam_a.terminal_state == "Complete" && pair.cam_b_started &&
+                  pair.error_category == "injected_power_off" &&
+                  wpd.observes == 1 && wpd.delete_attempts == 1 && sdk.captures == 2,
+            "a CAM-B active fault must retain completed CAM-A without B cleanup or retry");
+        Check(fs::exists(evidence.RunRoot() / pair.cam_a.transaction_id / "CAM-A" / "original.jpg") &&
+                  !fs::exists(evidence.RunRoot() / pair.cam_b.transaction_id / "CAM-B" / "original.jpg"),
+            "a CAM-B active fault must retain only CAM-A's verified canonical original");
+        HybridPairFaultRunSummary summary;
+        summary.scenario = "power-off";
+        summary.fault_camera_alias = "CAM-B";
+        summary.pair_state = pair.terminal_state;
+        summary.error_category = pair.error_category;
+        summary.acceptance_state = "Pass";
+        summary.cam_b_started = pair.cam_b_started;
+        summary.cam_a_original_persisted = true;
+        const auto path = PersistHybridPairFaultSummary(
+            root / "artifacts", evidence.RunId(), summary);
+        const auto body = ReadAll(path);
+        Check(body.find("\"schemaVersion\": \"phase0.hybrid-pair-fault-summary.v1\"") != std::string::npos &&
+                  body.find("\"faultCameraAlias\": \"CAM-B\"") != std::string::npos &&
+                  body.find("\"camAOriginalPersisted\": true") != std::string::npos &&
+                  body.find("\"camBOriginalPersisted\": false") != std::string::npos &&
+                  body.find("\"automaticRetry\": false") != std::string::npos &&
+                  body.find("\"actualShutterSynchronizationGuaranteed\": false") != std::string::npos &&
+                  body.find("sdk-a") == std::string::npos && body.find("wpd-b") == std::string::npos,
+            "pair fault evidence must record retention and no-retry policy without transport identities");
+        evidence.GenerateRedactedReport(root / "reports");
+        Check(fs::exists(root / "reports" / evidence.RunId() / "hybrid-pair-fault-summary.json"),
+            "redacted reports should include pair fault evidence");
+        fs::remove_all(root);
+    }
+}
+
+void TestHybridPairSharedWatchdogStopsBeforeCamB() {
+    const auto root = NewTestRoot("hybrid-pair-shared-watchdog");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-shared-watchdog", sdk.SdkVersion());
+    Timeouts timeouts;
+    timeouts.transaction_watchdog = std::chrono::seconds(2);
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", timeouts, [] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+        });
+
+    Check(pair.cam_a.terminal_state == "Complete" && pair.terminal_state == "FailedPartial" &&
+              pair.error_category == "transaction_watchdog" && !pair.cam_b_started,
+        "the shared pair watchdog should retain completed CAM-A and stop before CAM-B");
+    Check(sdk.captures == 1 && wpd.delete_successes == 1 && wpd.spool_empty_after_checks == 1,
+        "the shared watchdog should not undo CAM-A's verified original and exact cleanup");
+    Check(sdk.opens == 1 && wpd.opens == 2,
+        "the shared watchdog must prevent every CAM-B transport open");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamBStarting") == std::string::npos,
+        "an expired shared watchdog must emit no CAM-B start state");
+    fs::remove_all(root);
+}
+
+void TestHybridPairBoundaryCallbackFailureNeverStartsCamB() {
+    const auto root = NewTestRoot("hybrid-pair-boundary-failure");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-boundary-failure", sdk.SdkVersion());
+    const auto pair = ExecuteHybridCapturePair(
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", {}, [] {
+            throw TransportError("operator_interruption_continue_marker", "synthetic prohibited resume");
+        });
+    Check(pair.terminal_state == "FailedPartial" && pair.cam_a.terminal_state == "Complete" &&
+              pair.error_category == "pair_boundary_exception" && !pair.cam_b_started,
+        "a pair-boundary gate failure must retain CAM-A and stop before every CAM-B operation");
+    Check(sdk.captures == 1 && wpd.delete_successes == 1 &&
+              fs::exists(evidence.RunRoot() / pair.cam_a.transaction_id / "CAM-A" / "original.jpg"),
+        "a pair-boundary failure must retain CAM-A's verified original and exact cleanup without retry");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    Check(events.find("HybridPairCamAComplete") != std::string::npos &&
+              events.find("HybridPairCamBStarting") == std::string::npos,
+        "pair-boundary failure evidence must contain A completion and no B start");
+    fs::remove_all(root);
+}
+
+HybridPairResult SyntheticHybridPairResult(
+    int pair_number,
+    bool cam_b_complete = true) {
+    HybridPairResult pair;
+    pair.pair_id = "pair-" + std::to_string(pair_number);
+    pair.duration = std::chrono::milliseconds(pair_number);
+    pair.cam_b_started = true;
+    pair.cam_a.transaction_id = pair.pair_id + "-cam-a";
+    pair.cam_a.terminal_state = "Complete";
+    pair.cam_a.spool_empty_before_capture = true;
+    pair.cam_a.camera_card_delete_attempted = true;
+    pair.cam_a.camera_card_delete_succeeded = true;
+    pair.cam_a.spool_empty_after_cleanup = true;
+    pair.cam_b.transaction_id = pair.pair_id + "-cam-b";
+    pair.cam_b.terminal_state = cam_b_complete ? "Complete" : "FailedPartial";
+    pair.cam_b.spool_empty_before_capture = true;
+    if (cam_b_complete) {
+        pair.cam_b.camera_card_delete_attempted = true;
+        pair.cam_b.camera_card_delete_succeeded = true;
+        pair.cam_b.spool_empty_after_cleanup = true;
+        pair.terminal_state = "Complete";
+    } else {
+        pair.terminal_state = "FailedPartial";
+        pair.error_category = "image_event_timeout";
+        pair.error_detail = "synthetic CAM-B failure";
+    }
+    return pair;
+}
+
+void TestHybridPairRunAggregatesOneHundredSuccessfulPairs() {
+    int callbacks = 0;
+    const auto summary = ExecuteHybridPairRun(100, [&] {
+        return SyntheticHybridPairResult(++callbacks);
+    });
+
+    Check(callbacks == 100 && summary.requested_pairs == 100 &&
+              summary.attempted_pairs == 100 && summary.completed_pairs == 100 &&
+              summary.failures == 0 && summary.terminal_state == "Complete",
+        "hybrid pair run should execute and aggregate exactly 100 successful pairs");
+    Check(summary.attempted_camera_transactions == 200 &&
+              summary.completed_camera_transactions == 200 &&
+              summary.cam_a_completed_count == 100 && summary.cam_b_completed_count == 100,
+        "100 successful pairs should aggregate 200 completed sequential camera transactions");
+    Check(summary.spool_empty_before_count == 200 &&
+              summary.camera_card_delete_attempted_count == 200 &&
+              summary.camera_card_delete_succeeded_count == 200 &&
+              summary.spool_empty_after_count == 200,
+        "100 successful pairs should aggregate every exact-object spool safeguard");
+    Check(summary.duration_sample_count == 100 && summary.pair_duration_p50_ms == 50 &&
+              summary.pair_duration_p95_ms == 95 && summary.pair_duration_max_ms == 100,
+        "100 successful pairs should publish deterministic nearest-rank p50, p95, and max timing statistics");
+}
+
+void TestHybridPairRunStopsAtFirstFailureAndRetainsCounts() {
+    int callbacks = 0;
+    const auto summary = ExecuteHybridPairRun(100, [&] {
+        const int pair_number = ++callbacks;
+        return SyntheticHybridPairResult(pair_number, pair_number != 6);
+    });
+
+    Check(callbacks == 6 && summary.requested_pairs == 100 &&
+              summary.attempted_pairs == 6 && summary.completed_pairs == 5 &&
+              summary.failures == 1 && summary.terminal_state == "FailedPartial",
+        "hybrid pair run must stop immediately at the first failed pair without retry");
+    Check(summary.attempted_camera_transactions == 12 &&
+              summary.completed_camera_transactions == 11 &&
+              summary.cam_a_completed_count == 6 && summary.cam_b_completed_count == 5,
+        "a sixth-pair CAM-B failure should retain six CAM-A and five CAM-B completions");
+    Check(summary.last_pair_state == "FailedPartial" &&
+              summary.last_error_category == "image_event_timeout" &&
+              summary.last_error_detail == "synthetic CAM-B failure",
+        "hybrid pair run must retain the first failure category and detail");
+    Check(summary.duration_sample_count == 6 && summary.pair_duration_p50_ms == 3 &&
+              summary.pair_duration_p95_ms == 6 && summary.pair_duration_max_ms == 6,
+        "a failed run should publish timing statistics for attempted pairs only");
+}
+
 void TestHybridFaultGateRunsAfterSdkCloseAndFailsWithoutDeleteOrRetry() {
     const auto root = NewTestRoot("hybrid-fault-gate");
     HybridWpdFake wpd;
@@ -1400,12 +2182,24 @@ void TestHybridInvalidCandidatesAndMissingTokenNeverDelete() {
 void TestHybridCaptureArgumentConfirmations() {
     Check(ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("hybrid-capture-single", 10, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 1, true, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 10, true, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 100, true, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("live-view-handoff", 10, true, true, true) == std::nullopt &&
-              ValidateHybridCaptureArguments("hybrid-fault-single", 1, true, true, true) == std::nullopt,
+              ValidateHybridCaptureArguments("hybrid-fault-single", 1, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-fault-pair", 1, true, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-interrupt-pair", 1, true, true, true, true) == std::nullopt,
         "approved hybrid commands must accept their permitted counts and all three confirmations");
     Check(ValidateHybridCaptureArguments("hybrid-capture-single", 2, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 2, true, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 1, true, true, true, false).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("live-view-handoff", 1, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-fault-single", 2, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-fault-pair", 2, true, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-fault-pair", 1, true, true, true, false).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-interrupt-pair", 2, true, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-interrupt-pair", 1, true, true, true, false).has_value() &&
               ValidateHybridCaptureArguments("hybrid-capture-single", 1, false, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, false, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, true, false).has_value(),
@@ -1536,11 +2330,17 @@ int main() {
         TestWpdSpoolStatusSummaryIsAnonymousAndReportable();
         TestOperatorGateReadyThenContinue();
         TestOperatorGateTimeoutRefusesOverwrite();
+        TestProcessTerminationGateNeverContinues();
         TestLiveViewStopFailureBlocksWpdWithoutRetry();
         TestLiveViewCloseFailureBlocksWpdWithoutRetry();
         TestWpdFailureSkipsLiveViewResume();
         TestResumeFailureRetainsWpdOriginal();
         TestIdentityMap();
+        TestNikonSdkStableIdentityUsesDocumentedSourceStrings();
+        TestWpdStableIdentityUsesCameraSerialNotPnpPath();
+        TestCrossTransportBindingPrevalidatesBothMaps();
+        TestDualIdentityVerificationRequiresExactAliasCardinality();
+        TestDualSpoolVerificationRequiresIdentityAndBothEmptyCards();
         TestSuccessfulPairAndRedaction();
         TestAmbiguousCandidateFailsAndQuarantines();
         TestTransportFailureDoesNotRetry();
@@ -1552,6 +2352,18 @@ int main() {
         TestPairWatchdogStopsBeforeOpen();
         TestCloseFailureRetainsOriginalAndStopsPair();
         TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter();
+        TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry();
+        TestHybridPairRecoveryDetectsInterruptionAfterCamA();
+        TestHybridPairRecoveryClassifiesActiveStagesAndInvalidEvidence();
+        TestHybridPairStopsBeforeCamBAfterCamAFailure();
+        TestHybridPairRetainsCamAWhenCamBFailsWithoutRetry();
+        TestHybridPairCamASdkCloseFailureStopsBeforeCamB();
+        TestHybridPairCamBWpdRecoveryFailureRetainsCamAWithoutRetry();
+        TestHybridPairFaultHooksRunAfterEachSdkCloseWithoutRetry();
+        TestHybridPairSharedWatchdogStopsBeforeCamB();
+        TestHybridPairBoundaryCallbackFailureNeverStartsCamB();
+        TestHybridPairRunAggregatesOneHundredSuccessfulPairs();
+        TestHybridPairRunStopsAtFirstFailureAndRetainsCounts();
         TestHybridFaultGateRunsAfterSdkCloseAndFailsWithoutDeleteOrRetry();
         TestHybridWatchdogStopsBeforeHardwareOpen();
         TestHybridWatchdogClosesSdkAndStopsBeforeWpdRecovery();

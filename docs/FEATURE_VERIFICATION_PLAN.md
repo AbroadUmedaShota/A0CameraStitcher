@@ -30,7 +30,7 @@
 | V-SET-002 | 補正安全境界 | draft、unsupported version、provenance欠落、期限切れ、時刻順序不整合、画角不足、設定不整合、重複不足、上限超過をfail closed | 実機不要 | Pass 2026-08-07、全hard blocker contract |
 | V-SET-003 | 補正契約の純粋性 | 入力profile不変、閾値既定値なし、invalid値拒否、決定性 | 実機不要 | Pass 2026-08-07、境界・invalid・immutability contract |
 | V-SET-004 | synthetic画像補正 | known shift/rotation/scale/exposure/color差を測定し、上限内だけ補正 | 実機不要/OpenCV | `HG-0001/0002`を確定しないpre-gateとして後続 |
-| V-M3P-001 | simulated app | IPC、永続transaction、crash/restart、画面上のSimulated表示 | 実機不要/.NET 10 | Pass 2026-08-07、Release build警告0・Foundation 11/11・検証script合格 |
+| V-M3P-001 | simulated app | IPC、永続transaction、crash/restart、画面上のSimulated表示 | 実機不要/.NET 10 | Pass 2026-08-08、Release build警告0・Foundation 13/13・Operator Shell 1/1・検証script合格 |
 | V-M3P-002 | operator workflow | 起動同意、全readiness blocker、Ready/補正範囲内、active時全操作ロック、失敗別結果、別job再合成、明示保存、新規撮影準備 | 実機不要/.NET 10 | Pass 2026-08-07、contract・static shell・Windows UI Automationで連続二回Invoke時transaction一件、明示保存一件、Ready復帰。screen reader/keyboard/focusはPartial |
 | V-1CAM-001 | CAM-A接続状態 | SDK statusが一台を解決し、Live View状態等を取得後session close | D810一台、読取専用 | Pass、2026-08-07に`run-1786077278290-1`で再確認。設定変更0・Live View開始0・session close |
 | V-1CAM-001W | CAM-A WPD状態 | functional targetを一意に選択し、capture/vendor operationを送らない | D810一台、読取専用 | Partial `run-1786036293601-1`、target選択成功、vendor queryはread-only権限拒否、変更操作0 |
@@ -41,7 +41,7 @@
 | V-FAULT-001 | 切断・電源異常 | `FailedPartial`、no retry、復旧後は新規transaction | 空カード＋物理切断/電源操作 | Deferred |
 | V-RIG-001 | 二台固定校正 | lens、fixed transform、overlap、seam、crop、baseline residual | D810二台＋承認chart | `HG-0001/0002/0003B`待ち |
 | V-RIG-002 | 二台設置アシスタント | 自動補正可否、調整案内、profile再現性 | D810二台＋固定リグ | Deferred |
-| V-PAIR-001 | 二台順次撮影 | 10件、100/100、誤pair・原本消失・自動retry 0 | D810二台＋空カード | `HG-0003B`待ち |
+| V-PAIR-001 | 二台順次撮影 | 10件、100/100、誤pair・原本消失・自動retry 0 | D810二台＋各body専用empty card | Partial: software contractはCAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証までSDK有無各CTestで合格。実機は`HG-0003B`待ち |
 
 ## Setup-assist受入contract
 

@@ -24,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -31,6 +32,35 @@
 
 namespace a0::phase0 {
 namespace fs = std::filesystem;
+
+std::string DeriveNikonSdkStableIdentity(
+    std::string_view source_name,
+    std::string_view source_interface) {
+    constexpr std::size_t kMaximumMaidStringBytes = 255;
+    const auto invalid = [](std::string_view value) {
+        return value.empty() || value.size() > kMaximumMaidStringBytes ||
+            value.find('\0') != std::string_view::npos;
+    };
+    if (invalid(source_name) || invalid(source_interface)) {
+        throw std::invalid_argument("Nikon SDK source identity strings are missing or invalid");
+    }
+
+    std::vector<unsigned char> material;
+    constexpr std::string_view domain = "a0camera-nikon-maid-source-identity-v2";
+    material.insert(material.end(), domain.begin(), domain.end());
+    material.push_back(0);
+    const auto append = [&material](std::string_view value) {
+        const auto length = static_cast<std::uint32_t>(value.size());
+        material.push_back(static_cast<unsigned char>((length >> 24U) & 0xFFU));
+        material.push_back(static_cast<unsigned char>((length >> 16U) & 0xFFU));
+        material.push_back(static_cast<unsigned char>((length >> 8U) & 0xFFU));
+        material.push_back(static_cast<unsigned char>(length & 0xFFU));
+        material.insert(material.end(), value.begin(), value.end());
+    };
+    append(source_name);
+    append(source_interface);
+    return Sha256Hex(material);
+}
 
 #if defined(A0_NIKON_SDK_AVAILABLE) && defined(_WIN32)
 namespace {
@@ -44,11 +74,6 @@ constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_Card;
 
 std::mutex g_session_mutex;
 bool g_session_active = false;
-
-std::string IdentityForSource(ULONG source_id) {
-    const std::string material = "nikon-d810-source:" + std::to_string(source_id);
-    return Sha256Hex(std::vector<unsigned char>(material.begin(), material.end()));
-}
 
 std::string ResultText(NKERROR result) {
     if (result == kNkMAIDResult_DeviceBusy) return "DeviceBusy(152)";
@@ -216,7 +241,8 @@ public:
                 try {
                     EnumerateCapabilities(candidate, deadline, "open_failed");
                     const ULONG type = GetUnsigned(candidate, kNkMAIDCapability_CameraType, deadline, "open_failed");
-                    if (type == kNkMAIDCameraType_D810 && IdentityForSource(id) == stable_identity) {
+                    if (type == kNkMAIDCameraType_D810 &&
+                        StableIdentity(candidate, deadline, "open_failed") == stable_identity) {
                         ++matches;
                         selected_id = id;
                     }
@@ -602,6 +628,41 @@ private:
         return value;
     }
 
+    std::string GetRequiredString(
+        MaidObject& object,
+        ULONG id,
+        std::chrono::steady_clock::time_point deadline,
+        std::string_view category) {
+        const auto* cap = Capability(object, id);
+        if (cap == nullptr || cap->ulType != kNkMAIDCapType_String ||
+            !Supports(object, id, kNkMAIDCapOperation_Get)) {
+            throw TransportError(std::string(category), "required SDK identity string is unavailable");
+        }
+        NkMAIDString value{};
+        RunCompleted(object, kNkMAIDCommand_CapGet, id, kNkMAIDDataType_StringPtr,
+            reinterpret_cast<NKPARAM>(&value), deadline, category);
+        const char* const begin = reinterpret_cast<const char*>(value.str);
+        const char* const end = begin + sizeof(value.str);
+        const char* const terminator = std::find(begin, end, '\0');
+        if (terminator == begin || terminator == end) {
+            throw TransportError(std::string(category), "SDK identity string is empty or unterminated");
+        }
+        return std::string(begin, static_cast<std::size_t>(terminator - begin));
+    }
+
+    std::string StableIdentity(
+        MaidObject& source,
+        std::chrono::steady_clock::time_point deadline,
+        std::string_view category) {
+        try {
+            return DeriveNikonSdkStableIdentity(
+                GetRequiredString(source, kNkMAIDCapability_Name, deadline, category),
+                GetRequiredString(source, kNkMAIDCapability_Interface, deadline, category));
+        } catch (const std::invalid_argument&) {
+            throw TransportError(std::string(category), "SDK source identity material is invalid");
+        }
+    }
+
     std::optional<ULONG> TryGetCurrentValue(
         MaidObject& object,
         ULONG id,
@@ -958,6 +1019,7 @@ private:
 
     std::vector<CameraInfo> EnumerateD810s(std::chrono::steady_clock::time_point deadline) {
         std::vector<CameraInfo> cameras;
+        std::set<std::string> identities;
         for (const ULONG id : WaitForSourceIds(deadline, "inventory_failed")) {
             MaidObject source;
             OpenChild(module_, source, id, "inventory_failed");
@@ -965,7 +1027,11 @@ private:
                 EnumerateCapabilities(source, deadline, "inventory_failed");
                 const ULONG type = GetUnsigned(source, kNkMAIDCapability_CameraType, deadline, "inventory_failed");
                 if (type == kNkMAIDCameraType_D810) {
-                    cameras.push_back({"Nikon D810", Firmware(source, deadline, "inventory_failed"), ShootingMode(source, deadline), IdentityForSource(id)});
+                    const auto identity = StableIdentity(source, deadline, "inventory_failed");
+                    if (!identities.insert(identity).second) {
+                        throw TransportError("identity_collision", "multiple D810 sources reported the same SDK identity");
+                    }
+                    cameras.push_back({"Nikon D810", Firmware(source, deadline, "inventory_failed"), ShootingMode(source, deadline), identity});
                 }
             } catch (...) {
                 CloseObjectNoThrow(source);

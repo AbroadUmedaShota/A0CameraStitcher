@@ -7,7 +7,7 @@
 | `HG-0001` A0出力品質 | product owner | M2前 | D810二台の光学成立性と品質契約を承認 |
 | `HG-0002` 最終リグ | product owner | M2前 | 配置、レンズ、距離、重複、照明を承認 |
 | `HG-0003A` 一台環境 | engineer-admin | Phase 0A前 | D810一台、MSVC/CMake、対象PC、USB、実行許可 |
-| `HG-0003B` 二台環境 | engineer-admin | Phase 0B前 | 二台目D810と二台異常系を含む実行許可 |
+| `HG-0003B` 二台環境 | engineer-admin | Phase 0B前 | D810 PnP 2台は確認済み。licensed SDK、cross-transport binding、二台異常系の実行準備 |
 | `HG-0004` transport決定 | product owner | WPD実装前 | 2026-08-04解消。SDK失敗証拠を確認し`REVISE-WPD`を承認 |
 | `HG-0006` SDK内部評価 | requester | SDK取得前 | 2026-08-04解消。本人同意、公式取得、ignored local配置を確認 |
 | `HG-0007` 標準WPD不成立後のtransport判断 | product owner | P0-A2 10/10前 | 解消済み。one-shot hybrid（WPD baseline/close → SDK one card capture/close → WPD recovery）を明示承認 |
@@ -19,15 +19,15 @@ Phase 0は通信専用チャートを使うため、`HG-0001`と`HG-0002`がopen
 
 ## 現在のpreflight証拠
 
-確認日: 2026-08-05
+確認日: 2026-08-08（再起動後に再確認）
 
 - 正式対象: Nikon D810 2台
-- 利用可能台数: 1台。preflightは識別情報を出力せずD810候補PnP nodeを1件検出し、SDK inventoryも`CAM-A / Nikon D810 / 1台`を確認した。
+- 利用可能台数: 2台。Windows PnPは識別情報を出力せず、正常なD810 WPD nodeを2件検出した。旧SDK CAM-A bindingは無効化済みで、identity-v2のCAM-B一台checkpoint、CAM-A SDK v2再登録待ち。
 - OS: Windows x64（build 26200）
 - MSVC: 14.44.35207がVisual Studio Build Tools配下に存在
 - CMake: 3.31.6-msvc6がVisual Studio同梱パスに存在
-- .NET SDK: Phase 0では不要。M3前に準備する。
-- Nikon SDK: 2026-08-04に本人同意後、公式D810 SDK（2024-05-15版）を`.tools/nikon/d810-remote-sdk`へ隔離配置。archive SHA-256はignored receiptへ記録済み。
+- .NET SDK: 10.0.302を確認。Phase 0では不要だがM3のbuild/testに使用できる。
+- Nikon SDK: 2026-08-08に公式D810 Remote Module SDK（2024-05-15版）を再取得し、`.tools/nikon/d810-remote-sdk`へ隔離配置した。archive SHA-256はignored receiptへ記録済み。
 - SDK実機確認: 公式x64 sampleでD810を1台列挙し、Source open/closeがexit 0で完了。Phase 0 CLIもlicensed adapterでsingle preflightと匿名inventoryに成功した。SDK内部IDは表示しない。
 - SDK撮影結果: D810のCaptureとカメラ側保存は成立したが、SDK adapterと公式sampleの双方でPC転送用SDRAM Itemが生成されなかった。JPEG Fine L、7360×4912、S、M、1/6秒、F8、15秒・60秒待機、強制EnumChildrenを確認してSDK経路を停止した。
 - transport決定: 2026-08-04の`REVISE-WPD`は履歴として保持する。標準WPD不成立後、product ownerはone-shot hybrid（WPD baseline/full close → SDK exactly-one card capture/full close → WPD reopen/no capture command/exactly-one JPEG recovery）を承認した。
@@ -43,7 +43,7 @@ Phase 0は通信専用チャートを使うため、`HG-0001`と`HG-0002`がopen
 - 匿名report: [SDK状態](evidence/phase0/run-1785908501354-1/report.md)、[vendor opcode広告](evidence/phase0/run-1785908518274-1/report.md)、[電源再投入後のMTP応答付きWPD失敗](evidence/phase0/run-1785908732670-1/report.md)。過去の証拠も`docs/evidence/phase0`に保存する。実写画像、preview、実識別子、SDK配布物は含めていない。
 - hybrid failure: [run-1785914842210-1](evidence/phase0/run-1785914842210-1/report.md)はWPD baselineが10.385秒後に`baseline_timeout`、SDK open/capture前、0/1件の`FailedPartial`、自動retry/delete 0だった。
 - correlation診断: read-only [run-1785917005306-1](evidence/phase0/run-1785917005306-1/report.md)はWPD full close/reopen 3 sample（1500ms）、datetime 3/3 available、session close 3/3、terminal `Complete`を確認したが、advance 0/equal 2、JPEG date 240/240、latest object date > device time 3/3だった。capture、vendor operation、settings、deleteは0件で、device datetime cutoffは製品帰属契約から撤回する。先行`run-1785915695600-1`も同じdatetime結果を保持する。
-- identity continuity: 電源再投入後の[run-1785917466375-1](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)は、再投入前から存在するSDK/WPD local identity mapが再列挙後も変更されず、両transportが一台のD810を`CAM-A`へ復元したことを匿名記録した。実識別子とmap hashは含めていないため、一台構成のP0-A1を合格とする。
+- identity continuity: 電源再投入後の[run-1785917466375-1](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持する。SDK側は2026-08-08の物理入替で別個体をCAM-Aへ誤一致し、ephemeral MAID source IDが原因と判明したため無効。P0-A1のSDK identityはidentity-v2による再接続・port交換確認までPartialである。
 - 5分Live View: [run-1785917554163-1](evidence/phase0/run-1785917554163-1/report.md)は304,347msで2,424 frameを取得し、停止、SDK session close、preview非保存に成功した。続く別プロセスの[run-1785917887961-1](evidence/phase0/run-1785917887961-1/report.md)も1 frame取得、停止、close、preview非保存に成功し、最終`run-1785917904556-1`はLive View `off`、session close、設定変更なしを確認した。Standalone Live Viewは合格、hybrid handoff 10回は未実施である。
 - 承認済みの次経路: dedicated empty/cleared cardをsingle-slot transient spoolとして使い、PC `.partial`、JPEG・size検証、SHA-256、atomic `original.jpg`確定、再読込検証後にexact just-recovered WPD objectだけを削除し、empty-afterを確認する。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にする。existing cardのbulk delete/format、vendor operation、retryは禁止する。
 - 全payload preflight: [run-1786014841232-1](evidence/phase0/run-1786014841232-1/report.md)は90 camera payload objectを検出し、SDK open、shutter、PC保存、delete、retryを0のまま`spool_not_empty` / `FailedPartial`で終了した。既存内容は自動削除せず、dedicated empty cardへの交換または操作者によるbackup・手動clearを待つ。
@@ -51,7 +51,7 @@ Phase 0は通信専用チャートを使うため、`HG-0001`と`HG-0002`がopen
 - final blocked audit: read-only [run-1786017282044-1](evidence/phase0/run-1786017282044-1/report.md)も全payload 90件、`NON_EMPTY`、WPD session close 1/1、capture/delete/vendor operation 0件だった。同じ物理阻害条件が3回連続したため、専用empty cardへの交換またはbackup・手動clearまでM1Aをブロックする。
 - 一台設定read-only: [run-1786040075194-1](evidence/phase0/run-1786040075194-1/report.md)はCAM-AからJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を取得し、撮影設定write、capture、Live View開始、WPD、deleteなしでSDK sessionを閉じた。FileTypeはnot-advertised。SDK control-plane callback登録は既存`CapSet`を使い得ることをsummaryへ明示し、撮影設定read-onlyと区別した。native command-trace testとfocus意味確定は未完了のためPartialである。
 - software確認: SDK有効・SDKなしの両Debug buildと全CTestを維持する。empty-spool aggregate、SDK close後/WPD recovery前の異常系operator gate、WPD reopen失敗時の`FailedPartial`、delete/retry 0、匿名fault summaryに加え、direct hardware capture拒否、process-wide named lease、pair/hybrid watchdogを契約化した。既存のstop/close失敗時のWPD未開始、WPD失敗時のresume skip、resume失敗時の原画像保持、preview非保存、匿名error detail、uncertain dispatch候補のquarantine、SDK状態summary、Live View/handoff reportも維持する。M3 simulated Release buildは警告0・エラー0で検証済みである。
-- 現在判定: `PHASE0A-DEDICATED-SPOOL-EMPTY-REQUIRED`。P0-A1とStandalone 5分Live View・別プロセス再起動は合格済み。ADR-0020のsoftware contractと全payload fail-closed preflightは合格したが、接続中cardに90 payload objectがあるためone-shot前で停止中である。P0-A2のone-shotと10/10、A3、A4の10回handoffは未実施で、M1Aは未完了。vendor operation、existing cardのbulk delete/format、retryは実装・実行しない。
+- 現在判定: `PHASE0A-IDENTITY-V2-REVERIFY / DEDICATED-SPOOL-EMPTY-REQUIRED`。Standalone 5分Live View・別プロセス再起動の一台実機結果は保持するが、P0-A1のSDK identity continuityはPartialへ戻した。ADR-0020のsoftware contractと全payload fail-closed preflightは合格したが、接続中cardに90 payload objectがあるためone-shot前で停止中である。P0-A2のone-shotと10/10、A3、A4の10回handoffは未実施で、M1Aは未完了。vendor operation、existing cardのbulk delete/format、retryは実装・実行しない。
 
 ```powershell
 pwsh -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single
@@ -95,15 +95,15 @@ D810 JPEG Fine Lの最大記録画素は7360×4912。M2で二台の画角・重�
 | MSVC/CMake | MSVC 14.44.35207、CMake 3.31.6でSDK有効build・CTest成功 |
 | Phase 0A実行許可 | 計画実装と最初の実機操作を承認済み。失敗後の次回撮影は新規transactionとして再指示を受ける |
 
-`HG-0003A`は2026-08-04に解消済み。電源再投入後の`CAM-A`維持は`run-1785917466375-1`で合格した。10回撮影とactive transaction中の切断・電源断・撮影経路のアプリ再起動試験は、引き続きM1Aの未完了試験として扱う。
+`HG-0003A`の環境・実行許可は2026-08-04に解消済み。`run-1785917466375-1`のWPD continuityは保持するが、SDK identity結論は無効化したためidentity-v2で再検証する。10回撮影、active transaction中のUSB切断、撮影経路のsoftware process再起動試験は、引き続きM1Aの未完了試験として扱う。2026-08-09のoperator判断により物理power-cycle/rebootと実power-off復旧はN/Aである。
 
 ## HG-0003B: 二台環境
 
-二台目D810の準備、一台ずつ接続してSDK/WPD identityを同じ`CAM-A/B`へ登録するcross-transport binding、100件撮影、USB切断、電源断、ポート交換を実行できる時点で解消する。現在は`WAITING-HARDWARE`。
+D810 PnP、licensed SDK inventory、WPD inventoryは各2台を匿名確認済み。旧SDK identityがMAID source object ID由来だったため無効化し、documented Source `Name`/`Interface` digest v2へ変更した。現在のCAM-B候補一台はSDK/WPD bound 1・unbound 0、Single `READY`のcheckpoint。CAM-Aだけへ戻してSDK/WPD identity-v2登録を完了し、接続順・ポート交換、二台同時readiness、100件撮影、USB切断まで解消しない。物理power-cycle/rebootと実power-off復旧はN/A。現在は`WAITING-CAM-A-IDENTITY-V2-REBIND`。
 
 ## HG-0006: SDK内部評価
 
-2026-08-04、本人がNikon D810 SDK使用許諾への同意を明示した。Codexが公式D810 SDKをダウンロードし、`.tools/nikon/d810-remote-sdk`へ隔離配置した。公式sampleによる一台列挙とSource open/closeも成功した。
+2026-08-04、本人がNikon D810 SDK使用許諾への同意を明示した。当時は公式D810 SDKを`.tools/nikon/d810-remote-sdk`へ隔離配置し、公式sampleによる一台列挙とSource open/closeも成功した。この記述は過去実績であり、2026-08-08現在はSDKを再配置する必要がある。
 
 `HG-0006`は解消済み。SDK固有のheader、sample、binary、資料およびarchive hash receiptはgitignored領域だけに保持する。
 

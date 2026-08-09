@@ -7,6 +7,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("protocol serialization and rejection", ProtocolSerializationAndRejectionAsync),
     ("named pipe fake agent roundtrip", NamedPipeRoundtripAsync),
     ("durable sequential success", DurableSequentialSuccessAsync),
+    ("durable sequential pair stability completes 100 of 100", DurableSequentialPairStabilityAsync),
+    ("live view stop failure is durable before capture", LiveViewStopFailureIsDurableAsync),
     ("partial failure preserves CAM-A and does not retry", PartialFailureAndNoRetryAsync),
     ("crash restart closes journal without recapture", CrashRestartRecoveryAsync),
     ("WPF-facing service boundary stays simulated", WorkflowServiceBoundaryAsync),
@@ -261,6 +263,94 @@ static async Task DurableSequentialSuccessAsync()
             Check.True(content.Contains("Simulated", StringComparison.Ordinal), "The artifact content must be visibly simulated.");
             Check.False(content.Contains("JFIF", StringComparison.Ordinal), "The artifact must not resemble a JPEG payload.");
         }
+    });
+}
+
+static async Task DurableSequentialPairStabilityAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var source = new DeterministicSimulatedCaptureSource();
+        var coordinator = new DurableSimulatedCaptureCoordinator(root, source);
+        await coordinator.InitializeAsync();
+
+        var transactionIds = new List<Guid>();
+        for (var index = 0; index < 100; index++)
+        {
+            var transactionId = Guid.NewGuid();
+            transactionIds.Add(transactionId);
+            var result = await coordinator.ExecuteAsync(transactionId);
+            Check.Equal(SimulatedTransactionState.Complete, result.State);
+            Check.SequenceEqual(
+                new[]
+                {
+                    SimulatedTransactionState.Idle,
+                    SimulatedTransactionState.CaptureA,
+                    SimulatedTransactionState.PersistA,
+                    SimulatedTransactionState.CaptureB,
+                    SimulatedTransactionState.PersistB,
+                    SimulatedTransactionState.Complete,
+                },
+                result.TransitionHistory);
+            Check.SequenceEqual(new[] { "CAM-A", "CAM-B" }, result.Originals.Select(original => original.Alias));
+            Check.Equal(0, result.AutomaticRetryCount);
+        }
+
+        Check.Equal(100, source.GetCaptureCount("CAM-A"));
+        Check.Equal(100, source.GetCaptureCount("CAM-B"));
+        foreach (var transactionId in transactionIds)
+        {
+            Check.True(File.Exists(coordinator.GetOriginalPath(transactionId, "CAM-A")), "CAM-A original is missing from the 100-pair run.");
+            Check.True(File.Exists(coordinator.GetOriginalPath(transactionId, "CAM-B")), "CAM-B original is missing from the 100-pair run.");
+        }
+
+        var restarted = new DurableSimulatedCaptureCoordinator(
+            root,
+            new DeterministicSimulatedCaptureSource());
+        Check.Equal(0, (await restarted.InitializeAsync()).Count);
+    });
+}
+
+static async Task LiveViewStopFailureIsDurableAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var transactionId = Guid.NewGuid();
+        ISimulatedTransactionService service = new SimulationFoundationService(root);
+
+        var failed = await service.ExecuteAsync(
+            transactionId,
+            SimulatedWorkflowScenario.FailLiveViewStop);
+
+        Check.Equal(transactionId, failed.TransactionId);
+        Check.Equal(SimulatedTransactionState.FailedPartial, failed.State);
+        Check.Equal("LiveViewStopFailed", failed.TerminalReason);
+        Check.Equal(0, failed.RetainedOriginalAliases.Count);
+
+        var source = new DeterministicSimulatedCaptureSource();
+        var coordinator = new DurableSimulatedCaptureCoordinator(root, source);
+        var journal = await coordinator.LoadAsync(transactionId);
+        Check.SequenceEqual(
+            new[]
+            {
+                SimulatedTransactionState.Idle,
+                SimulatedTransactionState.FailedPartial,
+            },
+            journal.TransitionHistory);
+        Check.Equal(0, journal.Originals.Count);
+        Check.Equal(0, journal.AutomaticRetryCount);
+        Check.Equal(0, source.GetCaptureCount("CAM-A"));
+        Check.Equal(0, source.GetCaptureCount("CAM-B"));
+
+        ISimulatedTransactionService restarted = new SimulationFoundationService(root);
+        var discovered = await restarted.InitializeAsync();
+        Check.Equal(1, discovered.Count);
+        Check.Equal(transactionId, discovered[0].TransactionId);
+        Check.Equal(SimulatedTransactionState.FailedPartial, discovered[0].State);
+        Check.Equal("LiveViewStopFailed", discovered[0].TerminalReason);
+
+        await Check.ThrowsAsync<InvalidOperationException>(() =>
+            restarted.ExecuteAsync(transactionId, SimulatedWorkflowScenario.Success));
     });
 }
 

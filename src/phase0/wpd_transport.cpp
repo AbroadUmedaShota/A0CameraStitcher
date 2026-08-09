@@ -1,7 +1,6 @@
 #include "a0/phase0/wpd_transport.hpp"
 
 #include <windows.h>
-#include <bcrypt.h>
 #include <portabledeviceapi.h>
 #include <portabledevice.h>
 #include <WpdMtpExtensions.h>
@@ -18,12 +17,33 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 namespace a0::phase0 {
+
+std::string DeriveWpdStableIdentity(std::string_view device_serial_utf8) {
+    constexpr std::size_t kMaximumSerialBytes = 512;
+    if (device_serial_utf8.empty() || device_serial_utf8.size() > kMaximumSerialBytes ||
+        device_serial_utf8.find('\0') != std::string_view::npos) {
+        throw std::invalid_argument("WPD device serial is missing or invalid");
+    }
+    std::vector<unsigned char> material;
+    constexpr std::string_view domain = "a0camera-wpd-device-serial-identity-v2";
+    material.insert(material.end(), domain.begin(), domain.end());
+    material.push_back(0);
+    const auto length = static_cast<std::uint32_t>(device_serial_utf8.size());
+    material.push_back(static_cast<unsigned char>((length >> 24U) & 0xFFU));
+    material.push_back(static_cast<unsigned char>((length >> 16U) & 0xFFU));
+    material.push_back(static_cast<unsigned char>((length >> 8U) & 0xFFU));
+    material.push_back(static_cast<unsigned char>(length & 0xFFU));
+    material.insert(material.end(), device_serial_utf8.begin(), device_serial_utf8.end());
+    return Sha256Hex(material);
+}
+
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -74,38 +94,6 @@ std::string WideToUtf8(std::wstring_view value) {
     WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
         output.data(), size, nullptr, nullptr);
     return output;
-}
-
-std::string Sha256(std::wstring_view value) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    DWORD object_size = 0;
-    DWORD hash_size = 0;
-    DWORD bytes = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&object_size),
-            sizeof(object_size), &bytes, 0) != 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_size),
-            sizeof(hash_size), &bytes, 0) != 0) {
-        if (algorithm != nullptr) BCryptCloseAlgorithmProvider(algorithm, 0);
-        throw TransportError("inventory_failed", "WPD identity hash initialization failed");
-    }
-    std::vector<unsigned char> object(object_size);
-    std::vector<unsigned char> digest(hash_size);
-    if (BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0) != 0 ||
-        BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(value.data())),
-            static_cast<ULONG>(value.size() * sizeof(wchar_t)), 0) != 0 ||
-        BCryptFinishHash(hash, digest.data(), hash_size, 0) != 0) {
-        if (hash != nullptr) BCryptDestroyHash(hash);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        throw TransportError("inventory_failed", "WPD identity hash failed");
-    }
-    BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (const auto byte : digest) output << std::setw(2) << static_cast<unsigned>(byte);
-    return output.str();
 }
 
 ComPtr<IPortableDeviceValues> NewValues(std::string_view category) {
@@ -211,6 +199,33 @@ std::string DeviceFirmware(IPortableDevice* device) {
     const std::string result = WideToUtf8(firmware);
     CoTaskMemFree(firmware);
     return result.empty() ? "unknown" : result;
+}
+
+std::string DeviceStableIdentity(IPortableDevice* device) {
+    ComPtr<IPortableDeviceContent> content;
+    ComPtr<IPortableDeviceProperties> properties;
+    auto keys = NewKeys("inventory_failed");
+    if (device == nullptr || FAILED(device->Content(&content)) ||
+        FAILED(content->Properties(&properties)) ||
+        FAILED(keys->Add(WPD_DEVICE_SERIAL_NUMBER))) {
+        throw TransportError("inventory_failed", "WPD device serial property is unavailable");
+    }
+    ComPtr<IPortableDeviceValues> values;
+    Check(properties->GetValues(WPD_DEVICE_OBJECT_ID, keys.Get(), &values),
+        "inventory_failed", "read WPD device identity properties");
+    PWSTR serial = nullptr;
+    if (!values || FAILED(values->GetStringValue(WPD_DEVICE_SERIAL_NUMBER, &serial)) ||
+        serial == nullptr || serial[0] == L'\0') {
+        if (serial != nullptr) CoTaskMemFree(serial);
+        throw TransportError("inventory_failed", "WPD device serial is missing");
+    }
+    const std::string serial_utf8 = WideToUtf8(serial);
+    CoTaskMemFree(serial);
+    try {
+        return DeriveWpdStableIdentity(serial_utf8);
+    } catch (const std::invalid_argument&) {
+        throw TransportError("inventory_failed", "WPD device serial is invalid");
+    }
 }
 
 struct CaptureTargetProbe {
@@ -482,22 +497,29 @@ public:
             if (ids[index] != nullptr) CoTaskMemFree(ids[index]);
             const std::wstring friendly = DeviceFriendlyName(manager.Get(), id.c_str());
             if (!ContainsD810(friendly)) continue;
+            // Inventory only reads capabilities, firmware, and the standard
+            // device serial property. Capture opens a separate read/write
+            // session later, after target validation.
+            auto device = OpenDevice(id, "inventory_failed", GENERIC_READ);
+            std::string firmware;
+            std::string identity;
             try {
-                // Inventory only reads capabilities and firmware. Capture opens
-                // a separate read/write session later, after target validation.
-                auto device = OpenDevice(id, "inventory_failed", GENERIC_READ);
                 if (!GetSupportedWpdCommands(device.Get()).still_image_capture) {
                     device->Close();
                     continue;
                 }
-                const std::string firmware = DeviceFirmware(device.Get());
+                firmware = DeviceFirmware(device.Get());
+                identity = DeviceStableIdentity(device.Get());
                 device->Close();
-                DeviceRecord record{id, Sha256(id), WideToUtf8(friendly)};
-                devices_.emplace(record.stable_identity, record);
-                cameras.push_back({"Nikon D810", firmware, "S", record.stable_identity});
-            } catch (const TransportError&) {
-                // A non-capture WPD projection of the same physical camera is ignored.
+            } catch (...) {
+                device->Close();
+                throw;
             }
+            DeviceRecord record{id, identity, WideToUtf8(friendly)};
+            if (!devices_.emplace(record.stable_identity, record).second) {
+                throw TransportError("identity_collision", "multiple D810 devices reported the same WPD serial identity");
+            }
+            cameras.push_back({"Nikon D810", firmware, "S", record.stable_identity});
         }
         return cameras;
     }

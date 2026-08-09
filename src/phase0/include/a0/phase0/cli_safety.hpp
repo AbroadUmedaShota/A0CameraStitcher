@@ -18,4 +18,10 @@ namespace a0::phase0 {
     std::string_view command,
     std::string_view transport) noexcept;
 
+[[nodiscard]] std::optional<std::string> ValidateIdentityBindingArguments(
+    std::string_view command,
+    std::string_view transport,
+    bool single_camera_connected_confirmed,
+    bool transport_explicit = true);
+
 } // namespace a0::phase0

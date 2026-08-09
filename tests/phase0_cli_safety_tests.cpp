@@ -38,6 +38,8 @@ void TestDirectCaptureCommandsAreFakeOnly() {
     }
     Check(!ValidateDirectCaptureSafety("hybrid-capture-single", "sdk", false),
         "the approved hybrid command should not be classified as legacy direct capture");
+    Check(!ValidateDirectCaptureSafety("hybrid-capture-pair", "sdk", false),
+        "the approved hybrid pair command should not be classified as legacy direct capture");
 }
 
 void TestHardwareCommandClassification() {
@@ -46,10 +48,52 @@ void TestHardwareCommandClassification() {
     Check(RequiresHardwareProcessLease("live-view", "sdk"), "Live View needs the process lease");
     Check(RequiresHardwareProcessLease("hybrid-capture-single", "sdk"),
         "hybrid capture needs the process lease");
+    Check(RequiresHardwareProcessLease("hybrid-capture-pair", "sdk"),
+        "hybrid pair capture needs the process lease");
+    Check(RequiresHardwareProcessLease("hybrid-fault-pair", "sdk"),
+        "hybrid pair fault injection needs the process lease");
+    Check(RequiresHardwareProcessLease("hybrid-interrupt-pair", "sdk"),
+        "hybrid pair boundary interruption needs the process lease");
+    Check(RequiresHardwareProcessLease("bind-identity", "sdk"),
+        "SDK identity binding needs the process lease");
+    Check(RequiresHardwareProcessLease("bind-identity", "wpd"),
+        "WPD identity binding needs the process lease");
+    Check(RequiresHardwareProcessLease("bind-cross-transport-identity", "wpd"),
+        "cross-transport identity binding needs one process lease");
+    Check(RequiresHardwareProcessLease("verify-dual-identity", "wpd"),
+        "dual identity verification needs one process lease");
+    Check(RequiresHardwareProcessLease("verify-dual-spools", "wpd"),
+        "dual spool verification needs one process lease");
     Check(!RequiresHardwareProcessLease("inventory", "fake"), "fake inventory must not need hardware lease");
     Check(!RequiresHardwareProcessLease("preflight", "wpd"), "preflight does not open a camera session");
-    Check(!RequiresHardwareProcessLease("report", "wpd"), "report generation does not open a camera session");
+    Check(RequiresHardwareProcessLease("report", "wpd"),
+        "report generation must not race an active hardware evidence writer");
+    Check(RequiresHardwareProcessLease("report", "fake"),
+        "an explicit fake transport must not bypass report evidence serialization");
     Check(!RequiresHardwareProcessLease("unknown", "wpd"), "unknown commands must not acquire hardware lease");
+}
+
+void TestIdentityBindingArguments() {
+    Check(!ValidateIdentityBindingArguments("inventory", "sdk", false),
+        "non-binding commands must ignore the binding confirmation");
+    Check(ValidateIdentityBindingArguments("bind-identity", "sdk", false).has_value(),
+        "SDK binding requires the single-camera confirmation");
+    Check(ValidateIdentityBindingArguments("bind-identity", "wpd", false).has_value(),
+        "WPD binding requires the single-camera confirmation");
+    Check(ValidateIdentityBindingArguments("bind-identity", "fake", true).has_value(),
+        "fake transport must not stand in for a physical cross-transport binding");
+    Check(ValidateIdentityBindingArguments("bind-identity", "sdk", true, false).has_value(),
+        "identity binding requires an explicit transport");
+    Check(!ValidateIdentityBindingArguments("bind-identity", "sdk", true),
+        "confirmed SDK binding should pass argument validation");
+    Check(!ValidateIdentityBindingArguments("bind-identity", "wpd", true),
+        "confirmed WPD binding should pass argument validation");
+    Check(!ValidateIdentityBindingArguments("bind-cross-transport-identity", "wpd", true, false),
+        "cross-transport binding should accept one-camera confirmation without a transport option");
+    Check(ValidateIdentityBindingArguments("bind-cross-transport-identity", "sdk", true, true).has_value(),
+        "cross-transport binding must reject an explicit transport option");
+    Check(ValidateIdentityBindingArguments("bind-cross-transport-identity", "wpd", false, false).has_value(),
+        "cross-transport binding must require the one-camera confirmation");
 }
 
 void TestProcessLeaseRejectsConcurrentOwner() {
@@ -200,6 +244,7 @@ int main(int argc, char** argv) {
     }
     TestDirectCaptureCommandsAreFakeOnly();
     TestHardwareCommandClassification();
+    TestIdentityBindingArguments();
     TestProcessLeaseRejectsConcurrentOwner();
     TestProcessLeaseRejectsSeparateProcess();
     if (failures != 0) {
