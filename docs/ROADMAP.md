@@ -7,23 +7,22 @@ MVP全体は`in-progress`である。2026-08-10に製品を明示的な`SingleCa
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
 | 安全基盤 M0 | Complete | SDK有無各CTest 5/5、旧direct実機拒否、同一operator session内の別process排他、撮影／保存watchdog途中超過が合格 |
-| 一台・非破壊 M1N | Active / Partial | SDK setting command traceを自動検証し、未広告・opaque値を明示処理 |
-| オフラインpre-gate M2P | Active | synthetic画像の測定値を上限付き補正判定へ接続 |
+| 一台・非破壊 M1N | Active / Partial | software contract済みのSDK setting command traceとprocess routing proofを維持し、実D810 v5 runと未広告・opaque値の扱いを確認 |
+| オフラインpre-gate M2P | Active / WI-0022C software complete | `HG-0001/HG-0002`承認後に実リグ値・品質作業へ進む |
 | simulated統合 M3P | Complete / Software-only | requirements 2.6.0の明示mode、no-auto-fallback、Single original一件、stitch N/A、明示exportをfresh contractで維持 |
 | 一台製品mode M1A/M3 | Software Boundary Complete / Hardware Deferred | 明示再開とempty spool確認を経てexactly-one D810のone-shot 1/1、続いて実WPF受入 |
-| 二台 Phase 0 M1B | Binding In Progress | CAM-B identity-v2 checkpoint済み。pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断CLIを実装し、dual identity未Ready時はcard/capture前停止。fake安全契約合格。CAM-A SDK/WPD v2再登録待ち |
+| 二台 Phase 0 M1B | Identity Strategy Blocked | CAM-B identity-v2 checkpointとfake安全契約は確認済みだが、二台接続時にSDK `identity_collision`。documentedな本体固有SDK propertyまたは安全なSDK/WPD相関が見つかるまで、binding、pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断は開始しない |
 | 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0003B/HG-0005/HG-0009`と先行実機証拠 |
 
 現在の詳細は[CURRENT_STATUS.md](CURRENT_STATUS.md)、機能単位の検証キューは[FEATURE_VERIFICATION_PLAN.md](FEATURE_VERIFICATION_PLAN.md)を正本とする。
 
 ## 現在の実行順
 
-1. `WI-0010A`: principal setting readbackのnative SDK command-trace contract
-2. `WI-0022C`: synthetic shift/rotation/scale/exposure/color測定とbounded decisionの接続
-3. 操作者がカード作業を明示再開した場合だけexactly-one D810のM1A one-shot
-4. `HG-0009`承認後に実D810のWPF→Camera Agent→canonical original→明示export受入
-5. CAM-A/B cross-transport binding後にM1B実機pair
-6. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
+1. identity strategyのhuman gateとソフトウェア判断（物理操作なし）
+2. 承認後にidentity-v3または明示承認された代替を実装し、旧v2 mapを自動成功扱いしないmigration/invalidationとpure testを追加
+3. identity Ready後にCAM-A/B cross-transport bindingを再開し、M1B実機pairへ進む
+4. `WI-0022C`はdependency確認済みのsoftware-only sliceとして完了。次のM2 calibration／quality作業は`HG-0001/HG-0002`承認後に扱う
+5. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
 
 ## M0: D810/SDK安全基盤
 
@@ -44,7 +43,7 @@ MVP全体は`in-progress`である。2026-08-10に製品を明示的な`SingleCa
 - SDK status、Live View状態、JPEG/露出/ISO/WB/focus capabilityのreadback
 - 撮影設定capabilityへのwrite、capture、Live View開始、WPD、deleteがないことをnative command traceで検証
 
-実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。旧CAM-A SDK continuityはephemeral Source IDのため無効で、CAM-B identity-v2はcheckpointに留まる。identity-v2 reconnect／port確認とnative command traceが未実装なのでM1NはPartial。
+実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010Aのsoftware contractは、MAID entry boundaryで全`CapStart`を計数・分類し、fake entry boundary testとLive View API compile-time negative testを含む。`sdk-status`専用executorの列挙・read-only status routingとWPD/capture/delete非到達proofをMAID traceと別項目でv5 summaryへ記録する。SDK-less/licensed-SDK-enabledのDebug/Release全CTestは各6/6、M3 ReleaseはPassしたが、実D810 v5 runは未検証である。旧CAM-A SDK continuityはephemeral Source IDのため無効で、CAM-B identity-v2はcheckpointに留まる。二台接続時の`identity_collision`後に行ったlicensed SDK headers/docsとWPD相関設計のread-only診断でもdocumentedな本体固有SDK propertyは見つからず、identity-v3は未実装・Blocked。identity-v2 reconnect／port確認を次の解決策とは扱わず、focus値の意味、FileType未広告の扱いも残るためM1NはPartial。過去v4 evidenceは変更しない。
 
 ## M2P: オフラインpre-gate
 
@@ -54,7 +53,7 @@ MVP全体は`in-progress`である。2026-08-10に製品を明示的な`SingleCa
 - `ready`、`ready-auto-correction`、`physical-adjustment-required`の純粋判定
 - known synthetic差分から測定値を生成し、profile上限内だけ補正候補にするcontract
 
-実装状態: 光学計算、schema、fixture、三状態setup-assessmentはsoftware-only合格。画像測定から補正判定への接続`WI-0022C`が次である。最終リグ、承認済み閾値、実写A0品質は証明しない。
+実装状態: 光学計算、schema、fixture、三状態setup-assessment、`WI-0022C`のsynthetic画像測定からprofile-bounded correction proposalへの接続はsoftware-only合格。測定値は決定的に保持され、over-limit、malformed、profile-mismatch、unapproved profileはfail closedし、profileを変更しない。最終リグ、承認済み閾値、実写A0品質、実機性能は証明しない。
 
 ## M3P: simulated統合基盤
 
@@ -62,7 +61,7 @@ MVP全体は`in-progress`である。2026-08-10に製品を明示的な`SingleCa
 - fake CAM-A/Bによるdurable transaction、片側失敗、crash/restart
 - 全画面に`SIMULATED / 実機未接続`と`NO AUTO RETRY`を表示するWPF shell
 
-実装状態: 2026-08-10のrequirements 2.6.0 fresh Release実行でbuild 0 warning/0 error、Foundation 19/19、Operator Shell 15/15、`Test-M3Simulated.ps1` Pass。さらにSDK-less／licensed-SDK-enabled Release CTest各6/6で`hardware_camera_agent_contracts`を含むC++ software boundaryを確認した。明示mode、Single original一件、他alias未開始、stitch N/A、明示export、mode lock、no-auto-fallbackをsoftware-onlyで確認したためM3PはCompleteとする。CTestではcamera commandを送っておらず、実D810を使うWPF Camera Agent実行、WPD/SDK、actual JPEG、製品受入とは分離する。
+実装状態: 2026-08-10のrequirements 2.6.0 fresh Release実行でbuild 0 warning/0 error、Foundation 19/19、Operator Shell 15/15、`Test-M3Simulated.ps1` Pass。さらにWI-0022C追加後のSDK-less Release CTest 7/7で`hardware_camera_agent_contracts`を含むC++ software boundaryを確認した。既存のlicensed-SDK-enabled 6/6 evidenceは保持する。明示mode、Single original一件、他alias未開始、stitch N/A、明示export、mode lock、no-auto-fallbackをsoftware-onlyで確認したためM3PはCompleteとする。CTestではcamera commandを送っておらず、実D810を使うWPF Camera Agent実行、WPD/SDK、actual JPEG、製品受入とは分離する。
 
 ## M1A: D810一台・物理撮影／SingleCamera transport受入 Phase 0
 
@@ -80,7 +79,7 @@ MVP全体は`in-progress`である。2026-08-10に製品を明示的な`SingleCa
 - `CAM-A → CAM-B`順次transaction 10件
 - 100/100、二台異常系、最終transport判断
 
-現在: D810 PnP/SDK/WPD各2台、read-only inventory、実機`hybrid-capture-pair` software contractを確認済み。CAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、100組集計、p50/p95/max匿名時間統計、CAM-A後の途中停止recovery診断がSDK有無各CTest 5/5で合格した。旧SDK source-ID mapは無効化してdocumented MAID Source `Name`/`Interface` identity-v2へ修正し、WPDもPnP IDから本体報告serial identity-v2へ強化した。現在はfirmware V1.11個体のCAM-B checkpoint。物理power-cycle/rebootと実power-off復旧はN/A。履歴上V1.14の元CAM-A本体だけへ交換後に別個体判定、CAM-A登録、接続順・port確認、二台readiness、1/10/100 pairへ進む。
+現在: D810 PnP/SDK/WPD各2台、read-only inventory、実機`hybrid-capture-pair` software contractを確認済み。CAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、100組集計、p50/p95/max匿名時間統計、CAM-A後の途中停止recovery診断がSDK有無各CTest 5/5で合格した。旧SDK source-ID mapは無効化してdocumented MAID Source `Name`/`Interface` identity-v2へ修正し、WPDもPnP IDから本体報告serial identity-v2へ強化した。しかし二台接続時のSDK identity-v2は衝突し、read-only SDK headers/docs調査でも本体固有propertyまたは安全なSDK/WPD相関は得られなかった。現在のfirmware V1.11個体のCAM-B checkpointは恒久的なDual identity証明ではなく、identity strategyがBlocked。物理power-cycle/rebootと実power-off復旧はN/A。抜線、CAM-A再登録、接続順・port確認、二台readiness、1/10/100 pairはhuman decisionまで保留する。
 
 ## M2: 実リグ・オフライン合成PoC
 

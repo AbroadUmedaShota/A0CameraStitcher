@@ -7,7 +7,7 @@
 ## 開始条件
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
-- Phase 0B前: `HG-0003B`の解消が必要。2026-08-08にD810 PnP、SDK inventory、WPD inventoryを各2台確認した。17:31 JSTのCAM-A SDK bindingは、物理入替後もCAM-Aへ誤一致したため無効化した。原因のephemeral MAID source IDを排除しSource `Name`/`Interface` identity-v2へ修正、SDK有無各CTest 5/5とCAM-B一台checkpointは合格した。CAM-A SDK v2再登録、別個体、再接続、port交換、二台同時readinessまで実機Phase 0B撮影を開始しない。
+- Phase 0B前: `HG-0003B`の解消が必要。2026-08-08にD810 PnP、SDK inventory、WPD inventoryを各2台確認した。17:31 JSTのCAM-A SDK bindingは、物理入替後もCAM-Aへ誤一致したため無効化した。原因のephemeral MAID source IDを排除しSource `Name`/`Interface` identity-v2へ修正、SDK有無各CTest 5/5とCAM-B一台checkpointは合格したが、二台接続時のSDK identity-v2は`identity_collision`となった。licensed SDK headers/docsとWPD相関設計のread-only診断ではdocumentedな本体固有propertyまたは安全なcross-transport anchorを確認できなかったため、identity strategyがsoftware-blockedである。CAM-A SDK v2再登録、抜線、再接続、port交換、二台同時readiness、実機Phase 0B撮影はhuman decisionまで開始しない。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
@@ -30,15 +30,17 @@ ADR-0023以後、Phase 0Aは`SingleCamera`実機transport受入の先行証拠�
 ### P0-A1: SDKとD810列挙
 
 - SDK版、OS、MSVC、CMakeを記録する。
-- 物理的にD810一台だけを接続し、SDKとWPDの両方で列挙したlocal identityを同じ選択alias（`CAM-A`または`CAM-B`）へ対応付ける。
+- 物理的にD810一台だけを接続することは、二台の恒久的区別を証明しない。documentedな本体固有SDK propertyまたは安全なSDK/WPD相関方法がhuman gateで承認されるまで、実機の再登録・bindingは行わない。
 - 取得可能なcapabilityとfirmwareを匿名化して記録する。
-- Phase 0Aでは記録済み電源再投入によるPnP再列挙後も`CAM-A`を復元する。物理cableの抜き差し、接続順変更、USB port交換はP0-B1で別途検証する。
+- Phase 0Aのidentity合格には、承認済みidentity strategyによる再列挙復元を要求する。旧identity-v2を一台状態で再開すること、物理cableの抜き差し、接続順変更、USB port交換だけでは二台の個体区別を証明しない。
 
 合格: D810を安定して選択aliasとして識別でき、実識別子がcommit対象へ出ない。
 
-2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。P0-A1のSDK identity continuityはidentity-v2による再接続・port交換確認までPartialへ戻す。実識別子とmap hashはcommit対象へ含めない。
+2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。二台接続時のidentity-v2衝突とread-only SDK資料診断を受け、P0-A1のSDK identity continuityは再接続・port試験ではなく、まずdocumented identity strategyと明示migration/invalidationの決定が必要である。実識別子とmap hashはcommit対象へ含めない。
 
 2026-08-07の設定read-only [run-1786040075194-1](evidence/phase0/run-1786040075194-1/report.md)は、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を匿名記録した。FileTypeはnot-advertisedだったが、CompressionLevelとImageSizeは取得できた。撮影設定write、capture、Live View開始、WPD、deleteは行わず、sessionを閉じた。MAID session確立時のcontrol-plane callback登録とModuleModeは既存`CapSet`を使い得るため、設定read-onlyは「撮影設定capabilityを書き換えない」という意味である。native command-trace自動試験とfocus値の意味確定が未完了のため、設定比較項目はPartialとする。
+
+WI-0010A revise loop後のsoftware contractは実装済みである。MAID traceは唯一のMAID entry boundaryで全`CapStart`を計数・分類し、photographic-setting、storage-routing、Live View-controlの各`CapSet`、capture、unknown/non-capture CapStart、session状態、counter整合性をfail closedする。fake entryを通る共有boundary testで一回計数と分類を検証し、`sdk-status`のLive View API非公開もcompile-time negative testで固定した。`sdk-status`は列挙とread-only statusだけの狭いexecutor/interfaceを通り、WPD/capture/deleteのprocess routing proofをMAID proofと別項目として`phase0.sdk-status-summary.v5`へ保存する。WI-0010A時点のSDK-less/licensed-SDK-enabled Debug/Release全CTest各6/6という過去evidenceは保持し、WI-0022C追加後の全CTestは各7/7、M3 ReleaseはPassした。実D810でのv5 runは未検証であり、上記の過去実機runとv4 evidenceは書き換えない。
 
 ### P0-A2: one-shot hybrid単体撮影・回収
 
@@ -145,6 +147,12 @@ active中の実USB切断には`hybrid-fault-pair --alias CAM-A|CAM-B --scenario 
 `report --run-id`はdurable event logにpair開始後のterminal stateがない場合、匿名`hybrid-pair-recovery-summary.json`を生成する。`CAM-A-active`、`after-CAM-A-before-CAM-B`、`CAM-B-active`を区別し、完了済み原本保持、automatic retry禁止、新規transaction必須を記録する。terminal failureも新規transactionを要求し、pair開始が重なる不整合証跡は`EvidenceInvalid`としてfail closedにする。reportはactive hardware evidence writerと競合しないよう、camera sessionを開かなくてもoperator-session camera-control leaseを保持する。software contractは合格済みだが、実プロセス終了と復旧後の新規実機transactionはP0-B4で別途実施する。
 
 `hybrid-interrupt-pair`はdual identity、両専用empty spool、安全確認、operator-session leaseを要求する。CAM-A完了後の中断専用gateはprocess終了以外で正常復帰せず、誤ってcontinue markerを作った場合やtimeoutでもpairをterminal failureとして閉じてCAM-Bを開かない。実process終了時はterminal pair eventがない状態を意図的に残し、再起動後の`report --run-id`だけが匿名recovery summaryを生成する。
+
+## M2P: software-only pre-gate
+
+`WI-0021A`と`WI-0022B`の依存を満たした`WI-0022C`は、実機を使わないbounded software sliceとして完了した。rights-clearedな合成画像fixtureからshift、rotation、scale、exposure、colorを決定的に測定し、測定値とfixture/profile provenanceを保持するproposalへ接続する。承認済みprofile envelope内の一時補正だけを受理し、target／automatic-correction上限のboundary、over-limit、malformed、profile-mismatch、unapproved profile、入力不整合をfail closedする。profileの自動学習・更新はない。
+
+SDK-less Debug/Release全CTestは各7/7、`pwsh -NoProfile -File .\\scripts\\Test-M3Simulated.ps1 -Configuration Release`はPassした。このsoftware contractは最終リグ、承認済みA0閾値、実写品質、実機性能、identity strategyの解決を証明しない。identity strategyはBlocked、`HG-0003B`は未解消、実D810 v5 runと実機captureは未検証のままである。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsliceで実行していない。
 
 ## P0判定
 

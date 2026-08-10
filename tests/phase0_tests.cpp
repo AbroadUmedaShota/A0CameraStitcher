@@ -17,12 +17,51 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <thread>
 
 namespace fs = std::filesystem;
 using namespace a0::phase0;
 
 namespace {
+
+template <typename T>
+concept ExposesCaptureToCard = requires(T& executor) {
+    executor.CaptureToCard(std::chrono::seconds(1), std::chrono::seconds(1));
+};
+
+template <typename T>
+concept ExposesRecoveredObjectDelete = requires(T& executor) {
+    executor.DeleteRecoveredObject(std::string_view{}, std::chrono::seconds(1));
+};
+
+template <typename T>
+concept ExposesLiveViewOpen = requires(T& executor) {
+    executor.OpenLiveView(std::string_view{}, std::chrono::seconds(1));
+};
+
+template <typename T>
+concept ExposesLiveViewStart = requires(T& executor) {
+    executor.StartLiveView(std::chrono::seconds(1));
+};
+
+template <typename T>
+concept ExposesLiveViewRead = requires(T& executor) {
+    executor.ReadLiveViewFrame(std::chrono::seconds(1));
+};
+
+template <typename T>
+concept ExposesLiveViewStop = requires(T& executor) {
+    executor.StopLiveView(std::chrono::seconds(1));
+};
+
+static_assert(std::is_base_of_v<ISdkStatusExecutor, NikonSdkStatusExecutor>);
+static_assert(!ExposesCaptureToCard<NikonSdkStatusExecutor>);
+static_assert(!ExposesRecoveredObjectDelete<NikonSdkStatusExecutor>);
+static_assert(!ExposesLiveViewOpen<NikonSdkStatusExecutor>);
+static_assert(!ExposesLiveViewStart<NikonSdkStatusExecutor>);
+static_assert(!ExposesLiveViewRead<NikonSdkStatusExecutor>);
+static_assert(!ExposesLiveViewStop<NikonSdkStatusExecutor>);
 
 int failures = 0;
 
@@ -407,6 +446,159 @@ void TestStandaloneLiveViewSummaryReport() {
     fs::remove_all(root);
 }
 
+void TestSdkReadOnlyCommandTraceRejectsMutatingBoundaries() {
+    SdkCommandTrace trace;
+    trace.cap_get_count = 9;
+    trace.cap_get_array_count = 8;
+    trace.cap_set_count = 3;
+    trace.control_plane_cap_set_count = 3;
+    trace.sdk_session_opened = true;
+    trace.sdk_session_closed = true;
+    Check(!ValidateSdkReadOnlyCommandTrace(trace),
+        "read-only SDK status trace should accept capability reads and control-plane CapSet only");
+
+    const auto expect_rejected = [&](SdkCommandTrace invalid, std::string_view reason) {
+        const auto failure = ValidateSdkReadOnlyCommandTrace(invalid);
+        Check(failure && *failure == reason,
+            std::string("read-only SDK status trace should reject ") + std::string(reason));
+    };
+
+    auto photographic_write = trace;
+    photographic_write.photographic_setting_cap_set_count = 1;
+    ++photographic_write.cap_set_count;
+    expect_rejected(photographic_write, "photographic_setting_cap_set");
+
+    auto capture = trace;
+    capture.cap_start_count = 1;
+    capture.capture_start_count = 1;
+    expect_rejected(capture, "capture_started");
+
+    auto non_capture_start = trace;
+    non_capture_start.cap_start_count = 1;
+    non_capture_start.non_capture_start_count = 1;
+    expect_rejected(non_capture_start, "non_capture_cap_start");
+
+    auto unknown_start = trace;
+    unknown_start.cap_start_count = 1;
+    unknown_start.unknown_cap_start_count = 1;
+    expect_rejected(unknown_start, "unknown_cap_start");
+
+    auto start_count_inconsistent = trace;
+    start_count_inconsistent.cap_start_count = 2;
+    start_count_inconsistent.capture_start_count = 1;
+    expect_rejected(start_count_inconsistent, "cap_start_count_inconsistent");
+
+    auto live_view = trace;
+    live_view.live_view_start_count = 1;
+    expect_rejected(live_view, "live_view_started");
+
+    auto storage_routing = trace;
+    storage_routing.storage_routing_cap_set_count = 1;
+    ++storage_routing.cap_set_count;
+    expect_rejected(storage_routing, "storage_routing_cap_set");
+
+    auto live_view_control = trace;
+    live_view_control.live_view_control_cap_set_count = 1;
+    ++live_view_control.cap_set_count;
+    expect_rejected(live_view_control, "live_view_control_cap_set");
+
+    auto unknown_write = trace;
+    unknown_write.unexpected_cap_set_count = 1;
+    ++unknown_write.cap_set_count;
+    expect_rejected(unknown_write, "unexpected_cap_set");
+
+    auto count_inconsistent = trace;
+    count_inconsistent.cap_set_count = 4;
+    expect_rejected(count_inconsistent, "trace_count_inconsistent");
+
+    auto no_reads = trace;
+    no_reads.cap_get_count = 0;
+    no_reads.cap_get_array_count = 0;
+    expect_rejected(no_reads, "no_capability_reads");
+
+    auto not_opened = trace;
+    not_opened.sdk_session_opened = false;
+    expect_rejected(not_opened, "session_not_opened");
+
+    auto not_closed = trace;
+    not_closed.sdk_session_closed = false;
+    expect_rejected(not_closed, "session_not_closed");
+}
+
+void TestSdkTraceBoundaryRecordsBeforeFakeMaidEntryExactlyOnce() {
+    SdkCommandTrace trace;
+    int entry_calls = 0;
+    const auto fake_entry = [&entry_calls] {
+        ++entry_calls;
+        return 37;
+    };
+
+    const int first = InvokeSdkTraceBoundary(
+        trace,
+        {SdkTraceCommand::capability_start, SdkTraceCapability::unknown_start, false},
+        fake_entry);
+    const int second = InvokeSdkTraceBoundary(
+        trace,
+        {SdkTraceCommand::capability_start, SdkTraceCapability::non_capture_start, false},
+        fake_entry);
+    const int third = InvokeSdkTraceBoundary(
+        trace,
+        {SdkTraceCommand::capability_set, SdkTraceCapability::storage_routing, false},
+        fake_entry);
+    const int fourth = InvokeSdkTraceBoundary(
+        trace,
+        {SdkTraceCommand::capability_set, SdkTraceCapability::live_view_control, true},
+        fake_entry);
+
+    Check(first == 37 && second == 37 && third == 37 && fourth == 37 && entry_calls == 4,
+        "MAID trace seam should invoke the fake entry exactly once per boundary call");
+    Check(trace.cap_start_count == 2 && trace.unknown_cap_start_count == 1 &&
+              trace.non_capture_start_count == 1 && trace.capture_start_count == 0,
+        "MAID trace seam should classify every fake CapStart exactly once");
+    Check(trace.cap_set_count == 2 && trace.storage_routing_cap_set_count == 1 &&
+              trace.live_view_control_cap_set_count == 1 && trace.live_view_start_count == 1,
+        "MAID trace seam should classify storage and Live View CapSet at the production boundary");
+}
+
+void TestSdkStatusProcessRoutingIsSeparateAndNarrow() {
+    SdkStatusProcessRouting routing;
+    routing.sdk_status_executor_selected = true;
+    routing.sdk_enumeration_count = 1;
+    routing.sdk_status_probe_count = 1;
+    Check(!ValidateSdkStatusProcessRouting(routing),
+        "sdk-status process routing should allow one SDK enumeration and one read-only status probe only");
+
+    const auto expect_rejected = [&](SdkStatusProcessRouting invalid, std::string_view reason) {
+        const auto failure = ValidateSdkStatusProcessRouting(invalid);
+        Check(failure && *failure == reason,
+            std::string("sdk-status process routing should reject ") + std::string(reason));
+    };
+
+    auto no_executor = routing;
+    no_executor.sdk_status_executor_selected = false;
+    expect_rejected(no_executor, "sdk_status_executor_not_selected");
+
+    auto enumeration_count = routing;
+    enumeration_count.sdk_enumeration_count = 2;
+    expect_rejected(enumeration_count, "sdk_enumeration_count_inconsistent");
+
+    auto probe_count = routing;
+    probe_count.sdk_status_probe_count = 2;
+    expect_rejected(probe_count, "sdk_status_probe_count_inconsistent");
+
+    auto wpd_call = routing;
+    wpd_call.wpd_call_count = 1;
+    expect_rejected(wpd_call, "wpd_call_routed");
+
+    auto capture_call = routing;
+    capture_call.capture_call_count = 1;
+    expect_rejected(capture_call, "capture_call_routed");
+
+    auto delete_call = routing;
+    delete_call.delete_call_count = 1;
+    expect_rejected(delete_call, "delete_call_routed");
+}
+
 void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
     const auto root = NewTestRoot("sdk-status-summary");
     const CameraInfo camera{"Nikon D810", "1.14", "S", "private-camera-identity"};
@@ -431,15 +623,29 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
     status.sensitivity = {false, "enum", "invalid-shape", "unsupported", std::nullopt, std::nullopt, std::nullopt, {}, {}};
     status.wb_mode = {false, "unsigned", "read-error", "unsupported", std::nullopt, std::nullopt, std::nullopt, {}, {}};
     status.focus_mode = {false, "enum", "get-array-not-supported", "unsupported", std::nullopt, std::nullopt, std::nullopt, {}, {}};
+    status.command_trace.cap_get_count = 9;
+    status.command_trace.cap_get_array_count = 8;
+    status.command_trace.cap_set_count = 3;
+    status.command_trace.control_plane_cap_set_count = 3;
+    status.command_trace.sdk_session_opened = true;
+    status.command_trace.sdk_session_closed = true;
+    SdkStatusProcessRouting routing;
+    routing.sdk_status_executor_selected = true;
+    routing.sdk_enumeration_count = 1;
+    routing.sdk_status_probe_count = 1;
 
     const auto path = PersistSdkStatusSummary(
-        root / "artifacts", "run-sdk-status", "CAM-A", camera, status);
+        root / "artifacts", "run-sdk-status", "CAM-A", camera, status, routing);
     const auto body = ReadAll(path);
-    Check(body.find("\"schemaVersion\": \"phase0.sdk-status-summary.v4\"") != std::string::npos &&
-              body.find("\"liveViewStatus\": \"off\"") != std::string::npos &&
-              body.find("\"liveViewSelector\": \"photo\"") != std::string::npos &&
-              body.find("\"liveViewProhibitMask\": 0") != std::string::npos,
+    Check(body.find("\"schemaVersion\": \"phase0.sdk-status-summary.v5\"") != std::string::npos &&
+               body.find("\"liveViewStatus\": \"off\"") != std::string::npos &&
+               body.find("\"liveViewSelector\": \"photo\"") != std::string::npos &&
+               body.find("\"liveViewProhibitMask\": 0") != std::string::npos,
         "SDK status summary should retain read-only Live View readiness values");
+    Check(body.find("\"processRoutingProof\": {\n") != std::string::npos &&
+              body.find("\"wpdCallCount\": 0") != std::string::npos &&
+              body.find("\"deleteCallCount\": 0") != std::string::npos,
+        "SDK status summary should keep process routing proof separate from the MAID trace");
     Check(body.find("\"fileType\": {\"available\": true, \"capType\": \"enum\", \"probeState\": \"available\", \"valueType\": \"unsigned\", \"currentValue\": 42, \"currentIndex\": 1, \"currentLabel\": null, \"numericValues\": [41, 42], \"stringValues\": []}") != std::string::npos &&
               body.find("\"compressionLevel\": {\"available\": true, \"capType\": \"unsigned\", \"probeState\": \"available\", \"valueType\": \"unsigned\", \"currentValue\": 9, \"currentIndex\": null, \"currentLabel\": null, \"numericValues\": [], \"stringValues\": []}") != std::string::npos &&
               body.find("\"imageSize\": {\"available\": false, \"capType\": \"unsupported\", \"probeState\": \"not-advertised\", \"valueType\": \"unsupported\", \"currentValue\": null, \"currentIndex\": null, \"currentLabel\": null, \"numericValues\": [], \"stringValues\": []}") != std::string::npos,
@@ -455,12 +661,17 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
         "SDK status summary should distinguish anonymous fail-closed probe states");
     SdkCameraStatus unsupported_status;
     unsupported_status.aperture = {false, "unsupported", "unsupported-type", "unsupported", std::nullopt, std::nullopt, std::nullopt, {}, {}};
+    unsupported_status.command_trace = status.command_trace;
     const auto unsupported_path = PersistSdkStatusSummary(
-        root / "artifacts", "run-sdk-status-unsupported", "CAM-A", camera, unsupported_status);
+        root / "artifacts", "run-sdk-status-unsupported", "CAM-A", camera, unsupported_status, routing);
     Check(ReadAll(unsupported_path).find("\"probeState\": \"unsupported-type\"") != std::string::npos,
         "SDK status summary should preserve unsupported capability types without a payload");
     Check(body.find("\"cameraSettingReadOnlyProbe\": true") != std::string::npos &&
               body.find("\"cameraSettingWriteAttempted\": false") != std::string::npos &&
+              body.find("\"photographicSettingCapSetCount\": 0") != std::string::npos &&
+              body.find("\"captureStartCount\": 0") != std::string::npos &&
+              body.find("\"liveViewStartCount\": 0") != std::string::npos &&
+              body.find("\"readOnlyContractValid\": true") != std::string::npos &&
               body.find("\"sdkControlPlaneCallbackRegistrationMayUseCapSet\": true") != std::string::npos &&
               body.find("\"cameraSettingsChanged\": false") != std::string::npos &&
               body.find("\"liveViewStarted\": false") != std::string::npos &&
@@ -471,7 +682,7 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
 
     bool overwrite_rejected = false;
     try {
-        (void)PersistSdkStatusSummary(root / "artifacts", "run-sdk-status", "CAM-A", camera, status);
+        (void)PersistSdkStatusSummary(root / "artifacts", "run-sdk-status", "CAM-A", camera, status, routing);
     } catch (const std::runtime_error&) {
         overwrite_rejected = true;
     }
@@ -481,7 +692,7 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
         const auto invalid_root = root / "invalid" / std::string(name);
         bool invalid_rejected = false;
         try {
-            (void)PersistSdkStatusSummary(invalid_root, "run-invalid", "CAM-A", camera, invalid_status);
+            (void)PersistSdkStatusSummary(invalid_root, "run-invalid", "CAM-A", camera, invalid_status, routing);
         } catch (const std::runtime_error&) {
             invalid_rejected = true;
         }
@@ -2318,6 +2529,9 @@ int main() {
         TestLiveViewFrameExtraction();
         TestLiveViewHandoffSummaryReplacement();
         TestStandaloneLiveViewSummaryReport();
+        TestSdkReadOnlyCommandTraceRejectsMutatingBoundaries();
+        TestSdkTraceBoundaryRecordsBeforeFakeMaidEntryExactlyOnce();
+        TestSdkStatusProcessRoutingIsSeparateAndNarrow();
         TestSdkStatusSummaryIsReadOnlyAndRedacted();
         TestPackedStringLabelParserBounds();
         TestWpdVendorOpcodeDiagnosticsAreFailClosedAndRedacted();

@@ -20,6 +20,114 @@
 namespace fs = std::filesystem;
 
 namespace a0::phase0 {
+
+void RecordSdkTraceEvent(SdkCommandTrace& trace, const SdkTraceEvent& event) noexcept {
+    switch (event.command) {
+    case SdkTraceCommand::capability_get:
+        ++trace.cap_get_count;
+        return;
+    case SdkTraceCommand::capability_get_array:
+        ++trace.cap_get_array_count;
+        return;
+    case SdkTraceCommand::capability_start:
+        ++trace.cap_start_count;
+        switch (event.capability) {
+        case SdkTraceCapability::capture_start:
+            ++trace.capture_start_count;
+            break;
+        case SdkTraceCapability::non_capture_start:
+            ++trace.non_capture_start_count;
+            break;
+        case SdkTraceCapability::unknown_start:
+            ++trace.unknown_cap_start_count;
+            break;
+        default:
+            ++trace.unknown_cap_start_count;
+            break;
+        }
+        return;
+    case SdkTraceCommand::capability_set:
+        ++trace.cap_set_count;
+        switch (event.capability) {
+        case SdkTraceCapability::photographic_setting:
+            ++trace.photographic_setting_cap_set_count;
+            break;
+        case SdkTraceCapability::control_plane:
+            ++trace.control_plane_cap_set_count;
+            break;
+        case SdkTraceCapability::storage_routing:
+            ++trace.storage_routing_cap_set_count;
+            break;
+        case SdkTraceCapability::live_view_control:
+            ++trace.live_view_control_cap_set_count;
+            if (event.live_view_on) ++trace.live_view_start_count;
+            break;
+        default:
+            ++trace.unexpected_cap_set_count;
+            break;
+        }
+        return;
+    case SdkTraceCommand::other:
+        return;
+    }
+}
+
+std::optional<std::string_view> ValidateSdkReadOnlyCommandTrace(
+    const SdkCommandTrace& trace) noexcept {
+    if (!trace.sdk_session_opened) return "session_not_opened";
+    if (!trace.sdk_session_closed) return "session_not_closed";
+    if (trace.cap_get_count == 0 && trace.cap_get_array_count == 0) {
+        return "no_capability_reads";
+    }
+    if (trace.photographic_setting_cap_set_count != 0) {
+        return "photographic_setting_cap_set";
+    }
+    if (trace.live_view_start_count != 0) return "live_view_started";
+    if (trace.storage_routing_cap_set_count != 0) {
+        return "storage_routing_cap_set";
+    }
+    if (trace.live_view_control_cap_set_count != 0) {
+        return "live_view_control_cap_set";
+    }
+    if (trace.unexpected_cap_set_count != 0) return "unexpected_cap_set";
+
+    const std::size_t classified_cap_starts = trace.capture_start_count +
+        trace.non_capture_start_count + trace.unknown_cap_start_count;
+    if (classified_cap_starts != trace.cap_start_count) {
+        return "cap_start_count_inconsistent";
+    }
+    if (trace.capture_start_count != 0) return "capture_started";
+    if (trace.unknown_cap_start_count != 0) return "unknown_cap_start";
+    if (trace.non_capture_start_count != 0) return "non_capture_cap_start";
+
+    std::size_t unclassified_cap_sets = trace.cap_set_count;
+    const auto consume_cap_set_count = [&unclassified_cap_sets](std::size_t count) {
+        if (count > unclassified_cap_sets) return false;
+        unclassified_cap_sets -= count;
+        return true;
+    };
+    if (!consume_cap_set_count(trace.control_plane_cap_set_count) ||
+        !consume_cap_set_count(trace.photographic_setting_cap_set_count) ||
+        !consume_cap_set_count(trace.storage_routing_cap_set_count) ||
+        !consume_cap_set_count(trace.live_view_control_cap_set_count) ||
+        !consume_cap_set_count(trace.unexpected_cap_set_count) ||
+        unclassified_cap_sets != 0) {
+        return "trace_count_inconsistent";
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string_view> ValidateSdkStatusProcessRouting(
+    const SdkStatusProcessRouting& routing) noexcept {
+    if (!routing.sdk_status_executor_selected) return "sdk_status_executor_not_selected";
+    if (routing.sdk_enumeration_count != 1) return "sdk_enumeration_count_inconsistent";
+    if (routing.sdk_status_probe_count != 1) return "sdk_status_probe_count_inconsistent";
+    if (routing.wpd_call_count != 0) return "wpd_call_routed";
+    if (routing.capture_call_count != 0) return "capture_call_routed";
+    if (routing.delete_call_count != 0) return "delete_call_routed";
+    return std::nullopt;
+}
+
 namespace {
 
 std::string JsonEscape(std::string_view value) {
@@ -1485,7 +1593,8 @@ fs::path PersistSdkStatusSummary(
     std::string_view run_id,
     std::string_view camera_alias,
     const CameraInfo& camera,
-    const SdkCameraStatus& status) {
+    const SdkCameraStatus& status,
+    const SdkStatusProcessRouting& routing) {
     const fs::path run_root = artifacts_root / std::string(run_id);
     const fs::path summary = run_root / "sdk-status-summary.json";
     const fs::path partial = run_root / "sdk-status-summary.json.partial";
@@ -1560,6 +1669,16 @@ fs::path PersistSdkStatusSummary(
     validate_setting(status.sensitivity);
     validate_setting(status.wb_mode);
     validate_setting(status.focus_mode);
+    const auto command_trace_failure = ValidateSdkReadOnlyCommandTrace(status.command_trace);
+    if (command_trace_failure) {
+        throw std::runtime_error(
+            "SDK status command trace is not read-only: " + std::string(*command_trace_failure));
+    }
+    const auto routing_failure = ValidateSdkStatusProcessRouting(routing);
+    if (routing_failure) {
+        throw std::runtime_error(
+            "SDK status process routing is not read-only: " + std::string(*routing_failure));
+    }
 
     std::ofstream output(partial, std::ios::binary | std::ios::trunc);
     if (!output) throw std::runtime_error("cannot create SDK status summary");
@@ -1592,7 +1711,7 @@ fs::path PersistSdkStatusSummary(
         output << "]}" << (trailing_comma ? ",\n" : "\n");
     };
     output << "{\n"
-           << "  \"schemaVersion\": \"phase0.sdk-status-summary.v4\",\n"
+           << "  \"schemaVersion\": \"phase0.sdk-status-summary.v5\",\n"
            << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
            << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
            << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
@@ -1617,12 +1736,44 @@ fs::path PersistSdkStatusSummary(
     write_setting("sensitivity", status.sensitivity, true);
     write_setting("wbMode", status.wb_mode, true);
     write_setting("focusMode", status.focus_mode, true);
-    output << "  \"cameraSettingReadOnlyProbe\": true,\n"
-           << "  \"cameraSettingWriteAttempted\": false,\n"
+    const auto& trace = status.command_trace;
+    output << "  \"commandTrace\": {\n"
+           << "    \"capGetCount\": " << trace.cap_get_count << ",\n"
+           << "    \"capGetArrayCount\": " << trace.cap_get_array_count << ",\n"
+           << "    \"capSetCount\": " << trace.cap_set_count << ",\n"
+           << "    \"controlPlaneCapSetCount\": " << trace.control_plane_cap_set_count << ",\n"
+           << "    \"photographicSettingCapSetCount\": " << trace.photographic_setting_cap_set_count << ",\n"
+           << "    \"storageRoutingCapSetCount\": " << trace.storage_routing_cap_set_count << ",\n"
+           << "    \"liveViewControlCapSetCount\": " << trace.live_view_control_cap_set_count << ",\n"
+           << "    \"unexpectedCapSetCount\": " << trace.unexpected_cap_set_count << ",\n"
+           << "    \"capStartCount\": " << trace.cap_start_count << ",\n"
+           << "    \"captureStartCount\": " << trace.capture_start_count << ",\n"
+           << "    \"nonCaptureStartCount\": " << trace.non_capture_start_count << ",\n"
+           << "    \"unknownCapStartCount\": " << trace.unknown_cap_start_count << ",\n"
+           << "    \"liveViewStartCount\": " << trace.live_view_start_count << ",\n"
+           << "    \"sdkSessionOpened\": " << (trace.sdk_session_opened ? "true" : "false") << ",\n"
+           << "    \"sdkSessionClosed\": " << (trace.sdk_session_closed ? "true" : "false") << ",\n"
+           << "    \"readOnlyContractValid\": true\n"
+           << "  },\n"
+           << "  \"processRoutingProof\": {\n"
+           << "    \"executor\": \"sdk-status\",\n"
+           << "    \"sdkStatusExecutorSelected\": " << (routing.sdk_status_executor_selected ? "true" : "false") << ",\n"
+           << "    \"sdkEnumerationCount\": " << routing.sdk_enumeration_count << ",\n"
+           << "    \"sdkStatusProbeCount\": " << routing.sdk_status_probe_count << ",\n"
+           << "    \"wpdCallCount\": " << routing.wpd_call_count << ",\n"
+           << "    \"captureCallCount\": " << routing.capture_call_count << ",\n"
+           << "    \"deleteCallCount\": " << routing.delete_call_count << ",\n"
+           << "    \"routingContractValid\": true\n"
+           << "  },\n"
+           << "  \"cameraSettingReadOnlyProbe\": true,\n"
+           << "  \"cameraSettingWriteAttempted\": "
+           << (trace.photographic_setting_cap_set_count != 0 ? "true" : "false") << ",\n"
            << "  \"sdkControlPlaneCallbackRegistrationMayUseCapSet\": true,\n"
            << "  \"cameraSettingsChanged\": false,\n"
-           << "  \"liveViewStarted\": false,\n"
-           << "  \"sdkSessionClosed\": true,\n"
+           << "  \"liveViewStarted\": "
+           << (trace.live_view_start_count != 0 ? "true" : "false") << ",\n"
+           << "  \"sdkSessionClosed\": "
+           << (trace.sdk_session_closed ? "true" : "false") << ",\n"
            << "  \"realIdentifiersPrinted\": false\n"
            << "}\n";
     output.close();

@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace a0::phase0 {
@@ -63,6 +64,77 @@ struct CameraInfo {
     std::string stable_identity;
 };
 
+// Bounded, anonymous evidence for the MAID command boundary used by a
+// read-only SDK status probe. Capability IDs and camera identifiers never
+// cross this boundary.
+struct SdkCommandTrace {
+    std::size_t cap_get_count{};
+    std::size_t cap_get_array_count{};
+    std::size_t cap_set_count{};
+    std::size_t control_plane_cap_set_count{};
+    std::size_t photographic_setting_cap_set_count{};
+    std::size_t storage_routing_cap_set_count{};
+    std::size_t live_view_control_cap_set_count{};
+    std::size_t unexpected_cap_set_count{};
+    std::size_t cap_start_count{};
+    std::size_t capture_start_count{};
+    std::size_t non_capture_start_count{};
+    std::size_t unknown_cap_start_count{};
+    std::size_t live_view_start_count{};
+    bool sdk_session_opened{false};
+    bool sdk_session_closed{false};
+};
+
+// Vendor-neutral event categories keep the MAID entry-boundary recorder
+// testable without loading Nikon binaries. NikonSdkTransport maps documented
+// MAID command/capability IDs to these categories before calling the shared
+// boundary below.
+enum class SdkTraceCommand {
+    capability_get,
+    capability_get_array,
+    capability_set,
+    capability_start,
+    other,
+};
+
+enum class SdkTraceCapability {
+    none,
+    capture_start,
+    non_capture_start,
+    unknown_start,
+    photographic_setting,
+    control_plane,
+    storage_routing,
+    live_view_control,
+    other,
+};
+
+struct SdkTraceEvent {
+    SdkTraceCommand command{SdkTraceCommand::other};
+    SdkTraceCapability capability{SdkTraceCapability::none};
+    bool live_view_on{false};
+};
+
+void RecordSdkTraceEvent(SdkCommandTrace& trace, const SdkTraceEvent& event) noexcept;
+
+// This is the production MAID entry-boundary seam. It records before the
+// injected entry call, so a fake entry can prove one invocation/one count and
+// the real adapter cannot rely on RunCompleted for a second recording.
+template <typename Entry>
+decltype(auto) InvokeSdkTraceBoundary(
+    SdkCommandTrace& trace,
+    const SdkTraceEvent& event,
+    Entry&& entry) {
+    RecordSdkTraceEvent(trace, event);
+    return std::invoke(std::forward<Entry>(entry));
+}
+
+// Returns nullopt only when the trace proves a completed, read-only status
+// probe. The error value is a stable anonymous reason suitable for tests and
+// diagnostics, not a vendor error detail.
+[[nodiscard]] std::optional<std::string_view> ValidateSdkReadOnlyCommandTrace(
+    const SdkCommandTrace& trace) noexcept;
+
 struct SdkCameraStatus {
     std::string firmware{"unknown"};
     std::string live_view_status{"unknown"};
@@ -90,6 +162,35 @@ struct SdkCameraStatus {
     SettingCapability sensitivity;
     SettingCapability wb_mode;
     SettingCapability focus_mode;
+    SdkCommandTrace command_trace;
+};
+
+// Process-level proof for the sdk-status CLI route. These counters are not
+// MAID evidence and must never be merged into SdkCommandTrace: WPD and delete
+// are excluded by the narrow executor type, so this proof records route
+// selection and the absence of non-status route calls separately.
+struct SdkStatusProcessRouting {
+    bool sdk_status_executor_selected{false};
+    std::size_t sdk_enumeration_count{};
+    std::size_t sdk_status_probe_count{};
+    std::size_t wpd_call_count{};
+    std::size_t capture_call_count{};
+    std::size_t delete_call_count{};
+};
+
+[[nodiscard]] std::optional<std::string_view> ValidateSdkStatusProcessRouting(
+    const SdkStatusProcessRouting& routing) noexcept;
+
+// The sdk-status CLI may enumerate and read status only. Capture, Live View,
+// WPD, and delete operations are deliberately absent from this interface.
+class ISdkStatusExecutor {
+public:
+    virtual ~ISdkStatusExecutor() = default;
+    [[nodiscard]] virtual std::string SdkVersion() const = 0;
+    [[nodiscard]] virtual std::vector<CameraInfo> Enumerate() = 0;
+    [[nodiscard]] virtual SdkCameraStatus ProbeSdkStatus(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) = 0;
 };
 
 // Anonymous aggregate for a read-only inspection of the dedicated camera
@@ -529,7 +630,8 @@ struct HybridPairFaultRunSummary {
     std::string_view run_id,
     std::string_view camera_alias,
     const CameraInfo& camera,
-    const SdkCameraStatus& status);
+    const SdkCameraStatus& status,
+    const SdkStatusProcessRouting& routing);
 [[nodiscard]] std::filesystem::path PersistWpdStatusSummary(
     const std::filesystem::path& artifacts_root,
     std::string_view run_id,

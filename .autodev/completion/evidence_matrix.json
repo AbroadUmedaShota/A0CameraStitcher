@@ -17,15 +17,15 @@
       "work_item_ids": ["WI-0010", "WI-0011", "WI-0014"],
       "evidence": ["docs/evidence/phase0/run-1786182705745-1/cross-transport-binding-command-summary.json", "docs/evidence/phase0/run-1786184898081-1/dual-identity-verification-summary.json"],
       "confirmed_scope": "One physical D810 is bound as CAM-B under SDK and WPD identity-v2 without committed real identity; the latest read-only dual check resolved that one alias and failed closed before card access.",
-      "remaining_gap": "CAM-A identity-v2, reconnect and port evidence, explicit mode integration, and dual-camera distinction remain incomplete; the old CAM-A SDK continuity result is invalid."
+      "remaining_gap": "The connected-pair SDK identity-v2 collision is a software identity-strategy blocker. No documented stable per-body SDK property or safe SDK/WPD cross-transport anchor was found; CAM-A identity, reconnect, port evidence, and dual-camera distinction remain blocked until an explicit strategy and migration/invalidation decision exists."
     },
     {
       "requirement_id": "FR-CAP-002",
       "status": "partial",
       "work_item_ids": ["WI-0011", "WI-0014"],
       "evidence": ["docs/evidence/phase0/run-1786182705745-1/cross-transport-binding-command-summary.json"],
-      "confirmed_scope": "CAM-B SDK Name/Interface identity-v2 and WPD device-serial identity-v2 are bound within one lease after SDK full close and before WPD enumeration.",
-      "remaining_gap": "CAM-A binding, distinct-body proof, reconnect, connection-order and port independence, and mode-specific WPF integration remain untested."
+      "confirmed_scope": "Historical CAM-B SDK Name/Interface identity-v2 and WPD device-serial identity-v2 binding was performed within one lease after SDK full close and before WPD enumeration; it remains a one-body checkpoint only.",
+      "remaining_gap": "The SDK identity-v2 collision prevents a permanent two-body claim. CAM-A binding, distinct-body proof, reconnect, connection-order and port independence, and mode-specific WPF integration remain blocked pending a documented unique SDK property or explicitly safe cross-transport correlation and explicit v2 migration/invalidation."
     },
     {
       "requirement_id": "FR-CAP-003",
@@ -95,33 +95,33 @@
       "requirement_id": "FR-STI-003",
       "status": "partial",
       "work_item_ids": ["WI-0021A", "WI-0022B", "WI-0022C", "WI-0023", "WI-0034"],
-      "evidence": ["tests/setup_assessment_tests.cpp", "docs/schemas/rig-profile.schema.json"],
-      "confirmed_scope": "Pure C++ contracts distinguish target and automatic-correction limits, reject over-limit values, remain deterministic, and do not mutate input profiles.",
-      "remaining_gap": "WI-0022C has not yet generated measurements from synthetic images or applied a bounded correction proposal."
+      "evidence": ["tests/setup_assessment_tests.cpp", "tests/synthetic_measurement_tests.cpp", "src/m2/synthetic_measurement.cpp", "docs/schemas/rig-profile.schema.json"],
+      "confirmed_scope": "Pure C++ contracts distinguish target and automatic-correction limits, reject over-limit values, remain deterministic, and do not mutate input profiles. WI-0022C derives deterministic shift, rotation, scale, exposure, and color measurements from synthetic image pixels and connects them to profile-envelope bounded proposals.",
+      "remaining_gap": "No approved fixed-rig calibration, real D810 image quality, or production stitch correction evidence exists."
     },
     {
       "requirement_id": "FR-STI-004",
       "status": "unverified",
       "work_item_ids": ["WI-0021A", "WI-0022C", "WI-0023"],
       "evidence": ["samples/public/m2-fixtures/fixture-manifest.json"],
-      "confirmed_scope": "Rights-cleared synthetic fixtures and expected damaged cases exist.",
-      "remaining_gap": "No exposure, color, seam, blend, or crop implementation has produced a stitched image."
+      "confirmed_scope": "Rights-cleared synthetic fixtures and expected damaged cases exist; WI-0022C adds deterministic synthetic exposure and color measurement coverage without producing real or product originals.",
+      "remaining_gap": "No seam, blend, crop, or stitched-image implementation has been verified."
     },
     {
       "requirement_id": "FR-STI-005",
       "status": "partial",
       "work_item_ids": ["WI-0021A", "WI-0022B", "WI-0022C", "WI-0024"],
-      "evidence": ["tests/setup_assessment_tests.cpp", "scripts/Test-M2PreGateAssets.ps1"],
-      "confirmed_scope": "Software contracts reject declared hard blockers and automatic-correction-limit exceedance without clamping to success or mutating a profile.",
+      "evidence": ["tests/setup_assessment_tests.cpp", "tests/synthetic_measurement_tests.cpp", "src/m2/synthetic_measurement.cpp", "scripts/Test-M2PreGateAssets.ps1"],
+      "confirmed_scope": "Software contracts reject declared hard blockers and automatic-correction-limit exceedance without clamping to success or mutating a profile. WI-0022C preserves measured values and provenance, accepts only bounded transient proposals, and fails closed for malformed and profile-mismatch inputs.",
       "remaining_gap": "Approved image-quality thresholds, corrected-image metrics, physical guidance, and real A0 chart rejection evidence are unavailable."
     },
     {
       "requirement_id": "FR-STI-006",
       "status": "partial",
       "work_item_ids": ["WI-0010A", "WI-0022A", "WI-0022B", "WI-0022C", "WI-0022", "WI-0033"],
-      "evidence": ["tests/setup_assessment_tests.cpp", "docs/schemas/rig-profile.schema.json", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json"],
-      "confirmed_scope": "The existing DualCamera rig-profile trust and three setup outcomes are validated without hard-coded product thresholds; CAM-A principal settings are read as values or explicit unavailable states.",
-      "remaining_gap": "HG-0009 and a versioned SingleCamera profile/assessment remain, along with native setting command trace, image measurement, approved Dual profile loading, two-body comparison, and physical setup guidance."
+      "evidence": ["tests/setup_assessment_tests.cpp", "tests/synthetic_measurement_tests.cpp", "src/m2/synthetic_measurement.cpp", "docs/schemas/rig-profile.schema.json", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json", "src/phase0/phase0.cpp", "src/phase0/nikon_sdk_transport.cpp", "tests/phase0_tests.cpp"],
+      "confirmed_scope": "The existing DualCamera rig-profile trust and three setup outcomes are validated without hard-coded product thresholds; WI-0022C adds synthetic image measurement and bounded proposal routing; CAM-A principal settings are read as values or explicit unavailable states; WI-0010A v5 software contracts validate the MAID entry-boundary trace and fail-closed classification.",
+      "remaining_gap": "A real D810 v5 summary run, focus value interpretation, FileType not-advertised handling, HG-0009, a versioned SingleCamera profile/assessment, approved Dual profile loading, two-body comparison, and physical setup guidance remain."
     },
     {
       "requirement_id": "FR-DATA-001",
@@ -199,8 +199,8 @@
       "requirement_id": "NFR-OBS-001",
       "status": "partial",
       "work_item_ids": ["WI-0004", "WI-0006", "WI-0010A", "WI-0013", "WI-0019", "WI-0016", "WI-0017", "WI-0024"],
-      "evidence": ["docs/evidence/phase0/run-1785917005306-1/report.md", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json", "docs/evidence/phase0/run-1786014841232-1/report.md", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json", "tests/hardware_camera_agent_tests.cpp"],
-      "confirmed_scope": "Anonymous WPD, Live View, spool, safety, and setting evidence is persisted without raw identities or images; fresh software contracts cover mode and required aliases, SingleCamera Stitch NotApplicable/export, profile snapshot and handoff intent, gap-free reservation and dispatch uncertainty, controlled failure, no retry, and bounded durable Camera Agent journals. SDK-less and licensed-SDK-enabled Release CTest each passed 6/6 without camera commands.",
+      "evidence": ["docs/evidence/phase0/run-1785917005306-1/report.md", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json", "docs/evidence/phase0/run-1786014841232-1/report.md", "docs/evidence/phase0/run-1786040075194-1/sdk-status-summary.json", "tests/hardware_camera_agent_tests.cpp", "src/phase0/nikon_sdk_transport.cpp", "src/phase0/main.cpp", "tests/phase0_cli_safety_tests.cpp"],
+      "confirmed_scope": "Anonymous WPD, Live View, spool, safety, and setting evidence is persisted without raw identities or images; fresh software contracts cover mode and required aliases, SingleCamera Stitch NotApplicable/export, profile snapshot and handoff intent, gap-free reservation and dispatch uncertainty, controlled failure, no retry, and bounded durable Camera Agent journals; WI-0010A keeps MAID evidence separate from the sdk-status process-routing proof. SDK-less and licensed-SDK-enabled Debug/Release CTest each passed 6/6 without camera commands.",
       "remaining_gap": "Real exact-object capture, WPF hardware recovery, fault, continuous Live View acceptance, profile/correction, paired, stitch, and final timing evidence remain incomplete."
     },
     {
@@ -239,8 +239,8 @@
       "requirement_id": "CON-003",
       "status": "partial",
       "work_item_ids": ["WI-0001", "WI-0005", "WI-0006", "WI-0010A", "WI-0018"],
-      "evidence": ["tests/phase0_tests.cpp", "tests/phase0_cli_safety_tests.cpp", "tests/hardware_camera_agent_tests.cpp", "docs/evidence/phase0/run-1786014841232-1/hybrid-capture-summary.json"],
-      "confirmed_scope": "Rejected datetime attribution remains disabled; direct legacy hardware capture is closed; fake and hardware-agent contracts enforce empty spool, fixed-local trusted inputs, SDK/WPD non-overlap, exact cleanup only while the verified PC file identity is locked, no vendor operation, no retry, and exclusive sessions.",
+      "evidence": ["tests/phase0_tests.cpp", "tests/phase0_cli_safety_tests.cpp", "tests/hardware_camera_agent_tests.cpp", "docs/evidence/phase0/run-1786014841232-1/hybrid-capture-summary.json", "src/phase0/nikon_sdk_transport.cpp", "src/phase0/main.cpp", "src/phase0/cli_safety.cpp"],
+      "confirmed_scope": "Rejected datetime attribution remains disabled; direct legacy hardware capture is closed; fake and hardware-agent contracts enforce empty spool, fixed-local trusted inputs, SDK/WPD non-overlap, exact cleanup only while the verified PC file identity is locked, no vendor operation, no retry, and exclusive sessions; the sdk-status executor exposes only SDK enumeration/read-only status and publishes process-routing proof separately from MAID trace evidence.",
       "remaining_gap": "The approved single-slot hardware sequence and two-body binding are not proven end to end."
     },
     {

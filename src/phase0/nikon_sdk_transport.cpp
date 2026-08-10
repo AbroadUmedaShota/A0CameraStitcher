@@ -219,6 +219,12 @@ public:
             status.focus_mode = ReadSettingCapability(source_, kNkMAIDCapability_FocusMode, deadline);
 
             Close(timeout);
+            status.command_trace = trace_;
+            if (const auto failure = ValidateSdkReadOnlyCommandTrace(status.command_trace)) {
+                throw TransportError(
+                    "sdk_status_command_trace_invalid",
+                    "SDK status probe crossed a mutating command boundary: " + std::string(*failure));
+            }
             return status;
         } catch (...) {
             try { Close(timeout); } catch (...) {}
@@ -229,6 +235,7 @@ public:
     void OpenSource(std::string_view stable_identity, std::chrono::seconds timeout, bool capture_session) {
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
+        trace_ = {};
         try {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             OpenModule(deadline);
@@ -284,6 +291,7 @@ public:
             session_open_ = true;
             capture_session_ = capture_session;
             live_view_session_ = !capture_session;
+            trace_.sdk_session_opened = true;
         } catch (...) {
             CleanupNoThrow();
             throw;
@@ -529,6 +537,7 @@ public:
             CleanupNoThrow();
         }
         ReleaseSession();
+        trace_.sdk_session_closed = true;
         if (pending_error) throw *pending_error;
     }
 
@@ -561,9 +570,84 @@ private:
     }
 
     NKERROR Call(LPNkMAIDObject object, ULONG command, ULONG parameter, ULONG data_type,
-                 NKPARAM data, LPNKFUNC completion = nullptr, NKREF reference = 0) const {
+                 NKPARAM data, LPNKFUNC completion = nullptr, NKREF reference = 0) {
         if (entry_ == nullptr) return kNkMAIDResult_MissingComponent;
-        return entry_(object, command, parameter, data_type, data, completion, reference);
+        // This is the only MAID entry-point call boundary. Recording here
+        // covers direct calls as well as RunCompleted and therefore cannot be
+        // bypassed by a future CapStart caller. RunCompleted deliberately does
+        // not record separately to avoid double counting.
+        const auto event = TraceEventForCommand(command, parameter, data);
+        return InvokeSdkTraceBoundary(trace_, event, [this, object, command, parameter, data_type, data, completion, reference] {
+            return entry_(object, command, parameter, data_type, data, completion, reference);
+        });
+    }
+
+    static bool IsPhotographicSettingCapability(ULONG capability) {
+        switch (capability) {
+        case kNkMAIDCapability_FileType:
+        case kNkMAIDCapability_CompressionLevel:
+        case kNkMAIDCapability_ImageSize:
+        case kNkMAIDCapability_ExposureMode:
+        case kNkMAIDCapability_ShutterSpeed:
+        case kNkMAIDCapability_Aperture:
+        case kNkMAIDCapability_Sensitivity:
+        case kNkMAIDCapability_WBMode:
+        case kNkMAIDCapability_FocusMode:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool IsControlPlaneCapability(ULONG capability) {
+        switch (capability) {
+        case kNkMAIDCapability_ModuleMode:
+        case kNkMAIDCapability_ProgressProc:
+        case kNkMAIDCapability_EventProc:
+        case kNkMAIDCapability_UIRequestProc:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    SdkTraceEvent TraceEventForCommand(ULONG command, ULONG parameter, NKPARAM data) noexcept {
+        SdkTraceEvent event;
+        if (command == kNkMAIDCommand_CapGet) {
+            event.command = SdkTraceCommand::capability_get;
+            return event;
+        }
+        if (command == kNkMAIDCommand_CapGetArray) {
+            event.command = SdkTraceCommand::capability_get_array;
+            return event;
+        }
+        if (command == kNkMAIDCommand_CapStart) {
+            event.command = SdkTraceCommand::capability_start;
+            if (parameter == kNkMAIDCapability_Capture) {
+                event.capability = SdkTraceCapability::capture_start;
+            } else if (parameter == kNkMAIDCapability_Acquire) {
+                event.capability = SdkTraceCapability::non_capture_start;
+            } else {
+                event.capability = SdkTraceCapability::unknown_start;
+            }
+            return event;
+        }
+        if (command != kNkMAIDCommand_CapSet) return event;
+
+        event.command = SdkTraceCommand::capability_set;
+        if (IsPhotographicSettingCapability(parameter)) {
+            event.capability = SdkTraceCapability::photographic_setting;
+        } else if (IsControlPlaneCapability(parameter)) {
+            event.capability = SdkTraceCapability::control_plane;
+        } else if (parameter == kNkMAIDCapability_SaveMedia) {
+            event.capability = SdkTraceCapability::storage_routing;
+        } else if (parameter == kNkMAIDCapability_LiveViewStatus) {
+            event.capability = SdkTraceCapability::live_view_control;
+            event.live_view_on = data == static_cast<NKPARAM>(kNkMAIDLiveViewStatus_ON);
+        } else {
+            event.capability = SdkTraceCapability::other;
+        }
+        return event;
     }
 
     void Pump(MaidObject& object, std::string_view category) {
@@ -710,6 +794,7 @@ private:
         status.sensitivity = ReadSettingCapability(source_, kNkMAIDCapability_Sensitivity, deadline);
         status.wb_mode = ReadSettingCapability(source_, kNkMAIDCapability_WBMode, deadline);
         status.focus_mode = ReadSettingCapability(source_, kNkMAIDCapability_FocusMode, deadline);
+        status.command_trace = trace_;
         return status;
     }
 
@@ -1363,6 +1448,7 @@ private:
     std::vector<std::unique_ptr<CompletionState>> completions_;
     std::vector<std::unique_ptr<DownloadState>> downloads_;
     bool require_exactly_one_d810_{};
+    SdkCommandTrace trace_;
 
     friend class NikonSdkTransport;
 };
@@ -1447,5 +1533,15 @@ void NikonSdkTransport::Close(std::chrono::seconds) { ThrowGated(); }
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept { return false; }
 
 #endif
+
+NikonSdkStatusExecutor::NikonSdkStatusExecutor() = default;
+NikonSdkStatusExecutor::~NikonSdkStatusExecutor() = default;
+std::string NikonSdkStatusExecutor::SdkVersion() const { return transport_.SdkVersion(); }
+std::vector<CameraInfo> NikonSdkStatusExecutor::Enumerate() { return transport_.Enumerate(); }
+SdkCameraStatus NikonSdkStatusExecutor::ProbeSdkStatus(
+    std::string_view stable_identity,
+    std::chrono::seconds timeout) {
+    return transport_.ProbeSdkStatus(stable_identity, timeout);
+}
 
 } // namespace a0::phase0

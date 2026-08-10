@@ -111,6 +111,17 @@ else()
     target_compile_options(a0_m2_setup PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(a0_m2_measurement
+    src/m2/synthetic_measurement.cpp
+)
+target_include_directories(a0_m2_measurement PUBLIC src/m2/include)
+target_link_libraries(a0_m2_measurement PUBLIC a0_m2_setup)
+if(MSVC)
+    target_compile_options(a0_m2_measurement PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_measurement PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(A0CameraStitcher.OpticalPlanner src/m2/main.cpp)
 target_link_libraries(A0CameraStitcher.OpticalPlanner PRIVATE a0_m2_optical)
 if(MSVC)
@@ -163,6 +174,15 @@ if(BUILD_TESTING)
         target_compile_options(m2_setup_assessment_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_setup_assessment_contracts COMMAND m2_setup_assessment_contracts)
+
+    add_executable(m2_synthetic_measurement_contracts tests/synthetic_measurement_tests.cpp)
+    target_link_libraries(m2_synthetic_measurement_contracts PRIVATE a0_m2_measurement)
+    if(MSVC)
+        target_compile_options(m2_synthetic_measurement_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_synthetic_measurement_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_synthetic_measurement_contracts COMMAND m2_synthetic_measurement_contracts)
 
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_test(

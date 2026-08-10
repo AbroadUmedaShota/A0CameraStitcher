@@ -51,6 +51,16 @@ std::optional<std::string> ValidateDirectCaptureSafety(
     return std::nullopt;
 }
 
+std::optional<std::string> ValidateSdkStatusCliRouting(
+    std::string_view command,
+    std::string_view transport) {
+    if (command != "sdk-status") return std::nullopt;
+    if (transport != "sdk") {
+        return "sdk-status must use the SDK-only read-status executor and cannot route to WPD or fake transport";
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> ValidateIdentityBindingArguments(
     std::string_view command,
     std::string_view transport,

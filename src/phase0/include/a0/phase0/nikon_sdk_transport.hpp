@@ -54,4 +54,20 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+class NikonSdkStatusExecutor final : public ISdkStatusExecutor {
+public:
+    NikonSdkStatusExecutor();
+    ~NikonSdkStatusExecutor() override;
+    NikonSdkStatusExecutor(const NikonSdkStatusExecutor&) = delete;
+    NikonSdkStatusExecutor& operator=(const NikonSdkStatusExecutor&) = delete;
+    [[nodiscard]] std::string SdkVersion() const override;
+    [[nodiscard]] std::vector<CameraInfo> Enumerate() override;
+    [[nodiscard]] SdkCameraStatus ProbeSdkStatus(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) override;
+
+private:
+    NikonSdkTransport transport_;
+};
+
 } // namespace a0::phase0

@@ -216,6 +216,9 @@ Options Parse(int argc, char** argv) {
     if (options.transport != "sdk" && options.transport != "wpd" && options.transport != "fake") {
         throw std::runtime_error("transport must be sdk, wpd, or fake");
     }
+    if (const auto sdk_status_error = ValidateSdkStatusCliRouting(options.command, options.transport)) {
+        throw std::runtime_error(*sdk_status_error);
+    }
     if (const auto binding_error = ValidateIdentityBindingArguments(
             options.command,
             options.transport,
@@ -525,15 +528,26 @@ CameraInfo ResolveCamera(
 }
 
 int RunSdkStatus(const Options& options) {
-    if (options.transport != "sdk") throw std::runtime_error("sdk-status requires --transport sdk");
-    NikonSdkTransport transport;
-    const auto camera = ResolveCamera(transport, options.camera_map, options.alias);
-    auto status = transport.ProbeSdkStatus(camera.stable_identity, std::chrono::seconds(10));
+    if (const auto routing_error = ValidateSdkStatusCliRouting(options.command, options.transport)) {
+        throw std::runtime_error(*routing_error);
+    }
+    NikonSdkStatusExecutor executor;
+    SdkStatusProcessRouting routing;
+    routing.sdk_status_executor_selected = true;
+    const auto cameras = executor.Enumerate();
+    ++routing.sdk_enumeration_count;
+    const auto camera = ResolveCamera(cameras, options.camera_map, options.alias);
+    auto status = executor.ProbeSdkStatus(camera.stable_identity, std::chrono::seconds(10));
+    ++routing.sdk_status_probe_count;
+    if (const auto routing_failure = ValidateSdkStatusProcessRouting(routing)) {
+        throw std::runtime_error("SDK status process routing failed: " + std::string(*routing_failure));
+    }
     if (status.firmware == "unknown" && camera.firmware != "unknown") status.firmware = camera.firmware;
 
     const std::string run_id = NewRunId();
-    const auto summary = PersistSdkStatusSummary(options.artifacts, run_id, options.alias, camera, status);
-    EvidenceWriter evidence(options.artifacts, run_id, transport.SdkVersion());
+    const auto summary = PersistSdkStatusSummary(
+        options.artifacts, run_id, options.alias, camera, status, routing);
+    EvidenceWriter evidence(options.artifacts, run_id, executor.SdkVersion());
     evidence.GenerateRedactedReport(options.reports);
 
     const auto write_setting = [](std::string_view name, const SdkCameraStatus::SettingCapability& setting) {
@@ -572,12 +586,35 @@ int RunSdkStatus(const Options& options) {
         std::cout << "unknown";
     }
     std::cout << "\nLiveViewProhibitAvailable: " << (status.live_view_prohibit_mask ? "true" : "false")
+              << "\nSdkStatusCapGetCount: " << status.command_trace.cap_get_count
+              << "\nSdkStatusCapGetArrayCount: " << status.command_trace.cap_get_array_count
+              << "\nSdkStatusCapSetCount: " << status.command_trace.cap_set_count
+              << "\nSdkStatusControlPlaneCapSetCount: " << status.command_trace.control_plane_cap_set_count
+              << "\nSdkStatusPhotographicSettingCapSetCount: "
+              << status.command_trace.photographic_setting_cap_set_count
+              << "\nSdkStatusCapStartCount: " << status.command_trace.cap_start_count
+              << "\nSdkStatusCaptureStartCount: " << status.command_trace.capture_start_count
+              << "\nSdkStatusNonCaptureStartCount: " << status.command_trace.non_capture_start_count
+              << "\nSdkStatusUnknownCapStartCount: " << status.command_trace.unknown_cap_start_count
+              << "\nSdkStatusLiveViewStartCount: " << status.command_trace.live_view_start_count
+              << "\nSdkStatusCommandTraceReadOnly: true"
+              << "\nSdkStatusProcessRoutingContract: true"
+              << "\nSdkStatusExecutorSelected: "
+              << (routing.sdk_status_executor_selected ? "true" : "false")
+              << "\nSdkStatusEnumerationCount: " << routing.sdk_enumeration_count
+              << "\nSdkStatusProbeCount: " << routing.sdk_status_probe_count
+              << "\nSdkStatusWpdCallCount: " << routing.wpd_call_count
+              << "\nSdkStatusCaptureCallCount: " << routing.capture_call_count
+              << "\nSdkStatusDeleteCallCount: " << routing.delete_call_count
               << "\nCameraSettingReadOnlyProbe: true"
-              << "\nCameraSettingWriteAttempted: false"
+              << "\nCameraSettingWriteAttempted: "
+              << (status.command_trace.photographic_setting_cap_set_count != 0 ? "true" : "false")
               << "\nSdkControlPlaneCallbackRegistrationMayUseCapSet: true"
               << "\nCameraSettingsChanged: false"
-              << "\nLiveViewStarted: false"
-              << "\nSdkSessionClosed: true"
+              << "\nLiveViewStarted: "
+              << (status.command_trace.live_view_start_count != 0 ? "true" : "false")
+              << "\nSdkSessionClosed: "
+              << (status.command_trace.sdk_session_closed ? "true" : "false")
               << "\nRealIdentifiersPrinted: false"
               << "\nSummaryPath: " << summary.string();
     write_setting("FileType", status.file_type);

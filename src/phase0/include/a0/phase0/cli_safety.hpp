@@ -13,6 +13,12 @@ namespace a0::phase0 {
     std::string_view transport,
     bool operator_gate_requested);
 
+// sdk-status must route through the SDK-only read/enumerate executor. It must
+// never be accepted with a WPD or fake transport.
+[[nodiscard]] std::optional<std::string> ValidateSdkStatusCliRouting(
+    std::string_view command,
+    std::string_view transport);
+
 // Returns true only for commands that can open a real SDK or WPD session.
 [[nodiscard]] bool RequiresHardwareProcessLease(
     std::string_view command,

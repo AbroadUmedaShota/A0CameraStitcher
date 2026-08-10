@@ -73,6 +73,17 @@ void TestHardwareCommandClassification() {
     Check(!RequiresHardwareProcessLease("unknown", "wpd"), "unknown commands must not acquire hardware lease");
 }
 
+void TestSdkStatusCliRouting() {
+    Check(!ValidateSdkStatusCliRouting("sdk-status", "sdk"),
+        "sdk-status must select the SDK-only status executor");
+    Check(ValidateSdkStatusCliRouting("sdk-status", "wpd").has_value(),
+        "sdk-status must reject WPD routing");
+    Check(ValidateSdkStatusCliRouting("sdk-status", "fake").has_value(),
+        "sdk-status must reject fake routing");
+    Check(!ValidateSdkStatusCliRouting("inventory", "wpd"),
+        "non-status commands must not be constrained by the SDK status route");
+}
+
 void TestIdentityBindingArguments() {
     Check(!ValidateIdentityBindingArguments("inventory", "sdk", false),
         "non-binding commands must ignore the binding confirmation");
@@ -244,6 +255,7 @@ int main(int argc, char** argv) {
     }
     TestDirectCaptureCommandsAreFakeOnly();
     TestHardwareCommandClassification();
+    TestSdkStatusCliRouting();
     TestIdentityBindingArguments();
     TestProcessLeaseRejectsConcurrentOwner();
     TestProcessLeaseRejectsSeparateProcess();
