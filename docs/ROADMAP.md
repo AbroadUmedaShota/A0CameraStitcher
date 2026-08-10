@@ -43,7 +43,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 - SDK status、Live View状態、JPEG/露出/ISO/WB/focus capabilityのreadback
 - 撮影設定capabilityへのwrite、capture、Live View開始、WPD、deleteがないことをnative command traceで検証
 
-実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。操作者報告では実D810一台のexactly-oneとCAM-A identity-v3登録はcamera mutation 0でPassした。登録直後の`sdk-status`がlegacy mapへ誤routingしたdefectは、CAM-A既定identity-v3、WPD identity列挙1回、SDK open-time exactly-one、明示legacy mapだけv2というsoftware contractへ修正済みである。実D810 v5再実行は未検証、Dual identity-v2 collisionは`HG-0003B`として残る。
+実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。操作者報告では実D810一台のexactly-oneとCAM-A identity-v3登録はcamera mutation 0でPassした。登録直後の`sdk-status`がlegacy mapへ誤routingしたdefectと、WPD digest照合前にSDKを列挙していたQA findingは、identity file→WPD exact-one/model/digest→SDK executor factory/enumerate/open/probeの二段階software contractへ修正済みである。前段失敗時はSDK call 0。実D810 v5再実行は未検証、Dual identity-v2 collisionは`HG-0003B`として残る。
 
 ## M2P: オフラインpre-gate
 

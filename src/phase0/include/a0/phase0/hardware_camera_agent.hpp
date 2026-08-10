@@ -93,6 +93,27 @@ struct SingleCameraIdentityV3 {
     const std::vector<CameraInfo>& sdk_cameras,
     const std::vector<CameraInfo>& wpd_cameras);
 
+class ISingleIdentityV3WpdEnumerator {
+public:
+    virtual ~ISingleIdentityV3WpdEnumerator() = default;
+    [[nodiscard]] virtual std::vector<CameraInfo> Enumerate() = 0;
+};
+
+struct SingleIdentityV3SdkStatusExecution {
+    CameraInfo camera;
+    SdkCameraStatus status;
+    SdkStatusProcessRouting routing;
+    std::string sdk_version;
+};
+
+[[nodiscard]] SingleIdentityV3SdkStatusExecution ExecuteSingleIdentityV3SdkStatus(
+    const std::filesystem::path& identity_path,
+    std::string_view requested_alias,
+    const std::function<std::unique_ptr<ISingleIdentityV3WpdEnumerator>()>&
+        wpd_factory,
+    const std::function<std::unique_ptr<ISdkStatusExecutor>()>& sdk_factory,
+    std::chrono::seconds timeout);
+
 struct ObservedCameraSetting {
     bool available{};
     std::string cap_type{"unsupported"};

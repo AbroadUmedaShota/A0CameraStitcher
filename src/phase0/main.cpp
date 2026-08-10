@@ -70,6 +70,23 @@ CameraInfo ResolveCamera(
     std::string_view alias);
 CameraInfo ResolveCamera(ICameraTransport& transport, const fs::path& camera_map, std::string_view alias);
 
+class ProductSingleIdentityV3WpdEnumerator final
+    : public ISingleIdentityV3WpdEnumerator {
+public:
+    explicit ProductSingleIdentityV3WpdEnumerator(
+        WpdCommandTargetPolicy command_target_policy)
+        : transport_(command_target_policy) {
+        transport_.RequireExactlyOneD810ForProductAgent();
+    }
+
+    std::vector<CameraInfo> Enumerate() override {
+        return transport_.Enumerate();
+    }
+
+private:
+    WpdTransport transport_;
+};
+
 std::optional<std::string> EnvironmentValue(const char* name) {
     char* buffer = nullptr;
     std::size_t size = 0;
@@ -582,31 +599,39 @@ int RunSdkStatus(const Options& options) {
     const bool use_single_identity_v3 =
         SelectSdkStatusIdentityRoute(options.alias, options.camera_map_explicit) ==
         SdkStatusIdentityRoute::single_identity_v3;
-    std::optional<SingleCameraIdentityV3> single_identity;
     if (use_single_identity_v3) {
-        // Load and validate the local identity authority before any transport
-        // enumeration or camera session can start. There is no legacy fallback.
-        single_identity = LoadSingleCameraIdentityV3(options.single_identity_v3);
         routing.single_identity_v3_selected = true;
     }
 
-    NikonSdkStatusExecutor executor;
-    std::vector<CameraInfo> wpd_cameras;
-    if (single_identity) {
-        WpdTransport wpd(options.wpd_command_target);
-        wpd.RequireExactlyOneD810ForProductAgent();
-        wpd_cameras = wpd.Enumerate();
-        ++routing.wpd_identity_enumeration_count;
-        executor.RequireExactlyOneD810ForSingleStatus();
+    CameraInfo camera;
+    SdkCameraStatus status;
+    std::string sdk_version;
+    if (use_single_identity_v3) {
+        auto execution = ExecuteSingleIdentityV3SdkStatus(
+            options.single_identity_v3,
+            options.alias,
+            [&options]() -> std::unique_ptr<ISingleIdentityV3WpdEnumerator> {
+                return std::make_unique<ProductSingleIdentityV3WpdEnumerator>(
+                    options.wpd_command_target);
+            },
+            []() -> std::unique_ptr<ISdkStatusExecutor> {
+                return std::make_unique<NikonSdkStatusExecutor>();
+            },
+            std::chrono::seconds(10));
+        camera = std::move(execution.camera);
+        status = std::move(execution.status);
+        routing = execution.routing;
+        sdk_version = std::move(execution.sdk_version);
+    } else {
+        NikonSdkStatusExecutor executor;
+        const auto cameras = executor.Enumerate();
+        ++routing.sdk_enumeration_count;
+        camera = ResolveCamera(cameras, options.camera_map, options.alias);
+        status = executor.ProbeSdkStatus(
+            camera.stable_identity, std::chrono::seconds(10));
+        ++routing.sdk_status_probe_count;
+        sdk_version = executor.SdkVersion();
     }
-    const auto cameras = executor.Enumerate();
-    ++routing.sdk_enumeration_count;
-    const auto camera = single_identity
-        ? ResolveSingleCameraSdkStatusCamera(
-              *single_identity, options.alias, cameras, wpd_cameras)
-        : ResolveCamera(cameras, options.camera_map, options.alias);
-    auto status = executor.ProbeSdkStatus(camera.stable_identity, std::chrono::seconds(10));
-    ++routing.sdk_status_probe_count;
     if (const auto routing_failure = ValidateSdkStatusProcessRouting(routing)) {
         throw std::runtime_error("SDK status process routing failed: " + std::string(*routing_failure));
     }
@@ -615,7 +640,7 @@ int RunSdkStatus(const Options& options) {
     const std::string run_id = NewRunId();
     const auto summary = PersistSdkStatusSummary(
         options.artifacts, run_id, options.alias, camera, status, routing);
-    EvidenceWriter evidence(options.artifacts, run_id, executor.SdkVersion());
+    EvidenceWriter evidence(options.artifacts, run_id, sdk_version);
     evidence.GenerateRedactedReport(options.reports);
 
     const auto write_setting = [](std::string_view name, const SdkCameraStatus::SettingCapability& setting) {

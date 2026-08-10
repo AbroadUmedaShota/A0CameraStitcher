@@ -190,6 +190,7 @@ class ISdkStatusExecutor {
 public:
     virtual ~ISdkStatusExecutor() = default;
     [[nodiscard]] virtual std::string SdkVersion() const = 0;
+    virtual void RequireExactlyOneD810ForSingleStatus() = 0;
     [[nodiscard]] virtual std::vector<CameraInfo> Enumerate() = 0;
     [[nodiscard]] virtual SdkCameraStatus ProbeSdkStatus(
         std::string_view stable_identity,

@@ -65,7 +65,7 @@ public:
     // SingleCamera identity-v3 only: require the status probe's SDK open-time
     // inventory to remain exactly one D810. This does not add capture, Live
     // View, WPD, or delete capabilities to the status-only executor.
-    void RequireExactlyOneD810ForSingleStatus();
+    void RequireExactlyOneD810ForSingleStatus() override;
     [[nodiscard]] SdkCameraStatus ProbeSdkStatus(
         std::string_view stable_identity,
         std::chrono::seconds timeout) override;

@@ -1883,6 +1883,132 @@ void TestSingleIdentityV3SdkStatusResolution() {
     fs::remove_all(root, cleanup_error);
 }
 
+void TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure() {
+    struct FakeWpd final : ISingleIdentityV3WpdEnumerator {
+        FakeWpd(std::vector<CameraInfo> source, std::vector<std::string>* trace)
+            : cameras(std::move(source)), calls(trace) {}
+        std::vector<CameraInfo> cameras;
+        std::vector<std::string>* calls{};
+        int enumerate_count{};
+        std::vector<CameraInfo> Enumerate() override {
+            ++enumerate_count;
+            calls->push_back("wpd-enumerate");
+            return cameras;
+        }
+    };
+    struct SdkCalls {
+        int factory_count{};
+        int require_count{};
+        int enumerate_count{};
+        int probe_count{};
+    };
+    struct FakeSdk final : ISdkStatusExecutor {
+        FakeSdk(std::vector<CameraInfo> source,
+                std::vector<std::string>* trace,
+                SdkCalls* counters)
+            : cameras(std::move(source)), calls(trace), counts(counters) {}
+        std::vector<CameraInfo> cameras;
+        std::vector<std::string>* calls{};
+        SdkCalls* counts{};
+        std::string SdkVersion() const override { return "fake-read-only"; }
+        void RequireExactlyOneD810ForSingleStatus() override {
+            ++counts->require_count;
+            calls->push_back("sdk-require-exactly-one");
+        }
+        std::vector<CameraInfo> Enumerate() override {
+            ++counts->enumerate_count;
+            calls->push_back("sdk-enumerate");
+            return cameras;
+        }
+        SdkCameraStatus ProbeSdkStatus(
+            std::string_view,
+            std::chrono::seconds) override {
+            ++counts->probe_count;
+            calls->push_back("sdk-probe");
+            SdkCameraStatus result;
+            result.command_trace.sdk_session_opened = true;
+            result.command_trace.sdk_session_closed = true;
+            return result;
+        }
+    };
+
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-single-sdk-status-routing-test-" + NewRunId());
+    const fs::path identity_path = root / "single-identity-v3.json";
+    const fs::path malformed_path = root / "malformed.json";
+    const CameraInfo sdk_camera{
+        "Nikon D810", "unknown", "S", "synthetic-current-sdk-projection"};
+    const CameraInfo matching_wpd{
+        "Nikon D810", "unknown", "S", std::string(64, 'a')};
+    PersistSingleIdentityV3(
+        identity_path, "CAM-A", {sdk_camera}, {matching_wpd});
+    WriteText(malformed_path, "{not-json}");
+    const auto run = [&](const fs::path& selected_identity_path,
+                         std::vector<CameraInfo> wpd_cameras,
+                         bool expect_success,
+                         int expected_wpd_enumerations) {
+        std::vector<std::string> calls;
+        int wpd_factory_count = 0;
+        const auto wpd_factory = [&]() ->
+            std::unique_ptr<ISingleIdentityV3WpdEnumerator> {
+            ++wpd_factory_count;
+            return std::make_unique<FakeWpd>(
+                std::move(wpd_cameras), &calls);
+        };
+        SdkCalls sdk_calls;
+        const auto sdk_factory = [&]() -> std::unique_ptr<ISdkStatusExecutor> {
+            ++sdk_calls.factory_count;
+            return std::make_unique<FakeSdk>(
+                std::vector<CameraInfo>{sdk_camera}, &calls, &sdk_calls);
+        };
+        bool succeeded = false;
+        try {
+            const auto result = ExecuteSingleIdentityV3SdkStatus(
+                selected_identity_path, "CAM-A", wpd_factory, sdk_factory,
+                std::chrono::seconds(1));
+            succeeded = result.camera.stable_identity == sdk_camera.stable_identity;
+        } catch (const std::exception&) {
+        }
+        if (expect_success) {
+            Check(succeeded && wpd_factory_count == 1 &&
+                      expected_wpd_enumerations == 1 &&
+                      sdk_calls.factory_count == 1 &&
+                      sdk_calls.require_count == 1 &&
+                      sdk_calls.enumerate_count == 1 &&
+                      sdk_calls.probe_count == 1 &&
+                      calls == std::vector<std::string>({
+                          "wpd-enumerate", "sdk-require-exactly-one",
+                          "sdk-enumerate", "sdk-probe"}),
+                "production SingleCamera status routing must validate WPD before SDK enumerate and probe");
+        } else {
+            Check(!succeeded &&
+                      wpd_factory_count == expected_wpd_enumerations &&
+                      sdk_calls.factory_count == 0 &&
+                      sdk_calls.require_count == 0 &&
+                      sdk_calls.enumerate_count == 0 &&
+                      sdk_calls.probe_count == 0 &&
+                      calls == (expected_wpd_enumerations == 0
+                          ? std::vector<std::string>{}
+                          : std::vector<std::string>{"wpd-enumerate"}),
+                "identity-file or WPD rejection must leave every SDK status call at zero");
+        }
+    };
+
+    run(identity_path, {matching_wpd}, true, 1);
+    run(root / "missing.json", {matching_wpd}, false, 0);
+    run(malformed_path, {matching_wpd}, false, 0);
+    run(identity_path, {}, false, 1);
+    run(identity_path, {matching_wpd, matching_wpd}, false, 1);
+    auto wrong_model_wpd = matching_wpd;
+    wrong_model_wpd.model = "Not a D810";
+    run(identity_path, {wrong_model_wpd}, false, 1);
+    auto mismatched_wpd = matching_wpd;
+    mismatched_wpd.stable_identity = std::string(64, 'b');
+    run(identity_path, {mismatched_wpd}, false, 1);
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 void TestContinuousLiveViewV2Protocol() {
     FakeBackend backend;
     HardwareCameraAgentDispatcher dispatcher(backend);
@@ -2133,6 +2259,7 @@ int main() {
     TestFixedLocalPathPolicy();
     TestSingleIdentityV3Parser();
     TestSingleIdentityV3SdkStatusResolution();
+    TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();
     TestContinuousLiveViewV2Protocol();
     TestProductionContinuousLiveViewContracts();
     if (failures != 0) {
