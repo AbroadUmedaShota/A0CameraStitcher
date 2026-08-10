@@ -36,6 +36,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private bool _initializationStarted;
     private bool _initializationComplete;
     private bool _stateLoadFailed;
+    private bool _hasOperatorSelectedExportDirectory;
     private bool _disposed;
     private int _profileExpiryGeneration;
     private ITimer? _profileExpiryTimer;
@@ -76,6 +77,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _preferencesStore = preferencesStore;
         _profileStore = profileStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        // An injected exporter is an explicit destination chosen by the caller.
+        // The product composition supplies a preference store, so its default
+        // LocalAppData path remains only a folder-picker starting point until a
+        // durable operator choice is loaded or saved.
+        _hasOperatorSelectedExportDirectory = preferencesStore is null;
 
         CheckReadinessCommand = new AsyncRelayCommand(CheckReadinessAsync, () => CanCheckReadiness, HandleCommandException);
         ProbeLiveViewCommand = new AsyncRelayCommand(ProbeLiveViewAsync, () => CanProbeLiveView, HandleCommandException);
@@ -99,6 +105,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         : "Camera Agent実行ファイル: 未検出";
 
     public string ExportDirectory => _exporter.ExportDirectory;
+
+    public string ExportDirectoryDisplay => _hasOperatorSelectedExportDirectory
+        ? _exporter.ExportDirectory
+        : "未選択（保存先を選択してください）";
 
     public string SelectedCamera
     {
@@ -334,6 +344,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 return "Camera Agentを使う前に排他使用へ同意してください。";
             }
 
+            if (!_hasOperatorSelectedExportDirectory)
+            {
+                return "検証済み原画像の保存先として、固定ローカルフォルダを選択してください。";
+            }
+
             if (_readiness is null)
             {
                 return "接続台数・identity binding・empty spool・read-only設定を確認してください。";
@@ -349,7 +364,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         "実機操作です。物理シャッター・他のカメラアプリを使わず、撮影中にUSBを抜かないでください。自動再試行は0回です。";
 
     public string InfoText =>
-        "Live View previewは原画像や合成入力ではありません。設定はread-onlyです。単体出力はlocal app data内への検証済みoriginal.jpgのbyte-identical copyです。";
+        "Live View previewは原画像や合成入力ではありません。設定はread-onlyです。単体出力は操作者指定の固定ローカルフォルダへの検証済みoriginal.jpgのbyte-identical copyです。";
 
     public bool CanCheckReadiness =>
         _initializationComplete && !IsBusy && !IsContinuousLiveViewActive && !_stateLoadFailed &&
@@ -375,6 +390,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _initializationComplete && !IsBusy && !_stateLoadFailed &&
         _pendingTransaction is null && _captureResult is null &&
         _readiness?.Ready == true && ExclusiveCameraControlConfirmed &&
+        _hasOperatorSelectedExportDirectory &&
         _readiness.CaptureProfileExpiresAtUtc is { } profileExpiry &&
         profileExpiry > _timeProvider.GetUtcNow() &&
         DedicatedSpoolScopeConfirmed && ExactObjectDeleteConfirmed;
@@ -387,7 +403,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public bool CanExport =>
         _initializationComplete && !IsBusy && !_stateLoadFailed && _captureResult is not null &&
         _captureResult.TerminalState is not ("Reserved" or "InProgress") &&
-        _verifiedOriginal is not null;
+        _verifiedOriginal is not null && _hasOperatorSelectedExportDirectory;
 
     public bool CanPrepareNewCapture =>
         _initializationComplete && !IsBusy && !_stateLoadFailed && _pendingTransaction is not null &&
@@ -400,7 +416,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     public bool CanChangeExportDirectory =>
         _preferencesStore is not null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
-        _pendingTransaction is null && _captureResult is null;
+        (_pendingTransaction is null || _captureResult is not null);
 
     public ICommand CheckReadinessCommand { get; }
 
@@ -437,7 +453,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 if (preferences is not null)
                 {
                     _exporter = new HardwareOriginalExporter(preferences.ExportDirectory);
+                    _hasOperatorSelectedExportDirectory = true;
                     OnPropertyChanged(nameof(ExportDirectory));
+                    OnPropertyChanged(nameof(ExportDirectoryDisplay));
                 }
             }
             _pendingTransaction = await _stateStore.LoadPendingAsync(cancellationToken).ConfigureAwait(true);
@@ -508,7 +526,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
             await _preferencesStore.SaveAsync(normalized, cancellationToken).ConfigureAwait(true);
             _exporter = new HardwareOriginalExporter(normalized);
+            _hasOperatorSelectedExportDirectory = true;
             OnPropertyChanged(nameof(ExportDirectory));
+            OnPropertyChanged(nameof(ExportDirectoryDisplay));
             ActivityText = "保存先をローカル固定ドライブへ更新しました。";
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
@@ -1402,6 +1422,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanApproveProfile));
         OnPropertyChanged(nameof(CanChangeExportDirectory));
+        OnPropertyChanged(nameof(ExportDirectoryDisplay));
         OnPropertyChanged(nameof(BlockerText));
         ((AsyncRelayCommand)CheckReadinessCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ProbeLiveViewCommand).NotifyCanExecuteChanged();

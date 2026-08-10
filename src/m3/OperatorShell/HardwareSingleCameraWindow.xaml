@@ -191,7 +191,7 @@
                     <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
                         <StackPanel>
                             <TextBlock Text="保存先" FontWeight="Bold" />
-                            <TextBlock Text="{Binding ExportDirectory}" Margin="0,5,0,8" />
+                            <TextBlock Text="{Binding ExportDirectoryDisplay}" Margin="0,5,0,8" />
                             <Button Content="保存先を選択" Click="OnChooseExportDirectory"
                                     IsEnabled="{Binding CanChangeExportDirectory}" HorizontalAlignment="Left"
                                     AutomationProperties.Name="ローカル固定ドライブ上の保存先を選択" />

@@ -196,8 +196,81 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL local export preference and 30-day CAM-A profile approval are durable and fail closed: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {17 - failures.Count}/17 passed.");
+try
+{
+    await HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync();
+    Console.WriteLine("PASS hardware single requires an operator export folder and permits repair after capture");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware single requires an operator export folder and permits repair after capture");
+    Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {18 - failures.Count}/18 passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var sourcePath = Path.Combine(root, "agent", "run-export-selection", "CAM-A", "original.jpg");
+        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        var wrongDimensionsPath = Path.Combine(root, "agent", "wrong-dimensions", "CAM-A", "original.jpg");
+        var wrongDimensions = WriteJpegRecord(wrongDimensionsPath, "CAM-A", preserveOnePixelDimensions: true);
+        await Check.ThrowsAsync<InvalidDataException>(() =>
+            HardwareArtifactVerifier.VerifyOriginalAsync(wrongDimensions));
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            CaptureResultFactory = (transactionId, alias) =>
+                CompleteCapture(transactionId, alias, original),
+        };
+        var preferences = new HardwareSinglePreferencesStore(
+            Path.Combine(root, "state", "preferences.json"));
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "default-not-selected")),
+            preferences,
+            profileStore: null);
+
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        Check.False(viewModel.CanCapture,
+            "The product composition must not treat its default LocalAppData path as an operator choice.");
+        Check.True(
+            viewModel.BlockerText.Contains("保存先", StringComparison.Ordinal),
+            "A missing operator export destination must be a visible capture blocker.");
+
+        var firstChoice = Path.Combine(root, "operator-choice-1");
+        await viewModel.ChangeExportDirectoryAsync(firstChoice);
+        Check.True(viewModel.CanCapture, "An explicit fixed-local destination must release the capture gate.");
+        await viewModel.CaptureAsync();
+        Check.True(viewModel.CanExport, "A verified original must be exportable to the selected destination.");
+        Check.True(viewModel.CanChangeExportDirectory,
+            "A terminal capture must allow the operator to repair the destination before export.");
+
+        var repairedChoice = Path.Combine(root, "operator-choice-2");
+        await viewModel.ChangeExportDirectoryAsync(repairedChoice);
+        await viewModel.ExportAsync();
+        Check.Equal(Path.GetFullPath(repairedChoice), Path.GetDirectoryName(viewModel.LastExportPath)!);
+        Check.True(
+            File.ReadAllBytes(sourcePath).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
+            "The repaired destination must receive a byte-identical copy of the verified canonical original.");
+
+        var loaded = await preferences.LoadAsync();
+        Check.Equal(Path.GetFullPath(repairedChoice), loaded!.ExportDirectory);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
 
 static async Task HardwareSinglePreferencesAndProfileApprovalAsync()
 {
@@ -436,7 +509,8 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
     {
         var sourcePath = Path.Combine(root, "agent", "run-live-1", "CAM-A", "original.jpg");
         var original = WriteJpegRecord(sourcePath, "CAM-A");
-        var frameBytes = File.ReadAllBytes(sourcePath);
+        var framePath = Path.Combine(root, "agent", "run-live-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
         var operations = new FakeContinuousHardwareOperations(frameBytes)
         {
             CaptureResultFactory = (transactionId, alias) =>
@@ -1178,7 +1252,10 @@ static string CreateHardwareTestRoot()
     return root;
 }
 
-static HardwareRetainedOriginalRecord WriteJpegRecord(string path, string alias)
+static HardwareRetainedOriginalRecord WriteJpegRecord(
+    string path,
+    string alias,
+    bool preserveOnePixelDimensions = false)
 {
     var pixels = new byte[] { 0x20, 0x80, 0xE0 };
     var bitmap = BitmapSource.Create(
@@ -1188,6 +1265,10 @@ static HardwareRetainedOriginalRecord WriteJpegRecord(string path, string alias)
     using var encoded = new MemoryStream();
     encoder.Save(encoded);
     var bytes = encoded.ToArray();
+    if (!preserveOnePixelDimensions)
+    {
+        RewriteJpegDimensions(bytes, width: 7360, height: 4912);
+    }
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     File.WriteAllBytes(path, bytes);
     return new HardwareRetainedOriginalRecord
@@ -1201,13 +1282,40 @@ static HardwareRetainedOriginalRecord WriteJpegRecord(string path, string alias)
 
 static HardwarePreviewJpegRecord WritePreviewRecord(string path)
 {
-    var original = WriteJpegRecord(path, "CAM-A");
+    var original = WriteJpegRecord(path, "CAM-A", preserveOnePixelDimensions: true);
     return new HardwarePreviewJpegRecord
     {
         Path = original.Path,
         SizeBytes = original.SizeBytes,
         Sha256 = original.Sha256,
     };
+}
+
+static void RewriteJpegDimensions(byte[] bytes, int width, int height)
+{
+    for (var index = 2; index + 8 < bytes.Length;)
+    {
+        if (bytes[index++] != 0xFF)
+        {
+            throw new InvalidDataException("Test JPEG marker structure is invalid.");
+        }
+        while (index < bytes.Length && bytes[index] == 0xFF) index++;
+        var marker = bytes[index++];
+        if (marker is 0xD9 or 0xDA) break;
+        if (marker == 0x01 || marker is >= 0xD0 and <= 0xD7) continue;
+        var segmentLength = (bytes[index] << 8) | bytes[index + 1];
+        var isStartOfFrame = marker is >= 0xC0 and <= 0xCF and not (0xC4 or 0xC8 or 0xCC);
+        if (isStartOfFrame)
+        {
+            bytes[index + 3] = (byte)(height >> 8);
+            bytes[index + 4] = (byte)height;
+            bytes[index + 5] = (byte)(width >> 8);
+            bytes[index + 6] = (byte)width;
+            return;
+        }
+        index += segmentLength;
+    }
+    throw new InvalidDataException("Test JPEG has no start-of-frame marker.");
 }
 
 static HardwareSingleCaptureResult CompleteCapture(

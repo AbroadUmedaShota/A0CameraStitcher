@@ -26,8 +26,50 @@ namespace {
 
 constexpr std::size_t kMaximumProtocolJsonBytes = 64U * 1024U;
 constexpr std::uintmax_t kMaximumVerifiedJpegBytes = 256U * 1024U * 1024U;
+constexpr std::uint16_t kSingleOriginalWidth = 7360U;
+constexpr std::uint16_t kSingleOriginalHeight = 4912U;
 constexpr std::string_view kTransactionJournalSchema =
     "a0.camera-agent.transaction.v1";
+
+bool HasExpectedSingleOriginalDimensions(
+    const std::vector<unsigned char>& bytes) {
+    if (!IsValidJpeg(bytes)) return false;
+    std::size_t offset = 2;
+    while (offset + 1 < bytes.size()) {
+        if (bytes[offset++] != 0xFFU) return false;
+        while (offset < bytes.size() && bytes[offset] == 0xFFU) ++offset;
+        if (offset >= bytes.size()) return false;
+        const unsigned char marker = bytes[offset++];
+        if (marker == 0x00U) return false;
+        if (marker == 0xD9U || marker == 0xDAU) return false;
+        if (marker == 0x01U || (marker >= 0xD0U && marker <= 0xD7U)) {
+            continue;
+        }
+        if (offset + 2 > bytes.size()) return false;
+        const std::size_t segment_length =
+            (static_cast<std::size_t>(bytes[offset]) << 8U) |
+            static_cast<std::size_t>(bytes[offset + 1]);
+        if (segment_length < 2 || segment_length > bytes.size() - offset) {
+            return false;
+        }
+        const bool is_start_of_frame =
+            marker >= 0xC0U && marker <= 0xCFU &&
+            marker != 0xC4U && marker != 0xC8U && marker != 0xCCU;
+        if (is_start_of_frame) {
+            if (segment_length < 7) return false;
+            const std::uint16_t height = static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(bytes[offset + 3]) << 8U) |
+                bytes[offset + 4]);
+            const std::uint16_t width = static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(bytes[offset + 5]) << 8U) |
+                bytes[offset + 6]);
+            return width == kSingleOriginalWidth &&
+                height == kSingleOriginalHeight;
+        }
+        offset += segment_length;
+    }
+    return false;
+}
 
 enum class JsonKind {
     object,
@@ -1668,7 +1710,8 @@ LockedVerifiedOriginal ValidateAndLockOriginalBeforeCameraDelete(
             }
             offset += read;
         }
-        if (bytes.size() != frame.bytes || !IsValidJpeg(bytes) ||
+        if (bytes.size() != frame.bytes ||
+            !HasExpectedSingleOriginalDimensions(bytes) ||
             Sha256Hex(bytes) != frame.sha256) {
             throw TransportError(
                 "pc_original_verification_failed",
@@ -1698,7 +1741,8 @@ bool VerifyJournalOriginal(
     try {
         const auto bytes = ReadBoundedFile(path);
         return bytes.size() == result.retained_original->size &&
-            IsValidJpeg(bytes) && Sha256Hex(bytes) == result.retained_original->sha256;
+            HasExpectedSingleOriginalDimensions(bytes) &&
+            Sha256Hex(bytes) == result.retained_original->sha256;
     } catch (...) {
         return false;
     }
@@ -1790,7 +1834,7 @@ std::optional<RetainedOriginalRecord> RecoverRetainedOriginal(
     }
     if (candidates.size() != 1) return std::nullopt;
     const auto bytes = ReadBoundedFile(candidates.front());
-    if (!IsValidJpeg(bytes)) return std::nullopt;
+    if (!HasExpectedSingleOriginalDimensions(bytes)) return std::nullopt;
     return RetainedOriginalRecord{
         journal.camera_alias,
         fs::absolute(candidates.front()),

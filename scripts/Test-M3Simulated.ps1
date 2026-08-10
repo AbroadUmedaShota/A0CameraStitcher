@@ -34,7 +34,7 @@ try {
     Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
     $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 17/17 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+    Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 18/18 passed.')) 'M3 operator shell test summary is missing or incomplete.'
 
     [xml]$shellProjectXml = Get-Content -Raw -LiteralPath $shellProject
     Assert-Condition ($shellProjectXml.Project.PropertyGroup.TargetFramework -eq 'net10.0-windows') 'Operator shell must target net10.0-windows.'

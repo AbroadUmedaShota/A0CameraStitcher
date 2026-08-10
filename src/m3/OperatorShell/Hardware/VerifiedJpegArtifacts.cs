@@ -11,6 +11,9 @@ public sealed record VerifiedHardwareJpeg(
 
 public static class HardwareArtifactVerifier
 {
+    private const int SingleOriginalWidth = 7360;
+    private const int SingleOriginalHeight = 4912;
+
     public static Task<VerifiedHardwareJpeg> VerifyOriginalAsync(
         HardwareRetainedOriginalRecord original,
         CancellationToken cancellationToken = default)
@@ -52,7 +55,12 @@ public static class HardwareArtifactVerifier
         ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName);
         EnsureRegularFile(path);
         await using var stream = OpenStableRead(path);
-        var observed = await InspectJpegAsync(stream, cancellationToken).ConfigureAwait(false);
+        var observed = await InspectJpegAsync(
+            stream,
+            cancellationToken,
+            requiredFileName.Equals("original.jpg", StringComparison.OrdinalIgnoreCase)
+                ? (SingleOriginalWidth, SingleOriginalHeight)
+                : null).ConfigureAwait(false);
         if (observed.SizeBytes != expectedSize ||
             !string.Equals(observed.Sha256, expectedSha256, StringComparison.Ordinal))
         {
@@ -74,6 +82,7 @@ public static class HardwareArtifactVerifier
     internal static async Task<(long SizeBytes, string Sha256)> InspectJpegAsync(
         Stream stream,
         CancellationToken cancellationToken,
+        (int Width, int Height)? expectedDimensions = null,
         Stream? copyDestination = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -125,7 +134,85 @@ public static class HardwareArtifactVerifier
             throw new InvalidDataException("Artifact is not a complete JPEG file.");
         }
 
+        if (expectedDimensions is { } dimensions)
+        {
+            await VerifyJpegDimensionsAsync(
+                stream,
+                dimensions.Width,
+                dimensions.Height,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return (total, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
+    }
+
+    private static async Task VerifyJpegDimensionsAsync(
+        Stream stream,
+        int expectedWidth,
+        int expectedHeight,
+        CancellationToken cancellationToken)
+    {
+        if (!stream.CanSeek)
+        {
+            throw new InvalidDataException("Original JPEG dimensions cannot be verified on a non-seekable stream.");
+        }
+
+        stream.Position = 2;
+        var markerBytes = new byte[2];
+        while (stream.Position + 1 < stream.Length)
+        {
+            await stream.ReadExactlyAsync(markerBytes.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+            if (markerBytes[0] != 0xFF)
+            {
+                throw new InvalidDataException("Original JPEG marker structure is invalid.");
+            }
+
+            do
+            {
+                await stream.ReadExactlyAsync(markerBytes.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+            }
+            while (markerBytes[0] == 0xFF);
+
+            var marker = markerBytes[0];
+            if (marker is 0x00 or 0xD9 or 0xDA)
+            {
+                break;
+            }
+            if (marker == 0x01 || marker is >= 0xD0 and <= 0xD7)
+            {
+                continue;
+            }
+
+            await stream.ReadExactlyAsync(markerBytes, cancellationToken).ConfigureAwait(false);
+            var segmentLength = (markerBytes[0] << 8) | markerBytes[1];
+            if (segmentLength < 2 || segmentLength - 2 > stream.Length - stream.Position)
+            {
+                throw new InvalidDataException("Original JPEG segment length is invalid.");
+            }
+
+            var isStartOfFrame = marker is >= 0xC0 and <= 0xCF and not (0xC4 or 0xC8 or 0xCC);
+            if (isStartOfFrame)
+            {
+                if (segmentLength < 7)
+                {
+                    break;
+                }
+                var frameHeader = new byte[5];
+                await stream.ReadExactlyAsync(frameHeader, cancellationToken).ConfigureAwait(false);
+                var height = (frameHeader[1] << 8) | frameHeader[2];
+                var width = (frameHeader[3] << 8) | frameHeader[4];
+                if (width != expectedWidth || height != expectedHeight)
+                {
+                    throw new InvalidDataException(
+                        $"Original JPEG dimensions must be {expectedWidth}x{expectedHeight}; observed {width}x{height}.");
+                }
+                return;
+            }
+
+            stream.Seek(segmentLength - 2, SeekOrigin.Current);
+        }
+
+        throw new InvalidDataException("Original JPEG dimensions could not be verified.");
     }
 
     internal static void ValidateExpectedRecord(
@@ -231,7 +318,7 @@ public sealed class HardwareOriginalExporter
                          FileOptions.Asynchronous | FileOptions.WriteThrough))
         {
             var observed = await HardwareArtifactVerifier
-                .InspectJpegAsync(source, cancellationToken, destination)
+                .InspectJpegAsync(source, cancellationToken, (7360, 4912), destination)
                 .ConfigureAwait(false);
             await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
             destination.Flush(flushToDisk: true);
@@ -246,7 +333,7 @@ public sealed class HardwareOriginalExporter
         await using var verifiedStagingFile =
             WindowsDurableFilePublisher.OpenLockedForVerifiedPublish(partialPath);
         var stagedRecord = await HardwareArtifactVerifier
-            .InspectJpegAsync(verifiedStagingFile, cancellationToken)
+            .InspectJpegAsync(verifiedStagingFile, cancellationToken, (7360, 4912))
             .ConfigureAwait(false);
         if (stagedRecord.SizeBytes != original.SizeBytes || stagedRecord.Sha256 != original.Sha256)
         {

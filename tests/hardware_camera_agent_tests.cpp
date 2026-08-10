@@ -36,6 +36,22 @@ void Check(bool condition, std::string_view message) {
     }
 }
 
+std::vector<unsigned char> FullSizeOriginalJpeg(
+    std::uint16_t width = 7360U,
+    std::uint16_t height = 4912U) {
+    return {
+        0xFFU, 0xD8U,
+        0xFFU, 0xC0U, 0x00U, 0x11U, 0x08U,
+        static_cast<unsigned char>(height >> 8U),
+        static_cast<unsigned char>(height & 0xFFU),
+        static_cast<unsigned char>(width >> 8U),
+        static_cast<unsigned char>(width & 0xFFU),
+        0x03U, 0x01U, 0x11U, 0x00U, 0x02U, 0x11U, 0x00U,
+        0x03U, 0x11U, 0x00U,
+        0xFFU, 0xD9U,
+    };
+}
+
 std::string Envelope(std::string_view operation, std::string_view payload) {
     return "{\"schemaVersion\":\"a0.camera-agent.hardware.v1\","
            "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"req-1\","
@@ -421,7 +437,7 @@ public:
             throw TransportError("baseline_mismatch", "fake observation mismatch");
         }
         if (!observed_candidates.empty()) return observed_candidates;
-        return {{"private-name.jpg", {0xFF, 0xD8, 0x01, 0xFF, 0xD9}, true, "exact-object"}};
+        return {{"private-name.jpg", FullSizeOriginalJpeg(), true, "exact-object"}};
     }
     void DeleteRecoveredObject(std::string_view token, std::chrono::seconds) override {
         if (token != "exact-object") throw TransportError("delete_scope", "wrong object");
@@ -903,7 +919,7 @@ void TestDurableJournalRecoveryContracts() {
             "journal runId traversal must reject before artifact recovery");
 
         const fs::path outside = root / "outside.jpg";
-        const std::vector<unsigned char> jpeg{0xFF, 0xD8, 0x01, 0xFF, 0xD9};
+        const std::vector<unsigned char> jpeg = FullSizeOriginalJpeg();
         {
             std::ofstream output(outside, std::ios::binary);
             output.write(reinterpret_cast<const char*>(jpeg.data()),
@@ -1053,6 +1069,25 @@ void TestExactlyOneBindingAndHybridExecutorReuse() {
             "successful capture should return the verified canonical PC original");
         Check(result.automatic_retry_count == 0,
             "agent capture must report zero automatic retries");
+
+        HybridWpdFake wrong_dimensions_wpd;
+        wrong_dimensions_wpd.observed_candidates = {{
+            "wrong-size.jpg", FullSizeOriginalJpeg(1U, 1U), true, "wrong-size-object"}};
+        HybridSdkFake wrong_dimensions_sdk;
+        EvidenceWriter wrong_dimensions_evidence(
+            root / "artifacts", "run-wrong-dimensions", "fake-combined");
+        const auto wrong_dimensions = ExecuteBoundSingleCapture(
+            request, sdk_cameras, wpd_cameras, sdk_map, wpd_map,
+            wrong_dimensions_wpd, wrong_dimensions_wpd,
+            wrong_dimensions_sdk, wrong_dimensions_sdk,
+            wrong_dimensions_evidence, ConfirmedLiveViewOffStatus(),
+            ConfirmedLiveViewOffProbe());
+        Check(!wrong_dimensions.succeeded &&
+              wrong_dimensions.error_category == "pc_original_verification_failed" &&
+              wrong_dimensions.retained_original &&
+              wrong_dimensions_wpd.delete_attempts == 0 &&
+              wrong_dimensions_wpd.empty_after_checks == 0,
+            "a non-7360x4912 SingleCamera JPEG must remain FailedPartial and must not authorize camera deletion");
 
         HybridWpdFake locked_original_wpd;
         HybridSdkFake locked_original_sdk;
