@@ -2,7 +2,7 @@
 
 ## 現在の進め方
 
-MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`をCAM-A、WPD-digest＋exact-one identity-v3、byte-identical `7360×4912` export、30日read-only profileへ固定した。identity/profile/exportのsoftware実装は追加済みだが、継続Live View v2と実機受入は未完了である。Dualのidentity collisionはDual laneだけをBlockする。空カードが必要なM1Aは`Deferred`のままとする。
+MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`をCAM-A、WPD-digest＋exact-one identity-v3、byte-identical `7360×4912` export、30日read-only profileへ固定した。identity/profile/exportと継続Live View v2のsoftware実装は追加済みだが、実機受入は未完了である。Dualのidentity collisionはDual laneだけをBlockする。空カードが必要なM1Aは`Deferred`のままとする。
 
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
@@ -10,7 +10,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 | 一台・非破壊 M1N | Active / Partial | software contract済みのSDK setting command traceとprocess routing proofを維持し、実D810 v5 runと未広告・opaque値の扱いを確認 |
 | オフラインpre-gate M2P | Active / WI-0022C software complete | `HG-0001/HG-0002`承認後に実リグ値・品質作業へ進む |
 | simulated統合 M3P | Complete / Software-only | requirements 2.7.0の明示mode、CAM-A-only、no-auto-fallback、Single original一件、stitch N/A、local profile/exportをfresh contractで維持 |
-| 一台製品mode M1A/M3 | Identity/Profile/Export Software Implemented / Live View Active / Hardware Deferred | 継続Live View v2、empty spool、CAM-A one-shot、10回p95承認、100件実WPF受入 |
+| 一台製品mode M1A/M3 | Identity/Profile/Export/Live View v2 Software Implemented / Hardware Deferred | empty spool、CAM-A one-shot、10回handoff、10回p95承認、100件実WPF受入 |
 | 二台 Phase 0 M1B | Identity Strategy Blocked | CAM-B identity-v2 checkpointとfake安全契約は確認済みだが、二台接続時にSDK `identity_collision`。documentedな本体固有SDK propertyまたは安全なSDK/WPD相関が見つかるまで、binding、pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断は開始しない |
 | 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0003B/HG-0005/HG-0009`と先行実機証拠 |
 
@@ -18,8 +18,8 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 ## 現在の実行順
 
-1. 物理操作なしで継続Live View v2のprotocol、agent session、WPF開始／frame／停止を実装する
-2. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回characterizationを行う
+1. 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffをfresh software検証で固定する
+2. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
 3. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
 4. Dualは`HG-0003B`解決後だけCAM-A/B bindingとM1Bへ進む
 5. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
@@ -63,7 +63,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 実装状態: 2026-08-10のrequirements 2.6.0 fresh Release実行でbuild 0 warning/0 error、Foundation 19/19、Operator Shell 15/15、`Test-M3Simulated.ps1` Pass。さらにWI-0022C追加後のSDK-less Release CTest 7/7で`hardware_camera_agent_contracts`を含むC++ software boundaryを確認した。既存のlicensed-SDK-enabled 6/6 evidenceは保持する。明示mode、Single original一件、他alias未開始、stitch N/A、明示export、mode lock、no-auto-fallbackをsoftware-onlyで確認したためM3PはCompleteとする。CTestではcamera commandを送っておらず、実D810を使うWPF Camera Agent実行、WPD/SDK、actual JPEG、製品受入とは分離する。
 
-requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-enabled Release CTest各7/7、.NET Release build 0 warning/0 error、Foundation 19/19、Operator Shell 16/16、M3 boundary scriptに合格した。CAM-A identity-v3、30日read-only profile、fixed-local export preferenceをsoftware-onlyで検証し、継続Live View v2と実機受入は未検証のまま残す。
+requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-enabled Release CTest各7/7、.NET Release build 0 warning/0 error、Foundation 19/19、Operator Shell 16/16、M3 boundary scriptに合格した。後続sliceで長寿命Camera Agent、strict `hardware.v2`、memory-only frame、heartbeat/max lifetime/backpressure、WPF start/stop、stop-before-v1-capture、成功後だけrestartをsoftware実装した。最終fresh結果はFoundation 20/20、Operator Shell 17/17、C++全CTest 7/7を記録し、実機受入は未検証のまま残す。
 
 ## M1A: D810一台・物理撮影／SingleCamera transport受入 Phase 0
 
@@ -94,7 +94,7 @@ requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-en
 ## M3: mode別撮影・合成統合MVP
 
 - .NET 10/WPFと単一C++ Camera Agent
-- 明示`SingleCamera`／`DualCamera`、no-auto-fallback、process-wide排他、Live View handoff、durable sequential transaction。現`hardware.v1`は有限probeなので、継続session、heartbeat、bounded lifetime、backpressureを持つ別versionの対話的Live Viewを実装する
+- 明示`SingleCamera`／`DualCamera`、no-auto-fallback、process-wide排他、Live View handoff、durable sequential transaction。`hardware.v1`の有限probeとは別に、継続session、heartbeat、bounded lifetime、backpressureを持つ`hardware.v2`をsoftware実装済み
 - `SingleCamera`: CAM-A identity-v3、exactly-one D810、30日app-approved read-only profile、canonical original一件、stitch `NotApplicable`、操作者選択fixed-local folderへのbyte-identical `7360×4912` export
 - `DualCamera`: CAM-A→CAM-B、setup assistant、approved rig profile、bounded correction、stitch/restitch
 - 部分失敗・再起動・原本保持

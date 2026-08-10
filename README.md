@@ -4,7 +4,7 @@
 
 ## 現在の段階
 
-総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original exportをsoftware実装しました。実WPFからD810を撮影・exportした合格証拠ではありません。現`hardware.v1` Live Viewは有限probeで、製品の対話的継続Live View v2は未実装です。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持し、SDK identity collisionにより別laneでBlockedです。
+総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持し、SDK identity collisionにより別laneでBlockedです。
 
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。現在の記録上、接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 

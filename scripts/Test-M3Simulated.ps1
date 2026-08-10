@@ -29,12 +29,12 @@ try {
     Assert-Condition (Test-Path -LiteralPath $foundationTestExecutable -PathType Leaf) 'M3 foundation test executable was not produced by the solution build.'
     $testOutput = & $foundationTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 foundation tests failed: $($testOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 19/19 passed.')) 'M3 foundation test summary is missing or incomplete.'
+    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 20/20 passed.')) 'M3 foundation test summary is missing or incomplete.'
 
     Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
     $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 16/16 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+    Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 17/17 passed.')) 'M3 operator shell test summary is missing or incomplete.'
 
     [xml]$shellProjectXml = Get-Content -Raw -LiteralPath $shellProject
     Assert-Condition ($shellProjectXml.Project.PropertyGroup.TargetFramework -eq 'net10.0-windows') 'Operator shell must target net10.0-windows.'
@@ -63,7 +63,7 @@ try {
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareViewModelText = Get-Content -Raw -LiteralPath $hardwareViewModelPath
     Assert-Condition ($hardwareWindowXml.Window.Title.Contains('HARDWARE') -and $hardwareWindowXml.Window.Title.Contains('一台構成')) 'Hardware window title must identify the real SingleCamera boundary.'
-    foreach ($marker in @('SingleCamera', '接続台数から推定・自動降格しません', '有限Live View', '未確定transactionの結果を確認', 'byte-identical', '再合成（SingleCameraでは対象外）')) {
+    foreach ($marker in @('SingleCamera', '接続台数から推定・自動降格しません', '継続Live View', '未確定transactionの結果を確認', 'byte-identical', '再合成（SingleCameraでは対象外）')) {
         Assert-Condition (($hardwareWindowText + $hardwareViewModelText).Contains($marker)) "Hardware SingleCamera shell is missing required marker: $marker"
     }
     Assert-Condition ($hardwareViewModelText.Contains('IHardwareSingleCameraOperations')) 'Hardware SingleCamera shell must use the typed Camera Agent facade.'

@@ -1,4 +1,6 @@
 using System.IO;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Input;
 using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -9,6 +11,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 {
     private static readonly TimeSpan MaximumProfileExpiryTimerDelay = TimeSpan.FromHours(1);
     private readonly IHardwareSingleCameraOperations _operations;
+    private readonly IHardwareContinuousLiveViewOperations? _continuousLiveViewOperations;
     private readonly IHardwareSingleAppStateStore _stateStore;
     private HardwareOriginalExporter _exporter;
     private readonly HardwareSinglePreferencesStore? _preferencesStore;
@@ -23,6 +26,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private bool _dedicatedSpoolScopeConfirmed;
     private bool _exactObjectDeleteConfirmed;
     private bool _liveViewHandoffRequested;
+    private bool _isContinuousLiveViewActive;
+    private string? _continuousLiveViewSessionId;
+    private CancellationTokenSource? _continuousLiveViewLoopCancellation;
+    private Task? _continuousLiveViewLoop;
+    private ImageSource? _previewImage;
     private bool _localPreDispatchFailure;
     private bool _isBusy;
     private bool _initializationStarted;
@@ -35,7 +43,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private string _readinessSummary = "未確認";
     private string _readinessDetail = "排他使用へ同意した後、状態確認を実行してください。";
     private string _observedSettingsText = "未確認";
-    private string _liveViewSummary = "未実行（有限1フレームのみ）";
+    private string _liveViewSummary = "未実行";
     private string _previewPath = string.Empty;
     private string _captureSummary = "未撮影";
     private string _retainedOriginalSummary = "なし";
@@ -62,6 +70,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         TimeProvider? timeProvider = null)
     {
         _operations = operations ?? throw new ArgumentNullException(nameof(operations));
+        _continuousLiveViewOperations = operations as IHardwareContinuousLiveViewOperations;
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _exporter = exporter ?? throw new ArgumentNullException(nameof(exporter));
         _preferencesStore = preferencesStore;
@@ -70,6 +79,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
         CheckReadinessCommand = new AsyncRelayCommand(CheckReadinessAsync, () => CanCheckReadiness, HandleCommandException);
         ProbeLiveViewCommand = new AsyncRelayCommand(ProbeLiveViewAsync, () => CanProbeLiveView, HandleCommandException);
+        StartContinuousLiveViewCommand = new AsyncRelayCommand(
+            StartContinuousLiveViewAsync, () => CanStartContinuousLiveView, HandleCommandException);
+        StopContinuousLiveViewCommand = new AsyncRelayCommand(
+            StopContinuousLiveViewAsync, () => CanStopContinuousLiveView, HandleCommandException);
         CaptureCommand = new AsyncRelayCommand(CaptureAsync, () => CanCapture, HandleCommandException);
         RecoverTransactionCommand = new AsyncRelayCommand(RecoverTransactionAsync, () => CanRecoverTransaction, HandleCommandException);
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, HandleCommandException);
@@ -100,7 +113,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             InvalidateReadiness("選択カメラを変更しました。状態を再確認してください。");
             _liveViewHandoffRequested = false;
             PreviewPath = string.Empty;
-            LiveViewSummary = "未実行（有限1フレームのみ）";
+            PreviewImage = null;
+            LiveViewSummary = "未実行";
             OnPropertyChanged(nameof(SelectedCameraDescription));
             NotifyAvailability();
         }
@@ -160,10 +174,12 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     }
 
     public bool CanSelectCamera =>
-        _initializationComplete && !IsBusy && _pendingTransaction is null && _captureResult is null && !_stateLoadFailed;
+        _initializationComplete && !IsBusy && !IsContinuousLiveViewActive &&
+        _pendingTransaction is null && _captureResult is null && !_stateLoadFailed;
 
     public bool CanChangeConfirmations =>
-        _initializationComplete && !IsBusy && _pendingTransaction is null && !_stateLoadFailed;
+        _initializationComplete && !IsBusy && !IsContinuousLiveViewActive &&
+        _pendingTransaction is null && !_stateLoadFailed;
 
     public string ActivityText
     {
@@ -207,7 +223,39 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
     }
 
-    public bool HasPreview => !string.IsNullOrEmpty(PreviewPath);
+    public ImageSource? PreviewImage
+    {
+        get => _previewImage;
+        private set
+        {
+            if (SetProperty(ref _previewImage, value))
+            {
+                OnPropertyChanged(nameof(HasPreview));
+            }
+        }
+    }
+
+    public bool HasPreview => PreviewImage is not null || !string.IsNullOrEmpty(PreviewPath);
+
+    public bool SupportsContinuousLiveView => _continuousLiveViewOperations is not null;
+
+    public bool IsContinuousLiveViewActive
+    {
+        get => _isContinuousLiveViewActive;
+        private set
+        {
+            if (SetProperty(ref _isContinuousLiveViewActive, value))
+            {
+                OnPropertyChanged(nameof(ContinuousLiveViewButtonText));
+                OnPropertyChanged(nameof(CanSelectCamera));
+                OnPropertyChanged(nameof(CanChangeConfirmations));
+                NotifyAvailability();
+            }
+        }
+    }
+
+    public string ContinuousLiveViewButtonText =>
+        IsContinuousLiveViewActive ? "継続Live Viewを停止" : "継続Live Viewを開始";
 
     public string CaptureSummary
     {
@@ -301,17 +349,27 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         "実機操作です。物理シャッター・他のカメラアプリを使わず、撮影中にUSBを抜かないでください。自動再試行は0回です。";
 
     public string InfoText =>
-        "Live Viewは有限プレビューで、原画像や合成入力ではありません。設定はread-onlyです。単体出力はlocal app data内への検証済みoriginal.jpgのbyte-identical copyです。";
+        "Live View previewは原画像や合成入力ではありません。設定はread-onlyです。単体出力はlocal app data内への検証済みoriginal.jpgのbyte-identical copyです。";
 
     public bool CanCheckReadiness =>
-        _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        _initializationComplete && !IsBusy && !IsContinuousLiveViewActive && !_stateLoadFailed &&
         _pendingTransaction is null && _captureResult is null &&
         _operations.AgentExecutableAvailable && ExclusiveCameraControlConfirmed;
 
     public bool CanProbeLiveView =>
-        _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        _continuousLiveViewOperations is null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
         _pendingTransaction is null && _captureResult is null &&
         IsIdentityReadyForLiveView(_readiness) && ExclusiveCameraControlConfirmed;
+
+    public bool CanStartContinuousLiveView =>
+        _continuousLiveViewOperations is not null && _initializationComplete && !IsBusy &&
+        !IsContinuousLiveViewActive && !_stateLoadFailed && _pendingTransaction is null &&
+        _captureResult is null && IsIdentityReadyForLiveView(_readiness) &&
+        ExclusiveCameraControlConfirmed;
+
+    public bool CanStopContinuousLiveView =>
+        _continuousLiveViewOperations is not null && _initializationComplete && !IsBusy &&
+        IsContinuousLiveViewActive;
 
     public bool CanCapture =>
         _initializationComplete && !IsBusy && !_stateLoadFailed &&
@@ -347,6 +405,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public ICommand CheckReadinessCommand { get; }
 
     public ICommand ProbeLiveViewCommand { get; }
+
+    public ICommand StartContinuousLiveViewCommand { get; }
+
+    public ICommand StopContinuousLiveViewCommand { get; }
 
     public ICommand CaptureCommand { get; }
 
@@ -565,6 +627,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                     .VerifyPreviewAsync(reply.Payload.Preview)
                     .ConfigureAwait(true);
                 PreviewPath = verified.Path;
+                PreviewImage = TryLoadFrozenImage(verified.Path);
                 _liveViewHandoffRequested = true;
                 LiveViewSummary = $"1フレーム確認済み ({verified.SizeBytes:N0} bytes)";
                 ActivityText = "Live Viewを停止しSDKを閉じました。撮影前に状態を再確認してください。";
@@ -589,6 +652,193 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
     }
 
+    public async Task StartContinuousLiveViewAsync()
+    {
+        if (!CanStartContinuousLiveView || _continuousLiveViewOperations is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            await StartContinuousLiveViewCoreAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public async Task StopContinuousLiveViewAsync()
+    {
+        if (!CanStopContinuousLiveView || _continuousLiveViewOperations is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            _ = await StopContinuousLiveViewCoreAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task StartContinuousLiveViewCoreAsync()
+    {
+        if (_continuousLiveViewOperations is null)
+        {
+            return;
+        }
+
+        var sessionId = _continuousLiveViewOperations.CreateSessionId();
+        ActivityText = "継続Live Viewセッションを開始中…";
+        LiveViewSummary = "開始中";
+        PreviewPath = string.Empty;
+        PreviewImage = null;
+        try
+        {
+            var reply = await _continuousLiveViewOperations
+                .StartLiveViewAsync(sessionId)
+                .ConfigureAwait(true);
+            if (!reply.Success)
+            {
+                LiveViewSummary = $"開始失敗: {reply.Payload.ErrorCategory}";
+                ActivityText = "継続Live Viewは開始されませんでした。撮影は実行していません。";
+                return;
+            }
+
+            _continuousLiveViewSessionId = sessionId;
+            _liveViewHandoffRequested = false;
+            IsContinuousLiveViewActive = true;
+            LiveViewSummary = "継続表示中（preview only）";
+            ActivityText = "CAM-A 継続Live Viewを表示しています。";
+            _continuousLiveViewLoopCancellation = new CancellationTokenSource();
+            _continuousLiveViewLoop = RunContinuousLiveViewLoopAsync(
+                sessionId, _continuousLiveViewLoopCancellation.Token);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            LiveViewSummary = "開始失敗";
+            ActivityText = "継続Live Viewを開始できませんでした。撮影は実行していません。";
+            TechnicalDetail += $"\ncontinuous_live_view_start_failed: {SafeMessage(exception)}";
+        }
+    }
+
+    private async Task<bool> StopContinuousLiveViewCoreAsync()
+    {
+        if (_continuousLiveViewOperations is null || _continuousLiveViewSessionId is null)
+        {
+            return false;
+        }
+
+        ActivityText = "継続Live Viewを停止し、SDKセッションをclose中…";
+        _continuousLiveViewLoopCancellation?.Cancel();
+        if (_continuousLiveViewLoop is not null)
+        {
+            try
+            {
+                await _continuousLiveViewLoop.ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        try
+        {
+            var reply = await _continuousLiveViewOperations
+                .StopLiveViewAsync(_continuousLiveViewSessionId)
+                .ConfigureAwait(true);
+            if (!reply.Success || reply.Payload.SdkSessionOpen || reply.Payload.LiveViewRunning)
+            {
+                LiveViewSummary = $"停止未確認: {reply.Payload.ErrorCategory}";
+                ActivityText = "Live View停止とSDK closeを確認できません。撮影を開始しません。";
+                if (!reply.Payload.SdkSessionOpen && !reply.Payload.LiveViewRunning)
+                {
+                    IsContinuousLiveViewActive = false;
+                    _continuousLiveViewLoopCancellation?.Dispose();
+                    _continuousLiveViewLoopCancellation = null;
+                    _continuousLiveViewLoop = null;
+                    InvalidateReadiness("Live View停止はfail-closedでSDK close済みですが、撮影前の状態再確認が必要です。");
+                }
+                return false;
+            }
+
+            IsContinuousLiveViewActive = false;
+            _continuousLiveViewLoopCancellation?.Dispose();
+            _continuousLiveViewLoopCancellation = null;
+            _continuousLiveViewLoop = null;
+            LiveViewSummary = "停止済み（SDK session closed）";
+            ActivityText = "継続Live Viewを停止し、SDKセッションをcloseしました。";
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            LiveViewSummary = "停止結果を確認できません";
+            ActivityText = "Live View停止状態が不明です。撮影を開始しません。";
+            TechnicalDetail += $"\ncontinuous_live_view_stop_unconfirmed: {SafeMessage(exception)}";
+            return false;
+        }
+    }
+
+    private async Task RunContinuousLiveViewLoopAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested &&
+               _continuousLiveViewOperations is not null)
+        {
+            HardwareCameraAgentReply<HardwareContinuousLiveViewResult> reply;
+            try
+            {
+                reply = await _continuousLiveViewOperations
+                    .ReadLiveViewFrameAsync(sessionId, cancellationToken)
+                    .ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                LiveViewSummary = "フレーム取得状態が不明です。停止操作が必要です。";
+                ActivityText = "Live View通信が中断しました。撮影前に停止を確認してください。";
+                TechnicalDetail += $"\ncontinuous_live_view_frame_unconfirmed: {SafeMessage(exception)}";
+                return;
+            }
+
+            if (!reply.Success)
+            {
+                IsContinuousLiveViewActive = false;
+                LiveViewSummary = $"Live View終了: {reply.Payload.ErrorCategory}";
+                ActivityText = "Camera AgentがLive View SDKセッションをfail-closedで終了しました。";
+                InvalidateReadiness("Live View failure後は撮影前の状態再確認が必要です。");
+                return;
+            }
+
+            try
+            {
+                var frame = reply.Payload.DecodeVerifiedFrame();
+                PreviewImage = LoadFrozenImage(frame);
+                PreviewPath = string.Empty;
+                LiveViewSummary = $"継続表示中 / frame {reply.Payload.FrameNumber:N0} / {frame.Length:N0} bytes";
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                LiveViewSummary = "preview JPEGを表示できません。停止操作が必要です。";
+                ActivityText = "Live View frameを採用しません。撮影前に停止を確認してください。";
+                TechnicalDetail += $"\ncontinuous_live_view_frame_invalid: {SafeMessage(exception)}";
+                return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(true);
+        }
+    }
+
     public async Task CaptureAsync()
     {
         if (!CanCapture)
@@ -596,9 +846,23 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             return;
         }
 
+        var restartContinuousLiveView = IsContinuousLiveViewActive;
+        if (restartContinuousLiveView)
+        {
+            IsBusy = true;
+            if (!await StopContinuousLiveViewCoreAsync().ConfigureAwait(true))
+            {
+                IsBusy = false;
+                NotifyAvailability();
+                return;
+            }
+        }
+
         CancelProfileExpiryInvalidation();
         var alias = SelectedCamera;
         var readiness = _readiness!;
+        var finiteLiveViewHandoffRequested =
+            _continuousLiveViewOperations is null && _liveViewHandoffRequested;
         var expectedProfile = new HardwareCaptureProfileSnapshot(
             readiness.CaptureProfileId,
             readiness.CaptureProfileVersion,
@@ -615,7 +879,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             CaptureProfileVersion = expectedProfile.ProfileVersion,
             CaptureProfileSha256 = expectedProfile.Sha256,
             CaptureProfileExpiresAtUtc = expectedProfile.ExpiresAtUtc,
-            LiveViewHandoffRequested = _liveViewHandoffRequested,
+            LiveViewHandoffRequested = finiteLiveViewHandoffRequested,
             CaptureRequestDispatchAttempted = false,
             StartedAtUtc = _timeProvider.GetUtcNow(),
         };
@@ -638,7 +902,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 alias,
                 expectedProfile,
                 HardwareCaptureSafetyConfirmations.AllConfirmed,
-                _liveViewHandoffRequested);
+                finiteLiveViewHandoffRequested);
             await _stateStore.MarkCaptureRequestDispatchAttemptedAsync(transactionId).ConfigureAwait(true);
             pending = pending with { CaptureRequestDispatchAttempted = true };
             _pendingTransaction = pending;
@@ -646,9 +910,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             ActivityText = $"{alias} を一回撮影中。自動再試行はしません…";
             CaptureSummary = "撮影・PC永続化・exact cleanup処理中";
             PreviewPath = string.Empty;
+            PreviewImage = null;
 
             var reply = await _operations
-                .CaptureAsync(transactionId, alias, expectedProfile, _liveViewHandoffRequested)
+                .CaptureAsync(transactionId, alias, expectedProfile, finiteLiveViewHandoffRequested)
                 .ConfigureAwait(true);
             if (reply.Payload.TerminalState is "Reserved" or "InProgress")
             {
@@ -658,6 +923,15 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             }
 
             await ApplyTerminalResultAsync(reply).ConfigureAwait(true);
+            if (restartContinuousLiveView && reply.Success &&
+                reply.Payload.TerminalState == "Complete")
+            {
+                await StartContinuousLiveViewCoreAsync().ConfigureAwait(true);
+                if (!IsContinuousLiveViewActive)
+                {
+                    ActivityText = "撮影は完了しましたが、継続Live Viewの再開に失敗しました。自動再試行しません。";
+                }
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
@@ -879,6 +1153,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                         .VerifyPreviewAsync(reply.Payload.PostCapturePreview)
                         .ConfigureAwait(true);
                     PreviewPath = postCapturePreview.Path;
+                    PreviewImage = LoadFrozenImage(postCapturePreview.Path);
                     LiveViewSummary = "撮影後の有限1フレームprobe成功（取得後に停止・SDK close済み）";
                     handoffArtifactVerified =
                         reply.Payload.LiveViewStoppedBeforeCapture &&
@@ -887,6 +1162,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
                 {
                     PreviewPath = string.Empty;
+                    PreviewImage = null;
                     LiveViewSummary = "撮影後の有限Live View preview再検証に失敗";
                     validationIssues.Add($"post_capture_preview_invalid: {SafeMessage(exception)}");
                 }
@@ -968,7 +1244,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ReadinessDetail = "安全確認後、状態を再確認してください。";
         ObservedSettingsText = "未確認";
         PreviewPath = string.Empty;
-        LiveViewSummary = "未実行（有限1フレームのみ）";
+        PreviewImage = null;
+        LiveViewSummary = "未実行";
         ActivityText = "新しいSingleCamera transactionの準備を開始しました。";
         TechnicalDetail = "automatic retry count: 0";
         IsBusy = false;
@@ -1072,6 +1349,25 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _profileExpiryTimer = null;
     }
 
+    public async Task ShutdownAsync()
+    {
+        if (IsContinuousLiveViewActive)
+        {
+            _ = await StopContinuousLiveViewCoreAsync().ConfigureAwait(true);
+        }
+        _continuousLiveViewLoopCancellation?.Cancel();
+        if (_continuousLiveViewLoop is not null)
+        {
+            try
+            {
+                await _continuousLiveViewLoop.ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -1080,6 +1376,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
 
         _disposed = true;
+        _continuousLiveViewLoopCancellation?.Cancel();
+        _continuousLiveViewLoopCancellation?.Dispose();
         CancelProfileExpiryInvalidation();
         GC.SuppressFinalize(this);
     }
@@ -1096,6 +1394,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(AgentAvailabilityText));
         OnPropertyChanged(nameof(CanCheckReadiness));
         OnPropertyChanged(nameof(CanProbeLiveView));
+        OnPropertyChanged(nameof(CanStartContinuousLiveView));
+        OnPropertyChanged(nameof(CanStopContinuousLiveView));
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CanRecoverTransaction));
         OnPropertyChanged(nameof(CanExport));
@@ -1105,6 +1405,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(BlockerText));
         ((AsyncRelayCommand)CheckReadinessCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ProbeLiveViewCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)StartContinuousLiveViewCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)StopContinuousLiveViewCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)CaptureCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)RecoverTransactionCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportCommand).NotifyCanExecuteChanged();
@@ -1118,6 +1420,44 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             ' ',
             exception.Message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         return message.Length <= 400 ? message : message[..400];
+    }
+
+    private static ImageSource LoadFrozenImage(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 64 * 1024, FileOptions.SequentialScan);
+        return LoadFrozenImage(stream);
+    }
+
+    private static ImageSource? TryLoadFrozenImage(string path)
+    {
+        try
+        {
+            return LoadFrozenImage(path);
+        }
+        catch (Exception exception) when (
+            exception is IOException or NotSupportedException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static ImageSource LoadFrozenImage(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        return LoadFrozenImage(stream);
+    }
+
+    private static ImageSource LoadFrozenImage(Stream stream)
+    {
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.StreamSource = stream;
+        image.EndInit();
+        image.Freeze();
+        return image;
     }
 
     private static bool IsConfirmedUndispatched(Exception exception) =>

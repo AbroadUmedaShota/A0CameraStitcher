@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using A0CameraStitcher.M3.Foundation;
@@ -27,6 +28,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("single-camera restart preserves the snapshotted plan", SingleCameraCrashRestartAsync),
     ("legacy v1 journal migrates as an explicit dual-camera plan", LegacyJournalMigratesAsDualAsync),
     ("single-camera readiness ignores only the inactive body", SingleCameraReadinessAsync),
+    ("continuous hardware Live View v2 validates sessions and JPEG frames", ContinuousHardwareLiveViewV2Async),
 };
 
 var failures = new List<string>();
@@ -46,6 +48,69 @@ foreach (var test in tests)
 
 Console.WriteLine($"Foundation tests: {tests.Length - failures.Count}/{tests.Length} passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static async Task ContinuousHardwareLiveViewV2Async()
+{
+    var sessionId = new string('a', 32);
+    var frame = new byte[] { 0xFF, 0xD8, 0xFF, 0xD9 };
+    var frameHash = Convert.ToHexString(SHA256.HashData(frame)).ToLowerInvariant();
+    var transport = new RecordingHardwareTransport(requestJson =>
+    {
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        var requestId = root.GetProperty("requestId").GetString()!;
+        var operation = root.GetProperty("operation").GetString()!;
+        var state = operation switch
+        {
+            "start-live-view" => "Started",
+            "read-live-view-frame" => "Frame",
+            "live-view-heartbeat" => "Heartbeat",
+            "stop-live-view" => "Stopped",
+            "close-agent-session" => "Closed",
+            _ => throw new InvalidOperationException("unexpected v2 operation"),
+        };
+        var running = state is "Started" or "Frame" or "Heartbeat";
+        return JsonSerializer.Serialize(new
+        {
+            schemaVersion = "a0.camera-agent.hardware.v2",
+            simulation = false,
+            marker = "Hardware",
+            requestId,
+            success = true,
+            resultCode = state,
+            payload = new
+            {
+                cameraMode = "SingleCamera",
+                cameraAlias = "CAM-A",
+                sessionId,
+                state,
+                frameNumber = state == "Frame" ? 1UL : 0UL,
+                frameSize = state == "Frame" ? frame.Length : 0,
+                frameSha256 = state == "Frame" ? frameHash : string.Empty,
+                frameJpegBase64 = state == "Frame" ? Convert.ToBase64String(frame) : string.Empty,
+                previewIsOriginal = false,
+                previewIsStitchInput = false,
+                sdkSessionOpen = running,
+                liveViewRunning = running,
+                heartbeatTimeoutSeconds = 20,
+                maximumSessionSeconds = 600,
+                realIdentifiersIncluded = false,
+                errorCategory = string.Empty,
+                errorDetail = string.Empty,
+            },
+        });
+    });
+    var client = new HardwareContinuousLiveViewClient(transport);
+    Check.Equal("Started", (await client.StartAsync(sessionId)).Payload.State);
+    var frameReply = await client.ReadFrameAsync(sessionId);
+    Check.SequenceEqual(frame, frameReply.Payload.DecodeVerifiedFrame());
+    Check.False(frameReply.Payload.PreviewIsOriginal, "Live View frame must never be an original.");
+    Check.Equal("Stopped", (await client.StopAsync(sessionId)).Payload.State);
+    Check.Equal("Closed", (await client.CloseAsync(sessionId)).Payload.State);
+    Check.Equal(4, transport.RequestCount);
+
+    await Check.ThrowsAsync<ArgumentException>(() => client.StartAsync("not-a-session"));
+}
 
 static Task OperatorReadinessClassificationAsync()
 {
@@ -1812,6 +1877,21 @@ static async Task WithTemporaryRootAsync(Func<string, Task> test)
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+}
+
+sealed class RecordingHardwareTransport(
+    Func<string, string> responseFactory) : IHardwareCameraAgentTransport
+{
+    public int RequestCount { get; private set; }
+
+    public Task<string> SendAsync(
+        string requestJson,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ++RequestCount;
+        return Task.FromResult(responseFactory(requestJson));
     }
 }
 

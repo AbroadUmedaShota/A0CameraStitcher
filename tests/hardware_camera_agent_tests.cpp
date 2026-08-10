@@ -217,10 +217,78 @@ public:
         return result;
     }
 
+    ContinuousLiveViewResult StartContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override {
+        ++continuous_start_calls;
+        continuous_session = request.session_id;
+        ContinuousLiveViewResult result;
+        result.succeeded = true;
+        result.session_id = request.session_id;
+        result.state = "Started";
+        result.sdk_session_open = true;
+        result.live_view_running = true;
+        return result;
+    }
+
+    ContinuousLiveViewResult ReadContinuousLiveViewFrame(
+        const HardwareCameraAgentRequest& request) override {
+        ++continuous_frame_calls;
+        ContinuousLiveViewResult result;
+        result.succeeded = true;
+        result.session_id = request.session_id;
+        result.state = "Frame";
+        result.frame_number = 1;
+        result.frame_size = 4;
+        result.frame_sha256 = std::string(64, 'd');
+        result.frame_jpeg_base64 = "/9j/2Q==";
+        result.sdk_session_open = true;
+        result.live_view_running = true;
+        return result;
+    }
+
+    ContinuousLiveViewResult HeartbeatContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override {
+        ContinuousLiveViewResult result;
+        result.succeeded = true;
+        result.session_id = request.session_id;
+        result.state = "Heartbeat";
+        result.frame_number = 1;
+        result.sdk_session_open = true;
+        result.live_view_running = true;
+        return result;
+    }
+
+    ContinuousLiveViewResult StopContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override {
+        ++continuous_stop_calls;
+        ContinuousLiveViewResult result;
+        result.succeeded = true;
+        result.session_id = request.session_id;
+        result.state = "Stopped";
+        result.frame_number = 1;
+        return result;
+    }
+
+    ContinuousLiveViewResult CloseAgentSession(
+        const HardwareCameraAgentRequest& request) override {
+        ++continuous_close_calls;
+        ContinuousLiveViewResult result;
+        result.succeeded = true;
+        result.session_id = request.session_id;
+        result.state = "Closed";
+        result.frame_number = 1;
+        return result;
+    }
+
     int readiness_calls{};
     int capture_calls{};
     int live_view_calls{};
     int transaction_calls{};
+    int continuous_start_calls{};
+    int continuous_frame_calls{};
+    int continuous_stop_calls{};
+    int continuous_close_calls{};
+    std::string continuous_session;
     bool return_malformed_capture{};
     bool return_mismatched_capture_profile{};
     bool return_mismatched_capture_alias{};
@@ -1515,6 +1583,15 @@ void TestFixedLocalPathPolicy() {
     fs::remove_all(root, cleanup_error);
 }
 
+std::string LiveViewV2Envelope(
+    std::string_view operation,
+    std::string_view payload) {
+    return "{\"schemaVersion\":\"a0.camera-agent.hardware.v2\","
+           "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"req-v2\","
+           "\"operation\":\"" + std::string(operation) + "\",\"payload\":" +
+        std::string(payload) + "}";
+}
+
 void TestSingleIdentityV3Parser() {
     const std::string digest(64, 'b');
     const std::string json =
@@ -1545,6 +1622,52 @@ void TestSingleIdentityV3Parser() {
     }
 }
 
+void TestContinuousLiveViewV2Protocol() {
+    FakeBackend backend;
+    HardwareCameraAgentDispatcher dispatcher(backend);
+    const std::string session(32, 'a');
+    const auto start = dispatcher.Handle(LiveViewV2Envelope(
+        "start-live-view",
+        "{\"cameraAlias\":\"CAM-A\",\"sessionId\":\"" + session +
+            "\",\"exclusiveCameraControlConfirmed\":true}"));
+    Check(start.find("\"schemaVersion\":\"a0.camera-agent.hardware.v2\"") != std::string::npos &&
+          start.find("\"resultCode\":\"Started\"") != std::string::npos &&
+          backend.continuous_start_calls == 1,
+        "hardware v2 must start one owned continuous Live View session");
+
+    const auto frame = dispatcher.Handle(LiveViewV2Envelope(
+        "read-live-view-frame",
+        "{\"sessionId\":\"" + session + "\"}"));
+    Check(frame.find("\"state\":\"Frame\"") != std::string::npos &&
+          frame.find("\"frameJpegBase64\":\"/9j/2Q==\"") != std::string::npos &&
+          frame.find("\"previewIsOriginal\":false") != std::string::npos &&
+          backend.continuous_frame_calls == 1,
+        "hardware v2 frame must remain a non-original bounded payload");
+
+    const auto stop = dispatcher.Handle(LiveViewV2Envelope(
+        "stop-live-view",
+        "{\"sessionId\":\"" + session + "\"}"));
+    Check(stop.find("\"resultCode\":\"Stopped\"") != std::string::npos &&
+          backend.continuous_stop_calls == 1 && !dispatcher.ShouldStop(),
+        "stopping Live View must keep the agent available for same-process capture");
+
+    const auto close = dispatcher.Handle(LiveViewV2Envelope(
+        "close-agent-session",
+        "{\"sessionId\":\"" + session + "\"}"));
+    Check(close.find("\"resultCode\":\"Closed\"") != std::string::npos &&
+          backend.continuous_close_calls == 1 && dispatcher.ShouldStop(),
+        "close-agent-session must request bounded process exit");
+
+    FakeBackend rejected_backend;
+    HardwareCameraAgentDispatcher rejected_dispatcher(rejected_backend);
+    const auto rejected = rejected_dispatcher.Handle(LiveViewV2Envelope(
+        "capture-single", "{}"));
+    Check(rejected.find("\"schemaVersion\":\"a0.camera-agent.hardware.v2\"") != std::string::npos &&
+          rejected.find("UnsupportedOperation") != std::string::npos &&
+          rejected_backend.capture_calls == 0,
+        "hardware v2 must not reinterpret v1 capture operations");
+}
+
 } // namespace
 
 int main() {
@@ -1555,6 +1678,7 @@ int main() {
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
     TestSingleIdentityV3Parser();
+    TestContinuousLiveViewV2Protocol();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;

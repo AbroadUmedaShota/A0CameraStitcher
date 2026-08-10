@@ -10,6 +10,7 @@ public partial class HardwareSingleCameraWindow : Window
 {
     private readonly CancellationTokenSource _lifetime = new();
     private readonly HardwareSingleAppSessionLease _sessionLease;
+    private readonly PersistentHardwareCameraAgentOperations _operations;
     private readonly HardwareSingleCameraViewModel _viewModel;
 
     public HardwareSingleCameraWindow(string cameraAgentExecutablePath)
@@ -22,11 +23,12 @@ public partial class HardwareSingleCameraWindow : Window
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
             var preferencesStore = new HardwareSinglePreferencesStore(storagePaths.PreferencesPath);
             var profileStore = new HardwareSingleCaptureProfileStore(storagePaths.CaptureProfilePath);
+            _operations = new PersistentHardwareCameraAgentOperations(
+                cameraAgentExecutablePath,
+                storagePaths.CaptureProfilePath,
+                storagePaths.SingleIdentityV3Path);
             _viewModel = new HardwareSingleCameraViewModel(
-                new ServeOnceHardwareCameraAgentOperations(
-                    cameraAgentExecutablePath,
-                    storagePaths.CaptureProfilePath,
-                    storagePaths.SingleIdentityV3Path),
+                _operations,
                 new HardwareSingleAppStateStore(storagePaths.StateDirectory),
                 new HardwareOriginalExporter(storagePaths.DefaultExportDirectory),
                 preferencesStore,
@@ -70,14 +72,35 @@ public partial class HardwareSingleCameraWindow : Window
         }
     }
 
-    private void OnClosed(object? sender, EventArgs eventArgs)
+    private async void OnClosed(object? sender, EventArgs eventArgs)
     {
-        // Cancelling the client may disconnect the pipe, but the serve-once
-        // Camera Agent is deliberately never killed and owns any dispatched
-        // capture through its durable terminal journal.
         _lifetime.Cancel();
-        _lifetime.Dispose();
-        _viewModel.Dispose();
-        _sessionLease.Dispose();
+        try
+        {
+            try
+            {
+                await _viewModel.ShutdownAsync();
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                // Closing remains fail-closed. The native heartbeat/max-lifetime
+                // guards own cleanup if an orderly stop cannot be confirmed.
+            }
+            try
+            {
+                await _operations.DisposeAsync();
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                // Never force-kill an agent whose capture dispatch state may be
+                // ambiguous. Durable recovery resolves it on the next launch.
+            }
+        }
+        finally
+        {
+            _lifetime.Dispose();
+            _viewModel.Dispose();
+            _sessionLease.Dispose();
+        }
     }
 }

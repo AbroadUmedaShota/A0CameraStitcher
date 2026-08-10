@@ -223,8 +223,13 @@ int RunHardwareCameraAgentNamedPipeServer(
     const std::wstring full_name =
         L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
     CurrentLogonPipeSecurity security;
+    const ULONGLONG server_deadline = GetTickCount64() + 10ULL * 60ULL * 1000ULL;
 
     for (;;) {
+        dispatcher.OnIdle();
+        if (dispatcher.ShouldStop() || (!serve_once && GetTickCount64() >= server_deadline)) {
+            return 0;
+        }
         const HANDLE pipe = CreateNamedPipeW(
             full_name.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
@@ -249,7 +254,9 @@ int RunHardwareCameraAgentNamedPipeServer(
         const DWORD connect_error = connected ? ERROR_SUCCESS : GetLastError();
         bool connection_ready = connected != FALSE || connect_error == ERROR_PIPE_CONNECTED;
         if (!connection_ready && connect_error == ERROR_IO_PENDING) {
-            const DWORD wait = WaitForSingleObject(connect_overlapped.hEvent, kAcceptTimeoutMs);
+            const DWORD wait = WaitForSingleObject(
+                connect_overlapped.hEvent,
+                serve_once ? kAcceptTimeoutMs : 5000U);
             if (wait == WAIT_OBJECT_0) {
                 DWORD ignored = 0;
                 connection_ready =
@@ -270,6 +277,7 @@ int RunHardwareCameraAgentNamedPipeServer(
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         if (serve_once) return request_processed ? 0 : 2;
+        if (dispatcher.ShouldStop()) return request_processed ? 0 : 2;
     }
 }
 

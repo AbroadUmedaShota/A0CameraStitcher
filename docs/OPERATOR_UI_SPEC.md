@@ -86,8 +86,8 @@
 
 ## 自動試験と受入境界
 
-- 2026-08-10 fresh software検証: .NET 10 Release build 0 warning/0 error、Foundation 19/19、Operator Shell 16/16、`Test-M3Simulated.ps1` Pass。CAM-A-only、起動同意、no-auto-fallback、30日read-only profile承認、fixed-local保存先、active中の操作ロック、Singleのstitch `NotApplicable`と明示保存を確認した。
-- Hardware Single headless contractは、起動時全操作gate、同一transactionの結果照会、profile/alias/expiry/handoff相関、pre-dispatchと曖昧dispatchの分離、no retry、有限Live View previewの非原本性、CAM-A identity-v3、30日profile、fixed-local preference、same-file-identity byte-identical exportを含み、Operator Shell 16/16で確認した。C++側もSDK-less／licensed-SDK-enabled Release CTest各7/7に合格したが、camera commandは送っていない。有限probeは製品の継続Live View受入ではない。
+- 2026-08-10 fresh software検証: .NET 10 Release build 0 warning/0 error、Foundation 20/20、Operator Shell 17/17、`Test-M3Simulated.ps1` Pass。CAM-A-only、起動同意、no-auto-fallback、30日read-only profile承認、fixed-local保存先、active中の操作ロック、Singleのstitch `NotApplicable`と明示保存を確認した。
+- Hardware Single headless contractは、起動時全操作gate、同一transactionの結果照会、profile/alias/expiry/handoff相関、pre-dispatchと曖昧dispatchの分離、no retry、CAM-A identity-v3、30日profile、fixed-local preference、same-file-identity byte-identical exportに加え、継続Live View v2のmemory-only frame、stop-before-capture、停止不明時capture 0、verified success後だけrestartを含み、Operator Shell 17/17で確認した。C++側もSDK-less／licensed-SDK-enabled Release CTest各7/7を要求するが、camera commandは送っていない。有限v1 probeはv2受入へ読み替えない。
 - 一括検証は外部NuGetなし、SIMULATED常設表示、警告レベル、accessibility live region、Foundation facade以外のcamera API不使用を静的・headlessに確認する。2026-08-08のWindows UI Automationは旧Dual contractの履歴証拠であり、requirements 2.6.0のSingle実画面受入へ読み替えない。screen reader、キーボード、focus、実WPF Hardware Single操作、実Camera Agent/D810の各失敗点は未実施である。
 
 ## 要件追跡

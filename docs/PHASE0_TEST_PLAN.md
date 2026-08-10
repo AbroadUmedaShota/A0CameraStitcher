@@ -69,7 +69,7 @@ active transactionのUSB切断は`hybrid-fault-single`で実行する。empty-be
 
 - Phase 0Aでは物理D810を一台だけ接続し、二台目は接続しない。これによりSDKとWPDが同じ実機を指す条件を固定する。
 - 選択alias一台だけをSDK Live Viewで開始し、プレビュー画像を10 frame取得する。プレビューは`artifacts`の診断用途に限り、原画像・合成入力・transaction JPEG候補にしない。
-- 製品UI受入では、開始後に明示停止までframeを継続取得するversioned long-lived session、heartbeat、bounded lifetime、backpressureを検証する。`hardware.v1`の1..30 frame有限probeを継続Live View合格へ読み替えない。
+- 製品UI受入では、開始後に明示停止までframeを継続取得するversioned long-lived session、heartbeat、bounded lifetime、backpressureを検証する。`hardware.v2` software contractはstart/frame/heartbeat/stop/close、20秒idle、600秒max、単列request、memory-only verified JPEG、stop-before-capture、成功後だけrestartを実装済み。`hardware.v1`の1..30 frame有限probeを継続Live View合格へ読み替えず、実D810の10回handoffは別途要求する。
 - `live-view --duration-seconds 300`で5分間継続し、有効JPEG frame数、停止、SDK closeを匿名summaryへ記録する。
 - Live View停止、SDK session close、WPD baseline/full close、SDK one card capture/full close、WPD recovery（capture commandなし）、PC JPEG保存、SDK Live View再開を一連のhandoffとして実行する。
 - 自動handoffを1回以上実行し、SDK/WPDが重複せず各closeが次のopen前に完了したtraceを確認する。

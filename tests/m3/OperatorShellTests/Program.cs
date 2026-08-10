@@ -5,6 +5,8 @@ using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 var failures = new List<string>();
 try
@@ -174,6 +176,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareContinuousLiveViewCaptureHandoffAsync();
+    Console.WriteLine("PASS hardware continuous Live View stops before capture and restarts only after success");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware continuous Live View stops before capture and restarts only after success");
+    Console.Error.WriteLine($"FAIL hardware continuous Live View stops before capture and restarts only after success: {exception}");
+}
+
+try
+{
     await HardwareSinglePreferencesAndProfileApprovalAsync();
     Console.WriteLine("PASS local export preference and 30-day CAM-A profile approval are durable and fail closed");
 }
@@ -183,7 +196,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL local export preference and 30-day CAM-A profile approval are durable and fail closed: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {16 - failures.Count}/16 passed.");
+Console.WriteLine($"Operator shell tests: {17 - failures.Count}/17 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task HardwareSinglePreferencesAndProfileApprovalAsync()
@@ -409,6 +422,83 @@ static async Task HardwarePendingTransactionRecoveryAsync()
         Check.True(await store.LoadPendingAsync() is not null, "Recovered terminal result must remain discoverable until operator preparation.");
         await viewModel.PrepareNewCaptureAsync();
         Check.True(await store.LoadPendingAsync() is null, "Explicit preparation must clear the recovered transaction marker.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var sourcePath = Path.Combine(root, "agent", "run-live-1", "CAM-A", "original.jpg");
+        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        var frameBytes = File.ReadAllBytes(sourcePath);
+        var operations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            CaptureResultFactory = (transactionId, alias) =>
+                CompleteCapture(transactionId, alias, original),
+        };
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")));
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        Check.True(viewModel.CanStartContinuousLiveView, "Ready CAM-A must allow continuous Live View v2.");
+        await viewModel.StartContinuousLiveViewAsync();
+        await operations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.True(viewModel.IsContinuousLiveViewActive, "The UI must expose the owned active Live View session.");
+        Check.True(viewModel.PreviewImage is not null, "A verified in-memory JPEG frame must be displayed.");
+
+        await viewModel.CaptureAsync();
+        Check.Equal(1, operations.CaptureCallCount);
+        Check.False(operations.LastCaptureLiveViewHandoffRequested,
+            "Continuous v2 must stop explicitly and must not be relabelled as the finite v1 handoff.");
+        Check.Equal(2, operations.StartCount);
+        Check.True(viewModel.IsContinuousLiveViewActive,
+            "A successful terminal capture must restart the continuous Live View session.");
+        Check.True(
+            operations.CallOrder.IndexOf("stop") < operations.CallOrder.IndexOf("capture"),
+            "SDK Live View stop and close must precede capture dispatch.");
+
+        await viewModel.StopContinuousLiveViewAsync();
+        Check.False(viewModel.IsContinuousLiveViewActive, "Explicit stop must close the continuous session.");
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+
+        var blockedOperations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            CaptureResultFactory = (transactionId, alias) =>
+                CompleteCapture(transactionId, alias, original),
+            FailNextStop = true,
+        };
+        var blockedViewModel = new HardwareSingleCameraViewModel(
+            blockedOperations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "blocked-state")),
+            new HardwareOriginalExporter(Path.Combine(root, "blocked-exports")));
+        await blockedViewModel.InitializeAsync();
+        blockedViewModel.ExclusiveCameraControlConfirmed = true;
+        await blockedViewModel.CheckReadinessAsync();
+        blockedViewModel.DedicatedSpoolScopeConfirmed = true;
+        blockedViewModel.ExactObjectDeleteConfirmed = true;
+        await blockedViewModel.StartContinuousLiveViewAsync();
+        await blockedOperations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await blockedViewModel.CaptureAsync();
+        Check.Equal(0, blockedOperations.CaptureCallCount);
+        Check.False(blockedViewModel.IsContinuousLiveViewActive,
+            "A failed stop whose typed result confirms SDK closed must invalidate the stale session.");
+        Check.False(blockedViewModel.CanCapture,
+            "A failed stop must invalidate readiness and keep capture disabled.");
+        await blockedViewModel.ShutdownAsync();
+        blockedViewModel.Dispose();
     }
     finally
     {
@@ -1090,7 +1180,14 @@ static string CreateHardwareTestRoot()
 
 static HardwareRetainedOriginalRecord WriteJpegRecord(string path, string alias)
 {
-    var bytes = new byte[] { 0xFF, 0xD8, 0x10, 0x20, 0x30, 0x40, 0xFF, 0xD9 };
+    var pixels = new byte[] { 0x20, 0x80, 0xE0 };
+    var bitmap = BitmapSource.Create(
+        1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
+    var encoder = new JpegBitmapEncoder();
+    encoder.Frames.Add(BitmapFrame.Create(bitmap));
+    using var encoded = new MemoryStream();
+    encoder.Save(encoded);
+    var bytes = encoded.ToArray();
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     File.WriteAllBytes(path, bytes);
     return new HardwareRetainedOriginalRecord
@@ -1405,7 +1502,7 @@ sealed class BlockingTransactionService : ISimulatedTransactionService
     public void Release() => _release.TrySetResult();
 }
 
-sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
+class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
 {
     public string AgentExecutablePath => "C:\\fake\\A0CameraStitcher.CameraAgent.exe";
 
@@ -1429,6 +1526,8 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
 
     public bool LastTransactionExpectedHandoff { get; private set; }
 
+    public List<string> CallOrder { get; } = [];
+
     public int TotalCallCount => ReadinessCallCount + LiveViewCallCount + CaptureCallCount + TransactionResultCallCount;
 
     public HardwarePreviewJpegRecord? Preview { get; init; }
@@ -1446,6 +1545,7 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
         CancellationToken cancellationToken = default)
     {
         ReadinessCallCount++;
+        CallOrder.Add("readiness");
         return Task.FromResult(new HardwareCameraAgentReply<HardwareSingleReadinessResult>(
             "readiness-request",
             true,
@@ -1458,6 +1558,7 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
         CancellationToken cancellationToken = default)
     {
         LiveViewCallCount++;
+        CallOrder.Add("finite-live-view");
         if (Preview is null)
         {
             throw new InvalidOperationException("A fake preview was not configured.");
@@ -1496,6 +1597,7 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
         CancellationToken cancellationToken = default)
     {
         CaptureCallCount++;
+        CallOrder.Add("capture");
         LastCaptureExpectedProfile = expectedProfile;
         LastCaptureLiveViewHandoffRequested = liveViewHandoffRequested;
         if (CaptureException is not null)
@@ -1520,6 +1622,7 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
         CancellationToken cancellationToken = default)
     {
         TransactionResultCallCount++;
+        CallOrder.Add("get-result");
         LastTransactionExpectedCameraAlias = expectedCameraAlias;
         LastTransactionExpectedProfile = expectedProfile;
         LastTransactionExpectedHandoff = expectedLiveViewHandoffRequested;
@@ -1541,6 +1644,100 @@ sealed class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperation
             success,
             resultCode,
             payload));
+    }
+}
+
+sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
+    FakeHardwareSingleCameraOperations,
+    IHardwareContinuousLiveViewOperations
+{
+    private ulong _frameNumber;
+
+    public int StartCount { get; private set; }
+
+    public int StopCount { get; private set; }
+
+    public bool FailNextStop { get; set; }
+
+    public TaskCompletionSource FirstFrame { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public string CreateSessionId() => Guid.NewGuid().ToString("N");
+
+    public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> StartLiveViewAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        StartCount++;
+        CallOrder.Add("start");
+        return Task.FromResult(Reply(sessionId, true, "Started", 0, []));
+    }
+
+    public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> ReadLiveViewFrameAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _frameNumber++;
+        CallOrder.Add("frame");
+        FirstFrame.TrySetResult();
+        return Task.FromResult(Reply(sessionId, true, "Frame", _frameNumber, frameBytes));
+    }
+
+    public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> HeartbeatLiveViewAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(Reply(sessionId, true, "Heartbeat", _frameNumber, []));
+
+    public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> StopLiveViewAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        StopCount++;
+        CallOrder.Add("stop");
+        if (FailNextStop)
+        {
+            FailNextStop = false;
+            return Task.FromResult(Reply(
+                sessionId, false, "continuous_live_view_stop_failed", _frameNumber, []));
+        }
+        return Task.FromResult(Reply(sessionId, true, "Stopped", _frameNumber, []));
+    }
+
+    private static HardwareCameraAgentReply<HardwareContinuousLiveViewResult> Reply(
+        string sessionId,
+        bool success,
+        string state,
+        ulong frameNumber,
+        byte[] bytes)
+    {
+        var frame = state == "Frame";
+        var running = state is "Started" or "Frame" or "Heartbeat";
+        var errorCategory = success ? string.Empty : state;
+        var payload = new HardwareContinuousLiveViewResult
+        {
+            CameraMode = "SingleCamera",
+            CameraAlias = "CAM-A",
+            SessionId = sessionId,
+            State = success ? state : string.Empty,
+            FrameNumber = frameNumber,
+            FrameSize = frame ? bytes.Length : 0,
+            FrameSha256 = frame
+                ? Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
+                : string.Empty,
+            FrameJpegBase64 = frame ? Convert.ToBase64String(bytes) : string.Empty,
+            PreviewIsOriginal = false,
+            PreviewIsStitchInput = false,
+            SdkSessionOpen = success && running,
+            LiveViewRunning = success && running,
+            HeartbeatTimeoutSeconds = 20,
+            MaximumSessionSeconds = 600,
+            RealIdentifiersIncluded = false,
+            ErrorCategory = errorCategory,
+            ErrorDetail = success ? string.Empty : "deterministic stop failure",
+        };
+        return new HardwareCameraAgentReply<HardwareContinuousLiveViewResult>(
+            "continuous-request", success, state, payload);
     }
 }
 

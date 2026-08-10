@@ -16,6 +16,8 @@ namespace a0::phase0 {
 
 inline constexpr std::string_view kHardwareCameraAgentSchemaVersion =
     "a0.camera-agent.hardware.v1";
+inline constexpr std::string_view kHardwareCameraAgentLiveViewSchemaVersion =
+    "a0.camera-agent.hardware.v2";
 inline constexpr std::string_view kHardwareCameraAgentMarker = "Hardware";
 inline constexpr std::string_view kDefaultHardwareCameraAgentPipeName =
     "A0CameraStitcher.CameraAgent.Hardware.v1";
@@ -25,6 +27,11 @@ enum class HardwareCameraAgentOperation {
     capture_single,
     live_view_probe,
     get_transaction_result,
+    start_live_view,
+    read_live_view_frame,
+    live_view_heartbeat,
+    stop_live_view,
+    close_agent_session,
 };
 
 class HardwareCameraAgentProtocolError final : public std::runtime_error {
@@ -37,6 +44,7 @@ private:
 };
 
 struct HardwareCameraAgentRequest {
+    std::string schema_version{std::string(kHardwareCameraAgentSchemaVersion)};
     std::string request_id;
     HardwareCameraAgentOperation operation{HardwareCameraAgentOperation::get_single_readiness};
     std::string transaction_id;
@@ -51,6 +59,7 @@ struct HardwareCameraAgentRequest {
     bool live_view_handoff_requested{};
     int live_view_frames{1};
     int live_view_interval_ms{100};
+    std::string session_id;
 };
 
 struct SingleCameraBindingResolution {
@@ -194,13 +203,35 @@ struct SingleCameraLiveViewProbeResult {
     std::string error_detail;
 };
 
+struct ContinuousLiveViewResult {
+    bool succeeded{};
+    std::string camera_alias{"CAM-A"};
+    std::string session_id;
+    std::string state{"Failed"};
+    std::uint64_t frame_number{};
+    std::size_t frame_size{};
+    std::string frame_sha256;
+    std::string frame_jpeg_base64;
+    bool preview_is_original{};
+    bool preview_is_stitch_input{};
+    bool sdk_session_open{};
+    bool live_view_running{};
+    int heartbeat_timeout_seconds{20};
+    int maximum_session_seconds{600};
+    bool real_identifiers_included{};
+    std::string error_category;
+    std::string error_detail;
+};
+
 struct HardwareCameraAgentResponse {
+    std::string schema_version{std::string(kHardwareCameraAgentSchemaVersion)};
     std::string request_id;
     bool success{};
     std::string result_code;
     std::optional<SingleCameraReadinessResult> readiness;
     std::optional<SingleCameraCaptureResult> capture;
     std::optional<SingleCameraLiveViewProbeResult> live_view;
+    std::optional<ContinuousLiveViewResult> continuous_live_view;
     std::string rejection_code;
     std::string error_detail;
 };
@@ -247,6 +278,17 @@ public:
         const HardwareCameraAgentRequest& request) = 0;
     [[nodiscard]] virtual SingleCameraCaptureResult GetTransactionResult(
         std::string_view transaction_id) = 0;
+    [[nodiscard]] virtual ContinuousLiveViewResult StartContinuousLiveView(
+        const HardwareCameraAgentRequest& request);
+    [[nodiscard]] virtual ContinuousLiveViewResult ReadContinuousLiveViewFrame(
+        const HardwareCameraAgentRequest& request);
+    [[nodiscard]] virtual ContinuousLiveViewResult HeartbeatContinuousLiveView(
+        const HardwareCameraAgentRequest& request);
+    [[nodiscard]] virtual ContinuousLiveViewResult StopContinuousLiveView(
+        const HardwareCameraAgentRequest& request);
+    [[nodiscard]] virtual ContinuousLiveViewResult CloseAgentSession(
+        const HardwareCameraAgentRequest& request);
+    virtual void OnAgentIdle() noexcept;
 };
 
 struct ProductionHardwareCameraAgentConfig {
@@ -286,6 +328,17 @@ public:
         const HardwareCameraAgentRequest& request) override;
     [[nodiscard]] SingleCameraCaptureResult GetTransactionResult(
         std::string_view transaction_id) override;
+    [[nodiscard]] ContinuousLiveViewResult StartContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override;
+    [[nodiscard]] ContinuousLiveViewResult ReadContinuousLiveViewFrame(
+        const HardwareCameraAgentRequest& request) override;
+    [[nodiscard]] ContinuousLiveViewResult HeartbeatContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override;
+    [[nodiscard]] ContinuousLiveViewResult StopContinuousLiveView(
+        const HardwareCameraAgentRequest& request) override;
+    [[nodiscard]] ContinuousLiveViewResult CloseAgentSession(
+        const HardwareCameraAgentRequest& request) override;
+    void OnAgentIdle() noexcept override;
 
 private:
     class Impl;
@@ -296,9 +349,12 @@ class HardwareCameraAgentDispatcher final {
 public:
     explicit HardwareCameraAgentDispatcher(IHardwareCameraAgentBackend& backend);
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
+    [[nodiscard]] bool ShouldStop() const noexcept;
+    void OnIdle() noexcept;
 
 private:
     IHardwareCameraAgentBackend& backend_;
+    bool should_stop_{};
 };
 
 // Serves one length-prefixed UTF-8 JSON request per local named-pipe
