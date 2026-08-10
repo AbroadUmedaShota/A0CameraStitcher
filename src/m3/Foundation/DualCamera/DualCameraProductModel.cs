@@ -238,6 +238,12 @@ public interface ITestSyntheticCamera
 
 public interface IOfflineStitcherAdapter
 {
+    Task ValidateCanonicalJpegAsync(
+        string jpegPath,
+        int expectedWidth,
+        int expectedHeight,
+        CancellationToken cancellationToken);
+
     Task<OfflineStitchArtifact> StitchAsync(
         IReadOnlyList<CanonicalJpegOriginal> originals,
         string outputJobDirectory,

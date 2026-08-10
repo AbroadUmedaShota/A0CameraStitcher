@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -173,6 +174,102 @@ void GenerateSyntheticJpeg(
     }
 }
 
+void ValidateCanonicalJpeg(
+    const std::filesystem::path& input,
+    const std::uint32_t expected_width,
+    const std::uint32_t expected_height) {
+    if (!std::filesystem::is_regular_file(input) || expected_width == 0 || expected_height == 0) {
+        throw std::invalid_argument("canonical JPEG validation input is invalid");
+    }
+    std::ifstream jpeg_stream(input, std::ios::binary);
+    const auto encoded_size = std::filesystem::file_size(input);
+    std::vector<std::uint8_t> encoded(static_cast<std::size_t>(encoded_size));
+    jpeg_stream.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
+    if (!jpeg_stream || jpeg_stream.gcount() != static_cast<std::streamsize>(encoded.size()) ||
+        encoded.size() < 8U || encoded[0] != 0xffU || encoded[1] != 0xd8U) {
+        throw std::runtime_error("canonical JPEG byte stream is malformed");
+    }
+    std::size_t position = 2U;
+    std::size_t entropy_start = 0U;
+    while (position + 4U <= encoded.size()) {
+        if (encoded[position] != 0xffU) throw std::runtime_error("canonical JPEG marker is malformed");
+        while (position < encoded.size() && encoded[position] == 0xffU) ++position;
+        if (position >= encoded.size()) throw std::runtime_error("canonical JPEG marker is truncated");
+        const auto marker = encoded[position++];
+        if (marker == 0xd9U || marker == 0x00U || (marker >= 0xd0U && marker <= 0xd7U)) {
+            throw std::runtime_error("canonical JPEG ended before a complete scan");
+        }
+        if (position + 2U > encoded.size()) throw std::runtime_error("canonical JPEG segment is truncated");
+        const auto length = static_cast<std::size_t>(encoded[position] << 8U) | encoded[position + 1U];
+        if (length < 2U || position + length > encoded.size()) {
+            throw std::runtime_error("canonical JPEG segment length is invalid");
+        }
+        if (marker == 0xdaU) {
+            entropy_start = position + length;
+            break;
+        }
+        position += length;
+    }
+    if (entropy_start == 0U || entropy_start >= encoded.size()) {
+        throw std::runtime_error("canonical JPEG scan is missing or truncated");
+    }
+    bool entropy_byte_seen = false;
+    position = entropy_start;
+    while (position < encoded.size()) {
+        if (encoded[position] != 0xffU) {
+            entropy_byte_seen = true;
+            ++position;
+            continue;
+        }
+        while (position < encoded.size() && encoded[position] == 0xffU) ++position;
+        if (position >= encoded.size()) throw std::runtime_error("canonical JPEG entropy marker is truncated");
+        const auto marker = encoded[position++];
+        if (marker == 0x00U || (marker >= 0xd0U && marker <= 0xd7U)) continue;
+        if (marker == 0xd9U && position == encoded.size() && entropy_byte_seen) break;
+        throw std::runtime_error("canonical JPEG entropy stream contains an invalid marker");
+    }
+    if (!entropy_byte_seen || position != encoded.size()) {
+        throw std::runtime_error("canonical JPEG entropy stream is incomplete");
+    }
+    IWICImagingFactory* raw_factory = nullptr;
+    CheckHr(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&raw_factory)), "WIC factory creation");
+    ComPtr<IWICImagingFactory> factory(raw_factory);
+    IWICBitmapDecoder* raw_decoder = nullptr;
+    CheckHr(factory.get()->CreateDecoderFromFilename(input.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, &raw_decoder), "canonical JPEG decoder creation");
+    ComPtr<IWICBitmapDecoder> decoder(raw_decoder);
+    GUID container{};
+    CheckHr(decoder.get()->GetContainerFormat(&container), "canonical JPEG container query");
+    if (container != GUID_ContainerFormatJpeg) throw std::runtime_error("canonical image container is not JPEG");
+    UINT frame_count = 0;
+    CheckHr(decoder.get()->GetFrameCount(&frame_count), "canonical JPEG frame count");
+    if (frame_count != 1U) throw std::runtime_error("canonical JPEG must contain exactly one frame");
+    IWICBitmapFrameDecode* raw_frame = nullptr;
+    CheckHr(decoder.get()->GetFrame(0, &raw_frame), "canonical JPEG frame read");
+    ComPtr<IWICBitmapFrameDecode> frame(raw_frame);
+    UINT width = 0;
+    UINT height = 0;
+    CheckHr(frame.get()->GetSize(&width, &height), "canonical JPEG dimensions");
+    if (width != expected_width || height != expected_height) {
+        throw std::runtime_error("canonical JPEG dimensions do not match the fixed profile");
+    }
+    IWICFormatConverter* raw_converter = nullptr;
+    CheckHr(factory.get()->CreateFormatConverter(&raw_converter), "canonical JPEG format converter creation");
+    ComPtr<IWICFormatConverter> converter(raw_converter);
+    CheckHr(converter.get()->Initialize(frame.get(), GUID_WICPixelFormat24bppBGR,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom),
+        "canonical JPEG full pixel decoder initialization");
+    const auto stride64 = static_cast<std::uint64_t>(width) * 3U;
+    const auto buffer64 = stride64 * height;
+    if (stride64 > std::numeric_limits<UINT>::max() || buffer64 > std::numeric_limits<UINT>::max()) {
+        throw std::runtime_error("canonical JPEG decoded pixel buffer is too large");
+    }
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(buffer64));
+    CheckHr(converter.get()->CopyPixels(nullptr, static_cast<UINT>(stride64),
+        static_cast<UINT>(buffer64), pixels.data()), "canonical JPEG complete pixel decode");
+}
+
 a0::m2::FixedRigStitchProfile ParseProfile(const std::map<std::wstring, std::wstring>& options) {
     const auto matrix_values = ParseDoubles(Required(options, L"matrix"));
     const auto crop_values = ParseUnsignedList(Required(options, L"crop"));
@@ -229,6 +326,12 @@ int wmain(const int argc, wchar_t* argv[]) {
                     ParseInteger<std::uint32_t>(Required(options, L"height"), "height"),
                     alias == L"CAM-A" ? std::array<std::uint8_t, 3>{220, 20, 20} : std::array<std::uint8_t, 3>{20, 20, 220});
                 std::cout << "result=generated-test-synthetic-jpeg\n";
+            } else if (operation == L"validate-canonical-jpeg") {
+                ValidateCanonicalJpeg(
+                    Required(options, L"input"),
+                    ParseInteger<std::uint32_t>(Required(options, L"width"), "width"),
+                    ParseInteger<std::uint32_t>(Required(options, L"height"), "height"));
+                std::cout << "result=validated-canonical-jpeg\n";
             } else if (operation == L"stitch") {
                 const auto result = a0::m2::StitchCanonicalPair({
                     Required(options, L"camera-a"),

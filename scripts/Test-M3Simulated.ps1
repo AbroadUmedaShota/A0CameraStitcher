@@ -48,12 +48,12 @@ try {
         Assert-Condition (Test-Path -LiteralPath $dualCameraFlowTestExecutable -PathType Leaf) 'DualCamera flow test executable was not produced by the solution build.'
         $dualCameraFlowOutput = & $dualCameraFlowTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "DualCamera flow tests failed: $($dualCameraFlowOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($dualCameraFlowOutput -join "`n").Contains('DualCamera flow tests: 7/7 passed.')) 'DualCamera flow test summary is missing or incomplete.'
+        Assert-Condition (($dualCameraFlowOutput -join "`n").Contains('DualCamera flow tests: 8/8 passed.')) 'DualCamera flow test summary is missing or incomplete.'
 
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 19/19 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 20/20 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath

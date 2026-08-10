@@ -142,7 +142,7 @@
                                 <StackPanel>
                                     <TextBlock Text="撮影・原本検証・合成・結果確認・exportの進捗" Style="{StaticResource SectionTitleStyle}" />
                                     <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,12,0,0">
-                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" Columns="6" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" Columns="8" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Border Margin="0,0,6,0" Padding="7" MinHeight="72" Background="{Binding Background}" BorderBrush="{Binding BorderBrush}" BorderThickness="2">

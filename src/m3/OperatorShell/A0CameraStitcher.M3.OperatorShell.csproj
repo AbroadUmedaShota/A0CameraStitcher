@@ -10,9 +10,20 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>A0CameraStitcher.M3.OperatorShell</AssemblyName>
     <RootNamespace>A0CameraStitcher.M3.OperatorShell</RootNamespace>
+    <RepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\..'))</RepositoryRoot>
+    <M2AdapterBuildDirectory>$(RepositoryRoot)\build\wpf-m2-adapter</M2AdapterBuildDirectory>
+    <M2AdapterSourcePath>$(M2AdapterBuildDirectory)\$(Configuration)\A0CameraStitcher.M2Adapter.exe</M2AdapterSourcePath>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Foundation\A0CameraStitcher.M3.Foundation.csproj" />
+    <Content Include="$(M2AdapterSourcePath)" Link="A0CameraStitcher.M2Adapter.exe"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <Target Name="BuildM2Adapter" BeforeTargets="PrepareForBuild">
+    <Exec Command="cmake -S &quot;$(RepositoryRoot)&quot; -B &quot;$(M2AdapterBuildDirectory)&quot; -A x64" />
+    <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.M2Adapter -- /m:1" />
+    <Error Condition="!Exists('$(M2AdapterSourcePath)')" Text="A0CameraStitcher.M2Adapter.exe was not produced." />
+  </Target>
 </Project>

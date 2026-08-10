@@ -141,7 +141,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                 throw new DualCameraFlowException(DualCameraFailureCode.StitchFailed, reason);
             }
             await StitchCoreAsync(cancellationToken).ConfigureAwait(false);
-            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Succeeded, "Stitched JPEG ready for operator review");
+            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Active, "Stitched JPEG awaiting operator review");
             return CompleteOperation();
         }
         catch (OperationCanceledException exception)
@@ -163,8 +163,9 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         BeginContinuation();
         try
         {
+            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Pending, "A distinct restitch job was requested");
             await StitchCoreAsync(cancellationToken).ConfigureAwait(false);
-            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Succeeded, "Restitched JPEG ready for operator review");
+            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Active, "Restitched JPEG awaiting operator review");
             return CompleteOperation();
         }
         catch (OperationCanceledException exception)
@@ -185,6 +186,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         BeginContinuation(requireSuccessfulStitch: true);
         var exportJobId = Guid.NewGuid();
         var destination = Path.Combine(directory, $"a0-stitched-{exportJobId:N}.jpg");
+        SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Succeeded, "Operator proceeded from result review to explicit export");
         SetStage(DualCameraProductStage.Export, DualCameraStageStatus.Active, "Explicit export started");
         try
         {
@@ -313,7 +315,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
     }
 
-    private static async Task<CanonicalJpegOriginal> ValidateCanonicalOriginalAsync(
+    private async Task<CanonicalJpegOriginal> ValidateCanonicalOriginalAsync(
         string alias,
         string path,
         int expectedWidth,
@@ -342,6 +344,25 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                 DualCameraFailureCode.InvalidOriginal,
                 $"{alias} original dimensions {width}x{height} do not match the fixed profile {expectedWidth}x{expectedHeight}.");
         }
+        try
+        {
+            await _stitcher.ValidateCanonicalJpegAsync(
+                path,
+                expectedWidth,
+                expectedHeight,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new DualCameraFlowException(
+                DualCameraFailureCode.InvalidOriginal,
+                $"{alias} original failed complete WIC JPEG decode validation.",
+                exception);
+        }
         return new CanonicalJpegOriginal(
             alias,
             Path.GetFullPath(path),
@@ -352,7 +373,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             true);
     }
 
-    private static async Task VerifyOriginalUnchangedAsync(
+    private async Task VerifyOriginalUnchangedAsync(
         CanonicalJpegOriginal original,
         CancellationToken cancellationToken)
     {

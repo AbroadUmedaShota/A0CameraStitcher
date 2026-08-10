@@ -8,26 +8,24 @@ param(
 $ErrorActionPreference = 'Stop'
 
 try {
-    $cmake = Get-Command cmake -ErrorAction Stop
     $dotnet = Get-Command dotnet -ErrorAction Stop
-    $nativeBuildDirectory = Join-Path $RepositoryRoot 'build/dual-camera-wpf-flow'
-    & $cmake.Source -S $RepositoryRoot -B $nativeBuildDirectory -A x64
-    if ($LASTEXITCODE -ne 0) { throw "Native configure failed with exit code $LASTEXITCODE." }
-    & $cmake.Source --build $nativeBuildDirectory --config $Configuration --target A0CameraStitcher.M2Adapter -- /m:1
-    if ($LASTEXITCODE -ne 0) { throw "M2 adapter build failed with exit code $LASTEXITCODE." }
-
     $solutionPath = Join-Path $RepositoryRoot 'A0CameraStitcher.M3.slnx'
     & $dotnet.Source build $solutionPath --configuration $Configuration --nologo --maxcpucount:1 --nodeReuse:false -p:UseSharedCompilation=false
     if ($LASTEXITCODE -ne 0) { throw ".NET product flow build failed with exit code $LASTEXITCODE." }
     $dualTestExecutable = Join-Path $RepositoryRoot "tests/m3/DualCameraFlowTests/bin/$Configuration/net10.0/A0CameraStitcher.M3.DualCameraFlowTests.exe"
     $operatorTestExecutable = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.M3.OperatorShellTests.exe"
+    $wpfAdapterPath = Join-Path $RepositoryRoot "src/m3/OperatorShell/bin/$Configuration/net10.0-windows/A0CameraStitcher.M2Adapter.exe"
+    $operatorTestAdapterPath = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.M2Adapter.exe"
+    if (-not (Test-Path -LiteralPath $wpfAdapterPath -PathType Leaf)) { throw 'Formal WPF output does not contain A0CameraStitcher.M2Adapter.exe.' }
+    if (-not (Test-Path -LiteralPath $operatorTestAdapterPath -PathType Leaf)) { throw 'Formal WPF test output does not contain the transitive M2 adapter artifact.' }
     $previousAdapterPath = $env:A0_M2_ADAPTER_PATH
     try {
-        $env:A0_M2_ADAPTER_PATH = Join-Path $nativeBuildDirectory "$Configuration/A0CameraStitcher.M2Adapter.exe"
+        $env:A0_M2_ADAPTER_PATH = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.M2Adapter.exe"
         $dualOutput = & $dualTestExecutable 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not (($dualOutput -join "`n").Contains('DualCamera flow tests: 7/7 passed.'))) {
+        if ($LASTEXITCODE -ne 0 -or -not (($dualOutput -join "`n").Contains('DualCamera flow tests: 8/8 passed.'))) {
             throw "Focused DualCamera product E2E failed: $($dualOutput -join [Environment]::NewLine)"
         }
+        Remove-Item Env:A0_M2_ADAPTER_PATH -ErrorAction SilentlyContinue
         $operatorOutput = & $operatorTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0 -or -not (($operatorOutput -join "`n").Contains('PASS formal WPF dual-camera flow uses real JPEG product artifacts'))) {
             throw "Focused DualCamera WPF E2E failed: $($operatorOutput -join [Environment]::NewLine)"

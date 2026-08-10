@@ -81,6 +81,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             new("capture-b", "CAM-B撮影"),
             new("persist-b", "CAM-B原本検証"),
             new("stitch", "自動合成"),
+            new("review", "結果確認"),
+            new("export", "明示export"),
         ];
 
         _acceptSafetyCommand = new RelayCommand(AcceptSafety, () => !SafetyAcknowledged && !IsBusy);
@@ -622,6 +624,8 @@ public sealed class OperatorShellViewModel : ObservableObject
                 DualCameraProductStage.CaptureCameraB => "capture-b",
                 DualCameraProductStage.ValidateCameraB => "persist-b",
                 DualCameraProductStage.Stitch => "stitch",
+                DualCameraProductStage.Review => "review",
+                DualCameraProductStage.Export => "export",
                 _ => null,
             };
             if (stepId is null) continue;
@@ -681,16 +685,18 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         var activeStage = state.Stages.FirstOrDefault(stage => stage.Status == DualCameraStageStatus.Active)?.Stage;
-        UiState = activeStage == DualCameraProductStage.Stitch
-            ? OperatorUiState.Stitching
-            : state.IsActive
-                ? OperatorUiState.Capturing
-                : state.FailureCode switch
-                {
-                    DualCameraFailureCode.None => OperatorUiState.Review,
-                    DualCameraFailureCode.StitchFailed or DualCameraFailureCode.ExportFailed => OperatorUiState.Review,
-                    _ => OperatorUiState.FailedPartial,
-                };
+        UiState = activeStage switch
+        {
+            DualCameraProductStage.Stitch => OperatorUiState.Stitching,
+            DualCameraProductStage.Review or DualCameraProductStage.Export => OperatorUiState.Review,
+            _ when state.IsActive => OperatorUiState.Capturing,
+            _ => state.FailureCode switch
+            {
+                DualCameraFailureCode.None => OperatorUiState.Review,
+                DualCameraFailureCode.StitchFailed or DualCameraFailureCode.ExportFailed => OperatorUiState.Review,
+                _ => OperatorUiState.FailedPartial,
+            },
+        };
         StatusMessage = state.IsActive
             ? activeStage is null ? "DualCamera product flow処理中" : $"進行中: {activeStage}"
             : state.FailureCode == DualCameraFailureCode.None

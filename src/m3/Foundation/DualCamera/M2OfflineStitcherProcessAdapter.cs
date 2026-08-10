@@ -83,6 +83,27 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
             values.GetValueOrDefault("profileId") ?? string.Empty);
     }
 
+    public async Task ValidateCanonicalJpegAsync(
+        string jpegPath,
+        int expectedWidth,
+        int expectedHeight,
+        CancellationToken cancellationToken)
+    {
+        var output = await RunAsync(
+            [
+                "validate-canonical-jpeg",
+                "--input", jpegPath,
+                "--width", expectedWidth.ToString(CultureInfo.InvariantCulture),
+                "--height", expectedHeight.ToString(CultureInfo.InvariantCulture),
+            ],
+            cancellationToken).ConfigureAwait(false);
+        if (!output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Contains("result=validated-canonical-jpeg", StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("The M2 adapter returned an invalid canonical JPEG validation response.");
+        }
+    }
+
     public async Task ExportAsync(
         string stitchedJpeg,
         string destinationJpeg,

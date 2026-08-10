@@ -67,6 +67,17 @@ catch (Exception exception)
 
 try
 {
+    await FormalDualCameraExportFailureProgressAsync();
+    Console.WriteLine("PASS formal WPF maps active and failed explicit export progress");
+}
+catch (Exception exception)
+{
+    failures.Add("formal WPF maps active and failed explicit export progress");
+    Console.Error.WriteLine($"FAIL formal WPF maps active and failed explicit export progress: {exception}");
+}
+
+try
+{
     await SingleCameraRestartPreservesPlanAsync();
     Console.WriteLine("PASS single-camera restart restores the durable mode and selected alias");
 }
@@ -219,7 +230,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {19 - failures.Count}/19 passed.");
+Console.WriteLine($"Operator shell tests: {20 - failures.Count}/20 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
@@ -1060,11 +1071,10 @@ static async Task DualCameraRegressionAsync()
 
 static async Task FormalDualCameraWpfFlowAsync()
 {
-    var adapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
-    if (string.IsNullOrWhiteSpace(adapterPath))
-    {
-        throw new InvalidOperationException("A0_M2_ADAPTER_PATH is required for the formal WPF flow test.");
-    }
+    var previousAdapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
+    Environment.SetEnvironmentVariable("A0_M2_ADAPTER_PATH", null);
+    var bundledAdapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(bundledAdapterPath), "The formal WPF output must bundle A0CameraStitcher.M2Adapter.exe.");
     var root = Path.Combine(
         Path.GetTempPath(),
         "A0CameraStitcher-M3-FormalDualWpfTests",
@@ -1076,8 +1086,7 @@ static async Task FormalDualCameraWpfFlowAsync()
     Directory.CreateDirectory(exportRoot);
     try
     {
-        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
-        var productFlow = new DualCameraProductFlow(productRoot, adapter, adapter);
+        var productFlow = DualCameraProductComposition.Create(productRoot);
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(transactionRoot),
             productFlow);
@@ -1094,7 +1103,9 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.True(viewModel.CaptureResult.Contains("canonical JPEG", StringComparison.Ordinal), "Both originals must be displayed as verified JPEGs.");
         Check.True(viewModel.RetainedOriginals.Contains("SHA-256", StringComparison.Ordinal), "The UI must display canonical original verification evidence.");
         Check.True(viewModel.StitchResult.Contains("実JPEG合成完了", StringComparison.Ordinal), "The formal shell must display a real stitched JPEG.");
-        Check.True(viewModel.ProgressSteps.Where(step => step.Id != "liveview").All(step => step.StatusText == "完了"), "Every capture, validation, and stitch stage must be complete.");
+        Check.True(viewModel.ProgressSteps.Where(step => step.Id is not ("liveview" or "review" or "export")).All(step => step.StatusText == "完了"), "Every capture, validation, and stitch stage must be complete.");
+        Check.Equal("処理中", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
+        Check.Equal("待機", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
         var firstJob = viewModel.LastStitchJobId;
 
         viewModel.RestitchCommand.Execute(null);
@@ -1109,6 +1120,8 @@ static async Task FormalDualCameraWpfFlowAsync()
             "Formal fixed-local export did not finish.");
         Check.True(File.Exists(viewModel.LastExportPath), "The formal WPF export must publish a JPEG.");
         Check.True(File.ReadAllBytes(viewModel.LastExportPath) is [0xff, 0xd8, .., 0xff, 0xd9], "The WPF export must be an actual JPEG.");
+        Check.Equal("完了", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
+        Check.Equal("完了", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
 
         viewModel.PrepareNewCaptureCommand.Execute(null);
         await WaitUntilAsync(() => viewModel.CanCapture, "A new formal diagnostic capture was not prepared.");
@@ -1122,6 +1135,56 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.False(viewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "CAM-B failure must not invent an original.");
         Check.True(viewModel.TechnicalDetail.Contains("automatic retry count: 0", StringComparison.Ordinal), "The formal diagnostic must show zero retries.");
         Check.Equal(0, Directory.EnumerateFiles(productRoot, "*.simulated", SearchOption.AllDirectories).Count());
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_M2_ADAPTER_PATH", previousAdapterPath);
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task FormalDualCameraExportFailureProgressAsync()
+{
+    var bundledAdapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(bundledAdapterPath), "The WPF test output must contain the bundled M2 adapter.");
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-FormalDualExportFailureTests",
+        Guid.NewGuid().ToString("N"));
+    var transactionRoot = Path.Combine(root, "legacy-journals");
+    var productRoot = Path.Combine(root, "products");
+    var exportRoot = Path.Combine(root, "operator-export");
+    Directory.CreateDirectory(transactionRoot);
+    Directory.CreateDirectory(exportRoot);
+    try
+    {
+        var native = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
+        var bridge = new BlockingFailedExportBridge(native);
+        var flow = new DualCameraProductFlow(productRoot, bridge, bridge);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(transactionRoot),
+            flow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.FixedLocalExportDirectory = exportRoot;
+        viewModel.AcceptSafetyCommand.Execute(null);
+        viewModel.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy,
+            "The export-failure fixture capture did not finish.");
+
+        Check.Equal("処理中", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
+        Check.Equal("待機", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
+        viewModel.ExportCommand.Execute(null);
+        await bridge.ExportStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check.Equal("完了", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
+        Check.Equal("処理中", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
+
+        bridge.ReleaseExport.TrySetResult();
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.ExportResult.Contains("export失敗", StringComparison.Ordinal),
+            "The deterministic export failure did not reach WPF.");
+        Check.Equal("失敗", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
+        Check.Equal(OperatorUiState.Review, viewModel.UiState);
     }
     finally
     {
@@ -1647,6 +1710,50 @@ static class HardwareTestData
             WhiteBalanceMode = Setting("profile-match"),
             FocusMode = Setting("profile-match"),
         };
+    }
+}
+
+sealed class BlockingFailedExportBridge(M2OfflineStitcherProcessAdapter inner) :
+    ITestSyntheticCamera,
+    IOfflineStitcherAdapter
+{
+    public TaskCompletionSource ExportStarted { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource ReleaseExport { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<string> CaptureAsync(
+        string alias,
+        Guid transactionId,
+        string destinationPath,
+        CancellationToken cancellationToken) =>
+        inner.CaptureAsync(alias, transactionId, destinationPath, cancellationToken);
+
+    public Task ValidateCanonicalJpegAsync(
+        string jpegPath,
+        int expectedWidth,
+        int expectedHeight,
+        CancellationToken cancellationToken) =>
+        inner.ValidateCanonicalJpegAsync(jpegPath, expectedWidth, expectedHeight, cancellationToken);
+
+    public Task<OfflineStitchArtifact> StitchAsync(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        string outputJobDirectory,
+        DualCameraRigProfile profile,
+        CancellationToken cancellationToken) =>
+        inner.StitchAsync(originals, outputJobDirectory, profile, cancellationToken);
+
+    public async Task ExportAsync(
+        string stitchedJpeg,
+        string destinationJpeg,
+        CancellationToken cancellationToken)
+    {
+        _ = stitchedJpeg;
+        _ = destinationJpeg;
+        ExportStarted.TrySetResult();
+        await ReleaseExport.Task.WaitAsync(cancellationToken);
+        throw new IOException("deterministic formal WPF export failure");
     }
 }
 

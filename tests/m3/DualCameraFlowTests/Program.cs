@@ -5,6 +5,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("native capture stitch restitch export E2E", NativeEndToEndAsync),
     ("malformed and oversized JPEG fail closed", InvalidJpegAsync),
+    ("WIC rejects fake SOF truncated scan and corrupt entropy before stitch", CorruptJpegDecodeAsync),
     ("draft and malformed profiles fail before capture", InvalidProfilesAsync),
     ("duplicate start and mode fallback are rejected", ConcurrencyAndModeLockAsync),
     ("capture A and B failures retain only verified originals", CaptureFailuresAsync),
@@ -85,9 +86,38 @@ static async Task InvalidJpegAsync()
             var flow = new DualCameraProductFlow(root, bridge, bridge);
             var result = await flow.CaptureAndStitchAsync(
                 DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
-            Check.Equal(DualCameraFailureCode.InvalidOriginal, result.FailureCode);
+            if (result.FailureCode != DualCameraFailureCode.InvalidOriginal)
+            {
+                throw new InvalidOperationException($"{payload} was accepted before stitch with {result.FailureCode}.");
+            }
             Check.False(result.IsActive);
             Check.Equal(0, bridge.StitchCalls);
+            Check.Equal(0, result.AutomaticRetryCount);
+        });
+    }
+}
+
+static async Task CorruptJpegDecodeAsync()
+{
+    var adapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
+    if (string.IsNullOrWhiteSpace(adapterPath))
+    {
+        throw new InvalidOperationException("A0_M2_ADAPTER_PATH is required for focused WIC corruption validation.");
+    }
+    foreach (var payload in new[] { CorruptPayload.FakeSofAndEoi, CorruptPayload.TruncatedScan, CorruptPayload.CorruptEntropy })
+    {
+        await WithRootAsync(async root =>
+        {
+            var bridge = new M2OfflineStitcherProcessAdapter(adapterPath);
+            var flow = new DualCameraProductFlow(root, new CorruptJpegCamera(payload), bridge);
+            var result = await flow.CaptureAndStitchAsync(
+                DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+            if (result.FailureCode != DualCameraFailureCode.InvalidOriginal)
+            {
+                throw new InvalidOperationException($"{payload} was accepted before stitch with {result.FailureCode}.");
+            }
+            Check.Equal(0, result.Capture!.Originals.Count);
+            Check.True(result.Stitch is null);
             Check.Equal(0, result.AutomaticRetryCount);
         });
     }
@@ -230,6 +260,15 @@ sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
     public int StitchCalls { get; private set; }
     public int ExportCalls { get; private set; }
 
+    public Task ValidateCanonicalJpegAsync(string jpegPath, int expectedWidth, int expectedHeight, CancellationToken cancellationToken)
+    {
+        _ = jpegPath;
+        _ = expectedWidth;
+        _ = expectedHeight;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
     public Task<string> CaptureAsync(string alias, Guid transactionId, string destinationPath, CancellationToken cancellationToken)
     {
         _ = transactionId;
@@ -272,6 +311,56 @@ sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
         if (FailExport) throw new IOException("deterministic export failure");
         File.Copy(stitchedJpeg, destinationJpeg, overwrite: false);
         return Task.CompletedTask;
+    }
+}
+
+enum CorruptPayload { FakeSofAndEoi, TruncatedScan, CorruptEntropy }
+
+sealed class CorruptJpegCamera(CorruptPayload payload) : ITestSyntheticCamera
+{
+    public async Task<string> CaptureAsync(
+        string alias,
+        Guid transactionId,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        _ = alias;
+        _ = transactionId;
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+        await File.WriteAllBytesAsync(destinationPath, CreatePayload(payload), cancellationToken);
+        return destinationPath;
+    }
+
+    private static byte[] CreatePayload(CorruptPayload value)
+    {
+        if (value == CorruptPayload.FakeSofAndEoi)
+        {
+            return
+            [
+                0xff, 0xd8,
+                0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x10, 0x03,
+                0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+                0xff, 0xd9,
+            ];
+        }
+        var source = TestJpegBytes.Value;
+        var scan = FindMarker(source, 0xda);
+        var headerLength = (source[scan + 2] << 8) | source[scan + 3];
+        var entropyStart = scan + 2 + headerLength;
+        if (value == CorruptPayload.TruncatedScan)
+        {
+            return [.. source[..(scan + 5)], 0xff, 0xd9];
+        }
+        return [.. source[..entropyStart], 0xff, 0xdb, 0x00, 0x02, 0xff, 0xd9];
+    }
+
+    private static int FindMarker(byte[] bytes, byte marker)
+    {
+        for (var index = 0; index < bytes.Length - 1; index++)
+        {
+            if (bytes[index] == 0xff && bytes[index + 1] == marker) return index;
+        }
+        throw new InvalidDataException("JPEG scan marker is missing from the test fixture.");
     }
 }
 
