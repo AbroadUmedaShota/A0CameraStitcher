@@ -43,7 +43,10 @@
                     <TextBlock Text="{Binding ProfileText}" FontWeight="Bold" />
                 </StackPanel>
                 <StackPanel Grid.Column="2">
-                    <TextBlock Text="保存先（SIMULATED）" Foreground="#FF56616B" />
+                    <TextBlock Text="明示export先（fixed-local folder）" Foreground="#FF56616B" />
+                    <TextBox Text="{Binding FixedLocalExportDirectory, UpdateSourceTrigger=PropertyChanged}"
+                             IsEnabled="{Binding CanChangeExportDirectory}"
+                             AutomationProperties.Name="操作者選択fixed-local export folder" />
                     <TextBlock Text="{Binding OutputDirectory}" FontWeight="Bold" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
                 <StackPanel Grid.Column="3" Orientation="Horizontal">
@@ -137,7 +140,7 @@
 
                             <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
                                 <StackPanel>
-                                    <TextBlock Text="撮影・保存・合成の進捗" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="撮影・原本検証・合成・結果確認・exportの進捗" Style="{StaticResource SectionTitleStyle}" />
                                     <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,12,0,0">
                                         <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" Columns="6" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                                         <ItemsControl.ItemTemplate>
@@ -170,7 +173,7 @@
                                         <TextBlock Grid.Row="5" Text="出力先" FontWeight="Bold" /><TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastExportPath}" />
                                     </Grid>
                                     <WrapPanel Margin="0,14,0,0">
-                                        <Button Content="保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}" AutomationProperties.Name="確認済み単体原画像または合成結果を明示保存" />
+                                        <Button Content="fixed-localへ明示export" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}" AutomationProperties.Name="確認済み単体原画像または合成結果を明示保存" />
                                         <Button Content="再合成（別job）" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}" />
                                         <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}" AutomationProperties.Name="read-only readiness再検査" />
                                     </WrapPanel>

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows.Input;
 using A0CameraStitcher.M3.Foundation;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 
 namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
@@ -14,14 +15,16 @@ public sealed class OperatorShellViewModel : ObservableObject
     private const string DualModeLabel = "2台構成";
 
     private readonly ISimulatedTransactionService _transactionService;
+    private readonly IDualCameraProductFlow? _dualCameraFlow;
+    private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
     private readonly AsyncRelayCommand _captureCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
     private readonly AsyncRelayCommand _prepareNewCaptureCommand;
     private readonly RelayCommand _acceptSafetyCommand;
     private readonly RelayCommand _declineSafetyCommand;
     private readonly RelayCommand _toggleLiveViewCommand;
-    private readonly RelayCommand _exportCommand;
-    private readonly RelayCommand _restitchCommand;
+    private readonly AsyncRelayCommand _exportCommand;
+    private readonly AsyncRelayCommand _restitchCommand;
     private readonly RelayCommand _showDashboardCommand;
     private readonly RelayCommand _showSetupCommand;
     private readonly RelayCommand _showCameraSettingsCommand;
@@ -46,6 +49,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _retainedOriginals = "なし";
     private string _lastStitchJobId = "未実行";
     private string _lastExportPath = "未実行";
+    private string _fixedLocalExportDirectory = string.Empty;
     private bool _cameraInspectionRequired;
     private int _transactionStartCount;
     private CaptureOutcome? _captureOutcome;
@@ -55,15 +59,27 @@ public sealed class OperatorShellViewModel : ObservableObject
     private OperatorActionAvailability _availability = null!;
 
     public OperatorShellViewModel(ISimulatedTransactionService transactionService)
+        : this(transactionService, null)
+    {
+    }
+
+    public OperatorShellViewModel(
+        ISimulatedTransactionService transactionService,
+        IDualCameraProductFlow? dualCameraFlow)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
+        _dualCameraFlow = dualCameraFlow;
+        if (_dualCameraFlow is not null)
+        {
+            _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
+        }
         ProgressSteps =
         [
             new("liveview", "Live View停止"),
             new("capture-a", "CAM-A撮影"),
-            new("persist-a", "CAM-A保存"),
+            new("persist-a", "CAM-A原本検証"),
             new("capture-b", "CAM-B撮影"),
-            new("persist-b", "CAM-B保存"),
+            new("persist-b", "CAM-B原本検証"),
             new("stitch", "自動合成"),
         ];
 
@@ -73,8 +89,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
         _prepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, ShowUnexpectedFailure);
         _toggleLiveViewCommand = new RelayCommand(ToggleLiveView, () => CanUseLiveView);
-        _exportCommand = new RelayCommand(ExportSimulatedResult, () => CanExport);
-        _restitchCommand = new RelayCommand(Restitch, () => CanRestitch);
+        _exportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, ShowUnexpectedFailure);
+        _restitchCommand = new AsyncRelayCommand(RestitchAsync, () => CanRestitch, ShowUnexpectedFailure);
         _showDashboardCommand = new RelayCommand(() => SelectedPage = "Dashboard", () => CanOpenMaintenance);
         _showSetupCommand = new RelayCommand(() => SelectedPage = "Setup", () => CanOpenMaintenance);
         _showCameraSettingsCommand = new RelayCommand(() => SelectedPage = "CameraSettings", () => CanOpenMaintenance);
@@ -126,6 +142,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(ActivityText));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
+                OnPropertyChanged(nameof(CanChangeExportDirectory));
             }
         }
     }
@@ -150,6 +167,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
     public bool CanSelectCamera => !IsBusy && !IsLiveViewActive &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
+    public bool CanChangeExportDirectory => !IsBusy;
     public string OperatingModeDescription => IsSingleCameraMode
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
@@ -280,8 +298,24 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string LastExportPath { get => _lastExportPath; private set => SetProperty(ref _lastExportPath, value); }
     public int TransactionStartCount { get => _transactionStartCount; private set => SetProperty(ref _transactionStartCount, value); }
 
+    public string FixedLocalExportDirectory
+    {
+        get => _fixedLocalExportDirectory;
+        set
+        {
+            if (!IsBusy && SetProperty(ref _fixedLocalExportDirectory, value?.Trim() ?? string.Empty))
+            {
+                OnPropertyChanged(nameof(OutputDirectory));
+                OnPropertyChanged(nameof(CanExport));
+                NotifyAllCommands();
+            }
+        }
+    }
+
     public string ProfileText => $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
-    public string OutputDirectory => _readiness.OutputDirectory;
+    public string OutputDirectory => _dualCameraFlow is not null && !IsSingleCameraMode
+        ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — fixed-local folderを明示入力" : FixedLocalExportDirectory)
+        : _readiness.OutputDirectory;
     public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
     public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
     public string SetupStatusText => _readiness.Setup.Summary;
@@ -293,7 +327,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanCapture => _availability.Capture.Allowed;
     public string CaptureDisabledReason => CanCapture ? "準備完了。確認ダイアログなしで一度だけ開始します。" : _availability.Capture.DisabledReason;
     public bool CanUseLiveView => _availability.LiveView.Allowed;
-    public bool CanExport => _availability.Export.Allowed;
+    public bool CanExport => _availability.Export.Allowed &&
+        (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
     public bool CanRestitch => _availability.Restitch.Allowed;
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed;
     public bool CanOpenMaintenance => _availability.OpenMaintenance.Allowed;
@@ -347,6 +382,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         if (!CanCapture)
         {
+            return;
+        }
+
+        if (!IsSingleCameraMode && _dualCameraFlow is not null)
+        {
+            await RunFormalDualCameraCaptureAsync(scenario).ConfigureAwait(true);
             return;
         }
 
@@ -500,6 +541,165 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
+    private async Task RunFormalDualCameraCaptureAsync(string scenario)
+    {
+        var flow = _dualCameraFlow ?? throw new InvalidOperationException("DualCamera product flow is unavailable.");
+        IsBusy = true;
+        TransactionStartCount++;
+        CaptureResult = "DualCamera撮影処理中";
+        StitchResult = "未実行";
+        ExportResult = "未実行";
+        _captureOutcome = null;
+        _stitchOutcome = null;
+        _exportOutcome = null;
+        ResetProgress(CapturePlan.Dual());
+        SetStep("liveview", scenario == "Live View停止失敗" ? "current" : "completed");
+        UiState = OperatorUiState.Capturing;
+        StatusMessage = "CAM-A→CAM-Bを一回ずつ撮影し、各canonical original.jpgを検証します。";
+        try
+        {
+            var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()) with
+            {
+                TestFault = scenario switch
+                {
+                    "Live View停止失敗" => DualCameraTestFault.FailBeforeCapture,
+                    "CAM-A撮影失敗" => DualCameraTestFault.FailCaptureCameraA,
+                    "CAM-B撮影失敗" => DualCameraTestFault.FailCaptureCameraB,
+                    "CAM-A保存後クラッシュ" => DualCameraTestFault.InterruptAfterCameraA,
+                    "合成失敗" => DualCameraTestFault.FailStitch,
+                    _ => DualCameraTestFault.None,
+                },
+            };
+            var state = await flow.CaptureAndStitchAsync(
+                request,
+                _lifetimeToken).ConfigureAwait(true);
+            ApplyFormalDualCameraState(state);
+            if (scenario == "Live View停止失敗")
+            {
+                SetStep("liveview", "failure");
+            }
+            else if (state.FailureCode == DualCameraFailureCode.None && scenario is "cleanup失敗" or "Live View再開失敗")
+            {
+                _cameraInspectionRequired = true;
+                UiState = OperatorUiState.Degraded;
+                StatusMessage = scenario == "cleanup失敗"
+                    ? "実JPEG製品結果は保持しましたが、TestSynthetic cleanup確認失敗として新規撮影を禁止します。"
+                    : "実JPEG製品結果は保持しましたが、Live View再開失敗として新規撮影を禁止します。";
+            }
+        }
+        finally
+        {
+            IsBusy = false;
+            RebuildReadiness(preserveOutcomeState: true);
+        }
+    }
+
+    private void OnDualCameraStateChanged(object? sender, DualCameraProductState state)
+    {
+        if (_synchronizationContext is not null && SynchronizationContext.Current != _synchronizationContext)
+        {
+            _synchronizationContext.Post(_ => ApplyFormalDualCameraState(state), null);
+            return;
+        }
+        ApplyFormalDualCameraState(state);
+    }
+
+    private void ApplyFormalDualCameraState(DualCameraProductState state)
+    {
+        if (state.Mode != CameraOperatingMode.DualCamera ||
+            state.ExecutionEnvironment != DualCameraExecutionEnvironment.TestSynthetic)
+        {
+            throw new InvalidDataException("Formal simulated WPF accepts only typed TestSynthetic DualCamera state.");
+        }
+
+        LastTransactionId = state.TransactionId == Guid.Empty ? "未実行" : state.TransactionId.ToString("N");
+        foreach (var stage in state.Stages)
+        {
+            var stepId = stage.Stage switch
+            {
+                DualCameraProductStage.CaptureCameraA => "capture-a",
+                DualCameraProductStage.ValidateCameraA => "persist-a",
+                DualCameraProductStage.CaptureCameraB => "capture-b",
+                DualCameraProductStage.ValidateCameraB => "persist-b",
+                DualCameraProductStage.Stitch => "stitch",
+                _ => null,
+            };
+            if (stepId is null) continue;
+            SetStep(stepId, stage.Status switch
+            {
+                DualCameraStageStatus.Active => "current",
+                DualCameraStageStatus.Succeeded => "completed",
+                DualCameraStageStatus.Failed => "failure",
+                _ => "pending",
+            });
+        }
+
+        var originals = state.Capture?.Originals ?? [];
+        RetainedOriginals = originals.Count == 0
+            ? "なし"
+            : string.Join(" / ", originals.Select(original =>
+                $"{original.Alias}: original.jpg {original.SizeBytes} bytes SHA-256 {original.Sha256[..12]}…"));
+        if (state.Capture is not null)
+        {
+            _captureOutcome = new CaptureOutcome(
+                state.TransactionId,
+                CapturePlan.Dual(),
+                state.Capture.Succeeded ? SimulatedTransactionState.Complete : SimulatedTransactionState.FailedPartial,
+                originals.Select(original => original.Alias).ToArray(),
+                state.Capture.Succeeded ? "二原本検証済み" : "撮影または原本検証失敗",
+                state.Capture.FailureCode == DualCameraFailureCode.None ? null : state.Capture.FailureCode.ToString(),
+                DateTimeOffset.UtcNow);
+            CaptureResult = state.Capture.Succeeded ? "CAM-A/CAM-B canonical JPEG検証済み" : "FailedPartial";
+        }
+
+        if (state.Stitch is not null)
+        {
+            LastStitchJobId = state.Stitch.JobId.ToString("N");
+            StitchResult = state.Stitch.Succeeded
+                ? $"実JPEG合成完了 / 別job {state.Stitch.JobId:N} / stitched.jpg"
+                : $"合成失敗 / job {state.Stitch.JobId:N}: {state.Stitch.FailureReason}";
+            _stitchOutcome = new StitchOutcome(
+                state.Stitch.JobId,
+                state.Stitch.Succeeded,
+                StitchResult,
+                _readiness.Setup.PlannedCorrections,
+                state.Stitch.Succeeded ? null : state.Stitch.FailureCode.ToString());
+        }
+
+        if (state.Export is not null)
+        {
+            LastExportPath = state.Export.OutputPath ?? "未公開";
+            ExportResult = state.Export.Succeeded
+                ? "fixed-local folderへbyte-identical明示export完了"
+                : $"export失敗: {state.Export.FailureReason}";
+            _exportOutcome = new ExportOutcome(
+                state.Export.JobId,
+                state.Export.Succeeded,
+                state.Export.OutputPath,
+                ExportResult,
+                state.Export.Succeeded ? null : state.Export.FailureCode.ToString());
+        }
+
+        var activeStage = state.Stages.FirstOrDefault(stage => stage.Status == DualCameraStageStatus.Active)?.Stage;
+        UiState = activeStage == DualCameraProductStage.Stitch
+            ? OperatorUiState.Stitching
+            : state.IsActive
+                ? OperatorUiState.Capturing
+                : state.FailureCode switch
+                {
+                    DualCameraFailureCode.None => OperatorUiState.Review,
+                    DualCameraFailureCode.StitchFailed or DualCameraFailureCode.ExportFailed => OperatorUiState.Review,
+                    _ => OperatorUiState.FailedPartial,
+                };
+        StatusMessage = state.IsActive
+            ? activeStage is null ? "DualCamera product flow処理中" : $"進行中: {activeStage}"
+            : state.FailureCode == DualCameraFailureCode.None
+                ? "撮影・原本検証・合成が完了しました。結果確認後に明示exportできます。"
+                : $"{state.FailureCode}: {state.FailureReason}";
+        TechnicalDetail = $"mode={state.Mode} / execution={state.ExecutionEnvironment} / profile={state.ProfileId} v{state.ProfileVersion} / automatic retry count: {state.AutomaticRetryCount} / failure={state.FailureCode}";
+        RecalculateAvailability();
+    }
+
     private Task PrepareNewCaptureAsync()
     {
         UiState = OperatorUiState.CheckingReadiness;
@@ -524,8 +724,27 @@ public sealed class OperatorShellViewModel : ObservableObject
             : $"{SelectedCamera} のSimulated Live Viewを停止しました。";
     }
 
-    private void Restitch()
+    private async Task RestitchAsync()
     {
+        if (_dualCameraFlow is not null && _captureOutcome?.CapturePlan.OperatingMode == CameraOperatingMode.DualCamera)
+        {
+            IsBusy = true;
+            UiState = OperatorUiState.Stitching;
+            SetStep("stitch", "current");
+            StatusMessage = "同じ二原本から別のstitch jobを開始しました。";
+            try
+            {
+                var state = await _dualCameraFlow.RestitchAsync(_lifetimeToken).ConfigureAwait(true);
+                ApplyFormalDualCameraState(state);
+            }
+            finally
+            {
+                IsBusy = false;
+                RebuildReadiness(preserveOutcomeState: true);
+            }
+            return;
+        }
+
         var jobId = Guid.NewGuid();
         LastStitchJobId = jobId.ToString("N");
         StitchResult = $"別jobで再合成成功 ({jobId:N})";
@@ -533,10 +752,28 @@ public sealed class OperatorShellViewModel : ObservableObject
         UiState = OperatorUiState.Review;
         StatusMessage = "保持済みの左右原画像から、新しいstitch jobとして再合成しました。撮影transactionは変更していません。";
         RebuildReadiness(preserveOutcomeState: true);
+        await Task.CompletedTask;
     }
 
-    private void ExportSimulatedResult()
+    private async Task ExportAsync()
     {
+        if (_dualCameraFlow is not null && _captureOutcome?.CapturePlan.OperatingMode == CameraOperatingMode.DualCamera)
+        {
+            IsBusy = true;
+            StatusMessage = "操作者選択fixed-local folderへ明示export中です。";
+            try
+            {
+                var state = await _dualCameraFlow.ExportAsync(FixedLocalExportDirectory, _lifetimeToken).ConfigureAwait(true);
+                ApplyFormalDualCameraState(state);
+            }
+            finally
+            {
+                IsBusy = false;
+                RebuildReadiness(preserveOutcomeState: true);
+            }
+            return;
+        }
+
         var exportId = Guid.NewGuid();
         var exportDirectory = Path.Combine(Path.GetTempPath(), "A0CameraStitcher", "simulated-exports");
         Directory.CreateDirectory(exportDirectory);
@@ -552,6 +789,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ExportResult = _exportOutcome.OperatorMessage;
         StatusMessage = "保存が完了しました。原画像を上書き・削除していません。";
         RecalculateAvailability();
+        await Task.CompletedTask;
     }
 
     private void ApplyCaptureResult(SimulatedWorkflowState result)

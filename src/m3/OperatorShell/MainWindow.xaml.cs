@@ -17,7 +17,13 @@ public partial class MainWindow : Window
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "A0CameraStitcher",
             "m3-simulated");
-        _viewModel = new OperatorShellViewModel(new SimulationFoundationService(simulatedRoot));
+        var dualProductRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "A0CameraStitcher",
+            "dual-camera-test-synthetic-products");
+        _viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(simulatedRoot),
+            DualCameraProductComposition.Create(dualProductRoot));
         DataContext = _viewModel;
         Loaded += OnLoaded;
         Closed += OnClosed;

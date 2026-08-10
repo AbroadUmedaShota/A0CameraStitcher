@@ -134,6 +134,17 @@ else()
     target_compile_options(a0_m2_offline_stitcher PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(A0CameraStitcher.M2Adapter
+    src/m2/offline_stitcher_adapter_main.cpp
+)
+target_link_libraries(A0CameraStitcher.M2Adapter PRIVATE a0_m2_offline_stitcher ole32 windowscodecs)
+target_compile_definitions(A0CameraStitcher.M2Adapter PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.M2Adapter PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.M2Adapter PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(A0CameraStitcher.OpticalPlanner src/m2/main.cpp)
 target_link_libraries(A0CameraStitcher.OpticalPlanner PRIVATE a0_m2_optical)
 if(MSVC)

@@ -1,5 +1,6 @@
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.Hardware;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
@@ -51,6 +52,17 @@ catch (Exception exception)
 {
     failures.Add("dual-camera workflow still captures, stitches, restitches, and exports");
     Console.Error.WriteLine($"FAIL dual-camera workflow still captures, stitches, restitches, and exports: {exception}");
+}
+
+try
+{
+    await FormalDualCameraWpfFlowAsync();
+    Console.WriteLine("PASS formal WPF dual-camera flow uses real JPEG product artifacts");
+}
+catch (Exception exception)
+{
+    failures.Add("formal WPF dual-camera flow uses real JPEG product artifacts");
+    Console.Error.WriteLine($"FAIL formal WPF dual-camera flow uses real JPEG product artifacts: {exception}");
 }
 
 try
@@ -207,7 +219,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {18 - failures.Count}/18 passed.");
+Console.WriteLine($"Operator shell tests: {19 - failures.Count}/19 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
@@ -1043,6 +1055,77 @@ static async Task DualCameraRegressionAsync()
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+}
+
+static async Task FormalDualCameraWpfFlowAsync()
+{
+    var adapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
+    if (string.IsNullOrWhiteSpace(adapterPath))
+    {
+        throw new InvalidOperationException("A0_M2_ADAPTER_PATH is required for the formal WPF flow test.");
+    }
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-FormalDualWpfTests",
+        Guid.NewGuid().ToString("N"));
+    var transactionRoot = Path.Combine(root, "legacy-journals");
+    var productRoot = Path.Combine(root, "products");
+    var exportRoot = Path.Combine(root, "operator-export");
+    Directory.CreateDirectory(transactionRoot);
+    Directory.CreateDirectory(exportRoot);
+    try
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+        var productFlow = new DualCameraProductFlow(productRoot, adapter, adapter);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(transactionRoot),
+            productFlow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.FixedLocalExportDirectory = exportRoot;
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.CanCapture, "The typed TestSynthetic dual flow must be ready.");
+
+        viewModel.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy,
+            "The formal dual-camera capture did not finish.");
+        Check.Equal(OperatorUiState.Review, viewModel.UiState);
+        Check.True(viewModel.CaptureResult.Contains("canonical JPEG", StringComparison.Ordinal), "Both originals must be displayed as verified JPEGs.");
+        Check.True(viewModel.RetainedOriginals.Contains("SHA-256", StringComparison.Ordinal), "The UI must display canonical original verification evidence.");
+        Check.True(viewModel.StitchResult.Contains("実JPEG合成完了", StringComparison.Ordinal), "The formal shell must display a real stitched JPEG.");
+        Check.True(viewModel.ProgressSteps.Where(step => step.Id != "liveview").All(step => step.StatusText == "完了"), "Every capture, validation, and stitch stage must be complete.");
+        var firstJob = viewModel.LastStitchJobId;
+
+        viewModel.RestitchCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && !string.Equals(firstJob, viewModel.LastStitchJobId, StringComparison.Ordinal),
+            "Formal restitch did not publish a distinct job.");
+        Check.True(viewModel.CanExport, "The reviewed restitch must be explicitly exportable.");
+
+        viewModel.ExportCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.ExportResult.Contains("byte-identical", StringComparison.Ordinal),
+            "Formal fixed-local export did not finish.");
+        Check.True(File.Exists(viewModel.LastExportPath), "The formal WPF export must publish a JPEG.");
+        Check.True(File.ReadAllBytes(viewModel.LastExportPath) is [0xff, 0xd8, .., 0xff, 0xd9], "The WPF export must be an actual JPEG.");
+
+        viewModel.PrepareNewCaptureCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.CanCapture, "A new formal diagnostic capture was not prepared.");
+        viewModel.SelectedDiagnosticScenario = "CAM-B撮影失敗";
+        viewModel.DiagnosticCommand.Execute(null);
+        await WaitUntilAsync(
+            () => viewModel.TransactionStartCount == 2 && !viewModel.IsBusy,
+            "The typed CAM-B failure diagnostic did not finish.");
+        Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-A: original.jpg", StringComparison.Ordinal), "CAM-A actual JPEG must remain after CAM-B failure.");
+        Check.False(viewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "CAM-B failure must not invent an original.");
+        Check.True(viewModel.TechnicalDetail.Contains("automatic retry count: 0", StringComparison.Ordinal), "The formal diagnostic must show zero retries.");
+        Check.Equal(0, Directory.EnumerateFiles(productRoot, "*.simulated", SearchOption.AllDirectories).Count());
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
