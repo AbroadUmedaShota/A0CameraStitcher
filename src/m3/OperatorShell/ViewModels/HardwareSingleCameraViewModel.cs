@@ -10,7 +10,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private static readonly TimeSpan MaximumProfileExpiryTimerDelay = TimeSpan.FromHours(1);
     private readonly IHardwareSingleCameraOperations _operations;
     private readonly IHardwareSingleAppStateStore _stateStore;
-    private readonly HardwareOriginalExporter _exporter;
+    private HardwareOriginalExporter _exporter;
+    private readonly HardwareSinglePreferencesStore? _preferencesStore;
+    private readonly HardwareSingleCaptureProfileStore? _profileStore;
     private readonly TimeProvider _timeProvider;
     private HardwarePendingTransaction? _pendingTransaction;
     private HardwareSingleReadinessResult? _readiness;
@@ -47,10 +49,23 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         IHardwareSingleAppStateStore stateStore,
         HardwareOriginalExporter exporter,
         TimeProvider? timeProvider = null)
+        : this(operations, stateStore, exporter, null, null, timeProvider)
+    {
+    }
+
+    internal HardwareSingleCameraViewModel(
+        IHardwareSingleCameraOperations operations,
+        IHardwareSingleAppStateStore stateStore,
+        HardwareOriginalExporter exporter,
+        HardwareSinglePreferencesStore? preferencesStore,
+        HardwareSingleCaptureProfileStore? profileStore,
+        TimeProvider? timeProvider = null)
     {
         _operations = operations ?? throw new ArgumentNullException(nameof(operations));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _exporter = exporter ?? throw new ArgumentNullException(nameof(exporter));
+        _preferencesStore = preferencesStore;
+        _profileStore = profileStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         CheckReadinessCommand = new AsyncRelayCommand(CheckReadinessAsync, () => CanCheckReadiness, HandleCommandException);
@@ -59,9 +74,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         RecoverTransactionCommand = new AsyncRelayCommand(RecoverTransactionAsync, () => CanRecoverTransaction, HandleCommandException);
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, HandleCommandException);
         PrepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, HandleCommandException);
+        ApproveProfileCommand = new AsyncRelayCommand(ApproveProfileAsync, () => CanApproveProfile, HandleCommandException);
     }
 
-    public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A", "CAM-B"];
+    public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A"];
 
     public string AgentExecutablePath => _operations.AgentExecutablePath;
 
@@ -76,7 +92,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         get => _selectedCamera;
         set
         {
-            if (!CanSelectCamera || value is not ("CAM-A" or "CAM-B") || !SetProperty(ref _selectedCamera, value))
+            if (!CanSelectCamera || value != "CAM-A" || !SetProperty(ref _selectedCamera, value))
             {
                 return;
             }
@@ -319,6 +335,15 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _initializationComplete && !IsBusy && !_stateLoadFailed && _pendingTransaction is not null &&
         (_captureResult is not null || _localPreDispatchFailure);
 
+    public bool CanApproveProfile =>
+        _profileStore is not null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        _pendingTransaction is null && _captureResult is null && _readiness is not null &&
+        SelectedCamera == "CAM-A" && ExclusiveCameraControlConfirmed;
+
+    public bool CanChangeExportDirectory =>
+        _preferencesStore is not null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        _pendingTransaction is null && _captureResult is null;
+
     public ICommand CheckReadinessCommand { get; }
 
     public ICommand ProbeLiveViewCommand { get; }
@@ -331,6 +356,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     public ICommand PrepareNewCaptureCommand { get; }
 
+    public ICommand ApproveProfileCommand { get; }
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         if (_initializationStarted || _initializationComplete)
@@ -342,6 +369,15 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         IsBusy = true;
         try
         {
+            if (_preferencesStore is not null)
+            {
+                var preferences = await _preferencesStore.LoadAsync(cancellationToken).ConfigureAwait(true);
+                if (preferences is not null)
+                {
+                    _exporter = new HardwareOriginalExporter(preferences.ExportDirectory);
+                    OnPropertyChanged(nameof(ExportDirectory));
+                }
+            }
             _pendingTransaction = await _stateStore.LoadPendingAsync(cancellationToken).ConfigureAwait(true);
             if (_pendingTransaction is not null)
             {
@@ -389,6 +425,64 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             _initializationStarted = false;
             IsBusy = false;
             NotifyAvailability();
+        }
+    }
+
+    public async Task ChangeExportDirectoryAsync(
+        string exportDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        if (!CanChangeExportDirectory || _preferencesStore is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            var normalized = Path.GetFullPath(exportDirectory);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+            Directory.CreateDirectory(normalized);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+            await _preferencesStore.SaveAsync(normalized, cancellationToken).ConfigureAwait(true);
+            _exporter = new HardwareOriginalExporter(normalized);
+            OnPropertyChanged(nameof(ExportDirectory));
+            ActivityText = "保存先をローカル固定ドライブへ更新しました。";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            ActivityText = "保存先を安全に更新できませんでした。以前の保存先を維持します。";
+            TechnicalDetail += $"\nexport_directory_failed: {SafeMessage(exception)}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public async Task ApproveProfileAsync()
+    {
+        if (!CanApproveProfile || _profileStore is null || _readiness is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        ActivityText = "read-only観測値を一台用プロファイルとして確認中…";
+        try
+        {
+            await _profileStore.ApproveCamAAsync(_readiness.ObservedSettings).ConfigureAwait(true);
+            InvalidateReadiness("30日有効のCAM-Aプロファイルを承認しました。状態を再確認してください。");
+            ActivityText = "CAM-Aプロファイルをローカル承認しました。カメラ設定は変更していません。";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            ActivityText = "観測値が承認条件に一致しないため、プロファイルを作成しませんでした。";
+            TechnicalDetail += $"\nprofile_approval_failed: {SafeMessage(exception)}";
+        }
+        finally
+        {
+            IsBusy = false;
         }
     }
 
@@ -1006,6 +1100,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(CanRecoverTransaction));
         OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
+        OnPropertyChanged(nameof(CanApproveProfile));
+        OnPropertyChanged(nameof(CanChangeExportDirectory));
         OnPropertyChanged(nameof(BlockerText));
         ((AsyncRelayCommand)CheckReadinessCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ProbeLiveViewCommand).NotifyCanExecuteChanged();
@@ -1013,6 +1109,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ((AsyncRelayCommand)RecoverTransactionCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)PrepareNewCaptureCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)ApproveProfileCommand).NotifyCanExecuteChanged();
     }
 
     private static string SafeMessage(Exception exception)

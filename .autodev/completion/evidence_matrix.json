@@ -1,6 +1,6 @@
 {
   "schema_version": "autodev.evidence-matrix.v1",
-  "requirements_version": "2.6.0",
+  "requirements_version": "2.7.0",
   "evaluated_at": "2026-08-10T00:00:00+09:00",
   "items": [
     {
@@ -8,7 +8,7 @@
       "status": "partial",
       "work_item_ids": ["WI-0001", "WI-0030A", "WI-0032A", "WI-0033A", "WI-0031", "WI-0032", "WI-0033"],
       "evidence": ["docs/DECISIONS.md", "docs/PRODUCT_REQUIREMENTS.md", "tests/m3/FoundationTests/Program.cs", "tests/m3/OperatorShellTests/Program.cs", "tests/hardware_camera_agent_tests.cpp", "scripts/Test-M3Simulated.ps1"],
-      "confirmed_scope": "The product owner approved explicit SingleCamera and DualCamera scope; fresh 2026-08-10 software contracts passed Foundation 19/19, Operator Shell 15/15, the M3 boundary script, and SDK-less plus licensed-SDK-enabled Release CTest 6/6 each for immutable active mode and required aliases, selected-alias Single operation, no automatic fallback, and fail-closed hardware-agent boundaries.",
+      "confirmed_scope": "The product owner approved explicit SingleCamera and DualCamera scope and the CAM-A-first contract; fresh software contracts passed Foundation 19/19, Operator Shell 16/16, the M3 boundary script, and SDK-less plus licensed-SDK-enabled Release CTest 7/7 each for CAM-A identity-v3, 30-day read-only profile approval, fixed-local export, immutable active mode, no automatic fallback, and fail-closed hardware-agent boundaries.",
       "remaining_gap": "Real D810 exact-count rejection, WPF-to-Camera-Agent hardware execution, actual SingleCamera capture/export, and product acceptance are not verified."
     },
     {
@@ -152,7 +152,7 @@
       "status": "partial",
       "work_item_ids": ["WI-0033A", "WI-0033"],
       "evidence": ["docs/M3_SIMULATED_FOUNDATION.md", "docs/OPERATOR_UI_SPEC.md", "tests/m3/FoundationTests/Program.cs", "scripts/Test-M3Simulated.ps1"],
-      "confirmed_scope": "Fresh 2026-08-10 Foundation 19/19 and Operator Shell 15/15 contracts cover explicit mode and required aliases, Single/Dual readiness and blockers, separated outcomes, startup operation gating, and no automatic fallback.",
+      "confirmed_scope": "Fresh 2026-08-10 Foundation 19/19 and Operator Shell 16/16 contracts cover explicit mode and required aliases, CAM-A-only Single operation, local profile approval and export preference, Single/Dual readiness and blockers, separated outcomes, startup operation gating, and no automatic fallback.",
       "remaining_gap": "Real WPF interaction, real camera readiness, mode-specific profile measurements, screen-reader/keyboard/focus acceptance, and real correction readiness remain."
     },
     {
@@ -185,7 +185,7 @@
       "work_item_ids": ["WI-0020A", "WI-0021", "WI-0024", "WI-0035"],
       "evidence": [],
       "confirmed_scope": "The DualCamera ten-second value remains a provisional target only.",
-      "remaining_gap": "No real mode-labelled capture-to-product-JPEG timing exists, and HG-0009 has not set the SingleCamera target."
+      "remaining_gap": "No real mode-labelled capture-to-product-JPEG timing exists. SingleCamera requires ten characterization runs and product-owner approval of the measured p95 under HG-0009."
     },
     {
       "requirement_id": "NFR-REL-001",
@@ -193,7 +193,7 @@
       "work_item_ids": ["WI-0016", "WI-0035"],
       "evidence": [],
       "confirmed_scope": "No real SingleCamera durability or DualCamera stability result is claimed.",
-      "remaining_gap": "DualCamera 100 of 100 awaits Phase 0B, and HG-0009 plus a separate real run must define and prove SingleCamera durability."
+      "remaining_gap": "DualCamera 100 of 100 awaits Phase 0B. SingleCamera requires p95 approval followed by a separate 100 of 100 first-attempt real run."
     },
     {
       "requirement_id": "NFR-OBS-001",

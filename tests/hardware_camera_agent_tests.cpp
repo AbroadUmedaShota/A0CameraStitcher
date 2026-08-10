@@ -1515,6 +1515,36 @@ void TestFixedLocalPathPolicy() {
     fs::remove_all(root, cleanup_error);
 }
 
+void TestSingleIdentityV3Parser() {
+    const std::string digest(64, 'b');
+    const std::string json =
+        "{\"schemaVersion\":\"a0.camera-agent.single-identity.v3\","
+        "\"cameraMode\":\"SingleCamera\",\"selectedAlias\":\"CAM-A\","
+        "\"wpdStableIdentitySha256\":\"" + digest +
+        "\",\"sdkSelectionPolicy\":\"exactly-one-current-session\"}";
+    const auto parsed = ParseSingleCameraIdentityV3(json);
+    Check(parsed.camera_alias == "CAM-A" &&
+              parsed.wpd_stable_identity_sha256 == digest &&
+              parsed.sdk_selection_policy == "exactly-one-current-session",
+        "identity-v3 parser must preserve the WPD authority and exact-one SDK policy");
+    for (const auto& invalid : {
+             json + " trailing",
+             std::string(json).replace(json.find("CAM-A"), 5, "CAM-B"),
+             std::string(json).replace(json.find(digest), digest.size(), std::string(64, 'G')),
+             std::string(json).replace(
+                 json.find("exactly-one-current-session"),
+                 std::string("exactly-one-current-session").size(),
+                 "enumeration-order")}) {
+        bool rejected = false;
+        try {
+            (void)ParseSingleCameraIdentityV3(invalid);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected, "identity-v3 must reject trailing, CAM-B, malformed digest, and unsafe SDK policy values");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1524,6 +1554,7 @@ int main() {
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
+    TestSingleIdentityV3Parser();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;

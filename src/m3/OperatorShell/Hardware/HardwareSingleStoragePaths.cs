@@ -2,8 +2,15 @@ using System.IO;
 
 namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 
-internal sealed record HardwareSingleStoragePaths(string StateDirectory, string ExportDirectory)
+internal sealed record HardwareSingleStoragePaths(
+    string StateDirectory,
+    string DefaultExportDirectory,
+    string PreferencesPath,
+    string CaptureProfilePath,
+    string SingleIdentityV3Path)
 {
+    public string ExportDirectory => DefaultExportDirectory;
+
     public static HardwareSingleStoragePaths Resolve(string localApplicationData)
     {
         if (string.IsNullOrWhiteSpace(localApplicationData) ||
@@ -15,8 +22,12 @@ internal sealed record HardwareSingleStoragePaths(string StateDirectory, string 
 
         var root = Path.GetFullPath(localApplicationData);
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(root);
+        var productRoot = Path.Combine(root, "A0CameraStitcher");
         return new HardwareSingleStoragePaths(
-            Path.Combine(root, "A0CameraStitcher", "hardware-single"),
-            Path.Combine(root, "A0CameraStitcher", "Exports"));
+            Path.Combine(productRoot, "hardware-single"),
+            Path.Combine(productRoot, "Exports"),
+            Path.Combine(productRoot, "hardware-single", "preferences.json"),
+            Path.Combine(productRoot, "camera-agent", "approved-single-capture-profile.json"),
+            Path.Combine(productRoot, "phase0", "single-identity-v3.json"));
     }
 }

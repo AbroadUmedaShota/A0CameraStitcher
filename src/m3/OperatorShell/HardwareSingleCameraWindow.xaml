@@ -78,6 +78,9 @@
                             </Border>
                             <Button Content="状態を確認" Command="{Binding CheckReadinessCommand}" IsEnabled="{Binding CanCheckReadiness}"
                                     HorizontalAlignment="Left" AutomationProperties.Name="一台実機のread-only readinessを確認" />
+                            <Button Content="観測値を30日プロファイルとして承認" Command="{Binding ApproveProfileCommand}"
+                                    IsEnabled="{Binding CanApproveProfile}" HorizontalAlignment="Left"
+                                    AutomationProperties.Name="CAM-Aのread-only設定を一台用profileとして承認" />
                             <TextBlock Text="設定値は表示・照合のみ。カメラ設定writeは実装していません。" Foreground="#FF56616B" />
                         </StackPanel>
                     </Border>
@@ -176,6 +179,9 @@
                         <StackPanel>
                             <TextBlock Text="保存先" FontWeight="Bold" />
                             <TextBlock Text="{Binding ExportDirectory}" Margin="0,5,0,8" />
+                            <Button Content="保存先を選択" Click="OnChooseExportDirectory"
+                                    IsEnabled="{Binding CanChangeExportDirectory}" HorizontalAlignment="Left"
+                                    AutomationProperties.Name="ローカル固定ドライブ上の保存先を選択" />
                             <TextBlock Text="Camera Agent" FontWeight="Bold" />
                             <TextBlock Text="{Binding AgentExecutablePath}" Margin="0,5,0,8" />
                             <Expander Header="技術情報（redacted）">

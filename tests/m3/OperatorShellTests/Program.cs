@@ -4,6 +4,7 @@ using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Security.Cryptography;
+using System.Text.Json;
 
 var failures = new List<string>();
 try
@@ -171,8 +172,116 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL startup inspection and profile expiry keep every hardware command closed: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {15 - failures.Count}/15 passed.");
+try
+{
+    await HardwareSinglePreferencesAndProfileApprovalAsync();
+    Console.WriteLine("PASS local export preference and 30-day CAM-A profile approval are durable and fail closed");
+}
+catch (Exception exception)
+{
+    failures.Add("local export preference and 30-day CAM-A profile approval are durable and fail closed");
+    Console.Error.WriteLine($"FAIL local export preference and 30-day CAM-A profile approval are durable and fail closed: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {16 - failures.Count}/16 passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static async Task HardwareSinglePreferencesAndProfileApprovalAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var exportDirectory = Path.Combine(root, "selected-exports");
+        Directory.CreateDirectory(exportDirectory);
+        var preferences = new HardwareSinglePreferencesStore(Path.Combine(root, "state", "preferences.json"));
+        await preferences.SaveAsync(exportDirectory);
+        var loaded = await preferences.LoadAsync();
+        Check.Equal(Path.GetFullPath(exportDirectory), loaded!.ExportDirectory);
+
+        var profilePath = Path.Combine(root, "camera-agent", "approved-single-capture-profile.json");
+        var now = DateTimeOffset.Parse("2026-08-10T01:02:03Z");
+        var timeProvider = new MutableTimeProvider(now);
+        var profileStore = new HardwareSingleCaptureProfileStore(profilePath, timeProvider);
+        await profileStore.ApproveCamAAsync(ApprovedCamAObservedSettings());
+        using var profile = JsonDocument.Parse(await File.ReadAllTextAsync(profilePath));
+        var document = profile.RootElement;
+        Check.Equal("a0.camera-agent.capture-profile.v1", document.GetProperty("schemaVersion").GetString() ?? string.Empty);
+        Check.Equal("CAM-A", document.GetProperty("selectedAlias").GetString() ?? string.Empty);
+        Check.Equal("SingleCamera", document.GetProperty("cameraMode").GetString() ?? string.Empty);
+        Check.Equal("2026-09-09T01:02:03Z", document.GetProperty("expiresAtUtc").GetString() ?? string.Empty);
+        Check.False(document.GetRawText().Contains("serial", StringComparison.OrdinalIgnoreCase), "Profile must not contain a camera serial.");
+        Check.False(document.GetProperty("expectedSettings").GetProperty("fileType").GetProperty("available").GetBoolean(), "FileType must remain explicitly unavailable.");
+        Check.Equal("JPEG Fine", document.GetProperty("expectedSettings").GetProperty("compressionLevel").GetProperty("currentLabel").GetString() ?? string.Empty);
+        Check.Equal((uint)3, document.GetProperty("expectedSettings").GetProperty("exposureMode").GetProperty("currentValue").GetUInt32());
+        Check.Equal("Preset 1", document.GetProperty("expectedSettings").GetProperty("whiteBalanceMode").GetProperty("currentLabel").GetString() ?? string.Empty);
+
+        var rejectedPath = Path.Combine(root, "camera-agent", "rejected-profile.json");
+        var rejectedStore = new HardwareSingleCaptureProfileStore(rejectedPath, timeProvider);
+        await Check.ThrowsAsync<InvalidOperationException>(() =>
+            rejectedStore.ApproveCamAAsync(ApprovedCamAObservedSettings() with
+            {
+                ExposureMode = ApprovedCamAObservedSettings().ExposureMode with { CurrentValue = 1 },
+            }));
+        Check.False(File.Exists(rejectedPath), "Rejected observations must not publish a profile.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static HardwareObservedCameraSettings ApprovedCamAObservedSettings()
+{
+    static HardwareObservedCameraSetting Setting(string label) => new()
+    {
+        Available = true,
+        CapType = "enum",
+        ProbeState = "observed",
+        ValueType = "label",
+        CurrentValue = null,
+        CurrentIndex = 0,
+        CurrentLabel = label,
+    };
+    return new HardwareObservedCameraSettings
+    {
+        FileType = new HardwareObservedCameraSetting
+        {
+            Available = false,
+            CapType = "unsupported",
+            ProbeState = "not-advertised",
+            ValueType = "unsupported",
+            CurrentValue = null,
+            CurrentIndex = null,
+            CurrentLabel = null,
+        },
+        CompressionLevel = Setting("JPEG Fine"),
+        ImageSize = Setting("L(7360*4912)"),
+        ExposureMode = new HardwareObservedCameraSetting
+        {
+            Available = true,
+            CapType = "enum",
+            ProbeState = "available",
+            ValueType = "unsigned",
+            CurrentValue = 3,
+            CurrentIndex = 3,
+            CurrentLabel = null,
+        },
+        ShutterSpeed = Setting("1/6"),
+        Aperture = Setting("8"),
+        Sensitivity = Setting("64"),
+        WhiteBalanceMode = Setting("Preset 1"),
+        FocusMode = new HardwareObservedCameraSetting
+        {
+            Available = true,
+            CapType = "generic",
+            ProbeState = "available",
+            ValueType = "unsigned",
+            CurrentValue = 1,
+            CurrentIndex = null,
+            CurrentLabel = null,
+        },
+    };
+}
 
 static async Task HardwareSingleHappyPathAsync()
 {

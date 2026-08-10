@@ -795,6 +795,12 @@ private:
 
 [[nodiscard]] std::string NewRunId();
 [[nodiscard]] std::filesystem::path DefaultIdentityMapPath();
+[[nodiscard]] std::filesystem::path DefaultSingleIdentityV3Path();
+void PersistSingleIdentityV3(
+    const std::filesystem::path& path,
+    std::string_view alias,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras);
 [[nodiscard]] bool IsValidJpeg(const std::vector<unsigned char>& bytes);
 [[nodiscard]] std::vector<unsigned char> ExtractD810LiveViewJpeg(
     const std::vector<unsigned char>& frame_with_header);

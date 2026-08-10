@@ -2345,6 +2345,83 @@ fs::path DefaultIdentityMapPath() {
     return fs::path(*local_app_data) / "A0CameraStitcher" / "phase0" / "camera-map.json";
 }
 
+fs::path DefaultSingleIdentityV3Path() {
+    const auto path = DefaultIdentityMapPath();
+    return path.parent_path() / "single-identity-v3.json";
+}
+
+void PersistSingleIdentityV3(
+    const fs::path& path,
+    std::string_view alias,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    if (alias != "CAM-A") {
+        throw std::runtime_error("SingleCamera identity-v3 product alias must be CAM-A");
+    }
+    if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1 ||
+        sdk_cameras.front().model != "Nikon D810" ||
+        wpd_cameras.front().model != "Nikon D810") {
+        throw std::runtime_error(
+            "SingleCamera identity-v3 requires exactly one D810 in both SDK and WPD inventories");
+    }
+    const std::string& wpd_identity = wpd_cameras.front().stable_identity;
+    if (wpd_identity.size() != 64 ||
+        !std::all_of(wpd_identity.begin(), wpd_identity.end(), [](unsigned char value) {
+            return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+        })) {
+        throw std::runtime_error("WPD identity digest is not a canonical SHA-256 value");
+    }
+
+    const fs::path absolute = fs::absolute(path).lexically_normal();
+    const std::wstring native = absolute.native();
+    if (!absolute.is_absolute() || native.size() < 3 || native[1] != L':' ||
+        (native[2] != L'\\' && native[2] != L'/') ||
+        native.find(L':', 2) != std::wstring::npos ||
+        native.starts_with(L"\\\\") || native.starts_with(L"\\??\\")) {
+        throw std::runtime_error("identity-v3 path must be drive-qualified local storage");
+    }
+    const std::wstring drive_root{native[0], L':', L'\\'};
+    if (GetDriveTypeW(drive_root.c_str()) != DRIVE_FIXED) {
+        throw std::runtime_error("identity-v3 path must be on a fixed local drive");
+    }
+    fs::path current = absolute.root_path();
+    for (const auto& component : absolute.lexically_relative(current)) {
+        current /= component;
+        if (fs::exists(current) && IsReparsePoint(current)) {
+            throw std::runtime_error("identity-v3 path chain must be reparse-free");
+        }
+    }
+    fs::create_directories(absolute.parent_path());
+    if (fs::exists(absolute)) {
+        throw std::runtime_error(
+            "identity-v3 already exists; explicit invalidation and review are required");
+    }
+    const fs::path partial = absolute.string() + ".partial";
+    if (fs::exists(partial)) {
+        throw std::runtime_error("identity-v3 partial exists; inspect before retrying");
+    }
+    const std::string body =
+        "{\n  \"schemaVersion\": \"a0.camera-agent.single-identity.v3\",\n"
+        "  \"cameraMode\": \"SingleCamera\",\n"
+        "  \"selectedAlias\": \"CAM-A\",\n"
+        "  \"wpdStableIdentitySha256\": \"" + wpd_identity + "\",\n"
+        "  \"sdkSelectionPolicy\": \"exactly-one-current-session\"\n}\n";
+    WriteBytesExclusive(
+        partial,
+        std::vector<unsigned char>(body.begin(), body.end()));
+    if (!MoveFileExW(
+            partial.c_str(),
+            absolute.c_str(),
+            MOVEFILE_WRITE_THROUGH)) {
+        const DWORD error = GetLastError();
+        std::error_code remove_error;
+        fs::remove(partial, remove_error);
+        throw std::system_error(
+            static_cast<int>(error), std::system_category(),
+            "cannot publish SingleCamera identity-v3");
+    }
+}
+
 bool IsValidJpeg(const std::vector<unsigned char>& bytes) {
     return bytes.size() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[bytes.size() - 2] == 0xFF && bytes.back() == 0xD9;
 }

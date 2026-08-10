@@ -25,8 +25,13 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
     private static readonly TimeSpan LiveViewResponseTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan CaptureResponseTimeout = TimeSpan.FromSeconds(240);
     private readonly string _agentExecutablePath;
+    private readonly string _captureProfilePath;
+    private readonly string _singleIdentityV3Path;
 
-    public ServeOnceHardwareCameraAgentOperations(string agentExecutablePath)
+    public ServeOnceHardwareCameraAgentOperations(
+        string agentExecutablePath,
+        string? captureProfilePath = null,
+        string? singleIdentityV3Path = null)
     {
         if (string.IsNullOrWhiteSpace(agentExecutablePath))
         {
@@ -34,6 +39,12 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         }
 
         _agentExecutablePath = Path.GetFullPath(agentExecutablePath);
+        _captureProfilePath = string.IsNullOrWhiteSpace(captureProfilePath)
+            ? string.Empty
+            : Path.GetFullPath(captureProfilePath);
+        _singleIdentityV3Path = string.IsNullOrWhiteSpace(singleIdentityV3Path)
+            ? string.Empty
+            : Path.GetFullPath(singleIdentityV3Path);
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
@@ -264,6 +275,20 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         startInfo.ArgumentList.Add("--serve-once");
         startInfo.ArgumentList.Add("--pipe-name");
         startInfo.ArgumentList.Add(pipeName);
+        if (!string.IsNullOrEmpty(_captureProfilePath))
+        {
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(
+                Path.GetDirectoryName(_captureProfilePath)!);
+            startInfo.ArgumentList.Add("--approved-capture-profile");
+            startInfo.ArgumentList.Add(_captureProfilePath);
+        }
+        if (!string.IsNullOrEmpty(_singleIdentityV3Path))
+        {
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(
+                Path.GetDirectoryName(_singleIdentityV3Path)!);
+            startInfo.ArgumentList.Add("--single-identity-v3");
+            startInfo.ArgumentList.Add(_singleIdentityV3Path);
+        }
         return startInfo;
     }
 

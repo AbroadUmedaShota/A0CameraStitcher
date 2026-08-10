@@ -25,7 +25,7 @@
 
 ## Phase 0A: 一台先行
 
-ADR-0023以後、Phase 0Aは`SingleCamera`実機transport受入の先行証拠として使う。初期仕様ではSDK/WPD双方で同じ登録済みD810が厳密に一台だけ列挙されることを要求し、選択aliasは`CAM-A`または`CAM-B`とする。既存のCAM-A履歴証拠をidentity-v2、実WPF Camera Agent、canonical original明示export、一台製品受入へ読み替えない。
+ADR-0024以後、Phase 0AはCAM-A専用`SingleCamera`実機transport受入の先行証拠として使う。登録済みWPD serial digestとSDK/WPD双方のexactly-one current-session projectionをidentity-v3で要求し、衝突するSDK Name/Interfaceを永続identityにしない。既存証拠をidentity-v3、実WPF Camera Agent、canonical original明示export、一台製品受入へ読み替えない。
 
 ### P0-A1: SDKとD810列挙
 
@@ -69,6 +69,7 @@ active transactionのUSB切断は`hybrid-fault-single`で実行する。empty-be
 
 - Phase 0Aでは物理D810を一台だけ接続し、二台目は接続しない。これによりSDKとWPDが同じ実機を指す条件を固定する。
 - 選択alias一台だけをSDK Live Viewで開始し、プレビュー画像を10 frame取得する。プレビューは`artifacts`の診断用途に限り、原画像・合成入力・transaction JPEG候補にしない。
+- 製品UI受入では、開始後に明示停止までframeを継続取得するversioned long-lived session、heartbeat、bounded lifetime、backpressureを検証する。`hardware.v1`の1..30 frame有限probeを継続Live View合格へ読み替えない。
 - `live-view --duration-seconds 300`で5分間継続し、有効JPEG frame数、停止、SDK closeを匿名summaryへ記録する。
 - Live View停止、SDK session close、WPD baseline/full close、SDK one card capture/full close、WPD recovery（capture commandなし）、PC JPEG保存、SDK Live View再開を一連のhandoffとして実行する。
 - 自動handoffを1回以上実行し、SDK/WPDが重複せず各closeが次のopen前に完了したtraceを確認する。
@@ -78,6 +79,12 @@ active transactionのUSB切断は`hybrid-fault-single`で実行する。empty-be
 Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evidence/phase0/run-1785917554163-1/report.md)は5分04秒で2,424 frameを取得し、停止、SDK session close、preview非保存を確認した。続く別プロセスの[run-1785917887961-1](evidence/phase0/run-1785917887961-1/report.md)も1 frame取得、停止、close、preview非保存に成功し、最終`run-1785917904556-1`はLive View `off`とSDK session closeを確認した。ただしこれらは承認済みspool handoffの合格証拠ではない。10回連続handoffは未実施のため、P0-A4全体はPartial/Hardware Pendingとする。
 
 合格: 10回連続で、SDK Live View停止・close後だけhybrid transactionを開始し、PC JPEG保存後に選択中の一台Live Viewを再開できる。失敗時はtransactionと診断を保持し、新規操作でのみ再開する。
+
+### P0-A5: SingleCamera製品characterizationと100件受入
+
+- one-shot合格後、CAM-A、承認済み30日profile、empty dedicated spool、no-retryで10 transactionを実行し、capture開始からbyte-identical `7360×4912`製品JPEG確定までのp50/p95/maxを記録する。
+- 10回はcharacterizationであり、`HG-0009`でproduct ownerが実測p95を承認するまで性能Passにしない。
+- 承認後、同じ契約で100件連続の初回成功を要求する。失敗、original損失、曖昧採用、cleanup不整合、自動retryを0件とする。
 
 ## SDK単独PC転送経路の不成立判定（判定済み）
 

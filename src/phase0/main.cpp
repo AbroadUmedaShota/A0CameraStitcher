@@ -105,6 +105,8 @@ void Usage() {
         << "    (exactly one physical D810 connected; refuses replacement or enumeration-order assignment)\n"
         << "  bind-cross-transport-identity --alias CAM-A|CAM-B --single-camera-connected-confirmed\n"
         << "    (one lease; SDK then WPD; validates both local maps before either binding)\n"
+        << "  bind-single-identity-v3 --alias CAM-A --single-camera-connected-confirmed\n"
+        << "    (read-only SDK/WPD enumeration; persists only the WPD serial digest and exact-one SDK policy)\n"
         << "  verify-dual-identity (read-only; requires exactly CAM-A and CAM-B in SDK and WPD)\n"
         << "  verify-dual-spools (read-only; requires dual identity, then counts all payloads on both cards)\n"
         << "  sdk-status --alias CAM-A (read-only; does not start Live View or change camera settings)\n"
@@ -399,6 +401,32 @@ int BindCrossTransportIdentityCommand(const Options& options) {
               << "\nSdkSessionClosedBeforeWpdInventory: true"
               << "\nBothMapsValidatedBeforeBinding: true"
               << "\nIdentityMapsChanged: " << (maps_changed ? "true" : "false")
+              << "\nCaptureCommandSent: false"
+              << "\nLiveViewStarted: false"
+              << "\nCameraSettingsChanged: false"
+              << "\nCardAccessPerformed: false"
+              << "\nReal identifiers were not printed.\n";
+    return 0;
+}
+
+int BindSingleIdentityV3Command(const Options& options) {
+    if (options.alias != "CAM-A") {
+        throw std::runtime_error("bind-single-identity-v3 supports only product alias CAM-A");
+    }
+    NikonSdkTransport sdk;
+    WpdTransport wpd(options.wpd_command_target);
+    sdk.RequireExactlyOneD810ForProductAgent();
+    wpd.RequireExactlyOneD810ForProductAgent();
+    const auto sdk_cameras = sdk.Enumerate();
+    const auto wpd_cameras = wpd.Enumerate();
+    const auto path = DefaultSingleIdentityV3Path();
+    PersistSingleIdentityV3(path, options.alias, sdk_cameras, wpd_cameras);
+    std::cout << "CameraAlias: CAM-A"
+              << "\nSdkCameraCount: " << sdk_cameras.size()
+              << "\nWpdCameraCount: " << wpd_cameras.size()
+              << "\nIdentityStrategy: wpd-serial-digest-plus-exactly-one-sdk-session"
+              << "\nBindingState: identity-v3-created"
+              << "\nSingleCameraConnectedConfirmed: true"
               << "\nCaptureCommandSent: false"
               << "\nLiveViewStarted: false"
               << "\nCameraSettingsChanged: false"
@@ -1381,6 +1409,7 @@ int main(int argc, char** argv) {
         if (options.command == "inventory") return Inventory(options);
         if (options.command == "bind-identity") return BindIdentity(options);
         if (options.command == "bind-cross-transport-identity") return BindCrossTransportIdentityCommand(options);
+        if (options.command == "bind-single-identity-v3") return BindSingleIdentityV3Command(options);
         if (options.command == "verify-dual-identity") return VerifyDualIdentityCommand(options);
         if (options.command == "verify-dual-spools") return VerifyDualSpoolsCommand(options);
         if (options.command == "sdk-status") return RunSdkStatus(options);

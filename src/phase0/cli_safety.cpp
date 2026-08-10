@@ -14,6 +14,7 @@ bool IsRealHardwareCommand(std::string_view command) noexcept {
         std::string_view{"inventory"},
         std::string_view{"bind-identity"},
         std::string_view{"bind-cross-transport-identity"},
+        std::string_view{"bind-single-identity-v3"},
         std::string_view{"verify-dual-identity"},
         std::string_view{"verify-dual-spools"},
         std::string_view{"sdk-status"},
@@ -68,18 +69,19 @@ std::optional<std::string> ValidateIdentityBindingArguments(
     bool transport_explicit) {
     const bool single_transport = command == "bind-identity";
     const bool cross_transport = command == "bind-cross-transport-identity";
-    if (!single_transport && !cross_transport) {
+    const bool single_v3 = command == "bind-single-identity-v3";
+    if (!single_transport && !cross_transport && !single_v3) {
         if (single_camera_connected_confirmed) {
             return "single-camera-connected-confirmed is valid only for identity binding commands";
         }
         return std::nullopt;
     }
-    if (cross_transport) {
+    if (cross_transport || single_v3) {
         if (transport_explicit) {
-            return "bind-cross-transport-identity selects SDK and WPD internally and does not accept --transport";
+            return std::string(command) + " selects SDK and WPD internally and does not accept --transport";
         }
         if (!single_camera_connected_confirmed) {
-            return "bind-cross-transport-identity requires --single-camera-connected-confirmed after all other D810 bodies are disconnected";
+            return std::string(command) + " requires --single-camera-connected-confirmed after all other D810 bodies are disconnected";
         }
         return std::nullopt;
     }

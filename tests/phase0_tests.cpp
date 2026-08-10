@@ -1328,6 +1328,40 @@ void TestWpdStableIdentityUsesCameraSerialNotPnpPath() {
         "missing, oversized, or embedded-NUL WPD serials must fail closed");
 }
 
+void TestSingleIdentityV3PersistsOnlyWpdAuthority() {
+    const auto root = NewTestRoot("single-identity-v3");
+    const auto path = root / "single-identity-v3.json";
+    const std::string wpd_digest(64, 'a');
+    const std::vector<CameraInfo> sdk{{"Nikon D810", "unknown", "S", "sdk-session-projection"}};
+    const std::vector<CameraInfo> wpd{{"Nikon D810", "1.14", "S", wpd_digest}};
+    PersistSingleIdentityV3(path, "CAM-A", sdk, wpd);
+    const auto body = ReadAll(path);
+    Check(body.find("a0.camera-agent.single-identity.v3") != std::string::npos &&
+              body.find("exactly-one-current-session") != std::string::npos &&
+              body.find(wpd_digest) != std::string::npos &&
+              body.find("sdk-session-projection") == std::string::npos,
+        "identity-v3 must persist only WPD authority and the exact-one SDK policy");
+    bool duplicate_rejected = false;
+    try {
+        PersistSingleIdentityV3(path, "CAM-A", sdk, wpd);
+    } catch (const std::runtime_error&) {
+        duplicate_rejected = true;
+    }
+    Check(duplicate_rejected,
+        "identity-v3 must never overwrite an existing binding without explicit invalidation");
+    bool extra_camera_rejected = false;
+    try {
+        PersistSingleIdentityV3(
+            root / "extra.json", "CAM-A",
+            {sdk.front(), sdk.front()}, wpd);
+    } catch (const std::runtime_error&) {
+        extra_camera_rejected = true;
+    }
+    Check(extra_camera_rejected && !fs::exists(root / "extra.json"),
+        "identity-v3 must reject any inventory other than exactly one SDK and one WPD D810");
+    fs::remove_all(root);
+}
+
 void TestCrossTransportBindingPrevalidatesBothMaps() {
     const CameraInfo sdk_camera{"Nikon D810", "unknown", "S", "sdk-body-a"};
     const CameraInfo wpd_camera{"Nikon D810", "1.14", "S", "wpd-body-a"};
@@ -2552,6 +2586,7 @@ int main() {
         TestIdentityMap();
         TestNikonSdkStableIdentityUsesDocumentedSourceStrings();
         TestWpdStableIdentityUsesCameraSerialNotPnpPath();
+        TestSingleIdentityV3PersistsOnlyWpdAuthority();
         TestCrossTransportBindingPrevalidatesBothMaps();
         TestDualIdentityVerificationRequiresExactAliasCardinality();
         TestDualSpoolVerificationRequiresIdentityAndBothEmptyCards();

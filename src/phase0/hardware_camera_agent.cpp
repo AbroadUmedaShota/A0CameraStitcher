@@ -1155,6 +1155,9 @@ SingleCameraCaptureResult ParseTransactionJournal(
 fs::path StrictFixedLocalPath(
     const fs::path& path,
     std::string_view purpose);
+void ValidateDistinctProductIdentityMaps(
+    const IdentityMap& sdk_map,
+    const IdentityMap& wpd_map);
 
 fs::path TransactionJournalPath(const fs::path& root, std::string_view transaction_id) {
     if (!IsSafeTransactionId(transaction_id)) {
@@ -1319,6 +1322,80 @@ IdentityMap LoadStrictProductIdentityMap(const fs::path& path) {
             "identity_map_invalid",
             "product Camera Agent identity map is malformed or outside its trusted local scope");
     }
+}
+
+SingleCameraIdentityV3 LoadStrictSingleIdentityV3(const fs::path& path) {
+    try {
+        const fs::path absolute =
+            StrictFixedLocalPath(path, "SingleCamera identity-v3");
+        std::error_code type_error;
+        if (!fs::is_regular_file(absolute, type_error) || type_error ||
+            IsReparsePoint(absolute)) {
+            throw std::runtime_error("identity-v3 is not a regular local file");
+        }
+        const auto size = fs::file_size(absolute, type_error);
+        if (type_error || size == 0 || size > 16U * 1024U) {
+            throw std::runtime_error("identity-v3 size is invalid");
+        }
+        std::ifstream input(absolute, std::ios::binary);
+        const std::string body{
+            std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        if (!input || input.bad() || body.size() != size) {
+            throw std::runtime_error("identity-v3 could not be read completely");
+        }
+        return ParseSingleCameraIdentityV3(body);
+    } catch (const TransportError&) {
+        throw;
+    } catch (const std::exception&) {
+        throw TransportError(
+            "single_identity_v3_invalid",
+            "SingleCamera identity-v3 is missing, malformed, or outside trusted local storage");
+    }
+}
+
+std::pair<IdentityMap, IdentityMap> LoadProductSingleIdentityMaps(
+    const ProductionHardwareCameraAgentConfig& config,
+    const std::vector<CameraInfo>& sdk_cameras) {
+    if (config.single_identity_v3.empty()) {
+        IdentityMap sdk_map = LoadStrictProductIdentityMap(config.sdk_identity_map);
+        IdentityMap wpd_map = LoadStrictProductIdentityMap(config.wpd_identity_map);
+        ValidateDistinctProductIdentityMaps(sdk_map, wpd_map);
+        return {std::move(sdk_map), std::move(wpd_map)};
+    }
+
+    const SingleCameraIdentityV3 identity =
+        LoadStrictSingleIdentityV3(config.single_identity_v3);
+    const std::optional<std::string> session_sdk_identity =
+        sdk_cameras.size() == 1
+            ? std::optional<std::string>(sdk_cameras.front().stable_identity)
+            : std::nullopt;
+    return {
+        IdentityMap(
+            config.sdk_identity_map,
+            identity.camera_alias == "CAM-A" ? session_sdk_identity : std::nullopt,
+            identity.camera_alias == "CAM-B" ? session_sdk_identity : std::nullopt),
+        IdentityMap(
+            config.single_identity_v3,
+            identity.camera_alias == "CAM-A"
+                ? std::optional<std::string>(identity.wpd_stable_identity_sha256)
+                : std::nullopt,
+            identity.camera_alias == "CAM-B"
+                ? std::optional<std::string>(identity.wpd_stable_identity_sha256)
+                : std::nullopt),
+    };
+}
+
+void ValidateProductSingleIdentityConfiguration(
+    const ProductionHardwareCameraAgentConfig& config) {
+    if (!config.single_identity_v3.empty()) {
+        (void)LoadStrictSingleIdentityV3(config.single_identity_v3);
+        return;
+    }
+    const IdentityMap sdk_map =
+        LoadStrictProductIdentityMap(config.sdk_identity_map);
+    const IdentityMap wpd_map =
+        LoadStrictProductIdentityMap(config.wpd_identity_map);
+    ValidateDistinctProductIdentityMaps(sdk_map, wpd_map);
 }
 
 ApprovedCaptureProfile LoadStrictApprovedCaptureProfile(const fs::path& path) {
@@ -1974,6 +2051,34 @@ bool IsLiveViewResultStructurallyValid(
 
 } // namespace
 
+SingleCameraIdentityV3 ParseSingleCameraIdentityV3(std::string_view json) {
+    const JsonValue root = JsonParser(json).Parse();
+    RequireExactFields(root, {
+        "schemaVersion", "cameraMode", "selectedAlias",
+        "wpdStableIdentitySha256", "sdkSelectionPolicy"});
+    if (RequireField(root, "schemaVersion", JsonKind::string).string !=
+            "a0.camera-agent.single-identity.v3" ||
+        RequireField(root, "cameraMode", JsonKind::string).string !=
+            "SingleCamera") {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidSingleIdentityV3", "identity-v3 schema or mode is invalid");
+    }
+    SingleCameraIdentityV3 identity;
+    identity.camera_alias =
+        RequireField(root, "selectedAlias", JsonKind::string).string;
+    identity.wpd_stable_identity_sha256 =
+        RequireField(root, "wpdStableIdentitySha256", JsonKind::string).string;
+    identity.sdk_selection_policy =
+        RequireField(root, "sdkSelectionPolicy", JsonKind::string).string;
+    if (identity.camera_alias != "CAM-A" ||
+        !IsLowerHex(identity.wpd_stable_identity_sha256, 64) ||
+        identity.sdk_selection_policy != "exactly-one-current-session") {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidSingleIdentityV3", "identity-v3 values are invalid");
+    }
+    return identity;
+}
+
 HardwareCameraAgentProtocolError::HardwareCameraAgentProtocolError(
     std::string code,
     std::string message)
@@ -2402,6 +2507,8 @@ ProductionHardwareCameraAgentConfig ProductionHardwareCameraAgentConfig::Default
     ProductionHardwareCameraAgentConfig config;
     config.sdk_identity_map = DefaultIdentityMapPath();
     config.wpd_identity_map = WpdIdentityMapPath(config.sdk_identity_map);
+    config.single_identity_v3 =
+        config.sdk_identity_map.parent_path() / "single-identity-v3.json";
     const fs::path root = config.sdk_identity_map.parent_path() / "camera-agent";
     config.artifacts_root = root / "artifacts";
     config.reports_root = root / "reports";
@@ -2445,11 +2552,7 @@ public:
             return result;
         }
         try {
-            const IdentityMap sdk_map =
-                LoadStrictProductIdentityMap(config_.sdk_identity_map);
-            const IdentityMap wpd_map =
-                LoadStrictProductIdentityMap(config_.wpd_identity_map);
-            ValidateDistinctProductIdentityMaps(sdk_map, wpd_map);
+            ValidateProductSingleIdentityConfiguration(config_);
             HardwareProcessLease lease;
             NikonSdkTransport sdk;
             WpdTransport wpd;
@@ -2457,6 +2560,8 @@ public:
             wpd.RequireExactlyOneD810ForProductAgent();
             const auto sdk_cameras = sdk.Enumerate();
             const auto wpd_cameras = wpd.Enumerate();
+            const auto [sdk_map, wpd_map] =
+                LoadProductSingleIdentityMaps(config_, sdk_cameras);
             const auto binding = ResolveExactlyOneBoundCamera(
                 sdk_cameras, wpd_cameras, sdk_map, wpd_map, camera_alias);
             CopyBindingResult(binding, result);
@@ -2648,11 +2753,7 @@ public:
         bool live_view_resumed = false;
         std::optional<PreviewJpegRecord> resumed_preview;
         try {
-            const IdentityMap sdk_map =
-                LoadStrictProductIdentityMap(config_.sdk_identity_map);
-            const IdentityMap wpd_map =
-                LoadStrictProductIdentityMap(config_.wpd_identity_map);
-            ValidateDistinctProductIdentityMaps(sdk_map, wpd_map);
+            ValidateProductSingleIdentityConfiguration(config_);
             (void)PrepareExclusiveArtifactRun(config_.artifacts_root, run_id);
             ensure_active();
             lease = std::make_unique<HardwareProcessLease>();
@@ -2675,6 +2776,8 @@ public:
             ensure_active();
             const auto wpd_cameras = wpd.Enumerate();
             ensure_active();
+            const auto [sdk_map, wpd_map] =
+                LoadProductSingleIdentityMaps(config_, sdk_cameras);
             ensure_active();
             EvidenceWriter evidence(
                 config_.artifacts_root,
@@ -2958,11 +3061,7 @@ public:
         result.preview_is_original = false;
         result.preview_is_stitch_input = false;
         try {
-            const IdentityMap sdk_map =
-                LoadStrictProductIdentityMap(config_.sdk_identity_map);
-            const IdentityMap wpd_map =
-                LoadStrictProductIdentityMap(config_.wpd_identity_map);
-            ValidateDistinctProductIdentityMaps(sdk_map, wpd_map);
+            ValidateProductSingleIdentityConfiguration(config_);
             (void)PrepareExclusiveArtifactRun(config_.artifacts_root, result.run_id);
             HardwareProcessLease lease;
             NikonSdkTransport sdk;
@@ -2971,6 +3070,8 @@ public:
             wpd.RequireExactlyOneD810ForProductAgent();
             const auto sdk_cameras = sdk.Enumerate();
             const auto wpd_cameras = wpd.Enumerate();
+            const auto [sdk_map, wpd_map] =
+                LoadProductSingleIdentityMaps(config_, sdk_cameras);
             const auto binding = ResolveExactlyOneBoundCamera(
                 sdk_cameras, wpd_cameras, sdk_map, wpd_map, request.camera_alias);
             if (!binding.ready) {

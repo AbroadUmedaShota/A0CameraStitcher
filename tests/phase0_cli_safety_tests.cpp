@@ -60,6 +60,8 @@ void TestHardwareCommandClassification() {
         "WPD identity binding needs the process lease");
     Check(RequiresHardwareProcessLease("bind-cross-transport-identity", "wpd"),
         "cross-transport identity binding needs one process lease");
+    Check(RequiresHardwareProcessLease("bind-single-identity-v3", "wpd"),
+        "SingleCamera identity-v3 binding needs one process lease");
     Check(RequiresHardwareProcessLease("verify-dual-identity", "wpd"),
         "dual identity verification needs one process lease");
     Check(RequiresHardwareProcessLease("verify-dual-spools", "wpd"),
@@ -105,6 +107,10 @@ void TestIdentityBindingArguments() {
         "cross-transport binding must reject an explicit transport option");
     Check(ValidateIdentityBindingArguments("bind-cross-transport-identity", "wpd", false, false).has_value(),
         "cross-transport binding must require the one-camera confirmation");
+    Check(!ValidateIdentityBindingArguments("bind-single-identity-v3", "wpd", true, false),
+        "identity-v3 should accept one-camera confirmation without a transport option");
+    Check(ValidateIdentityBindingArguments("bind-single-identity-v3", "sdk", true, true).has_value(),
+        "identity-v3 must reject an explicit transport option");
 }
 
 void TestProcessLeaseRejectsConcurrentOwner() {

@@ -13,18 +13,26 @@ spool, exact-object delete, 180-second deadline, or no-retry contracts.
 
 Build target: `A0CameraStitcher.CameraAgent.exe`.
 
-The WPF launcher should generate a new unpredictable ASCII pipe name for each
-operation, pass the same human-approved capture profile used for readiness and
-capture, and start:
+The WPF launcher generates a new unpredictable ASCII pipe name for each
+operation, passes the same operator-approved local capture profile used for readiness and
+capture, and starts:
 
 ```powershell
 .\A0CameraStitcher.CameraAgent.exe `
   --serve-once `
   --pipe-name A0CameraStitcher.CameraAgent.Hardware.v1.<random-guid> `
-  --approved-capture-profile C:\approved-local-path\single-profile.json
+  --approved-capture-profile C:\approved-local-path\single-profile.json `
+  --single-identity-v3 C:\approved-local-path\single-identity-v3.json
 ```
 
-Optional path arguments are `--camera-map SDK_MAP`, `--wpd-camera-map WPD_MAP`,
+The initial product SingleCamera path requires `--single-identity-v3`. Its
+strict schema stores only `selectedAlias:"CAM-A"`, a lowercase WPD serial
+digest, and `sdkSelectionPolicy:"exactly-one-current-session"`. The colliding
+SDK Source Name/Interface projection is never persisted. Missing, malformed,
+CAM-B, digest mismatch, or SDK/WPD cardinality other than exactly one fails
+before camera open. This identity is not DualCamera binding evidence.
+
+Legacy/test-only optional path arguments are `--camera-map SDK_MAP`, `--wpd-camera-map WPD_MAP`,
 `--artifacts-root PATH`, `--reports-root PATH`, and
 `--transaction-state-root PATH`. If `--camera-map` is supplied without an
 explicit WPD map, `name.ext` derives `name-wpd.ext`. The two strict product maps
@@ -80,9 +88,11 @@ transaction IDs are exactly 32 hexadecimal characters. Every typed operation
 payload carries `cameraMode:"SingleCamera"`. Capture and durable-query payloads
 also carry `requiredCameraAlias`, exactly equal to their `cameraAlias`.
 
-## Human-approved Single profile
+## Operator-approved Single profile
 
-Readiness and capture require `--approved-capture-profile`. The file has exact
+Readiness and capture require `--approved-capture-profile`. The WPF operator
+explicitly approves the observed read-only CAM-A settings for 30 days; this
+does not write camera settings. The file has exact
 schema `a0.camera-agent.capture-profile.v1`:
 
 ```json
@@ -277,6 +287,11 @@ last valid frame as `preview.jpg.partial` followed by write-through atomic
 stop/close evidence, plus nullable preview path/size/SHA. It always reports
 `previewIsOriginal:false`, `previewIsStitchInput:false`, and no real IDs. This
 operation verifies finite acquisition only; it is not a continuous display
+
+This v1 operation is diagnostic only and does not satisfy product interactive
+Live View. Continuous start/frame/stop, heartbeat, bounded lifetime,
+backpressure, and same-session capture handoff belong to the separately
+versioned hardware v2 contract and remain unimplemented at this checkpoint.
 session.
 
 ## Durability and retry rules

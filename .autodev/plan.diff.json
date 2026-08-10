@@ -1,6 +1,6 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.9.0",
+  "plan_version": "2.10.0",
   "base_plan_version": "2.8.1",
   "generated_at": "2026-08-10",
   "summary": "Add explicit SingleCamera product operation without weakening DualCamera A0 stitching: no mode inference or automatic fallback, initial SingleCamera exactly-one D810, canonical-original explicit export, Stitch NotApplicable, and read-only settings.",

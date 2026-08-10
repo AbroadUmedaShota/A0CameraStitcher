@@ -34,6 +34,7 @@ void PrintUsage() {
     std::wcerr
         << L"Usage: A0CameraStitcher.CameraAgent [--serve-once] [--pipe-name NAME] "
            L"[--camera-map SDK_MAP] [--wpd-camera-map WPD_MAP] "
+           L"[--single-identity-v3 PATH] "
            L"[--artifacts-root PATH] [--reports-root PATH] "
            L"[--transaction-state-root PATH] [--approved-capture-profile PATH]\n";
 }
@@ -63,7 +64,8 @@ int wmain(int argc, wchar_t** argv) {
             }
             const bool known =
                 argument == L"--pipe-name" || argument == L"--camera-map" ||
-                argument == L"--wpd-camera-map" || argument == L"--artifacts-root" ||
+                argument == L"--wpd-camera-map" || argument == L"--single-identity-v3" ||
+                argument == L"--artifacts-root" ||
                 argument == L"--reports-root" || argument == L"--transaction-state-root" ||
                 argument == L"--approved-capture-profile";
             if (!known) throw std::invalid_argument("unknown hardware Camera Agent argument");
@@ -79,6 +81,8 @@ int wmain(int argc, wchar_t** argv) {
             } else if (argument == L"--wpd-camera-map") {
                 config.wpd_identity_map = value;
                 wpd_map_overridden = true;
+            } else if (argument == L"--single-identity-v3") {
+                config.single_identity_v3 = value;
             } else if (argument == L"--artifacts-root") config.artifacts_root = value;
             else if (argument == L"--reports-root") config.reports_root = value;
             else if (argument == L"--transaction-state-root") config.transaction_state_root = value;

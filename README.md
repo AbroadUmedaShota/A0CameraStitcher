@@ -4,7 +4,7 @@
 
 ## 現在の段階
 
-総合状態は`in-progress`です。2026-08-10に`SingleCamera`と`DualCamera`の明示modeを製品要件へ追加しました。mode-awareなM3 simulated workflowに加え、実機一台用Camera Agent、厳密なhardware IPC、WPFのreadiness／有限Live View／一回撮影／未確定結果照会／canonical original明示exportをsoftware contractとして実装済みです。fresh Release検証は.NET build警告0・エラー0、Foundation 19/19、Operator Shell 15/15、SDK有効／SDKなしのnative CTest各6/6に合格しました。実WPFからD810を撮影・exportした合格証拠ではなく、承認済みSingle capture profileがない状態ではシャッターをfail closedします。`HG-0008`は2026-08-06に承認され、専用empty/cleared cardをsingle-slot transient spoolに使うPhase 0実装は完了しています。一台出力の対象原稿、DPI、crop、画像処理、品質・性能・耐久基準は`HG-0009`で未決です。
+総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original exportをsoftware実装しました。実WPFからD810を撮影・exportした合格証拠ではありません。現`hardware.v1` Live Viewは有限probeで、製品の対話的継続Live View v2は未実装です。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持し、SDK identity collisionにより別laneでBlockedです。
 
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。現在の記録上、接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 
@@ -12,7 +12,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 
 ## MVPの前提
 
-- 対象: 静止した平面原稿。二台構成はA0級を主用途とし、一台構成の対象サイズ・DPI・cropは`HG-0009`で確定する
+- 対象: 静止した平面原稿。二台構成はA0級。一台構成は`7360×4912`原画像のbyte-identical保存だけを保証し、対象原稿サイズ・DPI・crop・lens補正・物理寸法は保証しない
 - mode: `SingleCamera`または`DualCamera`をactive transaction外で明示選択し、開始時に固定する
 - カメラ: `SingleCamera`は登録済みNikon D810を厳密に一台、`DualCamera`は登録済みD810二台と固定リグ
 - 現在の接続: D810一台。identity-v2で`CAM-B`としてSDK/WPD双方へ登録済み。履歴上V1.14の別個体`CAM-A`の一台接続・登録後に二台同時検証へ進む
@@ -20,7 +20,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 - 制御: WPD baseline/recoveryと、カメラカードへ一回撮影するNikon SDK、および一台選択式SDK Live View
 - 入力: FX JPEG Fine L
 - 出力: `SingleCamera`はcanonical `original.jpg`のbyte-identicalな明示export（合成なし）、`DualCamera`は合成JPEG
-- 時間目標: `DualCamera`はp95 10秒以内を暫定目標とし、`SingleCamera`は`HG-0009`で確定する。Phase 0では測定のみ
+- 時間目標: `DualCamera`はp95 10秒以内を暫定目標とする。`SingleCamera`はone-shot後の10回でp95を測定し、`HG-0009`で承認後に100件連続受入を行う
 - 保存: PCへ確定・再読込検証済みの原画像を保持。カメラカードは一過性の転送元で、承認済みsingle-slot spoolではexact WPD objectだけを削除して空状態を確認する
 
 ## ドキュメント
@@ -132,7 +132,7 @@ cmake --build build-sdk --config Release --target A0CameraStitcher.CameraAgent
 dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Release -- --hardware-single --camera-agent .\build-sdk\Release\A0CameraStitcher.CameraAgent.exe
 ```
 
-Camera Agentはhuman-approvedな`%LOCALAPPDATA%\A0CameraStitcher\phase0\camera-agent\approved-single-capture-profile.json`が存在し、選択alias、期限、read-only observed settingsが一致する場合だけ`Ready`にします。profileの期待値をアプリへ内蔵したり自動生成したりしません。現時点では`HG-0009`と実機受入が未完了なので、上記は実装済みsoftware boundaryの起動手順であり、製品撮影合格の主張ではありません。wire、journal、profile schemaの詳細は[Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)を参照してください。
+Camera Agentは`%LOCALAPPDATA%\A0CameraStitcher\camera-agent\approved-single-capture-profile.json`が存在し、CAM-A、期限、read-only observed settingsが一致する場合だけ`Ready`にします。WPFの「観測値を30日プロファイルとして承認」は現在の観測値をlocal profileへ保存しますが、camera settingは変更しません。identity-v3は`%LOCALAPPDATA%\A0CameraStitcher\phase0\single-identity-v3.json`です。これらはsoftware boundaryであり、製品撮影合格の主張ではありません。wire、journal、profile schemaの詳細は[Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)を参照してください。
 
 ## 公式根拠
 

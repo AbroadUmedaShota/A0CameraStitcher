@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using Microsoft.Win32;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 
@@ -19,10 +20,17 @@ public partial class HardwareSingleCameraWindow : Window
             InitializeComponent();
             var storagePaths = HardwareSingleStoragePaths.Resolve(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            var preferencesStore = new HardwareSinglePreferencesStore(storagePaths.PreferencesPath);
+            var profileStore = new HardwareSingleCaptureProfileStore(storagePaths.CaptureProfilePath);
             _viewModel = new HardwareSingleCameraViewModel(
-                new ServeOnceHardwareCameraAgentOperations(cameraAgentExecutablePath),
+                new ServeOnceHardwareCameraAgentOperations(
+                    cameraAgentExecutablePath,
+                    storagePaths.CaptureProfilePath,
+                    storagePaths.SingleIdentityV3Path),
                 new HardwareSingleAppStateStore(storagePaths.StateDirectory),
-                new HardwareOriginalExporter(storagePaths.ExportDirectory));
+                new HardwareOriginalExporter(storagePaths.DefaultExportDirectory),
+                preferencesStore,
+                profileStore);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closed += OnClosed;
@@ -31,6 +39,20 @@ public partial class HardwareSingleCameraWindow : Window
         {
             _sessionLease.Dispose();
             throw;
+        }
+    }
+
+    private async void OnChooseExportDirectory(object sender, RoutedEventArgs eventArgs)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "検証済みSingleCamera原画像の保存先を選択",
+            InitialDirectory = _viewModel.ExportDirectory,
+            Multiselect = false,
+        };
+        if (dialog.ShowDialog(this) == true)
+        {
+            await _viewModel.ChangeExportDirectoryAsync(dialog.FolderName, _lifetime.Token);
         }
     }
 

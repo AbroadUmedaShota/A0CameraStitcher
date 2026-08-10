@@ -68,6 +68,15 @@ struct SingleCameraBindingResolution {
     std::string failure_detail;
 };
 
+struct SingleCameraIdentityV3 {
+    std::string camera_alias;
+    std::string wpd_stable_identity_sha256;
+    std::string sdk_selection_policy{"exactly-one-current-session"};
+};
+
+[[nodiscard]] SingleCameraIdentityV3 ParseSingleCameraIdentityV3(
+    std::string_view json);
+
 struct ObservedCameraSetting {
     bool available{};
     std::string cap_type{"unsupported"};
@@ -245,6 +254,11 @@ struct ProductionHardwareCameraAgentConfig {
     std::filesystem::path reports_root;
     std::filesystem::path sdk_identity_map;
     std::filesystem::path wpd_identity_map;
+    // Product SingleCamera identity-v3. When configured, the WPD serial
+    // digest is the persistent body identity and SDK selection is permitted
+    // only by exact-one current-session cardinality. Legacy SDK/WPD maps are
+    // never automatically migrated into this file.
+    std::filesystem::path single_identity_v3;
     std::filesystem::path transaction_state_root;
     std::filesystem::path approved_capture_profile;
     Timeouts timeouts{};
