@@ -50,6 +50,7 @@ internal static partial class HardwareCameraAgentDiagnostic
         var sanitized = SensitiveAssignment().Replace(printable, "$1=[redacted]");
         sanitized = AbsoluteWindowsPath().Replace(sanitized, "[redacted-path]");
         sanitized = LongIdentifier().Replace(sanitized, "[redacted-identifier]");
+        sanitized = GeneralAlphanumericIdentifier().Replace(sanitized, "[redacted-identifier]");
         sanitized = RepeatedWhitespace().Replace(sanitized, " ").Trim();
         return sanitized[..Math.Min(sanitized.Length, MaximumOutputCharacters)];
     }
@@ -64,6 +65,11 @@ internal static partial class HardwareCameraAgentDiagnostic
 
     [GeneratedRegex(@"\b(?:[0-9a-fA-F]{16,}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b")]
     private static partial Regex LongIdentifier();
+
+    [GeneratedRegex(
+        @"(?<![A-Za-z0-9])(?=[A-Za-z0-9]{24,}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]+",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex GeneralAlphanumericIdentifier();
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex RepeatedWhitespace();

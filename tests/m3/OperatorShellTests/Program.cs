@@ -259,6 +259,8 @@ return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
 {
+    VerifyHardwareCameraAgentStderrSanitizer();
+
     var executablePath = Path.Combine(
         AppContext.BaseDirectory,
         "A0CameraStitcher.M3.OperatorShellTests.exe");
@@ -1594,6 +1596,59 @@ static async Task ModeAndAliasLockDuringCaptureAsync()
     await WaitUntilAsync(() => !viewModel.IsBusy, "The blocking capture did not finish.");
     Check.Equal(OperatorUiState.Review, viewModel.UiState);
     Check.True(viewModel.RetainedOriginals.Contains("CAM-B", StringComparison.Ordinal), "The snapshotted plan must remain CAM-B.");
+}
+
+static void VerifyHardwareCameraAgentStderrSanitizer()
+{
+    const string longIdentifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    var sanitized = HardwareCameraAgentDiagnostic.SanitizeStandardError(
+        "ordinary readiness failure sdk_load_failed " +
+        $"requestId={longIdentifier} identifier={longIdentifier} cameraId={longIdentifier} " +
+        $"bare {longIdentifier} repeated {longIdentifier}");
+
+    Check.True(
+        sanitized.Contains("ordinary readiness failure sdk_load_failed", StringComparison.Ordinal),
+        "Ordinary diagnostic prose and a safe error code must remain readable.");
+    Check.False(
+        sanitized.Contains(longIdentifier, StringComparison.Ordinal),
+        "A long general alphanumeric identifier must be redacted regardless of key or position.");
+    Check.True(
+        sanitized.Contains("requestId=[redacted]", StringComparison.Ordinal) &&
+        sanitized.Contains("identifier=[redacted]", StringComparison.Ordinal) &&
+        sanitized.Contains("cameraId=[redacted-identifier]", StringComparison.Ordinal),
+        "Known and unknown identifier keys must both redact their values.");
+    Check.True(
+        sanitized.Split("[redacted-identifier]", StringSplitOptions.None).Length - 1 == 3,
+        "Every unknown-key and bare occurrence must be redacted.");
+
+    const string belowBoundary = "ABCDEFGHIJKLMNOPQRSTUV1";
+    const string atBoundary = "ABCDEFGHIJKLMNOPQRSTUVW1";
+    Check.True(belowBoundary.Length == 23 && atBoundary.Length == 24, "The identifier boundary fixture must remain exact.");
+    var boundary = HardwareCameraAgentDiagnostic.SanitizeStandardError(
+        $"short token {belowBoundary} boundary token {atBoundary} safe code E_CAMERA_17");
+    Check.True(
+        boundary.Contains(belowBoundary, StringComparison.Ordinal),
+        "A 23-character alphanumeric token must remain available to diagnostics.");
+    Check.False(
+        boundary.Contains(atBoundary, StringComparison.Ordinal),
+        "A 24-character alphanumeric identifier must be redacted.");
+    Check.True(
+        boundary.Contains("safe code E_CAMERA_17", StringComparison.Ordinal),
+        "A short safe error code must not be damaged.");
+
+    const string hexadecimalIdentifier = "0123456789abcdef0123456789abcdef";
+    const string uuidIdentifier = "123e4567-e89b-12d3-a456-426614174000";
+    var existingProtections = HardwareCameraAgentDiagnostic.SanitizeStandardError(
+        "diagnostic secret=super-secret path=C:\\private\\sdk rawIdentity=RAW-CAMERA-IDENTITY " +
+        $"hex={hexadecimalIdentifier} uuid={uuidIdentifier} " + new string('x', 600));
+    Check.False(
+        existingProtections.Contains("super-secret", StringComparison.Ordinal) ||
+        existingProtections.Contains("C:\\private", StringComparison.Ordinal) ||
+        existingProtections.Contains("RAW-CAMERA-IDENTITY", StringComparison.Ordinal) ||
+        existingProtections.Contains(hexadecimalIdentifier, StringComparison.Ordinal) ||
+        existingProtections.Contains(uuidIdentifier, StringComparison.Ordinal),
+        "Existing secret, path, raw identity, hex, and UUID protections must remain active.");
+    Check.True(existingProtections.Length <= 512, "Sanitized stderr must remain bounded to 512 characters.");
 }
 
 static async Task LiveViewStopFailureWorkflowAsync()
