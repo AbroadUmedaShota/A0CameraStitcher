@@ -122,6 +122,18 @@ else()
     target_compile_options(a0_m2_measurement PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(a0_m2_offline_stitcher
+    src/m2/offline_stitcher.cpp
+)
+target_include_directories(a0_m2_offline_stitcher PUBLIC src/m2/include)
+target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup PRIVATE ole32 windowscodecs)
+target_compile_definitions(a0_m2_offline_stitcher PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(a0_m2_offline_stitcher PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_offline_stitcher PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(A0CameraStitcher.OpticalPlanner src/m2/main.cpp)
 target_link_libraries(A0CameraStitcher.OpticalPlanner PRIVATE a0_m2_optical)
 if(MSVC)
@@ -183,6 +195,16 @@ if(BUILD_TESTING)
         target_compile_options(m2_synthetic_measurement_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_synthetic_measurement_contracts COMMAND m2_synthetic_measurement_contracts)
+
+    add_executable(m2_offline_stitcher_contracts tests/offline_stitcher_tests.cpp)
+    target_link_libraries(m2_offline_stitcher_contracts PRIVATE a0_m2_offline_stitcher ole32 windowscodecs)
+    target_compile_definitions(m2_offline_stitcher_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(m2_offline_stitcher_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_offline_stitcher_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_offline_stitcher_contracts COMMAND m2_offline_stitcher_contracts)
 
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_test(
