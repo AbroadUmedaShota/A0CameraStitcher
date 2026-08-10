@@ -207,7 +207,12 @@ bool ProcessOneConnection(HANDLE pipe, HardwareCameraAgentDispatcher& dispatcher
     };
     if (!WriteExact(
             pipe, response_header.data(), response_header.size(), kResponseWriteTimeoutMs)) return true;
-    (void)WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs);
+    if (!WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs)) return true;
+    // DisconnectNamedPipe discards unread data.  Wait until the connected WPF
+    // client has consumed the complete frame before the server disconnects.
+    // If the client has already closed, FlushFileBuffers fails and the already
+    // dispatched operation remains authoritative without retry.
+    (void)FlushFileBuffers(pipe);
     return true;
 }
 

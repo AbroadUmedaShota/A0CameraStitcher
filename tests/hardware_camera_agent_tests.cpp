@@ -1700,6 +1700,19 @@ void TestNamedPipeMaximumFrameBoundary() {
                 std::array<unsigned char, 4> response_header{};
                 Check(ReadAll(pipe, response_header.data(), response_header.size()),
                     "limit-1 and limit named-pipe frames must receive a rejection envelope");
+                const std::uint32_t response_length =
+                    static_cast<std::uint32_t>(response_header[0]) |
+                    (static_cast<std::uint32_t>(response_header[1]) << 8U) |
+                    (static_cast<std::uint32_t>(response_header[2]) << 16U) |
+                    (static_cast<std::uint32_t>(response_header[3]) << 24U);
+                Check(response_length > 0 && response_length <= maximum,
+                    "named-pipe response header must describe a bounded body");
+                Check(server.wait_for(std::chrono::milliseconds(50)) ==
+                        std::future_status::timeout,
+                    "server must not disconnect while the response body remains unread");
+                std::string response(response_length, '\0');
+                Check(ReadAll(pipe, response.data(), response.size()),
+                    "limit-1 and limit named-pipe frames must receive a complete response body");
             }
             CloseHandle(pipe);
         }

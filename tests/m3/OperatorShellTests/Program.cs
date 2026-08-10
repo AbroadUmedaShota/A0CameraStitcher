@@ -4,12 +4,36 @@ using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
+using System.Buffers.Binary;
+using System.IO.Pipes;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
+const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (Environment.GetEnvironmentVariable(persistentChildScenarioVariable) is { Length: > 0 } childScenario)
+{
+    return await RunPersistentCameraAgentTestChildAsync(childScenario, args);
+}
+if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
+{
+    return await RunSdklessPersistentReadinessE2EAsync(sdklessAgentPath);
+}
+
 var failures = new List<string>();
+try
+{
+    await PersistentHardwareCameraAgentPipeFailuresAsync();
+    Console.WriteLine("PASS persistent hardware Camera Agent classifies pipe exits and typed readiness");
+}
+catch (Exception exception)
+{
+    failures.Add("persistent hardware Camera Agent classifies pipe exits and typed readiness");
+    Console.Error.WriteLine($"FAIL persistent hardware Camera Agent classifies pipe exits and typed readiness: {exception}");
+}
+
 try
 {
     await LiveViewStopFailureWorkflowAsync();
@@ -230,8 +254,248 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {20 - failures.Count}/20 passed.");
+Console.WriteLine($"Operator shell tests: {21 - failures.Count}/21 passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
+{
+    var executablePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "A0CameraStitcher.M3.OperatorShellTests.exe");
+    Check.True(File.Exists(executablePath), "The persistent test child apphost must exist.");
+
+    var root = Path.Combine(Path.GetTempPath(), $"a0-persistent-agent-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var storagePaths = HardwareSingleStoragePaths.Resolve(root);
+        var profilePath = storagePaths.CaptureProfilePath;
+        var identityPath = storagePaths.SingleIdentityV3Path;
+        Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(identityPath)!);
+
+        foreach (var scenario in new[] { "before-response", "partial-header", "partial-body" })
+        {
+            Environment.SetEnvironmentVariable(persistentChildScenarioVariable, scenario);
+            await using var operations = new PersistentHardwareCameraAgentOperations(
+                executablePath,
+                profilePath,
+                identityPath);
+            try
+            {
+                _ = await operations.GetReadinessAsync("CAM-A");
+                throw new InvalidOperationException($"The {scenario} child must fail before a full response.");
+            }
+            catch (HardwareCameraAgentLaunchException exception)
+            {
+                Check.True(exception.ProcessExitCode == 37, "The child exit code must be preserved.");
+                Check.True(
+                    exception.RequestMayHaveBeenDispatched,
+                    "A response-side pipe close must remain dispatch-ambiguous.");
+                Check.True(
+                    exception.SanitizedStandardError.Contains("synthetic child failed closed", StringComparison.Ordinal),
+                    "The safe stderr classification must be retained.");
+                Check.False(
+                    exception.SanitizedStandardError.Contains("super-secret", StringComparison.Ordinal) ||
+                    exception.SanitizedStandardError.Contains("C:\\private", StringComparison.Ordinal) ||
+                    exception.SanitizedStandardError.Contains("RAW-CAMERA-IDENTITY", StringComparison.Ordinal),
+                    "Secrets, paths, and raw identity must be removed from diagnostics.");
+                Check.True(
+                    exception.SanitizedStandardError.Length <= 512,
+                    "The stderr diagnostic must be bounded.");
+            }
+        }
+
+        var tracePath = Path.Combine(root, "composition.json");
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "typed-fail-closed");
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+        await using (var operations = new PersistentHardwareCameraAgentOperations(
+            executablePath,
+            profilePath,
+            identityPath))
+        {
+            var reply = await operations.GetReadinessAsync("CAM-A");
+            Check.True(reply.Success, "A typed not-ready result is a successful protocol response.");
+            Check.False(reply.Payload.Ready, "The SDK-less child must fail closed as not ready.");
+            Check.Equal("licensed_adapter_unavailable", reply.Payload.FailureCategory);
+        }
+
+        using var trace = JsonDocument.Parse(await File.ReadAllTextAsync(tracePath));
+        var traceRoot = trace.RootElement;
+        Check.Equal(Path.GetFullPath(executablePath), traceRoot.GetProperty("executablePath").GetString()!);
+        Check.Equal(Path.GetDirectoryName(executablePath)!, traceRoot.GetProperty("workingDirectory").GetString()!);
+        var childArguments = traceRoot.GetProperty("arguments").EnumerateArray()
+            .Select(value => value.GetString()!)
+            .ToArray();
+        Check.True(childArguments.Contains("--pipe-name", StringComparer.Ordinal), "The persistent pipe argument is required.");
+        Check.True(childArguments.Contains(profilePath, StringComparer.Ordinal), "WPF and the Agent must share the profile path.");
+        Check.True(childArguments.Contains(identityPath, StringComparer.Ordinal), "WPF and the Agent must share identity-v3.");
+        Check.False(childArguments.Contains("--serve-once", StringComparer.Ordinal), "The formal WPF must use the persistent Agent mode.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", null);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task<int> RunSdklessPersistentReadinessE2EAsync(string agentExecutablePath)
+{
+    var root = Path.Combine(Path.GetTempPath(), $"a0-sdkless-agent-e2e-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var storagePaths = HardwareSingleStoragePaths.Resolve(root);
+        var profilePath = storagePaths.CaptureProfilePath;
+        var identityPath = storagePaths.SingleIdentityV3Path;
+        Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(identityPath)!);
+        await using var operations = new PersistentHardwareCameraAgentOperations(
+            agentExecutablePath,
+            profilePath,
+            identityPath);
+        var reply = await operations.GetReadinessAsync("CAM-A");
+        Check.True(reply.Success, "The real SDK-less Agent must return a typed hardware.v1 response.");
+        Check.False(reply.Payload.Ready, "An unconfigured SDK-less Agent must fail closed.");
+        Check.True(reply.Payload.ReadOnly, "SDK-less readiness must remain read-only.");
+        Check.False(reply.Payload.CaptureCommandSent, "SDK-less readiness must not capture.");
+        Check.False(reply.Payload.CameraObjectDeleteAttempted, "SDK-less readiness must not delete.");
+        Console.WriteLine($"PASS SDK-less persistent Camera Agent typed fail-closed: {reply.Payload.FailureCategory}");
+        return 0;
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task<int> RunPersistentCameraAgentTestChildAsync(
+    string scenario,
+    IReadOnlyList<string> arguments)
+{
+    var pipeIndex = arguments.ToList().IndexOf("--pipe-name");
+    if (pipeIndex < 0 || pipeIndex + 1 >= arguments.Count)
+    {
+        return 64;
+    }
+
+    var tracePath = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE");
+    if (!string.IsNullOrWhiteSpace(tracePath))
+    {
+        await File.WriteAllTextAsync(
+            tracePath,
+            JsonSerializer.Serialize(new
+            {
+                executablePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M3.OperatorShellTests.exe")),
+                workingDirectory = Environment.CurrentDirectory,
+                arguments,
+            }));
+    }
+
+    await using var pipe = new NamedPipeServerStream(
+        arguments[pipeIndex + 1],
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await pipe.WaitForConnectionAsync(timeout.Token);
+    var requestJson = await ReadPersistentTestFrameAsync(pipe, timeout.Token);
+    using var request = JsonDocument.Parse(requestJson);
+
+    if (scenario == "before-response")
+    {
+        WriteSyntheticSensitiveStderr();
+        return 37;
+    }
+    if (scenario == "partial-header")
+    {
+        await pipe.WriteAsync(new byte[] { 20, 0 }, timeout.Token);
+        await pipe.FlushAsync(timeout.Token);
+        WriteSyntheticSensitiveStderr();
+        return 37;
+    }
+    if (scenario == "partial-body")
+    {
+        var header = new byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(header, 20);
+        await pipe.WriteAsync(header, timeout.Token);
+        await pipe.WriteAsync("{\"short\":"u8.ToArray(), timeout.Token);
+        await pipe.FlushAsync(timeout.Token);
+        WriteSyntheticSensitiveStderr();
+        return 37;
+    }
+    if (scenario != "typed-fail-closed")
+    {
+        return 65;
+    }
+
+    var readiness = HardwareTestData.ReadyHardware("CAM-A") with
+    {
+        Ready = false,
+        SdkCameraCount = 0,
+        WpdCameraCount = 0,
+        SdkIdentityBound = false,
+        WpdIdentityBound = false,
+        SdkAliasMatches = false,
+        WpdAliasMatches = false,
+        SdkStatusProbed = false,
+        SpoolInspected = false,
+        SpoolKnownEmpty = false,
+        CaptureProfileApproved = false,
+        CaptureProfileId = string.Empty,
+        CaptureProfileVersion = 0,
+        CaptureProfileSha256 = string.Empty,
+        CaptureProfileCameraAlias = string.Empty,
+        CaptureProfileExpiresAtUtc = null,
+        CaptureProfileAliasMatches = false,
+        SettingsMatchApprovedProfile = false,
+        FailureCategory = "licensed_adapter_unavailable",
+        FailureDetail = "licensed adapter is unavailable",
+    };
+    var responseJson = JsonSerializer.Serialize(
+        new
+        {
+            schemaVersion = HardwareCameraAgentProtocol.SchemaVersion,
+            simulation = false,
+            marker = HardwareCameraAgentProtocol.Marker,
+            requestId = request.RootElement.GetProperty("requestId").GetString(),
+            success = true,
+            resultCode = "SingleNotReady",
+            payload = readiness,
+        },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    await WritePersistentTestFrameAsync(pipe, responseJson, timeout.Token);
+    return 0;
+}
+
+static void WriteSyntheticSensitiveStderr() =>
+    Console.Error.WriteLine(
+        "synthetic child failed closed secret=super-secret path=C:\\private\\sdk rawIdentity=RAW-CAMERA-IDENTITY");
+
+static async Task<string> ReadPersistentTestFrameAsync(Stream stream, CancellationToken cancellationToken)
+{
+    var header = new byte[sizeof(int)];
+    await stream.ReadExactlyAsync(header, cancellationToken);
+    var length = BinaryPrimitives.ReadInt32LittleEndian(header);
+    var payload = new byte[length];
+    await stream.ReadExactlyAsync(payload, cancellationToken);
+    return Encoding.UTF8.GetString(payload);
+}
+
+static async Task WritePersistentTestFrameAsync(
+    Stream stream,
+    string message,
+    CancellationToken cancellationToken)
+{
+    var payload = Encoding.UTF8.GetBytes(message);
+    var header = new byte[sizeof(int)];
+    BinaryPrimitives.WriteInt32LittleEndian(header, payload.Length);
+    await stream.WriteAsync(header, cancellationToken);
+    await stream.WriteAsync(payload, cancellationToken);
+    await stream.FlushAsync(cancellationToken);
+}
 
 static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
 {

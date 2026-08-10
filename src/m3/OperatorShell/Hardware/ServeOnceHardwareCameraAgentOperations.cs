@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.RegularExpressions;
 using A0CameraStitcher.M3.Foundation.Hardware;
 
 namespace A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -9,13 +10,59 @@ public sealed class HardwareCameraAgentLaunchException : Exception
     public HardwareCameraAgentLaunchException(
         string message,
         Exception? innerException = null,
-        bool requestMayHaveBeenDispatched = false)
+        bool requestMayHaveBeenDispatched = false,
+        int? processExitCode = null,
+        string? sanitizedStandardError = null)
         : base(message, innerException)
     {
         RequestMayHaveBeenDispatched = requestMayHaveBeenDispatched;
+        ProcessExitCode = processExitCode;
+        SanitizedStandardError = sanitizedStandardError ?? string.Empty;
     }
 
     public bool RequestMayHaveBeenDispatched { get; }
+
+    public int? ProcessExitCode { get; }
+
+    public string SanitizedStandardError { get; }
+}
+
+internal static partial class HardwareCameraAgentDiagnostic
+{
+    private const int MaximumInputCharacters = 4096;
+    private const int MaximumOutputCharacters = 512;
+
+    public static string SanitizeStandardError(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var bounded = value[..Math.Min(value.Length, MaximumInputCharacters)];
+        var printable = new string(bounded
+            .Select(character => char.IsControl(character) ? ' ' : character)
+            .ToArray());
+        var sanitized = SensitiveAssignment().Replace(printable, "$1=[redacted]");
+        sanitized = AbsoluteWindowsPath().Replace(sanitized, "[redacted-path]");
+        sanitized = LongIdentifier().Replace(sanitized, "[redacted-identifier]");
+        sanitized = RepeatedWhitespace().Replace(sanitized, " ").Trim();
+        return sanitized[..Math.Min(sanitized.Length, MaximumOutputCharacters)];
+    }
+
+    [GeneratedRegex(
+        "(?i)\\b(secret|token|password|serial|identity|rawidentity|path)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|\\S+)",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex SensitiveAssignment();
+
+    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/]|\\\\\\\\|//)[^\\s\"']+", RegexOptions.CultureInvariant)]
+    private static partial Regex AbsoluteWindowsPath();
+
+    [GeneratedRegex(@"\b(?:[0-9a-fA-F]{16,}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b")]
+    private static partial Regex LongIdentifier();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex RepeatedWhitespace();
 }
 
 public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCameraOperations

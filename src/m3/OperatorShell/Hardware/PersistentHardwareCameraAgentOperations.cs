@@ -257,12 +257,63 @@ public sealed class PersistentHardwareCameraAgentOperations :
         try
         {
             var pipeName = EnsureProcessStarted();
-            return await operation(pipeName, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await operation(pipeName, cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException exception) when (exception is not HardwareCameraAgentConnectException)
+            {
+                throw await CreatePipeFailureAsync(exception).ConfigureAwait(false);
+            }
         }
         finally
         {
             _operationGate.Release();
         }
+    }
+
+    private async Task<HardwareCameraAgentLaunchException> CreatePipeFailureAsync(IOException cause)
+    {
+        int? exitCode = null;
+        var standardError = string.Empty;
+        if (_process is not null)
+        {
+            try
+            {
+                if (!_process.HasExited)
+                {
+                    await _process.WaitForExitAsync(CancellationToken.None)
+                        .WaitAsync(TimeSpan.FromSeconds(2))
+                        .ConfigureAwait(false);
+                }
+                if (_process.HasExited)
+                {
+                    exitCode = _process.ExitCode;
+                    if (_standardError is not null)
+                    {
+                        standardError = await _standardError
+                            .WaitAsync(TimeSpan.FromSeconds(1))
+                            .ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                // The pipe failure remains authoritative when the child has not
+                // reached a stable exited state within the diagnostic bound.
+            }
+        }
+
+        var sanitized = HardwareCameraAgentDiagnostic.SanitizeStandardError(standardError);
+        var exitSummary = exitCode.HasValue ? exitCode.Value.ToString() : "unavailable";
+        var stderrSummary = string.IsNullOrEmpty(sanitized) ? "unavailable" : sanitized;
+        return new HardwareCameraAgentLaunchException(
+            $"Camera Agent pipe response was incomplete. ExitCode={exitSummary}; stderr={stderrSummary}",
+            cause,
+            requestMayHaveBeenDispatched: true,
+            processExitCode: exitCode,
+            sanitizedStandardError: sanitized);
     }
 
     private string EnsureProcessStarted()
