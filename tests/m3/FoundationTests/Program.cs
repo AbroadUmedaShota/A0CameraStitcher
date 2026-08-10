@@ -1,6 +1,10 @@
-using System.Text.Json;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
 using A0CameraStitcher.M3.Foundation;
+using A0CameraStitcher.M3.Foundation.Hardware;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -17,6 +21,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("operator readiness requires safety and classifies correction", OperatorReadinessClassificationAsync),
     ("operator readiness exposes every blocking reason", OperatorReadinessBlockersAsync),
     ("operator action availability locks active workflows", OperatorActionAvailabilityAsync),
+    ("capture plans reject implicit or ambiguous camera topology", CapturePlanValidationAsync),
+    ("durable single-camera plans capture only the selected alias", DurableSingleCameraSuccessAsync),
+    ("single-camera failure is terminal and never retries", SingleCameraFailureAndNoRetryAsync),
+    ("single-camera restart preserves the snapshotted plan", SingleCameraCrashRestartAsync),
+    ("legacy v1 journal migrates as an explicit dual-camera plan", LegacyJournalMigratesAsDualAsync),
+    ("single-camera readiness ignores only the inactive body", SingleCameraReadinessAsync),
 };
 
 var failures = new List<string>();
@@ -102,9 +112,238 @@ static Task OperatorActionAvailabilityAsync()
     return Task.CompletedTask;
 }
 
+static Task CapturePlanValidationAsync()
+{
+    Check.SequenceEqual(new[] { "CAM-A" }, CapturePlan.Single("CAM-A").RequiredCameraAliases);
+    Check.SequenceEqual(new[] { "CAM-B" }, CapturePlan.Single("CAM-B").RequiredCameraAliases);
+    Check.SequenceEqual(new[] { "CAM-A", "CAM-B" }, CapturePlan.Dual().RequiredCameraAliases);
+    Check.Throws<ArgumentException>(() => CapturePlan.Single("CAM-C"));
+    Check.Throws<ArgumentException>(() => new CapturePlan
+    {
+        OperatingMode = CameraOperatingMode.SingleCamera,
+        RequiredCameraAliases = ["CAM-A", "CAM-B"],
+    }.Validate());
+    Check.Throws<ArgumentException>(() => new CapturePlan
+    {
+        OperatingMode = CameraOperatingMode.DualCamera,
+        RequiredCameraAliases = ["CAM-B", "CAM-A"],
+    }.Validate());
+    return Task.CompletedTask;
+}
+
+static async Task DurableSingleCameraSuccessAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var source = new DeterministicSimulatedCaptureSource();
+        var coordinator = new DurableSimulatedCaptureCoordinator(root, source);
+        await coordinator.InitializeAsync();
+
+        var transactionA = Guid.NewGuid();
+        var resultA = await coordinator.ExecuteAsync(transactionA, CapturePlan.Single("CAM-A"));
+        Check.Equal(SimulatedTransactionState.Complete, resultA.State);
+        Check.Equal(CameraOperatingMode.SingleCamera, resultA.OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-A" }, resultA.RequiredCameraAliases);
+        Check.SequenceEqual(
+            new[]
+            {
+                SimulatedTransactionState.Idle,
+                SimulatedTransactionState.CaptureA,
+                SimulatedTransactionState.PersistA,
+                SimulatedTransactionState.Complete,
+            },
+            resultA.TransitionHistory);
+        Check.SequenceEqual(new[] { "CAM-A" }, resultA.Originals.Select(original => original.Alias));
+
+        var transactionB = Guid.NewGuid();
+        var resultB = await coordinator.ExecuteAsync(transactionB, CapturePlan.Single("CAM-B"));
+        Check.Equal(SimulatedTransactionState.Complete, resultB.State);
+        Check.Equal(CameraOperatingMode.SingleCamera, resultB.OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-B" }, resultB.RequiredCameraAliases);
+        Check.SequenceEqual(
+            new[]
+            {
+                SimulatedTransactionState.Idle,
+                SimulatedTransactionState.CaptureB,
+                SimulatedTransactionState.PersistB,
+                SimulatedTransactionState.Complete,
+            },
+            resultB.TransitionHistory);
+        Check.SequenceEqual(new[] { "CAM-B" }, resultB.Originals.Select(original => original.Alias));
+
+        Check.Equal(1, source.GetCaptureCount("CAM-A"));
+        Check.Equal(1, source.GetCaptureCount("CAM-B"));
+        Check.False(File.Exists(coordinator.GetOriginalPath(transactionA, "CAM-B")), "Single CAM-A must not invent CAM-B.");
+        Check.False(File.Exists(coordinator.GetOriginalPath(transactionB, "CAM-A")), "Single CAM-B must not invent CAM-A.");
+
+        var restarted = new DurableSimulatedCaptureCoordinator(root, new DeterministicSimulatedCaptureSource());
+        Check.Equal(0, (await restarted.InitializeAsync()).Count);
+        var loadedB = await restarted.LoadAsync(transactionB);
+        Check.Equal(CameraOperatingMode.SingleCamera, loadedB.OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-B" }, loadedB.RequiredCameraAliases);
+    });
+}
+
+static async Task SingleCameraFailureAndNoRetryAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var source = new DeterministicSimulatedCaptureSource(failAlias: "CAM-B");
+        var coordinator = new DurableSimulatedCaptureCoordinator(root, source);
+        await coordinator.InitializeAsync();
+        var transactionId = Guid.NewGuid();
+
+        var result = await coordinator.ExecuteAsync(transactionId, CapturePlan.Single("CAM-B"));
+        Check.Equal(SimulatedTransactionState.FailedPartial, result.State);
+        Check.Equal(CameraOperatingMode.SingleCamera, result.OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-B" }, result.RequiredCameraAliases);
+        Check.Equal(0, result.Originals.Count);
+        Check.Equal(0, source.GetCaptureCount("CAM-A"));
+        Check.Equal(1, source.GetCaptureCount("CAM-B"));
+        Check.Equal(0, result.AutomaticRetryCount);
+
+        await Check.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.ExecuteAsync(transactionId, CapturePlan.Single("CAM-B")));
+        Check.Equal(1, source.GetCaptureCount("CAM-B"));
+    });
+}
+
+static async Task SingleCameraCrashRestartAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var firstSource = new DeterministicSimulatedCaptureSource();
+        var firstCoordinator = new DurableSimulatedCaptureCoordinator(root, firstSource);
+        await firstCoordinator.InitializeAsync();
+        var transactionId = Guid.NewGuid();
+
+        await Check.ThrowsAsync<SimulatedProcessCrashException>(() =>
+            firstCoordinator.ExecuteAsync(
+                transactionId,
+                CapturePlan.Single("CAM-B"),
+                SimulatedCrashPoint.AfterPersistA));
+        var interrupted = await firstCoordinator.LoadAsync(transactionId);
+        Check.Equal(SimulatedTransactionState.PersistB, interrupted.State);
+        Check.Equal(CameraOperatingMode.SingleCamera, interrupted.OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-B" }, interrupted.RequiredCameraAliases);
+        Check.SequenceEqual(new[] { "CAM-B" }, interrupted.Originals.Select(original => original.Alias));
+
+        var restartedSource = new DeterministicSimulatedCaptureSource();
+        var restarted = new DurableSimulatedCaptureCoordinator(root, restartedSource);
+        var recovered = await restarted.InitializeAsync();
+        Check.Equal(1, recovered.Count);
+        Check.Equal(SimulatedTransactionState.FailedPartial, recovered[0].State);
+        Check.Equal(CameraOperatingMode.SingleCamera, recovered[0].OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-B" }, recovered[0].RequiredCameraAliases);
+        Check.SequenceEqual(new[] { "CAM-B" }, recovered[0].Originals.Select(original => original.Alias));
+        Check.Equal(0, restartedSource.GetCaptureCount("CAM-A"));
+        Check.Equal(0, restartedSource.GetCaptureCount("CAM-B"));
+    });
+}
+
+static async Task LegacyJournalMigratesAsDualAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var transactionId = Guid.NewGuid();
+        var transactionDirectory = Path.Combine(root, transactionId.ToString("N"));
+        Directory.CreateDirectory(transactionDirectory);
+        var journalPath = Path.Combine(transactionDirectory, "transaction.json");
+        var legacyJournal = $$"""
+        {
+          "schemaVersion": "a0.simulated-transaction.v1",
+          "simulation": true,
+          "marker": "Simulated",
+          "transactionId": "{{transactionId}}",
+          "state": "PersistA",
+          "transitionHistory": ["Idle", "CaptureA", "PersistA"],
+          "originals": [],
+          "automaticRetryCount": 0,
+          "terminalReason": null,
+          "updatedAtUtc": "2026-08-07T00:00:00+00:00"
+        }
+        """;
+        await File.WriteAllTextAsync(journalPath, legacyJournal);
+
+        var source = new DeterministicSimulatedCaptureSource();
+        var coordinator = new DurableSimulatedCaptureCoordinator(root, source);
+        var recovered = await coordinator.InitializeAsync();
+
+        Check.Equal(1, recovered.Count);
+        Check.Equal(SimulatedTransactionState.FailedPartial, recovered[0].State);
+        Check.Equal(CameraOperatingMode.DualCamera, recovered[0].OperatingMode);
+        Check.SequenceEqual(new[] { "CAM-A", "CAM-B" }, recovered[0].RequiredCameraAliases);
+        Check.Equal("RestartDetectedIncompleteTransaction", recovered[0].TerminalReason);
+        Check.Equal(0, source.GetCaptureCount("CAM-A"));
+        Check.Equal(0, source.GetCaptureCount("CAM-B"));
+
+        var migratedJson = await File.ReadAllTextAsync(journalPath);
+        using var migratedDocument = JsonDocument.Parse(migratedJson);
+        Check.Equal("DualCamera", migratedDocument.RootElement.GetProperty("operatingMode").GetString());
+        Check.SequenceEqual(
+            new[] { "CAM-A", "CAM-B" },
+            migratedDocument.RootElement.GetProperty("requiredCameraAliases")
+                .EnumerateArray()
+                .Select(element => element.GetString()!));
+    });
+}
+
+static Task SingleCameraReadinessAsync()
+{
+    var today = new DateOnly(2026, 8, 10);
+    var snapshot = CreateReadySnapshot(safetyAcknowledged: true) with
+    {
+        CapturePlan = CapturePlan.Single("CAM-A"),
+        Cameras =
+        [
+            new CameraReadiness("CAM-A", true, true, true, true),
+            new CameraReadiness("CAM-B", false, false, false, false),
+        ],
+        Setup = new SetupAssessment(SetupAssessmentStatus.Ready, "single ready", [], []),
+    };
+
+    var notices = OperatorReadinessEvaluator.BuildNotices(snapshot, today);
+    Check.False(notices.Any(notice => notice.Code == "CameraMissing"), "Inactive CAM-B must not block Single CAM-A.");
+    Check.False(notices.Any(notice => notice.Code == "NoShutterSync"), "Single mode must not display a pair-only warning.");
+    Check.True(notices.Any(notice => notice.Code == "SingleCameraOutput"), "Single output provenance must be visible.");
+    Check.Equal(OperatorUiState.Ready, OperatorReadinessEvaluator.GetReadyState(snapshot, today));
+
+    var availability = OperatorReadinessEvaluator.Evaluate(snapshot, OperatorUiState.Review, today, true, false);
+    Check.True(availability.Export.Allowed, "A reviewed single original must be explicitly exportable.");
+    Check.False(availability.Restitch.Allowed, "A single original must not enable restitch.");
+
+    var missingSelected = snapshot with
+    {
+        Cameras =
+        [
+            new CameraReadiness("CAM-A", false, false, false, false),
+            new CameraReadiness("CAM-B", true, true, true, true),
+        ],
+    };
+    Check.True(
+        OperatorReadinessEvaluator.BuildNotices(missingSelected, today).Any(notice => notice.Code == "CameraMissing"),
+        "The selected Single camera must remain required.");
+
+    var extraConnected = snapshot with
+    {
+        Cameras =
+        [
+            new CameraReadiness("CAM-A", true, true, true, true),
+            new CameraReadiness("CAM-B", true, true, true, true),
+        ],
+    };
+    var extraConnectedNotices = OperatorReadinessEvaluator.BuildNotices(extraConnected, today);
+    Check.True(
+        extraConnectedNotices.Any(notice => notice.Code == "UnexpectedCameraConnected"),
+        "Single mode must block an additional connected D810 instead of silently ignoring it.");
+    Check.Equal(OperatorUiState.NotReady, OperatorReadinessEvaluator.GetReadyState(extraConnected, today));
+    return Task.CompletedTask;
+}
+
 static ReadinessSnapshot CreateReadySnapshot(bool safetyAcknowledged) => new()
 {
     SafetyAcknowledged = safetyAcknowledged,
+    CapturePlan = CapturePlan.Dual(),
     Cameras =
     [
         new CameraReadiness("CAM-A", true, true, true, true),
@@ -173,7 +412,1068 @@ static Task ProtocolSerializationAndRejectionAsync()
     Check.ThrowsProtocol("SimulationRequired", () =>
         CameraAgentProtocolCodec.DeserializeResponse(nonSimulationResponse));
 
+    HardwareProtocolValidation();
+
     return Task.CompletedTask;
+}
+
+static void HardwareProtocolValidation()
+{
+    const string requestId = "hardware-contract";
+    const string transactionId = "0123456789abcdef0123456789abcdef";
+    const string runId = "run-1786300000000-1";
+    var hash = new string('a', 64);
+    var profileExpiry = new DateTimeOffset(2099, 8, 10, 0, 0, 0, TimeSpan.Zero);
+    var profileSnapshot = new HardwareCaptureProfileSnapshot(
+        "approved-single-cam-a",
+        3,
+        new string('b', 64),
+        profileExpiry);
+
+    var readinessRequest = HardwareCameraAgentProtocolCodec.CreateReadinessRequest("CAM-A", requestId);
+    var readinessRequestJson = HardwareCameraAgentProtocolCodec.SerializeRequest(readinessRequest);
+    var readinessRequestRoundTrip = HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson);
+    Check.False(readinessRequestRoundTrip.Simulation, "Hardware requests must remain simulation=false.");
+    Check.Equal(HardwareCameraAgentProtocol.Marker, readinessRequestRoundTrip.Marker);
+    Check.Equal("CAM-A", readinessRequestRoundTrip.Payload.GetProperty("cameraAlias").GetString());
+    Check.ThrowsProtocol("UnsupportedSchemaVersion", () =>
+        CameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson));
+
+    Check.ThrowsHardwareProtocol("InvalidAlias", () =>
+        HardwareCameraAgentProtocolCodec.CreateReadinessRequest("CAM-C"));
+    Check.ThrowsHardwareProtocol("UnsupportedSchemaVersion", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson.Replace(
+            HardwareCameraAgentProtocol.SchemaVersion,
+            "a0.camera-agent.hardware.v999",
+            StringComparison.Ordinal)));
+    Check.ThrowsHardwareProtocol("HardwareProtocolRequired", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson.Replace(
+            "\"simulation\":false",
+            "\"simulation\":true",
+            StringComparison.Ordinal)));
+    Check.ThrowsHardwareProtocol("HardwareMarkerRequired", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson.Replace(
+            "\"marker\":\"Hardware\"",
+            "\"marker\":\"Simulated\"",
+            StringComparison.Ordinal)));
+    Check.ThrowsHardwareProtocol("UnsupportedOperation", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson.Replace(
+            "\"operation\":\"get-single-readiness\"",
+            "\"operation\":\"capture-pair\"",
+            StringComparison.Ordinal)));
+    Check.ThrowsHardwareProtocol("DuplicateField", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(readinessRequestJson.Replace(
+            "\"requestId\":\"hardware-contract\"",
+            "\"requestId\":\"hardware-contract\",\"requestId\":\"hardware-contract\"",
+            StringComparison.Ordinal)));
+
+    var requestWithUnknownRoot = readinessRequestJson.Insert(
+        readinessRequestJson.Length - 1,
+        ",\"unknown\":false");
+    Check.ThrowsHardwareProtocol("MalformedEnvelope", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(requestWithUnknownRoot));
+
+    var captureRequest = HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        HardwareCaptureSafetyConfirmations.AllConfirmed,
+        liveViewHandoffRequested: false,
+        requestId: "hardware-capture");
+    var captureRequestJson = HardwareCameraAgentProtocolCodec.SerializeRequest(captureRequest);
+    Check.True(
+        captureRequestJson.Contains("\"exclusiveCameraControlConfirmed\":true", StringComparison.Ordinal) &&
+        captureRequestJson.Contains("\"dedicatedSpoolScopeConfirmed\":true", StringComparison.Ordinal) &&
+        captureRequestJson.Contains("\"exactObjectDeleteConfirmed\":true", StringComparison.Ordinal) &&
+        captureRequestJson.Contains("\"expectedCaptureProfileId\":\"approved-single-cam-a\"", StringComparison.Ordinal) &&
+        captureRequestJson.Contains("\"expectedCaptureProfileVersion\":3", StringComparison.Ordinal) &&
+        captureRequestJson.Contains($"\"expectedCaptureProfileSha256\":\"{new string('b', 64)}\"", StringComparison.Ordinal) &&
+        captureRequestJson.Contains("\"expectedCaptureProfileExpiresAtUtc\":\"2099-08-10T00:00:00Z\"", StringComparison.Ordinal),
+        "Capture serialization must carry every safety confirmation and approved profile snapshot.");
+    Check.ThrowsHardwareProtocol("CaptureProfileSnapshotRequired", () =>
+        HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+            transactionId,
+            "CAM-A",
+            HardwareCaptureSafetyConfirmations.AllConfirmed));
+    Check.ThrowsHardwareProtocol("SafetyConfirmationRequired", () =>
+        HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            new HardwareCaptureSafetyConfirmations(true, false, true),
+            liveViewHandoffRequested: false));
+    Check.ThrowsHardwareProtocol("InvalidTransactionId", () =>
+        HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+            "not-a-transaction",
+            "CAM-A",
+            profileSnapshot,
+            HardwareCaptureSafetyConfirmations.AllConfirmed,
+            liveViewHandoffRequested: false));
+    Check.ThrowsHardwareProtocol("InvalidCaptureProfileSnapshot", () =>
+        HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+            transactionId,
+            "CAM-A",
+            profileSnapshot with { ExpiresAtUtc = profileExpiry.AddMilliseconds(1) },
+            HardwareCaptureSafetyConfirmations.AllConfirmed,
+            liveViewHandoffRequested: false));
+
+    var captureWithNonCanonicalExpiry = captureRequestJson.Replace(
+        "2099-08-10T00:00:00Z",
+        "2099-08-10T00:00:00+00:00",
+        StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol("InvalidCaptureProfileSnapshot", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(captureWithNonCanonicalExpiry));
+    Check.ThrowsHardwareProtocol("InvalidCaptureProfileSnapshot", () =>
+        HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+            transactionId,
+            "CAM-A",
+            profileSnapshot with
+            {
+                ExpiresAtUtc = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            },
+            HardwareCaptureSafetyConfirmations.AllConfirmed,
+            liveViewHandoffRequested: false));
+
+    var captureWithUnknownPayload = captureRequestJson.Replace(
+        "\"liveViewHandoffRequested\":false}",
+        "\"liveViewHandoffRequested\":false,\"unknown\":true}",
+        StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol("InvalidPayload", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeRequest(captureWithUnknownPayload));
+
+    Check.ThrowsHardwareProtocol("SafetyConfirmationRequired", () =>
+        HardwareCameraAgentProtocolCodec.CreateLiveViewProbeRequest(
+            "CAM-A",
+            new HardwareLiveViewSafetyConfirmation(false)));
+    Check.ThrowsHardwareProtocol("InvalidLiveViewRequest", () =>
+        HardwareCameraAgentProtocolCodec.CreateLiveViewProbeRequest(
+            "CAM-A",
+            HardwareLiveViewSafetyConfirmation.Confirmed,
+            frames: 31));
+    var liveViewRequest = HardwareCameraAgentProtocolCodec.CreateLiveViewProbeRequest(
+        "CAM-B",
+        HardwareLiveViewSafetyConfirmation.Confirmed,
+        frames: 3,
+        intervalMs: 25,
+        requestId: "hardware-live-view");
+    var liveViewRequestRoundTrip = HardwareCameraAgentProtocolCodec.DeserializeRequest(
+        HardwareCameraAgentProtocolCodec.SerializeRequest(liveViewRequest));
+    Check.Equal(3, liveViewRequestRoundTrip.Payload.GetProperty("liveViewFrames").GetInt32());
+    Check.Equal(25, liveViewRequestRoundTrip.Payload.GetProperty("liveViewIntervalMs").GetInt32());
+
+    var transactionRequest = HardwareCameraAgentProtocolCodec.CreateTransactionResultRequest(
+        transactionId,
+        "hardware-transaction-result");
+    var transactionRequestRoundTrip = HardwareCameraAgentProtocolCodec.DeserializeRequest(
+        HardwareCameraAgentProtocolCodec.SerializeRequest(transactionRequest));
+    Check.Equal(HardwareCameraAgentProtocol.Operations.GetTransactionResult, transactionRequestRoundTrip.Operation);
+    Check.Equal(transactionId, transactionRequestRoundTrip.Payload.GetProperty("transactionId").GetString());
+
+    var ready = new HardwareSingleReadinessResult
+    {
+        CameraMode = "SingleCamera",
+        CameraAlias = "CAM-A",
+        Ready = true,
+        SdkCameraCount = 1,
+        WpdCameraCount = 1,
+        SdkIdentityBound = true,
+        WpdIdentityBound = true,
+        SdkAliasMatches = true,
+        WpdAliasMatches = true,
+        SdkStatusProbed = true,
+        SpoolInspected = true,
+        SpoolPayloadObjectCount = 0,
+        SpoolKnownEmpty = true,
+        Firmware = "1.11",
+        LiveViewStatus = "off",
+        LiveViewStatusAvailable = true,
+        CaptureProfileApproved = true,
+        CaptureProfileId = "approved-single-cam-a",
+        CaptureProfileVersion = 3,
+        CaptureProfileSha256 = new string('b', 64),
+        CaptureProfileCameraAlias = "CAM-A",
+        CaptureProfileExpiresAtUtc = profileExpiry,
+        CaptureProfileAliasMatches = true,
+        SettingsMatchApprovedProfile = true,
+        ObservedSettings = CreateObservedHardwareSettings(),
+        ReadOnly = true,
+        CaptureCommandSent = false,
+        CameraObjectDeleteAttempted = false,
+        CameraSettingsChanged = false,
+        RealIdentifiersIncluded = false,
+        FailureCategory = "",
+        FailureDetail = "",
+    };
+    var readinessResponseJson = HardwareResponseJson(requestId, true, "SingleReady", ready);
+    var readinessReply = HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+        readinessResponseJson,
+        requestId,
+        "CAM-A");
+    Check.True(readinessReply.Payload.Ready, "Typed hardware readiness should accept complete one-camera evidence.");
+    var forgedLiveViewOnReady = ready with { LiveViewStatus = "on" };
+    Check.ThrowsHardwareProtocol("ForgedReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(requestId, true, "SingleReady", forgedLiveViewOnReady),
+            requestId,
+            "CAM-A"));
+    var liveViewOnNotReady = ready with
+    {
+        Ready = false,
+        LiveViewStatus = "on",
+        FailureCategory = "live_view_not_off",
+        FailureDetail = "SDK Live View must be off before the WPD baseline.",
+    };
+    Check.False(HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+        HardwareResponseJson(requestId, true, "SingleNotReady", liveViewOnNotReady),
+        requestId,
+        "CAM-A").Payload.Ready, "Live View ON must remain a typed not-ready condition.");
+    var liveViewUnknownNotReady = ready with
+    {
+        Ready = false,
+        LiveViewStatus = "",
+        LiveViewStatusAvailable = false,
+        FailureCategory = "live_view_status_unavailable",
+        FailureDetail = "SDK Live View status is unavailable.",
+    };
+    Check.False(HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+        HardwareResponseJson(requestId, true, "SingleNotReady", liveViewUnknownNotReady),
+        requestId,
+        "CAM-A").Payload.Ready, "Unavailable Live View status must remain a typed not-ready condition.");
+    var extraCameraNotReady = ready with
+    {
+        Ready = false,
+        SdkCameraCount = 2,
+        WpdCameraCount = 2,
+        SdkIdentityBound = false,
+        WpdIdentityBound = false,
+        SdkAliasMatches = false,
+        WpdAliasMatches = false,
+        SdkStatusProbed = false,
+        SpoolInspected = false,
+        SpoolKnownEmpty = false,
+        FailureCategory = "camera_count_mismatch",
+        FailureDetail = "single-camera operation requires exactly one body",
+    };
+    var extraCameraReply = HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+        HardwareResponseJson(requestId, true, "SingleNotReady", extraCameraNotReady),
+        requestId,
+        "CAM-A");
+    Check.False(extraCameraReply.Payload.Ready, "A second connected body must remain an explicit hardware blocker.");
+    Check.ThrowsProtocol("UnsupportedSchemaVersion", () =>
+        CameraAgentProtocolCodec.DeserializeResponse(readinessResponseJson));
+    Check.ThrowsHardwareProtocol("UnsupportedSchemaVersion", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            readinessResponseJson.Replace(
+                HardwareCameraAgentProtocol.SchemaVersion,
+                "a0.camera-agent.hardware.v999",
+                StringComparison.Ordinal),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("MalformedEnvelope", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            readinessResponseJson.Insert(readinessResponseJson.Length - 1, ",\"unknown\":true"),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("InvalidPayload", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            readinessResponseJson.Replace(
+                "\"currentLabel\":null",
+                "\"currentLabel\":null,\"unknownSettingField\":true",
+                StringComparison.Ordinal),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("InvalidAlias", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(requestId, true, "SingleReady", ready with { CameraAlias = "CAM-C" }),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("UnsafeReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(requestId, true, "SingleReady", ready with { RealIdentifiersIncluded = true }),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(requestId, true, "SingleReady", ready with { SdkCameraCount = 2 }),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(
+                requestId,
+                true,
+                "SingleReady",
+                ready with
+                {
+                    CaptureProfileCameraAlias = "CAM-B",
+                    CaptureProfileAliasMatches = false,
+                    SettingsMatchApprovedProfile = false,
+                }),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(
+                requestId,
+                true,
+                "SingleReady",
+                ready with
+                {
+                    CaptureProfileExpiresAtUtc =
+                        new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                }),
+            requestId,
+            "CAM-A"));
+    var invalidProfileUtcJson = HardwareResponseJson(requestId, true, "SingleReady", ready)
+        .Replace(
+            "2099-08-10T00:00:00Z",
+            "2099-08-10T00:00:00+00:00",
+            StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol("InvalidPayload", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            invalidProfileUtcJson,
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(
+                requestId,
+                true,
+                "SingleReady",
+                ready with
+                {
+                    CaptureProfileApproved = false,
+                    CaptureProfileId = "",
+                    CaptureProfileVersion = 0,
+                    CaptureProfileSha256 = "",
+                    CaptureProfileCameraAlias = "",
+                    CaptureProfileExpiresAtUtc = null,
+                    CaptureProfileAliasMatches = false,
+                    SettingsMatchApprovedProfile = false,
+                }),
+            requestId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("InvalidReadinessResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeReadinessResponse(
+            HardwareResponseJson(
+                requestId,
+                true,
+                "SingleReady",
+                ready with
+                {
+                    ObservedSettings = ready.ObservedSettings with
+                    {
+                        CompressionLevel = ready.ObservedSettings.CompressionLevel with
+                        {
+                            Available = false,
+                        },
+                    },
+                }),
+            requestId,
+            "CAM-A"));
+
+    var original = new HardwareRetainedOriginalRecord
+    {
+        CameraAlias = "CAM-A",
+        Path = @"C:\A0CameraStitcher\artifacts\run-1786300000000-1\hybrid-tx-1786300000001-1\CAM-A\original.jpg",
+        SizeBytes = 4096,
+        Sha256 = hash,
+    };
+    var capture = new HardwareSingleCaptureResult
+    {
+        CameraMode = "SingleCamera",
+        CameraAlias = "CAM-A",
+        RequiredCameraAlias = "CAM-A",
+        RunId = runId,
+        TransactionId = transactionId,
+        CaptureProfileId = "approved-single-cam-a",
+        CaptureProfileVersion = 3,
+        CaptureProfileSha256 = new string('b', 64),
+        CaptureProfileCameraAlias = "CAM-A",
+        CaptureProfileExpiresAtUtc = profileExpiry,
+        TerminalState = "Complete",
+        ErrorCategory = "",
+        ErrorDetail = "",
+        RetainedOriginal = original,
+        LiveViewHandoffRequested = false,
+        LiveViewStoppedBeforeCapture = false,
+        LiveViewSdkSessionClosedBeforeCapture = false,
+        PostCaptureLiveViewProbeAttempted = false,
+        PostCaptureLiveViewProbeSucceeded = false,
+        PostCapturePreview = null,
+        SpoolEmptyBeforeCapture = true,
+        CameraObjectDeleteAttempted = true,
+        CameraObjectDeleteSucceeded = true,
+        SpoolEmptyAfterCleanup = true,
+        AutomaticRetryCount = 0,
+        TransactionWatchdogSeconds = 180,
+        RealIdentifiersIncluded = false,
+    };
+    var captureResponseJson = HardwareResponseJson("capture-response", true, "CaptureComplete", capture);
+    var captureReply = HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+        captureResponseJson,
+        "capture-response",
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        expectedLiveViewHandoffRequested: false);
+    Check.Equal(original.Path, captureReply.Payload.RetainedOriginal?.Path);
+
+    var historicalExpiry = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    var historicalProfile = profileSnapshot with { ExpiresAtUtc = historicalExpiry };
+    var historicalReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "historical-capture",
+            true,
+            "CaptureComplete",
+            capture with { CaptureProfileExpiresAtUtc = historicalExpiry }),
+        "historical-capture",
+        transactionId,
+        "CAM-A",
+        historicalProfile,
+        expectedLiveViewHandoffRequested: false);
+    Check.Equal(
+        "Complete",
+        historicalReply.Payload.TerminalState);
+
+    Check.ThrowsHardwareProtocol("CaptureProfileSnapshotMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson(
+                "capture-response",
+                true,
+                "CaptureComplete",
+                capture with { CaptureProfileSha256 = new string('c', 64) }),
+            "capture-response",
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            expectedLiveViewHandoffRequested: false));
+
+    var profileSnapshotMismatch = capture with
+    {
+        CaptureProfileId = "replacement-single-cam-a",
+        CaptureProfileVersion = 4,
+        CaptureProfileSha256 = new string('c', 64),
+        TerminalState = "Blocked",
+        ErrorCategory = "capture_profile_snapshot_mismatch",
+        ErrorDetail = "approved capture profile changed since readiness",
+        RetainedOriginal = null,
+        SpoolEmptyBeforeCapture = false,
+        CameraObjectDeleteAttempted = false,
+        CameraObjectDeleteSucceeded = false,
+        SpoolEmptyAfterCleanup = false,
+    };
+    var mismatchReply = HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+        HardwareResponseJson(
+            "capture-profile-mismatch",
+            false,
+            "capture_profile_snapshot_mismatch",
+            profileSnapshotMismatch),
+        "capture-profile-mismatch",
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        expectedLiveViewHandoffRequested: false);
+    Check.Equal("Blocked", mismatchReply.Payload.TerminalState);
+    Check.ThrowsHardwareProtocol("ForgedCaptureProfileMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson(
+                "forged-profile-mismatch",
+                false,
+                "capture_profile_snapshot_mismatch",
+                profileSnapshotMismatch with
+                {
+                    CaptureProfileId = profileSnapshot.ProfileId,
+                    CaptureProfileVersion = profileSnapshot.ProfileVersion,
+                    CaptureProfileSha256 = profileSnapshot.Sha256,
+                }),
+            "forged-profile-mismatch",
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            expectedLiveViewHandoffRequested: false));
+
+    Check.ThrowsHardwareProtocol("InvalidVerifiedJpeg", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson(
+                "capture-response",
+                true,
+                "CaptureComplete",
+                capture with { RetainedOriginal = original with { Sha256 = hash.ToUpperInvariant() } }),
+            "capture-response",
+            transactionId,
+            "CAM-A"));
+    foreach (var invalidPath in new[]
+             {
+                 @"artifacts\CAM-A\original.jpg",
+                 @"\\server\share\CAM-A\original.jpg",
+                 @"C:\artifacts\..\outside\original.jpg",
+             })
+    {
+        Check.ThrowsHardwareProtocol("InvalidArtifactPath", () =>
+            HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+                HardwareResponseJson(
+                    "capture-response",
+                    true,
+                    "CaptureComplete",
+                    capture with { RetainedOriginal = original with { Path = invalidPath } }),
+                "capture-response",
+                transactionId,
+                "CAM-A"));
+    }
+
+    Check.ThrowsHardwareProtocol("ForgedCaptureSuccess", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson(
+                "capture-response",
+                true,
+                "CaptureComplete",
+                capture with { CameraObjectDeleteSucceeded = false }),
+            "capture-response",
+            transactionId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("RequiredCameraAliasMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson(
+                "capture-response",
+                true,
+                "CaptureComplete",
+                capture with { RequiredCameraAlias = "CAM-B" }),
+            "capture-response",
+            transactionId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("RequestIdMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            captureResponseJson,
+            "different-request",
+            transactionId,
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("TransactionIdMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            captureResponseJson,
+            "capture-response",
+            "ffffffffffffffffffffffffffffffff",
+            "CAM-A"));
+
+    var inProgress = capture with
+    {
+        TerminalState = "InProgress",
+        ErrorCategory = "transaction_in_progress",
+        ErrorDetail = "query again without resubmitting capture",
+        RetainedOriginal = null,
+        SpoolEmptyBeforeCapture = false,
+        CameraObjectDeleteAttempted = false,
+        CameraObjectDeleteSucceeded = false,
+        SpoolEmptyAfterCleanup = false,
+    };
+    var inProgressReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson("lookup-progress", false, "TransactionInProgress", inProgress),
+        "lookup-progress",
+        transactionId);
+    Check.False(inProgressReply.Success, "An active transaction query must not masquerade as capture success.");
+    Check.Equal("InProgress", inProgressReply.Payload.TerminalState);
+
+    var reserved = inProgress with
+    {
+        TerminalState = "Reserved",
+        ErrorCategory = "transaction_reserved",
+        ErrorDetail = "transaction owner is active before camera access",
+    };
+    var reservedReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson("lookup-reserved", false, "TransactionReserved", reserved),
+        "lookup-reserved",
+        transactionId);
+    Check.Equal("Reserved", reservedReply.Payload.TerminalState);
+
+    var notFound = inProgress with
+    {
+        CameraAlias = "",
+        RequiredCameraAlias = "",
+        RunId = "",
+        CaptureProfileId = "",
+        CaptureProfileVersion = 0,
+        CaptureProfileSha256 = "",
+        CaptureProfileCameraAlias = "",
+        CaptureProfileExpiresAtUtc = null,
+        TerminalState = "Blocked",
+        ErrorCategory = "transaction_not_found",
+        ErrorDetail = "no durable transaction exists",
+    };
+    var notFoundReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson("lookup-missing", false, "TransactionNotFound", notFound),
+        "lookup-missing",
+        transactionId);
+    Check.Equal("TransactionNotFound", notFoundReply.ResultCode);
+
+    var incompleteReservation = notFound with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "transaction_reservation_incomplete",
+        ErrorDetail = "reserved transaction has no committed journal",
+    };
+    var incompleteReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-incomplete",
+            false,
+            "transaction_reservation_incomplete",
+            incompleteReservation),
+        "lookup-incomplete",
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        expectedLiveViewHandoffRequested: true);
+    Check.Equal("FailedPartial", incompleteReply.Payload.TerminalState);
+
+    Check.ThrowsHardwareProtocol("CameraAliasMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+            HardwareResponseJson(
+                "lookup-wrong-alias",
+                false,
+                "TransactionInProgress",
+                inProgress with
+                {
+                    CameraAlias = "CAM-B",
+                    RequiredCameraAlias = "CAM-B",
+                    CaptureProfileCameraAlias = "CAM-B",
+                }),
+            "lookup-wrong-alias",
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            expectedLiveViewHandoffRequested: false));
+
+    Check.ThrowsHardwareProtocol("CaptureProfileCameraAliasMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+            HardwareResponseJson(
+                "lookup-wrong-profile-alias",
+                false,
+                "TransactionInProgress",
+                inProgress with { CaptureProfileCameraAlias = "CAM-B" }),
+            "lookup-wrong-profile-alias",
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            expectedLiveViewHandoffRequested: false));
+
+    var preview = new HardwarePreviewJpegRecord
+    {
+        Path = @"C:\A0CameraStitcher\artifacts\run-1786300000000-1\live-view\CAM-A\preview.jpg",
+        SizeBytes = 2048,
+        Sha256 = hash,
+    };
+    var handoffCapture = capture with
+    {
+        LiveViewHandoffRequested = true,
+        LiveViewStoppedBeforeCapture = true,
+        LiveViewSdkSessionClosedBeforeCapture = true,
+        PostCaptureLiveViewProbeAttempted = true,
+        PostCaptureLiveViewProbeSucceeded = true,
+        PostCapturePreview = preview,
+    };
+    var handoffReply = HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+        HardwareResponseJson("handoff-capture", true, "CaptureComplete", handoffCapture),
+        "handoff-capture",
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        expectedLiveViewHandoffRequested: true);
+    Check.True(
+        handoffReply.Payload.PostCaptureLiveViewProbeSucceeded,
+        "Successful handoff must prove a finite post-capture probe, not a continuing stream.");
+    Check.ThrowsHardwareProtocol("LiveViewHandoffMismatch", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson("handoff-mismatch", true, "CaptureComplete", handoffCapture),
+            "handoff-mismatch",
+            transactionId,
+            "CAM-A",
+            profileSnapshot,
+            expectedLiveViewHandoffRequested: false));
+
+    var failedPostCaptureProbe = handoffCapture with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "post_capture_live_view_probe_failed",
+        ErrorDetail = "finite post-capture Live View probe failed closed",
+        PostCaptureLiveViewProbeSucceeded = false,
+        PostCapturePreview = null,
+    };
+    var failedPostProbeReply = HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+        HardwareResponseJson(
+            "handoff-post-probe-failed",
+            false,
+            "post_capture_live_view_probe_failed",
+            failedPostCaptureProbe),
+        "handoff-post-probe-failed",
+        transactionId,
+        "CAM-A",
+        profileSnapshot,
+        expectedLiveViewHandoffRequested: true);
+    Check.Equal("FailedPartial", failedPostProbeReply.Payload.TerminalState);
+
+    var liveView = new HardwareSingleLiveViewResult
+    {
+        CameraMode = "SingleCamera",
+        CameraAlias = "CAM-A",
+        RunId = runId,
+        Frames = 3,
+        LastFrameBytes = preview.SizeBytes,
+        LastFrameSha256 = preview.Sha256,
+        DurationMs = 240,
+        PreviewPersisted = true,
+        Preview = preview,
+        PreviewIsOriginal = false,
+        PreviewIsStitchInput = false,
+        LiveViewStopped = true,
+        SdkSessionClosed = true,
+        RealIdentifiersIncluded = false,
+        ErrorCategory = "",
+        ErrorDetail = "",
+    };
+    var liveViewReply = HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+        HardwareResponseJson("live-view-response", true, "LiveViewProbeComplete", liveView),
+        "live-view-response",
+        "CAM-A",
+        expectedFrames: 3);
+    Check.False(liveViewReply.Payload.PreviewIsOriginal, "Preview provenance must remain non-original.");
+    var previewPersistenceFailure = liveView with
+    {
+        PreviewPersisted = false,
+        Preview = null,
+        ErrorCategory = "live_view_exception",
+        ErrorDetail = "verified preview persistence failed closed",
+    };
+    var previewFailureReply = HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+        HardwareResponseJson(
+            "live-view-preview-failure",
+            false,
+            "live_view_exception",
+            previewPersistenceFailure),
+        "live-view-preview-failure",
+        "CAM-A",
+        expectedFrames: 3);
+    Check.False(
+        previewFailureReply.Success,
+        "A failed preview persistence may retain frame hash and closed-session evidence without claiming success.");
+    Check.ThrowsHardwareProtocol("ForgedLiveViewSuccess", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+            HardwareResponseJson("live-view-response", true, "LiveViewProbeComplete", liveView),
+            "live-view-response",
+            "CAM-A",
+            expectedFrames: 2));
+    Check.ThrowsHardwareProtocol("InvalidVerifiedJpeg", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+            HardwareResponseJson(
+                "live-view-response",
+                true,
+                "LiveViewProbeComplete",
+                liveView with { Preview = preview with { Sha256 = new string('F', 64) } }),
+            "live-view-response",
+            "CAM-A",
+            expectedFrames: 3));
+    Check.ThrowsHardwareProtocol("UnsafeLiveViewResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+            HardwareResponseJson(
+                "live-view-response",
+                true,
+                "LiveViewProbeComplete",
+                liveView with { PreviewIsOriginal = true }),
+            "live-view-response",
+            "CAM-A",
+            expectedFrames: 3));
+    Check.ThrowsHardwareProtocol("ForgedLiveViewSuccess", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeLiveViewResponse(
+            HardwareResponseJson(
+                "live-view-response",
+                true,
+                "LiveViewProbeComplete",
+                liveView with { SdkSessionClosed = false }),
+            "live-view-response",
+            "CAM-A",
+            expectedFrames: 3));
+
+    var remoteFailure = new HardwareCameraAgentFailure
+    {
+        CameraAccess = "None",
+        RejectionCode = "SafetyConfirmationRequired",
+        ErrorDetail = "all capture confirmations are required",
+        RealIdentifiersIncluded = false,
+    };
+    try
+    {
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            HardwareResponseJson("capture-rejected", false, "ProtocolRejected", remoteFailure),
+            "capture-rejected",
+            transactionId,
+            "CAM-A");
+        throw new InvalidOperationException("A protocol rejection must surface as a typed remote exception.");
+    }
+    catch (HardwareCameraAgentRemoteException exception)
+    {
+        Check.Equal("ProtocolRejected", exception.ResultCode);
+        Check.Equal("SafetyConfirmationRequired", exception.RejectionCode);
+    }
+}
+
+static string HardwareResponseJson<T>(
+    string requestId,
+    bool success,
+    string resultCode,
+    T payload) =>
+    JsonSerializer.Serialize(
+        new
+        {
+            schemaVersion = HardwareCameraAgentProtocol.SchemaVersion,
+            simulation = false,
+            marker = HardwareCameraAgentProtocol.Marker,
+            requestId,
+            success,
+            resultCode,
+            payload,
+        },
+        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+
+static HardwareObservedCameraSettings CreateObservedHardwareSettings() => new()
+{
+    FileType = new HardwareObservedCameraSetting
+    {
+        Available = false,
+        CapType = "unsupported",
+        ProbeState = "not-advertised",
+        ValueType = "unsupported",
+        CurrentValue = null,
+        CurrentIndex = null,
+        CurrentLabel = null,
+    },
+    CompressionLevel = ObservedLabelSetting("JPEG Fine", 2),
+    ImageSize = ObservedLabelSetting("L(7360*4912)", 0),
+    ExposureMode = ObservedNumericSetting(3, 3),
+    ShutterSpeed = ObservedLabelSetting("1/6", 26),
+    Aperture = ObservedLabelSetting("8", 9),
+    Sensitivity = ObservedLabelSetting("64", 3),
+    WhiteBalanceMode = ObservedLabelSetting("Preset 1", 7),
+    FocusMode = ObservedNumericSetting(1, null),
+};
+
+static HardwareObservedCameraSetting ObservedLabelSetting(string label, uint index) => new()
+{
+    Available = true,
+    CapType = "enum",
+    ProbeState = "available",
+    ValueType = "packed-string",
+    CurrentValue = null,
+    CurrentIndex = index,
+    CurrentLabel = label,
+};
+
+static HardwareObservedCameraSetting ObservedNumericSetting(uint value, uint? index) => new()
+{
+    Available = true,
+    CapType = "unsigned",
+    ProbeState = "available",
+    ValueType = "unsigned",
+    CurrentValue = value,
+    CurrentIndex = index,
+    CurrentLabel = null,
+};
+
+static async Task HardwareNamedPipeRoundtripAsync()
+{
+    var pipeName = $"a0-camera-stitcher-hardware-{Guid.NewGuid():N}";
+    var serverTask = ServeHardwareReadinessOnceAsync(pipeName);
+    var client = new HardwareCameraAgentClient(
+        pipeName,
+        connectTimeout: TimeSpan.FromSeconds(5),
+        responseTimeout: TimeSpan.FromSeconds(5));
+
+    var reply = await client.GetSingleReadinessAsync("CAM-B");
+    Check.True(reply.Success && reply.Payload.Ready, "The typed hardware client must accept a valid local pipe response.");
+    Check.Equal("CAM-B", reply.Payload.CameraAlias);
+    await serverTask;
+
+    await HardwareConnectFailureIsTypedAsync();
+    await HardwarePostDispatchCancellationIsNotConnectFailureAsync();
+}
+
+static async Task HardwareConnectFailureIsTypedAsync()
+{
+    var pipeName = $"a0-camera-stitcher-hardware-missing-{Guid.NewGuid():N}";
+    var transport = new NamedPipeHardwareCameraAgentTransport(
+        pipeName,
+        connectTimeout: TimeSpan.FromSeconds(5),
+        responseTimeout: TimeSpan.FromSeconds(5));
+    using var cancellationSource = new CancellationTokenSource();
+    cancellationSource.Cancel();
+
+    try
+    {
+        await transport.SendAsync("{}", cancellationSource.Token);
+        throw new InvalidOperationException("A cancelled pre-dispatch connection must fail.");
+    }
+    catch (HardwareCameraAgentConnectException exception)
+    {
+        Check.Equal(pipeName, exception.PipeName);
+        Check.True(
+            exception.CallerCancellationRequested,
+            "The typed connect failure must preserve caller-cancellation context.");
+        Check.True(
+            exception.InnerException is OperationCanceledException,
+            "The typed connect failure must preserve its transport cause.");
+    }
+}
+
+static async Task HardwarePostDispatchCancellationIsNotConnectFailureAsync()
+{
+    var pipeName = $"a0-camera-stitcher-hardware-dispatched-{Guid.NewGuid():N}";
+    var requestReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseServer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = HoldHardwarePipeAfterRequestAsync(
+        pipeName,
+        requestReceived,
+        releaseServer);
+    var transport = new NamedPipeHardwareCameraAgentTransport(
+        pipeName,
+        connectTimeout: TimeSpan.FromSeconds(5),
+        responseTimeout: TimeSpan.FromSeconds(5));
+    using var cancellationSource = new CancellationTokenSource();
+    var responseTask = transport.SendAsync("{}", cancellationSource.Token);
+
+    await requestReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    cancellationSource.Cancel();
+    try
+    {
+        await responseTask;
+        throw new InvalidOperationException("A cancelled dispatched request must fail.");
+    }
+    catch (HardwareCameraAgentConnectException)
+    {
+        throw new InvalidOperationException(
+            "A post-dispatch cancellation must never authorize connect-failure cleanup.");
+    }
+    catch (OperationCanceledException)
+    {
+        // Expected: only pre-dispatch connection failures receive the lifecycle-safe wrapper.
+    }
+    finally
+    {
+        releaseServer.TrySetResult(true);
+        await serverTask;
+    }
+}
+
+static async Task HoldHardwarePipeAfterRequestAsync(
+    string pipeName,
+    TaskCompletionSource<bool> requestReceived,
+    TaskCompletionSource<bool> releaseServer)
+{
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await pipe.WaitForConnectionAsync(timeoutSource.Token);
+    _ = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
+    requestReceived.TrySetResult(true);
+    await releaseServer.Task.WaitAsync(timeoutSource.Token);
+}
+
+static async Task ServeHardwareReadinessOnceAsync(string pipeName)
+{
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await pipe.WaitForConnectionAsync(timeoutSource.Token);
+    var requestJson = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
+    var request = HardwareCameraAgentProtocolCodec.DeserializeRequest(requestJson);
+    Check.Equal(HardwareCameraAgentProtocol.Operations.GetSingleReadiness, request.Operation);
+    Check.Equal("CAM-B", request.Payload.GetProperty("cameraAlias").GetString());
+
+    var ready = new HardwareSingleReadinessResult
+    {
+        CameraMode = "SingleCamera",
+        CameraAlias = "CAM-B",
+        Ready = true,
+        SdkCameraCount = 1,
+        WpdCameraCount = 1,
+        SdkIdentityBound = true,
+        WpdIdentityBound = true,
+        SdkAliasMatches = true,
+        WpdAliasMatches = true,
+        SdkStatusProbed = true,
+        SpoolInspected = true,
+        SpoolPayloadObjectCount = 0,
+        SpoolKnownEmpty = true,
+        Firmware = "1.11",
+        LiveViewStatus = "off",
+        LiveViewStatusAvailable = true,
+        CaptureProfileApproved = true,
+        CaptureProfileId = "approved-single-cam-b",
+        CaptureProfileVersion = 5,
+        CaptureProfileSha256 = new string('c', 64),
+        CaptureProfileCameraAlias = "CAM-B",
+        CaptureProfileExpiresAtUtc = new DateTimeOffset(2099, 8, 10, 0, 0, 0, TimeSpan.Zero),
+        CaptureProfileAliasMatches = true,
+        SettingsMatchApprovedProfile = true,
+        ObservedSettings = CreateObservedHardwareSettings(),
+        ReadOnly = true,
+        CaptureCommandSent = false,
+        CameraObjectDeleteAttempted = false,
+        CameraSettingsChanged = false,
+        RealIdentifiersIncluded = false,
+        FailureCategory = "",
+        FailureDetail = "",
+    };
+    await WriteTestPipeFrameAsync(
+        pipe,
+        HardwareResponseJson(request.RequestId, true, "SingleReady", ready),
+        timeoutSource.Token);
+}
+
+static async Task<string> ReadTestPipeFrameAsync(Stream stream, CancellationToken cancellationToken)
+{
+    var header = new byte[sizeof(int)];
+    await ReadTestPipeExactlyAsync(stream, header, cancellationToken);
+    var length = BinaryPrimitives.ReadInt32LittleEndian(header);
+    Check.True(length is > 0 and <= 1024 * 1024, "The hardware test pipe frame length is invalid.");
+    var payload = new byte[length];
+    await ReadTestPipeExactlyAsync(stream, payload, cancellationToken);
+    return Encoding.UTF8.GetString(payload);
+}
+
+static async Task WriteTestPipeFrameAsync(
+    Stream stream,
+    string message,
+    CancellationToken cancellationToken)
+{
+    var payload = Encoding.UTF8.GetBytes(message);
+    var header = new byte[sizeof(int)];
+    BinaryPrimitives.WriteInt32LittleEndian(header, payload.Length);
+    await stream.WriteAsync(header, cancellationToken);
+    await stream.WriteAsync(payload, cancellationToken);
+    await stream.FlushAsync(cancellationToken);
+}
+
+static async Task ReadTestPipeExactlyAsync(
+    Stream stream,
+    Memory<byte> buffer,
+    CancellationToken cancellationToken)
+{
+    var offset = 0;
+    while (offset < buffer.Length)
+    {
+        var read = await stream.ReadAsync(buffer[offset..], cancellationToken);
+        if (read == 0)
+        {
+            throw new EndOfStreamException("The hardware test pipe closed before a complete frame.");
+        }
+
+        offset += read;
+    }
 }
 
 static async Task NamedPipeRoundtripAsync()
@@ -225,6 +1525,8 @@ static async Task NamedPipeRoundtripAsync()
         await client.SendRawAsync(wrongMarkerJson));
     Check.False(markerRejection.Success, "A wrong marker must be rejected by the pipe server.");
     Check.Equal("SimulationMarkerRequired", markerRejection.Payload.GetProperty("rejectionCode").GetString());
+
+    await HardwareNamedPipeRoundtripAsync();
 }
 
 static async Task DurableSequentialSuccessAsync()
@@ -557,12 +1859,42 @@ static class Check
         throw new InvalidOperationException($"Expected protocol error '{expectedErrorCode}'.");
     }
 
+    public static void ThrowsHardwareProtocol(string expectedErrorCode, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (HardwareProtocolViolationException exception)
+        {
+            Equal(expectedErrorCode, exception.ErrorCode);
+            return;
+        }
+
+        throw new InvalidOperationException($"Expected hardware protocol error '{expectedErrorCode}'.");
+    }
+
     public static async Task ThrowsAsync<TException>(Func<Task> action)
         where TException : Exception
     {
         try
         {
             await action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Expected exception {typeof(TException).Name}.");
+    }
+
+    public static void Throws<TException>(Action action)
+        where TException : Exception
+    {
+        try
+        {
+            action();
         }
         catch (TException)
         {

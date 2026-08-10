@@ -130,14 +130,98 @@ std::optional<std::string> EnvironmentValue(const char* name) {
     return value;
 }
 
+bool IsReparsePoint(const fs::path& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+void PrepareReparseFreeEvidenceDirectory(
+    const fs::path& trusted_root,
+    const fs::path& directory) {
+    const fs::path absolute_root = fs::absolute(trusted_root).lexically_normal();
+    const fs::path absolute_directory = fs::absolute(directory).lexically_normal();
+    const fs::path relative = absolute_directory.lexically_relative(absolute_root);
+    if ((!relative.empty() && std::any_of(
+            relative.begin(), relative.end(), [](const fs::path& component) {
+                return component == "..";
+            })) || absolute_root.root_path() != absolute_directory.root_path()) {
+        throw std::runtime_error("evidence directory escaped its trusted run root");
+    }
+    const auto validate_chain = [&](const fs::path& target) {
+        fs::path current = target.root_path();
+        const fs::path from_volume = target.lexically_relative(current);
+        for (const auto& component : from_volume) {
+            current /= component;
+            if (IsReparsePoint(current)) {
+                throw std::runtime_error(
+                    "evidence directory path contains a reparse point");
+            }
+        }
+    };
+    validate_chain(absolute_root);
+    validate_chain(absolute_directory);
+    fs::create_directories(absolute_directory);
+    validate_chain(absolute_directory);
+    std::error_code type_error;
+    if (!fs::is_directory(absolute_directory, type_error) || type_error) {
+        throw std::runtime_error("evidence directory is not a local directory");
+    }
+}
+
 void WriteBytesExclusive(const fs::path& path, const std::vector<unsigned char>& bytes) {
-    if (fs::exists(path)) throw std::runtime_error("refusing to overwrite evidence: " + path.string());
-    fs::create_directories(path.parent_path());
-    std::ofstream output(path, std::ios::binary | std::ios::out);
-    if (!output) throw std::runtime_error("cannot create evidence file: " + path.string());
-    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    output.flush();
-    if (!output) throw std::runtime_error("cannot persist evidence file: " + path.string());
+    std::error_code parent_error;
+    if (!fs::is_directory(path.parent_path(), parent_error) || parent_error) {
+        throw std::runtime_error("evidence parent directory was not prepared");
+    }
+    HANDLE handle = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw std::system_error(
+            static_cast<int>(GetLastError()),
+            std::system_category(),
+            "cannot exclusively create evidence file");
+    }
+    try {
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+                bytes.size() - offset,
+                static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+            DWORD written = 0;
+            if (!WriteFile(handle, bytes.data() + offset, chunk, &written, nullptr) ||
+                written != chunk) {
+                throw std::system_error(
+                    static_cast<int>(GetLastError()),
+                    std::system_category(),
+                    "cannot write evidence file");
+            }
+            offset += written;
+        }
+        if (!FlushFileBuffers(handle)) {
+            throw std::system_error(
+                static_cast<int>(GetLastError()),
+                std::system_category(),
+                "cannot durably flush evidence file");
+        }
+        if (!CloseHandle(handle)) {
+            handle = INVALID_HANDLE_VALUE;
+            throw std::system_error(
+                static_cast<int>(GetLastError()),
+                std::system_category(),
+                "cannot close evidence file");
+        }
+        handle = INVALID_HANDLE_VALUE;
+    } catch (...) {
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        throw;
+    }
 }
 
 class ActiveGuard {
@@ -264,6 +348,12 @@ fs::path OperatorGate::AwaitContinue(std::ostream& output) {
 }
 
 IdentityMap::IdentityMap(fs::path path) : path_(std::move(path)) { Load(); }
+
+IdentityMap::IdentityMap(
+    fs::path path,
+    std::optional<std::string> cam_a,
+    std::optional<std::string> cam_b)
+    : path_(std::move(path)), cam_a_(std::move(cam_a)), cam_b_(std::move(cam_b)) {}
 
 void IdentityMap::Load() {
     if (!fs::exists(path_)) return;
@@ -542,7 +632,7 @@ fs::path PersistDualSpoolVerificationSummary(
 EvidenceWriter::EvidenceWriter(fs::path artifacts_root, std::string run_id, std::string sdk_version)
     : artifacts_root_(std::move(artifacts_root)), run_root_(artifacts_root_ / run_id),
       run_id_(std::move(run_id)), sdk_version_(std::move(sdk_version)) {
-    fs::create_directories(run_root_);
+    PrepareReparseFreeEvidenceDirectory(run_root_, run_root_);
 }
 
 void EvidenceWriter::AppendEvent(std::string_view json_line) {
@@ -590,8 +680,11 @@ FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id,
         frame.error_category = candidates.empty() ? "no_candidate" :
             (candidates.size() > 1 ? "ambiguous_candidates" :
                 (!candidates.front().attributable ? "late_candidate" : "invalid_jpeg"));
-        const fs::path quarantine = artifacts_root_ / "quarantine" / run_id_ /
+        const fs::path quarantine = run_root_ / "quarantine" /
             std::string(transaction_id) / std::string(camera_alias);
+        if (!candidates.empty()) {
+            PrepareReparseFreeEvidenceDirectory(run_root_, quarantine);
+        }
         for (std::size_t index = 0; index < candidates.size(); ++index) {
             const auto& candidate = candidates[index];
             WriteBytesExclusive(quarantine / (std::to_string(index) + "_" + SanitizeFileName(candidate.source_name) + ".bin"), candidate.bytes);
@@ -600,8 +693,9 @@ FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id,
         return frame;
     }
     if (deadline_expired()) {
-        const fs::path quarantine = artifacts_root_ / "quarantine" / run_id_ /
+        const fs::path quarantine = run_root_ / "quarantine" /
             std::string(transaction_id) / std::string(camera_alias);
+        PrepareReparseFreeEvidenceDirectory(run_root_, quarantine);
         WriteBytesExclusive(quarantine / ("watchdog_" + SanitizeFileName(candidates.front().source_name) + ".bin"),
             candidates.front().bytes);
         return watchdog_failure(quarantine);
@@ -611,12 +705,18 @@ FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id,
     const fs::path final = directory / "original.jpg";
     frame.bytes = candidates.front().bytes.size();
     frame.sha256 = Sha256Hex(candidates.front().bytes);
+    PrepareReparseFreeEvidenceDirectory(run_root_, directory);
     WriteBytesExclusive(partial, candidates.front().bytes);
     if (deadline_expired()) return watchdog_failure(partial);
     if (fs::exists(final)) throw std::runtime_error("refusing to overwrite an original JPEG");
     if (before_atomic_rename) before_atomic_rename();
     if (deadline_expired()) return watchdog_failure(partial);
-    fs::rename(partial, final);
+    if (!MoveFileExW(partial.c_str(), final.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        throw std::system_error(
+            static_cast<int>(GetLastError()),
+            std::system_category(),
+            "cannot atomically publish durable original JPEG");
+    }
     frame.path = final;
     if (deadline_expired()) return watchdog_failure(final);
     std::error_code size_error;
@@ -647,8 +747,11 @@ FrameEvidence EvidenceWriter::QuarantineUnconfirmed(
     const std::vector<ImageCandidate>& candidates, std::string_view command_detail) {
     FrameEvidence frame;
     frame.camera_alias = std::string(camera_alias);
-    const fs::path quarantine = artifacts_root_ / "quarantine" / run_id_ /
+    const fs::path quarantine = run_root_ / "quarantine" /
         std::string(transaction_id) / std::string(camera_alias);
+    if (!candidates.empty()) {
+        PrepareReparseFreeEvidenceDirectory(run_root_, quarantine);
+    }
     frame.path = quarantine;
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         const auto& candidate = candidates[index];
@@ -1094,7 +1197,9 @@ TransactionResult ExecuteHybridCaptureOnce(
     Timeouts timeouts,
     const std::function<void()>& before_wpd_recovery,
     const std::function<void()>& before_pc_original_rename,
-    std::optional<std::chrono::steady_clock::time_point> transaction_deadline) {
+    std::optional<std::chrono::steady_clock::time_point> transaction_deadline,
+    const std::function<void(const FrameEvidence&)>& before_camera_object_delete,
+    const std::function<void()>& before_sdk_capture) {
     TransactionResult result;
     result.run_id = evidence.RunId();
     result.transaction_id = "hybrid-tx-" + NewRunId().substr(4);
@@ -1147,6 +1252,14 @@ TransactionResult ExecuteHybridCaptureOnce(
         sdk_session.Open(sdk_identity, budget(timeouts.open));
         sdk_open = true;
         ensure_active();
+        if (before_sdk_capture) {
+            evidence.RecordState(
+                result.transaction_id,
+                "HybridSdkProfileRevalidation",
+                camera_alias);
+            before_sdk_capture();
+            ensure_active();
+        }
         sdk.CaptureToCard(
             budget(timeouts.image_event),
             budget(timeouts.image_event + timeouts.download));
@@ -1200,6 +1313,10 @@ TransactionResult ExecuteHybridCaptureOnce(
                 "the recovered JPEG has no in-memory exact-object cleanup capability");
         }
         ensure_active();
+        if (before_camera_object_delete) {
+            before_camera_object_delete(result.frames.front());
+            ensure_active();
+        }
         result.camera_card_delete_attempted = true;
         evidence.RecordState(result.transaction_id, "HybridCameraObjectDeleteStarted", camera_alias);
         wpd.DeleteRecoveredObject(candidates.front().cleanup_token, budget(timeouts.close));

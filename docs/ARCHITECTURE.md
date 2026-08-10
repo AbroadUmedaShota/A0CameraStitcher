@@ -2,7 +2,7 @@
 
 ## 設計方針
 
-MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画像合成エンジン」を分離する。Phase 0は.NETへ依存しないC++20コンソールとして、Nikon SDK Live Viewと、2026-08-06に`HG-0008`承認済みのsingle-slot spool経路の排他handoffを検証する。
+MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画像合成エンジン」を分離する。製品modeは`SingleCamera`と`DualCamera`を明示選択し、接続台数から推定しない。Phase 0は.NETへ依存しないC++20コンソールとして、Nikon SDK Live Viewと、2026-08-06に`HG-0008`承認済みのsingle-slot spool経路の排他handoffを検証する。
 
 ```text
 ┌────────────────────────────────────────────┐
@@ -18,7 +18,7 @@ MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画�
 │ -> WPD recover (no capture command)        │
 └───────────────────┬────────────────────────┘
                     │ Nikon Remote SDK / WPD / USB
-              Nikon D810 A / B
+         selected Nikon D810 / D810 A + B
 
 ┌────────────────────────────────────────────┐
 │ StitchEngine (C++20 / OpenCV, M2)         │
@@ -31,23 +31,39 @@ MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画�
 `A0CameraStitcher.Phase0.exe` は次の境界を持つ。
 
 - `ICameraTransport`: 列挙、セッション開始、基準点取得、撮影、JPEG取得、セッション終了。
-- `CaptureCoordinator`: 単一進行トランザクションと`CAM-A → CAM-B`の状態遷移。
+- `CaptureCoordinator`: immutableな`CapturePlan { mode, requiredAliases, profileId }`を一transactionに固定し、`SingleCamera`では選択alias一台、`DualCamera`では`CAM-A → CAM-B`を順次処理する。`DualCamera`の一台不足を自動で一台transactionへ変更しない。
 - `ICardCaptureTransport` / `IPostCardObservationTransport`: SDK card captureとWPD post-baseline回収を分離し、hybrid executorが各`ICameraTransport::Close`の完了後だけ次のtransportを開く。
 - `EvidenceWriter`: 原画像の原子的保存、SHA-256、JSONLイベント、匿名化レポート。
 - `NikonSdkTransport`: 正規取得したD810用SDKをリポジトリ外から読み込み、選択中一台のLive View、設定、およびone-shotのカメラカード撮影を行うadapter。capture後はWPD recovery前にfull closeする。
 - `WpdTransport`: correlation diagnosticsと、承認済みsingle-slot spool recovery専用。attempted hybridのdatetime cutoffはRejectedであり、clock cutoffを帰属に使わない。
-- `ILiveViewTransport` / `LiveViewCoordinator`: SDKで選択中一台のLive Viewだけを開始・画像取得・停止し、hybrid transactionへ渡す前にstopとsession closeの完了を保証する。fake transportで停止・close・撮影・再開失敗を契約試験する。
+- `ILiveViewTransport` / `LiveViewCoordinator`: SDKで選択中一台のLive Viewだけを開始・画像取得・停止し、hybrid transactionへ渡す前にstopとsession closeの完了を保証する。fake transportで停止・close・撮影・撮影後確認失敗を契約試験する。
 - `FakeCameraTransport`: SDK不要のtransaction・失敗系テスト用。
 - `CliSafety`: 旧direct captureをfake-onlyへ制限し、実機を開くcommandだけを明示分類する。
 - `HardwareProcessLease`: `Local\` Windows named mutexにより、同じinteractive Windows logon session内の別processを含め実SDK/WPD commandを同時に一件だけ許可する。transport内のsession guardとは別の安全層である。別ユーザーsession／serviceはMVP運用外とし、M4のinstaller・運用policyで二重起動を禁止する。
 
 SDK APIは、本人同意後に正規取得したlocal資料と公式sampleで確認した範囲だけをadapterへ反映する。SDK binaryは配置元から動的loadし、copy・link・再配布しない。
 
-Live Viewは一台選択式であり、二台同時表示は行わない。プレビューframeは一時表示・診断専用で、`EvidenceWriter`の原画像、JPEG帰属、合成入力に渡さない。撮影要求が来たら`LiveViewCoordinator`はSDK Live Viewを停止しsession closeの成功を待つ。次にWPD baselineを取得してfull closeし、SDKがカメラカードへ一回だけ撮影してfull closeし、WPDがreopenして撮影commandなしで回収する。成功時だけ操作者が選択していた一台のLive ViewをSDKで再開する。停止・close・再開・baseline・capture・recoveryの失敗は自動再試行せず、診断を残して明示操作を要求する。
+Live Viewは一台選択式であり、二台同時表示は行わない。プレビューframeは一時表示・診断専用で、`EvidenceWriter`の原画像、JPEG帰属、合成入力に渡さない。撮影要求が来たらSDK Live Viewを停止しsession closeの成功を待つ。次にWPD baselineを取得してfull closeし、SDKがカメラカードへ一回だけ撮影してfull closeし、WPDがreopenして撮影commandなしで回収する。現`hardware.v1`は成功後に有限一frameだけをprobeし、その取得後にLive Viewを停止してSDK sessionを閉じる。これは継続streamの「再開」ではない。停止・close・post-capture probe・baseline・capture・recoveryの失敗は自動再試行せず、診断を残して明示操作を要求する。継続的・対話的なLive View再開は`FR-LV`の実機受入が完了するまで未検証である。
+
+M3の`HardwareSingleCamera`画面は、operationごとに一回起動するC++ `A0CameraStitcher.CameraAgent.exe`とrandom named pipeで接続する。capture前にlocal app stateへ`SingleCamera`、transaction ID、required alias、承認profile ID/version/SHA/expiry、handoff intent、dispatch markerをwrite-throughで保存する。応答不明や再起動後は同じIDとsnapshotの`get-transaction-result`だけを実行し、captureを再送しない。`TransactionNotFound`は曖昧状態としてpendingを保持する。canonical originalはアプリ側でも再読込検証し、明示export時は`.partial`へbyte-identical copyし、write/deleteを拒否するhandleで再読込検証して、その同じfile identityをhandle-based renameでpublishする。wire・journal・failure contractの詳細は[Hardware Camera Agent v1](HARDWARE_CAMERA_AGENT_V1.md)に固定する。これらはsoftware contractであり、実D810・actual JPEGの製品受入ではない。
 
 ## 撮影トランザクション
 
+modeはtransaction開始前に明示選択し、開始後は変更しない。初期`SingleCamera`はSDK/WPD双方でexactly-one physical D810を要求する。二台接続中に片方だけを使う経路は許可せず、modeと物理台数が一致しなければcard access前に失敗する。
+
 ```text
+SingleCamera:
+Idle
+ -> CaptureSelected: WPD baseline / close / SDK one card capture / close / WPD recover exactly-one JPEG
+ -> PersistSelected: .partial / validate / SHA-256 / atomic rename / reread verification
+ -> Captured
+ -> Complete (StitchOutcome = NotApplicable)
+```
+
+canonical `original.jpg`を単一撮影出力として明示exportする。bit-identical copy以外のlens/crop処理は`HG-0009`が解消するまで製品契約に含めず、単一出力を`stitched`と呼ばない。
+
+```text
+DualCamera:
 Idle
  -> CaptureA: WPD baseline / close / SDK one card capture / close / WPD recover exactly-one JPEG
  -> PersistA: .partial / validate / SHA-256 / atomic rename / close
@@ -57,9 +73,9 @@ Idle
  -> Complete
 ```
 
-どの段階でもtimeout、切断、複数候補、既存・遅延画像を検出した場合は`FailedPartial`へ遷移する。自動再試行・同一トランザクションの再開・曖昧画像の自動帰属は行わない。取得済み原画像と曖昧画像は削除しない。
+どのmode・段階でもtimeout、切断、複数候補、既存・遅延画像を検出した場合は`FailedPartial`へ遷移する。自動再試行・同一transactionの再開・曖昧画像の自動帰属は行わない。取得済み原画像と曖昧画像は削除しない。journalにはmode、required aliases、profile ID、各cameraの状態、合成または`NotApplicable`理由を記録する。
 
-`run-1785914842210-1`でWPD baselineが10.385秒後に`baseline_timeout`となりSDK open/capture前に終了し、read-only `run-1785917005306-1`では3/3 session close後もdevice datetimeがadvance 0/equal 2、latest object date > device time 3/3だった。このためdevice datetime cutoffを製品帰属契約から撤回する。`HG-0008`は2026-08-06に承認済みで、専用empty/cleared card single-slot spoolを実装・実機評価できる。撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、SDK one capture後の唯一JPEG objectをWPDで回収する。PC `.partial`、JPEG・size検証、SHA-256、atomic `original.jpg`確定、再読込検証後にそのexact objectだけを削除し、全payload 0件を再確認する。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にする。existing cardのbulk delete/format、vendor operation、retryは禁止する。
+`run-1785914842210-1`でWPD baselineが10.385秒後に`baseline_timeout`となりSDK open/capture前に終了し、read-only `run-1785917005306-1`では3/3 session close後もdevice datetimeがadvance 0/equal 2、latest object date > device time 3/3だった。このためdevice datetime cutoffを製品帰属契約から撤回する。`HG-0008`は2026-08-06に承認済みで、専用empty/cleared card single-slot spoolを実装・実機評価できる。撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、SDK one capture後の唯一JPEG objectをWPDで回収する。PC `.partial`、JPEG・size検証、SHA-256、atomic `original.jpg`確定後、同じfile identityをhandleで再読込検証し、write/deleteを拒否したままexact WPD objectを削除して全payload 0件を再確認する。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にする。existing cardのbulk delete/format、vendor operation、retryは禁止する。
 
 `wpd-status`はtarget互換性に加え、Microsoftの`WPD_COMMAND_MTP_EXT_GET_SUPPORTED_VENDOR_OPCODES`だけをqueryし、個別opcode一覧を保存せず件数と`0x9207`広告有無だけを匿名化する。撮影commandとvendor operationは構築・送信しない。既定は`GENERIC_READ`で、driverがqueryを`Access denied`にした場合も自動で権限を上げない。明示的な`--wpd-status-access read-write` runだけがread/write sessionを開けるが、送るcommandは同じ非変更query一件に固定する。WPD common HRESULTだけで原因を特定できない場合は、Microsoft WPD/MTP ETWを一transactionだけ収集し、raw traceはgitignored領域へ隔離する。commit可能な証拠にはopcode、response code、時刻、候補件数だけを残し、実識別子を含めない。
 
@@ -84,7 +100,7 @@ camera aliasは列挙順で決めず、transport別のlocal identity mapから�
 - ローカル実識別子対応表: `%LOCALAPPDATA%\A0CameraStitcher\phase0\camera-map.json`
 - raw証拠: `artifacts/phase0/<run-id>/`
 - Live View handoff証拠: `artifacts/phase0/<run-id>/handoff-summary.json`
-- 曖昧画像: `artifacts/phase0/quarantine/<run-id>/<transaction-id>/<alias>/`
+- 曖昧画像: `artifacts/phase0/<run-id>/quarantine/<transaction-id>/<alias>/`
 - commit可能レポート: `docs/evidence/phase0/<run-id>/report.md`と、存在する匿名`summary.json`、`handoff-summary.json`、`live-view-summary.json`、`transaction-events.jsonl`
 
 実識別子はローカル対応表だけに保存し、ログ・レポート・fixtureでは`CAM-A`、`CAM-B`へ置換する。JPEGは`.partial`へ保存し、JPEG構造・サイズ・SHA-256確認後に`original.jpg`へ原子的にrenameする。
@@ -93,13 +109,13 @@ camera aliasは列挙順で決めず、transport別のlocal identity mapから�
 
 M2はD810の7360×4912 JPEGを前提に、150/180/200 DPI候補の光学成立性を計算してから、Planar Homographyと固定キャリブレーションを使用する。
 
-設置の目的はpixel単位で人が完全一致させることではなく、承認済みprofileの自動補正範囲へ撮影条件を入れることである。設置アシスタントは、profile承認状態、全画角、重複、カメラ設定整合と、位置・回転・倍率・露出・色の測定値を評価し、次の三状態を返す。
+`DualCamera`設置の目的はpixel単位で人が完全一致させることではなく、承認済みprofileの自動補正範囲へ撮影条件を入れることである。設置アシスタントは、profile承認状態、全画角、重複、カメラ設定整合と、位置・回転・倍率・露出・色の測定値を評価し、次の三状態を返す。
 
 - `ready`: 目標範囲内で補正不要。
 - `ready-auto-correction`: 承認済み上限内なので、一時的な補正を適用して処理を続行できる。
 - `physical-adjustment-required`: 画角・重複・設定または補正量が範囲外で、物理調整または再キャリブレーションが必要。
 
-判定器は閾値の既定値を持たず、承認済みrig profileから明示的に受け取る。単純な`approved`フラグを信用せず、status、対応schema版、provenance、`measuredAt <= assessedAt < validUntil`を自分で検査する。draft・不整合・期限切れprofileは本番撮影に使わない。JSON Schemaはshapeと型を担当し、cross-field順序と評価時点の期限はproduction validator／判定器がfail closedにする。Live View frameは設置の目視案内に限り、正確な校正と品質測定には明示的な校正用JPEGを使う。Live View frameを原画像・合成入力・撮影候補へ昇格しない。
+判定器は閾値の既定値を持たず、承認済みprofileから明示的に受け取る。単純な`approved`フラグを信用せず、status、対応schema版、provenance、`measuredAt <= assessedAt < validUntil`を自分で検査する。draft・不整合・期限切れprofileは本番撮影に使わない。現行rig-profile 1.1は二台専用として維持し、単に`cameraSlots.minItems`を1へ緩めない。`SingleCamera`のprofileはidentity、read-only設定、画角、crop、mode別品質を持ち、overlap、seam、二台間相対補正を`NotApplicable`にできるversioned schemaとして`HG-0009`後に定義する。Live View frameは設置の目視案内に限り、正確な校正と品質測定には明示的な校正用JPEGを使う。Live View frameを原画像・合成入力・撮影候補へ昇格しない。
 
 M2 pre-gateの`A0CameraStitcher.OpticalPlanner`はOpenCVや実画像に依存しない純粋計算境界である。全光学条件を引数で受け取り、結果へ`unapproved`と`not-evaluated`を常設する。公開synthetic chartとdraft rig-profileは契約試験専用であり、実写品質や承認済みcalibrationとして画像処理pipelineへ自動投入しない。
 
@@ -131,8 +147,8 @@ JPEG decode
 
 ## M3 pre-gateのsimulation境界
 
-M3Pは.NET 10内の`Foundation`、実Named Pipeを使うfake agent、WPF `OperatorShell`でapplication contractだけを先行検証する。messageは`simulation=true`と`marker=Simulated`を必須とし、画面は常時`SIMULATED / 実機未接続`を表示する。fake原本は`.simulated`のplain textであり、JPEGやLive View frameとして扱わない。
+M3Pは.NET 10内の`Foundation`、実Named Pipeを使うfake agent、WPF `OperatorShell`でapplication contractだけを先行検証する。messageは`simulation=true`と`marker=Simulated`を必須とし、画面は常時`SIMULATED / 実機未接続`を表示する。modeは`SingleCamera`または`DualCamera`を明示してjournalへ固定する。fake原本は`.simulated`のplain textであり、JPEGやLive View frameとして扱わない。
 
-M3Pのfake agentは将来のC++ Camera Agentそのものではない。M3で置換するまで、SDK/WPD transport、実camera identity、実Live View、実JPEGをこの境界へ接続しない。durable transactionのstate／no-retry／部分成功保持契約だけを共通化する。
+M3Pのfake agentは将来のC++ Camera Agentそのものではない。M3で置換するまで、SDK/WPD transport、実camera identity、実Live View、実JPEGをこの境界へ接続しない。durable transactionのmode/state／no-auto-fallback／no-retry／部分成功保持契約だけを共通化する。software-onlyの一台workflow合格を実WPF Camera Agent連携や実機一台撮影の合格へ読み替えない。
 
 2026-08-04の`REVISE-WPD`承認と標準WPD失敗の履歴を保持する。2026-08-06の`HG-0008`承認により、専用empty/cleared cardに限り、PC原本の再読込検証後にjust-recovered WPD objectを削除できる。bulk delete、format、vendor operation、retryは行わない。

@@ -58,6 +58,8 @@ public sealed record ReadinessSnapshot
 {
     public required bool SafetyAcknowledged { get; init; }
 
+    public required CapturePlan CapturePlan { get; init; }
+
     public required IReadOnlyList<CameraReadiness> Cameras { get; init; }
 
     public required RigProfileReadiness Profile { get; init; }
@@ -109,8 +111,19 @@ public static class OperatorReadinessEvaluator
             notices.Add(new(OperatorWarningSeverity.Blocker, "SafetyAckRequired", "起動時の排他使用への同意が必要です。"));
         }
 
-        foreach (var camera in snapshot.Cameras)
+        snapshot.CapturePlan.Validate();
+        var camerasByAlias = snapshot.Cameras
+            .GroupBy(camera => camera.Alias, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        foreach (var alias in snapshot.CapturePlan.RequiredCameraAliases)
         {
+            if (!camerasByAlias.TryGetValue(alias, out var matchingCameras) || matchingCameras.Length != 1)
+            {
+                notices.Add(new(OperatorWarningSeverity.Blocker, "CameraInventoryInvalid", $"{alias} の状態を一意に確認できません。"));
+                continue;
+            }
+
+            var camera = matchingCameras[0];
             if (!camera.Connected)
             {
                 notices.Add(new(OperatorWarningSeverity.Blocker, "CameraMissing", $"{camera.Alias} が接続されていません。"));
@@ -129,6 +142,17 @@ public static class OperatorReadinessEvaluator
             {
                 notices.Add(new(OperatorWarningSeverity.Blocker, "CardNotKnownEmpty", $"{camera.Alias} のカードがempty-spoolと確認できません。"));
             }
+        }
+
+        if (snapshot.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera &&
+            snapshot.Cameras.Any(camera =>
+                camera.Connected &&
+                !snapshot.CapturePlan.RequiredCameraAliases.Contains(camera.Alias, StringComparer.Ordinal)))
+        {
+            notices.Add(new(
+                OperatorWarningSeverity.Blocker,
+                "UnexpectedCameraConnected",
+                "一台構成では選択した一台以外のD810を取り外してください。接続台数から自動降格しません。"));
         }
 
         if (!snapshot.Profile.Approved || !snapshot.Profile.Consistent || snapshot.Profile.ExpiresOn < today)
@@ -161,7 +185,14 @@ public static class OperatorReadinessEvaluator
         }
 
         notices.Add(new(OperatorWarningSeverity.Info, "PreviewIsNotOriginal", "Live Viewはプレビューであり、原画像や合成入力には使用しません。"));
-        notices.Add(new(OperatorWarningSeverity.Info, "NoShutterSync", "二台の実シャッター時刻差は保証しません。"));
+        if (snapshot.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera)
+        {
+            notices.Add(new(OperatorWarningSeverity.Info, "SingleCameraOutput", "一台構成では選択カメラの検証済み原画像を出力し、合成は行いません。"));
+        }
+        else
+        {
+            notices.Add(new(OperatorWarningSeverity.Info, "NoShutterSync", "二台の実シャッター時刻差は保証しません。"));
+        }
         return notices.Concat(snapshot.Notices).ToArray();
     }
 
@@ -182,7 +213,7 @@ public static class OperatorReadinessEvaluator
         ReadinessSnapshot snapshot,
         OperatorUiState state,
         DateOnly today,
-        bool hasStitchResult,
+        bool hasExportableResult,
         bool canRestitch)
     {
         var blocker = BuildNotices(snapshot, today)
@@ -198,9 +229,9 @@ public static class OperatorReadinessEvaluator
             LiveView = !active && snapshot.SafetyAcknowledged && !snapshot.CameraStateRequiresInspection
                 ? OperatorActionDecision.Permit()
                 : OperatorActionDecision.Block(active ? "処理中はLive Viewを変更できません。" : "排他同意またはSDK状態確認が必要です。"),
-            Export = !active && state == OperatorUiState.Review && hasStitchResult
+            Export = !active && state == OperatorUiState.Review && hasExportableResult
                 ? OperatorActionDecision.Permit()
-                : OperatorActionDecision.Block("検証済みの合成結果を確認してから保存できます。"),
+                : OperatorActionDecision.Block("検証済みの撮影または合成結果を確認してから保存できます。"),
             Restitch = !active && canRestitch
                 ? OperatorActionDecision.Permit()
                 : OperatorActionDecision.Block("左右両方の保持原画像が必要です。"),
@@ -216,6 +247,7 @@ public static class OperatorReadinessEvaluator
 
 public sealed record CaptureOutcome(
     Guid TransactionId,
+    CapturePlan CapturePlan,
     SimulatedTransactionState State,
     IReadOnlyList<string> RetainedOriginalAliases,
     string OperatorMessage,

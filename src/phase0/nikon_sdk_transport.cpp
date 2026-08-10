@@ -234,6 +234,7 @@ public:
             OpenModule(deadline);
             const auto ids = WaitForSourceIds(deadline, "open_failed");
             std::size_t matches = 0;
+            std::size_t d810_count = 0;
             std::optional<ULONG> selected_id;
             for (const ULONG id : ids) {
                 MaidObject candidate;
@@ -241,16 +242,23 @@ public:
                 try {
                     EnumerateCapabilities(candidate, deadline, "open_failed");
                     const ULONG type = GetUnsigned(candidate, kNkMAIDCapability_CameraType, deadline, "open_failed");
-                    if (type == kNkMAIDCameraType_D810 &&
-                        StableIdentity(candidate, deadline, "open_failed") == stable_identity) {
-                        ++matches;
-                        selected_id = id;
+                    if (type == kNkMAIDCameraType_D810) {
+                        ++d810_count;
+                        if (StableIdentity(candidate, deadline, "open_failed") == stable_identity) {
+                            ++matches;
+                            selected_id = id;
+                        }
                     }
                     CloseObjectNoThrow(candidate);
                 } catch (...) {
                     CloseObjectNoThrow(candidate);
                     throw;
                 }
+            }
+            if (require_exactly_one_d810_ && d810_count != 1) {
+                throw TransportError(
+                    "camera_count_mismatch",
+                    "product SingleCamera SDK open requires exactly one currently connected D810");
             }
             if (matches != 1 || !selected_id) {
                 throw TransportError("open_failed", "requested D810 was not uniquely available");
@@ -661,6 +669,48 @@ private:
         } catch (const std::invalid_argument&) {
             throw TransportError(std::string(category), "SDK source identity material is invalid");
         }
+    }
+
+    SdkCameraStatus ProbeOpenCaptureSessionStatus(std::chrono::seconds timeout) {
+        return ReadOpenCaptureSessionStatus(timeout);
+    }
+
+    void RequireExactlyOneD810ForProductAgent() noexcept {
+        require_exactly_one_d810_ = true;
+    }
+
+    SdkCameraStatus ReadOpenCaptureSessionStatus(std::chrono::seconds timeout) {
+        RequireCaptureSession();
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        SdkCameraStatus status;
+        status.firmware = Firmware(source_, deadline, "sdk_status_failed");
+
+        if (const auto value = TryGetCurrentValue(
+                source_, kNkMAIDCapability_LiveViewStatus, deadline, "sdk_status_failed")) {
+            status.live_view_status_available = true;
+            if (*value == kNkMAIDLiveViewStatus_OFF) status.live_view_status = "off";
+            else if (*value == kNkMAIDLiveViewStatus_ON) status.live_view_status = "on";
+        }
+        if (const auto value = TryGetCurrentValue(
+                source_, kNkMAIDCapability_LiveViewSelector, deadline, "sdk_status_failed")) {
+            status.live_view_selector_available = true;
+            if (*value == kNkMAIDLiveViewSelector_Photo) status.live_view_selector = "photo";
+            else if (*value == kNkMAIDLiveViewSelector_Movie) status.live_view_selector = "movie";
+        }
+        if (const auto value = TryGetCurrentValue(
+                source_, kNkMAIDCapability_LiveViewProhibit, deadline, "sdk_status_failed")) {
+            status.live_view_prohibit_mask = static_cast<std::uint32_t>(*value);
+        }
+        status.file_type = ReadSettingCapability(source_, kNkMAIDCapability_FileType, deadline);
+        status.compression_level = ReadSettingCapability(source_, kNkMAIDCapability_CompressionLevel, deadline);
+        status.image_size = ReadSettingCapability(source_, kNkMAIDCapability_ImageSize, deadline);
+        status.exposure_mode = ReadSettingCapability(source_, kNkMAIDCapability_ExposureMode, deadline);
+        status.shutter_speed = ReadSettingCapability(source_, kNkMAIDCapability_ShutterSpeed, deadline);
+        status.aperture = ReadSettingCapability(source_, kNkMAIDCapability_Aperture, deadline);
+        status.sensitivity = ReadSettingCapability(source_, kNkMAIDCapability_Sensitivity, deadline);
+        status.wb_mode = ReadSettingCapability(source_, kNkMAIDCapability_WBMode, deadline);
+        status.focus_mode = ReadSettingCapability(source_, kNkMAIDCapability_FocusMode, deadline);
+        return status;
     }
 
     std::optional<ULONG> TryGetCurrentValue(
@@ -1312,6 +1362,9 @@ private:
     std::string sdk_version_;
     std::vector<std::unique_ptr<CompletionState>> completions_;
     std::vector<std::unique_ptr<DownloadState>> downloads_;
+    bool require_exactly_one_d810_{};
+
+    friend class NikonSdkTransport;
 };
 
 NikonSdkTransport::NikonSdkTransport() : impl_(std::make_unique<Impl>()) {}
@@ -1322,6 +1375,13 @@ SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(
     std::string_view stable_identity,
     std::chrono::seconds timeout) {
     return impl_->ProbeSdkStatus(stable_identity, timeout);
+}
+SdkCameraStatus NikonSdkTransport::ProbeOpenCaptureSessionStatus(
+    std::chrono::seconds timeout) {
+    return impl_->ProbeOpenCaptureSessionStatus(timeout);
+}
+void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {
+    impl_->RequireExactlyOneD810ForProductAgent();
 }
 void NikonSdkTransport::Open(std::string_view stable_identity, std::chrono::seconds timeout) {
     impl_->Open(stable_identity, timeout);
@@ -1372,6 +1432,8 @@ NikonSdkTransport::~NikonSdkTransport() = default;
 std::string NikonSdkTransport::SdkVersion() const { return "not-linked-license-gated"; }
 std::vector<CameraInfo> NikonSdkTransport::Enumerate() { ThrowGated(); }
 SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(std::string_view, std::chrono::seconds) { ThrowGated(); }
+SdkCameraStatus NikonSdkTransport::ProbeOpenCaptureSessionStatus(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {}
 void NikonSdkTransport::Open(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }

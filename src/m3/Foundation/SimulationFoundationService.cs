@@ -39,8 +39,21 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
     public async Task<SimulatedWorkflowState> ExecuteAsync(
         Guid transactionId,
         SimulatedWorkflowScenario scenario,
+        CancellationToken cancellationToken = default) =>
+        await ExecuteAsync(
+            transactionId,
+            CapturePlan.Dual(),
+            scenario,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<SimulatedWorkflowState> ExecuteAsync(
+        Guid transactionId,
+        CapturePlan capturePlan,
+        SimulatedWorkflowScenario scenario,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(capturePlan);
+        capturePlan.Validate();
         await _serviceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -50,6 +63,7 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
                 return ToWorkflowState(
                     await failureCoordinator.RecordLiveViewStopFailureAsync(
                         transactionId,
+                        capturePlan,
                         cancellationToken).ConfigureAwait(false));
             }
 
@@ -68,6 +82,7 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
             {
                 var result = await coordinator.ExecuteAsync(
                     transactionId,
+                    capturePlan,
                     crashPoint,
                     cancellationToken).ConfigureAwait(false);
                 return ToWorkflowState(result);
@@ -92,6 +107,8 @@ public sealed class SimulationFoundationService : ISimulatedTransactionService
             Simulation = true,
             Marker = SimulatedTransactionProtocol.Marker,
             TransactionId = journal.TransactionId,
+            OperatingMode = journal.OperatingMode,
+            RequiredCameraAliases = journal.RequiredCameraAliases.ToArray(),
             State = journal.State,
             IsTerminal = journal.State is SimulatedTransactionState.Complete or SimulatedTransactionState.FailedPartial,
             RetainedOriginalAliases = journal.Originals.Select(original => original.Alias).ToArray(),

@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <AssemblyName>A0CameraStitcher.M3.OperatorShell</AssemblyName>
     <RootNamespace>A0CameraStitcher.M3.OperatorShell</RootNamespace>

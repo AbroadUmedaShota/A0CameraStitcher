@@ -1,10 +1,11 @@
 {
   "schema_version": "autodev.human-gates.v1",
-  "updated_at": "2026-08-09",
+  "updated_at": "2026-08-10",
   "gates": [
     {"id":"HG-0001","category":"requirements","severity":"important-decision","required_role":"product-owner","summary":"D810二台のA0出力品質基準が未確定","requested_decision":"M2の光学成立性計算後に代表原稿、向き、実効DPI、pixels、crop、baseline校正残差、撮影ごとの自動補正target/hard上限、補正後の位置ずれ・色差・seam失敗基準、総p95を承認してください。","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"channels":["github","codex_inbox"],"status":"open"},
     {"id":"HG-0002","category":"requirements","severity":"important-decision","required_role":"product-owner","summary":"D810最終リグと光学構成が未確定","requested_decision":"M2前に配置、向き、lens、焦点距離、撮影距離、重複、露出・focus・WB、照明、A0 calibration chart、setup手順、profile有効期間、再校正triggerを承認してください。","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"channels":["github","codex_inbox"],"status":"open"},
     {"id":"HG-0003B","category":"ops","severity":"important-decision","required_role":"engineer-admin","summary":"D810 PnP/SDK inventory二台は確認済みだがPhase 0Bのcross-transport bindingと実機試験が未完了","requested_decision":"一台ずつCAM-A/BのSDK/WPD bindingを完了後、10件、100件、USB切断、接続順・port交換試験を段階実行してください。2026-08-09のoperator判断により、物理的な電源再投入・再起動とpower-off復旧subtestはN/Aとして合否項目から除外します。","blocking_scope":"work-item","blocking_work_item_ids":["WI-0014","WI-0015","WI-0016","WI-0017"],"channels":["codex_inbox"],"status":"open"},
-    {"id":"HG-0005","category":"risk","severity":"important-decision","required_role":"product-owner","summary":"Nikon SDK・OpenCV等の製品再配布条件が未承認","requested_decision":"packaging前にinstallerとnative dependenciesの再配布範囲を承認してください。","blocking_scope":"release","blocking_work_item_ids":["WI-0040"],"channels":["github","codex_inbox"],"status":"open"}
+    {"id":"HG-0005","category":"risk","severity":"important-decision","required_role":"product-owner","summary":"Nikon SDK・OpenCV等の製品再配布条件が未承認","requested_decision":"packaging前にinstallerとnative dependenciesの再配布範囲を承認してください。","blocking_scope":"release","blocking_work_item_ids":["WI-0040"],"channels":["github","codex_inbox"],"status":"open"},
+    {"id":"HG-0009","category":"requirements","severity":"important-decision","required_role":"product-owner","summary":"SingleCamera製品出力の品質・性能・耐久基準が未確定","requested_decision":"一台統合受入前に、対象原稿サイズ、目標DPI、crop・content loss、初期canonical originalのbit-identical exportを超える将来のlens/crop処理の要否、一台profile項目、p95、耐久run数を承認してください。撮影設定writeは別契約が承認されるまで追加しません。","blocking_scope":"release","blocking_work_item_ids":["WI-0035","WI-0042"],"channels":["github","codex_inbox"],"status":"open"}
   ]
 }

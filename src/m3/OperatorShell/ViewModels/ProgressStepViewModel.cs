@@ -29,6 +29,8 @@ public sealed class ProgressStepViewModel(string id, string label) : ObservableO
 
     public void SetFailure() => SetVisual("失敗", Brushes.MistyRose, Brushes.DarkRed, Brushes.Firebrick);
 
+    public void SetSkipped() => SetVisual("対象外", Brushes.Gainsboro, Brushes.DimGray, Brushes.DarkGray);
+
     private void SetVisual(string status, Brush background, Brush foreground, Brush border)
     {
         StatusText = status;

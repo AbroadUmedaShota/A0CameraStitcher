@@ -1,16 +1,17 @@
 # 現在の開発状況
 
-更新日: 2026-08-09
+更新日: 2026-08-10
 
 ## 総合判定
 
-`in-progress`。MVP要件31件の完全検証はまだ0件である。ただしプロジェクト全体が停止しているわけではなく、`software-active / hardware-capture-paused / dual-camera-waiting`の三状態で進行する。
+`in-progress`。requirements 2.6.0のMVP要件32件の完全検証はまだ0件である。2026-08-10に`SingleCamera`を製品modeとして追加し、`software-single-mode-active / hardware-capture-paused / dual-camera-waiting`で進行する。既存の一台Phase 0、simulated Dual、Live View証拠を新しい実WPF一台製品受入へ読み替えない。
 
 第三者向けには[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)を入口とする。二台順次撮影のsoftware contractと安全停止は提示可能だが、実機二台撮影とA0品質の受入完了は主張しない。
 
 ## 確認済み
 
-- 正式対象はNikon D810二台、USB、固定平面A0原稿、順次撮影。
+- 正式camera modelはNikon D810であり、明示的な`SingleCamera`または`DualCamera`をUSBで運用する。`SingleCamera`は初期仕様でphysical D810 exactly one、canonical original一件、stitch `NotApplicable`、画像処理なしの明示export、設定read-onlyとする。`DualCamera`は従来どおり固定平面A0原稿をCAM-A→CAM-Bで順次撮影・合成する。
+- modeはactive transaction外で明示選択し、接続台数から推定しない。`DualCamera`の一台不足を`SingleCamera`へ自動降格せず、active中のmode変更を禁止する。
 - D810一台の電源再投入後PnP再列挙とWPD側CAM-A continuityを匿名証拠化。SDK側の旧continuity結論はephemeral source ID使用のため無効化し、identity-v2で再検証中。
 - 一台Live Viewを5分04秒・2,424 frame継続し、停止、SDK close、preview非保存を確認。
 - read-only setting runでJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を取得。`FileType`はnot-advertised。
@@ -18,9 +19,11 @@
 - direct WPD/SDK capture入口をfake-onlyへ閉じ、承認済みhardware経路を`hybrid-capture-single`へ限定。
 - 実SDK/WPDコマンドを同じWindowsログオンsession内の二つのPhase 0 processから同時実行しないnamed OS leaseを追加し、別process保持中の拒否を自動試験で確認。別ユーザーsession／serviceはMVP運用外。
 - pair/hybrid transactionへ180秒の全体watchdogを適用し、SDK撮影が期限をまたいだ場合もWPD回収・保存・削除・成功状態へ進まないこと、PC保存中に期限をまたいだ場合は`.partial`を保持して`original.jpg` rename・削除・成功状態へ進まないことを確認。
-- 2026-08-08の現変更はSDK有効／なしの両構成でCTest 5/5、M3 simulated Release警告0、Foundation 13/13、Operator Shell 1/1に合格した。Nikon SDKはcommit対象外の`.tools`へ再配置済み。
+- 2026-08-08時点の変更はSDK有効／なしの両構成でCTest 5/5、当時のM3 simulated Release警告0、Foundation 13/13、Operator Shell 1/1に合格した履歴証拠である。Nikon SDKはcommit対象外の`.tools`へ再配置済み。
 - M2Pの光学計算、rig-profile trust、三状態setup-assessment contractがsoftware-only合格。
-- M3PのNamed Pipe、durable simulated transaction、起動同意・readiness・操作ロック・失敗復旧を含むWPF shellがsimulation-only合格。
+- M3PのNamed Pipe、durable simulated transaction、起動同意・readiness・操作ロック・失敗復旧を含むWPF shellは、2026-08-10のrequirements 2.6.0に対するfresh Release build 0 warning/0 error、Foundation 19/19、Operator Shell 15/15、`Test-M3Simulated.ps1` Passでsoftware-only合格した。明示Single/Dual、required aliases固定、no-auto-fallback、Single original一件、stitch `NotApplicable`、明示export、起動時操作gateを含む。
+- 実機一台WPF経路は、同一transaction ID・alias・承認profile ID/version/SHA/expiry・Live View handoff intentをdurable保存して結果照会するsoftware boundary、検証済みcanonical originalの明示byte-identical export、`TransactionNotFound`時のsupport-required保持まで実装・契約試験済みである。現在の`hardware.v1` Live View handoff結果は撮影後の有限一frame probeを取得後に停止・SDK closeするもので、継続streamの「再開」を主張しない。
+- C++ `hardware.v1`は、operator-session lease、directory作成から初期journal確定までを含むgap-free transaction reservation/mutex、exactly-one・alias/profile/expiry相関、Live View OFFのWPD前・open SDK shutter-session内再確認、SDK/WPD非重複、canonical originalを同一handleで再検証してwrite/delete禁止のままexact WPD delete・empty-afterまで保持する境界、fixed-local path、no retry、bounded pipe/journalをsoftware contract化した。2026-08-10のSDK-lessとlicensed-SDK-enabled Release CTestはそれぞれ6/6で、`hardware_camera_agent_contracts`を含め0 failureだった。camera commandは送っておらず、実D810、actual JPEG、WPF hardware操作の合格証拠ではない。
 - 2026-08-08の再起動後dual binding readinessでD810 PnP、SDK inventory、WPD inventoryを各2台匿名確認した。SDK/WPDともbound 0・unbound 2で`READY_FOR_IDENTITY_BINDING`。inventoryの列挙順自動割当を廃止し、旧SDK mapは値を読まず可逆隔離した。SDK有無各CTest 5/5も合格し、撮影、Live View、設定変更、card操作は実行していない。
 - readinessは選択stageの台数とSDK・WPD・PnP件数の完全一致を要求する。現在の二台接続はDualでbinding待ち、Singleではexit 1で拒否され、余分なD810を許可しない。
 - 2026-08-08 17:31 JSTのCAM-A cross-transport bindingは後続の物理入替試験で無効化した。WPDは入替後の個体を未登録として区別した一方、SDKは旧CAM-Aへ誤一致した。原因はMAID source object IDを個体IDとしていた実装であり、当該SDK mapを値を読まず可逆隔離した。過去のSDK側CAM-A continuity主張も再検証対象である。
@@ -40,6 +43,7 @@
 - 2026-08-09のoperator判断により、物理的な電源再投入・再起動と実power-off復旧subtestは`N/A / Skip`としてPhase 0合否項目から除外した。USB切断、software process再起動／pair境界中断、接続順・port確認、二台identity、empty spool、1/10/100 pairは残る。`power-off` CLIとfake安全contractは回帰保護として保持する。
 - 2026-08-09に第三者向け[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)と非破壊検証scriptを追加した。SDK有効／なしのRelease build、CTest各5/5、厳選した匿名証拠のschema・安全フラグ検証に合格し、`SOFTWARE_CONTRACT_READY_HARDWARE_PENDING`を出力した。camera command、撮影、Live View、設定変更、card accessは実行していない。
 - Live View停止失敗は撮影前の`Idle → FailedPartial`としてjournalへ永続化し、再起動復元、連打防止、明示的新規撮影準備までのロックを自動試験で確認した。
+- 2026-08-10のproduct owner指示をADR-0023として記録し、要件を2.6.0へ更新した。これは一台製品modeの実装開始判断であり、実WPF Camera Agent、実JPEG、canonical original export、実機one-shotの合格証拠ではない。
 
 ## Partial
 
@@ -47,7 +51,8 @@
 - Live View: standaloneは合格だが、実撮影を含むhandoff 10回は未実施。
 - identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。WPD側CAM-Aとidentity-v2のCAM-B checkpointは保持し、CAM-A SDK v2再登録、別個体判定、再接続、物理cable/port変更が未実施。
 - setup/correction: parameter contractは合格。画像から測定値を生成して補正候補へ接続する処理は未実装。
-- M3P: 実Camera Agent、実JPEG、実D810との統合証拠ではない。WPF連打防止・明示保存・Ready復帰はUI Automation合格だが、screen reader、keyboard/focus walkthroughは残る。
+- M3P: requirements 2.6.0のfresh software contractは合格したが、実D810、actual JPEG、実WPF画面操作の統合証拠ではない。旧Dual UI Automationは保持し、screen reader、keyboard/focus、Single実画面walkthroughは残る。
+- SingleCamera製品mode: 明示mode、no-auto-fallback、selected aliasだけのdurable capture、stitch `NotApplicable`、canonical original明示exportはsoftware-onlyで確認済み。実D810をWPF→Camera Agentで撮影・回収・exportする受入と、`HG-0009`の品質・性能・耐久条件は未検証である。
 
 ## Deferred / Waiting
 
@@ -56,6 +61,7 @@
 | M1A one-shot、10/10、fault、handoff | 操作者がカード作業を保留。最後の証拠は90 payload | empty cardへの交換または手動backup/clearの報告と明示再開 |
 | M1B二台試験 | D810 PnP/SDK/WPD各2台のread-only inventoryと実機pair CLI software contractを確認済み。SDK Name/Interface v2・WPD device-serial v2でV1.11個体のCAM-B checkpointまで完了。物理power-cycle/power-off復旧はN/A | 現在のV1.11本体を外して、履歴上V1.14の元CAM-A本体だけを接続。SDK/WPD双方の別個体判定後にCAM-A登録、接続順・port確認、二台readiness |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
+| SingleCamera製品受入 | 一台modeの対象原稿・DPI・crop・将来の画像処理・性能・耐久基準が未承認。WPF／Camera Agent software boundaryはあるが実D810・actual JPEGで未実行 | `HG-0009`、M1A再開、実機WPF受入 |
 | 配布 | native dependency再配布未承認 | `HG-0005` |
 
 既知の90 payload状態は、物理状態が変わるまで再確認しない。撮影、削除、format、USB切断、電源操作も自動では行わない。
@@ -64,8 +70,8 @@
 
 1. `WI-0010A`: SDK setting readbackのnative command trace
 2. `WI-0022C`: synthetic measurementからbounded setup decisionへの接続
-3. simulated journalと実Camera Agent置換差分の強化
-4. 操作者再開時だけM1A one-shot
+3. 操作者再開時だけexactly-one D810のM1A one-shot
+4. `HG-0009`承認後、実D810でWPF→Camera Agent→canonical original→明示exportを受入
 5. 一台ずつ`bind-cross-transport-identity`を実行し、SDK/WPD双方のCAM-A/B binding完成後にM1B
 
 ## Open human gates
@@ -74,10 +80,11 @@
 - `HG-0002`: 最終リグ・光学条件
 - `HG-0003B`: 二台D810のPnP存在は確認済み。SDK/WPD bindingと二台実機試験は未完了
 - `HG-0005`: Nikon SDK/OpenCV等の再配布
+- `HG-0009`: SingleCameraの対象原稿、DPI、crop、将来のlens/crop処理、性能・耐久基準
 
 ## 証拠の読み方
 
 - `Pass`: その項目の明示contractをfresh evidenceで満たす。
 - `Partial`: 一部のlayerまたは環境だけが確認済み。
 - `Unverified`: 必要な実行証拠がない。
-- software-only、one-camera、simulatedの結果を二台実機・A0品質・MVP受入へ読み替えない。
+- software-only、旧one-camera、simulatedの結果を実WPF Camera Agent、一台製品受入、二台実機、A0品質、MVP受入へ読み替えない。

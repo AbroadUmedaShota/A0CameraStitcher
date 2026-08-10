@@ -97,6 +97,10 @@ public:
     WpdTransport& operator=(const WpdTransport&) = delete;
     [[nodiscard]] std::string SdkVersion() const override;
     [[nodiscard]] std::vector<CameraInfo> Enumerate() override;
+    // Product Camera Agent only: refreshes at each open boundary and rejects
+    // unless exactly one D810 is present. Legacy pair experiments leave this
+    // disabled.
+    void RequireExactlyOneD810ForProductAgent();
     [[nodiscard]] WpdCaptureTargetDiagnostic ProbeCaptureTarget(std::string_view stable_identity);
     [[nodiscard]] WpdVendorOpcodeDiagnostic ProbeVendorOpcodes(
         std::string_view stable_identity,

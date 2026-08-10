@@ -524,9 +524,21 @@ public:
         return cameras;
     }
 
+    void RequireExactlyOneD810ForProductAgent() noexcept {
+        require_exactly_one_d810_ = true;
+    }
+
     void Open(std::string_view stable_identity) {
         if (device_) throw TransportError("session_busy", "WPD session is already open");
-        if (devices_.empty()) Enumerate();
+        if (require_exactly_one_d810_) {
+            if (Enumerate().size() != 1) {
+                throw TransportError(
+                    "camera_count_mismatch",
+                    "product SingleCamera WPD open requires exactly one currently connected D810");
+            }
+        } else if (devices_.empty()) {
+            Enumerate();
+        }
         const auto found = devices_.find(std::string(stable_identity));
         if (found == devices_.end()) throw TransportError("open_failed", "requested WPD D810 is unavailable");
         device_ = OpenDevice(found->second.pnp_id, "open_failed");
@@ -570,7 +582,15 @@ public:
 
     std::size_t InspectSpoolPayloadCount(std::string_view stable_identity) {
         if (device_) throw TransportError("session_busy", "WPD session is already open");
-        if (devices_.empty()) Enumerate();
+        if (require_exactly_one_d810_) {
+            if (Enumerate().size() != 1) {
+                throw TransportError(
+                    "camera_count_mismatch",
+                    "product SingleCamera spool inspection requires exactly one currently connected D810");
+            }
+        } else if (devices_.empty()) {
+            Enumerate();
+        }
         const auto found = devices_.find(std::string(stable_identity));
         if (found == devices_.end()) {
             throw TransportError("spool_status_open_failed", "requested WPD D810 is unavailable");
@@ -1193,6 +1213,7 @@ private:
     WpdCommandTargetPolicy command_target_policy_;
     WpdTransport::BeforeCommandCallback before_command_;
     std::map<std::string, DeviceRecord> devices_;
+    bool require_exactly_one_d810_{};
     ComPtr<IPortableDevice> device_;
     ComPtr<IPortableDeviceContent> content_;
     ComPtr<IPortableDeviceProperties> properties_;
@@ -1216,6 +1237,9 @@ std::string WpdTransport::SdkVersion() const {
     return impl_->SdkVersion();
 }
 std::vector<CameraInfo> WpdTransport::Enumerate() { return impl_->Enumerate(); }
+void WpdTransport::RequireExactlyOneD810ForProductAgent() {
+    impl_->RequireExactlyOneD810ForProductAgent();
+}
 WpdCaptureTargetDiagnostic WpdTransport::ProbeCaptureTarget(std::string_view stable_identity) {
     return impl_->ProbeCaptureTarget(stable_identity);
 }

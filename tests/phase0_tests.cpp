@@ -1323,7 +1323,7 @@ void TestAmbiguousCandidateFailsAndQuarantines() {
     Check(result.terminal_state == "FailedPartial", "ambiguity should fail the transaction");
     Check(result.error_category == "ambiguous_candidates", "ambiguity should be categorized");
     Check(transport.CaptureAttempts() == 1, "ambiguity must not auto-retry");
-    const auto quarantine = root / "artifacts" / "quarantine" / "run-ambiguous" / result.transaction_id / "CAM-A";
+    const auto quarantine = root / "artifacts" / "run-ambiguous" / "quarantine" / result.transaction_id / "CAM-A";
     Check(fs::exists(quarantine), "ambiguous candidates should be quarantined");
     Check(std::distance(fs::directory_iterator(quarantine), fs::directory_iterator{}) == 2, "both ambiguous candidates should be retained");
     fs::remove_all(root);
@@ -1373,7 +1373,7 @@ void TestUncertainDispatchQuarantinesExactlyOneAndStopsPair() {
     CaptureCoordinator coordinator(transport, evidence);
     const auto cameras = transport.Enumerate();
     const auto result = coordinator.CapturePair(cameras[0].stable_identity, cameras[1].stable_identity);
-    const auto quarantine = root / "artifacts" / "quarantine" / "run-uncertain-one" / result.transaction_id / "CAM-A";
+    const auto quarantine = root / "artifacts" / "run-uncertain-one" / "quarantine" / result.transaction_id / "CAM-A";
     Check(result.terminal_state == "FailedPartial", "uncertain dispatch must never complete a pair");
     Check(result.frames.size() == 1, "CAM-B must not start after uncertain CAM-A dispatch");
     Check(transport.OpenAttempts() == 1 && transport.CaptureAttempts() == 1, "uncertain dispatch must not resend the command");
@@ -1399,7 +1399,7 @@ void TestUncertainDispatchAmbiguousAndZeroCandidates() {
     EvidenceWriter ambiguous_evidence(root / "artifacts", "run-uncertain-ambiguous", ambiguous.SdkVersion());
     CaptureCoordinator ambiguous_coordinator(ambiguous, ambiguous_evidence);
     const auto ambiguous_result = ambiguous_coordinator.CaptureSingle("CAM-A", ambiguous.Enumerate().front().stable_identity);
-    const auto quarantine = root / "artifacts" / "quarantine" / "run-uncertain-ambiguous" / ambiguous_result.transaction_id / "CAM-A";
+    const auto quarantine = root / "artifacts" / "run-uncertain-ambiguous" / "quarantine" / ambiguous_result.transaction_id / "CAM-A";
     Check(ambiguous_result.terminal_state == "FailedPartial" && ambiguous_result.error_category == "uncertain_dispatch_ambiguous",
         "multiple uncertain candidates must be failed as ambiguous");
     Check(ambiguous.CaptureAttempts() == 1 && fs::exists(quarantine), "ambiguous uncertain candidates must be quarantined without retry");
@@ -1441,7 +1441,7 @@ void TestLateCandidateFailsAndQuarantines() {
     Check(result.terminal_state == "FailedPartial", "late candidate should fail the transaction");
     Check(result.error_category == "late_candidate", "late candidate should retain its category");
     Check(transport.CaptureAttempts() == 1, "late candidate must not auto-retry");
-    const auto quarantine = root / "artifacts" / "quarantine" / "run-late" / result.transaction_id / "CAM-A";
+    const auto quarantine = root / "artifacts" / "run-late" / "quarantine" / result.transaction_id / "CAM-A";
     Check(fs::exists(quarantine), "late candidate should be quarantined");
     Check(!fs::exists(root / "artifacts" / "run-late" / result.transaction_id / "CAM-A" / "original.jpg"),
         "late candidate must not become an original");
@@ -2244,7 +2244,7 @@ void TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry() {
             std::string(name) + " must execute one hybrid attempt without WPD shutter or retry");
         Check(!fs::exists(evidence.RunRoot() / result.transaction_id / "CAM-A" / "original.jpg"),
             std::string(name) + " must not create a canonical original");
-        const auto quarantine = root / "artifacts" / "quarantine" / evidence.RunId() /
+        const auto quarantine = root / "artifacts" / evidence.RunId() / "quarantine" /
             result.transaction_id / "CAM-A";
         Check(fs::exists(quarantine) == expect_quarantine,
             std::string(name) + " quarantine presence must match the available candidates");

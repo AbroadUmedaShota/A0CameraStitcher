@@ -63,7 +63,7 @@ public sealed class DurableSimulatedCaptureCoordinator
                         continue;
                     }
 
-                    var partialJournal = CreateJournal(transactionId);
+                    var partialJournal = CreateJournal(transactionId, CapturePlan.Dual());
                     Transition(partialJournal, SimulatedTransactionState.FailedPartial);
                     partialJournal.TerminalReason = "RestartDetectedPartialArtifact";
                     partialJournal.Originals.AddRange(
@@ -115,9 +115,12 @@ public sealed class DurableSimulatedCaptureCoordinator
 
     public async Task<SimulatedTransactionJournal> RecordLiveViewStopFailureAsync(
         Guid transactionId,
+        CapturePlan capturePlan,
         CancellationToken cancellationToken = default)
     {
         ValidateTransactionId(transactionId);
+        ArgumentNullException.ThrowIfNull(capturePlan);
+        capturePlan.Validate();
 
         await _transactionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -125,7 +128,7 @@ public sealed class DurableSimulatedCaptureCoordinator
             using var rootLease = AcquireRootLease();
             EnsureTransactionCanStart(transactionId);
 
-            var journal = CreateJournal(transactionId);
+            var journal = CreateJournal(transactionId, capturePlan);
             await SaveJournalAsync(journal, cancellationToken).ConfigureAwait(false);
             await MarkFailedPartialAsync(journal, "LiveViewStopFailed").ConfigureAwait(false);
             return journal;
@@ -139,9 +142,18 @@ public sealed class DurableSimulatedCaptureCoordinator
     public async Task<SimulatedTransactionJournal> ExecuteAsync(
         Guid transactionId,
         SimulatedCrashPoint crashPoint = SimulatedCrashPoint.None,
+        CancellationToken cancellationToken = default) =>
+        await ExecuteAsync(transactionId, CapturePlan.Dual(), crashPoint, cancellationToken).ConfigureAwait(false);
+
+    public async Task<SimulatedTransactionJournal> ExecuteAsync(
+        Guid transactionId,
+        CapturePlan capturePlan,
+        SimulatedCrashPoint crashPoint = SimulatedCrashPoint.None,
         CancellationToken cancellationToken = default)
     {
         ValidateTransactionId(transactionId);
+        ArgumentNullException.ThrowIfNull(capturePlan);
+        capturePlan.Validate();
 
         await _transactionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -149,18 +161,23 @@ public sealed class DurableSimulatedCaptureCoordinator
             using var rootLease = AcquireRootLease();
             EnsureTransactionCanStart(transactionId);
 
-            var journal = CreateJournal(transactionId);
+            var journal = CreateJournal(transactionId, capturePlan);
             await SaveJournalAsync(journal, cancellationToken).ConfigureAwait(false);
 
             try
             {
-                await CaptureAndPersistAsync(journal, "CAM-A", cancellationToken).ConfigureAwait(false);
-                if (crashPoint == SimulatedCrashPoint.AfterPersistA)
+                for (var index = 0; index < capturePlan.RequiredCameraAliases.Count; index++)
                 {
-                    throw new SimulatedProcessCrashException(transactionId);
+                    await CaptureAndPersistAsync(
+                        journal,
+                        capturePlan.RequiredCameraAliases[index],
+                        cancellationToken).ConfigureAwait(false);
+                    if (index == 0 && crashPoint == SimulatedCrashPoint.AfterPersistA)
+                    {
+                        throw new SimulatedProcessCrashException(transactionId);
+                    }
                 }
 
-                await CaptureAndPersistAsync(journal, "CAM-B", cancellationToken).ConfigureAwait(false);
                 Transition(journal, SimulatedTransactionState.Complete);
                 await SaveJournalAsync(journal, cancellationToken).ConfigureAwait(false);
                 return journal;
@@ -268,8 +285,9 @@ public sealed class DurableSimulatedCaptureCoordinator
         await SaveJournalAsync(journal, CancellationToken.None).ConfigureAwait(false);
     }
 
-    private SimulatedTransactionJournal CreateJournal(Guid transactionId)
+    private SimulatedTransactionJournal CreateJournal(Guid transactionId, CapturePlan capturePlan)
     {
+        capturePlan.Validate();
         var now = _timeProvider.GetUtcNow();
         return new SimulatedTransactionJournal
         {
@@ -277,6 +295,8 @@ public sealed class DurableSimulatedCaptureCoordinator
             Simulation = true,
             Marker = SimulatedTransactionProtocol.Marker,
             TransactionId = transactionId,
+            OperatingMode = capturePlan.OperatingMode,
+            RequiredCameraAliases = [.. capturePlan.RequiredCameraAliases],
             State = SimulatedTransactionState.Idle,
             TransitionHistory = [SimulatedTransactionState.Idle],
             Originals = [],
@@ -288,15 +308,7 @@ public sealed class DurableSimulatedCaptureCoordinator
 
     private void Transition(SimulatedTransactionJournal journal, SimulatedTransactionState nextState)
     {
-        var expectedNextState = journal.State switch
-        {
-            SimulatedTransactionState.Idle => SimulatedTransactionState.CaptureA,
-            SimulatedTransactionState.CaptureA => SimulatedTransactionState.PersistA,
-            SimulatedTransactionState.PersistA => SimulatedTransactionState.CaptureB,
-            SimulatedTransactionState.CaptureB => SimulatedTransactionState.PersistB,
-            SimulatedTransactionState.PersistB => SimulatedTransactionState.Complete,
-            _ => (SimulatedTransactionState?)null,
-        };
+        var expectedNextState = ExpectedNextState(journal);
 
         var validFailureTransition =
             nextState == SimulatedTransactionState.FailedPartial && !IsTerminal(journal.State);
@@ -309,6 +321,38 @@ public sealed class DurableSimulatedCaptureCoordinator
         journal.TransitionHistory.Add(nextState);
         journal.UpdatedAtUtc = _timeProvider.GetUtcNow();
     }
+
+    private static SimulatedTransactionState? ExpectedNextState(SimulatedTransactionJournal journal)
+    {
+        if (journal.State == SimulatedTransactionState.Idle)
+        {
+            return CaptureState(journal.RequiredCameraAliases[0]);
+        }
+
+        for (var index = 0; index < journal.RequiredCameraAliases.Count; index++)
+        {
+            var alias = journal.RequiredCameraAliases[index];
+            if (journal.State == CaptureState(alias))
+            {
+                return PersistState(alias);
+            }
+
+            if (journal.State == PersistState(alias))
+            {
+                return index == journal.RequiredCameraAliases.Count - 1
+                    ? SimulatedTransactionState.Complete
+                    : CaptureState(journal.RequiredCameraAliases[index + 1]);
+            }
+        }
+
+        return null;
+    }
+
+    private static SimulatedTransactionState CaptureState(string alias) =>
+        alias == "CAM-A" ? SimulatedTransactionState.CaptureA : SimulatedTransactionState.CaptureB;
+
+    private static SimulatedTransactionState PersistState(string alias) =>
+        alias == "CAM-A" ? SimulatedTransactionState.PersistA : SimulatedTransactionState.PersistB;
 
     private async Task SaveJournalAsync(
         SimulatedTransactionJournal journal,
@@ -488,9 +532,17 @@ public sealed class DurableSimulatedCaptureCoordinator
             throw new InvalidDataException("Automatic retry is not permitted.");
         }
 
+        var capturePlan = new CapturePlan
+        {
+            OperatingMode = journal.OperatingMode,
+            RequiredCameraAliases = journal.RequiredCameraAliases.AsReadOnly(),
+        };
+        capturePlan.Validate();
+
         if (journal.Originals.Any(original =>
                 !string.Equals(original.Marker, SimulatedTransactionProtocol.Marker, StringComparison.Ordinal) ||
-                !original.RelativePath.EndsWith(".simulated", StringComparison.OrdinalIgnoreCase)))
+                !original.RelativePath.EndsWith(".simulated", StringComparison.OrdinalIgnoreCase) ||
+                !journal.RequiredCameraAliases.Contains(original.Alias, StringComparer.Ordinal)))
         {
             throw new InvalidDataException("A retained original is not visibly simulated.");
         }

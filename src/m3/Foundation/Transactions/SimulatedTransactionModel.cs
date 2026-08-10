@@ -8,6 +8,68 @@ public static class SimulatedTransactionProtocol
     public const string Marker = "Simulated";
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<CameraOperatingMode>))]
+public enum CameraOperatingMode
+{
+    DualCamera,
+    SingleCamera,
+}
+
+public sealed record CapturePlan
+{
+    public required CameraOperatingMode OperatingMode { get; init; }
+
+    public required IReadOnlyList<string> RequiredCameraAliases { get; init; }
+
+    public static CapturePlan Single(string alias)
+    {
+        var plan = new CapturePlan
+        {
+            OperatingMode = CameraOperatingMode.SingleCamera,
+            RequiredCameraAliases = Array.AsReadOnly([alias]),
+        };
+        plan.Validate();
+        return plan;
+    }
+
+    public static CapturePlan Dual()
+    {
+        var plan = new CapturePlan
+        {
+            OperatingMode = CameraOperatingMode.DualCamera,
+            RequiredCameraAliases = Array.AsReadOnly(["CAM-A", "CAM-B"]),
+        };
+        plan.Validate();
+        return plan;
+    }
+
+    public void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(RequiredCameraAliases);
+        var aliases = RequiredCameraAliases.ToArray();
+        if (aliases.Any(alias => alias is not ("CAM-A" or "CAM-B")) ||
+            aliases.Distinct(StringComparer.Ordinal).Count() != aliases.Length)
+        {
+            throw new ArgumentException("Capture aliases must be unique CAM-A or CAM-B values.", nameof(RequiredCameraAliases));
+        }
+
+        if (OperatingMode == CameraOperatingMode.SingleCamera && aliases.Length == 1)
+        {
+            return;
+        }
+
+        if (OperatingMode == CameraOperatingMode.DualCamera &&
+            aliases.SequenceEqual(["CAM-A", "CAM-B"], StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        throw new ArgumentException(
+            "SingleCamera requires exactly one alias; DualCamera requires CAM-A then CAM-B.",
+            nameof(RequiredCameraAliases));
+    }
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter<SimulatedTransactionState>))]
 public enum SimulatedTransactionState
 {
@@ -43,6 +105,10 @@ public sealed record SimulatedWorkflowState
 
     public required Guid TransactionId { get; init; }
 
+    public required CameraOperatingMode OperatingMode { get; init; }
+
+    public required IReadOnlyList<string> RequiredCameraAliases { get; init; }
+
     public required SimulatedTransactionState State { get; init; }
 
     public required bool IsTerminal { get; init; }
@@ -60,6 +126,12 @@ public interface ISimulatedTransactionService
 
     Task<SimulatedWorkflowState> ExecuteAsync(
         Guid transactionId,
+        SimulatedWorkflowScenario scenario,
+        CancellationToken cancellationToken = default);
+
+    Task<SimulatedWorkflowState> ExecuteAsync(
+        Guid transactionId,
+        CapturePlan capturePlan,
         SimulatedWorkflowScenario scenario,
         CancellationToken cancellationToken = default);
 }
@@ -86,6 +158,11 @@ public sealed record SimulatedTransactionJournal
     public required string Marker { get; init; }
 
     public required Guid TransactionId { get; init; }
+
+    // Backward-compatible additive fields: journals written before explicit modes are legacy DualCamera journals.
+    public CameraOperatingMode OperatingMode { get; init; } = CameraOperatingMode.DualCamera;
+
+    public List<string> RequiredCameraAliases { get; init; } = ["CAM-A", "CAM-B"];
 
     public required SimulatedTransactionState State { get; set; }
 

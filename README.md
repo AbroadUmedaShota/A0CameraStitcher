@@ -1,25 +1,26 @@
 # A0 Camera Stitcher
 
-社内名称「大判撮影ツール（A0対応）」の開発リポジトリです。固定したNikon D810 2台をWindows PCへUSB接続し、静止した平面原稿を順次撮影して1枚の大画像へ合成することを目標とします。
+社内名称「大判撮影ツール（A0対応）」の開発リポジトリです。製品は、Nikon D810一台で検証済み原画像を撮影・保存する`SingleCamera`と、固定したD810二台で静止平面原稿を順次撮影して一枚へ合成する`DualCamera`を明示選択できる構成を目標とします。接続台数からmodeを推定せず、二台構成の不足時に一台構成へ自動降格しません。
 
 ## 現在の段階
 
-総合状態は`in-progress`です。ソフトウェア作業と一台の非破壊検証は継続し、Phase 0Aの物理撮影だけを操作者の指示で保留しています。`HG-0008`は2026-08-06に承認され、専用empty/cleared cardをsingle-slot transient spoolに使う実装は完了しました。最初の全payload preflight [run-1786014841232-1](docs/evidence/phase0/run-1786014841232-1/report.md)は90 objectを検出し、SDK open・shutter・保存・delete・retryをすべて0のまま`FailedPartial`で安全停止しました。read-only確認は[run-1786015997366-1](docs/evidence/phase0/run-1786015997366-1/report.md)と[run-1786017282044-1](docs/evidence/phase0/run-1786017282044-1/report.md)の双方で同じpayload 90件でした。物理状態が変わるまで再確認せず、M1Aはempty cardへの交換またはbackup・手動clearの報告と明示再開を待ちます。one-shot、10/10、異常系、handoffの合格証拠は未取得です。
+総合状態は`in-progress`です。2026-08-10に`SingleCamera`と`DualCamera`の明示modeを製品要件へ追加しました。mode-awareなM3 simulated workflowに加え、実機一台用Camera Agent、厳密なhardware IPC、WPFのreadiness／有限Live View／一回撮影／未確定結果照会／canonical original明示exportをsoftware contractとして実装済みです。fresh Release検証は.NET build警告0・エラー0、Foundation 19/19、Operator Shell 15/15、SDK有効／SDKなしのnative CTest各6/6に合格しました。実WPFからD810を撮影・exportした合格証拠ではなく、承認済みSingle capture profileがない状態ではシャッターをfail closedします。`HG-0008`は2026-08-06に承認され、専用empty/cleared cardをsingle-slot transient spoolに使うPhase 0実装は完了しています。一台出力の対象原稿、DPI、crop、画像処理、品質・性能・耐久基準は`HG-0009`で未決です。
 
-第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、二台順次撮影の安全なsoftware contractは提示可能ですが、現在接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実機二台撮影の受入は未完了です。
+第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。現在の記録上、接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 
 PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証を完了した`original.jpg`だけを製品上の正本とします。カメラカードは一過性の転送元で、永続保持を要件にしません。承認済みの専用empty/cleared card single-slot spoolでは、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、その後にjust-recovered WPD objectだけを削除して再びpayload 0件を確認します。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にします。existing cardのbulk delete/format、vendor operation、retryは禁止です。
 
 ## MVPの前提
 
-- 対象: 静止したA0級の平面原稿
-- カメラ: Nikon D810 2台、固定リグ
+- 対象: 静止した平面原稿。二台構成はA0級を主用途とし、一台構成の対象サイズ・DPI・cropは`HG-0009`で確定する
+- mode: `SingleCamera`または`DualCamera`をactive transaction外で明示選択し、開始時に固定する
+- カメラ: `SingleCamera`は登録済みNikon D810を厳密に一台、`DualCamera`は登録済みD810二台と固定リグ
 - 現在の接続: D810一台。identity-v2で`CAM-B`としてSDK/WPD双方へ登録済み。履歴上V1.14の別個体`CAM-A`の一台接続・登録後に二台同時検証へ進む
 - 接続: Windows 11 x64 PCへUSB接続
 - 制御: WPD baseline/recoveryと、カメラカードへ一回撮影するNikon SDK、および一台選択式SDK Live View
 - 入力: FX JPEG Fine L
-- 出力: 合成JPEG
-- 時間目標: 撮影開始から出力完了までp95 10秒以内（暫定、Phase 0では測定のみ）
+- 出力: `SingleCamera`はcanonical `original.jpg`のbyte-identicalな明示export（合成なし）、`DualCamera`は合成JPEG
+- 時間目標: `DualCamera`はp95 10秒以内を暫定目標とし、`SingleCamera`は`HG-0009`で確定する。Phase 0では測定のみ
 - 保存: PCへ確定・再読込検証済みの原画像を保持。カメラカードは一過性の転送元で、承認済みsingle-slot spoolではexact WPD objectだけを削除して空状態を確認する
 
 ## ドキュメント
@@ -34,6 +35,8 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 - [M2オフラインpre-gate](docs/M2_PRE_GATE.md)
 - [アプリ機能検証計画](docs/FEATURE_VERIFICATION_PLAN.md)
 - [M3 simulated統合基盤](docs/M3_SIMULATED_FOUNDATION.md)
+- [アプリ構成レビューと実装計画](docs/APP_ARCHITECTURE_REVIEW_AND_IMPLEMENTATION_PLAN.md)
+- [Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)
 - [ロードマップ](docs/ROADMAP.md)
 - [意思決定記録](docs/DECISIONS.md)
 - [旧D750参照会話（履歴のみ）](docs/REFERENCE_CONVERSATION.md)
@@ -42,7 +45,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 
 ```powershell
 pwsh -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 '-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk'
 cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 build\Debug\A0CameraStitcher.Phase0.exe sdk-status --alias CAM-A
@@ -111,14 +114,25 @@ Nikon SDKは本人同意済みで、`.tools/nikon/d810-remote-sdk`へローカ�
 
 `A0CameraStitcher.OpticalPlanner.exe`は、明示入力されたDPI、frame回転、二枚の配置、重複pixel、cropからA0幾何候補を計算します。`a0_m2_setup`は、明示入力された目標値・自動補正上限から`ready`、`ready-auto-correction`、`physical-adjustment-required`を判定します。どちらも未承認の数値を既定値にせず、最終リグやA0品質の承認には使いません。詳細は[M2オフラインpre-gate](docs/M2_PRE_GATE.md)と[アプリ機能検証計画](docs/FEATURE_VERIFICATION_PLAN.md)を参照してください。
 
-## M3 simulated shell
+## M3 application shell
 
 ```powershell
 pwsh -NoProfile -File .\scripts\Test-M3Simulated.ps1
 dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Debug
+dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Debug -- --simulated
 ```
 
-このWPF shellとNamed Pipe agentは実機非接続のfakeです。画面、IPC、保存物に`Simulated`を常設し、実D810、Nikon SDK、WPDへ接続しません。詳細は[M3 simulated統合基盤](docs/M3_SIMULATED_FOUNDATION.md)を参照してください。
+引数なしでは起動モード選択画面を開きます。`--simulated`のWPF shellとNamed Pipe agentは実機非接続のfakeであり、画面、IPC、保存物に`Simulated`を常設して実D810、Nikon SDK、WPDへ接続しません。詳細は[M3 simulated統合基盤](docs/M3_SIMULATED_FOUNDATION.md)を参照してください。
+
+実機一台画面はC++ Camera Agentを別processの`--serve-once`として起動し、WPF process内へNikon SDK/WPDを読み込みません。起動しただけではcameraへ接続せず、画面上の明示同意とread-only状態確認を要求します。別の実機画面とのoperator-session排他、client transaction IDのcamera access前永続化、同一IDの結果照会、no retry、SingleCameraでのstitch `NotApplicable`、FailedPartialを含む再読込済みoriginalのbyte-identical明示exportを実装しています。
+
+```powershell
+cmake -S . -B build-sdk -G "Visual Studio 17 2022" -A x64 '-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk'
+cmake --build build-sdk --config Release --target A0CameraStitcher.CameraAgent
+dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Release -- --hardware-single --camera-agent .\build-sdk\Release\A0CameraStitcher.CameraAgent.exe
+```
+
+Camera Agentはhuman-approvedな`%LOCALAPPDATA%\A0CameraStitcher\phase0\camera-agent\approved-single-capture-profile.json`が存在し、選択alias、期限、read-only observed settingsが一致する場合だけ`Ready`にします。profileの期待値をアプリへ内蔵したり自動生成したりしません。現時点では`HG-0009`と実機受入が未完了なので、上記は実装済みsoftware boundaryの起動手順であり、製品撮影合格の主張ではありません。wire、journal、profile schemaの詳細は[Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)を参照してください。
 
 ## 公式根拠
 

@@ -25,14 +25,16 @@
 
 ## Phase 0A: 一台先行
 
+ADR-0023以後、Phase 0Aは`SingleCamera`実機transport受入の先行証拠として使う。初期仕様ではSDK/WPD双方で同じ登録済みD810が厳密に一台だけ列挙されることを要求し、選択aliasは`CAM-A`または`CAM-B`とする。既存のCAM-A履歴証拠をidentity-v2、実WPF Camera Agent、canonical original明示export、一台製品受入へ読み替えない。
+
 ### P0-A1: SDKとD810列挙
 
 - SDK版、OS、MSVC、CMakeを記録する。
-- 物理的にD810一台だけを接続し、SDKとWPDの両方で列挙したlocal identityを同じ`CAM-A`へ対応付ける。
+- 物理的にD810一台だけを接続し、SDKとWPDの両方で列挙したlocal identityを同じ選択alias（`CAM-A`または`CAM-B`）へ対応付ける。
 - 取得可能なcapabilityとfirmwareを匿名化して記録する。
 - Phase 0Aでは記録済み電源再投入によるPnP再列挙後も`CAM-A`を復元する。物理cableの抜き差し、接続順変更、USB port交換はP0-B1で別途検証する。
 
-合格: D810を安定して`CAM-A`として識別でき、実識別子がcommit対象へ出ない。
+合格: D810を安定して選択aliasとして識別でき、実識別子がcommit対象へ出ない。
 
 2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。P0-A1のSDK identity continuityはidentity-v2による再接続・port交換確認までPartialへ戻す。実識別子とmap hashはcommit対象へ含めない。
 
@@ -64,7 +66,7 @@ active transactionのUSB切断は`hybrid-fault-single`で実行する。empty-be
 ### P0-A4: 一台選択式Live Viewとhybrid handoff
 
 - Phase 0Aでは物理D810を一台だけ接続し、二台目は接続しない。これによりSDKとWPDが同じ実機を指す条件を固定する。
-- `CAM-A`だけをSDK Live Viewで開始し、プレビュー画像を10 frame取得する。プレビューは`artifacts`の診断用途に限り、原画像・合成入力・transaction JPEG候補にしない。
+- 選択alias一台だけをSDK Live Viewで開始し、プレビュー画像を10 frame取得する。プレビューは`artifacts`の診断用途に限り、原画像・合成入力・transaction JPEG候補にしない。
 - `live-view --duration-seconds 300`で5分間継続し、有効JPEG frame数、停止、SDK closeを匿名summaryへ記録する。
 - Live View停止、SDK session close、WPD baseline/full close、SDK one card capture/full close、WPD recovery（capture commandなし）、PC JPEG保存、SDK Live View再開を一連のhandoffとして実行する。
 - 自動handoffを1回以上実行し、SDK/WPDが重複せず各closeが次のopen前に完了したtraceを確認する。

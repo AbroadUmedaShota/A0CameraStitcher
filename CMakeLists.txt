@@ -46,6 +46,8 @@ endif()
 
 add_library(a0_phase0_core
     src/phase0/cli_safety.cpp
+    src/phase0/hardware_camera_agent.cpp
+    src/phase0/hardware_camera_agent_pipe.cpp
     src/phase0/phase0.cpp
     src/phase0/fake_camera_transport.cpp
     src/phase0/hardware_process_lease.cpp
@@ -54,7 +56,7 @@ add_library(a0_phase0_core
 )
 target_include_directories(a0_phase0_core PUBLIC src/phase0/include)
 target_compile_definitions(a0_phase0_core PRIVATE UNICODE _UNICODE NOMINMAX)
-target_link_libraries(a0_phase0_core PRIVATE bcrypt ole32 PortableDeviceGuids)
+target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 PortableDeviceGuids)
 
 if(A0_NIKON_SDK_AVAILABLE)
     file(TO_CMAKE_PATH "${A0_NIKON_MODULE}" A0_NIKON_MODULE_NORMALIZED)
@@ -77,6 +79,16 @@ add_executable(A0CameraStitcher.Phase0 src/phase0/main.cpp)
 target_link_libraries(A0CameraStitcher.Phase0 PRIVATE a0_phase0_core)
 if(MSVC)
     target_compile_options(A0CameraStitcher.Phase0 PRIVATE /W4 /permissive- /EHsc)
+endif()
+
+add_executable(A0CameraStitcher.CameraAgent
+    src/phase0/hardware_camera_agent_main.cpp)
+target_link_libraries(A0CameraStitcher.CameraAgent PRIVATE a0_phase0_core)
+target_compile_definitions(A0CameraStitcher.CameraAgent PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.CameraAgent PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.CameraAgent PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_library(a0_m2_optical
@@ -124,6 +136,15 @@ if(BUILD_TESTING)
         target_compile_options(a0_phase0_cli_safety_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME phase0_cli_safety_contracts COMMAND a0_phase0_cli_safety_tests)
+
+    add_executable(a0_hardware_camera_agent_tests tests/hardware_camera_agent_tests.cpp)
+    target_link_libraries(a0_hardware_camera_agent_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_hardware_camera_agent_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_hardware_camera_agent_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME hardware_camera_agent_contracts COMMAND a0_hardware_camera_agent_tests)
 
     add_executable(a0_m2_tests tests/m2_tests.cpp)
     target_link_libraries(a0_m2_tests PRIVATE a0_m2_optical)

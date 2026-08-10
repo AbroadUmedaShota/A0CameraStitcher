@@ -251,6 +251,13 @@ public:
 class IdentityMap {
 public:
     explicit IdentityMap(std::filesystem::path path);
+    // Constructs a read-only snapshot from bindings already parsed and
+    // validated by a stricter product boundary. It does not read or write the
+    // backing file.
+    IdentityMap(
+        std::filesystem::path path,
+        std::optional<std::string> cam_a,
+        std::optional<std::string> cam_b);
     [[nodiscard]] std::optional<std::string> FindAlias(std::string_view stable_identity) const;
     void ValidateBinding(std::string_view alias, std::string_view stable_identity) const;
     void Bind(std::string_view alias, std::string_view stable_identity);
@@ -663,7 +670,9 @@ private:
     Timeouts timeouts = {},
     const std::function<void()>& before_wpd_recovery = {},
     const std::function<void()>& before_pc_original_rename = {},
-    std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt);
+    std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt,
+    const std::function<void(const FrameEvidence&)>& before_camera_object_delete = {},
+    const std::function<void()>& before_sdk_capture = {});
 [[nodiscard]] HybridPairResult ExecuteHybridCapturePair(
     ICameraTransport& wpd_session,
     IPostCardObservationTransport& wpd,

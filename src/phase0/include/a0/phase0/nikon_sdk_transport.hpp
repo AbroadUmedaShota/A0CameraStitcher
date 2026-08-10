@@ -24,6 +24,15 @@ public:
     [[nodiscard]] SdkCameraStatus ProbeSdkStatus(
         std::string_view stable_identity,
         std::chrono::seconds timeout);
+    // Reads settings from the already-open capture session. Camera Agent uses
+    // this immediately before the shutter command so the approved profile is
+    // checked in the same SDK session that performs the capture.
+    [[nodiscard]] SdkCameraStatus ProbeOpenCaptureSessionStatus(
+        std::chrono::seconds timeout);
+    // Product Camera Agent only: every subsequent SDK source open rejects
+    // unless the open-time inventory contains exactly one D810. Legacy pair
+    // experiments leave this disabled.
+    void RequireExactlyOneD810ForProductAgent();
     void Open(std::string_view stable_identity, std::chrono::seconds timeout) override;
     [[nodiscard]] std::string Baseline(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownload(

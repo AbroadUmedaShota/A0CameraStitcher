@@ -10,7 +10,8 @@ public sealed record CameraSettingRow(string Setting, string RequiredProfile, st
 public sealed class OperatorShellViewModel : ObservableObject
 {
     public const string SimulationBanner = "SIMULATED / 実機未接続";
-    private const string NoRetryMessage = "NO AUTO RETRY: FailedPartial後は同じtransactionを再開せず、両カメラを新しいtransactionで撮り直します。";
+    private const string SingleModeLabel = "1台構成";
+    private const string DualModeLabel = "2台構成";
 
     private readonly ISimulatedTransactionService _transactionService;
     private readonly AsyncRelayCommand _captureCommand;
@@ -30,6 +31,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool _isBusy;
     private bool _safetyAcknowledged;
     private bool _isLiveViewActive;
+    private string _selectedOperatingMode = DualModeLabel;
     private string _selectedCamera = "CAM-A";
     private string _selectedReadinessDemo = "自動補正範囲内";
     private string _selectedDiagnosticScenario = "正常完了";
@@ -82,9 +84,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
 
     public string BannerText => SimulationBanner;
+    public IReadOnlyList<string> OperatingModeOptions { get; } = [SingleModeLabel, DualModeLabel];
     public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A", "CAM-B"];
-    public IReadOnlyList<string> ReadinessDemoOptions { get; } = ["補正不要", "自動補正範囲内", "物理調整が必要", "CAM-B未接続", "カード状態要確認"];
-    public IReadOnlyList<string> DiagnosticScenarios { get; } = ["正常完了", "Live View停止失敗", "CAM-A撮影失敗", "CAM-B撮影失敗", "cleanup失敗", "合成失敗", "Live View再開失敗", "CAM-A保存後クラッシュ"];
+    public IReadOnlyList<string> ReadinessDemoOptions { get; } = ["補正不要", "自動補正範囲内", "物理調整が必要", "CAM-A未接続", "CAM-B未接続", "カード状態要確認"];
+    public IReadOnlyList<string> DiagnosticScenarios => IsSingleCameraMode
+        ? ["正常完了", "Live View停止失敗", "対象カメラ撮影失敗", "cleanup失敗", "Live View再開失敗", "1台目保存後クラッシュ"]
+        : ["正常完了", "Live View停止失敗", "CAM-A撮影失敗", "CAM-B撮影失敗", "cleanup失敗", "合成失敗", "Live View再開失敗", "CAM-A保存後クラッシュ"];
     public IReadOnlyList<CameraSettingRow> CameraSettingRows { get; } =
     [
         new("記録形式", "FX / JPEG Fine L", "SIMULATED: 整合", "SIMULATED: 整合"),
@@ -119,6 +124,8 @@ public sealed class OperatorShellViewModel : ObservableObject
                 RebuildReadiness(preserveOutcomeState);
                 NotifyAllCommands();
                 OnPropertyChanged(nameof(ActivityText));
+                OnPropertyChanged(nameof(CanChangeOperatingMode));
+                OnPropertyChanged(nameof(CanSelectCamera));
             }
         }
     }
@@ -138,6 +145,17 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public string SafetyAckText => SafetyAcknowledged ? "同意済み（アプリ終了時に破棄）" : "未同意 — 撮影禁止";
     public string ActivityText => IsBusy ? "操作をロック中" : "操作受付中";
+    public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
+    public bool CanChangeOperatingMode => !IsBusy && !IsLiveViewActive &&
+        UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
+    public bool CanSelectCamera => !IsBusy && !IsLiveViewActive &&
+        UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
+    public string OperatingModeDescription => IsSingleCameraMode
+        ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
+        : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
+    public string CaptureButtonText => IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
+    public string CameraSelectionLabel => IsSingleCameraMode ? "撮影・Live View対象" : "一台選択式 Live View";
+    public string ProcessingResultLabel => IsSingleCameraMode ? "単体出力" : "合成";
     public string OverallStateText => UiState switch
     {
         OperatorUiState.Ready => "撮影可能",
@@ -159,8 +177,33 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _uiState, value))
             {
                 OnPropertyChanged(nameof(OverallStateText));
+                OnPropertyChanged(nameof(CanChangeOperatingMode));
+                OnPropertyChanged(nameof(CanSelectCamera));
                 RecalculateAvailability();
             }
+        }
+    }
+
+    public string SelectedOperatingMode
+    {
+        get => _selectedOperatingMode;
+        set
+        {
+            if (!CanChangeOperatingMode || value is not (SingleModeLabel or DualModeLabel) ||
+                !SetProperty(ref _selectedOperatingMode, value))
+            {
+                return;
+            }
+
+            SelectedDiagnosticScenario = "正常完了";
+            OnPropertyChanged(nameof(IsSingleCameraMode));
+            OnPropertyChanged(nameof(OperatingModeDescription));
+            OnPropertyChanged(nameof(CaptureButtonText));
+            OnPropertyChanged(nameof(CameraSelectionLabel));
+            OnPropertyChanged(nameof(ProcessingResultLabel));
+            OnPropertyChanged(nameof(DiagnosticScenarios));
+            ResetProgress(CurrentCapturePlan);
+            RebuildReadiness();
         }
     }
 
@@ -169,10 +212,18 @@ public sealed class OperatorShellViewModel : ObservableObject
         get => _selectedCamera;
         set
         {
-            if (value is ("CAM-A" or "CAM-B") && SetProperty(ref _selectedCamera, value))
+            if (CanSelectCamera && value is ("CAM-A" or "CAM-B") && SetProperty(ref _selectedCamera, value))
             {
                 OnPropertyChanged(nameof(LiveViewPlaceholder));
                 OnPropertyChanged(nameof(LiveViewButtonText));
+                OnPropertyChanged(nameof(OperatingModeDescription));
+                OnPropertyChanged(nameof(CaptureButtonText));
+                if (IsSingleCameraMode)
+                {
+                    SelectedDiagnosticScenario = "正常完了";
+                    ResetProgress(CurrentCapturePlan);
+                    RebuildReadiness();
+                }
             }
         }
     }
@@ -189,12 +240,35 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
-    public string SelectedDiagnosticScenario { get => _selectedDiagnosticScenario; set => SetProperty(ref _selectedDiagnosticScenario, value); }
+    public string SelectedDiagnosticScenario
+    {
+        get => _selectedDiagnosticScenario;
+        set
+        {
+            if (!IsBusy && DiagnosticScenarios.Contains(value, StringComparer.Ordinal))
+            {
+                SetProperty(ref _selectedDiagnosticScenario, value);
+            }
+        }
+    }
     public string SelectedPage { get => _selectedPage; private set { if (SetProperty(ref _selectedPage, value)) OnPropertyChanged(nameof(PageTitle)); } }
     public string PageTitle => SelectedPage switch { "Setup" => "設置・校正", "CameraSettings" => "カメラ設定（read-only）", "Diagnostics" => "保存・診断", _ => "撮影ダッシュボード" };
     public string LiveViewPlaceholder => $"{SelectedCamera}\n\nSimulated Live View placeholder 非実画像\n原画像・合成入力には使用しません";
     public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} Live Viewを停止" : $"{SelectedCamera} Live Viewを開始";
-    public bool IsLiveViewActive { get => _isLiveViewActive; private set { if (SetProperty(ref _isLiveViewActive, value)) { OnPropertyChanged(nameof(LiveViewButtonText)); RebuildReadiness(); } } }
+    public bool IsLiveViewActive
+    {
+        get => _isLiveViewActive;
+        private set
+        {
+            if (SetProperty(ref _isLiveViewActive, value))
+            {
+                OnPropertyChanged(nameof(LiveViewButtonText));
+                OnPropertyChanged(nameof(CanChangeOperatingMode));
+                OnPropertyChanged(nameof(CanSelectCamera));
+                RebuildReadiness();
+            }
+        }
+    }
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public string TechnicalDetail { get => _technicalDetail; private set => SetProperty(ref _technicalDetail, value); }
     public string LastTransactionId { get => _lastTransactionId; private set => SetProperty(ref _lastTransactionId, value); }
@@ -208,8 +282,8 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public string ProfileText => $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
     public string OutputDirectory => _readiness.OutputDirectory;
-    public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"));
-    public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"));
+    public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
+    public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
     public string SetupStatusText => _readiness.Setup.Summary;
     public string CorrectionText => _readiness.Setup.PlannedCorrections.Count == 0 ? "予定補正なし" : string.Join(" / ", _readiness.Setup.PlannedCorrections);
     public string PhysicalAdjustmentText => _readiness.Setup.PhysicalAdjustments.Count == 0 ? "物理調整なし" : string.Join(" / ", _readiness.Setup.PhysicalAdjustments);
@@ -223,6 +297,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanRestitch => _availability.Restitch.Allowed;
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed;
     public bool CanOpenMaintenance => _availability.OpenMaintenance.Allowed;
+
+    private CapturePlan CurrentCapturePlan => IsSingleCameraMode ? CapturePlan.Single(SelectedCamera) : CapturePlan.Dual();
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -275,6 +351,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         IsBusy = true;
+        var capturePlan = CurrentCapturePlan;
         TransactionStartCount++;
         var transactionId = Guid.NewGuid();
         LastTransactionId = transactionId.ToString("N");
@@ -284,7 +361,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureOutcome = null;
         _stitchOutcome = null;
         _exportOutcome = null;
-        ResetProgress();
+        ResetProgress(capturePlan);
         UiState = OperatorUiState.Capturing;
         StatusMessage = $"{scenario}: 操作をロックし、選択中Live Viewを停止します。";
 
@@ -295,6 +372,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 var liveViewFailure = await _transactionService.ExecuteAsync(
                     transactionId,
+                    capturePlan,
                     SimulatedWorkflowScenario.FailLiveViewStop,
                     _lifetimeToken).ConfigureAwait(true);
                 ApplyCaptureResult(liveViewFailure);
@@ -306,15 +384,22 @@ public sealed class OperatorShellViewModel : ObservableObject
 
             IsLiveViewActive = false;
             SetStep("liveview", "completed");
-            SetStep("capture-a", "current");
+            SetStep(CaptureStep(capturePlan.RequiredCameraAliases[0]), "current");
             var foundationScenario = scenario switch
             {
                 "CAM-A撮影失敗" => SimulatedWorkflowScenario.FailCaptureA,
                 "CAM-B撮影失敗" => SimulatedWorkflowScenario.FailCaptureB,
+                "対象カメラ撮影失敗" when capturePlan.RequiredCameraAliases[0] == "CAM-A" => SimulatedWorkflowScenario.FailCaptureA,
+                "対象カメラ撮影失敗" => SimulatedWorkflowScenario.FailCaptureB,
                 "CAM-A保存後クラッシュ" => SimulatedWorkflowScenario.CrashAfterPersistA,
+                "1台目保存後クラッシュ" => SimulatedWorkflowScenario.CrashAfterPersistA,
                 _ => SimulatedWorkflowScenario.Success,
             };
-            var result = await _transactionService.ExecuteAsync(transactionId, foundationScenario, _lifetimeToken).ConfigureAwait(true);
+            var result = await _transactionService.ExecuteAsync(
+                transactionId,
+                capturePlan,
+                foundationScenario,
+                _lifetimeToken).ConfigureAwait(true);
             ApplyCaptureResult(result);
 
             if (!result.IsTerminal)
@@ -327,19 +412,50 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (result.State == SimulatedTransactionState.FailedPartial)
             {
                 UiState = OperatorUiState.FailedPartial;
-                StatusMessage = $"撮影をFailedPartialで終了しました。{NoRetryMessage}";
+                StatusMessage = $"撮影をFailedPartialで終了しました。{NoRetryMessage(capturePlan)}";
                 return;
             }
 
-            MarkCaptureStepsCompleted();
+            MarkCaptureStepsCompleted(capturePlan);
             if (scenario == "cleanup失敗")
             {
                 _cameraInspectionRequired = true;
-                SetStep("stitch", "completed");
-                CreateSuccessfulStitch("cleanup異常あり");
+                if (capturePlan.OperatingMode == CameraOperatingMode.SingleCamera)
+                {
+                    SetStep("stitch", "skipped");
+                    StitchResult = "対象外（1台構成）";
+                    _stitchOutcome = null;
+                }
+                else
+                {
+                    SetStep("stitch", "completed");
+                    CreateSuccessfulStitch("cleanup異常あり");
+                }
                 UiState = OperatorUiState.Review;
-                StatusMessage = "PC原本と合成結果は利用できますが、カード状態を再確認するまで新規撮影は禁止です。";
+                StatusMessage = capturePlan.OperatingMode == CameraOperatingMode.SingleCamera
+                    ? "PC単体原本は利用できますが、カード状態を再確認するまで新規撮影は禁止です。"
+                    : "PC原本と合成結果は利用できますが、カード状態を再確認するまで新規撮影は禁止です。";
                 TechnicalDetail = "error code: EmptyAfterCheckFailed / exact-object cleanup: simulated";
+                return;
+            }
+
+            if (capturePlan.OperatingMode == CameraOperatingMode.SingleCamera)
+            {
+                SetStep("stitch", "skipped");
+                StitchResult = "対象外（1台構成）";
+                _stitchOutcome = null;
+                UiState = scenario == "Live View再開失敗" ? OperatorUiState.Degraded : OperatorUiState.Review;
+                if (scenario == "Live View再開失敗")
+                {
+                    _cameraInspectionRequired = true;
+                    StatusMessage = "単体原画像を保持しました。Live View再開失敗のためSDK状態確認まで新規撮影を禁止します。";
+                    TechnicalDetail = "error code: LiveViewResumeFailed / single original retained: true";
+                }
+                else
+                {
+                    StatusMessage = $"{capturePlan.RequiredCameraAliases[0]}の撮影が完了しました。合成は行わず、検証済み単体原画像を明示保存できます。";
+                    TechnicalDetail = "error code: なし / stitch: NotApplicable / automatic retry count: 0";
+                }
                 return;
             }
 
@@ -389,7 +505,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         UiState = OperatorUiState.CheckingReadiness;
         StatusMessage = "read-onlyで接続・identity・profile・設置・カード・保存先を再検査しました。";
         _cameraInspectionRequired = false;
-        ResetProgress();
+        ResetProgress(CurrentCapturePlan);
         CaptureResult = "新しい撮影待ち（過去画像は再利用しません）";
         StitchResult = "未実行";
         ExportResult = "未実行";
@@ -425,8 +541,13 @@ public sealed class OperatorShellViewModel : ObservableObject
         var exportDirectory = Path.Combine(Path.GetTempPath(), "A0CameraStitcher", "simulated-exports");
         Directory.CreateDirectory(exportDirectory);
         var outputPath = Path.Combine(exportDirectory, $"{exportId:N}.simulated-export.txt");
-        File.WriteAllText(outputPath, $"Simulated export only{Environment.NewLine}transaction={LastTransactionId}{Environment.NewLine}stitchJob={LastStitchJobId}");
-        _exportOutcome = new ExportOutcome(exportId, true, outputPath, "明示操作でSIMULATED出力を保存しました（JPEGではありません）", null);
+        var singleOutput = _captureOutcome?.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera;
+        var resultKind = singleOutput ? "single-canonical-original" : "stitched-result";
+        File.WriteAllText(outputPath, $"Simulated export only{Environment.NewLine}transaction={LastTransactionId}{Environment.NewLine}resultKind={resultKind}{Environment.NewLine}stitchJob={LastStitchJobId}");
+        var message = singleOutput
+            ? "明示操作でSIMULATED単体原画像を保存しました（JPEGではありません）"
+            : "明示操作でSIMULATED合成出力を保存しました（JPEGではありません）";
+        _exportOutcome = new ExportOutcome(exportId, true, outputPath, message, null);
         LastExportPath = _exportOutcome.OutputPath ?? "未実行";
         ExportResult = _exportOutcome.OperatorMessage;
         StatusMessage = "保存が完了しました。原画像を上書き・削除していません。";
@@ -440,11 +561,34 @@ public sealed class OperatorShellViewModel : ObservableObject
             throw new InvalidDataException("実機非接続shellはSimulated markerのない結果を表示できません。");
         }
 
+        var resultPlan = new CapturePlan
+        {
+            OperatingMode = result.OperatingMode,
+            RequiredCameraAliases = result.RequiredCameraAliases,
+        };
+        resultPlan.Validate();
+        _selectedOperatingMode = resultPlan.OperatingMode == CameraOperatingMode.SingleCamera
+            ? SingleModeLabel
+            : DualModeLabel;
+        if (resultPlan.OperatingMode == CameraOperatingMode.SingleCamera)
+        {
+            _selectedCamera = resultPlan.RequiredCameraAliases[0];
+        }
+        OnPropertyChanged(nameof(SelectedOperatingMode));
+        OnPropertyChanged(nameof(SelectedCamera));
+        OnPropertyChanged(nameof(IsSingleCameraMode));
+        OnPropertyChanged(nameof(OperatingModeDescription));
+        OnPropertyChanged(nameof(CaptureButtonText));
+        OnPropertyChanged(nameof(CameraSelectionLabel));
+        OnPropertyChanged(nameof(ProcessingResultLabel));
+        OnPropertyChanged(nameof(DiagnosticScenarios));
+
         LastTransactionId = result.TransactionId.ToString("N");
         CaptureResult = result.State.ToString();
         RetainedOriginals = result.RetainedOriginalAliases.Count == 0 ? "なし" : string.Join(", ", result.RetainedOriginalAliases) + "（simulated原画像）";
         _captureOutcome = new CaptureOutcome(
             result.TransactionId,
+            resultPlan,
             result.State,
             result.RetainedOriginalAliases,
             CaptureResult,
@@ -456,6 +600,13 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void ApplyProgressFromResult(SimulatedWorkflowState result)
     {
+        var resultPlan = new CapturePlan
+        {
+            OperatingMode = result.OperatingMode,
+            RequiredCameraAliases = result.RequiredCameraAliases,
+        };
+        resultPlan.Validate();
+        ResetProgress(resultPlan);
         if (string.Equals(result.TerminalReason, "LiveViewStopFailed", StringComparison.Ordinal))
         {
             SetStep("liveview", "failure");
@@ -475,14 +626,23 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         if (result.State == SimulatedTransactionState.FailedPartial)
         {
-            var failedStep = result.RetainedOriginalAliases.Count == 0 ? "capture-a" : "capture-b";
-            SetStep(failedStep, "failure");
+            var failedAlias = resultPlan.RequiredCameraAliases
+                .FirstOrDefault(alias => !result.RetainedOriginalAliases.Contains(alias, StringComparer.Ordinal));
+            if (failedAlias is not null)
+            {
+                SetStep(CaptureStep(failedAlias), "failure");
+            }
         }
     }
 
-    private void MarkCaptureStepsCompleted()
+    private void MarkCaptureStepsCompleted(CapturePlan capturePlan)
     {
-        foreach (var id in new[] { "liveview", "capture-a", "persist-a", "capture-b", "persist-b" }) SetStep(id, "completed");
+        SetStep("liveview", "completed");
+        foreach (var alias in capturePlan.RequiredCameraAliases)
+        {
+            SetStep(CaptureStep(alias), "completed");
+            SetStep(PersistStep(alias), "completed");
+        }
     }
 
     private void CreateSuccessfulStitch(string description)
@@ -495,24 +655,37 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void RebuildReadiness(bool preserveOutcomeState = false)
     {
-        var setup = SelectedReadinessDemo switch
+        var capturePlan = CurrentCapturePlan;
+        var setup = IsSingleCameraMode
+            ? SelectedReadinessDemo switch
+            {
+                "物理調整が必要" => new SetupAssessment(SetupAssessmentStatus.PhysicalAdjustmentRequired, "選択カメラの物理調整が必要 — 撮影禁止", [], [$"{SelectedCamera}の原稿範囲を調整"]),
+                _ => new SetupAssessment(SetupAssessmentStatus.Ready, "1台構成 — 合成補正なし・撮影可能", [], []),
+            }
+            : SelectedReadinessDemo switch
         {
             "補正不要" => new SetupAssessment(SetupAssessmentStatus.Ready, "補正不要 — 撮影可能", [], []),
             "物理調整が必要" => new SetupAssessment(SetupAssessmentStatus.PhysicalAdjustmentRequired, "物理調整が必要 — 撮影禁止", [], ["CAM-Bを左へ2.4 mm", "時計回りに0.8°"]),
             _ => new SetupAssessment(SetupAssessmentStatus.ReadyWithCorrection, "自動補正範囲内 — 撮影可能", ["位置 +0.7 mm", "回転 -0.2°", "露出 +0.1 EV"], []),
         };
-        var camBConnected = SelectedReadinessDemo != "CAM-B未接続";
+        var camAConnected = IsSingleCameraMode
+            ? SelectedCamera == "CAM-A" && SelectedReadinessDemo != "CAM-A未接続"
+            : SelectedReadinessDemo != "CAM-A未接続";
+        var camBConnected = IsSingleCameraMode
+            ? SelectedCamera == "CAM-B" && SelectedReadinessDemo != "CAM-B未接続"
+            : SelectedReadinessDemo != "CAM-B未接続";
         var cardsKnownEmpty = SelectedReadinessDemo != "カード状態要確認" && !_cameraInspectionRequired;
         var outputDirectory = Path.Combine(Path.GetTempPath(), "A0CameraStitcher", "simulated-exports");
         _readiness = new ReadinessSnapshot
         {
             SafetyAcknowledged = SafetyAcknowledged,
+            CapturePlan = capturePlan,
             Cameras =
             [
-                new("CAM-A", true, true, true, cardsKnownEmpty, IsLiveViewActive && SelectedCamera == "CAM-A"),
+                new("CAM-A", camAConnected, camAConnected, true, cardsKnownEmpty, IsLiveViewActive && SelectedCamera == "CAM-A"),
                 new("CAM-B", camBConnected, camBConnected, true, cardsKnownEmpty, IsLiveViewActive && SelectedCamera == "CAM-B"),
             ],
-            Profile = new("RIG-SIM-A0", "0.3", new DateOnly(2027, 3, 31), true, true),
+            Profile = new(IsSingleCameraMode ? $"SINGLE-SIM-{SelectedCamera}" : "RIG-SIM-A0", "0.4", new DateOnly(2027, 3, 31), true, true),
             Setup = setup,
             OutputDirectory = outputDirectory,
             OutputDirectoryValid = true,
@@ -531,15 +704,20 @@ public sealed class OperatorShellViewModel : ObservableObject
     private void RecalculateAvailability()
     {
         if (_readiness is null) return;
-        var hasBothOriginals = _captureOutcome is not null &&
-            _captureOutcome.RetainedOriginalAliases.Contains("CAM-A") &&
-            _captureOutcome.RetainedOriginalAliases.Contains("CAM-B");
+        var outcomePlan = _captureOutcome?.CapturePlan;
+        var hasRequiredOriginals = _captureOutcome is not null && outcomePlan is not null &&
+            outcomePlan.RequiredCameraAliases.All(alias =>
+                _captureOutcome.RetainedOriginalAliases.Contains(alias, StringComparer.Ordinal));
+        var hasExportableResult = outcomePlan?.OperatingMode == CameraOperatingMode.SingleCamera
+            ? hasRequiredOriginals
+            : _stitchOutcome?.Succeeded == true;
+        var canRestitch = outcomePlan?.OperatingMode == CameraOperatingMode.DualCamera && hasRequiredOriginals;
         _availability = OperatorReadinessEvaluator.Evaluate(
             _readiness,
             UiState,
             DateOnly.FromDateTime(DateTime.Today),
-            _stitchOutcome?.Succeeded == true,
-            hasBothOriginals);
+            hasExportableResult,
+            canRestitch);
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(CanUseLiveView));
@@ -547,12 +725,14 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanRestitch));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanOpenMaintenance));
+        OnPropertyChanged(nameof(CanChangeOperatingMode));
+        OnPropertyChanged(nameof(CanSelectCamera));
         NotifyAllCommands();
     }
 
     private void RaiseReadinessProperties()
     {
-        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText) }) OnPropertyChanged(name);
+        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel) }) OnPropertyChanged(name);
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)
@@ -561,16 +741,40 @@ public sealed class OperatorShellViewModel : ObservableObject
         return messages.Length == 0 ? emptyText : string.Join("\n", messages);
     }
 
-    private static string FormatCamera(CameraReadiness camera) =>
-        $"{(camera.Connected ? "接続" : "未接続")} / identity {(camera.IdentityBound ? "OK" : "未登録")} / 設定 {(camera.SettingsMatch ? "整合" : "不整合")} / card {(camera.CardKnownEmpty ? "empty確認" : "要確認")} / Live View {(camera.LiveViewActive ? "ON" : "OFF")}";
+    private static string FormatCamera(CameraReadiness camera, bool required) =>
+        required
+            ? $"構成対象 / {(camera.Connected ? "接続" : "未接続")} / identity {(camera.IdentityBound ? "OK" : "未登録")} / 設定 {(camera.SettingsMatch ? "整合" : "不整合")} / card {(camera.CardKnownEmpty ? "empty確認" : "要確認")} / Live View {(camera.LiveViewActive ? "ON" : "OFF")}"
+            : "構成対象外 / 一台構成では接続しません";
 
     private void SetStep(string id, string state)
     {
         var step = ProgressSteps.Single(item => item.Id == id);
-        switch (state) { case "completed": step.SetCompleted(); break; case "current": step.SetCurrent(); break; case "failure": step.SetFailure(); break; default: step.SetPending(); break; }
+        switch (state) { case "completed": step.SetCompleted(); break; case "current": step.SetCurrent(); break; case "failure": step.SetFailure(); break; case "skipped": step.SetSkipped(); break; default: step.SetPending(); break; }
     }
 
-    private void ResetProgress() { foreach (var step in ProgressSteps) step.SetPending(); }
+    private void ResetProgress(CapturePlan? capturePlan = null)
+    {
+        capturePlan ??= CurrentCapturePlan;
+        foreach (var step in ProgressSteps) step.SetPending();
+        foreach (var alias in new[] { "CAM-A", "CAM-B" }.Where(alias => !capturePlan.RequiredCameraAliases.Contains(alias, StringComparer.Ordinal)))
+        {
+            SetStep(CaptureStep(alias), "skipped");
+            SetStep(PersistStep(alias), "skipped");
+        }
+        if (capturePlan.OperatingMode == CameraOperatingMode.SingleCamera)
+        {
+            SetStep("stitch", "skipped");
+        }
+    }
+
+    private static string CaptureStep(string alias) => alias == "CAM-A" ? "capture-a" : "capture-b";
+
+    private static string PersistStep(string alias) => alias == "CAM-A" ? "persist-a" : "persist-b";
+
+    private static string NoRetryMessage(CapturePlan capturePlan) =>
+        capturePlan.OperatingMode == CameraOperatingMode.SingleCamera
+            ? "NO AUTO RETRY: FailedPartial後は同じtransactionを再開せず、選択カメラを新しいtransactionで撮り直します。"
+            : "NO AUTO RETRY: FailedPartial後は同じtransactionを再開せず、両カメラを新しいtransactionで撮り直します。";
 
     private void ShowUnexpectedFailure(Exception exception)
     {

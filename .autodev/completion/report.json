@@ -1,6 +1,6 @@
 {
   "schema_version": "autodev.completion-report.v1",
-  "evaluated_at": "2026-08-09T00:00:00+09:00",
+  "evaluated_at": "2026-08-10T00:00:00+09:00",
   "completion_state": "in-progress",
   "automatable_gaps": [
     "WI-0010A must add a traceable native SDK boundary proving the setting readback does not issue photographic-setting writes, capture, Live View start, WPD calls, or deletion",
@@ -8,11 +8,13 @@
     "Phase 0 evidence, CLI, transaction, and test-support responsibilities should be split incrementally under characterization tests; this refactor is not an MVP acceptance substitute"
   ],
   "blocking_gaps": [
+    "real D810 execution through the WPF Camera Agent, exactly-one physical SingleCamera capture, actual canonical-original export, and mode-specific hardware recovery remain unverified; fresh software evidence must not be reclassified as product acceptance",
     "the M1A hardware-capture lane is paused at the operator's request after three checks ending with read-only run-1786017282044-1 found the same 90 protected payload objects; do not repeat the check until a physical state change is reported, then require an explicit resume for one-shot hardware proof",
     "10 of 10, Phase 0A capture-path fault recovery, and ten hybrid handoffs remain incomplete",
     "the former SDK CAM-A binding is invalid because it used an ephemeral MAID source object ID; CAM-B identity-v2 is bound as a one-body checkpoint, but CAM-A SDK v2 rebind, distinct-body, reconnect, port-swap, and dual-camera verification remain incomplete",
-    "HG-0001 and HG-0002 block final M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
-    "real Camera Agent integration, acceptance, redistribution, and release remain open"
+    "HG-0001 and HG-0002 block final DualCamera M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
+    "HG-0009 blocks final SingleCamera target-size, DPI, crop, optional future processing, performance, durability, integrated acceptance, and release decisions",
+    "real Camera Agent/D810 execution, acceptance, redistribution, and release remain open"
   ],
   "degraded_gaps": [
     "standard WPD capture returned MTP 0x2002 without a new JPEG",
@@ -62,10 +64,12 @@
     "rig-profile schema 1.1 validates shape/type and keeps draft values null; runtime contracts validate supported version, provenance, time ordering, assessment-time expiry, and correction-envelope ordering",
     "SDK-enabled and SDK-less native CTest each passed 5 of 5; the setup-assessment contract covers structured profile status/version/provenance/time trust, ready, ready-auto-correction, physical-adjustment-required, hard blockers, invalid values, boundary equality, determinism, and input immutability",
     "SDK status summary v4 handles unsigned, packed-string, and fixed-string setting values with bounded parsing, explicit probe states, photographic-setting-write versus SDK control-plane disclosure, ASCII-safe JSON and CLI escaping, atomic persistence, redaction, and fail-closed serializer validation; independent review passed and native command-trace coverage remains open",
-    "M3P .NET 10 Release solution built with zero warnings; Foundation contracts passed 13/13, Operator Shell contracts passed 1/1, and CAM-A to CAM-B durable simulated pairs passed 100/100 with both originals, ordered capture, and zero retry",
-    "visibly simulated WPF operator shell validation passed; no real camera integration is claimed"
+    "2026-08-10 requirements 2.6.0 fresh M3P verification passed: .NET 10 Release solution build had zero warnings and zero errors, Foundation contracts passed 19/19, Operator Shell contracts passed 15/15, and Test-M3Simulated.ps1 reported the simulated foundation plus SingleCamera hardware software boundary passed validation",
+    "the fresh M3P contracts prove explicit SingleCamera/DualCamera, immutable active mode and required aliases, no automatic fallback, selected-alias-only Single capture, one simulated original, Stitch NotApplicable, explicit export, startup operation gating, and no retry",
+    "Hardware Single headless contracts cover durable alias/profile ID/version/SHA/expiry/handoff correlation, same-ID startup query, prepared versus attempted dispatch recovery, support-required TransactionNotFound, finite non-original Live View probes, reread-verified originals, and same-file-identity staged byte-identical export; no real D810, actual camera JPEG, or WPF interaction is claimed",
+    "the 2026-08-10 SDK-less and licensed-SDK-enabled Release CTest independently passed 6/6 each with 0 failures and no camera command, including hardware_camera_agent_contracts for operator-session lease, gap-free transaction reservation/recovery, exactly-one alias and profile-expiry correlation, Live View OFF gates, SDK/WPD non-overlap, fixed-local roots/maps/profiles, canonical-original file identity locked against write/delete through exact WPD deletion, no retry, and bounded named-pipe/journal behavior; this remains software-only"
   ],
-  "remaining_human_actions": ["HG-0001", "HG-0002", "HG-0003B", "HG-0005"],
+  "remaining_human_actions": ["HG-0001", "HG-0002", "HG-0003B", "HG-0005", "HG-0009"],
   "showcase_handoff": {
     "document": "docs/PHASE0_SHOWCASE.md",
     "verification_command": "pwsh -NoProfile -File .\\scripts\\Test-Phase0Showcase.ps1",
@@ -100,10 +104,26 @@
       "automatic retry"
     ]
   },
+  "single_camera_scope": {
+    "decision_id": "HD-20260810-001",
+    "requirements_version": "2.6.0",
+    "plan_version": "2.9.0",
+    "initial_physical_d810_count": 1,
+    "explicit_mode_required": true,
+    "connected_count_inference_allowed": false,
+    "dual_to_single_auto_fallback_allowed": false,
+    "camera_settings_write_allowed": false,
+    "single_output": "byte-identical explicit export of the verified canonical original",
+    "stitch_outcome": "NotApplicable",
+    "fresh_software_verification": "passed 2026-08-10: Release build 0 warnings/0 errors, Foundation 19/19, Operator Shell 15/15, M3 boundary script passed, SDK-less and licensed-SDK-enabled Release CTest each passed 6/6 with 0 failures and no camera command",
+    "real_wpf_camera_agent_verified": false,
+    "real_single_capture_export_verified": false,
+    "quality_gate": "HG-0009"
+  },
   "evidence_summary": {
     "requirements_verified": 0,
-    "requirements_total": 31,
-    "partial_requirements_recorded": 26,
-    "unverified_requirements_recorded": 5
+    "requirements_total": 32,
+    "partial_requirements_recorded": 28,
+    "unverified_requirements_recorded": 4
   }
 }
