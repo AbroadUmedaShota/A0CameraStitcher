@@ -12,12 +12,14 @@ public sealed class HardwareCameraAgentLaunchException : Exception
         Exception? innerException = null,
         bool requestMayHaveBeenDispatched = false,
         int? processExitCode = null,
-        string? sanitizedStandardError = null)
+        string? sanitizedStandardError = null,
+        HardwarePipeResponseFailureStage? responseFailureStage = null)
         : base(message, innerException)
     {
         RequestMayHaveBeenDispatched = requestMayHaveBeenDispatched;
         ProcessExitCode = processExitCode;
         SanitizedStandardError = sanitizedStandardError ?? string.Empty;
+        ResponseFailureStage = responseFailureStage;
     }
 
     public bool RequestMayHaveBeenDispatched { get; }
@@ -25,6 +27,8 @@ public sealed class HardwareCameraAgentLaunchException : Exception
     public int? ProcessExitCode { get; }
 
     public string SanitizedStandardError { get; }
+
+    public HardwarePipeResponseFailureStage? ResponseFailureStage { get; }
 }
 
 internal static partial class HardwareCameraAgentDiagnostic
@@ -51,7 +55,7 @@ internal static partial class HardwareCameraAgentDiagnostic
     }
 
     [GeneratedRegex(
-        "(?i)\\b(secret|token|password|serial|identity|rawidentity|path)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|\\S+)",
+        "(?i)\\b(secret|token|password|serial|identity|rawidentity|identifier|path|requestid|correlationid|sessionid|transactionid)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|\\S+)",
         RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveAssignment();
 

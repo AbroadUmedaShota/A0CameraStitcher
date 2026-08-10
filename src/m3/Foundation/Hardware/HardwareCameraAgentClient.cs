@@ -26,6 +26,25 @@ public sealed class HardwareCameraAgentConnectException : IOException
     public bool CallerCancellationRequested { get; }
 }
 
+public enum HardwarePipeResponseFailureStage
+{
+    BeforeResponse,
+    PartialHeader,
+    PartialBody,
+}
+
+public sealed class HardwareCameraAgentIncompleteResponseException : EndOfStreamException
+{
+    internal HardwareCameraAgentIncompleteResponseException(
+        HardwarePipeResponseFailureStage failureStage)
+        : base("The hardware pipe closed before a complete frame was received.")
+    {
+        FailureStage = failureStage;
+    }
+
+    public HardwarePipeResponseFailureStage FailureStage { get; }
+}
+
 public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgentTransport
 {
     private readonly string _pipeName;
@@ -143,7 +162,8 @@ internal static class HardwarePipeFrameProtocol
     public static async Task<string> ReadAsync(Stream stream, CancellationToken cancellationToken)
     {
         var header = new byte[HeaderLength];
-        await ReadExactlyAsync(stream, header, cancellationToken).ConfigureAwait(false);
+        await ReadExactlyAsync(
+            stream, header, readingHeader: true, cancellationToken).ConfigureAwait(false);
         var payloadLength = BinaryPrimitives.ReadInt32LittleEndian(header);
         if (payloadLength is <= 0 or > MaximumPayloadLength)
         {
@@ -151,7 +171,8 @@ internal static class HardwarePipeFrameProtocol
         }
 
         var payload = new byte[payloadLength];
-        await ReadExactlyAsync(stream, payload, cancellationToken).ConfigureAwait(false);
+        await ReadExactlyAsync(
+            stream, payload, readingHeader: false, cancellationToken).ConfigureAwait(false);
         try
         {
             return StrictUtf8.GetString(payload);
@@ -165,6 +186,7 @@ internal static class HardwarePipeFrameProtocol
     private static async Task ReadExactlyAsync(
         Stream stream,
         Memory<byte> buffer,
+        bool readingHeader,
         CancellationToken cancellationToken)
     {
         var offset = 0;
@@ -173,8 +195,12 @@ internal static class HardwarePipeFrameProtocol
             var count = await stream.ReadAsync(buffer[offset..], cancellationToken).ConfigureAwait(false);
             if (count == 0)
             {
-                throw new EndOfStreamException(
-                    "The hardware pipe closed before a complete frame was received.");
+                var failureStage = readingHeader
+                    ? offset == 0
+                        ? HardwarePipeResponseFailureStage.BeforeResponse
+                        : HardwarePipeResponseFailureStage.PartialHeader
+                    : HardwarePipeResponseFailureStage.PartialBody;
+                throw new HardwareCameraAgentIncompleteResponseException(failureStage);
             }
 
             offset += count;

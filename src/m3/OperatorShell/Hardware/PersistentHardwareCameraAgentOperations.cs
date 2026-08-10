@@ -306,14 +306,19 @@ public sealed class PersistentHardwareCameraAgentOperations :
         }
 
         var sanitized = HardwareCameraAgentDiagnostic.SanitizeStandardError(standardError);
+        var responseFailureStage =
+            (cause as HardwareCameraAgentIncompleteResponseException)?.FailureStage;
         var exitSummary = exitCode.HasValue ? exitCode.Value.ToString() : "unavailable";
+        var responseStageSummary = responseFailureStage?.ToString() ?? "unavailable";
         var stderrSummary = string.IsNullOrEmpty(sanitized) ? "unavailable" : sanitized;
         return new HardwareCameraAgentLaunchException(
-            $"Camera Agent pipe response was incomplete. ExitCode={exitSummary}; stderr={stderrSummary}",
+            $"Camera Agent pipe response was incomplete. Stage={responseStageSummary}; " +
+            $"ExitCode={exitSummary}; stderr={stderrSummary}",
             cause,
             requestMayHaveBeenDispatched: true,
             processExitCode: exitCode,
-            sanitizedStandardError: sanitized);
+            sanitizedStandardError: sanitized,
+            responseFailureStage: responseFailureStage);
     }
 
     private string EnsureProcessStarted()

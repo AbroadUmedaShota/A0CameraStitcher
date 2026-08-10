@@ -419,9 +419,16 @@ private:
 // connection. The loop is intentionally single-threaded: the production
 // backend also takes the operator-session-wide camera-control lease for every
 // real operation.
+struct HardwareCameraAgentPipeFailureInjectionForTesting {
+    bool fail_response_header_write{};
+    bool fail_response_body_write{};
+    bool fail_response_flush{};
+};
+
 [[nodiscard]] int RunHardwareCameraAgentNamedPipeServer(
     std::string_view pipe_name,
     HardwareCameraAgentDispatcher& dispatcher,
-    bool serve_once = false);
+    bool serve_once = false,
+    HardwareCameraAgentPipeFailureInjectionForTesting failure_injection = {});
 
 } // namespace a0::phase0

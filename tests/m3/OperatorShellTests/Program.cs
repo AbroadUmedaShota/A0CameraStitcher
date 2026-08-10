@@ -274,7 +274,12 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
         Directory.CreateDirectory(Path.GetDirectoryName(identityPath)!);
 
-        foreach (var scenario in new[] { "before-response", "partial-header", "partial-body" })
+        foreach (var (scenario, expectedStage) in new[]
+                 {
+                     ("before-response", HardwarePipeResponseFailureStage.BeforeResponse),
+                     ("partial-header", HardwarePipeResponseFailureStage.PartialHeader),
+                     ("partial-body", HardwarePipeResponseFailureStage.PartialBody),
+                 })
         {
             Environment.SetEnvironmentVariable(persistentChildScenarioVariable, scenario);
             await using var operations = new PersistentHardwareCameraAgentOperations(
@@ -290,15 +295,23 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
             {
                 Check.True(exception.ProcessExitCode == 37, "The child exit code must be preserved.");
                 Check.True(
+                    exception.ResponseFailureStage == expectedStage,
+                    $"The {scenario} response failure stage must remain distinct.");
+                Check.True(
                     exception.RequestMayHaveBeenDispatched,
                     "A response-side pipe close must remain dispatch-ambiguous.");
                 Check.True(
                     exception.SanitizedStandardError.Contains("synthetic child failed closed", StringComparison.Ordinal),
                     "The safe stderr classification must be retained.");
+                Check.True(
+                    exception.SanitizedStandardError.Contains("requestId=[redacted]", StringComparison.Ordinal),
+                    "A long general alphanumeric request identifier must be redacted.");
                 Check.False(
                     exception.SanitizedStandardError.Contains("super-secret", StringComparison.Ordinal) ||
                     exception.SanitizedStandardError.Contains("C:\\private", StringComparison.Ordinal) ||
-                    exception.SanitizedStandardError.Contains("RAW-CAMERA-IDENTITY", StringComparison.Ordinal),
+                    exception.SanitizedStandardError.Contains("RAW-CAMERA-IDENTITY", StringComparison.Ordinal) ||
+                    exception.SanitizedStandardError.Contains(
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", StringComparison.Ordinal),
                     "Secrets, paths, and raw identity must be removed from diagnostics.");
                 Check.True(
                     exception.SanitizedStandardError.Length <= 512,
@@ -472,7 +485,8 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
 
 static void WriteSyntheticSensitiveStderr() =>
     Console.Error.WriteLine(
-        "synthetic child failed closed secret=super-secret path=C:\\private\\sdk rawIdentity=RAW-CAMERA-IDENTITY");
+        "synthetic child failed closed secret=super-secret path=C:\\private\\sdk " +
+        "rawIdentity=RAW-CAMERA-IDENTITY requestId=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
 
 static async Task<string> ReadPersistentTestFrameAsync(Stream stream, CancellationToken cancellationToken)
 {

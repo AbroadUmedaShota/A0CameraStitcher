@@ -1727,6 +1727,93 @@ void TestNamedPipeMaximumFrameBoundary() {
     }
 }
 
+void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
+    const std::array<HardwareCameraAgentPipeFailureInjectionForTesting, 3>
+        failures_to_inject{{
+        {.fail_response_header_write = true},
+        {.fail_response_body_write = true},
+        {.fail_response_flush = true},
+    }};
+    for (std::size_t index = 0; index < failures_to_inject.size(); ++index) {
+        FakeBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string pipe_name =
+            "A0CameraStitcher.CameraAgent.Hardware.v1.delivery-" + NewRunId();
+        const std::wstring full_pipe_name =
+            L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
+        auto server = std::async(std::launch::async, [&] {
+            return RunHardwareCameraAgentNamedPipeServer(
+                pipe_name, dispatcher, false, failures_to_inject[index]);
+        });
+
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            pipe = CreateFileW(
+                full_pipe_name.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+            if (pipe != INVALID_HANDLE_VALUE) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        Check(pipe != INVALID_HANDLE_VALUE,
+            "delivery-failure injection client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const std::string request = Envelope(
+                "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+            const std::uint32_t request_length =
+                static_cast<std::uint32_t>(request.size());
+            const std::array<unsigned char, 4> header{
+                static_cast<unsigned char>(request_length & 0xFFU),
+                static_cast<unsigned char>((request_length >> 8U) & 0xFFU),
+                static_cast<unsigned char>((request_length >> 16U) & 0xFFU),
+                static_cast<unsigned char>((request_length >> 24U) & 0xFFU),
+            };
+            Check(WriteAll(pipe, header.data(), header.size()) &&
+                    WriteAll(pipe, request.data(), request.size()),
+                "delivery-failure request must be writable");
+
+            std::array<unsigned char, 4> response_header{};
+            const bool header_received =
+                ReadAll(pipe, response_header.data(), response_header.size());
+            if (failures_to_inject[index].fail_response_header_write) {
+                Check(!header_received,
+                    "injected header failure must not deliver a response header");
+            } else {
+                Check(header_received,
+                    "body and flush failure injection must deliver the response header");
+                if (header_received) {
+                    const std::uint32_t response_length =
+                        static_cast<std::uint32_t>(response_header[0]) |
+                        (static_cast<std::uint32_t>(response_header[1]) << 8U) |
+                        (static_cast<std::uint32_t>(response_header[2]) << 16U) |
+                        (static_cast<std::uint32_t>(response_header[3]) << 24U);
+                    std::string response(response_length, '\0');
+                    const bool body_received =
+                        ReadAll(pipe, response.data(), response.size());
+                    if (failures_to_inject[index].fail_response_body_write) {
+                        Check(!body_received,
+                            "injected body failure must truncate the response body");
+                    }
+                }
+            }
+            CloseHandle(pipe);
+        }
+
+        Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
+            "delivery-failure server must terminate");
+        Check(server.get() == 3,
+            "dispatch-complete delivery failure must return the typed nonzero exit code");
+        Check(backend.readiness_calls == 1,
+            "delivery failure must not retry or redispatch readiness");
+    }
+}
+
 std::string LiveViewV2Envelope(
     std::string_view operation,
     std::string_view payload) {
@@ -2301,6 +2388,7 @@ int main() {
     TestStrictProtocolAndTypedResponses();
     TestServeOnceRejectsPartialFrameWithoutDispatch();
     TestNamedPipeMaximumFrameBoundary();
+    TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch();
     TestDurableJournalRecoveryContracts();
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();

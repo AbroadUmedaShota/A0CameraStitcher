@@ -22,6 +22,14 @@ constexpr std::uint32_t kMaximumPipeFrameBytes = 1024U * 1024U;
 constexpr DWORD kAcceptTimeoutMs = 15000;
 constexpr DWORD kFrameReadTimeoutMs = 5000;
 constexpr DWORD kResponseWriteTimeoutMs = 1000;
+constexpr int kFailedBeforeDispatchExitCode = 2;
+constexpr int kDispatchedDeliveryFailureExitCode = 3;
+
+enum class ProcessOneConnectionOutcome {
+    failed_before_dispatch,
+    dispatched_delivery_failed,
+    complete_delivery,
+};
 
 class CurrentLogonPipeSecurity final {
 public:
@@ -180,24 +188,35 @@ bool WriteExact(HANDLE pipe, const void* source, std::size_t bytes, DWORD timeou
     return true;
 }
 
-bool ProcessOneConnection(HANDLE pipe, HardwareCameraAgentDispatcher& dispatcher) {
+ProcessOneConnectionOutcome ProcessOneConnection(
+    HANDLE pipe,
+    HardwareCameraAgentDispatcher& dispatcher,
+    const HardwareCameraAgentPipeFailureInjectionForTesting& failure_injection) {
     std::array<unsigned char, 4> header{};
-    if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs)) return false;
+    if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs)) {
+        return ProcessOneConnectionOutcome::failed_before_dispatch;
+    }
     const std::uint32_t length =
         static_cast<std::uint32_t>(header[0]) |
         (static_cast<std::uint32_t>(header[1]) << 8U) |
         (static_cast<std::uint32_t>(header[2]) << 16U) |
         (static_cast<std::uint32_t>(header[3]) << 24U);
-    if (length == 0 || length > kMaximumPipeFrameBytes) return false;
+    if (length == 0 || length > kMaximumPipeFrameBytes) {
+        return ProcessOneConnectionOutcome::failed_before_dispatch;
+    }
 
     std::string request(length, '\0');
-    if (!ReadExact(pipe, request.data(), request.size(), kFrameReadTimeoutMs)) return false;
+    if (!ReadExact(pipe, request.data(), request.size(), kFrameReadTimeoutMs)) {
+        return ProcessOneConnectionOutcome::failed_before_dispatch;
+    }
 
     // Dispatch is deliberately completed before attempting to write. In
     // serve-once capture mode, a WPF/client disconnect therefore cannot abort
     // the camera transaction or trigger another shutter command.
     const std::string response = dispatcher.Handle(request);
-    if (response.empty() || response.size() > kMaximumPipeFrameBytes) return false;
+    if (response.empty() || response.size() > kMaximumPipeFrameBytes) {
+        return ProcessOneConnectionOutcome::dispatched_delivery_failed;
+    }
     const std::uint32_t response_length = static_cast<std::uint32_t>(response.size());
     const std::array<unsigned char, 4> response_header{
         static_cast<unsigned char>(response_length & 0xFFU),
@@ -205,15 +224,23 @@ bool ProcessOneConnection(HANDLE pipe, HardwareCameraAgentDispatcher& dispatcher
         static_cast<unsigned char>((response_length >> 16U) & 0xFFU),
         static_cast<unsigned char>((response_length >> 24U) & 0xFFU),
     };
-    if (!WriteExact(
-            pipe, response_header.data(), response_header.size(), kResponseWriteTimeoutMs)) return true;
-    if (!WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs)) return true;
+    if (failure_injection.fail_response_header_write ||
+        !WriteExact(
+            pipe, response_header.data(), response_header.size(), kResponseWriteTimeoutMs)) {
+        return ProcessOneConnectionOutcome::dispatched_delivery_failed;
+    }
+    if (failure_injection.fail_response_body_write ||
+        !WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs)) {
+        return ProcessOneConnectionOutcome::dispatched_delivery_failed;
+    }
     // DisconnectNamedPipe discards unread data.  Wait until the connected WPF
     // client has consumed the complete frame before the server disconnects.
     // If the client has already closed, FlushFileBuffers fails and the already
     // dispatched operation remains authoritative without retry.
-    (void)FlushFileBuffers(pipe);
-    return true;
+    if (failure_injection.fail_response_flush || !FlushFileBuffers(pipe)) {
+        return ProcessOneConnectionOutcome::dispatched_delivery_failed;
+    }
+    return ProcessOneConnectionOutcome::complete_delivery;
 }
 
 } // namespace
@@ -221,7 +248,8 @@ bool ProcessOneConnection(HANDLE pipe, HardwareCameraAgentDispatcher& dispatcher
 int RunHardwareCameraAgentNamedPipeServer(
     std::string_view pipe_name,
     HardwareCameraAgentDispatcher& dispatcher,
-    bool serve_once) {
+    bool serve_once,
+    HardwareCameraAgentPipeFailureInjectionForTesting failure_injection) {
     if (!IsSafePipeName(pipe_name)) {
         throw std::invalid_argument("hardware Camera Agent pipe name is invalid");
     }
@@ -252,7 +280,7 @@ int RunHardwareCameraAgentNamedPipeServer(
         connect_overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (connect_overlapped.hEvent == nullptr) {
             CloseHandle(pipe);
-            if (serve_once) return 2;
+            if (serve_once) return kFailedBeforeDispatchExitCode;
             continue;
         }
         const BOOL connected = ConnectNamedPipe(pipe, &connect_overlapped);
@@ -274,15 +302,27 @@ int RunHardwareCameraAgentNamedPipeServer(
         CloseHandle(connect_overlapped.hEvent);
         if (!connection_ready) {
             CloseHandle(pipe);
-            if (serve_once) return 2;
+            if (serve_once) return kFailedBeforeDispatchExitCode;
             continue;
         }
 
-        const bool request_processed = ProcessOneConnection(pipe, dispatcher);
+        const ProcessOneConnectionOutcome outcome =
+            ProcessOneConnection(pipe, dispatcher, failure_injection);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
-        if (serve_once) return request_processed ? 0 : 2;
-        if (dispatcher.ShouldStop()) return request_processed ? 0 : 2;
+        if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
+            return kDispatchedDeliveryFailureExitCode;
+        }
+        if (serve_once) {
+            return outcome == ProcessOneConnectionOutcome::complete_delivery
+                ? 0
+                : kFailedBeforeDispatchExitCode;
+        }
+        if (dispatcher.ShouldStop()) {
+            return outcome == ProcessOneConnectionOutcome::complete_delivery
+                ? 0
+                : kFailedBeforeDispatchExitCode;
+        }
     }
 }
 
