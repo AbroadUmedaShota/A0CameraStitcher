@@ -33,6 +33,17 @@ void CheckRejected(Callable&& callable, const std::string& message) {
     }
 }
 
+template <typename Callable>
+void CheckRejectedContains(Callable&& callable, const std::string& expected, const std::string& message) {
+    try {
+        callable();
+        Check(false, message);
+    } catch (const std::exception& error) {
+        Check(std::string(error.what()).find(expected) != std::string::npos,
+            message + " (unexpected rejection: " + error.what() + ")");
+    }
+}
+
 void CheckHr(const HRESULT result, const char* operation) {
     if (FAILED(result)) {
         throw std::runtime_error(std::string(operation) + " failed");
@@ -89,6 +100,47 @@ void WriteSolidJpeg(
 std::vector<std::uint8_t> ReadBytes(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void WriteBytes(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("test byte output open failed");
+    }
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!output) {
+        throw std::runtime_error("test byte output write failed");
+    }
+}
+
+void WriteOversizedMetadataJpeg(
+    const std::filesystem::path& path,
+    const std::vector<std::uint8_t>& valid_jpeg) {
+    if (valid_jpeg.size() < 4 || valid_jpeg[0] != 0xff || valid_jpeg[1] != 0xd8) {
+        throw std::runtime_error("metadata test requires a valid JPEG prefix");
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("metadata JPEG output open failed");
+    }
+    output.put(static_cast<char>(0xff));
+    output.put(static_cast<char>(0xd8));
+    std::vector<char> app1_segment(65'537, 0);
+    app1_segment[0] = static_cast<char>(0xff);
+    app1_segment[1] = static_cast<char>(0xe1);
+    app1_segment[2] = static_cast<char>(0xff);
+    app1_segment[3] = static_cast<char>(0xff);
+    while (static_cast<std::uint64_t>(output.tellp())
+        + app1_segment.size() + valid_jpeg.size() - 2 <= a0::m2::kMaximumCompressedJpegBytes) {
+        output.write(app1_segment.data(), static_cast<std::streamsize>(app1_segment.size()));
+    }
+    output.write(app1_segment.data(), static_cast<std::streamsize>(app1_segment.size()));
+    output.write(
+        reinterpret_cast<const char*>(valid_jpeg.data() + 2),
+        static_cast<std::streamsize>(valid_jpeg.size() - 2));
+    if (!output) {
+        throw std::runtime_error("metadata JPEG output write failed");
+    }
 }
 
 struct DecodedJpeg {
@@ -221,6 +273,114 @@ void TestFailClosedContracts(const std::filesystem::path& root) {
         "output must not share a canonical input job directory");
 }
 
+void TestCompressedJpegByteLimit(const std::filesystem::path& root) {
+    const auto a_directory = root / "size-a";
+    const auto b_directory = root / "size-b";
+    const auto metadata_directory = root / "size-metadata";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    std::filesystem::create_directories(metadata_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    const auto metadata_jpeg = metadata_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 16, 8, 20, 40, 60);
+    WriteSolidJpeg(camera_b, 16, 8, 60, 40, 20);
+    const auto valid_jpeg = ReadBytes(camera_b);
+
+    std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes - 1);
+    const auto below = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "size-below-job", ApprovedProfile()});
+    Check(std::filesystem::is_regular_file(below.stitched_jpeg),
+        "compressed JPEG one byte below the limit must reach WIC and remain accepted");
+
+    std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes);
+    const auto exact = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "size-exact-job", ApprovedProfile()});
+    Check(std::filesystem::is_regular_file(exact.stitched_jpeg),
+        "compressed JPEG exactly at the limit must remain accepted");
+
+    std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes + 1);
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "size-over-job", ApprovedProfile()}); },
+        "compressed JPEG byte size",
+        "compressed JPEG one byte above the limit must fail before WIC decoder creation");
+
+    WriteOversizedMetadataJpeg(metadata_jpeg, valid_jpeg);
+    Check(std::filesystem::file_size(metadata_jpeg) > a0::m2::kMaximumCompressedJpegBytes,
+        "generated metadata JPEG must exceed the compressed byte limit");
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, metadata_jpeg, root / "size-metadata-job", ApprovedProfile()}); },
+        "compressed JPEG byte size",
+        "oversized APP1 metadata JPEG must fail before WIC decoder creation");
+}
+
+void TestExportValidationFailures(const std::filesystem::path& root) {
+    const auto directory = root / "export-negative";
+    std::filesystem::create_directories(directory);
+
+    const auto valid_source = directory / "valid-source.jpg";
+    WriteSolidJpeg(valid_source, 16, 8, 30, 60, 90);
+
+    const auto non_jpeg = directory / "non-jpeg.jpg";
+    WriteBytes(non_jpeg, {'n', 'o', 't', '-', 'j', 'p', 'e', 'g'});
+    const auto non_jpeg_destination = directory / "non-jpeg-export.jpg";
+    CheckRejected([&] { a0::m2::ExportStitchedJpeg(non_jpeg, non_jpeg_destination); },
+        "explicit export must reject a non-JPEG source");
+    Check(!std::filesystem::exists(non_jpeg_destination),
+        "non-JPEG rejection must not publish a destination");
+
+    const auto corrupt_jpeg = directory / "corrupt.jpg";
+    auto corrupt_bytes = ReadBytes(valid_source);
+    corrupt_bytes.pop_back();
+    WriteBytes(corrupt_jpeg, corrupt_bytes);
+    const auto corrupt_destination = directory / "corrupt-export.jpg";
+    CheckRejected([&] { a0::m2::ExportStitchedJpeg(corrupt_jpeg, corrupt_destination); },
+        "explicit export must reject a truncated JPEG");
+    Check(!std::filesystem::exists(corrupt_destination),
+        "corrupt JPEG rejection must not publish a destination");
+
+    const auto partial_destination = directory / "existing-partial-export.jpg";
+    const auto existing_partial = directory / "existing-partial-export.jpg.partial";
+    const std::vector<std::uint8_t> sentinel{'k', 'e', 'e', 'p'};
+    WriteBytes(existing_partial, sentinel);
+    CheckRejected([&] { a0::m2::ExportStitchedJpeg(valid_source, partial_destination); },
+        "explicit export must reject an existing partial");
+    Check(ReadBytes(existing_partial) == sentinel,
+        "existing partial rejection must preserve the pre-existing file");
+
+    const auto mutable_source = directory / "mutable-source.jpg";
+    std::filesystem::copy_file(valid_source, mutable_source);
+    HANDLE mutation_handle = CreateFileW(
+        mutable_source.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (mutation_handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("source mutation test handle creation failed");
+    }
+    const auto mutable_destination = directory / "mutable-export.jpg";
+    CheckRejectedContains(
+        [&] { a0::m2::ExportStitchedJpeg(mutable_source, mutable_destination); },
+        "cannot be locked",
+        "a source open for mutation must block explicit export");
+    CloseHandle(mutation_handle);
+    Check(!std::filesystem::exists(mutable_destination)
+            && !std::filesystem::exists(directory / "mutable-export.jpg.partial"),
+        "source lock rejection must not leave export artifacts");
+
+    const auto oversized_source = directory / "oversized-source.jpg";
+    std::filesystem::copy_file(valid_source, oversized_source);
+    std::filesystem::resize_file(oversized_source, a0::m2::kMaximumCompressedJpegBytes + 1);
+    const auto oversized_destination = directory / "oversized-export.jpg";
+    CheckRejectedContains(
+        [&] { a0::m2::ExportStitchedJpeg(oversized_source, oversized_destination); },
+        "compressed JPEG byte size",
+        "explicit export must independently enforce the compressed JPEG byte limit");
+}
+
 } // namespace
 
 int main() {
@@ -239,6 +399,8 @@ int main() {
         }
         TestStitchRecomposeAndExport(root);
         TestFailClosedContracts(root);
+        TestCompressedJpegByteLimit(root);
+        TestExportValidationFailures(root);
         std::filesystem::remove_all(root);
     } catch (const std::exception& error) {
         std::cerr << "UNEXPECTED: " << error.what() << '\n';

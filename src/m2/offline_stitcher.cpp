@@ -75,6 +75,62 @@ struct Bounds {
     double maximum_y{};
 };
 
+class LockedReadFile final {
+public:
+    explicit LockedReadFile(const std::filesystem::path& path, const bool allow_rename = false) {
+        handle_ = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | (allow_rename ? FILE_SHARE_DELETE : 0),
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            throw std::invalid_argument("JPEG source cannot be locked for immutable read");
+        }
+    }
+
+    ~LockedReadFile() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+
+    LockedReadFile(const LockedReadFile&) = delete;
+    LockedReadFile& operator=(const LockedReadFile&) = delete;
+
+    [[nodiscard]] std::uint64_t Size() const {
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(handle_, &size) || size.QuadPart < 0) {
+            throw std::runtime_error("locked JPEG size inspection failed");
+        }
+        return static_cast<std::uint64_t>(size.QuadPart);
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> ReadAll() const {
+        const auto size = Size();
+        if (size == 0 || size > kMaximumCompressedJpegBytes) {
+            throw std::invalid_argument("compressed JPEG byte size is empty or exceeds the 64 MiB limit");
+        }
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto remaining = bytes.size() - offset;
+            const auto request = static_cast<DWORD>(std::min<std::size_t>(remaining, 1024U * 1024U));
+            DWORD read = 0;
+            if (!ReadFile(handle_, bytes.data() + offset, request, &read, nullptr) || read == 0) {
+                throw std::runtime_error("locked JPEG read failed before the declared size");
+            }
+            offset += read;
+        }
+        return bytes;
+    }
+
+private:
+    HANDLE handle_{INVALID_HANDLE_VALUE};
+};
+
 [[noreturn]] void ThrowHresult(const std::string& operation, const HRESULT result) {
     throw std::runtime_error(operation + " failed (HRESULT " + std::to_string(result) + ")");
 }
@@ -102,7 +158,23 @@ std::uint64_t PixelCount(const std::uint32_t width, const std::uint32_t height) 
     return count;
 }
 
+std::uint64_t ValidateCompressedJpegFileSize(const std::filesystem::path& path) {
+    std::error_code error;
+    const bool regular = std::filesystem::is_regular_file(path, error);
+    if (error || !regular) {
+        throw std::invalid_argument("JPEG input must be a regular file");
+    }
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size == 0 || size > kMaximumCompressedJpegBytes) {
+        throw std::invalid_argument("compressed JPEG byte size is empty or exceeds the 64 MiB limit");
+    }
+    return size;
+}
+
 Image DecodeJpeg(IWICImagingFactory* factory, const std::filesystem::path& path) {
+    // This regular-file and compressed-byte check intentionally occurs before
+    // WIC is asked to construct a decoder for attacker-controlled input.
+    (void)ValidateCompressedJpegFileSize(path);
     IWICBitmapDecoder* decoder_raw = nullptr;
     CheckHresult(factory->CreateDecoderFromFilename(
         path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder_raw),
@@ -142,6 +214,93 @@ Image DecodeJpeg(IWICImagingFactory* factory, const std::filesystem::path& path)
     CheckHresult(converter->CopyPixels(nullptr, stride, static_cast<UINT>(image.bgr.size()), image.bgr.data()),
         "JPEG pixel read");
     return image;
+}
+
+void ValidateLockedJpegSnapshot(
+    IWICImagingFactory* factory,
+    std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8
+        || bytes[bytes.size() - 2] != 0xff || bytes.back() != 0xd9) {
+        throw std::invalid_argument("export source is not a complete JPEG byte stream");
+    }
+
+    IWICStream* stream_raw = nullptr;
+    CheckHresult(factory->CreateStream(&stream_raw), "export JPEG memory stream creation");
+    ComPtr<IWICStream> stream(stream_raw);
+    CheckHresult(stream->InitializeFromMemory(bytes.data(), static_cast<DWORD>(bytes.size())),
+        "export JPEG memory stream initialization");
+
+    IWICBitmapDecoder* decoder_raw = nullptr;
+    CheckHresult(factory->CreateDecoderFromStream(
+        stream.get(), nullptr, WICDecodeMetadataCacheOnLoad, &decoder_raw),
+        "export JPEG decoder creation");
+    ComPtr<IWICBitmapDecoder> decoder(decoder_raw);
+    GUID container{};
+    CheckHresult(decoder->GetContainerFormat(&container), "export JPEG container inspection");
+    if (container != GUID_ContainerFormatJpeg) {
+        throw std::invalid_argument("export source must be a JPEG container");
+    }
+    UINT frame_count = 0;
+    CheckHresult(decoder->GetFrameCount(&frame_count), "export JPEG frame count");
+    if (frame_count != 1) {
+        throw std::invalid_argument("export JPEG must contain exactly one frame");
+    }
+
+    IWICBitmapFrameDecode* frame_raw = nullptr;
+    CheckHresult(decoder->GetFrame(0, &frame_raw), "export JPEG frame decode");
+    ComPtr<IWICBitmapFrameDecode> frame(frame_raw);
+    UINT width = 0;
+    UINT height = 0;
+    CheckHresult(frame->GetSize(&width, &height), "export JPEG dimensions");
+    const auto pixels = PixelCount(width, height);
+
+    IWICFormatConverter* converter_raw = nullptr;
+    CheckHresult(factory->CreateFormatConverter(&converter_raw), "export JPEG pixel converter creation");
+    ComPtr<IWICFormatConverter> converter(converter_raw);
+    CheckHresult(converter->Initialize(
+        frame.get(), GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, nullptr, 0.0,
+        WICBitmapPaletteTypeCustom), "export JPEG pixel conversion");
+    std::vector<std::uint8_t> decoded(static_cast<std::size_t>(pixels * 3));
+    CheckHresult(converter->CopyPixels(
+        nullptr, width * 3U, static_cast<UINT>(decoded.size()), decoded.data()),
+        "export JPEG complete pixel read");
+}
+
+void WriteBytesToNewFile(
+    const std::filesystem::path& path,
+    const std::vector<std::uint8_t>& bytes) {
+    HANDLE handle = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("explicit export partial creation failed");
+    }
+    try {
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto remaining = bytes.size() - offset;
+            const auto request = static_cast<DWORD>(std::min<std::size_t>(remaining, 1024U * 1024U));
+            DWORD written = 0;
+            if (!WriteFile(handle, bytes.data() + offset, request, &written, nullptr) || written == 0) {
+                throw std::runtime_error("explicit export partial write failed");
+            }
+            offset += written;
+        }
+        if (!FlushFileBuffers(handle)) {
+            throw std::runtime_error("explicit export partial flush failed");
+        }
+    } catch (...) {
+        CloseHandle(handle);
+        throw;
+    }
+    if (!CloseHandle(handle)) {
+        throw std::runtime_error("explicit export partial close failed");
+    }
 }
 
 Point Transform(const std::array<double, 9>& matrix, const Point point) {
@@ -449,8 +608,22 @@ void ExportStitchedJpeg(
     if (std::filesystem::exists(partial)) {
         throw std::invalid_argument("explicit export partial already exists");
     }
+
+    // Keep this handle alive through validation, partial verification, and
+    // rename. FILE_SHARE_READ prevents source write, replacement, or deletion.
+    LockedReadFile locked_source(stitched_jpeg);
+    auto source_bytes = locked_source.ReadAll();
+    ComApartment apartment;
+    auto factory = CreateFactory();
+    ValidateLockedJpegSnapshot(factory.get(), source_bytes);
+
     PartialFileGuard partial_guard(partial);
-    std::filesystem::copy_file(stitched_jpeg, partial, std::filesystem::copy_options::none);
+    WriteBytesToNewFile(partial, source_bytes);
+    LockedReadFile locked_partial(partial, true);
+    const auto partial_bytes = locked_partial.ReadAll();
+    if (partial_bytes != source_bytes) {
+        throw std::runtime_error("explicit export partial reread is not byte-identical");
+    }
     std::error_code error;
     std::filesystem::rename(partial, destination_jpeg, error);
     if (error) {

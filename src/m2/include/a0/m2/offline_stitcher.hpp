@@ -10,6 +10,8 @@
 
 namespace a0::m2 {
 
+inline constexpr std::uint64_t kMaximumCompressedJpegBytes = 64ULL * 1024ULL * 1024ULL;
+
 enum class StitchLayout {
     camera_a_left_camera_b_right,
     camera_a_top_camera_b_bottom,
