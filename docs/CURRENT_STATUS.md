@@ -25,10 +25,11 @@
 - 実機一台WPF経路は、同一transaction ID・alias・承認profile ID/version/SHA/expiry・Live View handoff intentをdurable保存して結果照会するsoftware boundary、検証済みcanonical originalの明示byte-identical export、`TransactionNotFound`時のsupport-required保持まで実装・契約試験済みである。現在の`hardware.v1` Live View handoff結果は撮影後の有限一frame probeを取得後に停止・SDK closeするもので、継続streamの「再開」を主張しない。
 - requirements 2.7.0の継続Live View v2 sliceはQA revise後のfresh SDK-less／licensed-SDK-enabled Debug/Release CTest各7/7、.NET Release build警告0・エラー0、Foundation 20/20、Operator Shell 17/17、M3 boundary script、非破壊showcaseに合格した。production backendへ偽SDK/clockを注入し、512 KiB frame境界、session所有権、二重start、heartbeat timeout、単列backpressure、stop/close失敗後のcapture拒否を確認した。実Named Pipeは1 MiB未満／丁度を受理し、1 MiB超過をdispatch前に拒否する。canonical Base64と解析済みv2 rejection envelopeもnegative test済みである。camera command 0のsoftware-onlyで、実機合格ではない。
 - C++ `hardware.v1`は、operator-session lease、directory作成から初期journal確定までを含むgap-free transaction reservation/mutex、exactly-one・alias/profile/expiry相関、Live View OFFのWPD前・open SDK shutter-session内再確認、SDK/WPD非重複、canonical originalを同一handleで再検証してwrite/delete禁止のままexact WPD delete・empty-afterまで保持する境界、fixed-local path、no retry、bounded pipe/journalをsoftware contract化した。WI-0022C追加後の2026-08-10 SDK-less Debug/Release全CTestは7/7で、`hardware_camera_agent_contracts`を含め0 failureだった（このsliceのlicensed SDK buildは未実行）。camera commandは送っておらず、実D810、actual JPEG、WPF hardware操作の合格証拠ではない。
-- `WI-0010A`のsoftware contractを実装した。MAID `SdkCommandTrace`は唯一のMAID entry boundaryで全`CapStart`を計数・分類し、photographic-setting CapSet、storage-routing CapSet、Live View-control CapSet、capture、unknown/non-capture CapStart、session状態、counter整合性をfail closedする。`sdk-status`は列挙とread-only statusだけを公開する`NikonSdkStatusExecutor`へ分離し、WPD/capture/deleteのprocess routing proofをMAID証明と別項目でv5 summaryへ記録する。実D810でのv5 runは未検証であり、過去のv4 evidenceは変更していない。
+- `WI-0010A`のsoftware contractを実装した。MAID `SdkCommandTrace`は唯一のMAID entry boundaryで全`CapStart`を計数・分類し、photographic-setting CapSet、storage-routing CapSet、Live View-control CapSet、capture、unknown/non-capture CapStart、session状態、counter整合性をfail closedする。`sdk-status`は列挙とread-only statusだけを公開する`NikonSdkStatusExecutor`へ分離した。CAM-Aの既定経路はSingleCamera identity-v3をstrict loadし、WPD identityのread-only列挙1回とSDK/WPD各exactly-one、current WPD digest一致をcamera status open前に要求する。明示`--camera-map`だけがlegacy/Dual v2へ入り、CAM-BへSingle identityを流用しない。process routing proofはidentity列挙と禁止対象のWPD/capture/deleteを分けてv5 summaryへ記録する。修正後の実D810 v5再実行は未検証であり、過去のv4 evidenceは変更していない。
+- このidentity-v3 route修正はfocused Phase 0／CLI safety／Camera Agent contract、SDK-less Debug/Release全CTest各7/7、licensed-SDK-enabled Debug/Release全CTest各7/7、M3 Release警告0・エラー0、非破壊showcaseに合格した。licensed構成を含めcamera commandは0件である。
 - 2026-08-08の再起動後dual binding readinessでD810 PnP、SDK inventory、WPD inventoryを各2台匿名確認した。SDK/WPDともbound 0・unbound 2で`READY_FOR_IDENTITY_BINDING`。inventoryの列挙順自動割当を廃止し、旧SDK mapは値を読まず可逆隔離した。SDK有無各CTest 5/5も合格し、撮影、Live View、設定変更、card操作は実行していない。
 - readinessは選択stageの台数とSDK・WPD・PnP件数の完全一致を要求する。現在の二台接続はDualでbinding待ち、Singleではexit 1で拒否され、余分なD810を許可しない。
-- WI-0010A完了後、licensed Release binaryの`verify-dual-identity`をread-only identity確認として厳密に1回実行したが、SDK inventoryで`identity_collision`となりfail closedした。WPD inventory開始、map変更、cross-transport binding、cardアクセス、capture、Live View、設定write、delete、format、0x9207、retryはない。追加のSDK header／document調査でも、二台のD810本体を恒久的に区別するdocumented SDK propertyまたは安全なSDK/WPD相関アンカーは見つからなかった。これは一台を切断すればidentity-v2を再開できる問題ではなく、identity strategyのsoftware blockerである。identity-v3は未実装であり、現在は抜線・再登録を含む物理操作を依頼しない。
+- WI-0010A完了後、licensed Release binaryの`verify-dual-identity`をread-only identity確認として厳密に1回実行したが、SDK inventoryで`identity_collision`となりfail closedした。WPD inventory開始、map変更、cross-transport binding、cardアクセス、capture、Live View、設定write、delete、format、0x9207、retryはない。追加のSDK header／document調査でも、二台のD810本体を恒久的に区別するdocumented SDK propertyまたは安全なSDK/WPD相関アンカーは見つからず、Dual identity strategyはBlockedのままである。一方、操作者報告では一台exactly-oneと`bind-single-identity-v3 --alias CAM-A`はSDK/WPD各1台、camera mutation 0でPassした。その直後の`sdk-status`はlegacy mapを参照してcamera open前にalias unavailableとなったため、このsoftware defectを上記identity-v3経路へ修正した。実機での再実行までは合格扱いにしない。
 - 2026-08-08 17:31 JSTのCAM-A cross-transport bindingは後続の物理入替試験で無効化した。WPDは入替後の個体を未登録として区別した一方、SDKは旧CAM-Aへ誤一致した。原因はMAID source object IDを個体IDとしていた実装であり、当該SDK mapを値を読まず可逆隔離した。過去のSDK側CAM-A continuity主張も再検証対象である。
 - SDK identityをdocumented MAID Source `Name`/`Interface`の境界付きlocal-only digest v2へ変更し、source object IDを除外、欠落・不正文字列・二台衝突をfail closedにした。SDK有無Release CTestは各5/5。17:49 JST、現在のCAM-B候補をSDK/WPDへ明示bindingし、各bound 1・unbound 0、Single `READY`を確認した。CAM-Aへ戻した際の別個体判定、再接続、port交換まではcheckpointであり完了扱いにしない。
 - 18:14 JSTのCAM-A swap-back申告後もSDK/WPDはともにCAM-B、WPD firmwareは直前のCAM-Bと同じ`V1.11`だったため、本体交換は証拠化できずCAM-A登録を拒否した。WPD identityはPnP device IDから本体報告`WPD_DEVICE_SERIAL_NUMBER`のlocal-only digest v2へ強化し、現在のV1.11個体をCAM-Bへ再登録した。実serial/identityは出力していない。
@@ -50,9 +51,9 @@
 
 ## Partial
 
-- setting readback: native MAID command-traceと`sdk-status` process-routing software contractは実装・fresh test済み。実D810 v5 run、focus値の意味、FileType未広告の扱いは未検証／未確定。
+- setting readback: native MAID command-traceとSingle identity-v3対応`sdk-status` process-routing software contractは実装・fresh test済み。identity-v3登録後の実D810 v5再実行、focus値の意味、FileType未広告の扱いは未検証／未確定。
 - Live View: standaloneは合格だが、実撮影を含むhandoff 10回は未実施。
-- identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。WPD側CAM-Aとidentity-v2のCAM-B checkpointは保持するが、二台接続時のSDK Name/Interface v2は衝突した。SDK documented unique propertyと安全なSDK/WPD相関が未確認のため、identity-v3、旧v2 mapの明示migration/invalidation、CAM-A/Bの恒久的区別は未実装・Blockedである。物理cable/port確認や再登録はこの判断を解決しないため保留する。
+- identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。SingleCamera CAM-AはWPD digest＋exactly-one current SDK/WPDのidentity-v3を実装し、操作者報告の一台登録はPassした。旧v2 mapへ自動fallbackせず、欠落・破損・digest不一致・0台／複数台をstatus open前に拒否する。二台接続時のSDK Name/Interface v2衝突、旧v2 mapの明示migration/invalidation、CAM-A/Bの恒久的区別はDual laneの`HG-0003B`としてBlockedであり、Single identity-v3をDualへ流用しない。
 - setup/correction: parameter contractとWI-0022Cのsynthetic measurement seamは合格。proposalは測定値・fixture/profile provenanceを保持し、profile envelope外を拒否し、profileを変更しない。実写A0品質、承認済みDual profile、実機性能は未検証である。
 - M3P: requirements 2.6.0のfresh software contractは合格したが、実D810、actual JPEG、実WPF画面操作の統合証拠ではない。旧Dual UI Automationは保持し、screen reader、keyboard/focus、Single実画面walkthroughは残る。
 - SingleCamera製品mode: CAM-A identity-v3、30日profile承認、操作者選択fixed-local folder、byte-identical export、`hardware.v2`継続Live Viewをsoftware実装済み。v2はcanonical Base64を含むmemory-only frame、512 KiB frame上限、1 MiB pipe上限、20秒heartbeat timeout、600秒max lifetime、単列backpressure、session所有権、cleanup失敗時のcapture拒否、stop/SDK-close前のcapture 0、verified capture成功後だけ再startを契約化する。実D810、actual JPEG、実WPF操作、10回handoff、10回p95、100件受入は未検証である。
@@ -71,8 +72,8 @@
 
 ## 次の安全な順番
 
-1. fresh software verificationで`WI-0019/0031`の継続Live View v2実装を固定する
-2. empty dedicated spoolの用意と明示再開後だけ、CAM-A identity-v3登録、one-shot、10回handoff／characterizationへ進む
+1. 明示的な実機再開後に一台CAM-Aの`sdk-status` v5をidentity-v3経路でread-only再実行し、設定・capture・Live View・card操作0を確認する
+2. empty dedicated spoolの用意と明示再開後だけ、one-shot、10回handoff／characterizationへ進む
 3. 10回の実測p95を`HG-0009`で承認後、SingleCamera 100件受入を行う
 4. Dualは別laneとして`HG-0003B`解決後だけbindingとM1Bを再開する
 

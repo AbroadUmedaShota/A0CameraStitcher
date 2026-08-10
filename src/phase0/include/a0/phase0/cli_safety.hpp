@@ -19,6 +19,17 @@ namespace a0::phase0 {
     std::string_view command,
     std::string_view transport);
 
+enum class SdkStatusIdentityRoute {
+    single_identity_v3,
+    legacy_identity_v2,
+};
+
+// CAM-A defaults to the SingleCamera identity-v3 authority. An explicitly
+// supplied legacy camera map selects the preserved Dual/legacy v2 route.
+[[nodiscard]] SdkStatusIdentityRoute SelectSdkStatusIdentityRoute(
+    std::string_view camera_alias,
+    bool legacy_camera_map_explicit) noexcept;
+
 // Returns true only for commands that can open a real SDK or WPD session.
 [[nodiscard]] bool RequiresHardwareProcessLease(
     std::string_view command,

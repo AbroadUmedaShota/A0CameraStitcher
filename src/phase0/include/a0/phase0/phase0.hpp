@@ -166,13 +166,16 @@ struct SdkCameraStatus {
 };
 
 // Process-level proof for the sdk-status CLI route. These counters are not
-// MAID evidence and must never be merged into SdkCommandTrace: WPD and delete
-// are excluded by the narrow executor type, so this proof records route
-// selection and the absence of non-status route calls separately.
+// MAID evidence and must never be merged into SdkCommandTrace. The narrow SDK
+// executor excludes WPD and delete operations. SingleCamera identity-v3 may
+// perform exactly one separate read-only WPD identity enumeration before the
+// SDK probe; all other WPD/capture/delete route calls remain forbidden.
 struct SdkStatusProcessRouting {
     bool sdk_status_executor_selected{false};
+    bool single_identity_v3_selected{false};
     std::size_t sdk_enumeration_count{};
     std::size_t sdk_status_probe_count{};
+    std::size_t wpd_identity_enumeration_count{};
     std::size_t wpd_call_count{};
     std::size_t capture_call_count{};
     std::size_t delete_call_count{};

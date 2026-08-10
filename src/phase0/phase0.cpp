@@ -122,6 +122,10 @@ std::optional<std::string_view> ValidateSdkStatusProcessRouting(
     if (!routing.sdk_status_executor_selected) return "sdk_status_executor_not_selected";
     if (routing.sdk_enumeration_count != 1) return "sdk_enumeration_count_inconsistent";
     if (routing.sdk_status_probe_count != 1) return "sdk_status_probe_count_inconsistent";
+    if (routing.wpd_identity_enumeration_count > 1) return "wpd_identity_enumeration_count_inconsistent";
+    if (routing.single_identity_v3_selected != (routing.wpd_identity_enumeration_count == 1)) {
+        return "single_identity_v3_routing_inconsistent";
+    }
     if (routing.wpd_call_count != 0) return "wpd_call_routed";
     if (routing.capture_call_count != 0) return "capture_call_routed";
     if (routing.delete_call_count != 0) return "delete_call_routed";
@@ -1758,8 +1762,10 @@ fs::path PersistSdkStatusSummary(
            << "  \"processRoutingProof\": {\n"
            << "    \"executor\": \"sdk-status\",\n"
            << "    \"sdkStatusExecutorSelected\": " << (routing.sdk_status_executor_selected ? "true" : "false") << ",\n"
+           << "    \"singleIdentityV3Selected\": " << (routing.single_identity_v3_selected ? "true" : "false") << ",\n"
            << "    \"sdkEnumerationCount\": " << routing.sdk_enumeration_count << ",\n"
            << "    \"sdkStatusProbeCount\": " << routing.sdk_status_probe_count << ",\n"
+           << "    \"wpdIdentityEnumerationCount\": " << routing.wpd_identity_enumeration_count << ",\n"
            << "    \"wpdCallCount\": " << routing.wpd_call_count << ",\n"
            << "    \"captureCallCount\": " << routing.capture_call_count << ",\n"
            << "    \"deleteCallCount\": " << routing.delete_call_count << ",\n"

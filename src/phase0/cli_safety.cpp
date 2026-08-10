@@ -62,6 +62,14 @@ std::optional<std::string> ValidateSdkStatusCliRouting(
     return std::nullopt;
 }
 
+SdkStatusIdentityRoute SelectSdkStatusIdentityRoute(
+    std::string_view camera_alias,
+    bool legacy_camera_map_explicit) noexcept {
+    return camera_alias == "CAM-A" && !legacy_camera_map_explicit
+        ? SdkStatusIdentityRoute::single_identity_v3
+        : SdkStatusIdentityRoute::legacy_identity_v2;
+}
+
 std::optional<std::string> ValidateIdentityBindingArguments(
     std::string_view command,
     std::string_view transport,

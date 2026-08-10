@@ -116,7 +116,7 @@ try {
         SdkCTest = $sdkCTestResult
         SdklessCTest = $sdklessCTestResult
         RealDualCaptureExecuted = $false
-        LatestHardwareState = 'ONE_CAM_B_CONNECTED'
+        LatestHardwareState = 'SINGLE_CAM_A_IDENTITY_V3_BOUND_SDK_STATUS_RERUN_PENDING'
         ActualShutterSyncGuaranteed = $false
         PhysicalPowerCycleRequired = $false
         HardwareCommandsExecuted = $false

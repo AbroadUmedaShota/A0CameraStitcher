@@ -34,7 +34,7 @@ pwsh -NoProfile -File .\scripts\Test-Phase0Showcase.ps1
 ```text
 ShowcaseState                    SOFTWARE_CONTRACT_READY_HARDWARE_PENDING
 RealDualCaptureExecuted          False
-LatestHardwareState              ONE_CAM_B_CONNECTED
+LatestHardwareState              SINGLE_CAM_A_IDENTITY_V3_BOUND_SDK_STATUS_RERUN_PENDING
 ActualShutterSyncGuaranteed      False
 PhysicalPowerCycleRequired       False
 ```

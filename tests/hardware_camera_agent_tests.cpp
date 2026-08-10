@@ -1816,6 +1816,73 @@ void TestSingleIdentityV3Parser() {
     }
 }
 
+void TestSingleIdentityV3SdkStatusResolution() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-single-sdk-status-identity-test-" + NewRunId());
+    const fs::path identity_path = root / "single-identity-v3.json";
+    const fs::path legacy_map_path = root / "camera-map.json";
+    const CameraInfo sdk_camera{
+        "Nikon D810", "unknown", "S", "ephemeral-sdk-current-session"};
+    const CameraInfo wpd_camera{
+        "Nikon D810", "1.14", "S", std::string(64, 'a')};
+    try {
+        PersistSingleIdentityV3(
+            identity_path, "CAM-A", {sdk_camera}, {wpd_camera});
+        const auto identity = LoadSingleCameraIdentityV3(identity_path);
+        const auto selected = ResolveSingleCameraSdkStatusCamera(
+            identity, "CAM-A", {sdk_camera}, {wpd_camera});
+        Check(selected.stable_identity == sdk_camera.stable_identity,
+            "SingleCamera sdk-status must select the exact-one current SDK projection from identity-v3");
+
+        const auto rejected = [&](const SingleCameraIdentityV3& candidate,
+                                  std::string_view alias,
+                                  const std::vector<CameraInfo>& sdk,
+                                  const std::vector<CameraInfo>& wpd) {
+            try {
+                (void)ResolveSingleCameraSdkStatusCamera(
+                    candidate, alias, sdk, wpd);
+                return false;
+            } catch (const std::exception&) {
+                return true;
+            }
+        };
+        CameraInfo mismatched_wpd = wpd_camera;
+        mismatched_wpd.stable_identity = std::string(64, 'b');
+        Check(rejected(identity, "CAM-A", {}, {wpd_camera}) &&
+              rejected(identity, "CAM-A", {sdk_camera, sdk_camera}, {wpd_camera}) &&
+              rejected(identity, "CAM-A", {sdk_camera}, {}) &&
+              rejected(identity, "CAM-A", {sdk_camera}, {wpd_camera, wpd_camera}) &&
+              rejected(identity, "CAM-A", {sdk_camera}, {mismatched_wpd}) &&
+              rejected(identity, "CAM-B", {sdk_camera}, {wpd_camera}),
+            "SingleCamera sdk-status must reject missing, multiple, digest-mismatched, or non-CAM-A identity before status probe");
+
+        WriteText(root / "malformed.json", "{not-json}");
+        bool malformed_rejected = false;
+        try {
+            (void)LoadSingleCameraIdentityV3(root / "malformed.json");
+        } catch (const std::exception&) {
+            malformed_rejected = true;
+        }
+        IdentityMap legacy_map(legacy_map_path);
+        legacy_map.Bind("CAM-A", sdk_camera.stable_identity);
+        bool legacy_only_rejected = false;
+        try {
+            (void)LoadSingleCameraIdentityV3(root / "missing-v3.json");
+        } catch (const std::exception&) {
+            legacy_only_rejected = true;
+        }
+        Check(malformed_rejected && legacy_only_rejected &&
+              legacy_map.FindAlias(sdk_camera.stable_identity) == "CAM-A",
+            "malformed or missing identity-v3 must fail even when a legacy CAM-A map exists");
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: SingleCamera sdk-status identity contract threw: "
+                  << error.what() << '\n';
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 void TestContinuousLiveViewV2Protocol() {
     FakeBackend backend;
     HardwareCameraAgentDispatcher dispatcher(backend);
@@ -2065,6 +2132,7 @@ int main() {
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
     TestSingleIdentityV3Parser();
+    TestSingleIdentityV3SdkStatusResolution();
     TestContinuousLiveViewV2Protocol();
     TestProductionContinuousLiveViewContracts();
     if (failures != 0) {

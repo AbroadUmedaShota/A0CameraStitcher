@@ -1538,6 +1538,9 @@ NikonSdkStatusExecutor::NikonSdkStatusExecutor() = default;
 NikonSdkStatusExecutor::~NikonSdkStatusExecutor() = default;
 std::string NikonSdkStatusExecutor::SdkVersion() const { return transport_.SdkVersion(); }
 std::vector<CameraInfo> NikonSdkStatusExecutor::Enumerate() { return transport_.Enumerate(); }
+void NikonSdkStatusExecutor::RequireExactlyOneD810ForSingleStatus() {
+    transport_.RequireExactlyOneD810ForProductAgent();
+}
 SdkCameraStatus NikonSdkStatusExecutor::ProbeSdkStatus(
     std::string_view stable_identity,
     std::chrono::seconds timeout) {

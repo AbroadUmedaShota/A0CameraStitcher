@@ -568,6 +568,12 @@ void TestSdkStatusProcessRoutingIsSeparateAndNarrow() {
     Check(!ValidateSdkStatusProcessRouting(routing),
         "sdk-status process routing should allow one SDK enumeration and one read-only status probe only");
 
+    auto single_v3 = routing;
+    single_v3.single_identity_v3_selected = true;
+    single_v3.wpd_identity_enumeration_count = 1;
+    Check(!ValidateSdkStatusProcessRouting(single_v3),
+        "SingleCamera sdk-status should allow one read-only WPD identity enumeration before the SDK probe");
+
     const auto expect_rejected = [&](SdkStatusProcessRouting invalid, std::string_view reason) {
         const auto failure = ValidateSdkStatusProcessRouting(invalid);
         Check(failure && *failure == reason,
@@ -585,6 +591,19 @@ void TestSdkStatusProcessRoutingIsSeparateAndNarrow() {
     auto probe_count = routing;
     probe_count.sdk_status_probe_count = 2;
     expect_rejected(probe_count, "sdk_status_probe_count_inconsistent");
+
+    auto unmarked_identity_enumeration = routing;
+    unmarked_identity_enumeration.wpd_identity_enumeration_count = 1;
+    expect_rejected(unmarked_identity_enumeration, "single_identity_v3_routing_inconsistent");
+
+    auto missing_identity_enumeration = routing;
+    missing_identity_enumeration.single_identity_v3_selected = true;
+    expect_rejected(missing_identity_enumeration, "single_identity_v3_routing_inconsistent");
+
+    auto repeated_identity_enumeration = routing;
+    repeated_identity_enumeration.single_identity_v3_selected = true;
+    repeated_identity_enumeration.wpd_identity_enumeration_count = 2;
+    expect_rejected(repeated_identity_enumeration, "wpd_identity_enumeration_count_inconsistent");
 
     auto wpd_call = routing;
     wpd_call.wpd_call_count = 1;
@@ -631,8 +650,10 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
     status.command_trace.sdk_session_closed = true;
     SdkStatusProcessRouting routing;
     routing.sdk_status_executor_selected = true;
+    routing.single_identity_v3_selected = true;
     routing.sdk_enumeration_count = 1;
     routing.sdk_status_probe_count = 1;
+    routing.wpd_identity_enumeration_count = 1;
 
     const auto path = PersistSdkStatusSummary(
         root / "artifacts", "run-sdk-status", "CAM-A", camera, status, routing);
@@ -643,6 +664,8 @@ void TestSdkStatusSummaryIsReadOnlyAndRedacted() {
                body.find("\"liveViewProhibitMask\": 0") != std::string::npos,
         "SDK status summary should retain read-only Live View readiness values");
     Check(body.find("\"processRoutingProof\": {\n") != std::string::npos &&
+              body.find("\"singleIdentityV3Selected\": true") != std::string::npos &&
+              body.find("\"wpdIdentityEnumerationCount\": 1") != std::string::npos &&
               body.find("\"wpdCallCount\": 0") != std::string::npos &&
               body.find("\"deleteCallCount\": 0") != std::string::npos,
         "SDK status summary should keep process routing proof separate from the MAID trace");

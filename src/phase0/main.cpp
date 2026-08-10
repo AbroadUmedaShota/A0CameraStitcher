@@ -1,5 +1,6 @@
 #include "a0/phase0/fake_camera_transport.hpp"
 #include "a0/phase0/cli_safety.hpp"
+#include "a0/phase0/hardware_camera_agent.hpp"
 #include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/phase0.hpp"
@@ -57,6 +58,9 @@ struct Options {
     fs::path artifacts{"artifacts/phase0"};
     fs::path reports{"docs/evidence/phase0"};
     fs::path camera_map{DefaultIdentityMapPath()};
+    bool camera_map_explicit{false};
+    fs::path single_identity_v3{DefaultSingleIdentityV3Path()};
+    bool single_identity_v3_explicit{false};
 };
 
 fs::path WpdIdentityMapPath(const Options& options);
@@ -109,7 +113,10 @@ void Usage() {
         << "    (read-only SDK/WPD enumeration; persists only the WPD serial digest and exact-one SDK policy)\n"
         << "  verify-dual-identity (read-only; requires exactly CAM-A and CAM-B in SDK and WPD)\n"
         << "  verify-dual-spools (read-only; requires dual identity, then counts all payloads on both cards)\n"
-        << "  sdk-status --alias CAM-A (read-only; does not start Live View or change camera settings)\n"
+        << "  sdk-status --alias CAM-A [--single-identity-v3 PATH]\n"
+        << "    (SingleCamera identity-v3 by default; read-only; does not start Live View or change camera settings)\n"
+        << "  sdk-status --alias CAM-A|CAM-B --camera-map PATH\n"
+        << "    (explicit legacy/Dual identity-v2 route; never reuses SingleCamera identity-v3)\n"
         << "  wpd-status --alias CAM-A [--wpd-status-access read-only|read-write] (query-only; does not capture or execute a vendor operation)\n"
         << "  spool-status --alias CAM-A (read-only aggregate; counts all camera payload objects without capture or deletion)\n"
         << "  wpd-correlation-status --alias CAM-A [--samples 3] [--sample-interval-ms 1500] (read-only close/reopen observation)\n"
@@ -181,7 +188,11 @@ Options Parse(int argc, char** argv) {
         else if (arg == "--operator-gate-timeout-seconds") options.operator_gate_timeout_seconds = std::stoi(require_value());
         else if (arg == "--artifacts") options.artifacts = require_value();
         else if (arg == "--reports") options.reports = require_value();
-        else if (arg == "--camera-map") options.camera_map = require_value();
+        else if (arg == "--camera-map") { options.camera_map = require_value(); options.camera_map_explicit = true; }
+        else if (arg == "--single-identity-v3") {
+            options.single_identity_v3 = require_value();
+            options.single_identity_v3_explicit = true;
+        }
         else throw std::runtime_error("unknown option: " + arg);
     }
     if (options.count < 1) throw std::runtime_error("count must be positive");
@@ -220,6 +231,13 @@ Options Parse(int argc, char** argv) {
     }
     if (const auto sdk_status_error = ValidateSdkStatusCliRouting(options.command, options.transport)) {
         throw std::runtime_error(*sdk_status_error);
+    }
+    if (options.single_identity_v3_explicit &&
+        (options.command != "sdk-status" || options.alias != "CAM-A")) {
+        throw std::runtime_error("single-identity-v3 is valid only for sdk-status --alias CAM-A");
+    }
+    if (options.command == "sdk-status" && options.single_identity_v3_explicit && options.camera_map_explicit) {
+        throw std::runtime_error("sdk-status cannot combine SingleCamera identity-v3 with a legacy camera map");
     }
     if (const auto binding_error = ValidateIdentityBindingArguments(
             options.command,
@@ -559,12 +577,34 @@ int RunSdkStatus(const Options& options) {
     if (const auto routing_error = ValidateSdkStatusCliRouting(options.command, options.transport)) {
         throw std::runtime_error(*routing_error);
     }
-    NikonSdkStatusExecutor executor;
     SdkStatusProcessRouting routing;
     routing.sdk_status_executor_selected = true;
+    const bool use_single_identity_v3 =
+        SelectSdkStatusIdentityRoute(options.alias, options.camera_map_explicit) ==
+        SdkStatusIdentityRoute::single_identity_v3;
+    std::optional<SingleCameraIdentityV3> single_identity;
+    if (use_single_identity_v3) {
+        // Load and validate the local identity authority before any transport
+        // enumeration or camera session can start. There is no legacy fallback.
+        single_identity = LoadSingleCameraIdentityV3(options.single_identity_v3);
+        routing.single_identity_v3_selected = true;
+    }
+
+    NikonSdkStatusExecutor executor;
+    std::vector<CameraInfo> wpd_cameras;
+    if (single_identity) {
+        WpdTransport wpd(options.wpd_command_target);
+        wpd.RequireExactlyOneD810ForProductAgent();
+        wpd_cameras = wpd.Enumerate();
+        ++routing.wpd_identity_enumeration_count;
+        executor.RequireExactlyOneD810ForSingleStatus();
+    }
     const auto cameras = executor.Enumerate();
     ++routing.sdk_enumeration_count;
-    const auto camera = ResolveCamera(cameras, options.camera_map, options.alias);
+    const auto camera = single_identity
+        ? ResolveSingleCameraSdkStatusCamera(
+              *single_identity, options.alias, cameras, wpd_cameras)
+        : ResolveCamera(cameras, options.camera_map, options.alias);
     auto status = executor.ProbeSdkStatus(camera.stable_identity, std::chrono::seconds(10));
     ++routing.sdk_status_probe_count;
     if (const auto routing_failure = ValidateSdkStatusProcessRouting(routing)) {
@@ -629,8 +669,11 @@ int RunSdkStatus(const Options& options) {
               << "\nSdkStatusProcessRoutingContract: true"
               << "\nSdkStatusExecutorSelected: "
               << (routing.sdk_status_executor_selected ? "true" : "false")
+              << "\nSingleIdentityV3Selected: "
+              << (routing.single_identity_v3_selected ? "true" : "false")
               << "\nSdkStatusEnumerationCount: " << routing.sdk_enumeration_count
               << "\nSdkStatusProbeCount: " << routing.sdk_status_probe_count
+              << "\nSdkStatusWpdIdentityEnumerationCount: " << routing.wpd_identity_enumeration_count
               << "\nSdkStatusWpdCallCount: " << routing.wpd_call_count
               << "\nSdkStatusCaptureCallCount: " << routing.capture_call_count
               << "\nSdkStatusDeleteCallCount: " << routing.delete_call_count

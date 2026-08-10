@@ -84,6 +84,15 @@ void TestSdkStatusCliRouting() {
         "sdk-status must reject fake routing");
     Check(!ValidateSdkStatusCliRouting("inventory", "wpd"),
         "non-status commands must not be constrained by the SDK status route");
+    Check(SelectSdkStatusIdentityRoute("CAM-A", false) ==
+              SdkStatusIdentityRoute::single_identity_v3,
+        "implicit CAM-A sdk-status must use SingleCamera identity-v3 without legacy fallback");
+    Check(SelectSdkStatusIdentityRoute("CAM-A", true) ==
+              SdkStatusIdentityRoute::legacy_identity_v2,
+        "an explicit legacy map must preserve the CAM-A identity-v2 route");
+    Check(SelectSdkStatusIdentityRoute("CAM-B", false) ==
+              SdkStatusIdentityRoute::legacy_identity_v2,
+        "SingleCamera identity-v3 must never be reused for CAM-B or DualCamera");
 }
 
 void TestIdentityBindingArguments() {

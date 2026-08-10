@@ -2123,6 +2123,42 @@ SingleCameraIdentityV3 ParseSingleCameraIdentityV3(std::string_view json) {
     return identity;
 }
 
+SingleCameraIdentityV3 LoadSingleCameraIdentityV3(const fs::path& path) {
+    return LoadStrictSingleIdentityV3(path);
+}
+
+CameraInfo ResolveSingleCameraSdkStatusCamera(
+    const SingleCameraIdentityV3& identity,
+    std::string_view requested_alias,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    if (requested_alias != "CAM-A" || identity.camera_alias != "CAM-A" ||
+        identity.sdk_selection_policy != "exactly-one-current-session") {
+        throw TransportError(
+            "single_identity_v3_invalid",
+            "SingleCamera sdk-status requires the CAM-A identity-v3 exact-one policy");
+    }
+    if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1 ||
+        sdk_cameras.front().model != "Nikon D810" ||
+        wpd_cameras.front().model != "Nikon D810") {
+        throw TransportError(
+            "single_camera_count_mismatch",
+            "SingleCamera sdk-status requires exactly one D810 in SDK and WPD inventories");
+    }
+    if (wpd_cameras.front().stable_identity !=
+        identity.wpd_stable_identity_sha256) {
+        throw TransportError(
+            "single_identity_v3_mismatch",
+            "the current WPD body does not match the registered SingleCamera identity-v3");
+    }
+    if (sdk_cameras.front().stable_identity.empty()) {
+        throw TransportError(
+            "single_identity_v3_invalid",
+            "the exact-one current SDK projection has no selectable identity");
+    }
+    return sdk_cameras.front();
+}
+
 bool IsContinuousLiveViewResultStructurallyValid(
     const ContinuousLiveViewResult& result,
     const HardwareCameraAgentRequest& request) noexcept {

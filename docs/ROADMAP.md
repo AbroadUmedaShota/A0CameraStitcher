@@ -7,7 +7,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
 | 安全基盤 M0 | Complete | SDK有無各CTest 5/5、旧direct実機拒否、同一operator session内の別process排他、撮影／保存watchdog途中超過が合格 |
-| 一台・非破壊 M1N | Active / Partial | software contract済みのSDK setting command traceとprocess routing proofを維持し、実D810 v5 runと未広告・opaque値の扱いを確認 |
+| 一台・非破壊 M1N | Active / Partial | identity-v3登録後のalias解決defectはsoftware修正済み。実D810 `sdk-status` v5をread-only再実行し、未広告・opaque値の扱いを確認 |
 | オフラインpre-gate M2P | Active / WI-0022C software complete | `HG-0001/HG-0002`承認後に実リグ値・品質作業へ進む |
 | simulated統合 M3P | Complete / Software-only | requirements 2.7.0の明示mode、CAM-A-only、no-auto-fallback、Single original一件、stitch N/A、local profile/exportをfresh contractで維持 |
 | 一台製品mode M1A/M3 | Identity/Profile/Export/Live View v2 Software Implemented / Hardware Deferred | empty spool、CAM-A one-shot、10回handoff、10回p95承認、100件実WPF受入 |
@@ -43,7 +43,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 - SDK status、Live View状態、JPEG/露出/ISO/WB/focus capabilityのreadback
 - 撮影設定capabilityへのwrite、capture、Live View開始、WPD、deleteがないことをnative command traceで検証
 
-実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。実D810登録は未実行で、Dual identity-v2 collisionは`HG-0003B`として残る。
+実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。操作者報告では実D810一台のexactly-oneとCAM-A identity-v3登録はcamera mutation 0でPassした。登録直後の`sdk-status`がlegacy mapへ誤routingしたdefectは、CAM-A既定identity-v3、WPD identity列挙1回、SDK open-time exactly-one、明示legacy mapだけv2というsoftware contractへ修正済みである。実D810 v5再実行は未検証、Dual identity-v2 collisionは`HG-0003B`として残る。
 
 ## M2P: オフラインpre-gate
 
