@@ -110,6 +110,22 @@ static async Task ContinuousHardwareLiveViewV2Async()
     Check.Equal(4, transport.RequestCount);
 
     await Check.ThrowsAsync<ArgumentException>(() => client.StartAsync("not-a-session"));
+
+    foreach (var nonCanonicalBase64 in new[]
+             {
+                 Convert.ToBase64String(frame) + "\r\n",
+                 Convert.ToBase64String(frame).Insert(4, " "),
+                 Convert.ToBase64String(frame) + "=",
+                 "/9j/2Q",
+             })
+    {
+        var nonCanonical = frameReply.Payload with
+        {
+            FrameJpegBase64 = nonCanonicalBase64,
+        };
+        Check.Throws<HardwareProtocolViolationException>(
+            () => nonCanonical.DecodeVerifiedFrame());
+    }
 }
 
 static Task OperatorReadinessClassificationAsync()

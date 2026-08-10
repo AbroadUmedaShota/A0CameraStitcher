@@ -13,6 +13,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <system_error>
@@ -65,7 +66,10 @@ void AppendUtf8(std::string& output, std::uint32_t code_point) {
 
 class JsonParser final {
 public:
-    explicit JsonParser(std::string_view input) : input_(input) {
+    explicit JsonParser(
+        std::string_view input,
+        bool reject_duplicate_fields = true)
+        : input_(input), reject_duplicate_fields_(reject_duplicate_fields) {
         if (input.empty() || input.size() > kMaximumProtocolJsonBytes) {
             ProtocolFailure("MalformedEnvelope", "hardware protocol JSON length is outside the allowed range");
         }
@@ -115,7 +119,8 @@ private:
             if (!Consume(':')) ProtocolFailure("MalformedEnvelope", "hardware protocol JSON object is missing ':'");
             SkipWhitespace();
             JsonValue child = ParseValue(depth);
-            if (!value.object.emplace(std::move(key), std::move(child)).second) {
+            if (!value.object.emplace(std::move(key), std::move(child)).second &&
+                reject_duplicate_fields_) {
                 ProtocolFailure("MalformedEnvelope", "duplicate hardware protocol JSON field");
             }
             SkipWhitespace();
@@ -243,7 +248,26 @@ private:
 
     std::string_view input_;
     std::size_t position_{};
+    bool reject_duplicate_fields_{};
 };
+
+std::optional<std::string> TryParseResponseSchemaVersion(
+    std::string_view json) noexcept {
+    try {
+        const JsonValue root = JsonParser(json, false).Parse();
+        if (root.kind != JsonKind::object) return std::nullopt;
+        const auto found = root.object.find("schemaVersion");
+        if (found == root.object.end() || found->second.kind != JsonKind::string) {
+            return std::nullopt;
+        }
+        if (found->second.string == kHardwareCameraAgentSchemaVersion ||
+            found->second.string == kHardwareCameraAgentLiveViewSchemaVersion) {
+            return found->second.string;
+        }
+    } catch (...) {
+    }
+    return std::nullopt;
+}
 
 const JsonValue& RequireField(const JsonValue& object, std::string_view name, JsonKind kind) {
     if (object.kind != JsonKind::object) ProtocolFailure("MalformedEnvelope", "hardware protocol envelope must be an object");
@@ -2644,6 +2668,46 @@ ProductionHardwareCameraAgentConfig ProductionHardwareCameraAgentConfig::Default
     return config;
 }
 
+class NikonContinuousLiveViewSdkTransport final
+    : public IContinuousLiveViewSdkTransport {
+public:
+    NikonContinuousLiveViewSdkTransport() {
+        sdk_.RequireExactlyOneD810ForProductAgent();
+    }
+
+    std::vector<CameraInfo> Enumerate() override { return sdk_.Enumerate(); }
+
+    SdkCameraStatus ProbeSdkStatus(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) override {
+        return sdk_.ProbeSdkStatus(stable_identity, timeout);
+    }
+
+    void OpenLiveView(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) override {
+        sdk_.OpenLiveView(stable_identity, timeout);
+    }
+
+    void StartLiveView(std::chrono::seconds timeout) override {
+        sdk_.StartLiveView(timeout);
+    }
+
+    std::vector<unsigned char> ReadLiveViewFrame(
+        std::chrono::seconds timeout) override {
+        return sdk_.ReadLiveViewFrame(timeout);
+    }
+
+    void StopLiveView(std::chrono::seconds timeout) override {
+        sdk_.StopLiveView(timeout);
+    }
+
+    void Close(std::chrono::seconds timeout) override { sdk_.Close(timeout); }
+
+private:
+    NikonSdkTransport sdk_;
+};
+
 class ProductionHardwareCameraAgentBackend::Impl final {
 public:
     explicit Impl(ProductionHardwareCameraAgentConfig config) : config_(std::move(config)) {
@@ -2660,6 +2724,12 @@ public:
             config_.transaction_state_root, "transaction-state root");
         if (config_.timeouts.transaction_watchdog != std::chrono::seconds(180)) {
             throw std::invalid_argument("hardware Camera Agent transaction watchdog must be 180 seconds");
+        }
+        if (static_cast<bool>(config_.continuous_live_view_sdk_factory_for_testing) !=
+            static_cast<bool>(
+                config_.continuous_live_view_identity_resolver_for_testing)) {
+            throw std::invalid_argument(
+                "continuous Live View test SDK factory and identity resolver must be configured together");
         }
     }
 
@@ -2779,7 +2849,13 @@ public:
                 "capture-single requires every hardware safety confirmation");
         }
 
-        if (live_view_sdk_) {
+        bool live_view_blocks_capture = false;
+        {
+            const std::scoped_lock lock(continuous_live_view_mutex_);
+            live_view_blocks_capture =
+                static_cast<bool>(live_view_sdk_) || residual_live_view_unsafe_;
+        }
+        if (live_view_blocks_capture) {
             SingleCameraCaptureResult blocked;
             blocked.camera_alias = request.camera_alias;
             blocked.transaction_id = request.transaction_id;
@@ -3257,34 +3333,59 @@ public:
 
     ContinuousLiveViewResult StartContinuousLiveView(
         const HardwareCameraAgentRequest& request) {
+        const std::scoped_lock lock(continuous_live_view_mutex_);
         ContinuousLiveViewResult result;
         result.camera_alias = request.camera_alias;
         result.session_id = request.session_id;
-        if (live_view_sdk_) {
+        if (live_view_sdk_ || residual_live_view_unsafe_) {
             result.error_category = "live_view_session_active";
             result.error_detail = "another continuous Live View session is already active";
             return result;
         }
         try {
-            ValidateProductSingleIdentityConfiguration(config_);
             live_view_lease_ = std::make_unique<HardwareProcessLease>();
-            WpdTransport wpd;
-            wpd.RequireExactlyOneD810ForProductAgent();
-            const auto wpd_cameras = wpd.Enumerate();
-            live_view_sdk_ = std::make_unique<NikonSdkTransport>();
-            live_view_sdk_->RequireExactlyOneD810ForProductAgent();
+            live_view_sdk_ = config_.continuous_live_view_sdk_factory_for_testing
+                ? config_.continuous_live_view_sdk_factory_for_testing()
+                : std::make_unique<NikonContinuousLiveViewSdkTransport>();
+            if (!live_view_sdk_) {
+                throw std::runtime_error(
+                    "continuous Live View SDK factory returned no transport");
+            }
             const auto sdk_cameras = live_view_sdk_->Enumerate();
-            const auto [sdk_map, wpd_map] =
-                LoadProductSingleIdentityMaps(config_, sdk_cameras);
-            const auto binding = ResolveExactlyOneBoundCamera(
-                sdk_cameras, wpd_cameras, sdk_map, wpd_map, request.camera_alias);
-            if (!binding.ready) {
-                throw TransportError(
-                    binding.failure_category.empty() ? "single_identity_not_ready" : binding.failure_category,
-                    "CAM-A identity-v3 was not ready for continuous Live View");
+            std::string sdk_identity;
+            if (config_.continuous_live_view_identity_resolver_for_testing) {
+                sdk_identity =
+                    config_.continuous_live_view_identity_resolver_for_testing(
+                        request.camera_alias, sdk_cameras);
+                if (sdk_identity.empty()) {
+                    throw TransportError(
+                        "single_identity_not_ready",
+                        "the injected continuous Live View identity was empty");
+                }
+            } else {
+                ValidateProductSingleIdentityConfiguration(config_);
+                WpdTransport wpd;
+                wpd.RequireExactlyOneD810ForProductAgent();
+                const auto wpd_cameras = wpd.Enumerate();
+                const auto [sdk_map, wpd_map] =
+                    LoadProductSingleIdentityMaps(config_, sdk_cameras);
+                const auto binding = ResolveExactlyOneBoundCamera(
+                    sdk_cameras,
+                    wpd_cameras,
+                    sdk_map,
+                    wpd_map,
+                    request.camera_alias);
+                if (!binding.ready) {
+                    throw TransportError(
+                        binding.failure_category.empty()
+                            ? "single_identity_not_ready"
+                            : binding.failure_category,
+                        "CAM-A identity-v3 was not ready for continuous Live View");
+                }
+                sdk_identity = binding.sdk_camera->stable_identity;
             }
             const auto status = live_view_sdk_->ProbeSdkStatus(
-                binding.sdk_camera->stable_identity, config_.timeouts.open);
+                sdk_identity, config_.timeouts.open);
             if (!LiveViewIsConfirmedOff(status)) {
                 throw TransportError(
                     status.live_view_status_available
@@ -3292,12 +3393,12 @@ public:
                     "continuous Live View requires a confirmed OFF baseline");
             }
             live_view_sdk_->OpenLiveView(
-                binding.sdk_camera->stable_identity, config_.timeouts.open);
+                sdk_identity, config_.timeouts.open);
             live_view_sdk_->StartLiveView(config_.timeouts.open);
             live_view_session_id_ = request.session_id;
             live_view_camera_alias_ = request.camera_alias;
             live_view_frame_number_ = 0;
-            live_view_started_at_ = std::chrono::steady_clock::now();
+            live_view_started_at_ = ContinuousLiveViewNow();
             live_view_last_activity_ = live_view_started_at_;
             result.succeeded = true;
             result.state = "Started";
@@ -3317,6 +3418,7 @@ public:
 
     ContinuousLiveViewResult ReadContinuousLiveViewFrame(
         const HardwareCameraAgentRequest& request) {
+        const std::scoped_lock lock(continuous_live_view_mutex_);
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Frame");
         if (!ValidateContinuousSession(request, result)) return result;
         try {
@@ -3324,7 +3426,7 @@ public:
             if (!IsValidJpeg(frame) || frame.size() > 512U * 1024U) {
                 throw std::runtime_error("Live View frame is not a bounded JPEG");
             }
-            live_view_last_activity_ = std::chrono::steady_clock::now();
+            live_view_last_activity_ = ContinuousLiveViewNow();
             result.succeeded = true;
             result.frame_number = ++live_view_frame_number_;
             result.frame_size = frame.size();
@@ -3343,9 +3445,10 @@ public:
 
     ContinuousLiveViewResult HeartbeatContinuousLiveView(
         const HardwareCameraAgentRequest& request) {
+        const std::scoped_lock lock(continuous_live_view_mutex_);
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Heartbeat");
         if (!ValidateContinuousSession(request, result)) return result;
-        live_view_last_activity_ = std::chrono::steady_clock::now();
+        live_view_last_activity_ = ContinuousLiveViewNow();
         result.succeeded = true;
         result.frame_number = live_view_frame_number_;
         result.sdk_session_open = true;
@@ -3355,17 +3458,13 @@ public:
 
     ContinuousLiveViewResult StopContinuousLiveView(
         const HardwareCameraAgentRequest& request) {
+        const std::scoped_lock lock(continuous_live_view_mutex_);
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Stopped");
         if (!ValidateContinuousSession(request, result)) return result;
-        try {
-            live_view_sdk_->StopLiveView(config_.timeouts.close);
-            live_view_sdk_->Close(config_.timeouts.close);
-            live_view_sdk_.reset();
-            live_view_lease_.reset();
+        if (TryStopAndCloseContinuousLiveView(config_.timeouts.close)) {
             result.succeeded = true;
             result.frame_number = live_view_frame_number_;
-        } catch (const std::exception&) {
-            StopContinuousLiveViewNoThrow();
+        } else {
             result.error_category = "continuous_live_view_stop_failed";
             result.error_detail = "Live View stop or SDK close failed; the session is unusable";
         }
@@ -3374,6 +3473,7 @@ public:
 
     ContinuousLiveViewResult CloseAgentSession(
         const HardwareCameraAgentRequest& request) {
+        const std::scoped_lock lock(continuous_live_view_mutex_);
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Closed");
         if (live_view_sdk_ && request.session_id != live_view_session_id_) {
             result.error_category = "live_view_session_mismatch";
@@ -3385,15 +3485,25 @@ public:
             result.error_detail = "the close request does not own this agent session";
             return result;
         }
-        StopContinuousLiveViewNoThrow();
-        result.succeeded = true;
-        result.frame_number = live_view_frame_number_;
+        if (TryStopAndCloseContinuousLiveView(config_.timeouts.close)) {
+            result.succeeded = true;
+            result.frame_number = live_view_frame_number_;
+        } else {
+            result.error_category = "continuous_live_view_close_failed";
+            result.error_detail =
+                "Live View stop or SDK close failed; capture remains blocked";
+        }
         return result;
     }
 
     void OnAgentIdle() noexcept {
-        if (live_view_sdk_ && ContinuousSessionExpired()) {
-            StopContinuousLiveViewNoThrow();
+        try {
+            const std::scoped_lock lock(continuous_live_view_mutex_);
+            if (live_view_sdk_ &&
+                (residual_live_view_unsafe_ || ContinuousSessionExpired())) {
+                StopContinuousLiveViewNoThrow();
+            }
+        } catch (...) {
         }
     }
 
@@ -3640,9 +3750,15 @@ private:
         return result;
     }
 
-    bool ContinuousSessionExpired() const noexcept {
+    std::chrono::steady_clock::time_point ContinuousLiveViewNow() const {
+        return config_.continuous_live_view_clock_for_testing
+            ? config_.continuous_live_view_clock_for_testing()
+            : std::chrono::steady_clock::now();
+    }
+
+    bool ContinuousSessionExpired() const {
         if (!live_view_sdk_) return false;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ContinuousLiveViewNow();
         return now - live_view_started_at_ >= std::chrono::seconds(600) ||
             now - live_view_last_activity_ >= std::chrono::seconds(20);
     }
@@ -3664,19 +3780,41 @@ private:
         return true;
     }
 
-    void StopContinuousLiveViewNoThrow() noexcept {
-        if (live_view_sdk_) {
-            try { live_view_sdk_->StopLiveView(std::chrono::seconds(3)); } catch (...) {}
-            try { live_view_sdk_->Close(std::chrono::seconds(3)); } catch (...) {}
-            live_view_sdk_.reset();
+    bool TryStopAndCloseContinuousLiveView(
+        std::chrono::seconds timeout) noexcept {
+        if (!live_view_sdk_) return !residual_live_view_unsafe_;
+        bool stopped = true;
+        bool closed = true;
+        try {
+            live_view_sdk_->StopLiveView(timeout);
+        } catch (...) {
+            stopped = false;
         }
-        live_view_lease_.reset();
+        try {
+            live_view_sdk_->Close(timeout);
+        } catch (...) {
+            closed = false;
+        }
+        if (stopped && closed) {
+            live_view_sdk_.reset();
+            live_view_lease_.reset();
+            residual_live_view_unsafe_ = false;
+            return true;
+        }
+        residual_live_view_unsafe_ = true;
+        return false;
+    }
+
+    void StopContinuousLiveViewNoThrow() noexcept {
+        (void)TryStopAndCloseContinuousLiveView(std::chrono::seconds(3));
     }
 
     ProductionHardwareCameraAgentConfig config_;
     std::optional<ApprovedCaptureProfile> approved_profile_;
     std::unique_ptr<HardwareProcessLease> live_view_lease_;
-    std::unique_ptr<NikonSdkTransport> live_view_sdk_;
+    std::unique_ptr<IContinuousLiveViewSdkTransport> live_view_sdk_;
+    mutable std::mutex continuous_live_view_mutex_;
+    bool residual_live_view_unsafe_{};
     std::string live_view_session_id_;
     std::string live_view_camera_alias_;
     std::uint64_t live_view_frame_number_{};
@@ -3771,8 +3909,8 @@ HardwareCameraAgentDispatcher::HardwareCameraAgentDispatcher(IHardwareCameraAgen
 
 std::string HardwareCameraAgentDispatcher::Handle(std::string_view request_json) noexcept {
     const std::string extracted_request_id = TryExtractRequestId(request_json);
-    const bool request_is_live_view_v2 = request_json.find(
-        "\"schemaVersion\":\"a0.camera-agent.hardware.v2\"") != std::string_view::npos;
+    const std::string response_schema = TryParseResponseSchemaVersion(request_json)
+        .value_or(std::string(kHardwareCameraAgentSchemaVersion));
     try {
         const HardwareCameraAgentRequest request = ParseHardwareCameraAgentRequest(request_json);
         HardwareCameraAgentResponse response;
@@ -3874,22 +4012,16 @@ std::string HardwareCameraAgentDispatcher::Handle(std::string_view request_json)
         return SerializeHardwareCameraAgentResponse(response);
     } catch (const HardwareCameraAgentProtocolError& error) {
         auto response = ProtocolRejection(extracted_request_id, error.Code(), error.what());
-        if (request_is_live_view_v2) {
-            response.schema_version = std::string(kHardwareCameraAgentLiveViewSchemaVersion);
-        }
+        response.schema_version = response_schema;
         return SerializeHardwareCameraAgentResponse(response);
     } catch (const TransportError& error) {
         auto response = AgentFailure(extracted_request_id, error.Category(), error.what());
-        if (request_is_live_view_v2) {
-            response.schema_version = std::string(kHardwareCameraAgentLiveViewSchemaVersion);
-        }
+        response.schema_version = response_schema;
         return SerializeHardwareCameraAgentResponse(response);
     } catch (const std::exception&) {
         auto response = AgentFailure(
             extracted_request_id, "AgentFailure", "hardware Camera Agent operation failed closed");
-        if (request_is_live_view_v2) {
-            response.schema_version = std::string(kHardwareCameraAgentLiveViewSchemaVersion);
-        }
+        response.schema_version = response_schema;
         return SerializeHardwareCameraAgentResponse(response);
     }
 }

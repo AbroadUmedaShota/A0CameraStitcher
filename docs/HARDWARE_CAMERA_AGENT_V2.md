@@ -34,7 +34,10 @@ Every response is `simulation:false`, marker `Hardware`, and carries
 `cameraMode:SingleCamera`, CAM-A, the correlated session ID, SDK/Live View state,
 heartbeat/max-lifetime values, and redacted error fields. Frame responses contain
 at most 512 KiB of canonical-base64 JPEG bytes plus size and lowercase SHA-256.
-The .NET client rechecks base64, size, hash, and JPEG markers before WPF decoding.
+The .NET client decodes base64, re-encodes it, requires an ordinal byte-for-byte
+match with the received string, then rechecks size, hash, and JPEG markers before
+WPF decoding. Whitespace, line breaks, extra padding, and other non-canonical
+base64 representations are rejected.
 Frames remain memory-only and always set `previewIsOriginal:false` and
 `previewIsStitchInput:false`.
 
@@ -50,10 +53,16 @@ remain stopped and are never retried automatically.
 
 ## Verification boundary
 
-Native contract tests cover strict v2 envelopes, session correlation, start / one
-verified frame / stop / close, and rejection of v1 capture under v2. Foundation
-tests cover strict JSON and JPEG validation. Operator tests cover in-memory frame
-display, stop-before-capture ordering, v1 handoff=false, success-only restart, and
-zero capture when stop is unconfirmed. These are software-only tests: no actual
-D810 Live View, WPF interaction, empty-card capture, or ten-handoff acceptance is
-claimed.
+Native contract tests drive the production backend through a narrow injected SDK
+transport and monotonic clock without loading or calling a camera. They cover the
+512 KiB frame boundary, session takeover and active double-start rejection,
+heartbeat expiry, serialized backpressure, stop/close failure, and capture refusal
+while cleanup remains unsafe. Real named-pipe tests accept 1 MiB minus one byte and
+exactly 1 MiB, and reject 1 MiB plus one byte before dispatch. Parsed v2 schema
+correlation is retained for rejection envelopes despite whitespace, field order,
+unknown payload fields, or duplicate payload fields; no raw substring detection is
+used. Foundation tests cover strict JSON, canonical base64, and JPEG validation.
+Operator tests cover in-memory frame display, stop-before-capture ordering, v1
+handoff=false, success-only restart, and zero capture when stop is unconfirmed.
+These are software-only tests: no actual D810 Live View, WPF interaction,
+empty-card capture, or ten-handoff acceptance is claimed.

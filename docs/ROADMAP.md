@@ -18,7 +18,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 ## 現在の実行順
 
-1. 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffをfresh software検証で固定する
+1. 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffをQA revise済みfresh software検証（canonical Base64、512 KiB frame、1 MiB pipe、session所有権、timeout、backpressure、cleanup失敗時capture拒否）で固定する
 2. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
 3. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
 4. Dualは`HG-0003B`解決後だけCAM-A/B bindingとM1Bへ進む

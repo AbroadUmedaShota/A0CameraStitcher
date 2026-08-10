@@ -64,7 +64,7 @@
       "status": "partial",
       "work_item_ids": ["WI-0005", "WI-0019", "WI-0033"],
       "evidence": ["docs/evidence/phase0/run-1785917554163-1/live-view-summary.json", "docs/evidence/phase0/run-1785917887961-1/live-view-summary.json", "docs/evidence/phase0/run-1785917904556-1/sdk-status-summary.json", "tests/hardware_camera_agent_tests.cpp", "tests/m3/FoundationTests/Program.cs", "tests/m3/OperatorShellTests/Program.cs", "docs/HARDWARE_CAMERA_AGENT_V2.md"],
-      "confirmed_scope": "CAM-A standalone hardware evidence ran for 304347 ms and 2424 frames and closed cleanly. Fresh software contracts add strict hardware.v2 start/frame/heartbeat/stop/close, bounded session ownership, verified memory-only JPEG display, backpressure, and WPF controls without camera access.",
+      "confirmed_scope": "CAM-A standalone hardware evidence ran for 304347 ms and 2424 frames and closed cleanly. Fresh QA-revised software contracts add strict hardware.v2 start/frame/heartbeat/stop/close, parsed-schema v2 rejection envelopes, canonical-base64 memory-only JPEG display, exact 512 KiB frame and 1 MiB pipe limits, bounded session ownership, takeover/double-start rejection, deterministic heartbeat expiry, serialized backpressure, stop/close failure handling, residual-Live-View capture refusal, and WPF controls without camera access.",
       "remaining_gap": "Real WPF hardware.v2 interaction, ten capture handoffs, and Dual CAM-A/B selection are not verified."
     },
     {
@@ -72,7 +72,7 @@
       "status": "partial",
       "work_item_ids": ["WI-0005", "WI-0019", "WI-0031"],
       "evidence": ["tests/phase0_tests.cpp", "tests/hardware_camera_agent_tests.cpp", "tests/m3/OperatorShellTests/Program.cs", "docs/evidence/phase0/run-1785917554163-1/live-view-summary.json"],
-      "confirmed_scope": "Software contracts gate WPD/capture after Live View stop and SDK close, send zero capture requests on unconfirmed stop, do not relabel v2 as finite v1 handoff, restart only after verified CaptureComplete, and preserve durable no-retry recovery.",
+      "confirmed_scope": "Software contracts gate WPD/capture after Live View stop and SDK close, send zero capture requests on unconfirmed stop, keep capture blocked after injected stop/close cleanup failure leaves residual Live View unsafe, do not relabel v2 as finite v1 handoff, restart only after verified CaptureComplete, and preserve durable no-retry recovery.",
       "remaining_gap": "Ten approved single-slot hardware handoffs are not executed."
     },
     {

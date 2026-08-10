@@ -57,6 +57,14 @@ public sealed record HardwareContinuousLiveViewResult
             throw new HardwareProtocolViolationException(
                 "InvalidLiveViewFrame", "The continuous Live View frame is not canonical base64.", exception);
         }
+        if (!string.Equals(
+                Convert.ToBase64String(bytes),
+                FrameJpegBase64,
+                StringComparison.Ordinal))
+        {
+            throw new HardwareProtocolViolationException(
+                "InvalidLiveViewFrame", "The continuous Live View frame is not canonical base64.");
+        }
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         if (bytes.Length != FrameSize || !CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(hash), Convert.FromHexString(FrameSha256)) ||

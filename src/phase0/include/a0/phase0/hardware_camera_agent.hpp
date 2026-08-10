@@ -291,6 +291,26 @@ public:
     virtual void OnAgentIdle() noexcept;
 };
 
+// Narrow production boundary for the SDK session that owns continuous Live
+// View. The Nikon adapter is the default implementation; tests inject only
+// this boundary and never load the licensed SDK or issue a camera command.
+class IContinuousLiveViewSdkTransport {
+public:
+    virtual ~IContinuousLiveViewSdkTransport() = default;
+    [[nodiscard]] virtual std::vector<CameraInfo> Enumerate() = 0;
+    [[nodiscard]] virtual SdkCameraStatus ProbeSdkStatus(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) = 0;
+    virtual void OpenLiveView(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) = 0;
+    virtual void StartLiveView(std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual std::vector<unsigned char> ReadLiveViewFrame(
+        std::chrono::seconds timeout) = 0;
+    virtual void StopLiveView(std::chrono::seconds timeout) = 0;
+    virtual void Close(std::chrono::seconds timeout) = 0;
+};
+
 struct ProductionHardwareCameraAgentConfig {
     std::filesystem::path artifacts_root;
     std::filesystem::path reports_root;
@@ -309,6 +329,16 @@ struct ProductionHardwareCameraAgentConfig {
     std::function<void()> after_initial_active_journal_read_for_testing;
     std::function<void()>
         after_transaction_reservation_directory_created_for_testing;
+    // Continuous Live View contract-test seams. Production launchers leave
+    // all three empty. Factory/resolver must be supplied together.
+    std::function<std::unique_ptr<IContinuousLiveViewSdkTransport>()>
+        continuous_live_view_sdk_factory_for_testing;
+    std::function<std::string(
+        std::string_view,
+        const std::vector<CameraInfo>&)>
+        continuous_live_view_identity_resolver_for_testing;
+    std::function<std::chrono::steady_clock::time_point()>
+        continuous_live_view_clock_for_testing;
 
     [[nodiscard]] static ProductionHardwareCameraAgentConfig Defaults();
 };

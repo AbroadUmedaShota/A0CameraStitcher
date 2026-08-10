@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -13,6 +14,8 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1583,6 +1586,99 @@ void TestFixedLocalPathPolicy() {
     fs::remove_all(root, cleanup_error);
 }
 
+bool WriteAll(HANDLE pipe, const void* source, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(source);
+    std::size_t offset = 0;
+    while (offset < size) {
+        DWORD written = 0;
+        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+            size - offset, static_cast<std::size_t>(64U * 1024U)));
+        if (!WriteFile(pipe, bytes + offset, chunk, &written, nullptr) || written == 0) {
+            return false;
+        }
+        offset += written;
+    }
+    return true;
+}
+
+bool ReadAll(HANDLE pipe, void* destination, std::size_t size) {
+    auto* bytes = static_cast<unsigned char*>(destination);
+    std::size_t offset = 0;
+    while (offset < size) {
+        DWORD read = 0;
+        if (!ReadFile(
+                pipe,
+                bytes + offset,
+                static_cast<DWORD>(size - offset),
+                &read,
+                nullptr) || read == 0) {
+            return false;
+        }
+        offset += read;
+    }
+    return true;
+}
+
+void TestNamedPipeMaximumFrameBoundary() {
+    constexpr std::uint32_t maximum = 1024U * 1024U;
+    for (const std::uint32_t length : {maximum - 1U, maximum, maximum + 1U}) {
+        FakeBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string pipe_name =
+            "A0CameraStitcher.CameraAgent.Hardware.v1.boundary-" + NewRunId();
+        const std::wstring full_pipe_name =
+            L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
+        auto server = std::async(std::launch::async, [&] {
+            return RunHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, true);
+        });
+
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            pipe = CreateFileW(
+                full_pipe_name.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+            if (pipe != INVALID_HANDLE_VALUE) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        Check(pipe != INVALID_HANDLE_VALUE,
+            "named-pipe frame boundary client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const std::array<unsigned char, 4> header{
+                static_cast<unsigned char>(length & 0xFFU),
+                static_cast<unsigned char>((length >> 8U) & 0xFFU),
+                static_cast<unsigned char>((length >> 16U) & 0xFFU),
+                static_cast<unsigned char>((length >> 24U) & 0xFFU),
+            };
+            Check(WriteAll(pipe, header.data(), header.size()),
+                "named-pipe frame boundary header must be writable");
+            if (length <= maximum) {
+                const std::string body(length, ' ');
+                Check(WriteAll(pipe, body.data(), body.size()),
+                    "limit-1 and limit named-pipe request bodies must be accepted");
+                std::array<unsigned char, 4> response_header{};
+                Check(ReadAll(pipe, response_header.data(), response_header.size()),
+                    "limit-1 and limit named-pipe frames must receive a rejection envelope");
+            }
+            CloseHandle(pipe);
+        }
+        Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
+            "named-pipe frame boundary server must terminate");
+        const int exit_code = server.get();
+        Check(exit_code == (length <= maximum ? 0 : 2),
+            "named-pipe frame limit must accept limit-1/limit and reject limit+1");
+        Check(backend.readiness_calls == 0 && backend.capture_calls == 0 &&
+              backend.live_view_calls == 0 && backend.transaction_calls == 0,
+            "oversized or parser-rejected pipe frames must not dispatch hardware operations");
+    }
+}
+
 std::string LiveViewV2Envelope(
     std::string_view operation,
     std::string_view payload) {
@@ -1590,6 +1686,104 @@ std::string LiveViewV2Envelope(
            "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"req-v2\","
            "\"operation\":\"" + std::string(operation) + "\",\"payload\":" +
         std::string(payload) + "}";
+}
+
+struct FakeContinuousLiveViewSdkState {
+    std::vector<unsigned char> frame{0xFFU, 0xD8U, 0xFFU, 0xD9U};
+    std::function<void()> before_read;
+    std::atomic<int> enumerate_calls{};
+    std::atomic<int> probe_calls{};
+    std::atomic<int> open_calls{};
+    std::atomic<int> start_calls{};
+    std::atomic<int> read_calls{};
+    std::atomic<int> stop_calls{};
+    std::atomic<int> close_calls{};
+    bool fail_stop{};
+    bool fail_close{};
+};
+
+class FakeContinuousLiveViewSdkTransport final
+    : public IContinuousLiveViewSdkTransport {
+public:
+    explicit FakeContinuousLiveViewSdkTransport(
+        std::shared_ptr<FakeContinuousLiveViewSdkState> state)
+        : state_(std::move(state)) {}
+
+    std::vector<CameraInfo> Enumerate() override {
+        ++state_->enumerate_calls;
+        return {{"Nikon D810", "test", "test", "fake-sdk-identity"}};
+    }
+
+    SdkCameraStatus ProbeSdkStatus(
+        std::string_view,
+        std::chrono::seconds) override {
+        ++state_->probe_calls;
+        return ConfirmedLiveViewOffStatus();
+    }
+
+    void OpenLiveView(std::string_view, std::chrono::seconds) override {
+        ++state_->open_calls;
+    }
+
+    void StartLiveView(std::chrono::seconds) override {
+        ++state_->start_calls;
+    }
+
+    std::vector<unsigned char> ReadLiveViewFrame(
+        std::chrono::seconds) override {
+        ++state_->read_calls;
+        if (state_->before_read) state_->before_read();
+        return state_->frame;
+    }
+
+    void StopLiveView(std::chrono::seconds) override {
+        ++state_->stop_calls;
+        if (state_->fail_stop) throw std::runtime_error("injected stop failure");
+    }
+
+    void Close(std::chrono::seconds) override {
+        ++state_->close_calls;
+        if (state_->fail_close) throw std::runtime_error("injected close failure");
+    }
+
+private:
+    std::shared_ptr<FakeContinuousLiveViewSdkState> state_;
+};
+
+ProductionHardwareCameraAgentConfig ContinuousLiveViewTestConfig(
+    const fs::path& root,
+    const std::shared_ptr<FakeContinuousLiveViewSdkState>& state,
+    std::function<std::chrono::steady_clock::time_point()> clock = {}) {
+    ProductionHardwareCameraAgentConfig config;
+    config.artifacts_root = root / "artifacts";
+    config.reports_root = root / "reports";
+    config.transaction_state_root = root / "transactions";
+    config.continuous_live_view_sdk_factory_for_testing = [state] {
+        return std::make_unique<FakeContinuousLiveViewSdkTransport>(state);
+    };
+    config.continuous_live_view_identity_resolver_for_testing = [](
+        std::string_view alias,
+        const std::vector<CameraInfo>& cameras) {
+        if (alias != "CAM-A" || cameras.size() != 1) {
+            throw TransportError(
+                "single_identity_not_ready", "injected identity must remain exact-one CAM-A");
+        }
+        return cameras.front().stable_identity;
+    };
+    config.continuous_live_view_clock_for_testing = std::move(clock);
+    return config;
+}
+
+HardwareCameraAgentRequest ContinuousRequest(
+    HardwareCameraAgentOperation operation,
+    std::string session_id) {
+    HardwareCameraAgentRequest request;
+    request.schema_version = std::string(kHardwareCameraAgentLiveViewSchemaVersion);
+    request.operation = operation;
+    request.camera_alias = "CAM-A";
+    request.session_id = std::move(session_id);
+    request.exclusive_camera_control_confirmed = true;
+    return request;
 }
 
 void TestSingleIdentityV3Parser() {
@@ -1666,6 +1860,198 @@ void TestContinuousLiveViewV2Protocol() {
           rejected.find("UnsupportedOperation") != std::string::npos &&
           rejected_backend.capture_calls == 0,
         "hardware v2 must not reinterpret v1 capture operations");
+
+    const std::vector<std::string> malformed_v2_requests{
+        "{ \"schemaVersion\" : \"a0.camera-agent.hardware.v2\","
+        "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"spaced-v2\","
+        "\"operation\":\"capture-single\",\"payload\":{} }",
+        "{\"payload\":{\"sessionId\":\"" + session + "\",\"unknown\":true},"
+        "\"operation\":\"read-live-view-frame\",\"requestId\":\"reordered-v2\","
+        "\"marker\":\"Hardware\",\"simulation\":false,"
+        "\"schemaVersion\":\"a0.camera-agent.hardware.v2\"}",
+        "{\"payload\":{\"sessionId\":\"" + session + "\",\"sessionId\":\"" +
+        session + "\"},\"operation\":\"read-live-view-frame\","
+        "\"requestId\":\"duplicate-v2\",\"marker\":\"Hardware\","
+        "\"simulation\":false,\"schemaVersion\":\"a0.camera-agent.hardware.v2\"}",
+    };
+    for (const auto& malformed_v2 : malformed_v2_requests) {
+        const auto rejection = rejected_dispatcher.Handle(malformed_v2);
+        Check(rejection.find(
+                  "\"schemaVersion\":\"a0.camera-agent.hardware.v2\"") !=
+                  std::string::npos &&
+              rejection.find("\"success\":false") != std::string::npos,
+            "parsed v2 schema must survive whitespace, field order, and payload rejection");
+    }
+}
+
+void TestProductionContinuousLiveViewContracts() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-agent-continuous-live-view-test-" + NewRunId());
+    const std::string owner_session(32, 'a');
+    const std::string other_session(32, 'b');
+    try {
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            state->frame.assign(512U * 1024U, 0x5AU);
+            state->frame[0] = 0xFFU;
+            state->frame[1] = 0xD8U;
+            state->frame[state->frame.size() - 2] = 0xFFU;
+            state->frame.back() = 0xD9U;
+            ProductionHardwareCameraAgentBackend backend(
+                ContinuousLiveViewTestConfig(root / "frame-boundary", state));
+            const auto started = backend.StartContinuousLiveView(ContinuousRequest(
+                HardwareCameraAgentOperation::start_live_view, owner_session));
+            const auto frame = backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                HardwareCameraAgentOperation::read_live_view_frame, owner_session));
+            Check(started.succeeded && frame.succeeded &&
+                  frame.frame_size == 512U * 1024U,
+                "production backend must accept the exact 512 KiB JPEG boundary");
+            Check(backend.StopContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::stop_live_view,
+                      owner_session)).succeeded,
+                "exact-boundary session must stop cleanly");
+
+            state->frame.push_back(0x00U);
+            state->frame[state->frame.size() - 3] = 0x5AU;
+            state->frame[state->frame.size() - 2] = 0xFFU;
+            state->frame.back() = 0xD9U;
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "oversize-frame contract setup must start");
+            const auto oversized = backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                HardwareCameraAgentOperation::read_live_view_frame, owner_session));
+            Check(!oversized.succeeded &&
+                  oversized.error_category == "continuous_live_view_frame_failed" &&
+                  state->stop_calls >= 2 && state->close_calls >= 2,
+                "production backend must reject 512 KiB + 1 and close the SDK session");
+        }
+
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            ProductionHardwareCameraAgentBackend backend(
+                ContinuousLiveViewTestConfig(root / "ownership", state));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "ownership contract setup must start");
+            const auto takeover = backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                HardwareCameraAgentOperation::read_live_view_frame, other_session));
+            const auto double_start = backend.StartContinuousLiveView(ContinuousRequest(
+                HardwareCameraAgentOperation::start_live_view, other_session));
+            Check(!takeover.succeeded &&
+                  takeover.error_category == "live_view_session_not_found" &&
+                  !double_start.succeeded &&
+                  double_start.error_category == "live_view_session_active" &&
+                  state->read_calls == 0,
+                "another session must not take over or double-start active Live View");
+            Check(backend.StopContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::stop_live_view,
+                      owner_session)).succeeded,
+                "the owning session must retain stop authority");
+        }
+
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto now = std::chrono::steady_clock::time_point{};
+            ProductionHardwareCameraAgentBackend backend(
+                ContinuousLiveViewTestConfig(
+                    root / "heartbeat-timeout", state, [&] { return now; }));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "heartbeat timeout contract setup must start");
+            now += std::chrono::seconds(20);
+            const auto expired = backend.HeartbeatContinuousLiveView(ContinuousRequest(
+                HardwareCameraAgentOperation::live_view_heartbeat, owner_session));
+            Check(!expired.succeeded &&
+                  expired.error_category == "live_view_session_expired" &&
+                  state->stop_calls == 1 && state->close_calls == 1,
+                "the injected clock must deterministically expire and close an idle session");
+        }
+
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            std::promise<void> read_entered_promise;
+            auto read_entered = read_entered_promise.get_future();
+            std::promise<void> release_read_promise;
+            auto release_read = release_read_promise.get_future().share();
+            state->before_read = [&] {
+                read_entered_promise.set_value();
+                release_read.wait();
+            };
+            ProductionHardwareCameraAgentBackend backend(
+                ContinuousLiveViewTestConfig(root / "backpressure", state));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "backpressure contract setup must start");
+            auto frame = std::async(std::launch::async, [&] {
+                return backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                    HardwareCameraAgentOperation::read_live_view_frame,
+                    owner_session));
+            });
+            read_entered.wait();
+            auto heartbeat = std::async(std::launch::async, [&] {
+                return backend.HeartbeatContinuousLiveView(ContinuousRequest(
+                    HardwareCameraAgentOperation::live_view_heartbeat,
+                    owner_session));
+            });
+            Check(heartbeat.wait_for(std::chrono::milliseconds(100)) ==
+                      std::future_status::timeout,
+                "a second Live View command must observe backend backpressure");
+            release_read_promise.set_value();
+            Check(frame.get().succeeded && heartbeat.get().succeeded,
+                "serialized frame and heartbeat commands must both complete after release");
+            Check(backend.StopContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::stop_live_view,
+                      owner_session)).succeeded,
+                "backpressure session must stop cleanly");
+        }
+
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            state->fail_stop = true;
+            state->fail_close = true;
+            ProductionHardwareCameraAgentBackend backend(
+                ContinuousLiveViewTestConfig(root / "close-failure", state));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "stop/close failure contract setup must start");
+            const auto closed = backend.CloseAgentSession(ContinuousRequest(
+                HardwareCameraAgentOperation::close_agent_session, owner_session));
+            Check(!closed.succeeded &&
+                  closed.error_category == "continuous_live_view_close_failed" &&
+                  state->stop_calls == 1 && state->close_calls == 1,
+                "client close must surface both injected SDK cleanup failures");
+
+            HardwareCameraAgentRequest capture;
+            capture.operation = HardwareCameraAgentOperation::capture_single;
+            capture.transaction_id = "cccccccccccccccccccccccccccccccc";
+            capture.camera_alias = "CAM-A";
+            capture.expected_capture_profile_id = "test-profile";
+            capture.expected_capture_profile_version = 1;
+            capture.expected_capture_profile_sha256 = std::string(64, 'c');
+            capture.expected_capture_profile_expires_at_utc =
+                "2099-12-31T23:59:59Z";
+            capture.exclusive_camera_control_confirmed = true;
+            capture.dedicated_spool_scope_confirmed = true;
+            capture.exact_object_delete_confirmed = true;
+            const auto blocked = backend.CaptureSingle(capture);
+            Check(!blocked.succeeded &&
+                  blocked.error_category == "continuous_live_view_active" &&
+                  !fs::exists(root / "close-failure" / "transactions" /
+                      capture.transaction_id),
+                "residual Live View after client close failure must block capture before reservation");
+        }
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: production continuous Live View contract threw: "
+                  << error.what() << '\n';
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
 }
 
 } // namespace
@@ -1673,12 +2059,14 @@ void TestContinuousLiveViewV2Protocol() {
 int main() {
     TestStrictProtocolAndTypedResponses();
     TestServeOnceRejectsPartialFrameWithoutDispatch();
+    TestNamedPipeMaximumFrameBoundary();
     TestDurableJournalRecoveryContracts();
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
     TestSingleIdentityV3Parser();
     TestContinuousLiveViewV2Protocol();
+    TestProductionContinuousLiveViewContracts();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;
