@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -1946,6 +1947,21 @@ std::string DualIdentityProofJson(
     return SerializeDualIdentityBindingProof(proof);
 }
 
+void CheckDualIdentitySafetyZero(
+    const DualIdentitySafetyState& safety,
+    std::string_view context) {
+    Check(safety.inventory_read_only &&
+              !safety.capture_command_sent &&
+              !safety.card_access_performed &&
+              !safety.live_view_started &&
+              !safety.camera_settings_changed &&
+              !safety.camera_object_delete_attempted &&
+              !safety.card_format_attempted &&
+              !safety.vendor_operation_executed &&
+              safety.automatic_retry_count == 0,
+        std::string(context));
+}
+
 void TestDualIdentityProofContractIsStrictAndFailClosed() {
     const fs::path root = fs::temp_directory_path() /
         ("a0-dual-identity-proof-test-" + NewRunId());
@@ -1973,7 +1989,8 @@ void TestDualIdentityProofContractIsStrictAndFailClosed() {
     Check(std::holds_alternative<DualIdentityReady>(ready),
         "documented anonymous CAM-A/B proofs and exact read-only inventories should produce typed readiness");
     const auto& ready_value = std::get<DualIdentityReady>(ready);
-    Check(ready_value.sdk_cam_a_count == 1 && ready_value.sdk_cam_b_count == 1 &&
+    Check(ready_value.safety.inventory_read_only &&
+              ready_value.sdk_cam_a_count == 1 && ready_value.sdk_cam_b_count == 1 &&
               ready_value.wpd_cam_a_count == 1 && ready_value.wpd_cam_b_count == 1 &&
               ready_value.sdk_unbound_count == 0 && ready_value.wpd_unbound_count == 0 &&
               !ready_value.safety.capture_command_sent &&
@@ -1990,15 +2007,7 @@ void TestDualIdentityProofContractIsStrictAndFailClosed() {
         Check(std::holds_alternative<DualIdentityBlocked>(result),
             "negative dual identity case must return typed Block");
         const auto& blocked = std::get<DualIdentityBlocked>(result);
-        Check(blocked.safety.inventory_read_only &&
-                  !blocked.safety.capture_command_sent &&
-                  !blocked.safety.card_access_performed &&
-                  !blocked.safety.live_view_started &&
-                  !blocked.safety.camera_settings_changed &&
-                  !blocked.safety.camera_object_delete_attempted &&
-                  !blocked.safety.card_format_attempted &&
-                  !blocked.safety.vendor_operation_executed &&
-                  blocked.safety.automatic_retry_count == 0,
+        CheckDualIdentitySafetyZero(blocked.safety,
             "every typed dual identity Block must stop with read-only inventory and zero mutations/retries");
         return blocked.reason;
     };
@@ -2145,6 +2154,218 @@ void TestDualIdentityProofContractIsStrictAndFailClosed() {
               "2026-08-11T00:00:00Z", false)) ==
               DualIdentityBlockReason::proof_invalid,
         "unsupported proof schema/version must fail closed");
+
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
+void TestDualIdentityDirectNegativeMatrix() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-dual-identity-negative-matrix-" + NewRunId());
+    const fs::path cam_a_path = root / "cam-a.json";
+    const fs::path cam_b_path = root / "cam-b.json";
+    const std::string cam_a_json = DualIdentityProofJson("CAM-A", 'a', 'c');
+    const std::string cam_b_json = DualIdentityProofJson("CAM-B", 'b', 'd');
+    WriteText(cam_a_path, cam_a_json);
+    WriteText(cam_b_path, cam_b_json);
+
+    const auto remove_line = [](std::string body, std::string_view field) {
+        const auto field_position = body.find(field);
+        const auto line_start = body.rfind('\n', field_position);
+        const auto line_end = body.find('\n', field_position);
+        if (field_position == std::string::npos ||
+            line_start == std::string::npos || line_end == std::string::npos) {
+            throw std::runtime_error("test proof field was not found");
+        }
+        body.erase(line_start + 1, line_end - line_start);
+        return body;
+    };
+    const auto replace_once = [](std::string body,
+                                 std::string_view from,
+                                 std::string_view to) {
+        const auto position = body.find(from);
+        if (position == std::string::npos) {
+            throw std::runtime_error("test proof token was not found");
+        }
+        body.replace(position, from.size(), to);
+        return body;
+    };
+
+    std::string unknown_field = cam_a_json;
+    unknown_field.insert(unknown_field.find('{') + 1,
+        "\n  \"unknownField\": true,");
+    std::string invalid_utf8 = cam_a_json;
+    std::string invalid_provider{"bad-"};
+    invalid_provider.push_back(static_cast<char>(0xC3));
+    invalid_provider.push_back(static_cast<char>(0x28));
+    invalid_utf8 = replace_once(
+        std::move(invalid_utf8), "documented-test-provider", invalid_provider);
+    const std::vector<std::pair<std::string, std::string>> parse_cases{
+        {"unknown-field", std::move(unknown_field)},
+        {"missing-field", remove_line(cam_a_json, "\"providerVersion\"")},
+        {"wrong-type", replace_once(
+            cam_a_json, "\"providerVersion\": 1", "\"providerVersion\": \"1\"")},
+        {"invalid-utf8", std::move(invalid_utf8)},
+    };
+    for (const auto& [name, body] : parse_cases) {
+        DualIdentitySafetyState safety;
+        bool rejected = false;
+        try {
+            (void)ParseDualIdentityBindingProof(body);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected,
+            "direct dual identity parser negative must reject " + name);
+        CheckDualIdentitySafetyZero(safety,
+            "direct parser rejection must leave every safety counter at zero");
+    }
+
+    const fs::path empty_path = root / "empty.json";
+    const fs::path oversized_path = root / "oversized.json";
+    WriteText(empty_path, "");
+    WriteText(oversized_path, std::string(16U * 1024U + 1U, ' '));
+    std::vector<std::pair<std::string, fs::path>> load_cases{
+        {"zero-byte", empty_path},
+        {"oversized", oversized_path},
+        {"relative", fs::path("relative-dual-proof.json")},
+        {"unc", fs::path(L"\\\\invalid-server\\invalid-share\\proof.json")},
+        {"device", fs::path(L"\\\\?\\C:\\invalid-proof.json")},
+    };
+    const DWORD drive_mask = GetLogicalDrives();
+    for (wchar_t drive = L'Z'; drive >= L'D'; --drive) {
+        const DWORD bit = 1UL << static_cast<DWORD>(drive - L'A');
+        if ((drive_mask & bit) == 0) {
+            std::wstring unavailable_drive;
+            unavailable_drive.push_back(drive);
+            unavailable_drive.append(L":\\dual-proof.json");
+            load_cases.emplace_back(
+                "non-fixed-or-unavailable-drive", fs::path(unavailable_drive));
+            break;
+        }
+    }
+    for (const auto& [name, path] : load_cases) {
+        DualIdentitySafetyState safety;
+        bool rejected = false;
+        try {
+            (void)LoadDualIdentityBindingProof(path);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected,
+            "direct dual identity loader negative must reject " + name);
+        CheckDualIdentitySafetyZero(safety,
+            "direct loader rejection must leave every safety counter at zero");
+    }
+
+    const fs::path reparse_path = root / "cam-a-link.json";
+    const bool reparse_created = CreateSymbolicLinkW(
+        reparse_path.c_str(), cam_a_path.c_str(), 0x2U) != FALSE;
+    if (reparse_created) {
+        DualIdentitySafetyState safety;
+        bool rejected = false;
+        try {
+            (void)LoadDualIdentityBindingProof(reparse_path);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected,
+            "public dual identity loader must reject a proof file reparse point");
+        CheckDualIdentitySafetyZero(safety,
+            "reparse rejection must leave every safety counter at zero");
+        std::error_code remove_link_error;
+        fs::remove(reparse_path, remove_link_error);
+        Check(!remove_link_error,
+            "test proof reparse point must be removed without following it");
+        std::cout << "Dual identity proof reparse negative: exercised\n";
+    } else {
+        std::cout << "Dual identity proof reparse negative: unavailable in this Windows session\n";
+    }
+
+    const DualIdentityCorrelationProvider provider{
+        "documented-test-provider", 1, true};
+    const std::vector<DualIdentityInventoryProjection> sdk{
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'a'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'b'),
+            "documented-test-provider", 1}};
+    const std::vector<DualIdentityInventoryProjection> wpd{
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'c'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'd'),
+            "documented-test-provider", 1}};
+    const auto expect_block = [](const DualIdentityResult& result,
+                                 DualIdentityBlockReason expected,
+                                 std::string_view context) {
+        Check(std::holds_alternative<DualIdentityBlocked>(result),
+            std::string(context));
+        if (!std::holds_alternative<DualIdentityBlocked>(result)) return;
+        const auto& blocked = std::get<DualIdentityBlocked>(result);
+        Check(blocked.reason == expected, std::string(context));
+        CheckDualIdentitySafetyZero(blocked.safety,
+            "direct typed Block must keep every safety counter at zero");
+    };
+
+    WriteText(root / "correlation-unconfirmed.json",
+        DualIdentityProofJson("CAM-B", 'b', 'd',
+            "documented-test-provider", 1, true, false));
+    auto one_sdk = sdk;
+    one_sdk.pop_back();
+    auto wrong_model_sdk = sdk;
+    wrong_model_sdk.back().model = "Nikon Other";
+    auto wrong_inventory_provider_version = sdk;
+    wrong_inventory_provider_version.back().provider_version = 2;
+    const std::vector<std::tuple<
+        std::string, DualIdentityResult, DualIdentityBlockReason>> contract_cases{
+        {"same-proof-path",
+            VerifyDualIdentitySoftwareContract(
+                provider, {cam_a_path, cam_a_path}, sdk, wpd,
+                "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::alias_cardinality_mismatch},
+        {"provider-version-downgrade",
+            VerifyDualIdentitySoftwareContract(
+                DualIdentityCorrelationProvider{
+                    "documented-test-provider", 2, true},
+                {cam_a_path, cam_b_path}, sdk, wpd,
+                "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::provider_mismatch},
+        {"inventory-provider-version-mismatch",
+            VerifyDualIdentitySoftwareContract(
+                provider, {cam_a_path, cam_b_path},
+                wrong_inventory_provider_version, wpd,
+                "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::provider_mismatch},
+        {"one-camera-inventory",
+            VerifyDualIdentitySoftwareContract(
+                provider, {cam_a_path, cam_b_path}, one_sdk, wpd,
+                "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::camera_count_mismatch},
+        {"model-mismatch",
+            VerifyDualIdentitySoftwareContract(
+                provider, {cam_a_path, cam_b_path}, wrong_model_sdk, wpd,
+                "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::missing_identity},
+        {"documented-correlation-unconfirmed",
+            VerifyDualIdentitySoftwareContract(
+                provider, {cam_a_path, root / "correlation-unconfirmed.json"},
+                sdk, wpd, "2026-08-11T00:00:00Z", false),
+            DualIdentityBlockReason::confirmation_mismatch},
+    };
+    for (const auto& [name, result, expected] : contract_cases) {
+        expect_block(result, expected,
+            "direct dual identity contract negative must block " + name);
+    }
+
+    const auto ready = VerifyDualIdentitySoftwareContract(
+        provider, {cam_a_path, cam_b_path}, sdk, wpd,
+        "2026-08-11T00:00:00Z", false);
+    Check(std::holds_alternative<DualIdentityReady>(ready),
+        "direct negative matrix control must retain the typed Ready path");
+    if (std::holds_alternative<DualIdentityReady>(ready)) {
+        CheckDualIdentitySafetyZero(
+            std::get<DualIdentityReady>(ready).safety,
+            "typed Ready must explicitly retain inventory_read_only and zero mutation counters");
+    }
 
     std::error_code cleanup_error;
     fs::remove_all(root, cleanup_error);
@@ -2623,6 +2844,7 @@ int main() {
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
     TestDualIdentityProofContractIsStrictAndFailClosed();
+    TestDualIdentityDirectNegativeMatrix();
     TestSingleIdentityV3Parser();
     TestSingleIdentityV3SdkStatusResolution();
     TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();

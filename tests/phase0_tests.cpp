@@ -1462,6 +1462,27 @@ void TestDualIdentityVerificationRequiresExactAliasCardinality() {
               !ready.card_access_performed && !ready.real_identifiers_included,
         "legacy dual maps may count exact aliases but must not claim same-body readiness");
 
+    std::size_t pair_capture_dispatch_count = 0;
+    std::size_t card_inspection_dispatch_count = 0;
+    const auto legacy_spool_gate = PrepareDualSpoolVerification(ready);
+    if (ready.terminal_state == "Ready") {
+        ++pair_capture_dispatch_count;
+    }
+    if (legacy_spool_gate.terminal_state == "ReadyForInspection") {
+        ++card_inspection_dispatch_count;
+    }
+    Check(pair_capture_dispatch_count == 0 &&
+              card_inspection_dispatch_count == 0 &&
+              legacy_spool_gate.terminal_state == "Blocked" &&
+              legacy_spool_gate.failure_category == "dual_identity_not_ready" &&
+              legacy_spool_gate.wpd_sessions_closed == 0 &&
+              !legacy_spool_gate.card_inspection_performed &&
+              !legacy_spool_gate.capture_command_sent &&
+              !legacy_spool_gate.camera_delete_attempted &&
+              !legacy_spool_gate.vendor_operation_executed &&
+              !legacy_spool_gate.automatic_retry,
+        "legacy identity Block must stop caller-level pair capture and card inspection with all safety counters zero");
+
     const auto count_failure = VerifyDualIdentityBindings(
         sdk_map, wpd_map, {sdk_cameras.front()}, wpd_cameras);
     Check(count_failure.terminal_state == "Blocked" &&

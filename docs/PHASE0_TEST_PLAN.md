@@ -102,12 +102,12 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ### P0-B1: 二台識別
 
-- 一台ずつ物理接続した状態でSDK/WPD双方のidentityを同じaliasへ登録し、一台目を`CAM-A`、二台目を`CAM-B`としてcross-transport bindingする。
-- 登録は`bind-cross-transport-identity --alias CAM-A|CAM-B --single-camera-connected-confirmed`を使用する。一つのoperator-session lease内でSDKを列挙・完全close後にWPDを列挙し、両mapの競合を事前検証してから双方へbindingする。厳密に一台ずつ列挙できない場合、既存aliasを置換する場合、同じidentityを別aliasへ登録する場合、SDK/WPD map pathが同一の場合はどちらも変更せず失敗させる。旧`bind-identity --transport`は診断・復旧用の低レベル入口として残すが、通常の二台登録には使わない。
-- binding後に二台を接続し、SDKとWPDの両方で各aliasが一意に解決できることを確認する。binding登録機能が完成するまで二台接続時のLive View handoffは実行しない。
-- 二台接続後は`verify-dual-identity`を実行し、SDK/WPD各2台、各transportのCAM-A/B各1件、unbound 0、map変更0の匿名summaryとexit 0を必須にする。一台状態の`run-1786182987492-1`はSDK/WPD各1を検出して`camera_count_mismatch` / exit 5でfail closedし、撮影関連操作0を証拠化済み。
-- dual identity合格後は`verify-dual-spools`を実行し、CAM-A/Bの全payload object countが各0、read-only WPD session close各1、card inspection 2件、capture/delete/vendor operation/retry 0の匿名summaryとexit 0を必須にする。identity未合格時はcardを開かない。`run-1786183481065-1`は一台状態を`dual_identity_not_ready`としてcard inspection・WPD session・削除各0で拒否した。
-- 各aliasを選択して、Live View停止・SDK close後のhybrid transactionが同じ物理D810のシャッターとPC原本になることを一回ずつ確認する。
+- 旧`bind-cross-transport-identity`／`bind-identity --transport`とidentity-v2 mapは匿名診断・明示的なinvalid化判断のためだけに残す。現行SDKの衝突するName/Interface digest、enumeration order、USB port、ephemeral Source IDを恒久bindingまたは同一実機相関の証拠へ読み替えない。
+- `HG-0003B`でdocumented stable per-body providerまたは安全なSDK/WPD correlation protocolが承認され、そのprovider実装が匿名・versioned・fixed-local proof loaderと実際のread-only inventory callerへ接続されるまで、`verify-dual-identity`はSDK/WPD各2台、各transportのCAM-A/B各1件、unbound 0でも`Blocked/identity_strategy_unresolved`・exit 5とする。legacy identity-v2 mapだけでexit 0または`Ready`にしてはならない。
+- 将来の合格候補は、一台だけを接続した状態で操作者がCAM-A/Bごとに作成したlocal-only proof、documented provider ID/version、proof schema/version・有効期間・confirmation、二台inventoryのeach alias exactly once、unbound/duplicate/collision各0がすべて一致し、typed `DualIdentityReady`を返すsoftware contractに限定する。この契約試験はproviderの承認・接続または実機Readyを意味しない。
+- 上記typed Readyがproduction callerへ接続されるまでは`verify-dual-spools`、Live View handoff、`hybrid-capture-pair`へ進まない。`identity_strategy_unresolved`ではcard inspection、WPD spool session、capture、Live View、設定write、delete、format、vendor operation、retryをすべて0のまま停止する。既存の一台証拠`run-1786182987492-1`／`run-1786183481065-1`もhardware Readyへ読み替えない。
+- reparse path negativeは、Windowsがunprivileged symlink作成を許可する環境では公開`LoadDualIdentityBindingProof` seamで拒否を直接確認する。権限またはDeveloper Mode不足時は、同じ公開seamのrelative/UNC/device/non-fixed-local拒否と既存fixed-local path-chain契約をsoftware evidenceとし、reparse実体作成を未検証として残す。権限回避やproduction policy緩和は行わない。
+- documented provider実装・proof作成手順・production caller接続が承認された後に限り、各aliasのLive View停止・SDK close後のhybrid transactionが同じ物理D810のシャッターとPC原本になることを一回ずつ確認する。
 - 接続順変更3回、各カメラのUSBポート交換後も別名が維持されることを確認する。
 
 ### P0-B2: 順次二台transaction
