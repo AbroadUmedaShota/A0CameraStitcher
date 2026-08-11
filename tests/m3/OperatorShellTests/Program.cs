@@ -91,6 +91,17 @@ catch (Exception exception)
 
 try
 {
+    await DualIdentityExpiryBlocksWpfCaptureAsync();
+    Console.WriteLine("PASS expired ready dual identity blocks WPF transaction start");
+}
+catch (Exception exception)
+{
+    failures.Add("expired ready dual identity blocks WPF transaction start");
+    Console.Error.WriteLine($"FAIL expired ready dual identity blocks WPF transaction start: {exception}");
+}
+
+try
+{
     await FormalDualCameraWpfFlowAsync();
     Console.WriteLine("PASS formal WPF dual-camera flow uses real JPEG product artifacts");
 }
@@ -265,7 +276,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {21 - failures.Count}/21 passed.");
+Console.WriteLine($"Operator shell tests: {22 - failures.Count}/22 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -1383,6 +1394,51 @@ static async Task DualIdentityBlocksWpfCaptureAsync()
         Check.False(viewModel.CanCapture, "HardwarePending identity must close the WPF capture gate.");
         Check.True(viewModel.CaptureDisabledReason.Contains("HardwarePending", StringComparison.Ordinal),
             "The typed identity blocker must be visible without identifiers.");
+        viewModel.CaptureCommand.Execute(null);
+        Check.Equal(0, viewModel.TransactionStartCount);
+        Check.Equal(0, bridge.CaptureCalls);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualIdentityExpiryBlocksWpfCaptureAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-DualIdentityExpiryWpfTests",
+        Guid.NewGuid().ToString("N"));
+    var exportRoot = Path.Combine(root, "export");
+    Directory.CreateDirectory(exportRoot);
+    try
+    {
+        var now = DateTimeOffset.Parse("2026-08-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var finiteReady = new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Ready,
+            "ready",
+            now.AddMinutes(-1),
+            now.AddSeconds(1));
+        var bridge = new NeverCaptureDualBridge();
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(finiteReady),
+            time);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            flow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.FixedLocalExportDirectory = exportRoot;
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.CanCapture, "A finite unexpired Ready snapshot must allow WPF capture.");
+        time.Advance(TimeSpan.FromSeconds(2));
+        Check.False(viewModel.CanCapture, "An expired Ready snapshot must close the WPF capture gate.");
+        Check.True(viewModel.CaptureDisabledReason.Contains("Expired", StringComparison.Ordinal),
+            "The WPF blocker must expose the normalized Expired state.");
         viewModel.CaptureCommand.Execute(null);
         Check.Equal(0, viewModel.TransactionStartCount);
         Check.Equal(0, bridge.CaptureCalls);

@@ -11,6 +11,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
     private readonly ITestSyntheticCamera _camera;
     private readonly IOfflineStitcherAdapter _stitcher;
     private readonly IDualCameraIdentitySnapshotSource _identitySource;
+    private readonly TimeProvider _timeProvider;
     private readonly object _sync = new();
     private readonly Dictionary<DualCameraProductStage, DualCameraStageRecord> _stages = [];
     private readonly List<DualCameraStitchResult> _stitchJobs = [];
@@ -39,7 +40,8 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         string rootDirectory,
         ITestSyntheticCamera camera,
         IOfflineStitcherAdapter stitcher,
-        IDualCameraIdentitySnapshotSource identitySource)
+        IDualCameraIdentitySnapshotSource identitySource,
+        TimeProvider? timeProvider = null)
     {
         if (string.IsNullOrWhiteSpace(rootDirectory))
         {
@@ -50,11 +52,13 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _camera = camera ?? throw new ArgumentNullException(nameof(camera));
         _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
         _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
     }
 
-    public DualCameraIdentitySnapshot IdentitySnapshot => _identitySource.Current;
+    public DualCameraIdentitySnapshot IdentitySnapshot =>
+        _identitySource.Current.EvaluateAt(_timeProvider.GetUtcNow());
 
     public DualCameraProductState? Current
     {
@@ -245,7 +249,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                 throw new DualCameraFlowException(DualCameraFailureCode.DuplicateStart, "A DualCamera product operation is already active.");
             }
 
-            var identity = _identitySource.Current;
+            var identity = IdentitySnapshot;
             if (!identity.IsReady)
             {
                 throw new DualCameraFlowException(

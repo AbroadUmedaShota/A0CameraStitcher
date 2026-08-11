@@ -25,6 +25,15 @@ public sealed record DualCameraIdentitySnapshot(
 {
     public bool IsReady => Status == DualCameraIdentityStatus.Ready;
 
+    public DualCameraIdentitySnapshot EvaluateAt(DateTimeOffset nowUtc) =>
+        Status == DualCameraIdentityStatus.Ready && ExpiresAtUtc <= nowUtc
+            ? this with
+            {
+                Status = DualCameraIdentityStatus.Expired,
+                ReasonCode = "proof_stale",
+            }
+            : this;
+
     public static DualCameraIdentitySnapshot AnonymousTestSyntheticReady() => new(
         DualCameraIdentityStatus.Ready,
         "test_synthetic_anonymous_ready",

@@ -22,7 +22,7 @@ try {
     try {
         $env:A0_M2_ADAPTER_PATH = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.M2Adapter.exe"
         $dualOutput = & $dualTestExecutable 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not (($dualOutput -join "`n").Contains('DualCamera flow tests: 10/10 passed.'))) {
+        if ($LASTEXITCODE -ne 0 -or -not (($dualOutput -join "`n").Contains('DualCamera flow tests: 11/11 passed.'))) {
             throw "Focused DualCamera product E2E failed: $($dualOutput -join [Environment]::NewLine)"
         }
         Remove-Item Env:A0_M2_ADAPTER_PATH -ErrorAction SilentlyContinue

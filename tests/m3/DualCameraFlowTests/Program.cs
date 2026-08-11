@@ -5,6 +5,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("anonymous native identity DTO maps to typed states", IdentityAdapterAsync),
     ("identity gate rejects before capture and freezes active snapshot", IdentityGateAsync),
+    ("identity expiry is reevaluated at each capture boundary", IdentityExpiryBoundaryAsync),
     ("native capture stitch restitch export E2E", NativeEndToEndAsync),
     ("malformed and oversized JPEG fail closed", InvalidJpegAsync),
     ("WIC rejects fake SOF truncated scan and corrupt entropy before stitch", CorruptJpegDecodeAsync),
@@ -146,6 +147,83 @@ static async Task IdentityGateAsync()
             () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
         camera.Release.TrySetResult();
         var completed = await first;
+        Check.Equal(DualCameraIdentityStatus.Ready, completed.IdentitySnapshot.Status);
+        Check.Equal(2, camera.CaptureCalls);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        Check.Equal(2, camera.CaptureCalls);
+    });
+}
+
+static async Task IdentityExpiryBoundaryAsync()
+{
+    var now = DateTimeOffset.Parse("2026-08-11T00:00:00Z");
+    await WithRootAsync(async root =>
+    {
+        var bridge = new FailureBridge();
+        var time = new MutableIdentityTimeProvider(now);
+        var expiredReady = new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Ready,
+            "ready",
+            now.AddMinutes(-1),
+            now);
+        var flow = new DualCameraProductFlow(
+            root,
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(expiredReady),
+            time);
+        Check.Equal(DualCameraIdentityStatus.Expired, flow.IdentitySnapshot.Status);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        Check.Equal(0, bridge.CaptureCalls);
+    });
+
+    await WithRootAsync(async root =>
+    {
+        var bridge = new FailureBridge();
+        var time = new MutableIdentityTimeProvider(now);
+        var validReady = new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Ready,
+            "ready",
+            now.AddMinutes(-1),
+            now.AddMinutes(1));
+        var flow = new DualCameraProductFlow(
+            root,
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(validReady),
+            time);
+        var completed = await flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+        Check.Equal(DualCameraIdentityStatus.Ready, completed.IdentitySnapshot.Status);
+        Check.Equal(2, bridge.CaptureCalls);
+    });
+
+    await WithRootAsync(async root =>
+    {
+        var camera = new BlockingCamera();
+        var bridge = new FailureBridge();
+        var time = new MutableIdentityTimeProvider(now);
+        var finiteReady = new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Ready,
+            "ready",
+            now.AddMinutes(-1),
+            now.AddSeconds(1));
+        var flow = new DualCameraProductFlow(
+            root,
+            camera,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(finiteReady),
+            time);
+        var active = flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+        await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        time.Advance(TimeSpan.FromSeconds(2));
+        Check.Equal(DualCameraIdentityStatus.Expired, flow.IdentitySnapshot.Status);
+        Check.Equal(DualCameraIdentityStatus.Ready, flow.Current!.IdentitySnapshot.Status);
+        camera.Release.TrySetResult();
+        var completed = await active;
         Check.Equal(DualCameraIdentityStatus.Ready, completed.IdentitySnapshot.Status);
         Check.Equal(2, camera.CaptureCalls);
         await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
@@ -560,6 +638,15 @@ sealed class MutableIdentitySource(DualCameraIdentitySnapshot initial) : IDualCa
         Current = snapshot;
         SnapshotChanged?.Invoke(this, snapshot);
     }
+}
+
+sealed class MutableIdentityTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private DateTimeOffset _utcNow = utcNow;
+
+    public override DateTimeOffset GetUtcNow() => _utcNow;
+
+    public void Advance(TimeSpan delta) => _utcNow += delta;
 }
 
 static class Check
