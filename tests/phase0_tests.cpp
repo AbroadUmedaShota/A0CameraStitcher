@@ -1452,14 +1452,15 @@ void TestDualIdentityVerificationRequiresExactAliasCardinality() {
 
     const auto ready = VerifyDualIdentityBindings(
         sdk_map, wpd_map, sdk_cameras, wpd_cameras);
-    Check(ready.terminal_state == "Ready" && ready.failure_category.empty() &&
+    Check(ready.terminal_state == "Blocked" &&
+              ready.failure_category == "identity_strategy_unresolved" &&
               ready.sdk_cam_a_count == 1 && ready.sdk_cam_b_count == 1 &&
               ready.wpd_cam_a_count == 1 && ready.wpd_cam_b_count == 1 &&
               ready.sdk_unbound_count == 0 && ready.wpd_unbound_count == 0 &&
               !ready.identity_maps_changed && !ready.capture_command_sent &&
               !ready.live_view_started && !ready.camera_settings_changed &&
               !ready.card_access_performed && !ready.real_identifiers_included,
-        "dual identity verification should require exactly one CAM-A and CAM-B in both transports");
+        "legacy dual maps may count exact aliases but must not claim same-body readiness");
 
     const auto count_failure = VerifyDualIdentityBindings(
         sdk_map, wpd_map, {sdk_cameras.front()}, wpd_cameras);
@@ -1478,7 +1479,8 @@ void TestDualIdentityVerificationRequiresExactAliasCardinality() {
     const auto path = PersistDualIdentityVerificationSummary(
         root / "artifacts", "run-dual-identity", ready);
     const auto body = ReadAll(path);
-    Check(body.find("\"terminalState\": \"Ready\"") != std::string::npos &&
+    Check(body.find("\"terminalState\": \"Blocked\"") != std::string::npos &&
+              body.find("\"failureCategory\": \"identity_strategy_unresolved\"") != std::string::npos &&
               body.find("\"sdkCamACount\": 1") != std::string::npos &&
               body.find("\"wpdCamBCount\": 1") != std::string::npos &&
               body.find("sdk-a") == std::string::npos && body.find("wpd-a") == std::string::npos &&

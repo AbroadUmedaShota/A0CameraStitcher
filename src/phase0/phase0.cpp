@@ -620,7 +620,11 @@ DualIdentityVerificationSummary VerifyDualIdentityBindings(
                result.wpd_cam_a_count != 1 || result.wpd_cam_b_count != 1) {
         result.failure_category = "alias_cardinality_mismatch";
     } else {
-        result.terminal_state = "Ready";
+        // Legacy identity-v2 maps can count aliases but cannot prove that the
+        // two SDK and WPD projections refer to the same physical bodies. Keep
+        // every legacy caller blocked until the separate documented-provider
+        // DualCamera proof contract is supplied by an approved integration.
+        result.failure_category = "identity_strategy_unresolved";
     }
     return result;
 }

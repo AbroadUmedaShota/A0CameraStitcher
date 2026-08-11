@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace a0::phase0 {
@@ -82,6 +83,104 @@ struct SingleCameraIdentityV3 {
     std::string wpd_stable_identity_sha256;
     std::string sdk_selection_policy{"exactly-one-current-session"};
 };
+
+// DualCamera deliberately uses a separate contract from SingleCamera
+// identity-v3. Digests are anonymous projections supplied by a future
+// documented same-body correlation provider; this layer never invents one.
+enum class DualIdentityTransport {
+    sdk,
+    wpd,
+};
+
+struct DualIdentityBindingProof {
+    std::string camera_alias;
+    std::string provider_id;
+    std::uint32_t provider_version{};
+    std::string sdk_identity_sha256;
+    std::string wpd_identity_sha256;
+    std::string created_at_utc;
+    std::string expires_at_utc;
+    bool single_camera_connected_confirmed{};
+    bool documented_correlation_confirmed{};
+    std::string proof_payload_sha256;
+};
+
+struct DualIdentityCorrelationProvider {
+    std::string provider_id;
+    std::uint32_t provider_version{};
+    bool documented_stable_per_body_correlation{};
+};
+
+struct DualIdentityInventoryProjection {
+    DualIdentityTransport transport{DualIdentityTransport::sdk};
+    std::string model;
+    std::string identity_sha256;
+    std::string provider_id;
+    std::uint32_t provider_version{};
+};
+
+struct DualIdentitySafetyState {
+    bool inventory_read_only{true};
+    bool capture_command_sent{};
+    bool card_access_performed{};
+    bool live_view_started{};
+    bool camera_settings_changed{};
+    bool camera_object_delete_attempted{};
+    bool card_format_attempted{};
+    bool vendor_operation_executed{};
+    std::uint32_t automatic_retry_count{};
+};
+
+enum class DualIdentityBlockReason {
+    identity_strategy_unresolved,
+    legacy_map_fallback_prohibited,
+    proof_count_mismatch,
+    proof_invalid,
+    proof_tampered,
+    proof_stale,
+    confirmation_mismatch,
+    provider_mismatch,
+    camera_count_mismatch,
+    missing_identity,
+    duplicate_identity,
+    identity_collision,
+    mismatched_transport,
+    unbound_identity,
+    alias_cardinality_mismatch,
+};
+
+struct DualIdentityReady {
+    std::size_t sdk_cam_a_count{};
+    std::size_t sdk_cam_b_count{};
+    std::size_t sdk_unbound_count{};
+    std::size_t wpd_cam_a_count{};
+    std::size_t wpd_cam_b_count{};
+    std::size_t wpd_unbound_count{};
+    DualIdentitySafetyState safety;
+};
+
+struct DualIdentityBlocked {
+    DualIdentityBlockReason reason{DualIdentityBlockReason::identity_strategy_unresolved};
+    DualIdentitySafetyState safety;
+};
+
+using DualIdentityResult = std::variant<DualIdentityReady, DualIdentityBlocked>;
+
+[[nodiscard]] std::string ComputeDualIdentityBindingProofPayloadSha256(
+    const DualIdentityBindingProof& proof);
+[[nodiscard]] std::string SerializeDualIdentityBindingProof(
+    const DualIdentityBindingProof& proof);
+[[nodiscard]] DualIdentityBindingProof ParseDualIdentityBindingProof(
+    std::string_view json);
+[[nodiscard]] DualIdentityBindingProof LoadDualIdentityBindingProof(
+    const std::filesystem::path& path);
+[[nodiscard]] DualIdentityResult VerifyDualIdentitySoftwareContract(
+    const std::optional<DualIdentityCorrelationProvider>& provider,
+    const std::vector<std::filesystem::path>& proof_paths,
+    const std::vector<DualIdentityInventoryProjection>& sdk_inventory,
+    const std::vector<DualIdentityInventoryProjection>& wpd_inventory,
+    std::string_view observed_at_utc,
+    bool legacy_map_fallback_requested);
 
 [[nodiscard]] SingleCameraIdentityV3 ParseSingleCameraIdentityV3(
     std::string_view json);

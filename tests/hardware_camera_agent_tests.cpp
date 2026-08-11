@@ -1921,6 +1921,235 @@ HardwareCameraAgentRequest ContinuousRequest(
     return request;
 }
 
+std::string DualIdentityProofJson(
+    std::string_view alias,
+    char sdk_digest,
+    char wpd_digest,
+    std::string_view provider_id = "documented-test-provider",
+    std::uint32_t provider_version = 1,
+    bool single_camera_confirmed = true,
+    bool documented_correlation_confirmed = true,
+    std::string_view expires_at_utc = "2026-09-01T00:00:00Z",
+    std::string_view created_at_utc = "2026-08-01T00:00:00Z") {
+    DualIdentityBindingProof proof;
+    proof.camera_alias = std::string(alias);
+    proof.provider_id = std::string(provider_id);
+    proof.provider_version = provider_version;
+    proof.sdk_identity_sha256 = std::string(64, sdk_digest);
+    proof.wpd_identity_sha256 = std::string(64, wpd_digest);
+    proof.created_at_utc = std::string(created_at_utc);
+    proof.expires_at_utc = std::string(expires_at_utc);
+    proof.single_camera_connected_confirmed = single_camera_confirmed;
+    proof.documented_correlation_confirmed = documented_correlation_confirmed;
+    proof.proof_payload_sha256 =
+        ComputeDualIdentityBindingProofPayloadSha256(proof);
+    return SerializeDualIdentityBindingProof(proof);
+}
+
+void TestDualIdentityProofContractIsStrictAndFailClosed() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-dual-identity-proof-test-" + NewRunId());
+    const fs::path cam_a_path = root / "cam-a.json";
+    const fs::path cam_b_path = root / "cam-b.json";
+    WriteText(cam_a_path, DualIdentityProofJson("CAM-A", 'a', 'c'));
+    WriteText(cam_b_path, DualIdentityProofJson("CAM-B", 'b', 'd'));
+
+    const DualIdentityCorrelationProvider provider{
+        "documented-test-provider", 1, true};
+    const std::vector<DualIdentityInventoryProjection> sdk{
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'a'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'b'),
+            "documented-test-provider", 1}};
+    const std::vector<DualIdentityInventoryProjection> wpd{
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'c'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'd'),
+            "documented-test-provider", 1}};
+
+    const auto ready = VerifyDualIdentitySoftwareContract(
+        provider, {cam_a_path, cam_b_path}, sdk, wpd,
+        "2026-08-11T00:00:00Z", false);
+    Check(std::holds_alternative<DualIdentityReady>(ready),
+        "documented anonymous CAM-A/B proofs and exact read-only inventories should produce typed readiness");
+    const auto& ready_value = std::get<DualIdentityReady>(ready);
+    Check(ready_value.sdk_cam_a_count == 1 && ready_value.sdk_cam_b_count == 1 &&
+              ready_value.wpd_cam_a_count == 1 && ready_value.wpd_cam_b_count == 1 &&
+              ready_value.sdk_unbound_count == 0 && ready_value.wpd_unbound_count == 0 &&
+              !ready_value.safety.capture_command_sent &&
+              !ready_value.safety.card_access_performed &&
+              !ready_value.safety.live_view_started &&
+              !ready_value.safety.camera_settings_changed &&
+              !ready_value.safety.camera_object_delete_attempted &&
+              !ready_value.safety.card_format_attempted &&
+              !ready_value.safety.vendor_operation_executed &&
+              ready_value.safety.automatic_retry_count == 0,
+        "dual identity readiness must remain read-only with every camera mutation counter at zero");
+
+    const auto block_reason = [](const DualIdentityResult& result) {
+        Check(std::holds_alternative<DualIdentityBlocked>(result),
+            "negative dual identity case must return typed Block");
+        const auto& blocked = std::get<DualIdentityBlocked>(result);
+        Check(blocked.safety.inventory_read_only &&
+                  !blocked.safety.capture_command_sent &&
+                  !blocked.safety.card_access_performed &&
+                  !blocked.safety.live_view_started &&
+                  !blocked.safety.camera_settings_changed &&
+                  !blocked.safety.camera_object_delete_attempted &&
+                  !blocked.safety.card_format_attempted &&
+                  !blocked.safety.vendor_operation_executed &&
+                  blocked.safety.automatic_retry_count == 0,
+            "every typed dual identity Block must stop with read-only inventory and zero mutations/retries");
+        return blocked.reason;
+    };
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              std::nullopt, {cam_a_path, cam_b_path}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::identity_strategy_unresolved,
+        "missing documented provider must keep DualCamera identity unresolved");
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, sdk, wpd,
+              "2026-08-11T00:00:00Z", true)) ==
+              DualIdentityBlockReason::legacy_map_fallback_prohibited,
+        "legacy identity maps must never be accepted as a fallback");
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_count_mismatch,
+        "zero or missing alias proof must block");
+
+    WriteText(root / "collision.json",
+        DualIdentityProofJson("CAM-B", 'a', 'd'));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "collision.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::identity_collision,
+        "same anonymous projection bound to both aliases must block as a collision");
+
+    WriteText(root / "duplicate-alias.json",
+        DualIdentityProofJson("CAM-A", 'b', 'd'));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "duplicate-alias.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::alias_cardinality_mismatch,
+        "CAM-A/B must each occur exactly once in the proof set");
+
+    WriteText(root / "provider-mismatch.json",
+        DualIdentityProofJson("CAM-B", 'b', 'd', "different-provider"));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "provider-mismatch.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::provider_mismatch,
+        "proof provider and version must match the documented provider seam");
+
+    WriteText(root / "stale.json",
+        DualIdentityProofJson("CAM-B", 'b', 'd',
+            "documented-test-provider", 1, true, true,
+            "2026-08-10T00:00:00Z"));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "stale.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_stale,
+        "expired proof must block before any camera control");
+
+    WriteText(root / "future.json",
+        DualIdentityProofJson("CAM-B", 'b', 'd',
+            "documented-test-provider", 1, true, true,
+            "2026-09-01T00:00:00Z", "2026-08-12T00:00:00Z"));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "future.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_stale,
+        "a proof created after the inventory observation must block");
+
+    WriteText(root / "unconfirmed.json",
+        DualIdentityProofJson("CAM-B", 'b', 'd',
+            "documented-test-provider", 1, false));
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "unconfirmed.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::confirmation_mismatch,
+        "one-body-at-a-time operator confirmation is mandatory for each alias");
+
+    auto duplicate_sdk = sdk;
+    duplicate_sdk.back().identity_sha256 = duplicate_sdk.front().identity_sha256;
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, duplicate_sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::duplicate_identity,
+        "duplicate current SDK projections must block");
+
+    auto three_sdk = sdk;
+    three_sdk.push_back(sdk.front());
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, {}, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::camera_count_mismatch &&
+          block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, three_sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::camera_count_mismatch,
+        "zero or more than two current projections must block exact dual cardinality");
+
+    auto missing_identity = sdk;
+    missing_identity.back().identity_sha256.clear();
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, missing_identity, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::missing_identity,
+        "missing or noncanonical anonymous current identity must block");
+
+    auto unbound_sdk = sdk;
+    unbound_sdk.back().identity_sha256 = std::string(64, 'e');
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, unbound_sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::unbound_identity,
+        "a current projection absent from both proofs must not be auto-bound");
+
+    auto wrong_transport = wpd;
+    wrong_transport.front().identity_sha256 = std::string(64, 'a');
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, cam_b_path}, sdk, wrong_transport,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::mismatched_transport,
+        "an SDK digest presented by WPD must block rather than auto-assign an alias");
+
+    std::string tampered = DualIdentityProofJson("CAM-B", 'b', 'd');
+    tampered.replace(tampered.find(std::string(64, 'd')), 64, std::string(64, 'e'));
+    WriteText(root / "tampered.json", tampered);
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "tampered.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_tampered,
+        "proof payload tampering must return a typed Block");
+
+    std::string malformed = DualIdentityProofJson("CAM-B", 'b', 'd');
+    malformed.insert(malformed.find("\"cameraMode\""),
+        "\"cameraMode\":\"DualCamera\",");
+    WriteText(root / "malformed.json", malformed);
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "malformed.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_invalid,
+        "duplicate or structurally invalid proof fields must fail strict parsing");
+
+    std::string wrong_version = DualIdentityProofJson("CAM-B", 'b', 'd');
+    wrong_version.replace(
+        wrong_version.find("dual-identity-binding-proof.v1"),
+        std::string("dual-identity-binding-proof.v1").size(),
+        "dual-identity-binding-proof.v2");
+    WriteText(root / "wrong-version.json", wrong_version);
+    Check(block_reason(VerifyDualIdentitySoftwareContract(
+              provider, {cam_a_path, root / "wrong-version.json"}, sdk, wpd,
+              "2026-08-11T00:00:00Z", false)) ==
+              DualIdentityBlockReason::proof_invalid,
+        "unsupported proof schema/version must fail closed");
+
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 void TestSingleIdentityV3Parser() {
     const std::string digest(64, 'b');
     const std::string json =
@@ -2393,6 +2622,7 @@ int main() {
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestFixedLocalPathPolicy();
+    TestDualIdentityProofContractIsStrictAndFailClosed();
     TestSingleIdentityV3Parser();
     TestSingleIdentityV3SdkStatusResolution();
     TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();

@@ -44,6 +44,53 @@ volume with a reparse-free path chain. UNC, device-path, alternate-data-stream,
 mapped-network, removable, optical, RAM-drive, and relative paths are rejected.
 Artifact, report, and transaction-state roots use the same fixed-local policy.
 
+## DualCamera identity software contract
+
+DualCamera does not reuse SingleCamera identity-v3 and no current Nikon SDK
+property is presented as a stable per-body identity. The production library
+therefore exposes a software-only extension seam for a future documented
+SDK/WPD correlation provider. No provider is installed or approved by this
+change, so the operational DualCamera lane remains
+`Blocked/identity_strategy_unresolved` and `HG-0003B` remains open.
+
+The seam accepts exactly two operator-created, local-only proof files, one for
+`CAM-A` and one for `CAM-B`. Each file must have the exact schema
+`a0.camera-agent.dual-identity-binding-proof.v1`, `bindingVersion:1`,
+`cameraMode:"DualCamera"`, a bounded provider ID/version, separate anonymous
+lowercase SHA-256 projections for SDK and WPD, a strict UTC creation/expiry
+window, and both `singleCameraConnectedConfirmed:true` and
+`documentedCorrelationConfirmed:true`. `proofPayloadSha256` detects a changed
+proof payload; it is an integrity check, not a signature or a substitute for
+operator-controlled local storage. Unknown, missing, duplicate, trailing,
+wrongly typed, stale, or digest-mismatched content is rejected.
+
+After a future provider performs non-overlapping read-only SDK and WPD
+inventory, the verifier returns the typed `DualIdentityReady` variant only
+when all of the following hold:
+
+- the provider explicitly declares documented stable same-body correlation and
+  its ID/version matches both proofs and every current projection;
+- SDK and WPD each contain exactly two Nikon D810 projections;
+- `CAM-A` and `CAM-B` each match exactly once in each transport, with zero
+  unbound, duplicate, cross-alias collision, or cross-transport matches;
+- both proofs are structurally valid, unexpired, untampered, and carry the
+  required one-body-at-a-time operator confirmations.
+
+Every failure returns typed `DualIdentityBlocked` with a specific category,
+including `identity_strategy_unresolved`, `legacy_map_fallback_prohibited`,
+`proof_invalid`, `proof_tampered`, `proof_stale`, `provider_mismatch`,
+`camera_count_mismatch`, `missing_identity`, `duplicate_identity`,
+`identity_collision`, `mismatched_transport`, `unbound_identity`, and
+`alias_cardinality_mismatch`. Both Ready and Block variants freeze the safety
+facts at read-only inventory, capture/card access/Live View/settings write/
+delete/format/vendor operation all false, and automatic retry count zero.
+
+The legacy identity-v2 map counter can still produce anonymous diagnostics,
+but it can no longer produce `Ready`; even exact CAM-A/B counts finish as
+`Blocked/identity_strategy_unresolved`. This prevents `verify-dual-spools` and
+pair capture entry points from treating enumeration order, USB port, ephemeral
+Source ID, or the colliding SDK Name/Interface digest as DualCamera evidence.
+
 `--serve-once` accepts one connection and one complete request, completes the
 operation, attempts one response, then exits. Accept is bounded to 15 seconds;
 the request header and body each have a 5-second absolute deadline, and the

@@ -63,7 +63,7 @@ Phase 0Bのidentity登録は、他方のD810を物理的に外して厳密に一
 ```powershell
 build\Debug\A0CameraStitcher.Phase0.exe bind-cross-transport-identity --alias CAM-A --single-camera-connected-confirmed
 # CAM-A/Bを一台ずつ登録後、二台を接続して匿名read-only検証
-build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity
+build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity # legacy map diagnostic; identity_strategy_unresolved until HG-0003B provider approval
 # identity合格後、二台の専用spoolが双方emptyかread-only確認
 build\Debug\A0CameraStitcher.Phase0.exe verify-dual-spools
 ```

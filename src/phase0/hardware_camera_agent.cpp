@@ -2139,6 +2139,286 @@ bool IsLiveViewResultStructurallyValid(
 
 } // namespace
 
+std::string ComputeDualIdentityBindingProofPayloadSha256(
+    const DualIdentityBindingProof& proof) {
+    std::ostringstream payload;
+    const auto append = [&](std::string_view name, std::string_view value) {
+        payload << name << ':' << value.size() << ':' << value << '\n';
+    };
+    append("schemaVersion", "a0.camera-agent.dual-identity-binding-proof.v1");
+    append("bindingVersion", "1");
+    append("cameraMode", "DualCamera");
+    append("selectedAlias", proof.camera_alias);
+    append("providerId", proof.provider_id);
+    append("providerVersion", std::to_string(proof.provider_version));
+    append("sdkIdentitySha256", proof.sdk_identity_sha256);
+    append("wpdIdentitySha256", proof.wpd_identity_sha256);
+    append("createdAtUtc", proof.created_at_utc);
+    append("expiresAtUtc", proof.expires_at_utc);
+    append("singleCameraConnectedConfirmed",
+        proof.single_camera_connected_confirmed ? "true" : "false");
+    append("documentedCorrelationConfirmed",
+        proof.documented_correlation_confirmed ? "true" : "false");
+    const std::string bytes = payload.str();
+    return Sha256Hex(std::vector<unsigned char>(bytes.begin(), bytes.end()));
+}
+
+std::string SerializeDualIdentityBindingProof(
+    const DualIdentityBindingProof& proof) {
+    std::ostringstream output;
+    output << "{\n"
+           << "  \"schemaVersion\": \"a0.camera-agent.dual-identity-binding-proof.v1\",\n"
+           << "  \"bindingVersion\": 1,\n"
+           << "  \"cameraMode\": \"DualCamera\",\n"
+           << "  \"selectedAlias\": \"" << JsonEscape(proof.camera_alias) << "\",\n"
+           << "  \"providerId\": \"" << JsonEscape(proof.provider_id) << "\",\n"
+           << "  \"providerVersion\": " << proof.provider_version << ",\n"
+           << "  \"sdkIdentitySha256\": \"" << proof.sdk_identity_sha256 << "\",\n"
+           << "  \"wpdIdentitySha256\": \"" << proof.wpd_identity_sha256 << "\",\n"
+           << "  \"createdAtUtc\": \"" << proof.created_at_utc << "\",\n"
+           << "  \"expiresAtUtc\": \"" << proof.expires_at_utc << "\",\n"
+           << "  \"singleCameraConnectedConfirmed\": "
+           << (proof.single_camera_connected_confirmed ? "true" : "false") << ",\n"
+           << "  \"documentedCorrelationConfirmed\": "
+           << (proof.documented_correlation_confirmed ? "true" : "false") << ",\n"
+           << "  \"proofPayloadSha256\": \"" << proof.proof_payload_sha256 << "\"\n"
+           << "}\n";
+    return output.str();
+}
+
+DualIdentityBindingProof ParseDualIdentityBindingProof(std::string_view json) {
+    const JsonValue root = JsonParser(json).Parse();
+    RequireExactFields(root, {
+        "schemaVersion", "bindingVersion", "cameraMode", "selectedAlias",
+        "providerId", "providerVersion", "sdkIdentitySha256",
+        "wpdIdentitySha256", "createdAtUtc", "expiresAtUtc",
+        "singleCameraConnectedConfirmed", "documentedCorrelationConfirmed",
+        "proofPayloadSha256"});
+    const auto binding_version =
+        RequireField(root, "bindingVersion", JsonKind::integer).integer;
+    const auto provider_version =
+        RequireField(root, "providerVersion", JsonKind::integer).integer;
+    if (RequireField(root, "schemaVersion", JsonKind::string).string !=
+            "a0.camera-agent.dual-identity-binding-proof.v1" ||
+        binding_version != 1 ||
+        RequireField(root, "cameraMode", JsonKind::string).string != "DualCamera" ||
+        provider_version < 1 ||
+        provider_version > std::numeric_limits<std::uint32_t>::max()) {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidDualIdentityProof", "dual identity proof schema or version is invalid");
+    }
+
+    DualIdentityBindingProof proof;
+    proof.camera_alias =
+        RequireField(root, "selectedAlias", JsonKind::string).string;
+    proof.provider_id = RequireField(root, "providerId", JsonKind::string).string;
+    proof.provider_version = static_cast<std::uint32_t>(provider_version);
+    proof.sdk_identity_sha256 =
+        RequireField(root, "sdkIdentitySha256", JsonKind::string).string;
+    proof.wpd_identity_sha256 =
+        RequireField(root, "wpdIdentitySha256", JsonKind::string).string;
+    proof.created_at_utc =
+        RequireField(root, "createdAtUtc", JsonKind::string).string;
+    proof.expires_at_utc =
+        RequireField(root, "expiresAtUtc", JsonKind::string).string;
+    proof.single_camera_connected_confirmed =
+        RequireField(root, "singleCameraConnectedConfirmed", JsonKind::boolean).boolean;
+    proof.documented_correlation_confirmed =
+        RequireField(root, "documentedCorrelationConfirmed", JsonKind::boolean).boolean;
+    proof.proof_payload_sha256 =
+        RequireField(root, "proofPayloadSha256", JsonKind::string).string;
+
+    if ((proof.camera_alias != "CAM-A" && proof.camera_alias != "CAM-B") ||
+        !IsSafeRequestId(proof.provider_id) ||
+        !IsLowerHex(proof.sdk_identity_sha256, 64) ||
+        !IsLowerHex(proof.wpd_identity_sha256, 64) ||
+        !IsLowerHex(proof.proof_payload_sha256, 64)) {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidDualIdentityProof", "dual identity proof contains an invalid value");
+    }
+    const FILETIME created = ParseProfileUtc(proof.created_at_utc);
+    const FILETIME expires = ParseProfileUtc(proof.expires_at_utc);
+    if (CompareFileTime(&created, &expires) >= 0) {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidDualIdentityProof", "dual identity proof validity window is invalid");
+    }
+    if (proof.proof_payload_sha256 !=
+        ComputeDualIdentityBindingProofPayloadSha256(proof)) {
+        throw HardwareCameraAgentProtocolError(
+            "DualIdentityProofTampered", "dual identity proof payload digest does not match");
+    }
+    return proof;
+}
+
+DualIdentityBindingProof LoadDualIdentityBindingProof(const fs::path& path) {
+    const fs::path absolute = StrictFixedLocalPath(path, "DualCamera identity proof");
+    std::error_code error;
+    if (!fs::is_regular_file(absolute, error) || error || IsReparsePoint(absolute)) {
+        throw std::runtime_error("DualCamera identity proof must be a regular reparse-free local file");
+    }
+    const auto size = fs::file_size(absolute, error);
+    if (error || size == 0 || size > 16U * 1024U) {
+        throw std::runtime_error("DualCamera identity proof size is invalid");
+    }
+    std::ifstream input(absolute, std::ios::binary);
+    const std::string body{
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (!input || input.bad() || body.size() != size) {
+        throw std::runtime_error("DualCamera identity proof could not be read completely");
+    }
+    return ParseDualIdentityBindingProof(body);
+}
+
+DualIdentityResult VerifyDualIdentitySoftwareContract(
+    const std::optional<DualIdentityCorrelationProvider>& provider,
+    const std::vector<fs::path>& proof_paths,
+    const std::vector<DualIdentityInventoryProjection>& sdk_inventory,
+    const std::vector<DualIdentityInventoryProjection>& wpd_inventory,
+    std::string_view observed_at_utc,
+    bool legacy_map_fallback_requested) {
+    const auto blocked = [](DualIdentityBlockReason reason) -> DualIdentityResult {
+        return DualIdentityBlocked{reason, {}};
+    };
+    if (legacy_map_fallback_requested) {
+        return blocked(DualIdentityBlockReason::legacy_map_fallback_prohibited);
+    }
+    if (!provider || !provider->documented_stable_per_body_correlation ||
+        !IsSafeRequestId(provider->provider_id) || provider->provider_version == 0) {
+        return blocked(DualIdentityBlockReason::identity_strategy_unresolved);
+    }
+    if (proof_paths.size() != 2) {
+        return blocked(DualIdentityBlockReason::proof_count_mismatch);
+    }
+
+    std::vector<DualIdentityBindingProof> proofs;
+    proofs.reserve(2);
+    try {
+        for (const auto& path : proof_paths) {
+            proofs.push_back(LoadDualIdentityBindingProof(path));
+        }
+    } catch (const HardwareCameraAgentProtocolError& error) {
+        return blocked(error.Code() == "DualIdentityProofTampered"
+            ? DualIdentityBlockReason::proof_tampered
+            : DualIdentityBlockReason::proof_invalid);
+    } catch (const std::exception&) {
+        return blocked(DualIdentityBlockReason::proof_invalid);
+    }
+
+    FILETIME observed{};
+    try {
+        observed = ParseProfileUtc(observed_at_utc);
+    } catch (const std::exception&) {
+        return blocked(DualIdentityBlockReason::proof_invalid);
+    }
+    std::size_t proof_cam_a = 0;
+    std::size_t proof_cam_b = 0;
+    for (const auto& proof : proofs) {
+        proof_cam_a += proof.camera_alias == "CAM-A" ? 1U : 0U;
+        proof_cam_b += proof.camera_alias == "CAM-B" ? 1U : 0U;
+        if (proof.provider_id != provider->provider_id ||
+            proof.provider_version != provider->provider_version) {
+            return blocked(DualIdentityBlockReason::provider_mismatch);
+        }
+        if (!proof.single_camera_connected_confirmed ||
+            !proof.documented_correlation_confirmed) {
+            return blocked(DualIdentityBlockReason::confirmation_mismatch);
+        }
+        const FILETIME created = ParseProfileUtc(proof.created_at_utc);
+        const FILETIME expires = ParseProfileUtc(proof.expires_at_utc);
+        if (CompareFileTime(&created, &observed) > 0 ||
+            CompareFileTime(&expires, &observed) <= 0) {
+            return blocked(DualIdentityBlockReason::proof_stale);
+        }
+    }
+    if (proof_cam_a != 1 || proof_cam_b != 1) {
+        return blocked(DualIdentityBlockReason::alias_cardinality_mismatch);
+    }
+    if (proofs[0].sdk_identity_sha256 == proofs[1].sdk_identity_sha256 ||
+        proofs[0].wpd_identity_sha256 == proofs[1].wpd_identity_sha256) {
+        return blocked(DualIdentityBlockReason::identity_collision);
+    }
+    if (sdk_inventory.size() != 2 || wpd_inventory.size() != 2) {
+        return blocked(DualIdentityBlockReason::camera_count_mismatch);
+    }
+
+    const auto validate_inventory = [&](const std::vector<DualIdentityInventoryProjection>& inventory,
+                                        DualIdentityTransport transport) ->
+        std::optional<DualIdentityBlockReason> {
+        std::set<std::string> identities;
+        for (const auto& camera : inventory) {
+            if (camera.transport != transport) {
+                return DualIdentityBlockReason::mismatched_transport;
+            }
+            if (camera.model != "Nikon D810" ||
+                !IsLowerHex(camera.identity_sha256, 64)) {
+                return DualIdentityBlockReason::missing_identity;
+            }
+            if (camera.provider_id != provider->provider_id ||
+                camera.provider_version != provider->provider_version) {
+                return DualIdentityBlockReason::provider_mismatch;
+            }
+            if (!identities.insert(camera.identity_sha256).second) {
+                return DualIdentityBlockReason::duplicate_identity;
+            }
+        }
+        return std::nullopt;
+    };
+    if (const auto reason = validate_inventory(sdk_inventory, DualIdentityTransport::sdk)) {
+        return blocked(*reason);
+    }
+    if (const auto reason = validate_inventory(wpd_inventory, DualIdentityTransport::wpd)) {
+        return blocked(*reason);
+    }
+
+    DualIdentityReady ready;
+    const auto count_matches = [&](const std::vector<DualIdentityInventoryProjection>& inventory,
+                                   DualIdentityTransport transport,
+                                   std::size_t& cam_a,
+                                   std::size_t& cam_b,
+                                   std::size_t& unbound) ->
+        std::optional<DualIdentityBlockReason> {
+        for (const auto& camera : inventory) {
+            bool matched = false;
+            for (const auto& proof : proofs) {
+                const auto& expected = transport == DualIdentityTransport::sdk
+                    ? proof.sdk_identity_sha256 : proof.wpd_identity_sha256;
+                const auto& opposite = transport == DualIdentityTransport::sdk
+                    ? proof.wpd_identity_sha256 : proof.sdk_identity_sha256;
+                if (camera.identity_sha256 == opposite) {
+                    return DualIdentityBlockReason::mismatched_transport;
+                }
+                if (camera.identity_sha256 == expected) {
+                    matched = true;
+                    if (proof.camera_alias == "CAM-A") ++cam_a;
+                    else ++cam_b;
+                }
+            }
+            if (!matched) ++unbound;
+        }
+        return std::nullopt;
+    };
+    if (const auto reason = count_matches(
+            sdk_inventory, DualIdentityTransport::sdk,
+            ready.sdk_cam_a_count, ready.sdk_cam_b_count,
+            ready.sdk_unbound_count)) {
+        return blocked(*reason);
+    }
+    if (const auto reason = count_matches(
+            wpd_inventory, DualIdentityTransport::wpd,
+            ready.wpd_cam_a_count, ready.wpd_cam_b_count,
+            ready.wpd_unbound_count)) {
+        return blocked(*reason);
+    }
+    if (ready.sdk_unbound_count != 0 || ready.wpd_unbound_count != 0) {
+        return blocked(DualIdentityBlockReason::unbound_identity);
+    }
+    if (ready.sdk_cam_a_count != 1 || ready.sdk_cam_b_count != 1 ||
+        ready.wpd_cam_a_count != 1 || ready.wpd_cam_b_count != 1) {
+        return blocked(DualIdentityBlockReason::alias_cardinality_mismatch);
+    }
+    return ready;
+}
+
 SingleCameraIdentityV3 ParseSingleCameraIdentityV3(std::string_view json) {
     const JsonValue root = JsonParser(json).Parse();
     RequireExactFields(root, {

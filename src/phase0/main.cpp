@@ -128,7 +128,7 @@ void Usage() {
         << "    (one lease; SDK then WPD; validates both local maps before either binding)\n"
         << "  bind-single-identity-v3 --alias CAM-A --single-camera-connected-confirmed\n"
         << "    (read-only SDK/WPD enumeration; persists only the WPD serial digest and exact-one SDK policy)\n"
-        << "  verify-dual-identity (read-only; requires exactly CAM-A and CAM-B in SDK and WPD)\n"
+        << "  verify-dual-identity (read-only legacy-map diagnostic; remains identity_strategy_unresolved)\n"
         << "  verify-dual-spools (read-only; requires dual identity, then counts all payloads on both cards)\n"
         << "  sdk-status --alias CAM-A [--single-identity-v3 PATH]\n"
         << "    (SingleCamera identity-v3 by default; read-only; does not start Live View or change camera settings)\n"
