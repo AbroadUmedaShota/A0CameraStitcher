@@ -33,6 +33,7 @@ public enum DualCameraFailureCode
     None,
     InvalidMode,
     InvalidExecutionEnvironment,
+    IdentityNotReady,
     InvalidProfile,
     DuplicateStart,
     CaptureCameraA,
@@ -208,6 +209,8 @@ public sealed record DualCameraProductState
 
     public required string ProfileVersion { get; init; }
 
+    public required DualCameraIdentitySnapshot IdentitySnapshot { get; init; }
+
     public required bool IsActive { get; init; }
 
     public required IReadOnlyList<DualCameraStageRecord> Stages { get; init; }
@@ -257,7 +260,11 @@ public interface IDualCameraProductFlow
 {
     event EventHandler<DualCameraProductState>? StateChanged;
 
+    event EventHandler<DualCameraIdentitySnapshot>? IdentityChanged;
+
     DualCameraProductState? Current { get; }
+
+    DualCameraIdentitySnapshot IdentitySnapshot { get; }
 
     Task<DualCameraProductState> CaptureAndStitchAsync(
         DualCameraCaptureRequest request,

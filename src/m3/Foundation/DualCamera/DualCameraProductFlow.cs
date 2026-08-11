@@ -10,19 +10,36 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
     private readonly string _rootDirectory;
     private readonly ITestSyntheticCamera _camera;
     private readonly IOfflineStitcherAdapter _stitcher;
+    private readonly IDualCameraIdentitySnapshotSource _identitySource;
     private readonly object _sync = new();
     private readonly Dictionary<DualCameraProductStage, DualCameraStageRecord> _stages = [];
     private readonly List<DualCameraStitchResult> _stitchJobs = [];
     private DualCameraProductState? _current;
     private DualCameraRigProfile? _profile;
+    private DualCameraIdentitySnapshot _transactionIdentity = DualCameraIdentitySnapshot.HardwarePending();
     private bool _active;
 
     public event EventHandler<DualCameraProductState>? StateChanged;
+
+    public event EventHandler<DualCameraIdentitySnapshot>? IdentityChanged;
 
     public DualCameraProductFlow(
         string rootDirectory,
         ITestSyntheticCamera camera,
         IOfflineStitcherAdapter stitcher)
+        : this(
+            rootDirectory,
+            camera,
+            stitcher,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()))
+    {
+    }
+
+    public DualCameraProductFlow(
+        string rootDirectory,
+        ITestSyntheticCamera camera,
+        IOfflineStitcherAdapter stitcher,
+        IDualCameraIdentitySnapshotSource identitySource)
     {
         if (string.IsNullOrWhiteSpace(rootDirectory))
         {
@@ -32,8 +49,12 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _rootDirectory = Path.GetFullPath(rootDirectory);
         _camera = camera ?? throw new ArgumentNullException(nameof(camera));
         _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
+        _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
+        _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
     }
+
+    public DualCameraIdentitySnapshot IdentitySnapshot => _identitySource.Current;
 
     public DualCameraProductState? Current
     {
@@ -224,7 +245,16 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                 throw new DualCameraFlowException(DualCameraFailureCode.DuplicateStart, "A DualCamera product operation is already active.");
             }
 
+            var identity = _identitySource.Current;
+            if (!identity.IsReady)
+            {
+                throw new DualCameraFlowException(
+                    DualCameraFailureCode.IdentityNotReady,
+                    $"DualCamera identity is {identity.Status}; capture was rejected before side effects.");
+            }
+
             _active = true;
+            _transactionIdentity = identity with { };
             _profile = request.Profile with
             {
                 CameraBToCameraA = Array.AsReadOnly(request.Profile.CameraBToCameraA.ToArray()),
@@ -509,6 +539,23 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
     }
 
+    private void OnIdentitySnapshotChanged(object? sender, DualCameraIdentitySnapshot snapshot)
+    {
+        var handlers = IdentityChanged;
+        if (handlers is null) return;
+        foreach (EventHandler<DualCameraIdentitySnapshot> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, snapshot);
+            }
+            catch (Exception)
+            {
+                // Identity gating must not depend on a UI observer.
+            }
+        }
+    }
+
     private IReadOnlyList<CanonicalJpegOriginal> DiscoverValidatedOriginals(Guid transactionId)
     {
         var originals = new List<CanonicalJpegOriginal>();
@@ -582,6 +629,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             TransactionId = transactionId ?? previous?.TransactionId ?? Guid.Empty,
             ProfileId = profile?.ProfileId ?? previous?.ProfileId ?? string.Empty,
             ProfileVersion = profile?.Version ?? previous?.ProfileVersion ?? string.Empty,
+            IdentitySnapshot = previous?.IdentitySnapshot ?? _transactionIdentity,
             IsActive = _active,
             Stages = _stages.Values.OrderBy(record => record.Stage).ToArray(),
             Capture = capture ?? previous?.Capture,

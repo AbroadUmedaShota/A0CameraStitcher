@@ -72,6 +72,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         if (_dualCameraFlow is not null)
         {
             _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
+            _dualCameraFlow.IdentityChanged += OnDualCameraIdentityChanged;
         }
         ProgressSteps =
         [
@@ -326,8 +327,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string BlockerText => FormatNotices(OperatorWarningSeverity.Blocker, "赤: Blockerなし");
     public string CautionText => FormatNotices(OperatorWarningSeverity.Caution, "黄: Cautionなし");
     public string InfoText => FormatNotices(OperatorWarningSeverity.Info, "青: PC原本を保持 / Live Viewは非原画像 / シャッター時刻差は非保証");
-    public bool CanCapture => _availability.Capture.Allowed;
-    public string CaptureDisabledReason => CanCapture ? "準備完了。確認ダイアログなしで一度だけ開始します。" : _availability.Capture.DisabledReason;
+    public bool CanCapture => _availability.Capture.Allowed &&
+        (IsSingleCameraMode || _dualCameraFlow is null || _dualCameraFlow.IdentitySnapshot.IsReady);
+    public string CaptureDisabledReason => CanCapture
+        ? "準備完了。確認ダイアログなしで一度だけ開始します。"
+        : !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
+            ? $"DualCamera identity: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
+            : _availability.Capture.DisabledReason;
     public bool CanUseLiveView => _availability.LiveView.Allowed;
     public bool CanExport => _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
@@ -604,6 +610,17 @@ public sealed class OperatorShellViewModel : ObservableObject
             return;
         }
         ApplyFormalDualCameraState(state);
+    }
+
+    private void OnDualCameraIdentityChanged(object? sender, DualCameraIdentitySnapshot snapshot)
+    {
+        _ = snapshot;
+        if (_synchronizationContext is not null && SynchronizationContext.Current != _synchronizationContext)
+        {
+            _synchronizationContext.Post(_ => RebuildReadiness(preserveOutcomeState: true), null);
+            return;
+        }
+        RebuildReadiness(preserveOutcomeState: true);
     }
 
     private void ApplyFormalDualCameraState(DualCameraProductState state)

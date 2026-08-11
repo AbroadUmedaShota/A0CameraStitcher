@@ -16,7 +16,12 @@ internal static class DualCameraProductComposition
             return new UnavailableDualCameraProductFlow(adapterPath);
         }
         var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
-        return new DualCameraProductFlow(artifactRoot, adapter, adapter);
+        return new DualCameraProductFlow(
+            artifactRoot,
+            adapter,
+            adapter,
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
     }
 
     private sealed class UnavailableDualCameraProductFlow(string expectedPath) : IDualCameraProductFlow
@@ -27,7 +32,15 @@ internal static class DualCameraProductComposition
             remove { }
         }
 
+        public event EventHandler<DualCameraIdentitySnapshot>? IdentityChanged
+        {
+            add { }
+            remove { }
+        }
+
         public DualCameraProductState? Current => null;
+
+        public DualCameraIdentitySnapshot IdentitySnapshot => DualCameraIdentitySnapshot.HardwarePending();
 
         public Task<DualCameraProductState> CaptureAndStitchAsync(
             DualCameraCaptureRequest request,

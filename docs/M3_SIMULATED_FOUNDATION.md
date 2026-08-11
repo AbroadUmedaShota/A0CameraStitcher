@@ -37,6 +37,8 @@ WPF shellのlocal stateは`%LOCALAPPDATA%\A0CameraStitcher\m3-simulated`へ置�
 
 起動時同意は永続化しない。`Ready`と`ReadyWithCorrection`だけが追加ダイアログなしの撮影を許可し、処理開始後はcommandとaction contractの両方で二重開始を拒否する。詳細な操作順、警告、禁止操作、失敗復旧は`docs/OPERATOR_UI_SPEC.md`を正とする。
 
+DualCameraのapplication flowは、C++ identity proof結果を匿名JSON DTOから`Ready`、`Missing`、`Ambiguous`、`Collision`、`AliasMismatch`、`TransportMismatch`、`Expired`、`InvalidSchema`、`HardwarePending`へ変換する。`Ready`以外はWPFとflow APIの両方で撮影開始前に拒否し、SingleCameraへfallbackしない。active transactionは開始時snapshotを固定する。`TestSynthetic`だけが明示的な匿名Ready snapshotを注入し、実provider未確定の経路は`HardwarePending`を既定値として維持する。このsoftware-only adapterと契約試験は、実機identity readiness、SDK/WPD correlation、card access、capture、Live View、設定変更、削除を承認・実行するものではない。
+
 ## 実行と検証
 
 ```powershell

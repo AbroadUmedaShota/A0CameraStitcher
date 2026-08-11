@@ -80,6 +80,17 @@ catch (Exception exception)
 
 try
 {
+    await DualIdentityBlocksWpfCaptureAsync();
+    Console.WriteLine("PASS non-ready dual identity blocks WPF and capture side effects");
+}
+catch (Exception exception)
+{
+    failures.Add("non-ready dual identity blocks WPF and capture side effects");
+    Console.Error.WriteLine($"FAIL non-ready dual identity blocks WPF and capture side effects: {exception}");
+}
+
+try
+{
     await FormalDualCameraWpfFlowAsync();
     Console.WriteLine("PASS formal WPF dual-camera flow uses real JPEG product artifacts");
 }
@@ -1349,6 +1360,39 @@ static async Task DualCameraRegressionAsync()
     }
 }
 
+static async Task DualIdentityBlocksWpfCaptureAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-DualIdentityWpfTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var bridge = new NeverCaptureDualBridge();
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()));
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            flow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(viewModel.CanCapture, "HardwarePending identity must close the WPF capture gate.");
+        Check.True(viewModel.CaptureDisabledReason.Contains("HardwarePending", StringComparison.Ordinal),
+            "The typed identity blocker must be visible without identifiers.");
+        viewModel.CaptureCommand.Execute(null);
+        Check.Equal(0, viewModel.TransactionStartCount);
+        Check.Equal(0, bridge.CaptureCalls);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task FormalDualCameraWpfFlowAsync()
 {
     var previousAdapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
@@ -1440,7 +1484,12 @@ static async Task FormalDualCameraExportFailureProgressAsync()
     {
         var native = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
         var bridge = new BlockingFailedExportBridge(native);
-        var flow = new DualCameraProductFlow(productRoot, bridge, bridge);
+        var flow = new DualCameraProductFlow(
+            productRoot,
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(transactionRoot),
             flow);
@@ -2044,6 +2093,38 @@ static class HardwareTestData
             FocusMode = Setting("profile-match"),
         };
     }
+}
+
+sealed class NeverCaptureDualBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
+{
+    public int CaptureCalls { get; private set; }
+
+    public Task<string> CaptureAsync(
+        string alias,
+        Guid transactionId,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        _ = alias;
+        _ = transactionId;
+        _ = destinationPath;
+        _ = cancellationToken;
+        CaptureCalls++;
+        return Task.FromException<string>(new InvalidOperationException("Identity gate was bypassed."));
+    }
+
+    public Task ValidateCanonicalJpegAsync(string jpegPath, int expectedWidth, int expectedHeight, CancellationToken cancellationToken) =>
+        Task.FromException(new InvalidOperationException("Identity gate was bypassed."));
+
+    public Task<OfflineStitchArtifact> StitchAsync(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        string outputJobDirectory,
+        DualCameraRigProfile profile,
+        CancellationToken cancellationToken) =>
+        Task.FromException<OfflineStitchArtifact>(new InvalidOperationException("Identity gate was bypassed."));
+
+    public Task ExportAsync(string stitchedJpeg, string destinationJpeg, CancellationToken cancellationToken) =>
+        Task.FromException(new InvalidOperationException("Identity gate was bypassed."));
 }
 
 sealed class BlockingFailedExportBridge(M2OfflineStitcherProcessAdapter inner) :

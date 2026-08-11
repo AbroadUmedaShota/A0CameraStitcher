@@ -3,6 +3,8 @@ using A0CameraStitcher.M3.Foundation.DualCamera;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("anonymous native identity DTO maps to typed states", IdentityAdapterAsync),
+    ("identity gate rejects before capture and freezes active snapshot", IdentityGateAsync),
     ("native capture stitch restitch export E2E", NativeEndToEndAsync),
     ("malformed and oversized JPEG fail closed", InvalidJpegAsync),
     ("WIC rejects fake SOF truncated scan and corrupt entropy before stitch", CorruptJpegDecodeAsync),
@@ -30,6 +32,138 @@ foreach (var test in tests)
 Console.WriteLine($"DualCamera flow tests: {tests.Length - failures.Count}/{tests.Length} passed.");
 return failures.Count == 0 ? 0 : 1;
 
+static Task IdentityAdapterAsync()
+{
+    const string schema = "a0.dual-identity-application.v1";
+    var now = DateTimeOffset.Parse("2026-08-11T00:00:00Z");
+    var ready = IdentityJson(schema, "ready", [
+        ("CAM-B", new string('b', 64), new string('d', 64)),
+        ("CAM-A", new string('a', 64), new string('c', 64)),
+    ]);
+    Check.Equal(DualCameraIdentityStatus.Ready,
+        DualCameraNativeIdentityAdapter.ParseAnonymousSnapshot(ready, now).Status);
+
+    var cases = new (string Json, DualCameraIdentityStatus Status)[]
+    {
+        (IdentityJson(schema, "camera_count_mismatch", []), DualCameraIdentityStatus.Missing),
+        (IdentityJson(schema, "unbound_identity", []), DualCameraIdentityStatus.Ambiguous),
+        (IdentityJson(schema, "duplicate_identity", []), DualCameraIdentityStatus.Collision),
+        (IdentityJson(schema, "alias_cardinality_mismatch", []), DualCameraIdentityStatus.AliasMismatch),
+        (IdentityJson(schema, "mismatched_transport", []), DualCameraIdentityStatus.TransportMismatch),
+        (IdentityJson(schema, "proof_stale", []), DualCameraIdentityStatus.Expired),
+        (IdentityJson(schema, "proof_invalid", []), DualCameraIdentityStatus.InvalidSchema),
+        (IdentityJson(schema, "identity_strategy_unresolved", []), DualCameraIdentityStatus.HardwarePending),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+        ]), DualCameraIdentityStatus.Missing),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+            ("CAM-A", new string('b', 64), new string('d', 64)),
+        ]), DualCameraIdentityStatus.AliasMismatch),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+            ("CAM-B", new string('a', 64), new string('d', 64)),
+        ]), DualCameraIdentityStatus.Collision),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+            ("CAM-B", new string('b', 64), string.Empty),
+        ]), DualCameraIdentityStatus.Missing),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+            ("CAM-B", new string('b', 64), new string('a', 64)),
+        ]), DualCameraIdentityStatus.TransportMismatch),
+        (IdentityJson(schema, "ready", [
+            ("CAM-A", new string('a', 64), new string('c', 64)),
+            ("UNKNOWN", new string('b', 64), new string('d', 64)),
+        ]), DualCameraIdentityStatus.AliasMismatch),
+        (IdentityJson("a0.dual-identity-application.v2", "ready", []), DualCameraIdentityStatus.InvalidSchema),
+        ("{malformed", DualCameraIdentityStatus.InvalidSchema),
+    };
+    foreach (var (json, status) in cases)
+    {
+        var snapshot = DualCameraNativeIdentityAdapter.ParseAnonymousSnapshot(json, now);
+        Check.Equal(status, snapshot.Status);
+        Check.False(snapshot.ToString().Contains(new string('a', 64), StringComparison.Ordinal));
+    }
+    const string unsafeUnknownReason = "CameraBody7ABCDEF123456789XYZ";
+    var sanitized = DualCameraNativeIdentityAdapter.ParseAnonymousSnapshot(
+        IdentityJson(schema, unsafeUnknownReason, []),
+        now);
+    Check.Equal(DualCameraIdentityStatus.InvalidSchema, sanitized.Status);
+    Check.False(sanitized.ToString().Contains(unsafeUnknownReason, StringComparison.Ordinal));
+    return Task.CompletedTask;
+}
+
+static async Task IdentityGateAsync()
+{
+    await WithRootAsync(async root =>
+    {
+        var bridge = new FailureBridge();
+        var flow = new DualCameraProductFlow(root, bridge, bridge);
+        Check.Equal(DualCameraIdentityStatus.HardwarePending, flow.IdentitySnapshot.Status);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        Check.Equal(0, bridge.CaptureCalls);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidMode,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()) with
+            { Mode = CameraOperatingMode.SingleCamera }));
+        Check.Equal(0, bridge.CaptureCalls);
+    });
+
+    foreach (var status in Enum.GetValues<DualCameraIdentityStatus>().Where(value => value != DualCameraIdentityStatus.Ready))
+    {
+        await WithRootAsync(async root =>
+        {
+            var bridge = new FailureBridge();
+            var snapshot = new DualCameraIdentitySnapshot(
+                status,
+                "anonymous_test_block",
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch);
+            var flow = new DualCameraProductFlow(
+                root,
+                bridge,
+                bridge,
+                new FixedDualCameraIdentitySnapshotSource(snapshot));
+            await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+                () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+            Check.Equal(0, bridge.CaptureCalls);
+        });
+    }
+
+    await WithRootAsync(async root =>
+    {
+        var camera = new BlockingCamera();
+        var bridge = new FailureBridge();
+        var source = new MutableIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        var flow = new DualCameraProductFlow(root, camera, bridge, source);
+        var first = flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+        await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        source.Set(DualCameraIdentitySnapshot.HardwarePending());
+        Check.Equal(DualCameraIdentityStatus.Ready, flow.Current!.IdentitySnapshot.Status);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.DuplicateStart,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        camera.Release.TrySetResult();
+        var completed = await first;
+        Check.Equal(DualCameraIdentityStatus.Ready, completed.IdentitySnapshot.Status);
+        Check.Equal(2, camera.CaptureCalls);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        Check.Equal(2, camera.CaptureCalls);
+    });
+}
+
+static string IdentityJson(
+    string schema,
+    string reason,
+    IReadOnlyList<(string Alias, string Sdk, string Wpd)> bindings)
+{
+    var bindingJson = string.Join(",", bindings.Select(binding =>
+        $"{{\"alias\":\"{binding.Alias}\",\"sdkIdentitySha256\":\"{binding.Sdk}\",\"wpdIdentitySha256\":\"{binding.Wpd}\"}}"));
+    return $"{{\"schemaVersion\":\"{schema}\",\"reason\":\"{reason}\",\"observedAtUtc\":\"2026-08-11T00:00:00Z\",\"expiresAtUtc\":\"2026-08-12T00:00:00Z\",\"bindings\":[{bindingJson}]}}";
+}
+
 static async Task NativeEndToEndAsync()
 {
     var adapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
@@ -40,7 +174,7 @@ static async Task NativeEndToEndAsync()
     await WithRootAsync(async root =>
     {
         var bridge = new M2OfflineStitcherProcessAdapter(adapterPath);
-        IDualCameraProductFlow flow = new DualCameraProductFlow(root, bridge, bridge);
+        IDualCameraProductFlow flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
         var captured = await flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
         Check.Equal(CameraOperatingMode.DualCamera, captured.Mode);
@@ -83,7 +217,7 @@ static async Task InvalidJpegAsync()
         await WithRootAsync(async root =>
         {
             var bridge = new FailureBridge { InvalidPayload = payload };
-            var flow = new DualCameraProductFlow(root, bridge, bridge);
+            var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
             var result = await flow.CaptureAndStitchAsync(
                 DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
             if (result.FailureCode != DualCameraFailureCode.InvalidOriginal)
@@ -109,7 +243,7 @@ static async Task CorruptJpegDecodeAsync()
         await WithRootAsync(async root =>
         {
             var bridge = new M2OfflineStitcherProcessAdapter(adapterPath);
-            var flow = new DualCameraProductFlow(root, new CorruptJpegCamera(payload), bridge);
+            var flow = new DualCameraProductFlow(root, new CorruptJpegCamera(payload), bridge, SyntheticIdentitySource());
             var result = await flow.CaptureAndStitchAsync(
                 DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
             if (result.FailureCode != DualCameraFailureCode.InvalidOriginal)
@@ -128,7 +262,7 @@ static async Task InvalidProfilesAsync()
     await WithRootAsync(async root =>
     {
         var bridge = new FailureBridge();
-        var flow = new DualCameraProductFlow(root, bridge, bridge);
+        var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
         var draft = DualCameraRigProfile.ApprovedSynthetic() with { Status = DualCameraProfileStatus.Draft };
         var singular = DualCameraRigProfile.ApprovedSynthetic() with { CameraBToCameraA = new double[9] };
         await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidProfile, () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(draft)));
@@ -143,7 +277,7 @@ static async Task ConcurrencyAndModeLockAsync()
     {
         var camera = new BlockingCamera();
         var bridge = new FailureBridge();
-        var flow = new DualCameraProductFlow(root, camera, bridge);
+        var flow = new DualCameraProductFlow(root, camera, bridge, SyntheticIdentitySource());
         var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic());
         var first = flow.CaptureAndStitchAsync(request);
         await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -165,7 +299,7 @@ static async Task CaptureFailuresAsync()
         await WithRootAsync(async root =>
         {
             var bridge = new FailureBridge { FailCaptureAlias = alias };
-            var flow = new DualCameraProductFlow(root, bridge, bridge);
+            var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
             var result = await flow.CaptureAndStitchAsync(
                 DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
             Check.Equal(alias == "CAM-A" ? DualCameraFailureCode.CaptureCameraA : DualCameraFailureCode.CaptureCameraB, result.FailureCode);
@@ -184,7 +318,7 @@ static async Task InterruptionAsync()
         using var cancellation = new CancellationTokenSource();
         var camera = new CancelOnCameraB(cancellation);
         var bridge = new FailureBridge();
-        var flow = new DualCameraProductFlow(root, camera, bridge);
+        var flow = new DualCameraProductFlow(root, camera, bridge, SyntheticIdentitySource());
         var result = await flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()),
             cancellation.Token);
@@ -202,7 +336,7 @@ static async Task OutputFailuresAsync()
     await WithRootAsync(async root =>
     {
         var bridge = new FailureBridge { FailStitch = true };
-        var flow = new DualCameraProductFlow(root, bridge, bridge);
+        var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
         var failed = await flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
         Check.Equal(DualCameraFailureCode.StitchFailed, failed.FailureCode);
@@ -215,7 +349,7 @@ static async Task OutputFailuresAsync()
     await WithRootAsync(async root =>
     {
         var bridge = new FailureBridge();
-        var flow = new DualCameraProductFlow(root, bridge, bridge);
+        var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
         var completed = await flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
         var stitchedBytes = File.ReadAllBytes(completed.Stitch!.OutputPath);
@@ -246,6 +380,9 @@ static async Task WithRootAsync(Func<string, Task> action)
     try { await action(root); }
     finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 }
+
+static IDualCameraIdentitySnapshotSource SyntheticIdentitySource() =>
+    new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
 
 enum InvalidPayload { None, Malformed, Oversized }
 
@@ -410,6 +547,19 @@ static class TestJpegBytes
 {
     public static readonly byte[] Value = Convert.FromBase64String(
         "/9j/4AAQSkZJRgABAQEAAAAAAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAIABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5/ooor8kP9Cz/2Q==");
+}
+
+sealed class MutableIdentitySource(DualCameraIdentitySnapshot initial) : IDualCameraIdentitySnapshotSource
+{
+    public event EventHandler<DualCameraIdentitySnapshot>? SnapshotChanged;
+
+    public DualCameraIdentitySnapshot Current { get; private set; } = initial;
+
+    public void Set(DualCameraIdentitySnapshot snapshot)
+    {
+        Current = snapshot;
+        SnapshotChanged?.Invoke(this, snapshot);
+    }
 }
 
 static class Check
