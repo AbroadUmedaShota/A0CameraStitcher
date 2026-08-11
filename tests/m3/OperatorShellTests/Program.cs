@@ -1025,9 +1025,13 @@ static void HardwareLaunchOptionsAreExplicit()
     Check.Equal(ApplicationLaunchMode.Launcher, launcher.Mode);
     var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", "C:\\agent\\A0CameraStitcher.CameraAgent.exe"], baseDirectory);
     Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
+    var hardwareDual = ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory);
+    Check.Equal(ApplicationLaunchMode.HardwareDual, hardwareDual.Mode);
     var simulated = ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory);
     Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
     Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--hardware-single"], baseDirectory));
+    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual", "--hardware-single"], baseDirectory));
+    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual", "--camera-agent", "C:\\agent\\agent.exe"], baseDirectory));
     Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--camera-agent", "C:\\agent\\agent.exe"], baseDirectory));
     Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve(string.Empty));
     Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve("relative-local-app-data"));
@@ -1467,6 +1471,60 @@ static async Task FormalDualCameraWpfFlowAsync()
     try
     {
         var productFlow = DualCameraProductComposition.Create(productRoot);
+        var pendingHardwareFlow = DualCameraProductComposition.Create(
+            Path.Combine(root, "hardware-pending-products"),
+            DualCameraExecutionEnvironment.HardwareDual);
+        var pendingViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "hardware-pending-journals")),
+            pendingHardwareFlow);
+        await pendingViewModel.InitializeAsync(CancellationToken.None);
+        pendingViewModel.FixedLocalExportDirectory = exportRoot;
+        pendingViewModel.AcceptSafetyCommand.Execute(null);
+        Check.Equal(DualCameraIdentityStatus.HardwarePending, pendingHardwareFlow.IdentitySnapshot.Status);
+        Check.False(pendingViewModel.CanCapture, "HardwareDual production composition must remain HardwarePending without provider/Agent operations.");
+        Check.Equal(OperatorShellViewModel.HardwareDualPendingBanner, pendingViewModel.BannerText);
+
+        var hardwareAdapter = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
+        var hardwareOperations = new WpfHardwareDualFakeOperations(hardwareAdapter);
+        var hardwareFlow = new DualCameraProductFlow(
+            Path.Combine(root, "hardware-fake-products"),
+            new HardwareDualCaptureSource(hardwareOperations),
+            hardwareAdapter,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+        var noRequestProviderViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "hardware-no-request-provider-journals")),
+            hardwareFlow);
+        await noRequestProviderViewModel.InitializeAsync(CancellationToken.None);
+        noRequestProviderViewModel.FixedLocalExportDirectory = exportRoot;
+        noRequestProviderViewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(noRequestProviderViewModel.CanCapture, "Ready identity alone must not bypass approved profile and explicit confirmation injection.");
+        Check.True(noRequestProviderViewModel.CaptureDisabledReason.Contains("explicit operator confirmations", StringComparison.Ordinal), "The WPF blocker must identify the missing HardwareDual request boundary.");
+        var hardwareViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "hardware-fake-journals")),
+            hardwareFlow,
+            () => DualCameraCaptureRequest.CreateHardwareDual(
+                DualCameraRigProfile.ApprovedSynthetic(),
+                HardwareDualCaptureProfile.ApprovedSynthetic(),
+                new HardwareDualOperatorConfirmations(true, true, true, true, true),
+                Guid.NewGuid()));
+        await hardwareViewModel.InitializeAsync(CancellationToken.None);
+        hardwareViewModel.FixedLocalExportDirectory = exportRoot;
+        hardwareViewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(hardwareViewModel.CanCapture, "Explicit fake Agent, Ready identity, approved profiles, and confirmations must enable the software-only HardwareDual path.");
+        hardwareViewModel.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => hardwareViewModel.TransactionStartCount == 1 && !hardwareViewModel.IsBusy,
+            "HardwareDual WPF fake capture did not finish.");
+        Check.Equal(OperatorUiState.Review, hardwareViewModel.UiState);
+        Check.Equal(1, hardwareOperations.StartCalls);
+        Check.True(hardwareViewModel.RetainedOriginals.Contains("CAM-A: original.jpg", StringComparison.Ordinal), "HardwareDual WPF must retain CAM-A original.");
+        Check.True(hardwareViewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "HardwareDual WPF must retain CAM-B original.");
+        hardwareViewModel.ExportCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !hardwareViewModel.IsBusy && hardwareViewModel.ExportResult.Contains("byte-identical", StringComparison.Ordinal),
+            "HardwareDual WPF fixed-local export did not finish.");
+        Check.True(File.Exists(hardwareViewModel.LastExportPath), "HardwareDual WPF must publish the explicit fixed-local export.");
+
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(transactionRoot),
             productFlow);
@@ -2149,6 +2207,51 @@ static class HardwareTestData
             FocusMode = Setting("profile-match"),
         };
     }
+}
+
+sealed class WpfHardwareDualFakeOperations(ITestSyntheticCamera camera) : IDualHardwareCaptureOperations
+{
+    public int StartCalls { get; private set; }
+
+    public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) =>
+        Task.FromResult(true);
+
+    public async Task<DualHardwareDispatchResult> StartReservedPairAsync(
+        DualHardwareCaptureRequest request,
+        CancellationToken cancellationToken)
+    {
+        StartCalls++;
+        var originals = new List<DualHardwareOriginalRecord>();
+        foreach (var alias in new[] { "CAM-A", "CAM-B" })
+        {
+            var path = Path.Combine(request.TransactionDirectory, alias, "original.jpg");
+            await camera.CaptureAsync(alias, request.TransactionId, path, cancellationToken);
+            originals.Add(new(alias, path, true, true));
+        }
+        var evidence = new DualHardwareCaptureEvidence(
+            DualHardwareCaptureTerminalState.Succeeded,
+            request.IdentitySnapshot,
+            request.CaptureProfileSnapshot.ProfileId,
+            request.CaptureProfileSnapshot.Version,
+            request.RigProfileSnapshot.ProfileId,
+            request.RigProfileSnapshot.Version,
+            request.StartedAtUtc,
+            request.WatchdogDeadlineUtc,
+            request.StartedAtUtc.AddSeconds(1),
+            true, true, true, true, 0);
+        return new(
+            DualHardwareDispatchState.Completed,
+            new DualHardwareCaptureResult(
+                request.TransactionId,
+                originals,
+                DualHardwareCaptureTerminalState.Succeeded,
+                DualCameraFailureCode.None,
+                evidence));
+    }
+
+    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken) => Task.FromResult<DualHardwareCaptureResult?>(null);
 }
 
 sealed class NeverCaptureDualBridge : ITestSyntheticCamera, IOfflineStitcherAdapter

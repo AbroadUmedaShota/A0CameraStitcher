@@ -11,11 +11,13 @@ public sealed record CameraSettingRow(string Setting, string RequiredProfile, st
 public sealed class OperatorShellViewModel : ObservableObject
 {
     public const string SimulationBanner = "SIMULATED / 実機未接続";
+    public const string HardwareDualPendingBanner = "HARDWARE DUAL / provider未接続 / 撮影禁止";
     private const string SingleModeLabel = "1台構成";
     private const string DualModeLabel = "2台構成";
 
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
+    private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
     private readonly AsyncRelayCommand _captureCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
@@ -65,10 +67,12 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public OperatorShellViewModel(
         ISimulatedTransactionService transactionService,
-        IDualCameraProductFlow? dualCameraFlow)
+        IDualCameraProductFlow? dualCameraFlow,
+        Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
+        _hardwareDualRequestProvider = hardwareDualRequestProvider;
         if (_dualCameraFlow is not null)
         {
             _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
@@ -102,7 +106,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         ResetProgress();
     }
 
-    public string BannerText => SimulationBanner;
+    public string BannerText => _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
+        ? HardwareDualPendingBanner
+        : SimulationBanner;
     public IReadOnlyList<string> OperatingModeOptions { get; } = [SingleModeLabel, DualModeLabel];
     public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A", "CAM-B"];
     public IReadOnlyList<string> ReadinessDemoOptions { get; } = ["補正不要", "自動補正範囲内", "物理調整が必要", "CAM-A未接続", "CAM-B未接続", "カード状態要確認"];
@@ -328,11 +334,17 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string CautionText => FormatNotices(OperatorWarningSeverity.Caution, "黄: Cautionなし");
     public string InfoText => FormatNotices(OperatorWarningSeverity.Info, "青: PC原本を保持 / Live Viewは非原画像 / シャッター時刻差は非保証");
     public bool CanCapture => _availability.Capture.Allowed &&
-        (IsSingleCameraMode || _dualCameraFlow is null || _dualCameraFlow.IdentitySnapshot.IsReady);
+        (IsSingleCameraMode || _dualCameraFlow is null ||
+            (_dualCameraFlow.IdentitySnapshot.IsReady &&
+             (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
+              _hardwareDualRequestProvider is not null)));
     public string CaptureDisabledReason => CanCapture
         ? "準備完了。確認ダイアログなしで一度だけ開始します。"
         : !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
             ? $"DualCamera identity: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
+            : !IsSingleCameraMode && _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual &&
+              _hardwareDualRequestProvider is null
+                ? "HardwareDual approved profiles and explicit operator confirmations are unavailable — 撮影禁止"
             : _availability.Capture.DisabledReason;
     public bool CanUseLiveView => _availability.LiveView.Allowed;
     public bool CanExport => _availability.Export.Allowed &&
@@ -566,18 +578,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         StatusMessage = "CAM-A→CAM-Bを一回ずつ撮影し、各canonical original.jpgを検証します。";
         try
         {
-            var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()) with
-            {
-                TestFault = scenario switch
+            var request = flow.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
+                ? (_hardwareDualRequestProvider?.Invoke() ??
+                    throw new DualCameraFlowException(DualCameraFailureCode.HardwarePending, "HardwareDual approved profiles and operator confirmations are unavailable."))
+                : DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()) with
                 {
-                    "Live View停止失敗" => DualCameraTestFault.FailBeforeCapture,
-                    "CAM-A撮影失敗" => DualCameraTestFault.FailCaptureCameraA,
-                    "CAM-B撮影失敗" => DualCameraTestFault.FailCaptureCameraB,
-                    "CAM-A保存後クラッシュ" => DualCameraTestFault.InterruptAfterCameraA,
-                    "合成失敗" => DualCameraTestFault.FailStitch,
-                    _ => DualCameraTestFault.None,
-                },
-            };
+                    TestFault = scenario switch
+                    {
+                        "Live View停止失敗" => DualCameraTestFault.FailBeforeCapture,
+                        "CAM-A撮影失敗" => DualCameraTestFault.FailCaptureCameraA,
+                        "CAM-B撮影失敗" => DualCameraTestFault.FailCaptureCameraB,
+                        "CAM-A保存後クラッシュ" => DualCameraTestFault.InterruptAfterCameraA,
+                        "合成失敗" => DualCameraTestFault.FailStitch,
+                        _ => DualCameraTestFault.None,
+                    },
+                };
             var state = await flow.CaptureAndStitchAsync(
                 request,
                 _lifetimeToken).ConfigureAwait(true);
@@ -625,10 +640,10 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void ApplyFormalDualCameraState(DualCameraProductState state)
     {
-        if (state.Mode != CameraOperatingMode.DualCamera ||
-            state.ExecutionEnvironment != DualCameraExecutionEnvironment.TestSynthetic)
+        if (state.Mode != CameraOperatingMode.DualCamera || _dualCameraFlow is null ||
+            state.ExecutionEnvironment != _dualCameraFlow.ExecutionEnvironment)
         {
-            throw new InvalidDataException("Formal simulated WPF accepts only typed TestSynthetic DualCamera state.");
+            throw new InvalidDataException("Formal WPF accepts only the configured typed DualCamera execution environment.");
         }
 
         LastTransactionId = state.TransactionId == Guid.Empty ? "未実行" : state.TransactionId.ToString("N");

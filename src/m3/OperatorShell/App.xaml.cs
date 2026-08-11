@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 
 namespace A0CameraStitcher.M3.OperatorShell;
 
@@ -32,6 +33,7 @@ public partial class App : Application
             {
                 ApplicationLaunchMode.Simulated => new MainWindow(),
                 ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(options.CameraAgentExecutablePath),
+                ApplicationLaunchMode.HardwareDual => new MainWindow(DualCameraExecutionEnvironment.HardwareDual),
                 _ => new LaunchWindow(options.CameraAgentExecutablePath),
             };
         }
@@ -55,6 +57,7 @@ public enum ApplicationLaunchMode
     Launcher,
     Simulated,
     HardwareSingle,
+    HardwareDual,
 }
 
 public sealed record ApplicationLaunchOptions(
@@ -94,6 +97,14 @@ public sealed record ApplicationLaunchOptions(
                     modeSeen = true;
                     mode = ApplicationLaunchMode.HardwareSingle;
                     break;
+                case "--hardware-dual":
+                    if (modeSeen)
+                    {
+                        throw new ArgumentException("起動モードは一つだけ指定してください。");
+                    }
+                    modeSeen = true;
+                    mode = ApplicationLaunchMode.HardwareDual;
+                    break;
                 case "--camera-agent":
                     if (configuredAgent is not null || ++index >= arguments.Count ||
                         string.IsNullOrWhiteSpace(arguments[index]))
@@ -108,9 +119,9 @@ public sealed record ApplicationLaunchOptions(
             }
         }
 
-        if (configuredAgent is not null && mode == ApplicationLaunchMode.Simulated)
+        if (configuredAgent is not null && mode is ApplicationLaunchMode.Simulated or ApplicationLaunchMode.HardwareDual)
         {
-            throw new ArgumentException("--camera-agent は実機一台構成または起動選択画面でのみ指定できます。");
+            throw new ArgumentException("--camera-agent は実機一台構成または起動選択画面でのみ指定できます。HardwareDual providerは未接続です。");
         }
 
         var agentPath = configuredAgent is null

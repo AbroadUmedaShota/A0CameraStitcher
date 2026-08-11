@@ -21,6 +21,8 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="18" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
             <Border Grid.Column="0" Style="{StaticResource CardStyle}" BorderBrush="#FF2673A5" BorderThickness="2">
                 <StackPanel>
@@ -31,7 +33,16 @@
                             AutomationProperties.Name="実機一台構成を明示選択" />
                 </StackPanel>
             </Border>
-            <Border Grid.Column="2" Style="{StaticResource CardStyle}" BorderBrush="#FF8E1712" BorderThickness="2">
+            <Border Grid.Column="2" Style="{StaticResource CardStyle}" BorderBrush="#FFB06A00" BorderThickness="2">
+                <StackPanel>
+                    <TextBlock Text="実機・二台構成" Style="{StaticResource SectionTitleStyle}" />
+                    <TextBlock Text="HardwareDual契約を使用します。production identity/provider未接続のため現在は撮影不可です。" Margin="0,8,0,12" />
+                    <TextBlock Text="HardwarePending / fallbackなし" FontWeight="Bold" Foreground="#FF8E1712" Margin="0,0,0,12" />
+                    <Button Content="HardwareDual状態を表示" Click="OnHardwareDualClick" Padding="18,12" FontSize="17"
+                            AutomationProperties.Name="実機二台構成を明示選択しHardwarePendingを表示" />
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="4" Style="{StaticResource CardStyle}" BorderBrush="#FF8E1712" BorderThickness="2">
                 <StackPanel>
                     <TextBlock Text="SIMULATED" Style="{StaticResource SectionTitleStyle}" />
                     <TextBlock Text="一台／二台の操作設計とdurable transactionを、実カメラ・SDK・WPDへ接続せず確認します。" Margin="0,8,0,12" />

@@ -14,6 +14,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("capture A and B failures retain only verified originals", CaptureFailuresAsync),
     ("interruption retains originals and never retries", InterruptionAsync),
     ("stitch and export failures preserve product artifacts", OutputFailuresAsync),
+    ("HardwareDual anonymous fake completes capture stitch review export", HardwareDualEndToEndAsync),
+    ("HardwareDual preflight negatives have zero capture side effects", HardwareDualPreflightNegativesAsync),
+    ("HardwareDual Agent negatives retain only safe originals and never retry", HardwareDualAgentNegativesAsync),
+    ("HardwareDual active identity and profile snapshots remain frozen", HardwareDualSnapshotFreezeAsync),
 };
 
 var failures = new List<string>();
@@ -445,6 +449,258 @@ static async Task OutputFailuresAsync()
     });
 }
 
+static async Task HardwareDualEndToEndAsync()
+{
+    await WithRootAsync(async root =>
+    {
+        var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+        var stitcher = new FailureBridge();
+        var flow = HardwareFlow(root, operations, stitcher);
+        var transactionId = Guid.NewGuid();
+        var state = await flow.CaptureAndStitchAsync(HardwareRequest(transactionId));
+        Check.Equal(DualCameraExecutionEnvironment.HardwareDual, state.ExecutionEnvironment);
+        Check.Equal(2, state.Capture!.Originals.Count);
+        Check.True(state.Capture.Originals[0].Path != state.Capture.Originals[1].Path);
+        Check.True(state.Capture.Originals.All(item => Path.GetFileName(item.Path) == "original.jpg"));
+        Check.True(state.Stitch!.Succeeded);
+        Check.Equal(DualHardwareCaptureTerminalState.Succeeded, state.Capture.HardwareEvidence!.TerminalState);
+        Check.Equal(0, state.Capture.HardwareEvidence.AutomaticRetryCount);
+        Check.Equal(1, operations.ReserveCalls);
+        Check.Equal(1, operations.StartCalls);
+        Check.Equal(0, operations.QueryCalls);
+        var originalHashes = state.Capture.Originals.Select(item => item.Sha256).ToArray();
+        var exportDirectory = Path.Combine(root, "exports");
+        Directory.CreateDirectory(exportDirectory);
+        var exported = await flow.ExportAsync(exportDirectory);
+        Check.True(exported.Export!.Succeeded);
+        Check.True(state.Capture.Originals.Select(item => item.Sha256).SequenceEqual(originalHashes));
+        Check.Equal(1, stitcher.StitchCalls);
+        Check.Equal(1, stitcher.ExportCalls);
+    });
+}
+
+static async Task HardwareDualPreflightNegativesAsync()
+{
+    foreach (var status in Enum.GetValues<DualCameraIdentityStatus>().Where(value => value != DualCameraIdentityStatus.Ready))
+    {
+        await WithRootAsync(async root =>
+        {
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+            var stitcher = new FailureBridge();
+            var identity = new DualCameraIdentitySnapshot(status, "anonymous_block", DateTimeOffset.UnixEpoch, DateTimeOffset.MaxValue);
+            var flow = HardwareFlow(root, operations, stitcher, identity);
+            await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady, () => flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid())));
+            AssertNoHardwareCaptureSideEffects(operations, stitcher);
+        });
+    }
+
+    await WithRootAsync(async root =>
+    {
+        var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+        var stitcher = new FailureBridge();
+        var flow = HardwareFlow(root, operations, stitcher);
+        var unconfirmed = HardwareRequest(Guid.NewGuid()) with
+        {
+            HardwareConfirmations = new HardwareDualOperatorConfirmations(true, true, true, false, true),
+        };
+        var result = await flow.CaptureAndStitchAsync(unconfirmed);
+        Check.Equal(DualCameraFailureCode.LiveViewStopFailed, result.FailureCode);
+        AssertNoHardwareCaptureSideEffects(operations, stitcher);
+    });
+
+    foreach (var profile in new[]
+    {
+        DualCameraRigProfile.ApprovedSynthetic() with { Status = DualCameraProfileStatus.Draft },
+        DualCameraRigProfile.ApprovedSynthetic() with { ValidUntilUtc = DateTimeOffset.UnixEpoch },
+        DualCameraRigProfile.ApprovedSynthetic() with { CameraAliases = Array.AsReadOnly(["CAM-A", "CAM-A"]) },
+    })
+    {
+        await WithRootAsync(async root =>
+        {
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+            var stitcher = new FailureBridge();
+            var flow = HardwareFlow(root, operations, stitcher);
+            await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidProfile,
+                () => flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()) with { Profile = profile }));
+            AssertNoHardwareCaptureSideEffects(operations, stitcher);
+        });
+    }
+
+    var approvedCapture = HardwareDualCaptureProfile.ApprovedSynthetic();
+    var mismatchedBodies = approvedCapture.Bodies.ToArray();
+    mismatchedBodies[1] = mismatchedBodies[1] with { JpegQuality = "Normal" };
+    var captureProfileCases = new[]
+    {
+        (approvedCapture with { Status = DualCameraProfileStatus.Draft }, DualCameraFailureCode.InvalidProfile),
+        (approvedCapture with { ValidUntilUtc = DateTimeOffset.UnixEpoch }, DualCameraFailureCode.InvalidProfile),
+        (approvedCapture with { Bodies = Array.AsReadOnly(mismatchedBodies) }, DualCameraFailureCode.ProfileMismatch),
+    };
+    foreach (var (captureProfile, expectedCode) in captureProfileCases)
+    {
+        await WithRootAsync(async root =>
+        {
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+            var stitcher = new FailureBridge();
+            var flow = HardwareFlow(root, operations, stitcher);
+            await Check.ThrowsCodeAsync(expectedCode,
+                () => flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()) with
+                {
+                    HardwareCaptureProfile = captureProfile,
+                }));
+            AssertNoHardwareCaptureSideEffects(operations, stitcher);
+        });
+    }
+
+    await WithRootAsync(async root =>
+    {
+        var stitcher = new FailureBridge();
+        var flow = new DualCameraProductFlow(root, new HardwareDualCaptureSource(null), stitcher, SyntheticIdentitySource());
+        var result = await flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()));
+        Check.Equal(DualCameraFailureCode.HardwarePending, result.FailureCode);
+        Check.Equal(0, stitcher.StitchCalls);
+        Check.Equal(0, stitcher.ExportCalls);
+    });
+}
+
+static async Task HardwareDualAgentNegativesAsync()
+{
+    var cases = new[]
+    {
+        (HardwareFakeScenario.LiveViewUnconfirmed, DualCameraFailureCode.LiveViewStopFailed, 0),
+        (HardwareFakeScenario.SpoolNotEmpty, DualCameraFailureCode.SpoolNotEmpty, 2),
+        (HardwareFakeScenario.CameraAFailure, DualCameraFailureCode.CaptureCameraA, 0),
+        (HardwareFakeScenario.CameraBFailure, DualCameraFailureCode.CaptureCameraB, 1),
+        (HardwareFakeScenario.WatchdogExpired, DualCameraFailureCode.WatchdogExpired, 2),
+        (HardwareFakeScenario.ResponseUnknown, DualCameraFailureCode.AgentResponseUnknown, 0),
+        (HardwareFakeScenario.InvalidSnapshot, DualCameraFailureCode.InvalidOriginal, 2),
+        (HardwareFakeScenario.ExternalPath, DualCameraFailureCode.InvalidOriginal, 0),
+        (HardwareFakeScenario.LateCompletion, DualCameraFailureCode.WatchdogExpired, 2),
+    };
+    foreach (var (scenario, code, retainedCount) in cases)
+    {
+        await WithRootAsync(async root =>
+        {
+            var operations = new FakeDualHardwareOperations(scenario);
+            var stitcher = new FailureBridge();
+            var flow = HardwareFlow(root, operations, stitcher);
+            var transactionId = Guid.NewGuid();
+            var result = await flow.CaptureAndStitchAsync(HardwareRequest(transactionId));
+            Check.Equal(code, result.FailureCode);
+            Check.Equal(retainedCount, result.Capture!.Originals.Count);
+            Check.Equal(0, result.AutomaticRetryCount);
+            Check.Equal(scenario != HardwareFakeScenario.ResponseUnknown, result.Capture.HardwareEvidence is not null);
+            Check.Equal(0, stitcher.StitchCalls);
+            Check.Equal(0, stitcher.ExportCalls);
+            Check.Equal(1, operations.StartCalls);
+            Check.Equal(scenario == HardwareFakeScenario.ResponseUnknown ? 1 : 0, operations.QueryCalls);
+            Check.False((result.FailureReason ?? string.Empty).Contains("CameraBody", StringComparison.Ordinal));
+            if (scenario == HardwareFakeScenario.ResponseUnknown)
+            {
+                var blocked = await flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()));
+                Check.Equal(DualCameraFailureCode.AgentResponseUnknown, blocked.FailureCode);
+                Check.Equal(1, operations.ReserveCalls);
+                Check.Equal(1, operations.StartCalls);
+                Check.Equal(1, operations.QueryCalls);
+                var recovered = await flow.CaptureAndStitchAsync(HardwareRequest(transactionId));
+                Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
+                Check.Equal(2, recovered.Capture!.Originals.Count);
+                Check.Equal(1, operations.ReserveCalls);
+                Check.Equal(1, operations.StartCalls);
+                Check.Equal(2, operations.QueryCalls);
+                Check.Equal(1, stitcher.StitchCalls);
+            }
+        });
+    }
+
+    await WithRootAsync(async root =>
+    {
+        var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success);
+        var stitcher = new FailureBridge();
+        var flow = HardwareFlow(root, operations, stitcher);
+        var id = Guid.NewGuid();
+        var first = await flow.CaptureAndStitchAsync(HardwareRequest(id));
+        Check.True(first.Capture!.Succeeded);
+        var duplicate = await flow.CaptureAndStitchAsync(HardwareRequest(id));
+        Check.Equal(DualCameraFailureCode.DuplicateStart, duplicate.FailureCode);
+        Check.Equal(1, operations.StartCalls);
+        Check.Equal(0, operations.QueryCalls);
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidExecutionEnvironment,
+            () => flow.CaptureAndStitchAsync(DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic())));
+        Check.Equal(1, operations.StartCalls);
+    });
+}
+
+static async Task HardwareDualSnapshotFreezeAsync()
+{
+    await WithRootAsync(async root =>
+    {
+        var matrix = DualCameraRigProfile.ApprovedSynthetic().CameraBToCameraA.ToList();
+        var crop = DualCameraRigProfile.ApprovedSynthetic().Crop.ToList();
+        var profile = DualCameraRigProfile.ApprovedSynthetic() with { CameraBToCameraA = matrix, Crop = crop };
+        var identitySource = new MutableIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        var operations = new BlockingDualHardwareOperations();
+        var stitcher = new FailureBridge();
+        var flow = new DualCameraProductFlow(root, new HardwareDualCaptureSource(operations), stitcher, identitySource);
+        var active = flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateHardwareDual(
+                profile,
+                HardwareDualCaptureProfile.ApprovedSynthetic(),
+                new HardwareDualOperatorConfirmations(true, true, true, true, true),
+                Guid.NewGuid()));
+        await operations.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        identitySource.Set(DualCameraIdentitySnapshot.HardwarePending());
+        matrix[0] = 0;
+        matrix[4] = 0;
+        matrix[8] = 0;
+        crop[0] = 999;
+        Check.Equal(DualCameraIdentityStatus.Ready, flow.Current!.IdentitySnapshot.Status);
+        Check.Equal(1.0, operations.Request!.RigProfileSnapshot.CameraBToCameraA[0]);
+        Check.Equal(1, operations.Request.RigProfileSnapshot.Crop[0]);
+        operations.Release.TrySetResult();
+        var completed = await active;
+        Check.Equal(DualCameraFailureCode.None, completed.FailureCode);
+        Check.Equal(DualCameraIdentityStatus.Ready, completed.IdentitySnapshot.Status);
+        identitySource.Set(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidProfile,
+            () => flow.CaptureAndStitchAsync(
+                DualCameraCaptureRequest.CreateHardwareDual(
+                    profile,
+                    HardwareDualCaptureProfile.ApprovedSynthetic(),
+                    new HardwareDualOperatorConfirmations(true, true, true, true, true),
+                    Guid.NewGuid())));
+        identitySource.Set(DualCameraIdentitySnapshot.HardwarePending());
+        await Check.ThrowsCodeAsync(DualCameraFailureCode.IdentityNotReady,
+            () => flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid())));
+        Check.Equal(1, operations.StartCalls);
+    });
+}
+
+static DualCameraProductFlow HardwareFlow(
+    string root,
+    FakeDualHardwareOperations operations,
+    IOfflineStitcherAdapter stitcher,
+    DualCameraIdentitySnapshot? identity = null) => new(
+        root,
+        new HardwareDualCaptureSource(operations),
+        stitcher,
+        new FixedDualCameraIdentitySnapshotSource(identity ?? DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+static DualCameraCaptureRequest HardwareRequest(Guid transactionId) =>
+    DualCameraCaptureRequest.CreateHardwareDual(
+        DualCameraRigProfile.ApprovedSynthetic(),
+        HardwareDualCaptureProfile.ApprovedSynthetic(),
+        new HardwareDualOperatorConfirmations(true, true, true, true, true),
+        transactionId);
+
+static void AssertNoHardwareCaptureSideEffects(FakeDualHardwareOperations operations, FailureBridge stitcher)
+{
+    Check.Equal(0, operations.ReserveCalls);
+    Check.Equal(0, operations.StartCalls);
+    Check.Equal(0, operations.QueryCalls);
+    Check.Equal(0, stitcher.StitchCalls);
+    Check.Equal(0, stitcher.ExportCalls);
+}
+
 static bool IsJpeg(string path)
 {
     var bytes = File.ReadAllBytes(path);
@@ -463,6 +719,175 @@ static IDualCameraIdentitySnapshotSource SyntheticIdentitySource() =>
     new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
 
 enum InvalidPayload { None, Malformed, Oversized }
+
+enum HardwareFakeScenario
+{
+    Success,
+    LiveViewUnconfirmed,
+    SpoolNotEmpty,
+    CameraAFailure,
+    CameraBFailure,
+    WatchdogExpired,
+    ResponseUnknown,
+    InvalidSnapshot,
+    ExternalPath,
+    LateCompletion,
+}
+
+sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHardwareCaptureOperations
+{
+    private static readonly byte[] TestJpeg = TestJpegBytes.Value;
+    private DualHardwareCaptureRequest? _unknownRequest;
+    public int ReserveCalls { get; private set; }
+    public int StartCalls { get; private set; }
+    public int QueryCalls { get; private set; }
+
+    public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken)
+    {
+        _ = transactionId;
+        cancellationToken.ThrowIfCancellationRequested();
+        ReserveCalls++;
+        return Task.FromResult(true);
+    }
+
+    public Task<DualHardwareDispatchResult> StartReservedPairAsync(
+        DualHardwareCaptureRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        StartCalls++;
+        if (scenario == HardwareFakeScenario.ResponseUnknown)
+        {
+            _unknownRequest = request;
+            return Task.FromResult(new DualHardwareDispatchResult(DualHardwareDispatchState.ResponseUnknown, null));
+        }
+
+        return Task.FromResult(new DualHardwareDispatchResult(
+            DualHardwareDispatchState.Completed,
+            CreateResult(request, scenario)));
+    }
+
+    private static DualHardwareCaptureResult CreateResult(
+        DualHardwareCaptureRequest request,
+        HardwareFakeScenario effectiveScenario)
+    {
+
+        var count = effectiveScenario switch
+        {
+            HardwareFakeScenario.CameraAFailure or HardwareFakeScenario.LiveViewUnconfirmed => 0,
+            HardwareFakeScenario.CameraBFailure => 1,
+            _ => 2,
+        };
+        var originals = new List<DualHardwareOriginalRecord>();
+        foreach (var alias in new[] { "CAM-A", "CAM-B" }.Take(count))
+        {
+            var path = Path.Combine(request.TransactionDirectory, alias, "original.jpg");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, TestJpeg);
+            var reportedPath = effectiveScenario == HardwareFakeScenario.ExternalPath
+                ? Path.Combine(Path.GetDirectoryName(request.TransactionDirectory)!, "outside", alias, "original.jpg")
+                : path;
+            if (effectiveScenario == HardwareFakeScenario.ExternalPath)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(reportedPath)!);
+                File.WriteAllBytes(reportedPath, TestJpeg);
+            }
+            originals.Add(new(alias, reportedPath,
+                effectiveScenario != HardwareFakeScenario.SpoolNotEmpty,
+                effectiveScenario != HardwareFakeScenario.SpoolNotEmpty));
+        }
+
+        var (terminal, code) = effectiveScenario switch
+        {
+            HardwareFakeScenario.CameraAFailure => (DualHardwareCaptureTerminalState.Failed, DualCameraFailureCode.CaptureCameraA),
+            HardwareFakeScenario.CameraBFailure => (DualHardwareCaptureTerminalState.FailedPartial, DualCameraFailureCode.CaptureCameraB),
+            HardwareFakeScenario.WatchdogExpired => (DualHardwareCaptureTerminalState.WatchdogExpired, DualCameraFailureCode.WatchdogExpired),
+            _ => (DualHardwareCaptureTerminalState.Succeeded, DualCameraFailureCode.None),
+        };
+        var evidenceIdentity = effectiveScenario == HardwareFakeScenario.InvalidSnapshot
+            ? DualCameraIdentitySnapshot.HardwarePending()
+            : request.IdentitySnapshot;
+        var evidence = new DualHardwareCaptureEvidence(
+            terminal,
+            evidenceIdentity,
+            request.CaptureProfileSnapshot.ProfileId,
+            request.CaptureProfileSnapshot.Version,
+            request.RigProfileSnapshot.ProfileId,
+            request.RigProfileSnapshot.Version,
+            request.StartedAtUtc,
+            request.WatchdogDeadlineUtc,
+            effectiveScenario == HardwareFakeScenario.LateCompletion
+                ? request.WatchdogDeadlineUtc.AddMilliseconds(1)
+                : request.StartedAtUtc.AddSeconds(1),
+            effectiveScenario != HardwareFakeScenario.WatchdogExpired,
+            effectiveScenario != HardwareFakeScenario.LiveViewUnconfirmed,
+            effectiveScenario != HardwareFakeScenario.SpoolNotEmpty,
+            effectiveScenario != HardwareFakeScenario.SpoolNotEmpty,
+            0);
+        var result = new DualHardwareCaptureResult(
+            request.TransactionId,
+            originals,
+            terminal,
+            code,
+            evidence);
+        return result;
+    }
+
+    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        _ = transactionId;
+        cancellationToken.ThrowIfCancellationRequested();
+        QueryCalls++;
+        if (scenario == HardwareFakeScenario.ResponseUnknown && QueryCalls >= 2 && _unknownRequest is not null)
+            return Task.FromResult<DualHardwareCaptureResult?>(CreateResult(_unknownRequest, HardwareFakeScenario.Success));
+        return Task.FromResult<DualHardwareCaptureResult?>(null);
+    }
+}
+
+sealed class BlockingDualHardwareOperations : IDualHardwareCaptureOperations
+{
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public DualHardwareCaptureRequest? Request { get; private set; }
+    public int StartCalls { get; private set; }
+
+    public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) => Task.FromResult(true);
+
+    public async Task<DualHardwareDispatchResult> StartReservedPairAsync(DualHardwareCaptureRequest request, CancellationToken cancellationToken)
+    {
+        Request = request;
+        StartCalls++;
+        Started.TrySetResult();
+        await Release.Task.WaitAsync(cancellationToken);
+        var records = new List<DualHardwareOriginalRecord>();
+        foreach (var alias in new[] { "CAM-A", "CAM-B" })
+        {
+            var path = Path.Combine(request.TransactionDirectory, alias, "original.jpg");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, TestJpegBytes.Value);
+            records.Add(new(alias, path, true, true));
+        }
+        var evidence = new DualHardwareCaptureEvidence(
+            DualHardwareCaptureTerminalState.Succeeded,
+            request.IdentitySnapshot,
+            request.CaptureProfileSnapshot.ProfileId,
+            request.CaptureProfileSnapshot.Version,
+            request.RigProfileSnapshot.ProfileId,
+            request.RigProfileSnapshot.Version,
+            request.StartedAtUtc,
+            request.WatchdogDeadlineUtc,
+            request.StartedAtUtc.AddSeconds(1),
+            true, true, true, true, 0);
+        var result = new DualHardwareCaptureResult(request.TransactionId, records,
+            DualHardwareCaptureTerminalState.Succeeded, DualCameraFailureCode.None, evidence);
+        return new(DualHardwareDispatchState.Completed, result);
+    }
+
+    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) =>
+        Task.FromResult<DualHardwareCaptureResult?>(null);
+}
 
 sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
 {

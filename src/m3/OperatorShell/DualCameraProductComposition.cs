@@ -5,7 +5,11 @@ namespace A0CameraStitcher.M3.OperatorShell;
 
 internal static class DualCameraProductComposition
 {
-    public static IDualCameraProductFlow Create(string artifactRoot)
+    public static IDualCameraProductFlow Create(
+        string artifactRoot,
+        DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,
+        IDualHardwareCaptureOperations? hardwareOperations = null,
+        IDualCameraIdentitySnapshotSource? hardwareIdentitySource = null)
     {
         var configuredPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
         var adapterPath = string.IsNullOrWhiteSpace(configuredPath)
@@ -13,18 +17,28 @@ internal static class DualCameraProductComposition
             : Path.GetFullPath(configuredPath);
         if (!File.Exists(adapterPath))
         {
-            return new UnavailableDualCameraProductFlow(adapterPath);
+            return new UnavailableDualCameraProductFlow(adapterPath, environment);
         }
         var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
-        return new DualCameraProductFlow(
-            artifactRoot,
-            adapter,
-            adapter,
-            new FixedDualCameraIdentitySnapshotSource(
-                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+        return environment switch
+        {
+            DualCameraExecutionEnvironment.TestSynthetic => new DualCameraProductFlow(
+                artifactRoot,
+                adapter,
+                adapter,
+                new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady())),
+            DualCameraExecutionEnvironment.HardwareDual => new DualCameraProductFlow(
+                artifactRoot,
+                new HardwareDualCaptureSource(hardwareOperations),
+                adapter,
+                hardwareIdentitySource ?? new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending())),
+            _ => throw new ArgumentOutOfRangeException(nameof(environment)),
+        };
     }
 
-    private sealed class UnavailableDualCameraProductFlow(string expectedPath) : IDualCameraProductFlow
+    private sealed class UnavailableDualCameraProductFlow(
+        string expectedPath,
+        DualCameraExecutionEnvironment environment) : IDualCameraProductFlow
     {
         public event EventHandler<DualCameraProductState>? StateChanged
         {
@@ -39,6 +53,8 @@ internal static class DualCameraProductComposition
         }
 
         public DualCameraProductState? Current => null;
+
+        public DualCameraExecutionEnvironment ExecutionEnvironment => environment;
 
         public DualCameraIdentitySnapshot IdentitySnapshot => DualCameraIdentitySnapshot.HardwarePending();
 
