@@ -1,5 +1,7 @@
 #include "a0/phase0/phase0.hpp"
 
+#include "a0/phase0/hardware_camera_agent.hpp"
+
 #include <Windows.h>
 #include <bcrypt.h>
 
@@ -627,6 +629,36 @@ DualIdentityVerificationSummary VerifyDualIdentityBindings(
         result.failure_category = "identity_strategy_unresolved";
     }
     return result;
+}
+
+DualIdentityVerificationSummary VerifyProductionDualIdentityPreflight(
+    const ProductionDualIdentityPreflightRequest& request) {
+    const auto result = RunProductionDualIdentityPreflight(request);
+    DualIdentityVerificationSummary summary;
+    summary.sdk_camera_count = request.sdk_inventory.size();
+    summary.wpd_camera_count = request.wpd_inventory.size();
+    if (std::holds_alternative<DualIdentityReady>(result)) {
+        const auto& ready = std::get<DualIdentityReady>(result);
+        summary.sdk_cam_a_count = ready.sdk_cam_a_count;
+        summary.sdk_cam_b_count = ready.sdk_cam_b_count;
+        summary.sdk_unbound_count = ready.sdk_unbound_count;
+        summary.wpd_cam_a_count = ready.wpd_cam_a_count;
+        summary.wpd_cam_b_count = ready.wpd_cam_b_count;
+        summary.wpd_unbound_count = ready.wpd_unbound_count;
+        summary.capture_command_sent = ready.safety.capture_command_sent;
+        summary.live_view_started = ready.safety.live_view_started;
+        summary.camera_settings_changed = ready.safety.camera_settings_changed;
+        summary.card_access_performed = ready.safety.card_access_performed;
+        summary.terminal_state = "Ready";
+        return summary;
+    }
+    const auto& blocked = std::get<DualIdentityBlocked>(result);
+    summary.capture_command_sent = blocked.safety.capture_command_sent;
+    summary.live_view_started = blocked.safety.live_view_started;
+    summary.camera_settings_changed = blocked.safety.camera_settings_changed;
+    summary.card_access_performed = blocked.safety.card_access_performed;
+    summary.failure_category = DualIdentityBlockReasonName(blocked.reason);
+    return summary;
 }
 
 fs::path PersistDualIdentityVerificationSummary(

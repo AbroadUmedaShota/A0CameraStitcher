@@ -61,6 +61,8 @@ struct Options {
     bool camera_map_explicit{false};
     fs::path single_identity_v3{DefaultSingleIdentityV3Path()};
     bool single_identity_v3_explicit{false};
+    std::optional<fs::path> dual_identity_provider;
+    std::vector<fs::path> dual_identity_proofs;
 };
 
 fs::path WpdIdentityMapPath(const Options& options);
@@ -128,8 +130,10 @@ void Usage() {
         << "    (one lease; SDK then WPD; validates both local maps before either binding)\n"
         << "  bind-single-identity-v3 --alias CAM-A --single-camera-connected-confirmed\n"
         << "    (read-only SDK/WPD enumeration; persists only the WPD serial digest and exact-one SDK policy)\n"
-        << "  verify-dual-identity (read-only legacy-map diagnostic; remains identity_strategy_unresolved)\n"
-        << "  verify-dual-spools (read-only; requires dual identity, then counts all payloads on both cards)\n"
+        << "  verify-dual-identity [--dual-identity-provider PATH --dual-identity-proof PATH x2]\n"
+        << "    (production provider is not implemented; default/legacy remains identity_strategy_unresolved)\n"
+        << "  verify-dual-spools [--dual-identity-provider PATH --dual-identity-proof PATH x2]\n"
+        << "    (read-only; requires production dual identity, then counts all payloads on both cards)\n"
         << "  sdk-status --alias CAM-A [--single-identity-v3 PATH]\n"
         << "    (SingleCamera identity-v3 by default; read-only; does not start Live View or change camera settings)\n"
         << "  sdk-status --alias CAM-A|CAM-B --camera-map PATH\n"
@@ -145,6 +149,7 @@ void Usage() {
         << "    (one physical D810; dedicated empty card; no physical/external shutter during the active transaction)\n"
         << "  hybrid-capture-pair --count 1|10|100 --exclusive-camera-control-confirmed\n"
         << "    --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed\n"
+        << "    [--dual-identity-provider PATH --dual-identity-proof PATH x2]\n"
         << "    (two explicitly bound D810 bodies; CAM-A then CAM-B; one dedicated empty card per body; no shutter synchronization guarantee)\n"
         << "  hybrid-fault-single --alias CAM-A --scenario usb-disconnect|power-off --operator-gate <safe-name>\n"
         << "    --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --exact-object-delete-confirmed\n"
@@ -210,6 +215,15 @@ Options Parse(int argc, char** argv) {
             options.single_identity_v3 = require_value();
             options.single_identity_v3_explicit = true;
         }
+        else if (arg == "--dual-identity-provider") {
+            if (options.dual_identity_provider) {
+                throw std::runtime_error("dual-identity-provider may be specified only once");
+            }
+            options.dual_identity_provider = require_value();
+        }
+        else if (arg == "--dual-identity-proof") {
+            options.dual_identity_proofs.emplace_back(require_value());
+        }
         else throw std::runtime_error("unknown option: " + arg);
     }
     if (options.count < 1) throw std::runtime_error("count must be positive");
@@ -256,6 +270,18 @@ Options Parse(int argc, char** argv) {
     if (options.command == "sdk-status" && options.single_identity_v3_explicit && options.camera_map_explicit) {
         throw std::runtime_error("sdk-status cannot combine SingleCamera identity-v3 with a legacy camera map");
     }
+    if (options.dual_identity_provider || !options.dual_identity_proofs.empty()) {
+        const bool supported_command = options.command == "verify-dual-identity" ||
+            options.command == "verify-dual-spools" ||
+            options.command == "hybrid-capture-pair";
+        if (!supported_command) {
+            throw std::runtime_error(
+                "dual identity provider/proof inputs are valid only for DualCamera production preflight commands");
+        }
+        if (options.dual_identity_proofs.size() > 2) {
+            throw std::runtime_error("dual-identity-proof may be specified at most twice");
+        }
+    }
     if (const auto binding_error = ValidateIdentityBindingArguments(
             options.command,
             options.transport,
@@ -301,6 +327,29 @@ Options Parse(int argc, char** argv) {
         if (!options.scenario.empty()) throw std::runtime_error("hybrid-interrupt-pair does not accept --scenario");
     }
     return options;
+}
+
+std::string CurrentUtcSeconds() {
+    const auto now = std::chrono::system_clock::now();
+    const auto seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+    gmtime_s(&utc, &seconds);
+    std::ostringstream output;
+    output << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return output.str();
+}
+
+DualIdentityVerificationSummary RunCliDualIdentityPreflight(
+    const Options& options) {
+    ProductionDualIdentityPreflightRequest request;
+    request.provider_config_path = options.dual_identity_provider;
+    request.proof_paths = options.dual_identity_proofs;
+    request.observed_at_utc = CurrentUtcSeconds();
+    // No Nikon production correlation provider has been approved or implemented.
+    // Consequently the real CLI never manufactures projections from raw IDs,
+    // serials, ports, or enumeration order. A future approved provider must
+    // populate these anonymous projections before hardware access is enabled.
+    return VerifyProductionDualIdentityPreflight(request);
 }
 
 int RunWpdCorrelationStatus(const Options& options) {
@@ -471,19 +520,12 @@ int BindSingleIdentityV3Command(const Options& options) {
 }
 
 int VerifyDualIdentityCommand(const Options& options) {
-    NikonSdkTransport sdk;
-    WpdTransport wpd(options.wpd_command_target);
-    const auto sdk_cameras = sdk.Enumerate();
-    const auto wpd_cameras = wpd.Enumerate();
-    IdentityMap sdk_map(options.camera_map);
-    IdentityMap wpd_map(WpdIdentityMapPath(options));
-    const auto summary = VerifyDualIdentityBindings(
-        sdk_map, wpd_map, sdk_cameras, wpd_cameras);
+    const auto summary = RunCliDualIdentityPreflight(options);
     const std::string run_id = NewRunId();
     const auto summary_path = PersistDualIdentityVerificationSummary(
         options.artifacts, run_id, summary);
     EvidenceWriter evidence(
-        options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
+        options.artifacts, run_id, "dual-identity-production-preflight-software-only");
     evidence.GenerateRedactedReport(options.reports);
     std::cout << "RunId: " << run_id
               << "\nSdkCameraCount: " << summary.sdk_camera_count
@@ -507,17 +549,12 @@ int VerifyDualIdentityCommand(const Options& options) {
 }
 
 int VerifyDualSpoolsCommand(const Options& options) {
-    NikonSdkTransport sdk;
-    WpdTransport wpd(options.wpd_command_target);
-    const auto sdk_cameras = sdk.Enumerate();
-    const auto wpd_cameras = wpd.Enumerate();
-    IdentityMap sdk_map(options.camera_map);
-    IdentityMap wpd_map(WpdIdentityMapPath(options));
-    const auto identity = VerifyDualIdentityBindings(
-        sdk_map, wpd_map, sdk_cameras, wpd_cameras);
+    const auto identity = RunCliDualIdentityPreflight(options);
     auto summary = PrepareDualSpoolVerification(identity);
     if (summary.terminal_state == "ReadyForInspection") {
         try {
+            WpdTransport wpd(options.wpd_command_target);
+            const auto wpd_cameras = wpd.Enumerate();
             const auto cam_a = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), "CAM-A");
             const auto cam_b = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), "CAM-B");
             summary.cam_a_payload_object_count = wpd.InspectSpoolPayloadCount(
@@ -541,7 +578,7 @@ int VerifyDualSpoolsCommand(const Options& options) {
     const auto summary_path = PersistDualSpoolVerificationSummary(
         options.artifacts, run_id, summary);
     EvidenceWriter evidence(
-        options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
+        options.artifacts, run_id, "dual-identity-production-preflight-software-only");
     evidence.GenerateRedactedReport(options.reports);
     std::cout << "RunId: " << run_id
               << "\nSdkCameraCount: " << summary.identity.sdk_camera_count
@@ -1057,18 +1094,12 @@ int RunHybridCapture(const Options& options) {
 
 int RunHybridPairCapture(const Options& options) {
     if (options.transport != "sdk") throw std::runtime_error("hybrid-capture-pair does not accept --transport");
-    NikonSdkTransport sdk;
-    WpdTransport wpd(options.wpd_command_target);
-    const auto sdk_cameras = sdk.Enumerate();
-    const auto wpd_cameras = wpd.Enumerate();
-    IdentityMap sdk_map(options.camera_map);
-    IdentityMap wpd_identity_map(WpdIdentityMapPath(options));
-    const auto identity = VerifyDualIdentityBindings(
-        sdk_map, wpd_identity_map, sdk_cameras, wpd_cameras);
+    const auto identity = RunCliDualIdentityPreflight(options);
     const std::string run_id = NewRunId();
     const auto identity_path = PersistDualIdentityVerificationSummary(
         options.artifacts, run_id, identity);
-    EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
+    EvidenceWriter evidence(
+        options.artifacts, run_id, "dual-identity-production-preflight-software-only");
     if (identity.terminal_state != "Ready") {
         evidence.GenerateRedactedReport(options.reports);
         std::cout << "RunId: " << run_id
@@ -1083,6 +1114,11 @@ int RunHybridPairCapture(const Options& options) {
         return 5;
     }
 
+    NikonSdkTransport sdk;
+    WpdTransport wpd(options.wpd_command_target);
+    const auto sdk_cameras = sdk.Enumerate();
+    const auto wpd_cameras = wpd.Enumerate();
+    IdentityMap wpd_identity_map(WpdIdentityMapPath(options));
     const auto sdk_cam_a = ResolveCamera(sdk_cameras, options.camera_map, "CAM-A");
     const auto sdk_cam_b = ResolveCamera(sdk_cameras, options.camera_map, "CAM-B");
     const auto wpd_cam_a = ResolveCamera(wpd_cameras, wpd_identity_map.Path(), "CAM-A");

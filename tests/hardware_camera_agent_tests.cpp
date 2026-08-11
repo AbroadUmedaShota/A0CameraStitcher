@@ -2371,6 +2371,192 @@ void TestDualIdentityDirectNegativeMatrix() {
     fs::remove_all(root, cleanup_error);
 }
 
+void TestProductionDualIdentityPreflightReachesSoftwareReady() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-production-dual-preflight-test-" + NewRunId());
+    const fs::path provider_path = root / "provider.json";
+    const fs::path cam_a_path = root / "cam-a.json";
+    const fs::path cam_b_path = root / "cam-b.json";
+    WriteText(provider_path,
+        "{\"schemaVersion\":\"a0.camera-agent.dual-correlation-provider.v1\","
+        "\"providerId\":\"documented-test-provider\",\"providerVersion\":1,"
+        "\"documentedStablePerBodyCorrelation\":true}");
+    WriteText(cam_a_path, DualIdentityProofJson("CAM-A", 'a', 'c'));
+    WriteText(cam_b_path, DualIdentityProofJson("CAM-B", 'b', 'd'));
+
+    ProductionDualIdentityPreflightRequest request;
+    request.provider_config_path = provider_path;
+    request.proof_paths = {cam_a_path, cam_b_path};
+    request.sdk_inventory = {
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'a'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'b'),
+            "documented-test-provider", 1}};
+    request.wpd_inventory = {
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'c'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'd'),
+            "documented-test-provider", 1}};
+    request.observed_at_utc = "2026-08-11T00:00:00Z";
+
+    const auto typed_result = RunProductionDualIdentityPreflight(request);
+    Check(std::holds_alternative<DualIdentityReady>(typed_result),
+        "typed production preflight must accept approved anonymous software inputs");
+    if (std::holds_alternative<DualIdentityReady>(typed_result)) {
+        CheckDualIdentitySafetyZero(std::get<DualIdentityReady>(typed_result).safety,
+            "software-only production preflight Ready must retain zero side effects");
+    }
+    const auto public_caller = VerifyProductionDualIdentityPreflight(request);
+    Check(public_caller.terminal_state == "Ready" &&
+              public_caller.sdk_camera_count == 2 &&
+              public_caller.wpd_camera_count == 2 &&
+              public_caller.sdk_cam_a_count == 1 &&
+              public_caller.sdk_cam_b_count == 1 &&
+              public_caller.wpd_cam_a_count == 1 &&
+              public_caller.wpd_cam_b_count == 1 &&
+              !public_caller.capture_command_sent &&
+              !public_caller.live_view_started &&
+              !public_caller.camera_settings_changed &&
+              !public_caller.card_access_performed,
+        "the public summary caller used by all three CLIs must reach software-only Ready");
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
+void TestProductionDualIdentityPreflightBlocksInvalidInputsWithoutSideEffects() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-production-dual-preflight-negative-test-" + NewRunId());
+    const fs::path provider_path = root / "provider.json";
+    const fs::path mismatch_provider_path = root / "provider-v2.json";
+    const fs::path malformed_provider_path = root / "malformed-provider.json";
+    const fs::path cam_a_path = root / "cam-a.json";
+    const fs::path cam_b_path = root / "cam-b.json";
+    const fs::path expired_path = root / "expired.json";
+    const fs::path unknown_alias_path = root / "unknown-alias.json";
+    const std::string provider_json =
+        "{\"schemaVersion\":\"a0.camera-agent.dual-correlation-provider.v1\","
+        "\"providerId\":\"documented-test-provider\",\"providerVersion\":1,"
+        "\"documentedStablePerBodyCorrelation\":true}";
+    WriteText(provider_path, provider_json);
+    WriteText(mismatch_provider_path,
+        "{\"schemaVersion\":\"a0.camera-agent.dual-correlation-provider.v1\","
+        "\"providerId\":\"documented-test-provider\",\"providerVersion\":2,"
+        "\"documentedStablePerBodyCorrelation\":true}");
+    WriteText(malformed_provider_path, provider_json + " trailing");
+    WriteText(cam_a_path, DualIdentityProofJson("CAM-A", 'a', 'c'));
+    WriteText(cam_b_path, DualIdentityProofJson("CAM-B", 'b', 'd'));
+    WriteText(expired_path, DualIdentityProofJson(
+        "CAM-B", 'b', 'd', "documented-test-provider", 1, true, true,
+        "2026-08-10T00:00:00Z"));
+    std::string unknown_alias = DualIdentityProofJson("CAM-B", 'b', 'd');
+    unknown_alias.replace(unknown_alias.find("CAM-B"), 5, "CAM-X");
+    WriteText(unknown_alias_path, unknown_alias);
+
+    ProductionDualIdentityPreflightRequest valid;
+    valid.provider_config_path = provider_path;
+    valid.proof_paths = {cam_a_path, cam_b_path};
+    valid.sdk_inventory = {
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'a'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::sdk, "Nikon D810", std::string(64, 'b'),
+            "documented-test-provider", 1}};
+    valid.wpd_inventory = {
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'c'),
+            "documented-test-provider", 1},
+        {DualIdentityTransport::wpd, "Nikon D810", std::string(64, 'd'),
+            "documented-test-provider", 1}};
+    valid.observed_at_utc = "2026-08-11T00:00:00Z";
+
+    const auto expect_block = [](const ProductionDualIdentityPreflightRequest& request,
+                                 DualIdentityBlockReason expected,
+                                 std::string_view context) {
+        const auto result = RunProductionDualIdentityPreflight(request);
+        Check(std::holds_alternative<DualIdentityBlocked>(result),
+            std::string(context));
+        if (!std::holds_alternative<DualIdentityBlocked>(result)) return;
+        const auto& blocked = std::get<DualIdentityBlocked>(result);
+        Check(blocked.reason == expected, std::string(context));
+        CheckDualIdentitySafetyZero(blocked.safety,
+            "production preflight Block must keep SDK/WPD/card/capture/delete/retry side effects zero");
+        const auto public_caller = VerifyProductionDualIdentityPreflight(request);
+        Check(public_caller.terminal_state == "Blocked" &&
+                  public_caller.failure_category ==
+                      DualIdentityBlockReasonName(expected) &&
+                  !public_caller.identity_maps_changed &&
+                  !public_caller.capture_command_sent &&
+                  !public_caller.live_view_started &&
+                  !public_caller.camera_settings_changed &&
+                  !public_caller.card_access_performed &&
+                  !public_caller.real_identifiers_included,
+            "the public summary caller used by all three CLIs must preserve typed Block and zero side effects");
+    };
+
+    auto request = valid;
+    request.proof_paths[1] = expired_path;
+    expect_block(request, DualIdentityBlockReason::proof_stale,
+        "expired proof must block the production caller");
+    request = valid;
+    request.provider_config_path = mismatch_provider_path;
+    expect_block(request, DualIdentityBlockReason::provider_mismatch,
+        "provider version mismatch must block the production caller");
+    request = valid;
+    request.provider_config_path = root / "missing-provider.json";
+    expect_block(request, DualIdentityBlockReason::provider_config_invalid,
+        "missing provider config must block the production caller");
+    request.provider_config_path = malformed_provider_path;
+    expect_block(request, DualIdentityBlockReason::provider_config_invalid,
+        "malformed provider config must block the production caller");
+    request = valid;
+    request.proof_paths[1] = root / "missing-proof.json";
+    expect_block(request, DualIdentityBlockReason::proof_invalid,
+        "missing proof must block the production caller");
+    request = valid;
+    request.proof_paths.pop_back();
+    expect_block(request, DualIdentityBlockReason::proof_count_mismatch,
+        "missing CAM-B proof input must block the production caller");
+    request = valid;
+    request.proof_paths[1] = unknown_alias_path;
+    expect_block(request, DualIdentityBlockReason::proof_invalid,
+        "unknown proof alias must block the production caller");
+    request = valid;
+    request.sdk_inventory[1].identity_sha256 =
+        request.sdk_inventory[0].identity_sha256;
+    expect_block(request, DualIdentityBlockReason::duplicate_identity,
+        "duplicate anonymous inventory digest must block the production caller");
+    request = valid;
+    request.sdk_inventory[0].identity_sha256 = std::string(64, 'c');
+    request.sdk_inventory[1].identity_sha256 = std::string(64, 'd');
+    request.wpd_inventory[0].identity_sha256 = std::string(64, 'a');
+    request.wpd_inventory[1].identity_sha256 = std::string(64, 'b');
+    expect_block(request, DualIdentityBlockReason::mismatched_transport,
+        "cross-transport inventory reversal must block without order fallback");
+    request = {};
+    request.observed_at_utc = "2026-08-11T00:00:00Z";
+    expect_block(request, DualIdentityBlockReason::identity_strategy_unresolved,
+        "default production caller must remain identity_strategy_unresolved");
+    request = valid;
+    request.legacy_map_fallback_requested = true;
+    expect_block(request, DualIdentityBlockReason::legacy_map_fallback_prohibited,
+        "legacy map fallback must remain prohibited in the production caller");
+
+    for (const auto& invalid_path : {
+             fs::path("relative-provider.json"),
+             fs::path(L"\\\\invalid-server\\invalid-share\\provider.json"),
+             fs::path(L"\\\\?\\C:\\invalid-provider.json")}) {
+        bool rejected = false;
+        try {
+            (void)LoadDualIdentityCorrelationProvider(invalid_path);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected,
+            "provider config loader must reject non-fixed-local input paths");
+    }
+
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 void TestSingleIdentityV3Parser() {
     const std::string digest(64, 'b');
     const std::string json =
@@ -2845,6 +3031,8 @@ int main() {
     TestFixedLocalPathPolicy();
     TestDualIdentityProofContractIsStrictAndFailClosed();
     TestDualIdentityDirectNegativeMatrix();
+    TestProductionDualIdentityPreflightReachesSoftwareReady();
+    TestProductionDualIdentityPreflightBlocksInvalidInputsWithoutSideEffects();
     TestSingleIdentityV3Parser();
     TestSingleIdentityV3SdkStatusResolution();
     TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();

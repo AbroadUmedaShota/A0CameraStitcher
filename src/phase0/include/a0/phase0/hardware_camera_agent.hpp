@@ -111,6 +111,11 @@ struct DualIdentityCorrelationProvider {
     bool documented_stable_per_body_correlation{};
 };
 
+[[nodiscard]] DualIdentityCorrelationProvider ParseDualIdentityCorrelationProvider(
+    std::string_view json);
+[[nodiscard]] DualIdentityCorrelationProvider LoadDualIdentityCorrelationProvider(
+    const std::filesystem::path& path);
+
 struct DualIdentityInventoryProjection {
     DualIdentityTransport transport{DualIdentityTransport::sdk};
     std::string model;
@@ -133,6 +138,7 @@ struct DualIdentitySafetyState {
 
 enum class DualIdentityBlockReason {
     identity_strategy_unresolved,
+    provider_config_invalid,
     legacy_map_fallback_prohibited,
     proof_count_mismatch,
     proof_invalid,
@@ -166,6 +172,18 @@ struct DualIdentityBlocked {
 
 using DualIdentityResult = std::variant<DualIdentityReady, DualIdentityBlocked>;
 
+struct ProductionDualIdentityPreflightRequest {
+    std::optional<std::filesystem::path> provider_config_path;
+    std::vector<std::filesystem::path> proof_paths;
+    std::vector<DualIdentityInventoryProjection> sdk_inventory;
+    std::vector<DualIdentityInventoryProjection> wpd_inventory;
+    std::string observed_at_utc;
+    bool legacy_map_fallback_requested{};
+};
+
+[[nodiscard]] std::string_view DualIdentityBlockReasonName(
+    DualIdentityBlockReason reason) noexcept;
+
 [[nodiscard]] std::string ComputeDualIdentityBindingProofPayloadSha256(
     const DualIdentityBindingProof& proof);
 [[nodiscard]] std::string SerializeDualIdentityBindingProof(
@@ -181,6 +199,8 @@ using DualIdentityResult = std::variant<DualIdentityReady, DualIdentityBlocked>;
     const std::vector<DualIdentityInventoryProjection>& wpd_inventory,
     std::string_view observed_at_utc,
     bool legacy_map_fallback_requested);
+[[nodiscard]] DualIdentityResult RunProductionDualIdentityPreflight(
+    const ProductionDualIdentityPreflightRequest& request);
 
 [[nodiscard]] SingleCameraIdentityV3 ParseSingleCameraIdentityV3(
     std::string_view json);

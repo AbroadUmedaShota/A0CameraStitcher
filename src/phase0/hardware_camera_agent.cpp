@@ -2186,6 +2186,58 @@ std::string SerializeDualIdentityBindingProof(
     return output.str();
 }
 
+DualIdentityCorrelationProvider ParseDualIdentityCorrelationProvider(
+    std::string_view json) {
+    const JsonValue root = JsonParser(json).Parse();
+    RequireExactFields(root, {
+        "schemaVersion", "providerId", "providerVersion",
+        "documentedStablePerBodyCorrelation"});
+    const auto version =
+        RequireField(root, "providerVersion", JsonKind::integer).integer;
+    if (RequireField(root, "schemaVersion", JsonKind::string).string !=
+            "a0.camera-agent.dual-correlation-provider.v1" ||
+        version < 1 || version > std::numeric_limits<std::uint32_t>::max()) {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidDualIdentityProvider",
+            "dual identity provider schema or version is invalid");
+    }
+    DualIdentityCorrelationProvider provider;
+    provider.provider_id =
+        RequireField(root, "providerId", JsonKind::string).string;
+    provider.provider_version = static_cast<std::uint32_t>(version);
+    provider.documented_stable_per_body_correlation = RequireField(
+        root, "documentedStablePerBodyCorrelation", JsonKind::boolean).boolean;
+    if (!IsSafeRequestId(provider.provider_id)) {
+        throw HardwareCameraAgentProtocolError(
+            "InvalidDualIdentityProvider",
+            "dual identity provider ID is invalid");
+    }
+    return provider;
+}
+
+DualIdentityCorrelationProvider LoadDualIdentityCorrelationProvider(
+    const fs::path& path) {
+    const fs::path absolute = StrictFixedLocalPath(
+        path, "DualCamera identity provider config");
+    std::error_code error;
+    if (!fs::is_regular_file(absolute, error) || error || IsReparsePoint(absolute)) {
+        throw std::runtime_error(
+            "DualCamera identity provider config must be a regular reparse-free local file");
+    }
+    const auto size = fs::file_size(absolute, error);
+    if (error || size == 0 || size > 16U * 1024U) {
+        throw std::runtime_error("DualCamera identity provider config size is invalid");
+    }
+    std::ifstream input(absolute, std::ios::binary);
+    const std::string body{
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (!input || input.bad() || body.size() != size) {
+        throw std::runtime_error(
+            "DualCamera identity provider config could not be read completely");
+    }
+    return ParseDualIdentityCorrelationProvider(body);
+}
+
 DualIdentityBindingProof ParseDualIdentityBindingProof(std::string_view json) {
     const JsonValue root = JsonParser(json).Parse();
     RequireExactFields(root, {
@@ -2417,6 +2469,66 @@ DualIdentityResult VerifyDualIdentitySoftwareContract(
         return blocked(DualIdentityBlockReason::alias_cardinality_mismatch);
     }
     return ready;
+}
+
+std::string_view DualIdentityBlockReasonName(
+    DualIdentityBlockReason reason) noexcept {
+    switch (reason) {
+    case DualIdentityBlockReason::identity_strategy_unresolved:
+        return "identity_strategy_unresolved";
+    case DualIdentityBlockReason::provider_config_invalid:
+        return "provider_config_invalid";
+    case DualIdentityBlockReason::legacy_map_fallback_prohibited:
+        return "legacy_map_fallback_prohibited";
+    case DualIdentityBlockReason::proof_count_mismatch:
+        return "proof_count_mismatch";
+    case DualIdentityBlockReason::proof_invalid:
+        return "proof_invalid";
+    case DualIdentityBlockReason::proof_tampered:
+        return "proof_tampered";
+    case DualIdentityBlockReason::proof_stale:
+        return "proof_stale";
+    case DualIdentityBlockReason::confirmation_mismatch:
+        return "confirmation_mismatch";
+    case DualIdentityBlockReason::provider_mismatch:
+        return "provider_mismatch";
+    case DualIdentityBlockReason::camera_count_mismatch:
+        return "camera_count_mismatch";
+    case DualIdentityBlockReason::missing_identity:
+        return "missing_identity";
+    case DualIdentityBlockReason::duplicate_identity:
+        return "duplicate_identity";
+    case DualIdentityBlockReason::identity_collision:
+        return "identity_collision";
+    case DualIdentityBlockReason::mismatched_transport:
+        return "mismatched_transport";
+    case DualIdentityBlockReason::unbound_identity:
+        return "unbound_identity";
+    case DualIdentityBlockReason::alias_cardinality_mismatch:
+        return "alias_cardinality_mismatch";
+    }
+    return "identity_strategy_unresolved";
+}
+
+DualIdentityResult RunProductionDualIdentityPreflight(
+    const ProductionDualIdentityPreflightRequest& request) {
+    std::optional<DualIdentityCorrelationProvider> provider;
+    if (request.provider_config_path) {
+        try {
+            provider = LoadDualIdentityCorrelationProvider(
+                *request.provider_config_path);
+        } catch (const std::exception&) {
+            return DualIdentityBlocked{
+                DualIdentityBlockReason::provider_config_invalid, {}};
+        }
+    }
+    return VerifyDualIdentitySoftwareContract(
+        provider,
+        request.proof_paths,
+        request.sdk_inventory,
+        request.wpd_inventory,
+        request.observed_at_utc,
+        request.legacy_map_fallback_requested);
 }
 
 SingleCameraIdentityV3 ParseSingleCameraIdentityV3(std::string_view json) {

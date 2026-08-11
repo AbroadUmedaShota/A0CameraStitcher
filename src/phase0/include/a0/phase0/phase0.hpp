@@ -15,6 +15,8 @@
 
 namespace a0::phase0 {
 
+struct ProductionDualIdentityPreflightRequest;
+
 class TransportError final : public std::runtime_error {
 public:
     TransportError(std::string category, std::string message);
@@ -427,6 +429,8 @@ struct DualIdentityVerificationSummary {
     const IdentityMap& wpd_map,
     const std::vector<CameraInfo>& sdk_cameras,
     const std::vector<CameraInfo>& wpd_cameras);
+[[nodiscard]] DualIdentityVerificationSummary VerifyProductionDualIdentityPreflight(
+    const ProductionDualIdentityPreflightRequest& request);
 [[nodiscard]] std::filesystem::path PersistDualIdentityVerificationSummary(
     const std::filesystem::path& artifacts_root,
     std::string_view run_id,
