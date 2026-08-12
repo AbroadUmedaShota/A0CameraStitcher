@@ -1527,9 +1527,11 @@ static async Task FormalDualCameraWpfFlowAsync()
 
         var recoveryIdentity = new MutableDualIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
         var recoveryOperations = new WpfHardwareDualFakeOperations(hardwareAdapter, responseUnknownOnce: true);
+        var recoveryProductRoot = Path.Combine(root, "hardware-recovery-products");
+        var recoveryStore = new HardwareDualTransactionSnapshotStore(recoveryProductRoot);
         var recoveryFlow = new DualCameraProductFlow(
-            Path.Combine(root, "hardware-recovery-products"),
-            new HardwareDualCaptureSource(recoveryOperations),
+            recoveryProductRoot,
+            new HardwareDualCaptureSource(recoveryOperations, recoveryStore: recoveryStore),
             hardwareAdapter,
             recoveryIdentity);
         var requestProviderCalls = 0;
@@ -1552,17 +1554,44 @@ static async Task FormalDualCameraWpfFlowAsync()
             () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
             "HardwareDual WPF response-unknown state was not retained.");
         recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
-        Check.True(recoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after current identity becomes Pending.");
-        recoveryViewModel.CaptureCommand.Execute(null);
+        var restartedRecoveryFlow = new DualCameraProductFlow(
+            recoveryProductRoot,
+            new HardwareDualCaptureSource(
+                recoveryOperations,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(recoveryProductRoot)),
+            hardwareAdapter,
+            recoveryIdentity);
+        var restartedRecoveryViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "hardware-restarted-recovery-journals")),
+            restartedRecoveryFlow,
+            () =>
+            {
+                requestProviderCalls++;
+                throw new InvalidOperationException("Restart recovery must not request current capture inputs.");
+            });
+        await restartedRecoveryViewModel.InitializeAsync(CancellationToken.None);
+        restartedRecoveryViewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(restartedRecoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after restart with current identity Pending.");
+        restartedRecoveryViewModel.CaptureCommand.Execute(null);
         await WaitUntilAsync(
-            () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
-            "HardwareDual WPF saved transaction recovery did not finish.");
+            () => !restartedRecoveryViewModel.IsBusy && restartedRecoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
+            "HardwareDual WPF saved transaction recovery did not finish after restart.");
         Check.Equal(1, requestProviderCalls);
-        Check.Equal(1, recoveryViewModel.TransactionStartCount);
+        Check.Equal(0, restartedRecoveryViewModel.TransactionStartCount);
         Check.Equal(1, recoveryOperations.ReserveCalls);
         Check.Equal(1, recoveryOperations.StartCalls);
         Check.Equal(2, recoveryOperations.QueryCalls);
-        Check.Equal(OperatorUiState.Review, recoveryViewModel.UiState);
+        Check.Equal(OperatorUiState.Review, restartedRecoveryViewModel.UiState);
+        var recoveryStatePath = Path.Combine(
+            recoveryProductRoot,
+            "recovery-state",
+            "pending-transaction.json");
+        File.WriteAllText(recoveryStatePath, "{\"schemaVersion\":\"unsupported\",\"dispatchMayHaveOccurred\":false,\"pendingRequest\":null}");
+        Check.Throws<InvalidDataException>(() =>
+            new HardwareDualTransactionSnapshotStore(recoveryProductRoot).LoadPending());
+        File.WriteAllBytes(recoveryStatePath, new byte[256 * 1024 + 1]);
+        Check.Throws<InvalidDataException>(() =>
+            new HardwareDualTransactionSnapshotStore(recoveryProductRoot).LoadPending());
 
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(transactionRoot),

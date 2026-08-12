@@ -57,6 +57,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _timeProvider = timeProvider ?? TimeProvider.System;
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
+        RestorePendingRecovery();
     }
 
     public DualCameraProductFlow(
@@ -77,6 +78,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _timeProvider = timeProvider ?? TimeProvider.System;
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
+        RestorePendingRecovery();
     }
 
     public DualCameraIdentitySnapshot IdentitySnapshot =>
@@ -387,6 +389,35 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             state = _current;
         }
         PublishState(state);
+    }
+
+    private void RestorePendingRecovery()
+    {
+        if (_captureSource is not IRecoverableDualCameraCaptureSource recoverable ||
+            recoverable.PendingRecoveryRequest is not { } pending)
+        {
+            return;
+        }
+
+        _transactionIdentity = pending.IdentitySnapshot with { };
+        _profile = pending.RigProfileSnapshot with
+        {
+            CameraBToCameraA = Array.AsReadOnly(pending.RigProfileSnapshot.CameraBToCameraA.ToArray()),
+            Crop = Array.AsReadOnly(pending.RigProfileSnapshot.Crop.ToArray()),
+            CameraAliases = Array.AsReadOnly(pending.RigProfileSnapshot.CameraAliases.ToArray()),
+        };
+        _hardwareCaptureProfile = pending.CaptureProfileSnapshot.Freeze();
+        _responseUnknownTransactionId = pending.TransactionId;
+        _stages.Clear();
+        foreach (var stage in Enum.GetValues<DualCameraProductStage>())
+        {
+            _stages[stage] = new(stage, DualCameraStageStatus.Pending, null);
+        }
+        _current = Snapshot(
+            transactionId: pending.TransactionId,
+            executionEnvironment: DualCameraExecutionEnvironment.HardwareDual,
+            failureCode: DualCameraFailureCode.AgentResponseUnknown,
+            failureReason: "A durable response-unknown HardwareDual transaction is awaiting query-only recovery.");
     }
 
     private void BeginContinuation(bool requireSuccessfulStitch = false)

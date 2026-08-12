@@ -300,6 +300,8 @@ public interface IDualCameraCaptureSource
 
 public interface IRecoverableDualCameraCaptureSource
 {
+    DualHardwareCaptureRequest? PendingRecoveryRequest { get; }
+
     Task<DualCameraCaptureSourceResult> RecoverPairAsync(
         Guid transactionId,
         CancellationToken cancellationToken);

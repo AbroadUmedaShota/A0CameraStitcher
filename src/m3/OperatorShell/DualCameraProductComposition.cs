@@ -1,5 +1,6 @@
 using System.IO;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using A0CameraStitcher.M3.OperatorShell.Hardware;
 
 namespace A0CameraStitcher.M3.OperatorShell;
 
@@ -27,13 +28,27 @@ internal static class DualCameraProductComposition
                 adapter,
                 adapter,
                 new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady())),
-            DualCameraExecutionEnvironment.HardwareDual => new DualCameraProductFlow(
+            DualCameraExecutionEnvironment.HardwareDual => CreateHardwareDual(
                 artifactRoot,
-                new HardwareDualCaptureSource(hardwareOperations),
+                hardwareOperations,
                 adapter,
-                hardwareIdentitySource ?? new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending())),
+                hardwareIdentitySource),
             _ => throw new ArgumentOutOfRangeException(nameof(environment)),
         };
+    }
+
+    private static IDualCameraProductFlow CreateHardwareDual(
+        string artifactRoot,
+        IDualHardwareCaptureOperations? hardwareOperations,
+        IOfflineStitcherAdapter adapter,
+        IDualCameraIdentitySnapshotSource? hardwareIdentitySource)
+    {
+        var recoveryStore = new HardwareDualTransactionSnapshotStore(artifactRoot);
+        return new DualCameraProductFlow(
+            artifactRoot,
+            new HardwareDualCaptureSource(hardwareOperations, recoveryStore: recoveryStore),
+            adapter,
+            hardwareIdentitySource ?? new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()));
     }
 
     private sealed class UnavailableDualCameraProductFlow(
