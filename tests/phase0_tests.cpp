@@ -1332,6 +1332,71 @@ void TestNikonSdkStableIdentityUsesDocumentedSourceStrings() {
         "embedded NUL bytes in SDK source identity components must fail closed");
 }
 
+void TestNikonCardCaptureEventWindowRequiresCaptureCompleteNotItemNotification() {
+    NikonCardCaptureEventWindow events;
+
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    Check(events.Snapshot().ignored_events == 1 && !events.CaptureCompleted(),
+        "events before callback registration must not complete a card capture");
+
+    events.ResetForSession();
+    Check(!events.BeginCaptureCommand() && !events.BeginEventPump(),
+        "capture and pump must not start before callback registration");
+    events.CallbackRegistered();
+    Check(events.BeginCaptureCommand() && events.BeginEventPump(),
+        "callback registration must precede capture command and event pump");
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    Check(!events.CaptureCompleted(),
+        "CaptureComplete received while the shutter command is pending must wait for command acceptance");
+    events.CaptureCommandAccepted();
+    Check(events.CaptureCompleted(),
+        "SaveMedia=Card must complete after command acceptance when CaptureComplete arrived without AddChildInCard");
+
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    events.Observe(NikonCardCaptureEvent::add_child_in_card);
+    Check(events.CaptureCompleted() &&
+              events.Snapshot().capture_complete_events == 2 &&
+              events.Snapshot().add_child_in_card_events == 1,
+        "duplicate and optional card-item events must be idempotent for completion");
+
+    events.EndEventPump();
+    events.SessionClosed();
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    const auto closed = events.Snapshot();
+    Check(closed.session_closed && !closed.session_closed_while_pumping &&
+              closed.capture_complete_events == 2 && closed.ignored_events == 1,
+        "pump must stop before close and events after close must be ignored");
+
+    events.ResetForSession();
+    events.CallbackRegistered();
+    Check(events.BeginCaptureCommand() && events.BeginEventPump(),
+        "a fresh session should arm exactly one new capture window");
+    events.CaptureCommandAccepted();
+    Check(!events.CaptureCompleted(),
+        "no event must remain incomplete for timeout handling");
+    events.Observe(NikonCardCaptureEvent::add_child_in_card);
+    Check(!events.CaptureCompleted(),
+        "AddChildInCard without CaptureComplete must never report success");
+    Check(!events.CaptureCompleted(),
+        "a delayed CaptureComplete must remain pending until observed");
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    Check(events.CaptureCompleted(),
+        "a delayed CaptureComplete inside the active pump window must succeed");
+
+    events.ResetForSession();
+    events.CallbackRegistered();
+    Check(events.BeginCaptureCommand() && events.BeginEventPump(),
+        "close-order negative case must start inside an active pump window");
+    events.CaptureCommandAccepted();
+    events.SessionClosed();
+    events.Observe(NikonCardCaptureEvent::capture_complete);
+    Check(events.Snapshot().session_closed_while_pumping &&
+              events.Snapshot().capture_complete_events == 0 &&
+              events.Snapshot().ignored_events == 1 &&
+              !events.CaptureCompleted(),
+        "session close before pump stop must be recorded and late completion must not resurrect success");
+}
+
 void TestWpdStableIdentityUsesCameraSerialNotPnpPath() {
     const auto first = DeriveWpdStableIdentity("camera-body-a");
     Check(first == DeriveWpdStableIdentity("camera-body-a") && first.size() == 64,
@@ -2631,6 +2696,7 @@ int main() {
         TestResumeFailureRetainsWpdOriginal();
         TestIdentityMap();
         TestNikonSdkStableIdentityUsesDocumentedSourceStrings();
+        TestNikonCardCaptureEventWindowRequiresCaptureCompleteNotItemNotification();
         TestWpdStableIdentityUsesCameraSerialNotPnpPath();
         TestSingleIdentityV3PersistsOnlyWpdAuthority();
         TestCrossTransportBindingPrevalidatesBothMaps();

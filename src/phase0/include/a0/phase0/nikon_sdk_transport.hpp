@@ -13,6 +13,45 @@ namespace a0::phase0 {
     std::string_view source_name,
     std::string_view source_interface);
 
+// Small SDK-independent model of the source callback window used by a
+// SaveMedia=Card capture. It keeps callback/pump/session ordering testable
+// without loading licensed Nikon binaries or issuing a camera command.
+enum class NikonCardCaptureEvent {
+    capture_complete,
+    add_child_in_card,
+    other,
+};
+
+struct NikonCardCaptureEventSnapshot {
+    bool callback_registered{false};
+    bool capture_command_started{false};
+    bool capture_command_accepted{false};
+    bool event_pump_started{false};
+    bool event_pump_stopped{false};
+    bool session_closed{false};
+    bool session_closed_while_pumping{false};
+    std::size_t capture_complete_events{};
+    std::size_t add_child_in_card_events{};
+    std::size_t ignored_events{};
+};
+
+class NikonCardCaptureEventWindow final {
+public:
+    void ResetForSession() noexcept;
+    void CallbackRegistered() noexcept;
+    [[nodiscard]] bool BeginCaptureCommand() noexcept;
+    [[nodiscard]] bool BeginEventPump() noexcept;
+    void CaptureCommandAccepted() noexcept;
+    void Observe(NikonCardCaptureEvent event) noexcept;
+    void EndEventPump() noexcept;
+    void SessionClosed() noexcept;
+    [[nodiscard]] bool CaptureCompleted() const noexcept;
+    [[nodiscard]] NikonCardCaptureEventSnapshot Snapshot() const noexcept;
+
+private:
+    NikonCardCaptureEventSnapshot snapshot_{};
+};
+
 class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport, public ICardCaptureTransport {
 public:
     NikonSdkTransport();

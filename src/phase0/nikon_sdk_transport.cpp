@@ -62,6 +62,73 @@ std::string DeriveNikonSdkStableIdentity(
     return Sha256Hex(material);
 }
 
+void NikonCardCaptureEventWindow::ResetForSession() noexcept {
+    snapshot_ = {};
+}
+
+void NikonCardCaptureEventWindow::CallbackRegistered() noexcept {
+    if (!snapshot_.session_closed) snapshot_.callback_registered = true;
+}
+
+bool NikonCardCaptureEventWindow::BeginCaptureCommand() noexcept {
+    if (!snapshot_.callback_registered || snapshot_.session_closed ||
+        snapshot_.capture_command_started) {
+        return false;
+    }
+    snapshot_.capture_command_started = true;
+    return true;
+}
+
+bool NikonCardCaptureEventWindow::BeginEventPump() noexcept {
+    if (!snapshot_.capture_command_started || snapshot_.session_closed ||
+        snapshot_.event_pump_started) {
+        return false;
+    }
+    snapshot_.event_pump_started = true;
+    snapshot_.event_pump_stopped = false;
+    return true;
+}
+
+void NikonCardCaptureEventWindow::CaptureCommandAccepted() noexcept {
+    if (snapshot_.capture_command_started && !snapshot_.session_closed) {
+        snapshot_.capture_command_accepted = true;
+    }
+}
+
+void NikonCardCaptureEventWindow::Observe(NikonCardCaptureEvent event) noexcept {
+    if (!snapshot_.callback_registered || !snapshot_.capture_command_started ||
+        !snapshot_.event_pump_started || snapshot_.event_pump_stopped ||
+        snapshot_.session_closed) {
+        ++snapshot_.ignored_events;
+        return;
+    }
+    if (event == NikonCardCaptureEvent::capture_complete) {
+        ++snapshot_.capture_complete_events;
+    } else if (event == NikonCardCaptureEvent::add_child_in_card) {
+        ++snapshot_.add_child_in_card_events;
+    }
+}
+
+void NikonCardCaptureEventWindow::EndEventPump() noexcept {
+    if (snapshot_.event_pump_started) snapshot_.event_pump_stopped = true;
+}
+
+void NikonCardCaptureEventWindow::SessionClosed() noexcept {
+    snapshot_.session_closed_while_pumping =
+        snapshot_.event_pump_started && !snapshot_.event_pump_stopped;
+    snapshot_.event_pump_stopped = snapshot_.event_pump_started;
+    snapshot_.session_closed = true;
+}
+
+bool NikonCardCaptureEventWindow::CaptureCompleted() const noexcept {
+    return snapshot_.capture_command_accepted &&
+        snapshot_.capture_complete_events > 0;
+}
+
+NikonCardCaptureEventSnapshot NikonCardCaptureEventWindow::Snapshot() const noexcept {
+    return snapshot_;
+}
+
 #if defined(A0_NIKON_SDK_AVAILABLE) && defined(_WIN32)
 namespace {
 
@@ -236,6 +303,7 @@ public:
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
         trace_ = {};
+        card_capture_events_.ResetForSession();
         try {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             OpenModule(deadline);
@@ -277,7 +345,10 @@ public:
             source_id_ = *selected_id;
             EnumerateCapabilities(source_, deadline, "open_failed");
             SetProgressCallback(source_, deadline, "open_failed");
+            const bool source_event_callback_supported =
+                Supports(source_, kNkMAIDCapability_EventProc, kNkMAIDCapOperation_Set);
             SetEventCallback(source_, deadline, "open_failed");
+            if (source_event_callback_supported) card_capture_events_.CallbackRegistered();
             RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
                 0, deadline, "open_failed");
             if (capture_session) {
@@ -391,21 +462,34 @@ public:
         const auto event_deadline = std::min(std::chrono::steady_clock::now() + image_event_timeout, overall_deadline);
         capture_complete_ = false;
         add_child_in_card_ = false;
-        StartProcess(source_, kNkMAIDCapability_Capture, event_deadline, "capture_command_failed");
-        while (std::chrono::steady_clock::now() < event_deadline) {
-            Pump(source_, "image_event_failed");
-            if (capture_complete_ && add_child_in_card_) break;
-            std::this_thread::sleep_for(kAsyncInterval);
+        if (!card_capture_events_.BeginCaptureCommand() ||
+            !card_capture_events_.BeginEventPump()) {
+            throw TransportError(
+                "image_event_failed",
+                "SDK source event callback was not active before the card capture command");
         }
+        try {
+            StartProcess(source_, kNkMAIDCapability_Capture, event_deadline, "capture_command_failed");
+            card_capture_events_.CaptureCommandAccepted();
+            while (std::chrono::steady_clock::now() < event_deadline) {
+                Pump(source_, "image_event_failed");
+                if (card_capture_events_.CaptureCompleted()) break;
+                std::this_thread::sleep_for(kAsyncInterval);
+            }
+        } catch (...) {
+            card_capture_events_.EndEventPump();
+            throw;
+        }
+        card_capture_events_.EndEventPump();
         if (std::chrono::steady_clock::now() >= overall_deadline) {
             throw TransportError("transaction_watchdog", "card capture transaction watchdog expired");
         }
-        if (!capture_complete_) {
+        if (!card_capture_events_.CaptureCompleted()) {
             throw TransportError("image_event_timeout", "card CaptureComplete was not observed");
         }
-        if (!add_child_in_card_) {
-            throw TransportError("image_event_timeout", "SDK did not publish AddChildInCard for the card capture");
-        }
+        // SaveMedia=Card does not require an SDK Item notification. WPD still
+        // must recover exactly one post-baseline JPEG after this SDK session
+        // fully closes, so CaptureComplete cannot cause ambiguous adoption.
     }
 
     void StartLiveView(std::chrono::seconds timeout) {
@@ -1291,6 +1375,7 @@ private:
         if (source_.opened) {
             const NKERROR result = Call(&source_.value, kNkMAIDCommand_Close, 0, kNkMAIDDataType_Null, 0);
             source_.opened = false;
+            card_capture_events_.SessionClosed();
             if (result != kNkMAIDResult_NoError && result != kNkMAIDResult_ZombieObject) {
                 throw TransportError("close_failed", "SDK source close failed: " + ResultText(result));
             }
@@ -1359,6 +1444,7 @@ private:
             original_save_media_.reset();
         }
         CloseObjectNoThrow(source_);
+        card_capture_events_.SessionClosed();
         CloseObjectNoThrow(module_);
         UnloadModule();
         session_open_ = false;
@@ -1401,9 +1487,11 @@ private:
             // The D810 SDK sample treats the event itself as completion and
             // does not assign a contract to its data parameter.
             self->capture_complete_ = true;
+            self->card_capture_events_.Observe(NikonCardCaptureEvent::capture_complete);
             break;
         case kNkMAIDEvent_AddChildInCard:
             self->add_child_in_card_ = true;
+            self->card_capture_events_.Observe(NikonCardCaptureEvent::add_child_in_card);
             break;
         default:
             break;
@@ -1436,6 +1524,7 @@ private:
     bool live_view_stop_attempted_{false};
     bool capture_complete_{false};
     bool add_child_in_card_{false};
+    NikonCardCaptureEventWindow card_capture_events_;
     std::optional<ULONG> original_save_media_;
     std::set<ULONG> baseline_;
     std::set<ULONG> module_sources_;
