@@ -148,7 +148,7 @@ public interface IDualHardwareCaptureOperations
         CancellationToken cancellationToken);
 }
 
-public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource
+public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecoverableDualCameraCaptureSource
 {
     private static readonly TimeSpan Watchdog = TimeSpan.FromSeconds(180);
     private readonly IDualHardwareCaptureOperations? _operations;
@@ -176,31 +176,26 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource
             return Failed(DualCameraFailureCode.HardwarePending, "HardwareDual provider and Agent operation are not connected.");
         }
 
-        var queryOnly = false;
         lock (_sync)
         {
             if (_responseUnknownTransactionId.HasValue)
             {
-                if (_responseUnknownTransactionId.Value != request.TransactionId)
-                    throw new DualCameraFlowException(
-                        DualCameraFailureCode.AgentResponseUnknown,
-                        "A prior Agent dispatch remains unknown; no new capture transaction is allowed.");
-                queryOnly = true;
+                throw new DualCameraFlowException(
+                    DualCameraFailureCode.AgentResponseUnknown,
+                    "A prior Agent dispatch remains unknown; use recovery for the saved transaction snapshot.");
             }
-            if (!queryOnly && !_seenTransactions.Add(request.TransactionId))
+            if (!_seenTransactions.Add(request.TransactionId))
             {
                 throw new DualCameraFlowException(DualCameraFailureCode.DuplicateStart, "The durable pair transaction ID was already started.");
             }
         }
 
-        if (!queryOnly && !await _operations.ReservePairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false))
+        if (!await _operations.ReservePairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false))
         {
             throw new DualCameraFlowException(DualCameraFailureCode.DuplicateStart, "The durable pair transaction reservation was rejected.");
         }
 
-        var hardwareRequest = queryOnly && _responseUnknownRequest is not null
-            ? _responseUnknownRequest
-            : new DualHardwareCaptureRequest(
+        var hardwareRequest = new DualHardwareCaptureRequest(
             request.TransactionId,
             request.TransactionDirectory,
             request.IdentitySnapshot with { },
@@ -209,18 +204,10 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource
             request.HardwareConfirmations!,
             request.StartedAtUtc,
             request.StartedAtUtc + Watchdog);
-        DualHardwareCaptureResult? result;
-        if (queryOnly)
-        {
-            result = await _operations.QueryPairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            var dispatch = await _operations.StartReservedPairAsync(hardwareRequest, cancellationToken).ConfigureAwait(false);
-            result = dispatch.State == DualHardwareDispatchState.Completed
-                ? dispatch.Result
-                : await _operations.QueryPairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false);
-        }
+        var dispatch = await _operations.StartReservedPairAsync(hardwareRequest, cancellationToken).ConfigureAwait(false);
+        var result = dispatch.State == DualHardwareDispatchState.Completed
+            ? dispatch.Result
+            : await _operations.QueryPairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false);
         if (result is null)
         {
             lock (_sync)
@@ -230,9 +217,40 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource
             }
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent response is unknown; only this transaction may be queried and no new capture is allowed.");
         }
+        return CompleteRecoveredResult(hardwareRequest, result);
+    }
+
+    public async Task<DualCameraCaptureSourceResult> RecoverPairAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        if (_operations is null)
+            return Failed(DualCameraFailureCode.HardwarePending, "HardwareDual provider and Agent operation are not connected.");
+
+        DualHardwareCaptureRequest hardwareRequest;
         lock (_sync)
         {
-            if (_responseUnknownTransactionId == request.TransactionId)
+            if (_responseUnknownTransactionId != transactionId || _responseUnknownRequest is null)
+                throw new DualCameraFlowException(
+                    DualCameraFailureCode.AgentResponseUnknown,
+                    "No response-unknown transaction snapshot is saved for recovery.");
+            hardwareRequest = _responseUnknownRequest;
+        }
+
+        var result = await _operations.QueryPairTransactionAsync(transactionId, cancellationToken).ConfigureAwait(false);
+        if (result is null)
+            return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent response remains unknown; no capture was reserved or dispatched again.");
+
+        return CompleteRecoveredResult(hardwareRequest, result);
+    }
+
+    private DualCameraCaptureSourceResult CompleteRecoveredResult(
+        DualHardwareCaptureRequest hardwareRequest,
+        DualHardwareCaptureResult result)
+    {
+        lock (_sync)
+        {
+            if (_responseUnknownTransactionId == hardwareRequest.TransactionId)
             {
                 _responseUnknownTransactionId = null;
                 _responseUnknownRequest = null;

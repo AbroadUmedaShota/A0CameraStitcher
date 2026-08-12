@@ -298,6 +298,13 @@ public interface IDualCameraCaptureSource
         CancellationToken cancellationToken);
 }
 
+public interface IRecoverableDualCameraCaptureSource
+{
+    Task<DualCameraCaptureSourceResult> RecoverPairAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken);
+}
+
 public interface IOfflineStitcherAdapter
 {
     Task ValidateCanonicalJpegAsync(
@@ -329,6 +336,10 @@ public interface IDualCameraProductFlow
 
     Task<DualCameraProductState> CaptureAndStitchAsync(
         DualCameraCaptureRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<DualCameraProductState> RecoverAndStitchAsync(
+        Guid transactionId,
         CancellationToken cancellationToken = default);
 
     Task<DualCameraProductState> RestitchAsync(CancellationToken cancellationToken = default);

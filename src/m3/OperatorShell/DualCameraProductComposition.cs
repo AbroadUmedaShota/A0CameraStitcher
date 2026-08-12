@@ -63,6 +63,11 @@ internal static class DualCameraProductComposition
             CancellationToken cancellationToken = default) =>
             Task.FromException<DualCameraProductState>(Unavailable());
 
+        public Task<DualCameraProductState> RecoverAndStitchAsync(
+            Guid transactionId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<DualCameraProductState>(Unavailable());
+
         public Task<DualCameraProductState> RestitchAsync(CancellationToken cancellationToken = default) =>
             Task.FromException<DualCameraProductState>(Unavailable());
 

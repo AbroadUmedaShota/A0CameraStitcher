@@ -17,6 +17,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("HardwareDual anonymous fake completes capture stitch review export", HardwareDualEndToEndAsync),
     ("HardwareDual preflight negatives have zero capture side effects", HardwareDualPreflightNegativesAsync),
     ("HardwareDual Agent negatives retain only safe originals and never retry", HardwareDualAgentNegativesAsync),
+    ("HardwareDual unknown recovery ignores current identity and profile inputs", HardwareDualFrozenRecoveryAsync),
     ("HardwareDual active identity and profile snapshots remain frozen", HardwareDualSnapshotFreezeAsync),
 };
 
@@ -601,7 +602,7 @@ static async Task HardwareDualAgentNegativesAsync()
                 Check.Equal(1, operations.ReserveCalls);
                 Check.Equal(1, operations.StartCalls);
                 Check.Equal(1, operations.QueryCalls);
-                var recovered = await flow.CaptureAndStitchAsync(HardwareRequest(transactionId));
+                var recovered = await flow.RecoverAndStitchAsync(transactionId);
                 Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
                 Check.Equal(2, recovered.Capture!.Originals.Count);
                 Check.Equal(1, operations.ReserveCalls);
@@ -673,6 +674,70 @@ static async Task HardwareDualSnapshotFreezeAsync()
             () => flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid())));
         Check.Equal(1, operations.StartCalls);
     });
+}
+
+static async Task HardwareDualFrozenRecoveryAsync()
+{
+    foreach (var changedIdentity in new[]
+    {
+        DualCameraIdentitySnapshot.HardwarePending(),
+        new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Expired,
+            "anonymous_expired",
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch),
+        new DualCameraIdentitySnapshot(
+            DualCameraIdentityStatus.Ready,
+            "anonymous_different_ready",
+            DateTimeOffset.FromUnixTimeSeconds(300),
+            DateTimeOffset.MaxValue),
+    })
+    {
+        await WithRootAsync(async root =>
+        {
+            var identitySource = new MutableIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.ResponseUnknown);
+            var stitcher = new FailureBridge();
+            IDualCameraProductFlow flow = new DualCameraProductFlow(
+                root,
+                new HardwareDualCaptureSource(operations),
+                stitcher,
+                identitySource);
+            var transactionId = Guid.NewGuid();
+
+            var unknown = await flow.CaptureAndStitchAsync(HardwareRequest(transactionId));
+            Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
+            var frozenIdentity = unknown.IdentitySnapshot;
+            var frozenProfileId = unknown.ProfileId;
+
+            identitySource.Set(changedIdentity);
+            var changedStart = HardwareRequest(Guid.NewGuid()) with
+            {
+                Profile = DualCameraRigProfile.ApprovedSynthetic() with { ProfileId = "anonymous-different-rig-v2" },
+                HardwareCaptureProfile = HardwareDualCaptureProfile.ApprovedSynthetic() with
+                {
+                    ProfileId = "anonymous-different-capture-v2",
+                },
+            };
+            var stillUnknown = await flow.CaptureAndStitchAsync(changedStart);
+            Check.Equal(transactionId, stillUnknown.TransactionId);
+            Check.Equal(DualCameraFailureCode.AgentResponseUnknown, stillUnknown.FailureCode);
+            Check.Equal(1, operations.ReserveCalls);
+            Check.Equal(1, operations.StartCalls);
+            Check.Equal(1, operations.QueryCalls);
+
+            var recovered = await flow.RecoverAndStitchAsync(transactionId);
+
+            Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
+            Check.Equal(frozenIdentity, recovered.IdentitySnapshot);
+            Check.Equal(frozenProfileId, recovered.ProfileId);
+            Check.Equal(2, recovered.Capture!.Originals.Count);
+            Check.Equal(1, operations.ReserveCalls);
+            Check.Equal(1, operations.StartCalls);
+            Check.Equal(2, operations.QueryCalls);
+            Check.Equal(1, stitcher.StitchCalls);
+        });
+    }
 }
 
 static DualCameraProductFlow HardwareFlow(

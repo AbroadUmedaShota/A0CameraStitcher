@@ -1525,6 +1525,45 @@ static async Task FormalDualCameraWpfFlowAsync()
             "HardwareDual WPF fixed-local export did not finish.");
         Check.True(File.Exists(hardwareViewModel.LastExportPath), "HardwareDual WPF must publish the explicit fixed-local export.");
 
+        var recoveryIdentity = new MutableDualIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        var recoveryOperations = new WpfHardwareDualFakeOperations(hardwareAdapter, responseUnknownOnce: true);
+        var recoveryFlow = new DualCameraProductFlow(
+            Path.Combine(root, "hardware-recovery-products"),
+            new HardwareDualCaptureSource(recoveryOperations),
+            hardwareAdapter,
+            recoveryIdentity);
+        var requestProviderCalls = 0;
+        var recoveryViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "hardware-recovery-journals")),
+            recoveryFlow,
+            () =>
+            {
+                requestProviderCalls++;
+                return DualCameraCaptureRequest.CreateHardwareDual(
+                    DualCameraRigProfile.ApprovedSynthetic(),
+                    HardwareDualCaptureProfile.ApprovedSynthetic(),
+                    new HardwareDualOperatorConfirmations(true, true, true, true, true),
+                    Guid.NewGuid());
+            });
+        await recoveryViewModel.InitializeAsync(CancellationToken.None);
+        recoveryViewModel.AcceptSafetyCommand.Execute(null);
+        recoveryViewModel.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
+            "HardwareDual WPF response-unknown state was not retained.");
+        recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
+        Check.True(recoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after current identity becomes Pending.");
+        recoveryViewModel.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
+            "HardwareDual WPF saved transaction recovery did not finish.");
+        Check.Equal(1, requestProviderCalls);
+        Check.Equal(1, recoveryViewModel.TransactionStartCount);
+        Check.Equal(1, recoveryOperations.ReserveCalls);
+        Check.Equal(1, recoveryOperations.StartCalls);
+        Check.Equal(2, recoveryOperations.QueryCalls);
+        Check.Equal(OperatorUiState.Review, recoveryViewModel.UiState);
+
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(transactionRoot),
             productFlow);
@@ -2209,18 +2248,38 @@ static class HardwareTestData
     }
 }
 
-sealed class WpfHardwareDualFakeOperations(ITestSyntheticCamera camera) : IDualHardwareCaptureOperations
+sealed class WpfHardwareDualFakeOperations(
+    ITestSyntheticCamera camera,
+    bool responseUnknownOnce = false) : IDualHardwareCaptureOperations
 {
+    private DualHardwareCaptureRequest? _unknownRequest;
+    public int ReserveCalls { get; private set; }
     public int StartCalls { get; private set; }
+    public int QueryCalls { get; private set; }
 
-    public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) =>
-        Task.FromResult(true);
+    public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken)
+    {
+        ReserveCalls++;
+        return Task.FromResult(true);
+    }
 
     public async Task<DualHardwareDispatchResult> StartReservedPairAsync(
         DualHardwareCaptureRequest request,
         CancellationToken cancellationToken)
     {
         StartCalls++;
+        if (responseUnknownOnce)
+        {
+            _unknownRequest = request;
+            return new(DualHardwareDispatchState.ResponseUnknown, null);
+        }
+        return new(DualHardwareDispatchState.Completed, await CreateResultAsync(request, cancellationToken));
+    }
+
+    private async Task<DualHardwareCaptureResult> CreateResultAsync(
+        DualHardwareCaptureRequest request,
+        CancellationToken cancellationToken)
+    {
         var originals = new List<DualHardwareOriginalRecord>();
         foreach (var alias in new[] { "CAM-A", "CAM-B" })
         {
@@ -2239,19 +2298,36 @@ sealed class WpfHardwareDualFakeOperations(ITestSyntheticCamera camera) : IDualH
             request.WatchdogDeadlineUtc,
             request.StartedAtUtc.AddSeconds(1),
             true, true, true, true, 0);
-        return new(
-            DualHardwareDispatchState.Completed,
-            new DualHardwareCaptureResult(
-                request.TransactionId,
-                originals,
-                DualHardwareCaptureTerminalState.Succeeded,
-                DualCameraFailureCode.None,
-                evidence));
+        return new DualHardwareCaptureResult(
+            request.TransactionId,
+            originals,
+            DualHardwareCaptureTerminalState.Succeeded,
+            DualCameraFailureCode.None,
+            evidence);
     }
 
-    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+    public async Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
         Guid transactionId,
-        CancellationToken cancellationToken) => Task.FromResult<DualHardwareCaptureResult?>(null);
+        CancellationToken cancellationToken)
+    {
+        QueryCalls++;
+        if (!responseUnknownOnce || QueryCalls < 2 || _unknownRequest is null)
+            return null;
+        return await CreateResultAsync(_unknownRequest, cancellationToken);
+    }
+}
+
+sealed class MutableDualIdentitySource(DualCameraIdentitySnapshot initial) : IDualCameraIdentitySnapshotSource
+{
+    public event EventHandler<DualCameraIdentitySnapshot>? SnapshotChanged;
+
+    public DualCameraIdentitySnapshot Current { get; private set; } = initial;
+
+    public void Set(DualCameraIdentitySnapshot snapshot)
+    {
+        Current = snapshot;
+        SnapshotChanged?.Invoke(this, snapshot);
+    }
 }
 
 sealed class NeverCaptureDualBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
