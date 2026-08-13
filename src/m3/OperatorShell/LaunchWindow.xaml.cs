@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 
 namespace A0CameraStitcher.M3.OperatorShell;
 
@@ -39,6 +40,9 @@ public partial class LaunchWindow : Window
 
     private void OnSimulatedClick(object sender, RoutedEventArgs eventArgs) =>
         OpenAndClose(new MainWindow());
+
+    private void OnHardwareDualClick(object sender, RoutedEventArgs eventArgs) =>
+        OpenAndClose(new MainWindow(DualCameraExecutionEnvironment.HardwareDual));
 
     private void OpenAndClose(Window nextWindow)
     {

@@ -48,7 +48,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $dualCameraFlowTestExecutable -PathType Leaf) 'DualCamera flow test executable was not produced by the solution build.'
         $dualCameraFlowOutput = & $dualCameraFlowTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "DualCamera flow tests failed: $($dualCameraFlowOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($dualCameraFlowOutput -join "`n").Contains('DualCamera flow tests: 11/11 passed.')) 'DualCamera flow test summary is missing or incomplete.'
+        Assert-Condition (($dualCameraFlowOutput -join "`n").Contains('DualCamera flow tests: 18/18 passed.')) 'DualCamera flow test summary is missing or incomplete.'
 
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
@@ -96,11 +96,14 @@ try {
     Assert-Condition (-not $hardwareViewModelText.Contains('DllImport')) 'Hardware shell must not invoke native camera APIs in-process.'
 
     foreach ($marker in @('CAM-A原本検証', 'CAM-B原本検証', 'fixed-local folder', '実JPEG合成完了', 'DualCameraExecutionEnvironment.TestSynthetic')) {
-        Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Formal DualCamera WPF flow is missing required marker: $marker"
+        Assert-Condition (($windowText + $viewModelText + $dualCompositionText).Contains($marker)) "Formal DualCamera WPF flow is missing required marker: $marker"
     }
     Assert-Condition ($dualCompositionText.Contains('DualCameraProductFlow')) 'WPF composition must use the typed DualCamera application flow.'
     Assert-Condition ($dualCompositionText.Contains('M2OfflineStitcherProcessAdapter')) 'WPF composition must connect the M2 offline stitcher adapter.'
     Assert-Condition ($dualCompositionText.Contains('does not fall back to SingleCamera')) 'Missing M2 adapter must fail closed without SingleCamera fallback.'
+    foreach ($marker in @('DualCameraExecutionEnvironment.HardwareDual', 'HardwareDualCaptureSource', 'DualCameraIdentitySnapshot.HardwarePending')) {
+        Assert-Condition ($dualCompositionText.Contains($marker)) "HardwareDual production composition is missing fail-closed marker: $marker"
+    }
 
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0

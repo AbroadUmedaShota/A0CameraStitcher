@@ -8,7 +8,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
 {
     public const long MaximumCompressedJpegBytes = 64L * 1024L * 1024L;
     private readonly string _rootDirectory;
-    private readonly ITestSyntheticCamera _camera;
+    private readonly IDualCameraCaptureSource _captureSource;
     private readonly IOfflineStitcherAdapter _stitcher;
     private readonly IDualCameraIdentitySnapshotSource _identitySource;
     private readonly TimeProvider _timeProvider;
@@ -17,7 +17,9 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
     private readonly List<DualCameraStitchResult> _stitchJobs = [];
     private DualCameraProductState? _current;
     private DualCameraRigProfile? _profile;
+    private HardwareDualCaptureProfile? _hardwareCaptureProfile;
     private DualCameraIdentitySnapshot _transactionIdentity = DualCameraIdentitySnapshot.HardwarePending();
+    private Guid? _responseUnknownTransactionId;
     private bool _active;
 
     public event EventHandler<DualCameraProductState>? StateChanged;
@@ -30,7 +32,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         IOfflineStitcherAdapter stitcher)
         : this(
             rootDirectory,
-            camera,
+            new TestSyntheticCaptureSource(camera),
             stitcher,
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()))
     {
@@ -49,16 +51,40 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
 
         _rootDirectory = Path.GetFullPath(rootDirectory);
-        _camera = camera ?? throw new ArgumentNullException(nameof(camera));
+        _captureSource = new TestSyntheticCaptureSource(camera ?? throw new ArgumentNullException(nameof(camera)));
         _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
         _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
+        RestorePendingRecovery();
+    }
+
+    public DualCameraProductFlow(
+        string rootDirectory,
+        IDualCameraCaptureSource captureSource,
+        IOfflineStitcherAdapter stitcher,
+        IDualCameraIdentitySnapshotSource identitySource,
+        TimeProvider? timeProvider = null)
+    {
+        if (string.IsNullOrWhiteSpace(rootDirectory))
+        {
+            throw new ArgumentException("A product artifact root is required.", nameof(rootDirectory));
+        }
+        _rootDirectory = Path.GetFullPath(rootDirectory);
+        _captureSource = captureSource ?? throw new ArgumentNullException(nameof(captureSource));
+        _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
+        _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
+        Directory.CreateDirectory(_rootDirectory);
+        RestorePendingRecovery();
     }
 
     public DualCameraIdentitySnapshot IdentitySnapshot =>
         _identitySource.Current.EvaluateAt(_timeProvider.GetUtcNow());
+
+    public DualCameraExecutionEnvironment ExecutionEnvironment => _captureSource.Environment;
 
     public DualCameraProductState? Current
     {
@@ -80,94 +106,49 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         {
             throw new DualCameraFlowException(DualCameraFailureCode.InvalidMode, "DualCamera product flow cannot change or fall back to SingleCamera.");
         }
-        if (request.ExecutionEnvironment != DualCameraExecutionEnvironment.TestSynthetic)
+        if (request.ExecutionEnvironment != _captureSource.Environment)
         {
-            throw new DualCameraFlowException(DualCameraFailureCode.InvalidExecutionEnvironment, "Only the typed TestSynthetic execution environment is accepted by this flow.");
+            throw new DualCameraFlowException(DualCameraFailureCode.InvalidExecutionEnvironment, "The requested execution environment does not match the configured typed capture source; fallback is prohibited.");
         }
-        if (!Enum.IsDefined(request.TestFault))
+        if (!Enum.IsDefined(request.TestFault) ||
+            (request.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual && request.TestFault != DualCameraTestFault.None))
         {
             throw new DualCameraFlowException(DualCameraFailureCode.InvalidExecutionEnvironment, "The TestSynthetic fault plan is unsupported.");
         }
 
-        request.Profile.Validate();
-        var transactionId = Guid.NewGuid();
+        lock (_sync)
+        {
+            if (_responseUnknownTransactionId.HasValue)
+                return _current ?? throw new InvalidOperationException("The response-unknown transaction state is unavailable.");
+        }
+
+        var startedAtUtc = _timeProvider.GetUtcNow();
+        request.Profile.Validate(startedAtUtc);
+        var transactionId = request.TransactionId ?? Guid.NewGuid();
+        if (transactionId == Guid.Empty)
+            throw new DualCameraFlowException(DualCameraFailureCode.InvalidExecutionEnvironment, "A non-empty transaction ID is required.");
         BeginOperation(transactionId, request);
         try
         {
-            if (request.TestFault == DualCameraTestFault.FailBeforeCapture)
-            {
-                throw new DualCameraFlowException(DualCameraFailureCode.LiveViewStopFailed, "TestSynthetic Live View stop failed before any capture call.");
-            }
-            var originals = new List<CanonicalJpegOriginal>(2);
-            foreach (var alias in new[] { "CAM-A", "CAM-B" })
-            {
-                var captureStage = alias == "CAM-A" ? DualCameraProductStage.CaptureCameraA : DualCameraProductStage.CaptureCameraB;
-                var validationStage = alias == "CAM-A" ? DualCameraProductStage.ValidateCameraA : DualCameraProductStage.ValidateCameraB;
-                SetStage(captureStage, DualCameraStageStatus.Active, $"{alias} capture started");
-                var originalPath = Path.Combine(_rootDirectory, "transactions", transactionId.ToString("N"), alias, "original.jpg");
-                if ((alias == "CAM-A" && request.TestFault == DualCameraTestFault.FailCaptureCameraA) ||
-                    (alias == "CAM-B" && request.TestFault == DualCameraTestFault.FailCaptureCameraB))
-                {
-                    var code = alias == "CAM-A" ? DualCameraFailureCode.CaptureCameraA : DualCameraFailureCode.CaptureCameraB;
-                    throw new DualCameraFlowException(code, $"{alias} TestSynthetic capture failed before file generation.");
-                }
-                try
-                {
-                    await _camera.CaptureAsync(alias, transactionId, originalPath, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception exception)
-                {
-                    var code = alias == "CAM-A" ? DualCameraFailureCode.CaptureCameraA : DualCameraFailureCode.CaptureCameraB;
-                    throw new DualCameraFlowException(code, $"{alias} capture failed.", exception);
-                }
-
-                SetStage(captureStage, DualCameraStageStatus.Succeeded, $"{alias} captured once");
-                SetStage(validationStage, DualCameraStageStatus.Active, $"{alias} canonical JPEG validation started");
-                var original = await ValidateCanonicalOriginalAsync(
-                    alias,
-                    originalPath,
-                    request.Profile.ExpectedInputWidth,
-                    request.Profile.ExpectedInputHeight,
-                    cancellationToken).ConfigureAwait(false);
-                originals.Add(original);
-                SetStage(validationStage, DualCameraStageStatus.Succeeded, $"{alias} canonical JPEG verified");
-                if (alias == "CAM-A" && request.TestFault == DualCameraTestFault.InterruptAfterCameraA)
-                {
-                    throw new DualCameraFlowException(DualCameraFailureCode.Interrupted, "TestSynthetic execution stopped after CAM-A canonical verification.");
-                }
-            }
-
-            lock (_sync)
-            {
-                _current = Snapshot(
-                    capture: new DualCameraCaptureResult(transactionId, originals.AsReadOnly(), true, DualCameraFailureCode.None));
-            }
-
-            if (request.TestFault == DualCameraTestFault.FailStitch)
-            {
-                const string reason = "TestSynthetic stitch failure was requested; originals remain retained.";
-                var jobId = Guid.NewGuid();
-                var failedStitch = new DualCameraStitchResult(
-                    jobId,
-                    string.Empty,
-                    false,
-                    DualCameraFailureCode.StitchFailed,
-                    reason);
-                lock (_sync)
-                {
-                    _stitchJobs.Add(failedStitch);
-                    _current = Snapshot(stitch: failedStitch, failureCode: DualCameraFailureCode.StitchFailed, failureReason: reason);
-                }
-                SetStage(DualCameraProductStage.Stitch, DualCameraStageStatus.Failed, reason);
-                throw new DualCameraFlowException(DualCameraFailureCode.StitchFailed, reason);
-            }
-            await StitchCoreAsync(cancellationToken).ConfigureAwait(false);
-            SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Active, "Stitched JPEG awaiting operator review");
-            return CompleteOperation();
+            SetStage(DualCameraProductStage.CaptureCameraA, DualCameraStageStatus.Active, "typed pair capture source started");
+            var transactionDirectory = Path.Combine(_rootDirectory, "transactions", transactionId.ToString("N"));
+            var sourceResult = await _captureSource.CapturePairAsync(
+                new DualCameraCaptureSourceRequest(
+                    transactionId,
+                    transactionDirectory,
+                    _transactionIdentity,
+                    _profile!,
+                    _hardwareCaptureProfile,
+                    request.HardwareConfirmations,
+                    request.TestFault,
+                    startedAtUtc,
+                    startedAtUtc.AddSeconds(180)),
+                cancellationToken).ConfigureAwait(false);
+            return await CompleteCaptureAndStitchAsync(
+                sourceResult,
+                transactionId,
+                request.TestFault,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException exception)
         {
@@ -181,6 +162,103 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         {
             return FailOperation(DualCameraFailureCode.StitchFailed, exception.Message, exception);
         }
+    }
+
+    public async Task<DualCameraProductState> RecoverAndStitchAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        BeginRecovery(transactionId);
+        try
+        {
+            SetStage(DualCameraProductStage.CaptureCameraA, DualCameraStageStatus.Active, "saved HardwareDual transaction query started");
+            var recoverableSource = (IRecoverableDualCameraCaptureSource)_captureSource;
+            var sourceResult = await recoverableSource.RecoverPairAsync(transactionId, cancellationToken).ConfigureAwait(false);
+            return await CompleteCaptureAndStitchAsync(
+                sourceResult,
+                transactionId,
+                DualCameraTestFault.None,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return FailOperation(DualCameraFailureCode.Interrupted, "The transaction query was interrupted; no capture was reserved or dispatched again.", exception);
+        }
+        catch (DualCameraFlowException exception)
+        {
+            return FailOperation(exception.Code, exception.Message, exception);
+        }
+        catch (Exception exception)
+        {
+            return FailOperation(DualCameraFailureCode.StitchFailed, exception.Message, exception);
+        }
+    }
+
+    private async Task<DualCameraProductState> CompleteCaptureAndStitchAsync(
+        DualCameraCaptureSourceResult sourceResult,
+        Guid transactionId,
+        DualCameraTestFault testFault,
+        CancellationToken cancellationToken)
+    {
+        var profile = _profile ?? throw new InvalidOperationException("Profile snapshot is unavailable.");
+        var originals = new List<CanonicalJpegOriginal>(2);
+        foreach (var retained in sourceResult.RetainedOriginals)
+        {
+            var alias = retained.Alias;
+            var captureStage = alias == "CAM-A" ? DualCameraProductStage.CaptureCameraA : DualCameraProductStage.CaptureCameraB;
+            var validationStage = alias == "CAM-A" ? DualCameraProductStage.ValidateCameraA : DualCameraProductStage.ValidateCameraB;
+            SetStage(captureStage, DualCameraStageStatus.Succeeded, $"{alias} captured once");
+            SetStage(validationStage, DualCameraStageStatus.Active, $"{alias} canonical JPEG validation started");
+            var original = await ValidateCanonicalOriginalAsync(
+                alias,
+                retained.Path,
+                profile.ExpectedInputWidth,
+                profile.ExpectedInputHeight,
+                cancellationToken).ConfigureAwait(false);
+            originals.Add(original);
+            SetStage(validationStage, DualCameraStageStatus.Succeeded, $"{alias} canonical JPEG verified");
+        }
+
+        lock (_sync)
+        {
+            _responseUnknownTransactionId = sourceResult.FailureCode == DualCameraFailureCode.AgentResponseUnknown
+                ? transactionId
+                : null;
+            _current = Snapshot(
+                capture: new DualCameraCaptureResult(
+                    transactionId,
+                    originals.AsReadOnly(),
+                    sourceResult.Succeeded,
+                    sourceResult.FailureCode,
+                    sourceResult.HardwareEvidence));
+        }
+
+        if (!sourceResult.Succeeded)
+            throw new DualCameraFlowException(sourceResult.FailureCode, sourceResult.FailureReason ?? "Typed pair capture failed without automatic retry.");
+        if (originals.Count != 2 || !originals.Select(item => item.Alias).SequenceEqual(["CAM-A", "CAM-B"], StringComparer.Ordinal))
+            throw new DualCameraFlowException(DualCameraFailureCode.InvalidOriginal, "Typed pair capture must retain exactly CAM-A and CAM-B canonical originals.");
+
+        if (testFault == DualCameraTestFault.FailStitch)
+        {
+            const string reason = "TestSynthetic stitch failure was requested; originals remain retained.";
+            var jobId = Guid.NewGuid();
+            var failedStitch = new DualCameraStitchResult(
+                jobId,
+                string.Empty,
+                false,
+                DualCameraFailureCode.StitchFailed,
+                reason);
+            lock (_sync)
+            {
+                _stitchJobs.Add(failedStitch);
+                _current = Snapshot(stitch: failedStitch, failureCode: DualCameraFailureCode.StitchFailed, failureReason: reason);
+            }
+            SetStage(DualCameraProductStage.Stitch, DualCameraStageStatus.Failed, reason);
+            throw new DualCameraFlowException(DualCameraFailureCode.StitchFailed, reason);
+        }
+        await StitchCoreAsync(cancellationToken).ConfigureAwait(false);
+        SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Active, "Stitched JPEG awaiting operator review");
+        return CompleteOperation();
     }
 
     public async Task<DualCameraProductState> RestitchAsync(CancellationToken cancellationToken = default)
@@ -257,12 +335,25 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                     $"DualCamera identity is {identity.Status}; capture was rejected before side effects.");
             }
 
+            if (request.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual)
+            {
+                if (request.HardwareCaptureProfile is null)
+                    throw new DualCameraFlowException(DualCameraFailureCode.InvalidProfile, "A HardwareDual capture profile snapshot is required.");
+                request.HardwareCaptureProfile.Validate(_timeProvider.GetUtcNow());
+                _hardwareCaptureProfile = request.HardwareCaptureProfile.Freeze();
+            }
+            else
+            {
+                _hardwareCaptureProfile = null;
+            }
+
             _active = true;
             _transactionIdentity = identity with { };
             _profile = request.Profile with
             {
                 CameraBToCameraA = Array.AsReadOnly(request.Profile.CameraBToCameraA.ToArray()),
                 Crop = Array.AsReadOnly(request.Profile.Crop.ToArray()),
+                CameraAliases = Array.AsReadOnly(request.Profile.CameraAliases.ToArray()),
             };
             _stages.Clear();
             foreach (var stage in Enum.GetValues<DualCameraProductStage>())
@@ -275,6 +366,58 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             state = _current;
         }
         PublishState(state);
+    }
+
+    private void BeginRecovery(Guid transactionId)
+    {
+        DualCameraProductState state;
+        lock (_sync)
+        {
+            if (_active)
+                throw new DualCameraFlowException(DualCameraFailureCode.DuplicateStart, "A DualCamera product operation is already active.");
+            if (_captureSource.Environment != DualCameraExecutionEnvironment.HardwareDual ||
+                _captureSource is not IRecoverableDualCameraCaptureSource)
+                throw new DualCameraFlowException(DualCameraFailureCode.InvalidExecutionEnvironment, "Only HardwareDual supports transaction recovery.");
+            if (transactionId == Guid.Empty || _current?.TransactionId != transactionId ||
+                _responseUnknownTransactionId != transactionId ||
+                _current.FailureCode != DualCameraFailureCode.AgentResponseUnknown ||
+                _profile is null || _hardwareCaptureProfile is null)
+                throw new DualCameraFlowException(DualCameraFailureCode.AgentResponseUnknown, "The requested response-unknown transaction has no frozen product snapshot.");
+
+            _active = true;
+            _current = Snapshot();
+            state = _current;
+        }
+        PublishState(state);
+    }
+
+    private void RestorePendingRecovery()
+    {
+        if (_captureSource is not IRecoverableDualCameraCaptureSource recoverable ||
+            recoverable.PendingRecoveryRequest is not { } pending)
+        {
+            return;
+        }
+
+        _transactionIdentity = pending.IdentitySnapshot with { };
+        _profile = pending.RigProfileSnapshot with
+        {
+            CameraBToCameraA = Array.AsReadOnly(pending.RigProfileSnapshot.CameraBToCameraA.ToArray()),
+            Crop = Array.AsReadOnly(pending.RigProfileSnapshot.Crop.ToArray()),
+            CameraAliases = Array.AsReadOnly(pending.RigProfileSnapshot.CameraAliases.ToArray()),
+        };
+        _hardwareCaptureProfile = pending.CaptureProfileSnapshot.Freeze();
+        _responseUnknownTransactionId = pending.TransactionId;
+        _stages.Clear();
+        foreach (var stage in Enum.GetValues<DualCameraProductStage>())
+        {
+            _stages[stage] = new(stage, DualCameraStageStatus.Pending, null);
+        }
+        _current = Snapshot(
+            transactionId: pending.TransactionId,
+            executionEnvironment: DualCameraExecutionEnvironment.HardwareDual,
+            failureCode: DualCameraFailureCode.AgentResponseUnknown,
+            failureReason: "A durable response-unknown HardwareDual transaction is awaiting query-only recovery.");
     }
 
     private void BeginContinuation(bool requireSuccessfulStitch = false)

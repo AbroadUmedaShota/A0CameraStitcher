@@ -7,6 +7,7 @@ namespace A0CameraStitcher.M3.Foundation.DualCamera;
 public enum DualCameraExecutionEnvironment
 {
     TestSynthetic,
+    HardwareDual,
 }
 
 public enum DualCameraProductStage
@@ -40,6 +41,11 @@ public enum DualCameraFailureCode
     CaptureCameraB,
     InvalidOriginal,
     LiveViewStopFailed,
+    HardwarePending,
+    ProfileMismatch,
+    SpoolNotEmpty,
+    WatchdogExpired,
+    AgentResponseUnknown,
     Interrupted,
     StitchFailed,
     ExportFailed,
@@ -89,6 +95,8 @@ public sealed record DualCameraRigProfile
 
     public required IReadOnlyList<int> Crop { get; init; }
 
+    public IReadOnlyList<string> CameraAliases { get; init; } = Array.AsReadOnly(["CAM-A", "CAM-B"]);
+
     public static DualCameraRigProfile ApprovedSynthetic() => new()
     {
         ProfileId = "synthetic-approved-rig-v1",
@@ -106,7 +114,7 @@ public sealed record DualCameraRigProfile
         Crop = Array.AsReadOnly([1, 1, 1, 1]),
     };
 
-    public void Validate()
+    public void Validate(DateTimeOffset? nowUtc = null)
     {
         if (Status != DualCameraProfileStatus.Approved ||
             !string.Equals(SchemaVersion, "1.1.0", StringComparison.Ordinal) ||
@@ -121,7 +129,10 @@ public sealed record DualCameraRigProfile
             CameraBToCameraA is null || CameraBToCameraA.Count != 9 ||
             CameraBToCameraA.Any(value => !double.IsFinite(value)) ||
             Crop is null || Crop.Count != 4 || Crop.Any(value => value < 0) ||
-            Layout is not ("camera-a-left-camera-b-right" or "camera-a-top-camera-b-bottom"))
+            Layout is not ("camera-a-left-camera-b-right" or "camera-a-top-camera-b-bottom") ||
+            CameraAliases is null || CameraAliases.Count != 2 ||
+            !CameraAliases.SequenceEqual(["CAM-A", "CAM-B"], StringComparer.Ordinal) ||
+            (nowUtc.HasValue && ValidUntilUtc <= nowUtc.Value))
         {
             throw new DualCameraFlowException(DualCameraFailureCode.InvalidProfile, "The fixed rig profile is draft, malformed, expired, or unsupported.");
         }
@@ -148,12 +159,32 @@ public sealed record DualCameraCaptureRequest
 
     public DualCameraTestFault TestFault { get; init; }
 
+    public Guid? TransactionId { get; init; }
+
+    public HardwareDualOperatorConfirmations? HardwareConfirmations { get; init; }
+
+    public HardwareDualCaptureProfile? HardwareCaptureProfile { get; init; }
+
     public static DualCameraCaptureRequest CreateTestSynthetic(DualCameraRigProfile profile) => new()
     {
         Mode = CameraOperatingMode.DualCamera,
         ExecutionEnvironment = DualCameraExecutionEnvironment.TestSynthetic,
         Profile = profile,
         TestFault = DualCameraTestFault.None,
+    };
+
+    public static DualCameraCaptureRequest CreateHardwareDual(
+        DualCameraRigProfile profile,
+        HardwareDualCaptureProfile captureProfile,
+        HardwareDualOperatorConfirmations confirmations,
+        Guid? transactionId = null) => new()
+    {
+        Mode = CameraOperatingMode.DualCamera,
+        ExecutionEnvironment = DualCameraExecutionEnvironment.HardwareDual,
+        Profile = profile,
+        HardwareCaptureProfile = captureProfile,
+        TransactionId = transactionId,
+        HardwareConfirmations = confirmations,
     };
 }
 
@@ -170,7 +201,8 @@ public sealed record DualCameraCaptureResult(
     Guid TransactionId,
     IReadOnlyList<CanonicalJpegOriginal> Originals,
     bool Succeeded,
-    DualCameraFailureCode FailureCode);
+    DualCameraFailureCode FailureCode,
+    DualHardwareCaptureEvidence? HardwareEvidence = null);
 
 public sealed record OfflineStitchArtifact(
     string OutputPath,
@@ -239,6 +271,42 @@ public interface ITestSyntheticCamera
         CancellationToken cancellationToken);
 }
 
+public sealed record DualCameraCaptureSourceRequest(
+    Guid TransactionId,
+    string TransactionDirectory,
+    DualCameraIdentitySnapshot IdentitySnapshot,
+    DualCameraRigProfile ProfileSnapshot,
+    HardwareDualCaptureProfile? HardwareCaptureProfileSnapshot,
+    HardwareDualOperatorConfirmations? HardwareConfirmations,
+    DualCameraTestFault TestFault,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset WatchdogDeadlineUtc);
+
+public sealed record DualCameraCaptureSourceResult(
+    IReadOnlyList<(string Alias, string Path)> RetainedOriginals,
+    bool Succeeded,
+    DualCameraFailureCode FailureCode,
+    string? FailureReason,
+    DualHardwareCaptureEvidence? HardwareEvidence = null);
+
+public interface IDualCameraCaptureSource
+{
+    DualCameraExecutionEnvironment Environment { get; }
+
+    Task<DualCameraCaptureSourceResult> CapturePairAsync(
+        DualCameraCaptureSourceRequest request,
+        CancellationToken cancellationToken);
+}
+
+public interface IRecoverableDualCameraCaptureSource
+{
+    DualHardwareCaptureRequest? PendingRecoveryRequest { get; }
+
+    Task<DualCameraCaptureSourceResult> RecoverPairAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken);
+}
+
 public interface IOfflineStitcherAdapter
 {
     Task ValidateCanonicalJpegAsync(
@@ -264,10 +332,16 @@ public interface IDualCameraProductFlow
 
     DualCameraProductState? Current { get; }
 
+    DualCameraExecutionEnvironment ExecutionEnvironment { get; }
+
     DualCameraIdentitySnapshot IdentitySnapshot { get; }
 
     Task<DualCameraProductState> CaptureAndStitchAsync(
         DualCameraCaptureRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<DualCameraProductState> RecoverAndStitchAsync(
+        Guid transactionId,
         CancellationToken cancellationToken = default);
 
     Task<DualCameraProductState> RestitchAsync(CancellationToken cancellationToken = default);
