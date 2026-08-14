@@ -46,6 +46,7 @@ endif()
 
 add_library(a0_phase0_core
     src/phase0/cli_safety.cpp
+    src/phase0/dual_hardware_camera_agent.cpp
     src/phase0/hardware_camera_agent.cpp
     src/phase0/hardware_camera_agent_pipe.cpp
     src/phase0/phase0.cpp
@@ -179,6 +180,17 @@ if(BUILD_TESTING)
         target_compile_options(a0_hardware_camera_agent_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME hardware_camera_agent_contracts COMMAND a0_hardware_camera_agent_tests)
+
+    add_executable(a0_dual_hardware_camera_agent_tests
+        tests/dual_hardware_camera_agent_tests.cpp)
+    target_link_libraries(a0_dual_hardware_camera_agent_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_dual_hardware_camera_agent_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_dual_hardware_camera_agent_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME dual_hardware_camera_agent_contracts
+        COMMAND a0_dual_hardware_camera_agent_tests)
 
     add_executable(a0_m2_tests tests/m2_tests.cpp)
     target_link_libraries(a0_m2_tests PRIVATE a0_m2_optical)

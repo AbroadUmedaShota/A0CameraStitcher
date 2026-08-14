@@ -32,7 +32,7 @@ try {
     Assert-Condition (Test-Path -LiteralPath $foundationTestExecutable -PathType Leaf) 'M3 foundation test executable was not produced by the solution build.'
     $testOutput = & $foundationTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 foundation tests failed: $($testOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 20/20 passed.')) 'M3 foundation test summary is missing or incomplete.'
+    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 22/22 passed.')) 'M3 foundation test summary is missing or incomplete.'
 
     $cmake = Get-Command cmake -ErrorAction Stop
     & $cmake.Source -S $RepositoryRoot -B $nativeBuildDirectory -A x64

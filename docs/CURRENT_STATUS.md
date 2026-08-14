@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-08-10
+更新日: 2026-08-14
 
 ## 総合判定
 
@@ -10,6 +10,7 @@
 
 ## 確認済み
 
+- 2026-08-14にDualCamera専用のCamera Agent v2アプリ側通信を追加した。アプリはAgentの機能を確認してから、一つのpair transaction IDで「予約→開始→同じIDの結果確認」を行う。CAM-A→CAM-B順、durable pair journal、same-ID query、retry 0をAgent能力として必須にし、不一致、別transactionの結果、重複fieldを拒否する。Native側にも同じschemaと4操作を認識する純粋なparser／dispatcher骨格を追加し、厳密でないJSONを拒否する。永続store未接続の予約・開始・照会はtyped unavailableで停止し、camera access・pair dispatch・retryは0件である。Foundation 22/22、M3 simulated Release/Debug、正式DualCamera WPF flow、SDK-less Debug/Release CTest各9/9が合格した。pair store、pair orchestrator、Named Pipe、製品起動への接続は未実装のため、HardwareDual画面は引き続き撮影不可であり、実カメラ操作は0件である。
 - 正式camera modelはNikon D810であり、明示的な`SingleCamera`または`DualCamera`をUSBで運用する。`SingleCamera`はCAM-A、WPD serial digest、SDK/WPD各exactly-one current session、canonical original一件、stitch `NotApplicable`、byte-identical `7360×4912` export、30日read-only profileとする。`DualCamera`は従来どおり固定平面A0原稿をCAM-A→CAM-Bで順次撮影・合成する。
 - modeはactive transaction外で明示選択し、接続台数から推定しない。`DualCamera`の一台不足を`SingleCamera`へ自動降格せず、active中のmode変更を禁止する。
 - D810一台の電源再投入後PnP再列挙とWPD側CAM-A continuityを匿名証拠化。SDK側の旧continuity結論はephemeral source ID使用のため無効化され、接続中二台のidentity-v2衝突によりidentity strategyはBlockedである。

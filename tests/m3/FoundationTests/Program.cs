@@ -4,7 +4,9 @@ using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using A0CameraStitcher.M3.Foundation;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.Foundation.Hardware;
 
 var tests = new (string Name, Func<Task> Run)[]
@@ -29,6 +31,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("legacy v1 journal migrates as an explicit dual-camera plan", LegacyJournalMigratesAsDualAsync),
     ("single-camera readiness ignores only the inactive body", SingleCameraReadinessAsync),
     ("continuous hardware Live View v2 validates sessions and JPEG frames", ContinuousHardwareLiveViewV2Async),
+    ("dual hardware Agent v2 reserves starts and queries one pair transaction", DualHardwareAgentV2RoundTripAsync),
+    ("dual hardware Agent v2 rejects retry capability and mismatched journals", DualHardwareAgentV2NegativesAsync),
 };
 
 var failures = new List<string>();
@@ -48,6 +52,174 @@ foreach (var test in tests)
 
 Console.WriteLine($"Foundation tests: {tests.Length - failures.Count}/{tests.Length} passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static async Task DualHardwareAgentV2RoundTripAsync()
+{
+    var transactionId = Guid.ParseExact("0123456789abcdef0123456789abcdef", "N");
+    var startedAtUtc = new DateTimeOffset(2026, 8, 14, 1, 2, 3, TimeSpan.Zero);
+    var request = new DualHardwareCaptureRequest(
+        transactionId,
+        $@"C:\A0CameraStitcher\transactions\{transactionId:N}",
+        DualCameraIdentitySnapshot.AnonymousTestSyntheticReady(),
+        HardwareDualCaptureProfile.ApprovedSynthetic(),
+        DualCameraRigProfile.ApprovedSynthetic(),
+        new HardwareDualOperatorConfirmations(true, true, true, true, true),
+        startedAtUtc,
+        startedAtUtc + TimeSpan.FromSeconds(180));
+    var terminal = new DualHardwareCaptureResult(
+        transactionId,
+        Array.AsReadOnly([
+            new DualHardwareOriginalRecord("CAM-A", $@"{request.TransactionDirectory}\CAM-A\original.jpg", true, true),
+            new DualHardwareOriginalRecord("CAM-B", $@"{request.TransactionDirectory}\CAM-B\original.jpg", true, true),
+        ]),
+        DualHardwareCaptureTerminalState.Succeeded,
+        DualCameraFailureCode.None,
+        new DualHardwareCaptureEvidence(
+            DualHardwareCaptureTerminalState.Succeeded,
+            request.IdentitySnapshot,
+            request.CaptureProfileSnapshot.ProfileId,
+            request.CaptureProfileSnapshot.Version,
+            request.RigProfileSnapshot.ProfileId,
+            request.RigProfileSnapshot.Version,
+            request.StartedAtUtc,
+            request.WatchdogDeadlineUtc,
+            request.StartedAtUtc + TimeSpan.FromSeconds(20),
+            true,
+            true,
+            true,
+            true,
+            0));
+    var operationsSeen = new List<string>();
+    var transport = new RecordingHardwareTransport(requestJson =>
+    {
+        using var document = JsonDocument.Parse(requestJson);
+        var root = document.RootElement;
+        Check.Equal(DualHardwareCameraAgentProtocol.SchemaVersion, root.GetProperty("schemaVersion").GetString());
+        Check.False(root.GetProperty("simulation").GetBoolean(), "Dual hardware Agent requests must never be simulation requests.");
+        var requestId = root.GetProperty("requestId").GetString()!;
+        var operation = root.GetProperty("operation").GetString()!;
+        operationsSeen.Add(operation);
+        var payload = root.GetProperty("payload");
+        return operation switch
+        {
+            "get-dual-capabilities" => DualHardwareCapabilitiesResponseJson(requestId),
+            "reserve-pair-transaction" => DualHardwareResponseJson(requestId, true, "PairTransactionReserved", new
+            {
+                transactionId = payload.GetProperty("transactionId").GetString(),
+                accepted = true,
+            }),
+            "start-reserved-pair" => DualHardwareResponseJson(requestId, true, "PairDispatchAccepted", new
+            {
+                transactionId = payload.GetProperty("transaction").GetProperty("transactionId").GetString(),
+                dispatchState = "ResponseUnknown",
+                result = (object?)null,
+            }),
+            "get-pair-transaction-result" => DualHardwareResponseJson(requestId, true, "PairTransactionFound", new
+            {
+                transactionId = payload.GetProperty("transactionId").GetString(),
+                found = true,
+                result = terminal,
+            }),
+            _ => throw new InvalidOperationException($"Unexpected Dual Agent operation: {operation}"),
+        };
+    });
+    var operations = new DualHardwareCameraAgentOperations(transport);
+
+    Check.True(await operations.ReservePairTransactionAsync(transactionId, default), "The pair reservation must be accepted once.");
+    var dispatch = await operations.StartReservedPairAsync(request, default);
+    Check.Equal(DualHardwareDispatchState.ResponseUnknown, dispatch.State);
+    Check.True(dispatch.Result is null, "A response-unknown dispatch must not forge a terminal result.");
+    var queried = await operations.QueryPairTransactionAsync(transactionId, default);
+    Check.True(queried is not null, "The same transaction query must return its terminal journal.");
+    Check.Equal(transactionId, queried!.TransactionId);
+    Check.Equal(DualHardwareCaptureTerminalState.Succeeded, queried.TerminalState);
+    Check.SequenceEqual(
+        new[] { "get-dual-capabilities", "reserve-pair-transaction", "start-reserved-pair", "get-pair-transaction-result" },
+        operationsSeen);
+}
+
+static async Task DualHardwareAgentV2NegativesAsync()
+{
+    var transactionId = Guid.ParseExact("11111111111111111111111111111111", "N");
+    var retryTransport = new RecordingHardwareTransport(requestJson =>
+    {
+        using var request = JsonDocument.Parse(requestJson);
+        return DualHardwareCapabilitiesResponseJson(
+            request.RootElement.GetProperty("requestId").GetString()!,
+            automaticRetryCount: 1);
+    });
+    var retryOperations = new DualHardwareCameraAgentOperations(retryTransport);
+    await Check.ThrowsAsync<HardwareProtocolViolationException>(
+        () => retryOperations.ReservePairTransactionAsync(transactionId, default));
+    Check.Equal(1, retryTransport.RequestCount);
+
+    var requestId = "request-negative-query";
+    var anotherTransaction = Guid.ParseExact("22222222222222222222222222222222", "N");
+    var mismatched = DualHardwareResponseJson(requestId, true, "PairTransactionFound", new
+    {
+        transactionId = anotherTransaction.ToString("N"),
+        found = true,
+        result = (object?)null,
+    });
+    Check.ThrowsHardwareProtocol(
+        "TransactionIdMismatch",
+        () => DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+            mismatched,
+            requestId,
+            transactionId));
+
+    var validNotFound = DualHardwareResponseJson(requestId, false, "PairTransactionNotFound", new
+    {
+        transactionId = transactionId.ToString("N"),
+        found = false,
+        result = (object?)null,
+    });
+    var schemaField = $"\"schemaVersion\":\"{DualHardwareCameraAgentProtocol.SchemaVersion}\"";
+    var duplicateField = validNotFound.Replace(
+        schemaField,
+        $"{schemaField},{schemaField}",
+        StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol(
+        "DuplicateField",
+        () => DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+            duplicateField,
+            requestId,
+            transactionId));
+}
+
+static string DualHardwareCapabilitiesResponseJson(string requestId, int automaticRetryCount = 0) =>
+    DualHardwareResponseJson(requestId, true, "DualCapabilities", new
+    {
+        cameraMode = "DualCamera",
+        protocolVersion = 2,
+        orderedRequiredAliases = new[] { "CAM-A", "CAM-B" },
+        supportedOperations = new[]
+        {
+            "get-dual-capabilities",
+            "reserve-pair-transaction",
+            "start-reserved-pair",
+            "get-pair-transaction-result",
+        },
+        pairJournalDurable = true,
+        sameTransactionQueryOnly = true,
+        automaticRetryCount,
+    });
+
+static string DualHardwareResponseJson(string requestId, bool success, string resultCode, object payload) =>
+    JsonSerializer.Serialize(new
+    {
+        schemaVersion = DualHardwareCameraAgentProtocol.SchemaVersion,
+        simulation = false,
+        marker = DualHardwareCameraAgentProtocol.Marker,
+        requestId,
+        success,
+        resultCode,
+        payload,
+    }, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new JsonStringEnumConverter(), new TestTransactionIdConverter() },
+    });
 
 static async Task ContinuousHardwareLiveViewV2Async()
 {
@@ -1909,6 +2081,15 @@ sealed class RecordingHardwareTransport(
         ++RequestCount;
         return Task.FromResult(responseFactory(requestJson));
     }
+}
+
+sealed class TestTransactionIdConverter : JsonConverter<Guid>
+{
+    public override Guid Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        Guid.ParseExact(reader.GetString()!, "N");
+
+    public override void Write(Utf8JsonWriter writer, Guid value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.ToString("N"));
 }
 
 static class Check
