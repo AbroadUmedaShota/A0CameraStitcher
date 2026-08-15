@@ -1,11 +1,14 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 namespace a0::phase0 {
+
+class DualHardwarePairJournalStore;
 
 inline constexpr std::string_view kDualHardwareCameraAgentSchemaVersion =
     "a0.camera-agent.hardware-dual.v2";
@@ -44,15 +47,23 @@ struct DualHardwareCameraAgentSafetyCounters {
 [[nodiscard]] DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
     std::string_view json);
 
-// AR-08a-1 intentionally owns only the pure software protocol boundary.
-// Pair persistence and camera dispatch are introduced behind this dispatcher
-// in a later task; until then every non-capability operation fails closed.
+// AR-08a-2B optionally connects the pure protocol boundary to one externally
+// owned pair journal store. Camera dispatch remains unavailable and fail closed.
 class DualHardwareCameraAgentDispatcher final {
 public:
+    DualHardwareCameraAgentDispatcher() noexcept = default;
+    explicit DualHardwareCameraAgentDispatcher(
+        std::shared_ptr<DualHardwarePairJournalStore> pair_store) noexcept;
+
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
     [[nodiscard]] DualHardwareCameraAgentSafetyCounters SafetyCounters()
         const noexcept;
+
+private:
+    // Shared ownership keeps the injected store alive for every Handle call.
+    // A null store preserves the fail-closed PairStoreUnavailable behavior.
+    std::shared_ptr<DualHardwarePairJournalStore> pair_store_;
 };
 
 } // namespace a0::phase0

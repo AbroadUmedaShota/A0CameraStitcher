@@ -1,6 +1,12 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
+#include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -8,6 +14,7 @@
 namespace {
 
 using namespace a0::phase0;
+namespace fs = std::filesystem;
 
 int failures = 0;
 
@@ -23,6 +30,74 @@ void CheckContains(
     std::string_view expected,
     std::string_view message) {
     Check(value.find(expected) != std::string_view::npos, message);
+}
+
+void CheckNotContains(
+    std::string_view value,
+    std::string_view unexpected,
+    std::string_view message) {
+    Check(value.find(unexpected) == std::string_view::npos, message);
+}
+
+class TempSandbox final {
+public:
+    TempSandbox() {
+        static std::atomic<unsigned long long> sequence{};
+        parent_ = fs::absolute(fs::temp_directory_path()).lexically_normal();
+        if (parent_.filename().empty()) parent_ = parent_.parent_path();
+        const auto timestamp = std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+        root_ = parent_ / ("a0-dual-agent-store-test-" +
+            std::to_string(timestamp) + "-" + std::to_string(++sequence));
+        if (root_.parent_path() != parent_ || root_.filename().empty()) {
+            throw std::runtime_error("test sandbox path escaped temporary parent");
+        }
+        fs::create_directory(root_);
+    }
+
+    ~TempSandbox() {
+        const fs::path normalized = fs::absolute(root_).lexically_normal();
+        if (normalized.parent_path() != parent_ || normalized.filename().empty()) {
+            return;
+        }
+        std::error_code cleanup_error;
+        fs::remove_all(normalized, cleanup_error);
+    }
+
+    [[nodiscard]] fs::path Child(std::string_view name) const {
+        return root_ / std::string(name);
+    }
+
+private:
+    fs::path parent_;
+    fs::path root_;
+};
+
+void WriteText(const fs::path& path, const std::string& text) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) throw std::runtime_error("test file could not be opened");
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    output.flush();
+    if (!output) throw std::runtime_error("test file could not be written");
+}
+
+std::string ReadText(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("test file could not be read");
+    return {
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+}
+
+DualHardwareCameraAgentDispatcher CreateOwnedDispatcher(
+    const fs::path& root,
+    std::weak_ptr<DualHardwarePairJournalStore>& observer) {
+    auto external_store =
+        std::make_shared<DualHardwarePairJournalStore>(root);
+    observer = external_store;
+    DualHardwareCameraAgentDispatcher dispatcher(external_store);
+    external_store.reset();
+    return dispatcher;
 }
 
 std::string Envelope(
@@ -245,6 +320,224 @@ void TestTransactionAndAliasValidation() {
         "InvalidFieldType", "transaction IDs with a wrong JSON type must be rejected");
 }
 
+void TestInjectedPairStoreReservationAndRestartQuery() {
+    TempSandbox sandbox;
+    const std::string transaction_id = "33333333333333333333333333333333";
+    const std::string other_id = "44444444444444444444444444444444";
+    const fs::path root = sandbox.Child("durable-store");
+    const fs::path journal = root / "active" / "pair-journal.json";
+
+    auto store = std::make_shared<DualHardwarePairJournalStore>(root);
+    DualHardwareCameraAgentDispatcher dispatcher(store);
+    const auto reserved = dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(transaction_id),
+        "request-reserve"));
+    CheckContains(reserved, "\"success\":true",
+        "an injected store must accept the first reservation");
+    CheckContains(reserved, "\"resultCode\":\"PairTransactionReserved\"",
+        "a successful reservation must return the typed reserved result");
+    CheckContains(reserved,
+        "\"payload\":{\"transactionId\":\"" + transaction_id +
+            "\",\"accepted\":true}",
+        "a successful reservation must acknowledge only the requested ID");
+    Check(fs::is_regular_file(journal),
+        "an accepted reservation must be durably journaled");
+    const std::string original_journal = ReadText(journal);
+
+    const auto duplicate = dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(transaction_id),
+        "request-duplicate"));
+    CheckContains(duplicate, "\"success\":false",
+        "the same reservation must be rejected");
+    CheckContains(duplicate, "\"resultCode\":\"DuplicateTransactionId\"",
+        "the same reservation must have the typed duplicate result");
+    Check(ReadText(journal) == original_journal,
+        "duplicate rejection must not rewrite the durable journal");
+
+    const auto active = dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(other_id),
+        "request-active"));
+    CheckContains(active, "\"success\":false",
+        "another active transaction must be rejected");
+    CheckContains(active, "\"resultCode\":\"ActiveTransactionExists\"",
+        "another active transaction must have a fixed typed result");
+    CheckContains(active, "\"transactionId\":\"" + other_id + "\"",
+        "active rejection must correlate only the requested ID");
+    CheckNotContains(active, transaction_id,
+        "active rejection must not leak the stored active transaction ID");
+    Check(ReadText(journal) == original_journal,
+        "active rejection must not rewrite the durable journal");
+
+    auto restarted_store =
+        std::make_shared<DualHardwarePairJournalStore>(root);
+    DualHardwareCameraAgentDispatcher restarted(restarted_store);
+    const auto found = restarted.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-found"));
+    CheckContains(found, "\"success\":false",
+        "a Reserved query is non-terminal and must not claim success");
+    CheckContains(found, "\"resultCode\":\"PairTransactionReserved\"",
+        "a restarted dispatcher must recover the Reserved state");
+    CheckContains(found,
+        "\"payload\":{\"transactionId\":\"" + transaction_id +
+            "\",\"found\":true,\"result\":null}",
+        "a Reserved query must return found without forging a result");
+
+    const auto other = restarted.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + other_id + "\"}",
+        "request-other"));
+    CheckContains(other, "\"resultCode\":\"PairTransactionNotFound\"",
+        "querying another ID must be typed not-found");
+    CheckContains(other, "\"found\":false,\"result\":null",
+        "another-ID query must not forge a result");
+    CheckNotContains(other, transaction_id,
+        "another-ID query must not leak the active transaction ID");
+    Check(ReadText(journal) == original_journal,
+        "queries must not mutate the durable journal");
+
+    const fs::path empty_root = sandbox.Child("empty-store");
+    auto empty_store =
+        std::make_shared<DualHardwarePairJournalStore>(empty_root);
+    DualHardwareCameraAgentDispatcher empty_dispatcher(empty_store);
+    const auto empty = empty_dispatcher.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + other_id + "\"}",
+        "request-empty"));
+    CheckContains(empty, "\"resultCode\":\"PairTransactionNotFound\"",
+        "an empty injected store must return typed not-found");
+    Check(!fs::exists(empty_root),
+        "an empty-store query must perform zero store writes");
+
+    const fs::path start_root = sandbox.Child("start-store");
+    auto start_store =
+        std::make_shared<DualHardwarePairJournalStore>(start_root);
+    DualHardwareCameraAgentDispatcher start_dispatcher(start_store);
+    const auto start = start_dispatcher.Handle(Envelope(
+        "start-reserved-pair", StartPayload(transaction_id), "request-start"));
+    CheckContains(start, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "start must remain unavailable even when a store is injected");
+    Check(!fs::exists(start_root),
+        "unavailable start must perform zero store reads or writes");
+
+    for (const auto* checked : {
+            &dispatcher, &restarted, &empty_dispatcher, &start_dispatcher}) {
+        const auto counters = checked->SafetyCounters();
+        Check(counters.camera_access_count == 0,
+            "store-backed operations must perform zero camera access");
+        Check(counters.pair_dispatch_count == 0,
+            "store-backed operations must perform zero pair dispatches");
+        Check(counters.automatic_retry_count == 0,
+            "store-backed operations must perform zero automatic retries");
+    }
+}
+
+void TestStoreFailureIsFixedAndRedacted() {
+    TempSandbox sandbox;
+    const std::string transaction_id = "55555555555555555555555555555555";
+    const fs::path root = sandbox.Child("sensitive-store-path");
+    const fs::path journal = root / "active" / "pair-journal.json";
+    fs::create_directories(journal.parent_path());
+    WriteText(journal, "{\"malformed\":true}");
+    const std::string original_journal = ReadText(journal);
+
+    auto store = std::make_shared<DualHardwarePairJournalStore>(root);
+    DualHardwareCameraAgentDispatcher dispatcher(store);
+    const auto response = dispatcher.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-store-error"));
+    CheckContains(response, "\"success\":false",
+        "a store failure must fail closed");
+    CheckContains(response, "\"resultCode\":\"PairStoreFailure\"",
+        "all internal store failures must use one fixed public result code");
+    CheckContains(response,
+        "\"transactionId\":\"" + transaction_id +
+            "\",\"found\":false,\"result\":null",
+        "a store failure must preserve the safe query response shape");
+    CheckNotContains(response, root.filename().string(),
+        "a store failure must not leak a local path");
+    CheckNotContains(response, "malformed or unsupported",
+        "a store failure must not leak internal diagnostic detail");
+    Check(ReadText(journal) == original_journal,
+        "a store failure must not rewrite the invalid journal");
+
+    const auto reserve_response = dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(transaction_id),
+        "request-store-reserve-error"));
+    CheckContains(reserve_response, "\"resultCode\":\"PairStoreFailure\"",
+        "reservation store failures must use the same fixed public result code");
+    CheckContains(reserve_response, "\"accepted\":false",
+        "a reservation store failure must never be accepted");
+    CheckNotContains(reserve_response, root.filename().string(),
+        "a reservation store failure must not leak a local path");
+    CheckNotContains(reserve_response, "malformed or unsupported",
+        "a reservation store failure must not leak internal detail");
+    Check(ReadText(journal) == original_journal,
+        "a reservation store failure must not rewrite the invalid journal");
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 &&
+          counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "a store failure must retain all zero-side-effect counters");
+}
+
+void TestDispatcherOwnsInjectedStoreLifetime() {
+    TempSandbox sandbox;
+    const fs::path root = sandbox.Child("owned-store");
+    const std::string transaction_id = "66666666666666666666666666666666";
+    std::weak_ptr<DualHardwarePairJournalStore> observer;
+
+    {
+        auto dispatcher = CreateOwnedDispatcher(root, observer);
+        Check(!observer.expired(),
+            "dispatcher must keep the injected store alive after factory exit");
+        const auto reserved = dispatcher.Handle(Envelope(
+            "reserve-pair-transaction", ReservationPayload(transaction_id),
+            "request-owned-reserve"));
+        CheckContains(reserved, "\"resultCode\":\"PairTransactionReserved\"",
+            "an owned store must remain usable after external reset");
+    }
+    Check(observer.expired(),
+        "the store must be released when its dispatcher is destroyed");
+
+    {
+        auto restarted = CreateOwnedDispatcher(root, observer);
+        Check(!observer.expired(),
+            "a restarted dispatcher must own its new store instance");
+        const auto found = restarted.Handle(Envelope(
+            "get-pair-transaction-result",
+            "{\"transactionId\":\"" + transaction_id + "\"}",
+            "request-owned-query"));
+        CheckContains(found, "\"resultCode\":\"PairTransactionReserved\"",
+            "an owned restarted store must recover the durable reservation");
+        CheckContains(found, "\"found\":true,\"result\":null",
+            "owned lifetime recovery must not forge a terminal result");
+    }
+    Check(observer.expired(),
+        "the restarted store must be released with its dispatcher");
+
+    DualHardwareCameraAgentDispatcher null_dispatcher(
+        std::shared_ptr<DualHardwarePairJournalStore>{});
+    const auto null_reserve = null_dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(transaction_id),
+        "request-null-reserve"));
+    CheckContains(null_reserve, "\"resultCode\":\"PairStoreUnavailable\"",
+        "an explicitly null store must fail closed as unavailable");
+    const auto null_query = null_dispatcher.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-null-query"));
+    CheckContains(null_query, "\"resultCode\":\"PairStoreUnavailable\"",
+        "an explicitly null query must fail closed as unavailable");
+    const auto counters = null_dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 &&
+          counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "a null store must retain all zero-side-effect counters");
+}
+
 } // namespace
 
 int main() {
@@ -252,6 +545,9 @@ int main() {
     TestStrictEnvelopeAndPayloadValidation();
     TestProtocolIdentityAndSafeTokens();
     TestTransactionAndAliasValidation();
+    TestInjectedPairStoreReservationAndRestartQuery();
+    TestStoreFailureIsFixedAndRedacted();
+    TestDispatcherOwnsInjectedStoreLifetime();
     if (failures != 0) {
         std::cerr << failures << " Dual hardware Camera Agent test(s) failed\n";
         return 1;

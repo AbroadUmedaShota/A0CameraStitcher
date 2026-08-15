@@ -1,4 +1,5 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
+#include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -492,6 +493,17 @@ std::string ReservationUnavailableResponse(
         "\",\"accepted\":false}}";
 }
 
+std::string ReservationResponse(
+    std::string_view request_id,
+    std::string_view transaction_id,
+    bool success,
+    std::string_view result_code,
+    bool accepted) {
+    return ResponsePrefix(request_id, success, result_code) +
+        "{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"accepted\":" + (accepted ? "true" : "false") + "}}";
+}
+
 std::string StartUnavailableResponse(
     std::string_view request_id,
     std::string_view transaction_id) {
@@ -506,6 +518,17 @@ std::string QueryUnavailableResponse(
     return ResponsePrefix(request_id, false, "PairStoreUnavailable") +
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"found\":false,\"result\":null}}";
+}
+
+std::string QueryResponse(
+    std::string_view request_id,
+    std::string_view transaction_id,
+    std::string_view result_code,
+    bool found) {
+    return ResponsePrefix(request_id, false, result_code) +
+        "{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"found\":" + (found ? "true" : "false") +
+        ",\"result\":null}}";
 }
 
 std::string ProtocolRejection(
@@ -525,6 +548,10 @@ DualHardwareCameraAgentProtocolError::DualHardwareCameraAgentProtocolError(
 const std::string& DualHardwareCameraAgentProtocolError::Code() const noexcept {
     return code_;
 }
+
+DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
+    std::shared_ptr<DualHardwarePairJournalStore> pair_store) noexcept
+    : pair_store_(std::move(pair_store)) {}
 
 DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
     std::string_view json) {
@@ -625,15 +652,49 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
         switch (request.operation) {
         case DualHardwareCameraAgentOperation::get_dual_capabilities:
             return CapabilitiesResponse(request.request_id);
-        case DualHardwareCameraAgentOperation::reserve_pair_transaction:
-            return ReservationUnavailableResponse(
-                request.request_id, request.transaction_id);
+        case DualHardwareCameraAgentOperation::reserve_pair_transaction: {
+            if (pair_store_ == nullptr) {
+                return ReservationUnavailableResponse(
+                    request.request_id, request.transaction_id);
+            }
+            try {
+                (void)pair_store_->Reserve(request.transaction_id);
+                return ReservationResponse(
+                    request.request_id, request.transaction_id, true,
+                    "PairTransactionReserved", true);
+            } catch (const DualHardwarePairJournalStoreError& error) {
+                if (error.Code() == "DuplicateTransactionId" ||
+                    error.Code() == "ActiveTransactionExists") {
+                    return ReservationResponse(
+                        request.request_id, request.transaction_id, false,
+                        error.Code(), false);
+                }
+                return ReservationResponse(
+                    request.request_id, request.transaction_id, false,
+                    "PairStoreFailure", false);
+            }
+        }
         case DualHardwareCameraAgentOperation::start_reserved_pair:
             return StartUnavailableResponse(
                 request.request_id, request.transaction_id);
-        case DualHardwareCameraAgentOperation::get_pair_transaction_result:
-            return QueryUnavailableResponse(
-                request.request_id, request.transaction_id);
+        case DualHardwareCameraAgentOperation::get_pair_transaction_result: {
+            if (pair_store_ == nullptr) {
+                return QueryUnavailableResponse(
+                    request.request_id, request.transaction_id);
+            }
+            try {
+                const auto record = pair_store_->Query(request.transaction_id);
+                return QueryResponse(
+                    request.request_id, request.transaction_id,
+                    record ? "PairTransactionReserved" :
+                        "PairTransactionNotFound",
+                    record.has_value());
+            } catch (const DualHardwarePairJournalStoreError&) {
+                return QueryResponse(
+                    request.request_id, request.transaction_id,
+                    "PairStoreFailure", false);
+            }
+        }
         }
     } catch (const DualHardwareCameraAgentProtocolError& error) {
         return ProtocolRejection(extracted_request_id, error.Code());
