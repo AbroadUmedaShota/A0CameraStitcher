@@ -1,7 +1,7 @@
 name: Release decision
 description: Request final MVP release approval
 title: "[release-decision] "
-labels: ["autodev:human-gate", "autodev:release-gate"]
+labels: ["human-gate", "release-gate"]
 body:
   - type: textarea
     id: evidence

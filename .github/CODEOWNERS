@@ -1,0 +1,48 @@
+# Code owners
+#
+# 所有レーンの宣言です。private plan では review 必須として強制されないため、
+# これは gate ではなく「変更前に誰へ確認するか」を示す運用ルールです。
+# 位置づけの詳細は ../CONTRIBUTING.md を参照してください。
+#
+# Sol / Tera / Luna は役割名で、GitHub アカウントとは 1:1 対応しません。
+# ここには実在するアカウントだけを書きます。担当アカウントが増えたら
+# 該当レーンの行を更新してください。
+
+# 既定 — 未分類の変更は integration owner が確認する
+*                                   @AbroadUmedaShota
+
+# --- Team governance lane (Issue #3) ---
+# このレーンだけが参加ルールと GitHub template を変更する
+/CONTRIBUTING.md                    @AbroadUmedaShota
+/.github/CODEOWNERS                 @AbroadUmedaShota
+/.github/ISSUE_TEMPLATE/            @AbroadUmedaShota
+/.github/pull_request_template.md   @AbroadUmedaShota
+
+# --- CI lane (Issue #4) ---
+# workflow 定義は CI Issue の専有。他レーンからは変更しない
+/.github/workflows/                 @AbroadUmedaShota
+
+# --- Native / CMake lane (C++20, Phase 0 + M2) ---
+/CMakeLists.txt                     @AbroadUmedaShota
+/src/phase0/                        @AbroadUmedaShota
+/src/m2/                            @AbroadUmedaShota
+/tests/*.cpp                        @AbroadUmedaShota
+
+# --- .NET / WPF lane (net10.0-windows, M3) ---
+/A0CameraStitcher.M3.slnx           @AbroadUmedaShota
+/src/m3/                            @AbroadUmedaShota
+/tests/m3/                          @AbroadUmedaShota
+
+# --- Verification scripts (shared) ---
+# Test-M3Simulated.ps1 は .NET テスト件数をリテラルで assert する。
+# テストを増減した PR は同じ PR で期待件数を更新する（CONTRIBUTING.md 参照）
+/scripts/                           @AbroadUmedaShota
+
+# --- Shared docs lane (Issue #14: 完了checkpointのGitHub文書同期) ---
+/README.md                          @AbroadUmedaShota
+/AGENTS.md                          @AbroadUmedaShota
+/docs/                              @AbroadUmedaShota
+
+# --- Governance state ---
+# 要件・計画・human gate の正本。実装 Issue からは変更しない
+/.autodev/                          @AbroadUmedaShota

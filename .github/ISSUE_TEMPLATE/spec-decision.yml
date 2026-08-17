@@ -1,7 +1,7 @@
 name: Specification decision
 description: Record a technical or product specification gate
 title: "[spec-decision] "
-labels: ["autodev:human-gate", "autodev:spec-decision"]
+labels: ["human-gate", "spec-decision"]
 body:
   - type: textarea
     id: options
