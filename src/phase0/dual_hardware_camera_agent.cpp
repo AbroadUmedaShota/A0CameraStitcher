@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -706,6 +707,128 @@ std::string ResponsePrefix(
     return output.str();
 }
 
+std::string JsonEscape(std::string_view value) {
+    std::ostringstream output;
+    for (unsigned char character : value) {
+        switch (character) {
+        case '"': output << "\\\""; break;
+        case '\\': output << "\\\\"; break;
+        case '\b': output << "\\b"; break;
+        case '\f': output << "\\f"; break;
+        case '\n': output << "\\n"; break;
+        case '\r': output << "\\r"; break;
+        case '\t': output << "\\t"; break;
+        default:
+            if (character < 0x20U) {
+                constexpr char digits[] = "0123456789abcdef";
+                output << "\\u00" << digits[character >> 4] << digits[character & 15];
+            } else output << static_cast<char>(character);
+        }
+    }
+    return output.str();
+}
+
+std::string SerializeJson(const JsonValue& value) {
+    switch (value.kind) {
+    case JsonKind::string: return "\"" + JsonEscape(value.string) + "\"";
+    case JsonKind::boolean: return value.boolean ? "true" : "false";
+    case JsonKind::number: return value.string;
+    case JsonKind::null_value: return "null";
+    case JsonKind::array: {
+        std::string result = "[";
+        for (std::size_t index = 0; index < value.array.size(); ++index) {
+            if (index != 0) result += ',';
+            result += SerializeJson(value.array[index]);
+        }
+        return result + "]";
+    }
+    case JsonKind::object: {
+        std::string result = "{"; bool first = true;
+        for (const auto& [key, child] : value.object) {
+            if (!first) result += ','; first = false;
+            result += "\"" + JsonEscape(key) + "\":" + SerializeJson(child);
+        }
+        return result + "}";
+    }
+    }
+    ProtocolFailure("AgentFailure", "JSON value kind is unsupported");
+}
+
+std::string FormatUtc100ns(std::int64_t unix_100ns) {
+    constexpr std::int64_t epoch = 116444736000000000LL;
+    const std::uint64_t ticks = static_cast<std::uint64_t>(unix_100ns + epoch);
+    FILETIME file_time{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32U)};
+    SYSTEMTIME system_time{};
+    if (!FileTimeToSystemTime(&file_time, &system_time))
+        ProtocolFailure("AgentFailure", "completion time could not be formatted");
+    char buffer[40]{};
+    std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02uT%02u:%02u:%02u.%07lldZ",
+        system_time.wYear, system_time.wMonth, system_time.wDay,
+        system_time.wHour, system_time.wMinute, system_time.wSecond,
+        static_cast<long long>((unix_100ns % kHundredNanosecondsPerSecond +
+            kHundredNanosecondsPerSecond) % kHundredNanosecondsPerSecond));
+    return buffer;
+}
+
+bool IsRegularCanonicalOriginal(const std::filesystem::path& path) {
+    ValidateTransactionDirectory(path.parent_path().generic_string());
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+}
+
+std::string BuildTerminalResult(
+    const JsonValue& transaction, std::string_view transaction_id,
+    std::string_view terminal_state, std::string_view failure_code,
+    const std::vector<std::pair<std::string, DualHardwareFakeCaptureOutcome>>& originals,
+    const std::filesystem::path& transaction_directory,
+    std::int64_t completed_at_100ns) {
+    const auto& identity = RequireField(transaction, "identitySnapshot", JsonKind::object);
+    const auto& capture = RequireField(transaction, "captureProfileSnapshot", JsonKind::object);
+    const auto& rig = RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+    std::string original_json = "[";
+    for (std::size_t index = 0; index < originals.size(); ++index) {
+        if (index != 0) original_json += ',';
+        const auto& [alias, outcome] = originals[index];
+        const auto canonical = (transaction_directory / alias / "original.jpg").generic_string();
+        original_json += "{\"alias\":\"" + alias + "\",\"canonicalOriginalPath\":\"" +
+            JsonEscape(canonical) + "\",\"exactRecoveredObjectDeleted\":" +
+            (outcome.exact_recovered_object_deleted ? "true" : "false") +
+            ",\"spoolEmptyAfterDelete\":" + (outcome.spool_empty_after_delete ? "true" : "false") + "}";
+    }
+    original_json += "]";
+    const bool exact = std::all_of(originals.begin(), originals.end(), [](const auto& item) {
+        return item.second.exact_recovered_object_deleted;
+    });
+    const bool empty = std::all_of(originals.begin(), originals.end(), [](const auto& item) {
+        return item.second.spool_empty_after_delete;
+    });
+    return "{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"originals\":" + original_json + ",\"terminalState\":\"" +
+        std::string(terminal_state) + "\",\"failureCode\":\"" + std::string(failure_code) +
+        "\",\"evidence\":{\"terminalState\":\"" + std::string(terminal_state) +
+        "\",\"identitySnapshot\":" + SerializeJson(identity) +
+        ",\"captureProfileId\":\"" + JsonEscape(RequireField(capture, "profileId", JsonKind::string).string) +
+        "\",\"captureProfileVersion\":\"" + JsonEscape(RequireField(capture, "version", JsonKind::string).string) +
+        "\",\"profileId\":\"" + JsonEscape(RequireField(rig, "profileId", JsonKind::string).string) +
+        "\",\"profileVersion\":\"" + JsonEscape(RequireField(rig, "version", JsonKind::string).string) +
+        "\",\"watchdogStartedAtUtc\":\"" + RequireField(transaction, "startedAtUtc", JsonKind::string).string +
+        "\",\"watchdogDeadlineUtc\":\"" + RequireField(transaction, "watchdogDeadlineUtc", JsonKind::string).string +
+        "\",\"completedAtUtc\":\"" + FormatUtc100ns(completed_at_100ns) +
+        "\",\"watchdogCompletedInTime\":" +
+        (terminal_state == "WatchdogExpired" ? "false" : "true") +
+        ",\"liveViewStopAndCloseConfirmed\":true,\"exactDeleteConfirmedForEveryRetainedOriginal\":" +
+        (exact ? "true" : "false") + ",\"bothSpoolsEmptyAfter\":" +
+        (empty ? "true" : "false") + ",\"automaticRetryCount\":0}}";
+}
+
+DualHardwarePairJournalState JournalStateFor(std::string_view terminal) {
+    if (terminal == "Succeeded") return DualHardwarePairJournalState::succeeded;
+    if (terminal == "Failed") return DualHardwarePairJournalState::failed;
+    if (terminal == "FailedPartial") return DualHardwarePairJournalState::failed_partial;
+    return DualHardwarePairJournalState::watchdog_expired;
+}
+
 std::string CapabilitiesResponse(std::string_view request_id) {
     return ResponsePrefix(request_id, true, "DualCapabilities") +
         "{\"cameraMode\":\"DualCamera\",\"protocolVersion\":2,"
@@ -787,6 +910,15 @@ DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
 DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
     std::shared_ptr<DualHardwarePairJournalStore> pair_store, DualHardwareUtcClock utc_clock)
     : pair_store_(std::move(pair_store)), utc_clock_(std::move(utc_clock)) {
+    if (!utc_clock_) throw std::invalid_argument("utc_clock is required");
+}
+
+DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
+    std::shared_ptr<DualHardwarePairJournalStore> pair_store,
+    DualHardwareUtcClock utc_clock,
+    std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend)
+    : pair_store_(std::move(pair_store)), utc_clock_(std::move(utc_clock)),
+      fake_backend_(std::move(fake_backend)) {
     if (!utc_clock_) throw std::invalid_argument("utc_clock is required");
 }
 
@@ -926,8 +1058,72 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
             ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
             ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
-            return StartUnavailableResponse(
-                request.request_id, request.transaction_id);
+            if (pair_store_ == nullptr || fake_backend_ == nullptr) {
+                return StartUnavailableResponse(
+                    request.request_id, request.transaction_id);
+            }
+            bool dispatch_started = false;
+            try {
+                (void)pair_store_->BeginDispatch(request.transaction_id);
+                dispatch_started = true;
+                ++safety_counters_.pair_dispatch_count;
+                const std::filesystem::path transaction_directory =
+                    std::filesystem::path(RequireField(transaction,
+                        "transactionDirectory", JsonKind::string).string);
+                std::vector<std::pair<std::string, DualHardwareFakeCaptureOutcome>> originals;
+                const auto terminalize = [&](std::string_view state,
+                                             std::string_view failure,
+                                             std::int64_t completed) {
+                    const std::string result = BuildTerminalResult(
+                        transaction, request.transaction_id, state, failure,
+                        originals, transaction_directory, completed);
+                    const auto persisted = pair_store_->CompleteTerminal(
+                        request.transaction_id, JournalStateFor(state), result);
+                    return ResponsePrefix(request.request_id, true, "PairDispatchAccepted") +
+                        "{\"transactionId\":\"" + request.transaction_id +
+                        "\",\"dispatchState\":\"Completed\",\"result\":" +
+                        persisted.terminal_result_json + "}}";
+                };
+                const auto before_a = Clock100ns(utc_clock_);
+                if (before_a >= request.watchdog_deadline_100ns)
+                    return terminalize("WatchdogExpired", "WatchdogExpired", before_a);
+                DualHardwareFakeCaptureOutcome a{};
+                bool a_spool_invalid = false;
+                try {
+                    const auto path = transaction_directory / "CAM-A" / "original.jpg";
+                    a = fake_backend_->Capture("CAM-A", path, request.watchdog_deadline_100ns);
+                    a_spool_invalid = a.succeeded &&
+                        (!a.exact_recovered_object_deleted || !a.spool_empty_after_delete);
+                    if (a.succeeded && !IsRegularCanonicalOriginal(path)) a.succeeded = false;
+                } catch (...) { a.succeeded = false; }
+                const auto after_a = Clock100ns(utc_clock_);
+                if (after_a >= request.watchdog_deadline_100ns)
+                    return terminalize("WatchdogExpired", "WatchdogExpired", after_a);
+                if (a_spool_invalid) return terminalize("Failed", "SpoolNotEmpty", after_a);
+                if (!a.succeeded) return terminalize("Failed", "CaptureCameraA", after_a);
+                originals.emplace_back("CAM-A", a);
+                DualHardwareFakeCaptureOutcome b{};
+                bool b_spool_invalid = false;
+                try {
+                    const auto path = transaction_directory / "CAM-B" / "original.jpg";
+                    b = fake_backend_->Capture("CAM-B", path, request.watchdog_deadline_100ns);
+                    b_spool_invalid = b.succeeded &&
+                        (!b.exact_recovered_object_deleted || !b.spool_empty_after_delete);
+                    if (b.succeeded && !IsRegularCanonicalOriginal(path)) b.succeeded = false;
+                } catch (...) { b.succeeded = false; }
+                const auto after_b = Clock100ns(utc_clock_);
+                if (after_b >= request.watchdog_deadline_100ns)
+                    return terminalize("WatchdogExpired", "WatchdogExpired", after_b);
+                if (b_spool_invalid) return terminalize("FailedPartial", "SpoolNotEmpty", after_b);
+                if (!b.succeeded) return terminalize("FailedPartial", "CaptureCameraB", after_b);
+                originals.emplace_back("CAM-B", b);
+                return terminalize("Succeeded", "None", after_b);
+            } catch (const DualHardwarePairJournalStoreError&) {
+                return ResponsePrefix(request.request_id, false, "PairStoreFailure") +
+                    "{\"transactionId\":\"" + request.transaction_id +
+                    "\",\"dispatchStarted\":" +
+                    (dispatch_started ? "true" : "false") + "}}";
+            }
         }
         case DualHardwareCameraAgentOperation::get_pair_transaction_result: {
             if (pair_store_ == nullptr) {
@@ -936,6 +1132,12 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             }
             try {
                 const auto record = pair_store_->Query(request.transaction_id);
+                if (record && !record->terminal_result_json.empty()) {
+                    return ResponsePrefix(request.request_id, true, "PairTransactionFound") +
+                        "{\"transactionId\":\"" + request.transaction_id +
+                        "\",\"found\":true,\"result\":" +
+                        record->terminal_result_json + "}}";
+                }
                 return QueryResponse(
                     request.request_id, request.transaction_id,
                     record ? "PairTransactionReserved" :
@@ -958,7 +1160,7 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
 
 DualHardwareCameraAgentSafetyCounters
 DualHardwareCameraAgentDispatcher::SafetyCounters() const noexcept {
-    return {};
+    return safety_counters_;
 }
 
 } // namespace a0::phase0

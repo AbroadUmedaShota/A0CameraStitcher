@@ -4,13 +4,16 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -240,6 +243,36 @@ DualHardwareCameraAgentDispatcher CreateFixedDispatcher(
     return DualHardwareCameraAgentDispatcher(
         std::move(store), [] { return FixedNow(); });
 }
+
+class RecordingFakePairBackend final : public DualHardwareFakePairCaptureBackend {
+public:
+    std::vector<DualHardwareFakeCaptureOutcome> outcomes;
+    std::string throw_alias;
+    std::vector<std::string> aliases;
+    std::vector<fs::path> paths;
+    std::vector<std::int64_t> deadlines;
+    std::function<void(std::string_view, const fs::path&)> after_capture;
+
+    DualHardwareFakeCaptureOutcome Capture(
+        std::string_view alias,
+        const fs::path& canonical_original_path,
+        std::int64_t watchdog_deadline_100ns) override {
+        aliases.emplace_back(alias);
+        paths.push_back(canonical_original_path);
+        deadlines.push_back(watchdog_deadline_100ns);
+        if (alias == throw_alias) throw std::runtime_error("anonymous fake backend failure");
+        const std::size_t index = aliases.size() - 1;
+        const auto outcome = index < outcomes.size()
+            ? outcomes[index]
+            : DualHardwareFakeCaptureOutcome{true, true, true};
+        if (outcome.succeeded) {
+            fs::create_directories(canonical_original_path.parent_path());
+            WriteText(canonical_original_path, "anonymous-fake-original");
+        }
+        if (after_capture) after_capture(alias, canonical_original_path);
+        return outcome;
+    }
+};
 
 void CheckRejected(
     DualHardwareCameraAgentDispatcher& dispatcher,
@@ -690,6 +723,174 @@ void TestInjectedPairStoreReservationAndRestartQuery() {
     }
 }
 
+void TestFakePairBackendSuccessAndRestartQuery() {
+    TempSandbox sandbox;
+    const std::string transaction_id = "77777777777777777777777777777777";
+    const fs::path store_root = sandbox.Child("fake-success-store");
+    const fs::path transaction_root = sandbox.Child("fake-success-transaction");
+    auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+    (void)store->Reserve(transaction_id);
+    auto backend = std::make_shared<RecordingFakePairBackend>();
+    DualHardwareCameraAgentDispatcher dispatcher(
+        store, [] { return FixedNow(); }, backend);
+
+    const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+        StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+            transaction_root.generic_string()), "request-fake-success"));
+    CheckContains(response, "\"success\":true", "fake pair success must return a successful envelope");
+    CheckContains(response, "\"resultCode\":\"PairDispatchAccepted\"",
+        "fake pair success must return the .NET-compatible dispatch result code");
+    CheckContains(response, "\"dispatchState\":\"Completed\"",
+        "a durable terminal result must use Completed dispatch state");
+    CheckContains(response, "\"terminalState\":\"Succeeded\"",
+        "two successful fake captures must terminalize as Succeeded");
+    CheckContains(response, "\"failureCode\":\"None\"",
+        "a successful pair must use the None failure code");
+    Check(backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
+        "the fake orchestrator must invoke CAM-A then CAM-B exactly once");
+    Check(backend->paths.size() == 2 &&
+          backend->paths[0] == transaction_root / "CAM-A" / "original.jpg" &&
+          backend->paths[1] == transaction_root / "CAM-B" / "original.jpg",
+        "the orchestrator must own both canonical original paths");
+    Check(backend->deadlines.size() == 2 && backend->deadlines[0] == backend->deadlines[1],
+        "both fake captures must share the frozen watchdog deadline");
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 && counters.pair_dispatch_count == 1 &&
+          counters.automatic_retry_count == 0,
+        "fake success must record one pair dispatch and no real camera access or retry");
+
+    auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+    DualHardwareCameraAgentDispatcher restarted(restarted_store);
+    const auto queried = restarted.Handle(Envelope("get-pair-transaction-result",
+        "{\"transactionId\":\"" + transaction_id + "\"}", "request-restart-terminal"));
+    CheckContains(queried, "\"success\":true", "restart query must recover a durable terminal result");
+    CheckContains(queried, "\"resultCode\":\"PairTransactionFound\"",
+        "restart query must use the .NET-compatible terminal query code");
+    CheckContains(queried, "\"found\":true", "restart terminal query must be found");
+    CheckContains(queried, "\"terminalState\":\"Succeeded\"",
+        "restart query must return the same terminal state without recapture");
+    Check(backend->aliases.size() == 2, "restart query must not invoke the backend again");
+}
+
+void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
+    const auto run = [](std::string_view name,
+                         std::vector<DualHardwareFakeCaptureOutcome> outcomes,
+                         std::string throw_alias,
+                         std::vector<std::chrono::system_clock::time_point> times) {
+        auto sandbox = std::make_unique<TempSandbox>();
+        const std::string transaction_id = name == "a-fail"
+            ? "88888888888888888888888888888888"
+            : name == "b-fail" ? "99999999999999999999999999999999"
+            : name == "exception" ? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const fs::path store_root = sandbox->Child(std::string(name) + "-store");
+        const fs::path transaction_root = sandbox->Child(std::string(name) + "-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        backend->outcomes = std::move(outcomes);
+        backend->throw_alias = std::move(throw_alias);
+        auto time_index = std::make_shared<std::size_t>(0);
+        DualHardwareCameraAgentDispatcher dispatcher(store, [times = std::move(times), time_index] {
+            const auto index = (std::min)(*time_index, times.size() - 1);
+            ++*time_index;
+            return times[index];
+        }, backend);
+        const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]", transaction_root.generic_string()),
+            "request-fake-failure"));
+        return std::tuple{std::move(sandbox), response, backend, transaction_root};
+    };
+    const std::vector normal_times(4, FixedNow());
+    auto [a_sandbox, a_response, a_backend, a_root] = run(
+        "a-fail", {{false, true, true}}, "", normal_times);
+    CheckContains(a_response, "\"terminalState\":\"Failed\"", "CAM-A failure must be terminal Failed");
+    CheckContains(a_response, "\"failureCode\":\"CaptureCameraA\"", "CAM-A failure must be typed");
+    Check(a_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "CAM-A failure must prevent CAM-B and retry");
+
+    auto [b_sandbox, b_response, b_backend, b_root] = run(
+        "b-fail", {{true, true, true}, {false, true, true}}, "", normal_times);
+    CheckContains(b_response, "\"terminalState\":\"FailedPartial\"", "CAM-B failure must be FailedPartial");
+    CheckContains(b_response, "\"failureCode\":\"CaptureCameraB\"", "CAM-B failure must be typed");
+    Check(b_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"} &&
+          fs::is_regular_file(b_root / "CAM-A" / "original.jpg"),
+        "CAM-B failure must retain the CAM-A original without retry");
+
+    auto [e_sandbox, e_response, e_backend, e_root] = run(
+        "exception", {}, "CAM-A", normal_times);
+    CheckContains(e_response, "\"terminalState\":\"Failed\"",
+        "a fake backend exception must terminalize without escaping or retry");
+    Check(e_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "a CAM-A exception must prevent CAM-B and retry");
+
+    using namespace std::chrono;
+    const auto deadline = sys_days{year{2026}/August/14} + minutes{3};
+    auto [w_sandbox, w_response, w_backend, w_root] = run(
+        "watchdog", {{true, true, true}}, "", {FixedNow(), FixedNow(), deadline});
+    CheckContains(w_response, "\"terminalState\":\"WatchdogExpired\"",
+        "deadline reached after CAM-A must terminalize as WatchdogExpired");
+    CheckContains(w_response, "\"failureCode\":\"WatchdogExpired\"",
+        "deadline failure code must match the .NET enum");
+    Check(w_backend->aliases == std::vector<std::string>{"CAM-A"} &&
+          fs::is_regular_file(w_root / "CAM-A" / "original.jpg"),
+        "deadline after CAM-A must retain its original and prevent CAM-B");
+
+    auto [pre_sandbox, pre_response, pre_backend, pre_root] = run(
+        "before-a", {}, "", {FixedNow(), deadline});
+    CheckContains(pre_response, "\"terminalState\":\"WatchdogExpired\"",
+        "an exact deadline before CAM-A must expire without backend access");
+    Check(pre_backend->aliases.empty(),
+        "an exact deadline before CAM-A must invoke no backend");
+
+    auto [fd_sandbox, fd_response, fd_backend, fd_root] = run(
+        "failure-deadline", {{false, true, true}}, "",
+        {FixedNow(), FixedNow(), deadline});
+    CheckContains(fd_response, "\"terminalState\":\"WatchdogExpired\"",
+        "deadline reached with a capture failure must take watchdog precedence");
+
+    auto [spool_sandbox, spool_response, spool_backend, spool_root] = run(
+        "spool-evidence", {{true, false, true}}, "", normal_times);
+    CheckNotContains(spool_response, "\"terminalState\":\"Succeeded\"",
+        "incomplete exact-delete evidence must never generate Succeeded");
+    Check(spool_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "incomplete CAM-A spool evidence must prevent CAM-B");
+}
+
+void TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch() {
+    TempSandbox sandbox;
+    const std::string transaction_id = "cccccccccccccccccccccccccccccccc";
+    const fs::path store_root = sandbox.Child("publish-failure-store");
+    const fs::path transaction_root = sandbox.Child("publish-failure-transaction");
+    auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+    (void)store->Reserve(transaction_id);
+    auto backend = std::make_shared<RecordingFakePairBackend>();
+    backend->outcomes = {{true, true, true}, {true, true, true}};
+    backend->after_capture = [store_root, transaction_id](std::string_view, const fs::path&) {
+        fs::create_directories(store_root / "terminal");
+        WriteText(store_root / "terminal" / (transaction_id + ".json.partial"), "poison");
+    };
+    DualHardwareCameraAgentDispatcher dispatcher(store, [] { return FixedNow(); }, backend);
+    const auto request = Envelope("start-reserved-pair",
+        StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+            transaction_root.generic_string()), "request-publish-failure");
+    const auto first = dispatcher.Handle(request);
+    CheckContains(first, "\"resultCode\":\"PairStoreFailure\"",
+        "terminal publish failure must not return Completed");
+    CheckContains(first, "\"dispatchStarted\":true",
+        "a failure after BeginDispatch must not claim dispatchStarted false");
+    CheckContains(ReadText(store_root / "active" / "pair-journal.json"),
+        "\"state\":\"Dispatching\"",
+        "terminal publish failure must retain durable Dispatching");
+    Check(fs::is_regular_file(transaction_root / "CAM-A" / "original.jpg"),
+        "terminal publish failure must retain an already written artifact");
+    const auto second = dispatcher.Handle(request);
+    CheckContains(second, "\"resultCode\":\"PairStoreFailure\"",
+        "a restart attempt with poisoned terminal publication must fail closed");
+    Check(backend->aliases.size() == 2,
+        "a restart after terminal publish failure must never redispatch");
+}
+
 void TestStoreFailureIsFixedAndRedacted() {
     TempSandbox sandbox;
     const std::string transaction_id = "55555555555555555555555555555555";
@@ -806,6 +1007,9 @@ int main() {
     TestPairStartBoundaryAndPoisonStoreIsolation();
     TestPairStartRejectsJunctionWithoutFollowingIt();
     TestInjectedPairStoreReservationAndRestartQuery();
+    TestFakePairBackendSuccessAndRestartQuery();
+    TestFakePairBackendFailuresAndDeadlineAreNoRetry();
+    TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch();
     TestStoreFailureIsFixedAndRedacted();
     TestDispatcherOwnsInjectedStoreLifetime();
     if (failures != 0) {

@@ -22,6 +22,10 @@ constexpr std::string_view kJournalPrefix =
     "\"cameraMode\":\"DualCamera\",\"transactionId\":\"";
 constexpr std::string_view kJournalSuffix =
     "\",\"state\":\"Reserved\",\"automaticRetryCount\":0}";
+constexpr std::string_view kV2Prefix =
+    "{\"schemaVersion\":\"a0.camera-agent.hardware-dual.pair-journal.v2\","
+    "\"cameraMode\":\"DualCamera\",\"transactionId\":\"";
+constexpr std::string_view kTerminalDirectory = "terminal";
 
 [[noreturn]] void StoreFailure(std::string code, std::string message) {
     throw DualHardwarePairJournalStoreError(
@@ -182,6 +186,14 @@ fs::path PartialJournalPath(const fs::path& root) {
     return partial;
 }
 
+fs::path TerminalDirectory(const fs::path& root) {
+    return root / std::string(kTerminalDirectory);
+}
+
+fs::path TerminalJournalPath(const fs::path& root, std::string_view transaction_id) {
+    return TerminalDirectory(root) / (std::string(transaction_id) + ".json");
+}
+
 void ValidateRootDirectory(const fs::path& root) {
     (void)ValidateFixedLocalRoot(root);
     ValidateExistingPathNoReparse(root, true, "StoreScopeInvalid");
@@ -198,8 +210,9 @@ void ValidateRootDirectory(const fs::path& root) {
             StoreFailure(
                 "StoreScopeInvalid", "pair journal root enumeration failed");
         }
-        if (iterator->path().filename() !=
-            std::string(kDualHardwarePairJournalActiveDirectory)) {
+        const auto name = iterator->path().filename();
+        if (name != std::string(kDualHardwarePairJournalActiveDirectory) &&
+            name != std::string(kTerminalDirectory)) {
             StoreFailure(
                 "StoreScopeInvalid",
                 "pair journal root contains an unexpected entry");
@@ -218,31 +231,122 @@ void ValidateActiveDirectory(const fs::path& root) {
 }
 
 std::string SerializeRecord(std::string_view transaction_id) {
-    return std::string(kJournalPrefix) + std::string(transaction_id) +
-        std::string(kJournalSuffix);
+    return std::string(kV2Prefix) + std::string(transaction_id) +
+        "\",\"state\":\"Reserved\",\"automaticRetryCount\":0}";
+}
+
+std::string StateName(DualHardwarePairJournalState state) {
+    switch (state) {
+    case DualHardwarePairJournalState::reserved: return "Reserved";
+    case DualHardwarePairJournalState::dispatching: return "Dispatching";
+    case DualHardwarePairJournalState::succeeded: return "Succeeded";
+    case DualHardwarePairJournalState::failed: return "Failed";
+    case DualHardwarePairJournalState::failed_partial: return "FailedPartial";
+    case DualHardwarePairJournalState::watchdog_expired: return "WatchdogExpired";
+    }
+    StoreFailure("JournalInvalid", "unsupported pair journal state");
+}
+
+bool IsTerminal(DualHardwarePairJournalState state) noexcept {
+    return state == DualHardwarePairJournalState::succeeded ||
+        state == DualHardwarePairJournalState::failed ||
+        state == DualHardwarePairJournalState::failed_partial ||
+        state == DualHardwarePairJournalState::watchdog_expired;
+}
+
+std::string HexEncode(std::string_view value) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string encoded; encoded.reserve(value.size() * 2);
+    for (unsigned char byte : value) {
+        encoded.push_back(digits[byte >> 4]); encoded.push_back(digits[byte & 15]);
+    }
+    return encoded;
+}
+
+std::string HexDecode(std::string_view value) {
+    if ((value.size() & 1U) != 0) StoreFailure("JournalInvalid", "terminal result encoding is invalid");
+    auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    std::string decoded; decoded.reserve(value.size() / 2);
+    for (std::size_t i = 0; i < value.size(); i += 2) {
+        const int high = digit(value[i]), low = digit(value[i + 1]);
+        if (high < 0 || low < 0) StoreFailure("JournalInvalid", "terminal result encoding is invalid");
+        decoded.push_back(static_cast<char>((high << 4) | low));
+    }
+    return decoded;
+}
+
+std::string SerializeV2(
+    std::string_view id, DualHardwarePairJournalState state,
+    std::string_view result = {}) {
+    std::string json = std::string(kV2Prefix) + std::string(id) +
+        "\",\"state\":\"" + StateName(state) +
+        "\",\"automaticRetryCount\":0";
+    if (IsTerminal(state)) json += ",\"terminalResultHex\":\"" + HexEncode(result) + "\"";
+    return json + "}";
 }
 
 DualHardwarePairJournalRecord ParseRecord(const std::string& json) {
     const std::size_t expected_size =
         kJournalPrefix.size() + 32U + kJournalSuffix.size();
-    if (json.size() != expected_size ||
-        !std::equal(kJournalPrefix.begin(), kJournalPrefix.end(), json.begin()) ||
-        !std::equal(
-            kJournalSuffix.begin(), kJournalSuffix.end(),
+    if (json.size() == expected_size &&
+        std::equal(kJournalPrefix.begin(), kJournalPrefix.end(), json.begin()) &&
+        std::equal(kJournalSuffix.begin(), kJournalSuffix.end(),
             json.begin() + static_cast<std::ptrdiff_t>(kJournalPrefix.size() + 32U))) {
+        const std::string transaction_id = json.substr(kJournalPrefix.size(), 32U);
+        if (!IsSafeTransactionId(transaction_id)) StoreFailure("JournalInvalid", "pair journal transactionId is invalid");
+        return {transaction_id, DualHardwarePairJournalState::reserved, 0, {}};
+    }
+    if (json.size() < kV2Prefix.size() + 32U ||
+        !std::equal(kV2Prefix.begin(), kV2Prefix.end(), json.begin())) {
         StoreFailure(
             "JournalInvalid", "pair journal JSON is malformed or unsupported");
     }
     const std::string transaction_id =
-        json.substr(kJournalPrefix.size(), 32U);
+        json.substr(kV2Prefix.size(), 32U);
     if (!IsSafeTransactionId(transaction_id)) {
         StoreFailure("JournalInvalid", "pair journal transactionId is invalid");
     }
-    return {
-        transaction_id,
-        DualHardwarePairJournalState::reserved,
-        0,
-    };
+    const std::string rest = json.substr(kV2Prefix.size() + 32U);
+    constexpr std::string_view state_prefix = "\",\"state\":\"";
+    constexpr std::string_view retry_suffix = "\",\"automaticRetryCount\":0}";
+    if (!rest.starts_with(state_prefix)) StoreFailure("JournalInvalid", "pair journal state is missing");
+    const auto end = rest.find('"', state_prefix.size());
+    if (end == std::string::npos) StoreFailure("JournalInvalid", "pair journal state is invalid");
+    const std::string name = rest.substr(state_prefix.size(), end - state_prefix.size());
+    DualHardwarePairJournalState state;
+    if (name == "Reserved") state = DualHardwarePairJournalState::reserved;
+    else if (name == "Dispatching") state = DualHardwarePairJournalState::dispatching;
+    else if (name == "Succeeded") state = DualHardwarePairJournalState::succeeded;
+    else if (name == "Failed") state = DualHardwarePairJournalState::failed;
+    else if (name == "FailedPartial") state = DualHardwarePairJournalState::failed_partial;
+    else if (name == "WatchdogExpired") state = DualHardwarePairJournalState::watchdog_expired;
+    else StoreFailure("JournalInvalid", "pair journal state is unsupported");
+    const std::string tail = rest.substr(end);
+    if (!IsTerminal(state)) {
+        if (tail != retry_suffix) StoreFailure("JournalInvalid", "pair journal JSON is malformed");
+        return {transaction_id, state, 0, {}};
+    }
+    constexpr std::string_view terminal_prefix = "\",\"automaticRetryCount\":0,\"terminalResultHex\":\"";
+    if (!tail.starts_with(terminal_prefix) || !tail.ends_with("\"}"))
+        StoreFailure("JournalInvalid", "terminal pair journal is malformed");
+    const auto encoded = std::string_view(tail).substr(
+        terminal_prefix.size(), tail.size() - terminal_prefix.size() - 2U);
+    const std::string result = HexDecode(encoded);
+    const std::string expected_id = "\"transactionId\":\"" + transaction_id + "\"";
+    const std::string expected_state = "\"terminalState\":\"" + StateName(state) + "\"";
+    if (result.empty() || result.front() != '{' || result.back() != '}' ||
+        result.find(expected_id) == std::string::npos ||
+        result.find(expected_state) == std::string::npos ||
+        result.find("\"automaticRetryCount\":0") == std::string::npos ||
+        std::any_of(result.begin(), result.end(), [](unsigned char value) {
+            return value == 0 || (value < 0x20U && value != '\t' && value != '\r' && value != '\n');
+        }))
+        StoreFailure("JournalInvalid", "terminal result is invalid");
+    return {transaction_id, state, 0, result};
 }
 
 std::string ReadJournalFile(const fs::path& path) {
@@ -349,6 +453,38 @@ std::optional<DualHardwarePairJournalRecord> TryReadActiveRecord(
     return ReadActiveRecord(root);
 }
 
+std::optional<DualHardwarePairJournalRecord> TryReadTerminalRecord(
+    const fs::path& root, std::string_view transaction_id) {
+    (void)ValidateFixedLocalRoot(root);
+    bool root_missing = false;
+    (void)AttributesOrMissing(root, root_missing);
+    if (root_missing) return std::nullopt;
+    ValidateRootDirectory(root);
+    bool missing = false;
+    (void)AttributesOrMissing(TerminalDirectory(root), missing);
+    if (missing) return std::nullopt;
+    ValidateExistingPathNoReparse(TerminalDirectory(root), true, "StoreScopeInvalid");
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(TerminalDirectory(root), error)) {
+        if (error) StoreFailure("JournalInvalid", "terminal pair journal enumeration failed");
+        const std::string name = entry.path().filename().string();
+        if (name.size() != 37U || !name.ends_with(".json") ||
+            !IsSafeTransactionId(std::string_view(name).substr(0, 32U)))
+            StoreFailure("JournalInvalid", "terminal pair journal filename is unsafe");
+        ValidateExistingPathNoReparse(entry.path(), false, "JournalInvalid");
+    }
+    if (error) StoreFailure("JournalInvalid", "terminal pair journal enumeration failed");
+    const fs::path exact = TerminalJournalPath(root, transaction_id);
+    bool exact_missing = false;
+    (void)AttributesOrMissing(exact, exact_missing);
+    if (exact_missing) return std::nullopt;
+    auto record = ParseRecord(ReadJournalFile(exact));
+    if (!IsTerminal(record.state)) StoreFailure("JournalInvalid", "terminal pair journal state is not terminal");
+    if (record.transaction_id != transaction_id)
+        StoreFailure("JournalInvalid", "terminal filename and transaction ID differ");
+    return record;
+}
+
 void WriteExclusiveAndFlush(
     const fs::path& path,
     const std::string& contents) {
@@ -388,6 +524,20 @@ void WriteExclusiveAndFlush(
     }
 }
 
+void ReplaceAndVerify(
+    const fs::path& directory, const fs::path& final_path,
+    const std::string& contents) {
+    fs::path partial = final_path; partial += ".partial";
+    bool missing = false;
+    (void)AttributesOrMissing(partial, missing);
+    if (!missing) StoreFailure("StoreIoFailure", "stale pair journal partial exists");
+    WriteExclusiveAndFlush(partial, contents);
+    ValidateExistingPathNoReparse(directory, true, "StoreScopeInvalid");
+    if (!MoveFileExW(partial.c_str(), final_path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        StoreFailure("StoreIoFailure", "atomic pair journal replacement failed");
+}
+
 void ClassifyExistingReservation(
     const DualHardwarePairJournalRecord& active,
     std::string_view requested_transaction_id) {
@@ -420,6 +570,9 @@ DualHardwarePairJournalRecord DualHardwarePairJournalStore::Reserve(
     ValidateTransactionId(transaction_id);
     if (const auto active = TryReadActiveRecord(root_)) {
         ClassifyExistingReservation(*active, transaction_id);
+    }
+    if (TryReadTerminalRecord(root_, transaction_id)) {
+        StoreFailure("DuplicateTransactionId", "pair transactionId is already terminal");
     }
 
     std::error_code create_error;
@@ -469,11 +622,65 @@ DualHardwarePairJournalRecord DualHardwarePairJournalStore::Reserve(
 std::optional<DualHardwarePairJournalRecord>
 DualHardwarePairJournalStore::Query(std::string_view transaction_id) const {
     ValidateTransactionId(transaction_id);
+    if (const auto terminal = TryReadTerminalRecord(root_, transaction_id)) return terminal;
     const auto active = TryReadActiveRecord(root_);
     if (!active || active->transaction_id != transaction_id) {
         return std::nullopt;
     }
     return active;
+}
+
+DualHardwarePairJournalRecord DualHardwarePairJournalStore::BeginDispatch(
+    std::string_view transaction_id) {
+    ValidateTransactionId(transaction_id);
+    if (TryReadTerminalRecord(root_, transaction_id)) StoreFailure("DispatchAlreadyStarted", "pair transaction is already terminal");
+    const auto active = TryReadActiveRecord(root_);
+    if (!active || active->transaction_id != transaction_id)
+        StoreFailure("TransactionIdMismatch", "pair transaction is not the active reservation");
+    if (active->state != DualHardwarePairJournalState::reserved)
+        StoreFailure("DispatchAlreadyStarted", "pair transaction dispatch already started");
+    ReplaceAndVerify(ActiveDirectory(root_), JournalPath(root_),
+        SerializeV2(transaction_id, DualHardwarePairJournalState::dispatching));
+    const auto persisted = ReadActiveRecord(root_);
+    if (persisted.state != DualHardwarePairJournalState::dispatching)
+        StoreFailure("JournalInvalid", "dispatch transition did not persist");
+    return persisted;
+}
+
+DualHardwarePairJournalRecord DualHardwarePairJournalStore::CompleteTerminal(
+    std::string_view transaction_id,
+    DualHardwarePairJournalState terminal_state,
+    std::string_view terminal_result_json) {
+    ValidateTransactionId(transaction_id);
+    if (!IsTerminal(terminal_state) || terminal_result_json.empty() ||
+        terminal_result_json.size() > kMaximumJournalBytes / 2U)
+        StoreFailure("JournalInvalid", "terminal pair result is invalid");
+    if (const auto terminal = TryReadTerminalRecord(root_, transaction_id)) {
+        StoreFailure("DispatchAlreadyStarted", "pair transaction is already terminal");
+    }
+    const auto active = TryReadActiveRecord(root_);
+    if (!active || active->transaction_id != transaction_id)
+        StoreFailure("TransactionIdMismatch", "pair transaction is not active");
+    if (active->state != DualHardwarePairJournalState::dispatching)
+        StoreFailure("DispatchNotStarted", "pair dispatch has not started");
+    if (!CreateDirectoryW(TerminalDirectory(root_).c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+        StoreFailure("StoreIoFailure", "terminal journal directory could not be created");
+    ValidateExistingPathNoReparse(TerminalDirectory(root_), true, "StoreScopeInvalid");
+    const auto final_path = TerminalJournalPath(root_, transaction_id);
+    bool final_missing = false; (void)AttributesOrMissing(final_path, final_missing);
+    if (!final_missing) StoreFailure("StoreIoFailure", "terminal journal already exists");
+    fs::path partial = final_path; partial += ".partial";
+    WriteExclusiveAndFlush(partial, SerializeV2(transaction_id, terminal_state, terminal_result_json));
+    if (!MoveFileExW(partial.c_str(), final_path.c_str(), MOVEFILE_WRITE_THROUGH))
+        StoreFailure("StoreIoFailure", "atomic terminal journal publication failed");
+    const auto persisted = TryReadTerminalRecord(root_, transaction_id);
+    if (!persisted || persisted->transaction_id != transaction_id ||
+        persisted->state != terminal_state || persisted->terminal_result_json != terminal_result_json)
+        StoreFailure("JournalInvalid", "terminal journal reread did not match");
+    if (!DeleteFileW(JournalPath(root_).c_str()) || !RemoveDirectoryW(ActiveDirectory(root_).c_str()))
+        StoreFailure("StoreIoFailure", "active journal could not be removed after terminal publication");
+    return *persisted;
 }
 
 } // namespace a0::phase0

@@ -99,6 +99,10 @@ fs::path JournalPath(const fs::path& root) {
     return root / "active" / "pair-journal.json";
 }
 
+fs::path TerminalPath(const fs::path& root, std::string_view transaction_id) {
+    return root / "terminal" / (std::string(transaction_id) + ".json");
+}
+
 void PrepareJournal(const fs::path& root, const std::string& contents) {
     fs::create_directories(root / "active");
     WriteText(JournalPath(root), contents);
@@ -145,6 +149,90 @@ void TestReserveAndRestartQuery() {
     }, "reserving another ID while one is active must fail closed");
     Check(ReadText(JournalPath(root)) == original_journal,
         "other-ID active rejection must not overwrite the journal");
+}
+
+void TestDispatchAndTerminalTransitionsAreDurable() {
+    TempSandbox sandbox;
+    const fs::path root = sandbox.Child("terminal-store");
+    const std::string transaction_id = "33333333333333333333333333333333";
+    const std::string other_id = "44444444444444444444444444444444";
+    const std::string result =
+        "{\"transactionId\":\"" + transaction_id +
+        "\",\"originals\":[],\"terminalState\":\"Succeeded\","
+        "\"failureCode\":\"None\",\"evidence\":{\"automaticRetryCount\":0}}";
+    DualHardwarePairJournalStore store(root);
+    (void)store.Reserve(transaction_id);
+    const auto dispatching = store.BeginDispatch(transaction_id);
+    Check(dispatching.state == DualHardwarePairJournalState::dispatching &&
+          dispatching.automatic_retry_count == 0,
+        "BeginDispatch must durably transition Reserved to no-retry Dispatching");
+    DualHardwarePairJournalStore restarted_dispatching(root);
+    const auto recovered_dispatching = restarted_dispatching.Query(transaction_id);
+    Check(recovered_dispatching && recovered_dispatching->state == DualHardwarePairJournalState::dispatching,
+        "restart must recover Dispatching without reverting to Reserved");
+    CheckStoreError("DispatchAlreadyStarted", [&] {
+        (void)restarted_dispatching.BeginDispatch(transaction_id);
+    }, "Dispatching must never be started twice");
+    CheckStoreError("TransactionIdMismatch", [&] {
+        (void)restarted_dispatching.CompleteTerminal(
+            other_id, DualHardwarePairJournalState::succeeded, result);
+    }, "terminal completion must require the exact active transaction ID");
+
+    const auto terminal = restarted_dispatching.CompleteTerminal(
+        transaction_id, DualHardwarePairJournalState::succeeded, result);
+    Check(terminal.state == DualHardwarePairJournalState::succeeded &&
+          terminal.terminal_result_json == result && terminal.automatic_retry_count == 0,
+        "terminal completion must return the reread durable result");
+    Check(!fs::exists(root / "active"),
+        "active state must be removed only after terminal publication");
+    Check(fs::is_regular_file(TerminalPath(root, transaction_id)) &&
+          !fs::exists(TerminalPath(root, transaction_id).wstring() + L".partial"),
+        "terminal completion must leave one canonical journal and no partial");
+    DualHardwarePairJournalStore restarted_terminal(root);
+    const auto recovered_terminal = restarted_terminal.Query(transaction_id);
+    Check(recovered_terminal && recovered_terminal->state == DualHardwarePairJournalState::succeeded &&
+          recovered_terminal->terminal_result_json == result,
+        "restart query must recover the exact terminal result without active state");
+    Check(!restarted_terminal.Query(other_id),
+        "terminal query for another ID must be not found without leaking the active ID");
+
+    (void)restarted_terminal.Reserve(other_id);
+    Check(restarted_terminal.Query(transaction_id)->state ==
+              DualHardwarePairJournalState::succeeded &&
+          restarted_terminal.Query(other_id)->state ==
+              DualHardwarePairJournalState::reserved,
+        "one historical terminal and one different active reservation must coexist");
+    (void)restarted_terminal.BeginDispatch(other_id);
+    const std::string result2 =
+        "{\"transactionId\":\"" + other_id +
+        "\",\"originals\":[],\"terminalState\":\"Failed\","
+        "\"failureCode\":\"CaptureCameraA\",\"evidence\":{\"automaticRetryCount\":0}}";
+    (void)restarted_terminal.CompleteTerminal(
+        other_id, DualHardwarePairJournalState::failed, result2);
+    DualHardwarePairJournalStore restarted_twice(root);
+    Check(restarted_twice.Query(transaction_id)->state ==
+              DualHardwarePairJournalState::succeeded &&
+          restarted_twice.Query(other_id)->state ==
+              DualHardwarePairJournalState::failed,
+        "restart must recover both exact-ID terminal journals");
+    CheckStoreError("DuplicateTransactionId", [&] {
+        (void)restarted_twice.Reserve(transaction_id);
+    }, "a historical terminal must reject only the same transaction ID");
+}
+
+void TestLegacyV1ReservedJournalRemainsReadable() {
+    TempSandbox sandbox;
+    const fs::path root = sandbox.Child("legacy-v1-store");
+    const std::string transaction_id = "55555555555555555555555555555555";
+    PrepareJournal(root,
+        "{\"schemaVersion\":\"a0.camera-agent.hardware-dual.pair-journal.v1\","
+        "\"cameraMode\":\"DualCamera\",\"transactionId\":\"" + transaction_id +
+        "\",\"state\":\"Reserved\",\"automaticRetryCount\":0}");
+    DualHardwarePairJournalStore store(root);
+    const auto record = store.Query(transaction_id);
+    Check(record && record->state == DualHardwarePairJournalState::reserved &&
+          record->automatic_retry_count == 0,
+        "v1 Reserved journals must remain restart-readable after v2 introduction");
 }
 
 void TestIdsAndRootScopeAreStrict() {
@@ -392,6 +480,43 @@ void TestReparsePointsAreRejected() {
     }, "a reparse-point active directory must be rejected without following it");
     Check(ReadText(outside_journal) == journal_contents,
         "active reparse rejection must not alter the outside target");
+
+    const fs::path terminal_link_root = sandbox.Child("terminal-link-store");
+    fs::create_directories(terminal_link_root);
+    const fs::path outside_terminal = sandbox.Child("outside-terminal-target");
+    fs::create_directory(outside_terminal);
+    ScopedDirectoryJunction terminal_junction(
+        terminal_link_root / "terminal", outside_terminal,
+        "terminal-directory reparse test could not be established safely");
+    DualHardwarePairJournalStore linked_terminal(terminal_link_root);
+    CheckStoreError("StoreScopeInvalid", [&] {
+        (void)linked_terminal.Query(transaction_id);
+    }, "a reparse-point terminal directory must be rejected");
+
+    const fs::path terminal_entry_root = sandbox.Child("terminal-entry-store");
+    fs::create_directories(terminal_entry_root / "terminal");
+    const fs::path outside_entry = sandbox.Child("outside-terminal-entry");
+    fs::create_directory(outside_entry);
+    ScopedDirectoryJunction terminal_entry_junction(
+        terminal_entry_root / "terminal" / (transaction_id + ".json"),
+        outside_entry,
+        "terminal-entry reparse test could not be established safely");
+    DualHardwarePairJournalStore linked_terminal_entry(terminal_entry_root);
+    CheckStoreError("JournalInvalid", [&] {
+        (void)linked_terminal_entry.Query(transaction_id);
+    }, "a reparse-point terminal journal entry must be rejected");
+
+    for (const std::string_view foreign_name : {std::string_view{"foreign.txt"},
+             std::string_view{"22222222222222222222222222222222.json.partial"}}) {
+        const fs::path foreign_root = sandbox.Child(
+            std::string("terminal-") + std::string(foreign_name.substr(0, 7)));
+        fs::create_directories(foreign_root / "terminal");
+        WriteText(foreign_root / "terminal" / std::string(foreign_name), "poison");
+        DualHardwarePairJournalStore foreign_store(foreign_root);
+        CheckStoreError("JournalInvalid", [&] {
+            (void)foreign_store.Query(transaction_id);
+        }, "foreign or partial terminal entries must fail closed");
+    }
 }
 
 } // namespace
@@ -399,6 +524,8 @@ void TestReparsePointsAreRejected() {
 int main() {
     try {
         TestReserveAndRestartQuery();
+        TestDispatchAndTerminalTransitionsAreDurable();
+        TestLegacyV1ReservedJournalRemainsReadable();
         TestIdsAndRootScopeAreStrict();
         TestMalformedOversizedAndNonRegularJournalsFailClosed();
         TestReparsePointsAreRejected();

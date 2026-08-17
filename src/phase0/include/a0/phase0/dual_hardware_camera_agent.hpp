@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -12,6 +13,21 @@
 namespace a0::phase0 {
 
 class DualHardwarePairJournalStore;
+
+struct DualHardwareFakeCaptureOutcome {
+    bool succeeded{};
+    bool exact_recovered_object_deleted{true};
+    bool spool_empty_after_delete{true};
+};
+
+class DualHardwareFakePairCaptureBackend {
+public:
+    virtual ~DualHardwareFakePairCaptureBackend() = default;
+    [[nodiscard]] virtual DualHardwareFakeCaptureOutcome Capture(
+        std::string_view alias,
+        const std::filesystem::path& canonical_original_path,
+        std::int64_t watchdog_deadline_100ns) = 0;
+};
 
 inline constexpr std::string_view kDualHardwareCameraAgentSchemaVersion =
     "a0.camera-agent.hardware-dual.v2";
@@ -69,6 +85,10 @@ public:
     DualHardwareCameraAgentDispatcher(
         std::shared_ptr<DualHardwarePairJournalStore> pair_store,
         DualHardwareUtcClock utc_clock);
+    DualHardwareCameraAgentDispatcher(
+        std::shared_ptr<DualHardwarePairJournalStore> pair_store,
+        DualHardwareUtcClock utc_clock,
+        std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend);
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -80,6 +100,8 @@ private:
     // A null store preserves the fail-closed PairStoreUnavailable behavior.
     std::shared_ptr<DualHardwarePairJournalStore> pair_store_;
     DualHardwareUtcClock utc_clock_;
+    std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend_;
+    DualHardwareCameraAgentSafetyCounters safety_counters_;
 };
 
 } // namespace a0::phase0
