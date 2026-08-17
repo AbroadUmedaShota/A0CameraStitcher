@@ -132,6 +132,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
 
+      # verify-only: repeat the dual agent test family to shake out
+      # scheduling-dependent flakes before the real PR merges. Never merged.
+      - name: CTest repeat dual agent tests (Debug, verify-only)
+        if: ${{ !cancelled() && steps.cxx-debug-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Debug -j 1 --repeat until-fail:3 -R dual_hardware_camera_agent --output-on-failure
+
+      - name: CTest repeat dual agent tests (Release, verify-only)
+        if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Release -j 1 --repeat until-fail:3 -R dual_hardware_camera_agent --output-on-failure
+
       - name: Software-only summary
         if: always()
         run: |
