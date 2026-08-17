@@ -93,6 +93,16 @@ else()
     target_compile_options(A0CameraStitcher.CameraAgent PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(A0CameraStitcher.DualCameraAgent
+    src/phase0/dual_hardware_camera_agent_main.cpp)
+target_link_libraries(A0CameraStitcher.DualCameraAgent PRIVATE a0_phase0_core)
+target_compile_definitions(A0CameraStitcher.DualCameraAgent PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.DualCameraAgent PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.DualCameraAgent PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_optical
     src/m2/optical_planner.cpp
 )
