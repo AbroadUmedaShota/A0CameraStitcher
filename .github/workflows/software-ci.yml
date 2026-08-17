@@ -132,6 +132,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
 
+      # verify-only: temporary repeat runs to confirm the Issue #17 race fix
+      # is deterministic under the runner scheduler. This branch is never merged.
+      - name: CTest repeat hardware_camera_agent_contracts (Debug, verify-only)
+        if: ${{ !cancelled() && steps.cxx-debug-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Debug -j 1 --repeat until-fail:5 -R hardware_camera_agent_contracts --output-on-failure
+
+      - name: CTest repeat hardware_camera_agent_contracts (Release, verify-only)
+        if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Release -j 1 --repeat until-fail:5 -R hardware_camera_agent_contracts --output-on-failure
+
       - name: Software-only summary
         if: always()
         run: |
