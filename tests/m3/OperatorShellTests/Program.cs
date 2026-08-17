@@ -21,6 +21,11 @@ if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
 {
     return await RunSdklessPersistentReadinessE2EAsync(sdklessAgentPath);
 }
+const string dualChildScenarioVariable = "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (Environment.GetEnvironmentVariable(dualChildScenarioVariable) is { Length: > 0 } dualChildScenario)
+{
+    return await RunDualCameraAgentTestChildAsync(dualChildScenario, args);
+}
 
 var failures = new List<string>();
 try
@@ -276,7 +281,51 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {22 - failures.Count}/22 passed.");
+try
+{
+    await DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle keeps process/camera at zero while identity is Pending");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle keeps process/camera at zero while identity is Pending");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle keeps process/camera at zero while identity is Pending: {exception}");
+}
+
+try
+{
+    await DualCameraAgentLifecycleFakeHostHappyPathAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end: {exception}");
+}
+
+try
+{
+    await DualCameraAgentLifecycleRestartRecoveryAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle process exit and native max-lifetime exit both recover via same-ID query only");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle process exit and native max-lifetime exit both recover via same-ID query only");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle process exit and native max-lifetime exit both recover via same-ID query only: {exception}");
+}
+
+try
+{
+    await DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {27 - failures.Count}/27 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2157,6 +2206,577 @@ static HardwarePendingTransaction HardwarePending(
         CaptureRequestDispatchAttempted = captureRequestDispatchAttempted,
         StartedAtUtc = DateTimeOffset.UtcNow,
     };
+
+// ---------------------------------------------------------------------------
+// HardwareDual .NET Agent lifecycle tests (Issue #8).
+//
+// These tests exercise DualCameraAgentLifecycle against a real, separate OS
+// process (this same test apphost, re-invoked with a scenario environment
+// variable) speaking the actual named-pipe wire protocol -- not an in-memory
+// fake IDualHardwareCaptureOperations. That is the only way to exercise
+// process/pipe failure and restart recovery for real.
+// ---------------------------------------------------------------------------
+
+static DualCameraCaptureRequest HardwareDualTestRequest(Guid transactionId) =>
+    DualCameraCaptureRequest.CreateHardwareDual(
+        DualCameraRigProfile.ApprovedSynthetic(),
+        HardwareDualCaptureProfile.ApprovedSynthetic(),
+        new HardwareDualOperatorConfirmations(true, true, true, true, true),
+        transactionId);
+
+static string DualCameraAgentTestHostPath()
+{
+    var path = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M3.OperatorShellTests.exe");
+    Check.True(File.Exists(path), "The fake Dual Camera Agent test host apphost must exist.");
+    return path;
+}
+
+static string DualCameraM2AdapterPath() =>
+    Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+
+static async Task DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        // A configured-but-nonexistent Agent executable: the lifecycle must construct
+        // cleanly and never probe or launch it while DualCameraProductFlow's identity
+        // gate keeps every capture rejected before any side effect.
+        var agentPath = Path.Combine(root, "A0CameraStitcher.DualCameraAgent.exe");
+        var journalRoot = Path.Combine(root, "agent-pair-journal");
+        await using var lifecycle = new DualCameraAgentLifecycle(
+            agentPath,
+            journalRoot,
+            Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
+            Path.Combine(root, "phase0", "dual-identity-proof.json"));
+        Check.False(lifecycle.AgentExecutableAvailable, "A nonexistent Agent path must report unavailable, not throw.");
+
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            new HardwareDualCaptureSource(lifecycle),
+            new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath()),
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()));
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            flow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.Equal(DualCameraIdentityStatus.HardwarePending, flow.IdentitySnapshot.Status);
+        Check.False(
+            viewModel.CanCapture,
+            "HardwareDual must stay CanCapture=false while identity is Pending, even with a real Agent lifecycle wired in.");
+        Check.Equal(OperatorShellViewModel.HardwareDualPendingBanner, viewModel.BannerText);
+
+        var rejected = false;
+        try
+        {
+            await flow.CaptureAndStitchAsync(HardwareDualTestRequest(Guid.NewGuid()));
+        }
+        catch (DualCameraFlowException exception) when (exception.Code == DualCameraFailureCode.IdentityNotReady)
+        {
+            rejected = true;
+        }
+        Check.True(rejected, "A Pending identity must reject capture with IdentityNotReady before any Agent call.");
+        Check.False(
+            Directory.Exists(journalRoot),
+            "Zero process/camera while Pending: the Agent lifecycle must not even create its pair journal directory.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-agent-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "happy");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        await using var lifecycle = new DualCameraAgentLifecycle(
+            DualCameraAgentTestHostPath(),
+            Path.Combine(root, "agent-pair-journal"),
+            Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
+            Path.Combine(root, "phase0", "dual-identity-proof.json"));
+        var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            new HardwareDualCaptureSource(lifecycle),
+            stitcher,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+        var transactionId = Guid.NewGuid();
+        var state = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
+
+        Check.Equal(DualCameraFailureCode.None, state.FailureCode);
+        Check.Equal(2, state.Capture!.Originals.Count);
+        Check.True(
+            state.Stitch is { Succeeded: true },
+            "The Ready synthetic seam's reserve->start Completed path must reach a real stitched JPEG.");
+
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.Equal(1, entries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+        Check.Equal(1, entries.Count(entry => entry.Operation == "start-reserved-pair"));
+        Check.Equal(0, entries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+        Check.True(
+            entries.Select(entry => entry.PipeName).Distinct().Count() == 1,
+            "A single-process happy path must stay on exactly one pipe name.");
+        Check.True(
+            entries.All(entry => entry.TransactionId is null || entry.TransactionId == transactionId.ToString("N")),
+            "Every observed operation must reference the one dispatched transaction id.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualCameraAgentLifecycleRestartRecoveryAsync()
+{
+    foreach (var (scenarioLabel, exitCode) in new (string, int)[]
+             {
+                 ("crash after dispatch (exit 3, dispatched_delivery_failed)", 3),
+                 ("native max-lifetime exit (exit 0, complete)", 0),
+             })
+    {
+        var root = CreateHardwareTestRoot();
+        var tracePath = Path.Combine(root, "dual-agent-trace.jsonl");
+        var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+        var previousExitCode = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
+        var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+        try
+        {
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "die-after-start");
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", exitCode.ToString());
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+            await using var lifecycle = new DualCameraAgentLifecycle(
+                DualCameraAgentTestHostPath(),
+                Path.Combine(root, "agent-pair-journal"),
+                Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
+                Path.Combine(root, "phase0", "dual-identity-proof.json"));
+            var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+            var flow = new DualCameraProductFlow(
+                Path.Combine(root, "products"),
+                new HardwareDualCaptureSource(lifecycle),
+                stitcher,
+                new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+            var transactionId = Guid.NewGuid();
+            var unknown = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
+            Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
+
+            // Process exit/pipe failure keeps support-required: a plain new capture
+            // attempt must stay blocked on the same frozen transaction, with zero new
+            // reserve/redispatch/retry.
+            var blocked = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(Guid.NewGuid()));
+            Check.Equal(DualCameraFailureCode.AgentResponseUnknown, blocked.FailureCode);
+            Check.Equal(transactionId, blocked.TransactionId);
+
+            var recovered = await flow.RecoverAndStitchAsync(transactionId);
+            Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
+            Check.Equal(2, recovered.Capture!.Originals.Count);
+            Check.True(
+                recovered.Stitch is { Succeeded: true },
+                $"{scenarioLabel}: recovery must reach a real stitched JPEG from the frozen snapshot.");
+
+            var entries = ReadDualAgentTraceEntries(tracePath);
+            Check.Equal(1, entries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+            Check.Equal(1, entries.Count(entry => entry.Operation == "start-reserved-pair"));
+            Check.Equal(1, entries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+            Check.True(
+                entries.Where(entry => entry.TransactionId is not null)
+                    .All(entry => entry.TransactionId == transactionId.ToString("N")),
+                $"{scenarioLabel}: every observed operation must reference the same transaction id (zero different-ID query).");
+            Check.Equal(2, entries.Select(entry => entry.PipeName).Distinct().Count());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", previousExitCode);
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-agent-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "pipe-only-after-start");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        await using var lifecycle = new DualCameraAgentLifecycle(
+            DualCameraAgentTestHostPath(),
+            Path.Combine(root, "agent-pair-journal"),
+            Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
+            Path.Combine(root, "phase0", "dual-identity-proof.json"));
+        var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            new HardwareDualCaptureSource(lifecycle),
+            stitcher,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+        var transactionId = Guid.NewGuid();
+        var unknown = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
+        Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
+
+        var recovered = await flow.RecoverAndStitchAsync(transactionId);
+        Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
+        Check.Equal(2, recovered.Capture!.Originals.Count);
+
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.Equal(
+            1,
+            entries.Select(entry => entry.PipeName).Distinct().Count()); // process stayed alive: no restart needed
+        Check.Equal(1, entries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+        Check.Equal(1, entries.Count(entry => entry.Operation == "start-reserved-pair"));
+        Check.Equal(1, entries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static List<(string PipeName, string Operation, string? TransactionId)> ReadDualAgentTraceEntries(string tracePath)
+{
+    var result = new List<(string, string, string?)>();
+    if (!File.Exists(tracePath))
+    {
+        return result;
+    }
+    foreach (var line in File.ReadAllLines(tracePath))
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            continue;
+        }
+        using var document = JsonDocument.Parse(line);
+        var root = document.RootElement;
+        result.Add((
+            root.GetProperty("pipeName").GetString()!,
+            root.GetProperty("operation").GetString()!,
+            root.TryGetProperty("transactionId", out var idElement) && idElement.ValueKind == JsonValueKind.String
+                ? idElement.GetString()
+                : null));
+    }
+    return result;
+}
+
+// --- Fake Dual Camera Agent test host (child process) -----------------------
+//
+// Speaks the real a0.camera-agent.hardware-dual.v2 named-pipe wire protocol so
+// DualCameraAgentLifecycle (production process/pipe lifecycle code) is exercised
+// end-to-end, including a real process exit and a real second-generation process
+// picking a fresh unique pipe name back up. Scenario and exit behavior are driven
+// by env vars set by the parent test process before it starts the child.
+
+static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOnlyList<string> arguments)
+{
+    var pipeName = TryGetDualAgentArgument(arguments, "--pipe-name");
+    var pairJournalRoot = TryGetDualAgentArgument(arguments, "--pair-journal-root");
+    var approvedCaptureProfile = TryGetDualAgentArgument(arguments, "--approved-capture-profile");
+    var dualIdentityProof = TryGetDualAgentArgument(arguments, "--dual-identity-proof");
+    if (pipeName is null || pairJournalRoot is null || approvedCaptureProfile is null || dualIdentityProof is null)
+    {
+        return 1; // argument/launch failure
+    }
+
+    var tracePath = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    var exitCodeText = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
+    var dieExitCode = int.TryParse(exitCodeText, out var parsedExitCode) ? parsedExitCode : 3;
+    Directory.CreateDirectory(pairJournalRoot);
+
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    var idleTimeout = TimeSpan.FromSeconds(5);
+    while (true)
+    {
+        using var acceptTimeout = new CancellationTokenSource(idleTimeout);
+        try
+        {
+            await pipe.WaitForConnectionAsync(acceptTimeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return 0; // idle: no further requests within the window; complete (0).
+        }
+
+        string requestJson;
+        try
+        {
+            using var requestTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            requestJson = await ReadPersistentTestFrameAsync(pipe, requestTimeout.Token);
+        }
+        catch (Exception) when (pipe.IsConnected)
+        {
+            pipe.Disconnect();
+            continue;
+        }
+
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        var operation = root.GetProperty("operation").GetString()!;
+        var requestId = root.GetProperty("requestId").GetString()!;
+        var payload = root.GetProperty("payload");
+
+        await AppendDualAgentTraceAsync(tracePath, pipeName, operation, TryGetDualAgentTransactionId(payload));
+
+        using var responseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        switch (operation)
+        {
+            case DualHardwareCameraAgentProtocol.Operations.GetCapabilities:
+                await WritePersistentTestFrameAsync(
+                    pipe,
+                    BuildDualAgentResponseEnvelopeJson(requestId, true, "DualCapabilities", BuildDualCapabilitiesPayload()),
+                    responseTimeout.Token);
+                break;
+
+            case DualHardwareCameraAgentProtocol.Operations.ReservePairTransaction:
+                await WritePersistentTestFrameAsync(
+                    pipe,
+                    BuildDualAgentResponseEnvelopeJson(
+                        requestId,
+                        true,
+                        "PairTransactionReserved",
+                        new { transactionId = payload.GetProperty("transactionId").GetString()!, accepted = true }),
+                    responseTimeout.Token);
+                break;
+
+            case DualHardwareCameraAgentProtocol.Operations.StartReservedPair:
+            {
+                var transaction = payload.GetProperty("transaction");
+                var transactionIdHex = transaction.GetProperty("transactionId").GetString()!;
+                var transactionDirectory = transaction.GetProperty("transactionDirectory").GetString()!;
+                var (camAPath, camBPath) = await WriteDualAgentOriginalsAsync(
+                    transactionDirectory,
+                    Guid.ParseExact(transactionIdHex, "N"));
+                await SaveDualAgentJournalEntryAsync(pairJournalRoot, transactionIdHex, transaction, camAPath, camBPath);
+
+                if (scenario == "happy")
+                {
+                    var resultPayload = BuildDualAgentCaptureResultPayload(transaction, transactionIdHex, camAPath, camBPath);
+                    await WritePersistentTestFrameAsync(
+                        pipe,
+                        BuildDualAgentResponseEnvelopeJson(
+                            requestId,
+                            true,
+                            "PairDispatchAccepted",
+                            new { transactionId = transactionIdHex, dispatchState = "Completed", result = resultPayload }),
+                        responseTimeout.Token);
+                    break;
+                }
+
+                // "die-after-start" / "pipe-only-after-start": the journal entry above
+                // is already durable (as a real Agent's own durable pair journal would
+                // be), but the response is never sent -- the exact ambiguous point the
+                // absolute invariant describes ("after start-reserved-pair's write
+                // completes, any transport failure may mean the pair was captured").
+                if (pipe.IsConnected)
+                {
+                    pipe.Disconnect();
+                }
+                if (scenario == "die-after-start")
+                {
+                    return dieExitCode;
+                }
+                continue; // pipe-only-after-start: stay alive for the next connection.
+            }
+
+            case DualHardwareCameraAgentProtocol.Operations.GetPairTransactionResult:
+            {
+                var transactionIdHex = payload.GetProperty("transactionId").GetString()!;
+                var journalResult = await LoadDualAgentJournalCaptureResultPayloadAsync(pairJournalRoot, transactionIdHex);
+                var responseJson = journalResult is null
+                    ? BuildDualAgentResponseEnvelopeJson(
+                        requestId,
+                        false,
+                        "PairTransactionNotFound",
+                        new { transactionId = transactionIdHex, found = false, result = (object?)null })
+                    : BuildDualAgentResponseEnvelopeJson(
+                        requestId,
+                        true,
+                        "PairTransactionFound",
+                        new { transactionId = transactionIdHex, found = true, result = journalResult });
+                await WritePersistentTestFrameAsync(pipe, responseJson, responseTimeout.Token);
+                break;
+            }
+
+            default:
+                return 65;
+        }
+
+        if (pipe.IsConnected)
+        {
+            pipe.Disconnect();
+        }
+    }
+}
+
+static string? TryGetDualAgentArgument(IReadOnlyList<string> arguments, string flag)
+{
+    var index = arguments.ToList().IndexOf(flag);
+    return index >= 0 && index + 1 < arguments.Count ? arguments[index + 1] : null;
+}
+
+static string? TryGetDualAgentTransactionId(JsonElement payload)
+{
+    if (payload.ValueKind != JsonValueKind.Object)
+    {
+        return null;
+    }
+    if (payload.TryGetProperty("transactionId", out var direct) && direct.ValueKind == JsonValueKind.String)
+    {
+        return direct.GetString();
+    }
+    if (payload.TryGetProperty("transaction", out var nested) && nested.ValueKind == JsonValueKind.Object &&
+        nested.TryGetProperty("transactionId", out var nestedId) && nestedId.ValueKind == JsonValueKind.String)
+    {
+        return nestedId.GetString();
+    }
+    return null;
+}
+
+static async Task AppendDualAgentTraceAsync(string? tracePath, string pipeName, string operation, string? transactionId)
+{
+    if (string.IsNullOrWhiteSpace(tracePath))
+    {
+        return;
+    }
+    var line = JsonSerializer.Serialize(
+        new { pipeName, operation, transactionId },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    await File.AppendAllTextAsync(tracePath, line + Environment.NewLine);
+}
+
+static string BuildDualAgentResponseEnvelopeJson(string requestId, bool success, string resultCode, object payload) =>
+    JsonSerializer.Serialize(
+        new
+        {
+            schemaVersion = DualHardwareCameraAgentProtocol.SchemaVersion,
+            simulation = false,
+            marker = DualHardwareCameraAgentProtocol.Marker,
+            requestId,
+            success,
+            resultCode,
+            payload,
+        },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+static object BuildDualCapabilitiesPayload() => new
+{
+    cameraMode = "DualCamera",
+    protocolVersion = 2,
+    orderedRequiredAliases = new[] { "CAM-A", "CAM-B" },
+    supportedOperations = DualHardwareCameraAgentProtocol.Operations.Required,
+    pairJournalDurable = true,
+    sameTransactionQueryOnly = true,
+    automaticRetryCount = 0,
+};
+
+static async Task<(string CamAPath, string CamBPath)> WriteDualAgentOriginalsAsync(
+    string transactionDirectory,
+    Guid transactionId)
+{
+    var adapter = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+    var camAPath = Path.Combine(transactionDirectory, "CAM-A", "original.jpg");
+    var camBPath = Path.Combine(transactionDirectory, "CAM-B", "original.jpg");
+    await adapter.CaptureAsync("CAM-A", transactionId, camAPath, CancellationToken.None);
+    await adapter.CaptureAsync("CAM-B", transactionId, camBPath, CancellationToken.None);
+    return (camAPath, camBPath);
+}
+
+static object BuildDualAgentCaptureResultPayload(
+    JsonElement transaction,
+    string transactionIdHex,
+    string camAPath,
+    string camBPath)
+{
+    var captureProfile = transaction.GetProperty("captureProfileSnapshot");
+    var rigProfile = transaction.GetProperty("rigProfileSnapshot");
+    var startedAtUtc = transaction.GetProperty("startedAtUtc").GetString()!;
+    var watchdogDeadlineUtc = transaction.GetProperty("watchdogDeadlineUtc").GetString()!;
+    return new
+    {
+        transactionId = transactionIdHex,
+        originals = new object[]
+        {
+            new { alias = "CAM-A", canonicalOriginalPath = camAPath, exactRecoveredObjectDeleted = true, spoolEmptyAfterDelete = true },
+            new { alias = "CAM-B", canonicalOriginalPath = camBPath, exactRecoveredObjectDeleted = true, spoolEmptyAfterDelete = true },
+        },
+        terminalState = "Succeeded",
+        failureCode = "None",
+        evidence = new
+        {
+            terminalState = "Succeeded",
+            identitySnapshot = transaction.GetProperty("identitySnapshot").Clone(),
+            captureProfileId = captureProfile.GetProperty("profileId").GetString()!,
+            captureProfileVersion = captureProfile.GetProperty("version").GetString()!,
+            profileId = rigProfile.GetProperty("profileId").GetString()!,
+            profileVersion = rigProfile.GetProperty("version").GetString()!,
+            watchdogStartedAtUtc = startedAtUtc,
+            watchdogDeadlineUtc,
+            completedAtUtc = startedAtUtc,
+            watchdogCompletedInTime = true,
+            liveViewStopAndCloseConfirmed = true,
+            exactDeleteConfirmedForEveryRetainedOriginal = true,
+            bothSpoolsEmptyAfter = true,
+            automaticRetryCount = 0,
+        },
+    };
+}
+
+static async Task SaveDualAgentJournalEntryAsync(
+    string pairJournalRoot,
+    string transactionIdHex,
+    JsonElement transaction,
+    string camAPath,
+    string camBPath)
+{
+    var path = Path.Combine(pairJournalRoot, $"{transactionIdHex}.json");
+    var json = JsonSerializer.Serialize(
+        new { transaction, camAPath, camBPath },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    await File.WriteAllTextAsync(path, json);
+}
+
+static async Task<object?> LoadDualAgentJournalCaptureResultPayloadAsync(string pairJournalRoot, string transactionIdHex)
+{
+    var path = Path.Combine(pairJournalRoot, $"{transactionIdHex}.json");
+    if (!File.Exists(path))
+    {
+        return null;
+    }
+    var json = await File.ReadAllTextAsync(path);
+    using var document = JsonDocument.Parse(json);
+    var root = document.RootElement;
+    return BuildDualAgentCaptureResultPayload(
+        root.GetProperty("transaction"),
+        transactionIdHex,
+        root.GetProperty("camAPath").GetString()!,
+        root.GetProperty("camBPath").GetString()!);
+}
 
 static class Check
 {
