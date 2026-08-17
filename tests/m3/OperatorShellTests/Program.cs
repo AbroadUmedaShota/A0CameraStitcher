@@ -305,6 +305,17 @@ catch (Exception exception)
 
 try
 {
+    await DualCameraAgentLifecycleExitCodeClassificationAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle classifies all four exit codes without inverting dispatch ambiguity");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle classifies all four exit codes without inverting dispatch ambiguity");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle classifies all four exit codes without inverting dispatch ambiguity: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleRestartRecoveryAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle process exit and native max-lifetime exit both recover via same-ID query only");
 }
@@ -325,7 +336,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {27 - failures.Count}/27 passed.");
+Console.WriteLine($"Operator shell tests: {28 - failures.Count}/28 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2339,6 +2350,92 @@ static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
     }
 }
 
+static async Task DualCameraAgentLifecycleExitCodeClassificationAsync()
+{
+    // Directly exercises DualCameraAgentLifecycle's own exit-code -> "may have been
+    // dispatched" classification (HardwareDualCaptureSource/DualCameraProductFlow
+    // never inspect it, so no flow-level test can catch a regression here). If this
+    // mapping ever inverts, a genuinely-dispatched pair could be misclassified as
+    // safe to retry -- the exact failure the absolute invariants forbid. Exit codes
+    // 1/2 are driven through the same "read the request, then exit" mechanics as 0/3
+    // to isolate the classifier's mapping table itself; a real Native agent would
+    // more plausibly fail before ever accepting the connection for exit 1, but that
+    // path never reaches this classifier at all (it surfaces as a distinct connect
+    // failure), so it is out of scope for this test.
+    foreach (var (exitCode, expectedDispatched) in new (int ExitCode, bool ExpectedDispatched)[]
+             {
+                 (0, true),  // complete, including a natural max-lifetime exit -> ambiguous
+                 (1, false), // argument/launch failure -> never reached the pipe
+                 (2, false), // failed_before_dispatch -> explicitly known not dispatched
+                 (3, true),  // dispatched_delivery_failed -> ambiguous
+             })
+    {
+        var root = CreateHardwareTestRoot();
+        var tracePath = Path.Combine(root, "dual-agent-trace.jsonl");
+        var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+        var previousExitCode = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
+        var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+        try
+        {
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "die-after-start");
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", exitCode.ToString());
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+            await using var lifecycle = new DualCameraAgentLifecycle(
+                DualCameraAgentTestHostPath(),
+                Path.Combine(root, "agent-pair-journal"),
+                Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
+                Path.Combine(root, "phase0", "dual-identity-proof.json"));
+
+            var transactionId = Guid.NewGuid();
+            Check.True(
+                await lifecycle.ReservePairTransactionAsync(transactionId, CancellationToken.None),
+                $"exit {exitCode}: reserve must be accepted before the classified failure.");
+
+            HardwareCameraAgentLaunchException? caught = null;
+            try
+            {
+                await lifecycle.StartReservedPairAsync(
+                    BuildDualAgentTestCaptureRequest(root, transactionId),
+                    CancellationToken.None);
+            }
+            catch (HardwareCameraAgentLaunchException exception)
+            {
+                caught = exception;
+            }
+
+            Check.True(
+                caught is not null,
+                $"exit {exitCode}: an incomplete pipe response must classify as a typed launch exception.");
+            Check.True(
+                caught!.ProcessExitCode == exitCode,
+                $"exit {exitCode}: ProcessExitCode must be observed as {exitCode}, was {caught.ProcessExitCode?.ToString() ?? "null"}.");
+            Check.Equal(expectedDispatched, caught.RequestMayHaveBeenDispatched);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", previousExitCode);
+            Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static DualHardwareCaptureRequest BuildDualAgentTestCaptureRequest(string root, Guid transactionId)
+{
+    var startedAtUtc = DateTimeOffset.UtcNow;
+    return new DualHardwareCaptureRequest(
+        transactionId,
+        Path.Combine(root, "products", "transactions", transactionId.ToString("N")),
+        DualCameraIdentitySnapshot.AnonymousTestSyntheticReady(),
+        HardwareDualCaptureProfile.ApprovedSynthetic(),
+        DualCameraRigProfile.ApprovedSynthetic(),
+        new HardwareDualOperatorConfirmations(true, true, true, true, true),
+        startedAtUtc,
+        startedAtUtc.AddSeconds(180));
+}
+
 static async Task DualCameraAgentLifecycleRestartRecoveryAsync()
 {
     foreach (var (scenarioLabel, exitCode) in new (string, int)[]
@@ -2374,29 +2471,43 @@ static async Task DualCameraAgentLifecycleRestartRecoveryAsync()
             var unknown = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
             Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
 
+            // AgentResponseUnknown is the catch-all failure code for the whole
+            // HardwareDual path -- a broken fake host (wrong scenario wiring, a crash
+            // before start-reserved-pair, etc.) would produce the exact same code as
+            // a correctly-behaving one. Assert what actually happened at the
+            // process/pipe level immediately, before any later ambiguous-outcome
+            // assert can hide which stage really broke.
+            var afterDispatchEntries = ReadDualAgentTraceEntries(tracePath);
+            Check.Equal(1, afterDispatchEntries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+            Check.Equal(1, afterDispatchEntries.Count(entry => entry.Operation == "start-reserved-pair"));
+            Check.Equal(1, afterDispatchEntries.Select(entry => entry.PipeName).Distinct().Count());
+
             // Process exit/pipe failure keeps support-required: a plain new capture
             // attempt must stay blocked on the same frozen transaction, with zero new
-            // reserve/redispatch/retry.
+            // reserve/redispatch/retry -- verified directly against the Agent, not
+            // just against the returned failure code.
             var blocked = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(Guid.NewGuid()));
             Check.Equal(DualCameraFailureCode.AgentResponseUnknown, blocked.FailureCode);
             Check.Equal(transactionId, blocked.TransactionId);
+            Check.Equal(afterDispatchEntries.Count, ReadDualAgentTraceEntries(tracePath).Count);
 
             var recovered = await flow.RecoverAndStitchAsync(transactionId);
+
+            var afterRecoveryEntries = ReadDualAgentTraceEntries(tracePath);
+            Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+            Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "start-reserved-pair"));
+            Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+            Check.True(
+                afterRecoveryEntries.Where(entry => entry.TransactionId is not null)
+                    .All(entry => entry.TransactionId == transactionId.ToString("N")),
+                $"{scenarioLabel}: every observed operation must reference the same transaction id (zero different-ID query).");
+            Check.Equal(2, afterRecoveryEntries.Select(entry => entry.PipeName).Distinct().Count());
+
             Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
             Check.Equal(2, recovered.Capture!.Originals.Count);
             Check.True(
                 recovered.Stitch is { Succeeded: true },
                 $"{scenarioLabel}: recovery must reach a real stitched JPEG from the frozen snapshot.");
-
-            var entries = ReadDualAgentTraceEntries(tracePath);
-            Check.Equal(1, entries.Count(entry => entry.Operation == "reserve-pair-transaction"));
-            Check.Equal(1, entries.Count(entry => entry.Operation == "start-reserved-pair"));
-            Check.Equal(1, entries.Count(entry => entry.Operation == "get-pair-transaction-result"));
-            Check.True(
-                entries.Where(entry => entry.TransactionId is not null)
-                    .All(entry => entry.TransactionId == transactionId.ToString("N")),
-                $"{scenarioLabel}: every observed operation must reference the same transaction id (zero different-ID query).");
-            Check.Equal(2, entries.Select(entry => entry.PipeName).Distinct().Count());
         }
         finally
         {
@@ -2435,17 +2546,26 @@ static async Task DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync()
         var unknown = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
         Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
 
-        var recovered = await flow.RecoverAndStitchAsync(transactionId);
-        Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
-        Check.Equal(2, recovered.Capture!.Originals.Count);
+        // Assert what actually happened before trusting the later ambiguous-outcome
+        // asserts: AgentResponseUnknown alone cannot distinguish a working scenario
+        // from a broken one.
+        var afterDispatchEntries = ReadDualAgentTraceEntries(tracePath);
+        Check.Equal(1, afterDispatchEntries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+        Check.Equal(1, afterDispatchEntries.Count(entry => entry.Operation == "start-reserved-pair"));
+        Check.Equal(1, afterDispatchEntries.Select(entry => entry.PipeName).Distinct().Count());
 
-        var entries = ReadDualAgentTraceEntries(tracePath);
+        var recovered = await flow.RecoverAndStitchAsync(transactionId);
+
+        var afterRecoveryEntries = ReadDualAgentTraceEntries(tracePath);
         Check.Equal(
             1,
-            entries.Select(entry => entry.PipeName).Distinct().Count()); // process stayed alive: no restart needed
-        Check.Equal(1, entries.Count(entry => entry.Operation == "reserve-pair-transaction"));
-        Check.Equal(1, entries.Count(entry => entry.Operation == "start-reserved-pair"));
-        Check.Equal(1, entries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+            afterRecoveryEntries.Select(entry => entry.PipeName).Distinct().Count()); // process stayed alive: no restart needed
+        Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "reserve-pair-transaction"));
+        Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "start-reserved-pair"));
+        Check.Equal(1, afterRecoveryEntries.Count(entry => entry.Operation == "get-pair-transaction-result"));
+
+        Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
+        Check.Equal(2, recovered.Capture!.Originals.Count);
     }
     finally
     {
@@ -2510,7 +2630,10 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    var idleTimeout = TimeSpan.FromSeconds(5);
+    // Generous idle window: this repo has hit timing-sensitive failures on slow CI
+    // runners more than once (#17 / #20 / #5-S7), and this fake host is a real
+    // subprocess talking over a real named pipe, not an in-memory fake.
+    var idleTimeout = TimeSpan.FromSeconds(12);
     while (true)
     {
         using var acceptTimeout = new CancellationTokenSource(idleTimeout);
@@ -2537,6 +2660,17 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
 
         using var request = JsonDocument.Parse(requestJson);
         var root = request.RootElement;
+        if (root.GetProperty("schemaVersion").GetString() != DualHardwareCameraAgentProtocol.SchemaVersion ||
+            root.GetProperty("marker").GetString() != DualHardwareCameraAgentProtocol.Marker ||
+            root.GetProperty("simulation").GetBoolean())
+        {
+            // A real Native agent runs a strict parser and would reject a malformed
+            // envelope outright instead of guessing at it; the fake host must fail
+            // the same way rather than silently accepting whatever the client sent,
+            // or a client-side envelope regression would only ever surface on real
+            // hardware.
+            return 66;
+        }
         var operation = root.GetProperty("operation").GetString()!;
         var requestId = root.GetProperty("requestId").GetString()!;
         var payload = root.GetProperty("payload");
