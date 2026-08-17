@@ -112,6 +112,8 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ### P0-B2: 順次二台transaction
 
+アプリ側のsoftware-only準備として、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約済みpair開始、同一ID結果照会、.NET Reserved／terminal recovery、strict semantic preflightを実装済みである。fake backend限定ではCAM-A→CAM-Bを各最大一回、共有180秒deadline、自動retry 0で実行し、A失敗時B 0、B失敗時A原本保持、transaction ID別terminal journalの再起動照会まで合格した。これはproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影の接続証拠ではない。既定経路は`PairDispatcherUnavailable`／`HardwarePending`であり、`HG-0003B`解消前に実機Readyへ昇格しない。
+
 - `CAM-A`でWPD baseline/close、SDK one card capture/close、WPD recovery、PC保存を完了する。
 - 次に`CAM-B`で同じhybrid処理を完了する。
 - `hybrid-capture-pair`を`--dual-dedicated-spools-confirmed`を含む全安全確認付きで使用する。コマンド自身も共通dual identity検証を先頭で実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名証跡を残してcard access・capture前にexit 5とする。合格後はpair全体で一つの180秒deadline、operator-session-wide lease、CAM-A→CAM-Bの固定順序を維持する。
@@ -159,7 +161,7 @@ active中の実USB切断には`hybrid-fault-pair --alias CAM-A|CAM-B --scenario 
 
 `WI-0021A`と`WI-0022B`の依存を満たした`WI-0022C`は、実機を使わないbounded software sliceとして完了した。rights-clearedな合成画像fixtureからshift、rotation、scale、exposure、colorを決定的に測定し、測定値とfixture/profile provenanceを保持するproposalへ接続する。承認済みprofile envelope内の一時補正だけを受理し、target／automatic-correction上限のboundary、over-limit、malformed、profile-mismatch、unapproved profile、入力不整合をfail closedする。profileの自動学習・更新はない。
 
-SDK-less Debug/Release全CTestは各7/7、`pwsh -NoProfile -File .\\scripts\\Test-M3Simulated.ps1 -Configuration Release`はPassした。このsoftware contractは最終リグ、承認済みA0閾値、実写品質、実機性能、identity strategyの解決を証明しない。identity strategyはBlocked、`HG-0003B`は未解消、実D810 v5 runと実機captureは未検証のままである。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsliceで実行していない。
+最新のsoftware-only回帰はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release全CTest各10/10、`Test-M3Simulated.ps1` Release/Debug、正式DualCamera WPF flowに合格した。このsoftware contractは最終リグ、承認済みA0閾値、実写品質、実機性能、identity strategyの解決を証明しない。identity strategyはBlocked、`HG-0003B`は未解消、実D810 v5 runと実機capture 1/10/100は未検証のままである。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsliceで実行していない。
 
 ## P0判定
 

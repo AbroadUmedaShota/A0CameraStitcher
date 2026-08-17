@@ -6,7 +6,9 @@
 
 総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持し、SDK identity collisionにより別laneでBlockedです。
 
-第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。現在の記録上、接続中の実機はidentity-v2で登録済みの`CAM-B`一台だけであり、実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
+DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。ただしproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、既定経路は`PairDispatcherUnavailable`／`HardwarePending`のままです。
+
+第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。committed済みの匿名証拠には一台接続時の記録がありますが、これは現在のlive接続状態を断定するものではありません。実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 
 PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証を完了した`original.jpg`だけを製品上の正本とします。カメラカードは一過性の転送元で、永続保持を要件にしません。承認済みの専用empty/cleared card single-slot spoolでは、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、その後にjust-recovered WPD objectだけを削除して再びpayload 0件を確認します。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にします。existing cardのbulk delete/format、vendor operation、retryは禁止です。
 
@@ -15,7 +17,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 - 対象: 静止した平面原稿。二台構成はA0級。一台構成は`7360×4912`原画像のbyte-identical保存だけを保証し、対象原稿サイズ・DPI・crop・lens補正・物理寸法は保証しない
 - mode: `SingleCamera`または`DualCamera`をactive transaction外で明示選択し、開始時に固定する
 - カメラ: `SingleCamera`は登録済みNikon D810を厳密に一台、`DualCamera`は登録済みD810二台と固定リグ
-- 現在の接続: D810一台。identity-v2で`CAM-B`としてSDK/WPD双方へ登録済み。履歴上V1.14の別個体`CAM-A`の一台接続・登録後に二台同時検証へ進む
+- 接続証拠: committed済み匿名記録にはD810一台のcheckpointがある。現在のlive接続台数・aliasはこのREADMEから断定せず、実行時のread-only inventoryで確認する
 - 接続: Windows 11 x64 PCへUSB接続
 - 制御: WPD baseline/recoveryと、カメラカードへ一回撮影するNikon SDK、および一台選択式SDK Live View
 - 入力: FX JPEG Fine L
@@ -56,19 +58,19 @@ build\Debug\A0CameraStitcher.Phase0.exe live-view --alias CAM-A --duration-secon
 build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 10 --frames 1
 ```
 
-Phase 0Bのidentity登録は、他方のD810を物理的に外して厳密に一台だけ接続した状態で、同じbodyへSDK/WPDの両方を明示登録します。列挙順による自動割当ては二台bindingの証拠にしません。
+Phase 0Bの旧identity-v2登録は履歴診断用checkpointとしてのみ保持します。列挙順、USB port、衝突するSDK Name/Interface digest、旧mapを二台のproduction binding根拠にしません。
 
-`inventory`はread-onlyであり、未登録個体を`CAM-A/B`へ自動割当てしません。接続中に未登録個体が一台でもあれば実カメラ操作はfail closedします。通常の登録は、一台だけを接続して`bind-cross-transport-identity`を使います。これは一つのlease内でSDKを完全closeしてからWPDを列挙し、両mapを事前検証後にだけ登録します。`Test-Phase0Readiness.ps1 -Stage Dual`はSDK/WPD双方の全個体が明示binding済みになるまで`READY_FOR_IDENTITY_BINDING`を返します。
+`inventory`はread-onlyであり、未登録個体を`CAM-A/B`へ自動割当てしません。`bind-cross-transport-identity`と旧identity-v2 mapはlegacy diagnostic／checkpointであり、production `Ready`の登録手順ではありません。`HG-0003B`でdocumented providerが承認され、CAM-A/Bそれぞれのlocal proofと二台inventoryのeach alias exactly onceが一致するまではdefault `Blocked / identity_strategy_unresolved`です。
 
 ```powershell
-build\Debug\A0CameraStitcher.Phase0.exe bind-cross-transport-identity --alias CAM-A --single-camera-connected-confirmed
-# CAM-A/Bを一台ずつ登録後、二台を接続して匿名read-only検証
+build\Debug\A0CameraStitcher.Phase0.exe bind-cross-transport-identity --alias CAM-A --single-camera-connected-confirmed # legacy diagnostic only
+# production ReadyにはHG-0003B承認provider、CAM-A/B local proof、each alias exactly onceが別途必要
 build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity # legacy map diagnostic; identity_strategy_unresolved until HG-0003B provider approval
 # identity合格後、二台の専用spoolが双方emptyかread-only確認
 build\Debug\A0CameraStitcher.Phase0.exe verify-dual-spools
 ```
 
-CAM-A/BのSDK/WPD binding、二台の専用empty spool、三つの安全確認が揃った後だけ、実機pairを次の順で段階実行します。
+`HG-0003B`承認provider、CAM-A/B local proof、each alias exactly once、二台の専用empty spool、全安全確認が揃った後だけ、実機pairを次の順で段階実行します。
 
 ```powershell
 build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 1 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed

@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-08-14
+更新日: 2026-08-17
 
 ## 総合判定
 
@@ -10,7 +10,7 @@
 
 ## 確認済み
 
-- 2026-08-14にDualCamera専用のCamera Agent v2アプリ側通信を追加した。アプリはAgentの機能を確認してから、一つのpair transaction IDで「予約→開始→同じIDの結果確認」を行う。CAM-A→CAM-B順、durable pair journal、same-ID query、retry 0をAgent能力として必須にし、不一致、別transactionの結果、重複fieldを拒否する。Native側にも同じschemaと4操作を認識する純粋なparser／dispatcher骨格を追加し、厳密でないJSONを拒否する。永続store未接続の予約・開始・照会はtyped unavailableで停止し、camera access・pair dispatch・retryは0件である。Foundation 22/22、M3 simulated Release/Debug、正式DualCamera WPF flow、SDK-less Debug/Release CTest各9/9が合格した。pair store、pair orchestrator、Named Pipe、製品起動への接続は未実装のため、HardwareDual画面は引き続き撮影不可であり、実カメラ操作は0件である。
+- 2026-08-17時点でDual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約→開始→同一ID照会、.NETのReserved／terminal typed recovery、厳密なsemantic preflightを実装済みである。fake backend限定orchestratorはCAM-A→CAM-Bを各最大一回、自動retry 0、共有180秒deadlineで実行する。A失敗時はBを開始せず、B失敗時はA原本を保持する。terminalはtransaction ID別にatomic publish・再読込検証され、その後だけactiveを削除する。過去結果を残したまま次pairを予約でき、再起動後も同一IDで照会できる。Foundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release CTest各10/10、M3 Release/Debug、正式DualCamera WPF flowが合格した。production Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続であり、既定は`PairDispatcherUnavailable`／`HardwarePending`、実カメラ操作0件である。
 - 正式camera modelはNikon D810であり、明示的な`SingleCamera`または`DualCamera`をUSBで運用する。`SingleCamera`はCAM-A、WPD serial digest、SDK/WPD各exactly-one current session、canonical original一件、stitch `NotApplicable`、byte-identical `7360×4912` export、30日read-only profileとする。`DualCamera`は従来どおり固定平面A0原稿をCAM-A→CAM-Bで順次撮影・合成する。
 - modeはactive transaction外で明示選択し、接続台数から推定しない。`DualCamera`の一台不足を`SingleCamera`へ自動降格せず、active中のmode変更を禁止する。
 - D810一台の電源再投入後PnP再列挙とWPD側CAM-A continuityを匿名証拠化。SDK側の旧continuity結論はephemeral source ID使用のため無効化され、接続中二台のidentity-v2衝突によりidentity strategyはBlockedである。

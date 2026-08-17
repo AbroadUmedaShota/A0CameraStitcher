@@ -1,12 +1,12 @@
 # Phase 0 二台カメラ・ショーケース
 
-更新日: 2026-08-09
+更新日: 2026-08-17
 
 ## 一行で表す現在地
 
 **二台のD810をCAM-A→CAM-Bの順に安全に扱うsoftware contractはデモ可能。実機二台のidentity、empty spool、1/10/100組撮影の受入は未完了。**
 
-現在接続されている実機はidentity-v2でSDK/WPD双方に登録済みの`CAM-B`一台です。`CAM-A`のidentity-v2登録がないため、実機pair入口は撮影やcard accessより前にfail closedします。
+committed済み匿名証拠には、identity-v2でSDK/WPD双方に`CAM-B`一台だけが確認されたcheckpointがあります。これは現在のlive接続状態を示しません。production Dual identityは`HG-0003B`未解消のため、実機pair入口は撮影やcard accessより前にfail closedします。
 
 ## 今見せられるもの
 
@@ -17,8 +17,9 @@
 | B側失敗時の保持 | Software Pass | CAM-Aの検証済みPC originalを保持し、Bの未確定original化・delete・retryをしない |
 | pair境界でのprocess終了 | Software Pass | CAM-A完了後・CAM-B開始前を復元し、CAM-A保持・新規transaction要求 |
 | operator-session lease / watchdog | Software Pass | 同一Windows logon session内を直列化し、pair全体を180秒でfail closed |
+| Dual schema `a0.camera-agent.hardware-dual.v2` pair実行 | Software Pass / Fake only | 4操作、durable予約、strict preflight、CAM-A→CAM-B、multi-terminal restart query。production pipe／実camera backendは未接続 |
 | 実機identity gate | One-camera evidence | SDK/WPDともCAM-B一台だけと匿名確認し、撮影・card accessなしで拒否 |
-| 実機二台撮影 | Unverified | CAM-A identity-v2登録、dual spool、1/10/100組が未実施 |
+| 実機二台撮影 | Unverified | `HG-0003B`承認provider、CAM-A/B local proof、each alias exactly once、dual spool、1/10/100組が未実施 |
 | A0光学品質 | Unverified | 最終リグ、補正上限、品質閾値が未承認 |
 
 ## 5分の安全なデモ
@@ -55,13 +56,14 @@ buildを再実行せず資料だけを確認する場合は`-SkipBuild`を指定
 - 実機二台のpair撮影が完了したとは言いません。
 - 二台の実シャッター同期は保証しません。設計は順次撮影です。
 - software-only、simulated、一台実機の結果を、A0光学品質やMVP受入へ読み替えません。
+- fake backendのCompleted応答をproduction DualCamera実撮影の合格へ読み替えません。既定経路はunavailable／`HardwarePending`です。
 - 旧SDK `CAM-A` continuityは有効な証拠として扱いません。ephemeral source ID依存が判明したため無効化済みです。
 - Nikon SDKやlicensed binaryの再配布可否は未承認です。
 
 ## 実機二台で残る受入順序
 
-1. 元`CAM-A`本体だけを接続し、SDK/WPD identity-v2を同一operator-session lease内で明示登録する。
-2. CAM-A/Bを同時接続し、接続順とUSB portを変えてもSDK/WPD各2、CAM-A/B各1、unbound 0であることを確認する。
+1. `HG-0003B`でdocumented production providerとlocal proof手順を承認し、CAM-A/Bそれぞれのproofを一台接続状態で作成する。旧identity-v2 checkpointは履歴診断に限定する。
+2. CAM-A/Bを同時接続し、承認providerの二台inventoryと両proofが一致してCAM-A/B each alias exactly once、unbound／duplicate／collision各0であることを確認する。
 3. 二つの専用spoolがpayload 0であることをread-only確認する。
 4. 1組、10組、100組を順に実行し、PC原本、exact-object cleanup、停止条件、180秒watchdogを記録する。
 5. USB切断とsoftware process再起動／CAM-A-CAM-B境界中断を実行し、保持・no retry・新規transactionを確認する。
