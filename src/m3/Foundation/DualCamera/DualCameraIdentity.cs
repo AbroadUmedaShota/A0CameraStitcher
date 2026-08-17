@@ -23,6 +23,7 @@ public sealed record DualCameraIdentitySnapshot(
     DateTimeOffset ObservedAtUtc,
     DateTimeOffset ExpiresAtUtc)
 {
+    [JsonIgnore]
     public bool IsReady => Status == DualCameraIdentityStatus.Ready;
 
     public DualCameraIdentitySnapshot EvaluateAt(DateTimeOffset nowUtc) =>

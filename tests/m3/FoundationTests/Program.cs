@@ -100,6 +100,31 @@ static async Task DualHardwareAgentV2RoundTripAsync()
         var operation = root.GetProperty("operation").GetString()!;
         operationsSeen.Add(operation);
         var payload = root.GetProperty("payload");
+        if (operation == "start-reserved-pair")
+        {
+            var transaction = payload.GetProperty("transaction");
+            static string FieldSet(JsonElement element) => string.Join(",",
+                element.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+            Check.Equal(
+                "captureProfileSnapshot,identitySnapshot,operatorConfirmations,rigProfileSnapshot,startedAtUtc,transactionDirectory,transactionId,watchdogDeadlineUtc",
+                FieldSet(transaction));
+            Check.Equal("expiresAtUtc,observedAtUtc,reasonCode,status",
+                FieldSet(transaction.GetProperty("identitySnapshot")));
+            Check.False(transaction.GetProperty("identitySnapshot").TryGetProperty("isReady", out _),
+                "Computed identity readiness must not cross the Native protocol boundary.");
+            Check.Equal("approvedAtUtc,bodies,profileId,schemaVersion,status,validUntilUtc,version",
+                FieldSet(transaction.GetProperty("captureProfileSnapshot")));
+            Check.Equal(
+                "assessedAtUtc,cameraAliases,cameraBToCameraA,crop,expectedInputHeight,expectedInputWidth,layout,measuredAtUtc,profileId,provenance,schemaVersion,status,validUntilUtc,version",
+                FieldSet(transaction.GetProperty("rigProfileSnapshot")));
+            Check.Equal(
+                "bothCardsConfirmedEmpty,captureProfileFrozen,identitySnapshotApproved,liveViewStoppedAndClosed,rigProfileFrozen",
+                FieldSet(transaction.GetProperty("operatorConfirmations")));
+            Check.False(transaction.GetProperty("operatorConfirmations").TryGetProperty("allConfirmed", out _),
+                "Computed confirmation state must not cross the Native protocol boundary.");
+            Check.Equal("2026-08-14T01:02:03+00:00", transaction.GetProperty("startedAtUtc").GetString());
+            Check.Equal("2026-08-14T01:05:03+00:00", transaction.GetProperty("watchdogDeadlineUtc").GetString());
+        }
         return operation switch
         {
             "get-dual-capabilities" => DualHardwareCapabilitiesResponseJson(requestId),

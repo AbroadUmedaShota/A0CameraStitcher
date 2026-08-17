@@ -1,12 +1,20 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 
+#include <Windows.h>
+
 #include <algorithm>
+#include <charconv>
 #include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -320,6 +328,7 @@ private:
         }
         JsonValue value;
         value.kind = JsonKind::number;
+        value.string = std::string(input_.substr(start, position_ - start));
         return value;
     }
 
@@ -406,11 +415,233 @@ bool IsSafeRequestId(std::string_view value) noexcept {
 
 bool IsSafeTransactionId(std::string_view value) noexcept {
     return value.size() == 32 &&
+        std::any_of(value.begin(), value.end(), [](char character) { return character != '0'; }) &&
         std::all_of(value.begin(), value.end(), [](unsigned char character) {
             return (character >= '0' && character <= '9') ||
                 (character >= 'a' && character <= 'f') ||
                 (character >= 'A' && character <= 'F');
         });
+}
+
+constexpr std::int64_t kHundredNanosecondsPerSecond = 10'000'000;
+constexpr std::int64_t kHundredNanosecondsPerDay = 86'400 * kHundredNanosecondsPerSecond;
+
+bool IsLeapYear(int year) noexcept { return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0); }
+int DaysInMonth(int year, int month) noexcept {
+    constexpr int days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    return days[month - 1] + (month == 2 && IsLeapYear(year) ? 1 : 0);
+}
+std::int64_t DaysFromCivil(int year, unsigned month, unsigned day) noexcept {
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned adjusted_month = month > 2 ? month - 3 : month + 9;
+    const unsigned doy = (153U * adjusted_month + 2U) / 5U + day - 1U;
+    const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    return static_cast<std::int64_t>(era) * 146097 + doe - 719468;
+}
+int ParseFixedDigits(std::string_view value, std::size_t offset, std::size_t count) {
+    int parsed = 0;
+    if (offset + count > value.size()) ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp");
+    for (std::size_t index = offset; index < offset + count; ++index) {
+        if (value[index] < '0' || value[index] > '9') ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp");
+        parsed = parsed * 10 + (value[index] - '0');
+    }
+    return parsed;
+}
+std::int64_t ParseUtc100ns(std::string_view value) {
+    if (value.size() < 20 || value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
+        value[13] != ':' || value[16] != ':') ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp");
+    const int year = ParseFixedDigits(value, 0, 4), month = ParseFixedDigits(value, 5, 2);
+    const int day = ParseFixedDigits(value, 8, 2), hour = ParseFixedDigits(value, 11, 2);
+    const int minute = ParseFixedDigits(value, 14, 2), second = ParseFixedDigits(value, 17, 2);
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > DaysInMonth(year, month) ||
+        hour > 23 || minute > 59 || second > 59) ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp");
+    std::size_t position = 19;
+    std::int64_t fraction = 0;
+    int fraction_digits = 0;
+    if (position < value.size() && value[position] == '.') {
+        ++position;
+        const std::size_t start = position;
+        while (position < value.size() && value[position] >= '0' && value[position] <= '9') {
+            if (++fraction_digits > 7) ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp precision");
+            fraction = fraction * 10 + (value[position++] - '0');
+        }
+        if (position == start) ProtocolFailure("InvalidPairRequest", "invalid UTC timestamp fraction");
+    }
+    while (fraction_digits++ < 7) fraction *= 10;
+    if (position == value.size() - 1 && value[position] == 'Z') ++position;
+    else if (position + 6 == value.size() && value.substr(position) == "+00:00") position += 6;
+    else ProtocolFailure("InvalidPairRequest", "timestamp must have a zero UTC offset");
+    return DaysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * kHundredNanosecondsPerDay +
+        (static_cast<std::int64_t>(hour) * 3600 + minute * 60 + second) * kHundredNanosecondsPerSecond + fraction;
+}
+std::int64_t Clock100ns(const DualHardwareUtcClock& clock) {
+    const auto value = clock ? clock() : std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(value.time_since_epoch()).count() / 100;
+}
+bool IsBoundedText(std::string_view value, std::size_t maximum) noexcept {
+    return !value.empty() && value.size() <= maximum &&
+        std::none_of(value.begin(), value.end(),
+            [](unsigned char character) { return character < 0x20U || character == 0x7FU; }) &&
+        std::any_of(value.begin(), value.end(),
+            [](unsigned char character) { return !std::isspace(character); });
+}
+std::int64_t ParseInteger(const JsonValue& value) {
+    if (value.kind != JsonKind::number || value.string.empty() || value.string.find_first_of(".eE") != std::string::npos)
+        ProtocolFailure("InvalidPairRequest", "integer field is invalid");
+    std::int64_t parsed{};
+    const auto result = std::from_chars(value.string.data(), value.string.data() + value.string.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.string.data() + value.string.size())
+        ProtocolFailure("InvalidPairRequest", "integer field is outside the supported range");
+    return parsed;
+}
+double ParseFiniteNumber(const JsonValue& value) {
+    if (value.kind != JsonKind::number || value.string.empty()) ProtocolFailure("InvalidPairRequest", "numeric field is invalid");
+    double parsed{};
+    const auto result = std::from_chars(value.string.data(), value.string.data() + value.string.size(), parsed,
+        std::chars_format::general);
+    if (result.ec != std::errc{} || result.ptr != value.string.data() + value.string.size() || !std::isfinite(parsed))
+        ProtocolFailure("InvalidPairRequest", "numeric field is outside the supported range");
+    return parsed;
+}
+void RequireStringValue(const JsonValue& object, std::string_view field, std::string_view expected) {
+    if (RequireField(object, field, JsonKind::string).string != expected)
+        ProtocolFailure("InvalidPairRequest", "frozen snapshot value is invalid");
+}
+void RequireTrue(const JsonValue& object, std::string_view field) {
+    if (!RequireField(object, field, JsonKind::boolean).boolean)
+        ProtocolFailure("InvalidPairRequest", "operator confirmation is missing");
+}
+std::wstring Utf8ToWide(std::string_view value) {
+    if (value.empty() || value.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        ProtocolFailure("InvalidPairRequest", "transaction directory encoding is invalid");
+    const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0);
+    if (required <= 0) ProtocolFailure("InvalidPairRequest", "transaction directory encoding is invalid");
+    std::wstring output(static_cast<std::size_t>(required), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), output.data(), required) != required)
+        ProtocolFailure("InvalidPairRequest", "transaction directory encoding is invalid");
+    return output;
+}
+void ValidateTransactionDirectory(std::string_view raw_path) {
+    if (raw_path.size() < 4 || raw_path.size() > 1024 || !std::isalpha(static_cast<unsigned char>(raw_path[0])) ||
+        raw_path[1] != ':' || (raw_path[2] != '\\' && raw_path[2] != '/') ||
+        raw_path.find(':', 2) != std::string_view::npos ||
+        std::any_of(raw_path.begin(), raw_path.end(), [](unsigned char character) { return character < 0x20U; }))
+        ProtocolFailure("InvalidPairRequest", "transaction directory must be a fixed local path");
+    std::string component;
+    for (std::size_t index = 3; index <= raw_path.size(); ++index) {
+        if (index == raw_path.size() || raw_path[index] == '\\' || raw_path[index] == '/') {
+            if (component.empty() || component == "." || component == "..")
+                ProtocolFailure("InvalidPairRequest", "transaction directory contains an unsafe component");
+            component.clear();
+        } else component.push_back(raw_path[index]);
+    }
+    const std::filesystem::path path(Utf8ToWide(raw_path));
+    const std::wstring drive_root = path.root_name().wstring() + L"\\";
+    if (GetDriveTypeW(drive_root.c_str()) != DRIVE_FIXED)
+        ProtocolFailure("InvalidPairRequest", "transaction directory drive is not fixed");
+    std::filesystem::path current = path.root_path();
+    for (const auto& part : path.relative_path()) {
+        current /= part;
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) break;
+            ProtocolFailure("InvalidPairRequest", "transaction directory cannot be inspected");
+        }
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            ProtocolFailure("InvalidPairRequest", "transaction directory contains a reparse point");
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            ProtocolFailure("InvalidPairRequest", "transaction directory names an existing file");
+    }
+}
+void ValidateIdentity(const JsonValue& identity, std::int64_t started, std::int64_t now,
+    DualHardwareCameraAgentRequest& request) {
+    RequireExactFields(identity, {"status", "reasonCode", "observedAtUtc", "expiresAtUtc"});
+    RequireStringValue(identity, "status", "Ready");
+    if (!IsBoundedText(RequireField(identity, "reasonCode", JsonKind::string).string, 128))
+        ProtocolFailure("InvalidPairRequest", "identity reason is invalid");
+    const auto observed = ParseUtc100ns(RequireField(identity, "observedAtUtc", JsonKind::string).string);
+    const auto expires = ParseUtc100ns(RequireField(identity, "expiresAtUtc", JsonKind::string).string);
+    if (observed > started || started > now || observed >= expires || now >= expires)
+        ProtocolFailure("InvalidPairRequest", "identity snapshot is stale or inconsistent");
+    request.identity_observed_at_100ns = observed;
+    request.identity_expires_at_100ns = expires;
+}
+void ValidateCaptureBody(const JsonValue& body, std::string_view alias) {
+    RequireExactFields(body, {"alias","imageArea","fileFormat","jpegQuality","imageSize","exposureMode",
+        "autoIsoEnabled","focusMode","whiteBalanceMode","vibrationReductionEnabled"});
+    RequireStringValue(body, "alias", alias); RequireStringValue(body, "imageArea", "FX");
+    RequireStringValue(body, "fileFormat", "JPEG"); RequireStringValue(body, "jpegQuality", "Fine");
+    RequireStringValue(body, "imageSize", "L"); RequireStringValue(body, "exposureMode", "Manual");
+    RequireStringValue(body, "focusMode", "Manual"); RequireStringValue(body, "whiteBalanceMode", "Fixed");
+    if (RequireField(body, "autoIsoEnabled", JsonKind::boolean).boolean ||
+        RequireField(body, "vibrationReductionEnabled", JsonKind::boolean).boolean)
+        ProtocolFailure("InvalidPairRequest", "capture body settings are not frozen");
+}
+void ValidateCaptureProfile(const JsonValue& profile, std::int64_t started, std::int64_t now,
+    DualHardwareCameraAgentRequest& request) {
+    RequireExactFields(profile, {"profileId","version","schemaVersion","status","approvedAtUtc","validUntilUtc","bodies"});
+    if (!IsBoundedText(RequireField(profile, "profileId", JsonKind::string).string, 128) ||
+        !IsBoundedText(RequireField(profile, "version", JsonKind::string).string, 64))
+        ProtocolFailure("InvalidPairRequest", "capture profile identity is invalid");
+    RequireStringValue(profile, "schemaVersion", "a0.hardware-dual-capture-profile.v1");
+    RequireStringValue(profile, "status", "Approved");
+    const auto approved = ParseUtc100ns(RequireField(profile, "approvedAtUtc", JsonKind::string).string);
+    const auto valid = ParseUtc100ns(RequireField(profile, "validUntilUtc", JsonKind::string).string);
+    if (approved >= valid || approved > started || valid <= started || valid <= now)
+        ProtocolFailure("InvalidPairRequest", "capture profile is stale or inconsistent");
+    const auto& bodies = RequireField(profile, "bodies", JsonKind::array).array;
+    if (bodies.size() != 2) ProtocolFailure("InvalidPairRequest", "capture profile requires two bodies");
+    ValidateCaptureBody(bodies[0], kCameraAliasA); ValidateCaptureBody(bodies[1], kCameraAliasB);
+    request.capture_profile_valid_until_100ns = valid;
+}
+void ValidateRigProfile(const JsonValue& profile, std::int64_t started, std::int64_t now,
+    DualHardwareCameraAgentRequest& request) {
+    RequireExactFields(profile, {"profileId","version","status","schemaVersion","provenance","measuredAtUtc",
+        "validUntilUtc","assessedAtUtc","expectedInputWidth","expectedInputHeight","cameraBToCameraA","layout","crop","cameraAliases"});
+    if (!IsBoundedText(RequireField(profile, "profileId", JsonKind::string).string, 128) ||
+        !IsBoundedText(RequireField(profile, "version", JsonKind::string).string, 64) ||
+        !IsBoundedText(RequireField(profile, "provenance", JsonKind::string).string, 256))
+        ProtocolFailure("InvalidPairRequest", "rig profile identity is invalid");
+    RequireStringValue(profile, "status", "Approved"); RequireStringValue(profile, "schemaVersion", "1.1.0");
+    const auto& layout = RequireField(profile, "layout", JsonKind::string).string;
+    if (layout != "camera-a-left-camera-b-right" &&
+        layout != "camera-a-top-camera-b-bottom")
+        ProtocolFailure("InvalidPairRequest", "rig layout is unsupported");
+    const auto measured = ParseUtc100ns(RequireField(profile, "measuredAtUtc", JsonKind::string).string);
+    const auto assessed = ParseUtc100ns(RequireField(profile, "assessedAtUtc", JsonKind::string).string);
+    const auto valid = ParseUtc100ns(RequireField(profile, "validUntilUtc", JsonKind::string).string);
+    if (measured > assessed || assessed > started || assessed >= valid || valid <= started || valid <= now)
+        ProtocolFailure("InvalidPairRequest", "rig profile is stale or inconsistent");
+    if (ParseInteger(RequireField(profile, "expectedInputWidth", JsonKind::number)) <= 0 ||
+        ParseInteger(RequireField(profile, "expectedInputHeight", JsonKind::number)) <= 0)
+        ProtocolFailure("InvalidPairRequest", "rig dimensions are invalid");
+    const auto& matrix = RequireField(profile, "cameraBToCameraA", JsonKind::array).array;
+    if (matrix.size() != 9) ProtocolFailure("InvalidPairRequest", "rig matrix must contain nine values");
+    double values[9]{}; for (std::size_t index = 0; index < 9; ++index) values[index] = ParseFiniteNumber(matrix[index]);
+    const double determinant = values[0]*(values[4]*values[8]-values[5]*values[7])-
+        values[1]*(values[3]*values[8]-values[5]*values[6])+values[2]*(values[3]*values[7]-values[4]*values[6]);
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12)
+        ProtocolFailure("InvalidPairRequest", "rig matrix is singular");
+    const auto& crop = RequireField(profile, "crop", JsonKind::array).array;
+    if (crop.size() != 4) ProtocolFailure("InvalidPairRequest", "rig crop must contain four values");
+    for (const auto& value : crop) if (ParseInteger(value) < 0) ProtocolFailure("InvalidPairRequest", "rig crop is invalid");
+    const auto& aliases = RequireField(profile, "cameraAliases", JsonKind::array).array;
+    if (aliases.size()!=2 || aliases[0].kind!=JsonKind::string || aliases[1].kind!=JsonKind::string ||
+        aliases[0].string!=kCameraAliasA || aliases[1].string!=kCameraAliasB)
+        ProtocolFailure("InvalidPairRequest", "rig aliases are invalid");
+    request.rig_profile_valid_until_100ns = valid;
+}
+void ValidateConfirmations(const JsonValue& confirmations) {
+    RequireExactFields(confirmations, {"identitySnapshotApproved","captureProfileFrozen","rigProfileFrozen",
+        "liveViewStoppedAndClosed","bothCardsConfirmedEmpty"});
+    RequireTrue(confirmations, "identitySnapshotApproved"); RequireTrue(confirmations, "captureProfileFrozen");
+    RequireTrue(confirmations, "rigProfileFrozen"); RequireTrue(confirmations, "liveViewStoppedAndClosed");
+    RequireTrue(confirmations, "bothCardsConfirmedEmpty");
 }
 
 void ValidateCameraMode(const JsonValue& payload) {
@@ -553,6 +784,12 @@ DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
     std::shared_ptr<DualHardwarePairJournalStore> pair_store) noexcept
     : pair_store_(std::move(pair_store)) {}
 
+DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
+    std::shared_ptr<DualHardwarePairJournalStore> pair_store, DualHardwareUtcClock utc_clock)
+    : pair_store_(std::move(pair_store)), utc_clock_(std::move(utc_clock)) {
+    if (!utc_clock_) throw std::invalid_argument("utc_clock is required");
+}
+
 DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
     std::string_view json) {
     const JsonValue root = JsonParser(json).Parse();
@@ -647,7 +884,7 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
     const std::string extracted_request_id =
         TryExtractSafeRequestId(request_json);
     try {
-        const auto request =
+        auto request =
             ParseDualHardwareCameraAgentRequest(request_json);
         switch (request.operation) {
         case DualHardwareCameraAgentOperation::get_dual_capabilities:
@@ -675,8 +912,23 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             }
         }
         case DualHardwareCameraAgentOperation::start_reserved_pair:
+        {
+            const JsonValue root = JsonParser(request_json).Parse();
+            const auto& transaction = RequireField(RequireField(root, "payload", JsonKind::object), "transaction", JsonKind::object);
+            const auto now = Clock100ns(utc_clock_);
+            request.started_at_100ns = ParseUtc100ns(RequireField(transaction, "startedAtUtc", JsonKind::string).string);
+            request.watchdog_deadline_100ns = ParseUtc100ns(RequireField(transaction, "watchdogDeadlineUtc", JsonKind::string).string);
+            if (request.started_at_100ns > now || now >= request.watchdog_deadline_100ns ||
+                request.watchdog_deadline_100ns - request.started_at_100ns != 180 * kHundredNanosecondsPerSecond)
+                ProtocolFailure("InvalidPairRequest", "pair watchdog window is invalid");
+            ValidateTransactionDirectory(RequireField(transaction, "transactionDirectory", JsonKind::string).string);
+            ValidateIdentity(RequireField(transaction, "identitySnapshot", JsonKind::object), request.started_at_100ns, now, request);
+            ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
+            ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
+            ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
             return StartUnavailableResponse(
                 request.request_id, request.transaction_id);
+        }
         case DualHardwareCameraAgentOperation::get_pair_transaction_result: {
             if (pair_store_ == nullptr) {
                 return QueryUnavailableResponse(

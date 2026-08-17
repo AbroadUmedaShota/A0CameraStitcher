@@ -1,6 +1,8 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 
+#include <Windows.h>
+
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -39,6 +41,13 @@ void CheckNotContains(
     Check(value.find(unexpected) == std::string_view::npos, message);
 }
 
+std::string ReplaceOnce(std::string value, std::string_view from, std::string_view to) {
+    const auto position = value.find(from);
+    if (position == std::string::npos) throw std::runtime_error("test mutation target was not found");
+    value.replace(position, from.size(), to);
+    return value;
+}
+
 class TempSandbox final {
 public:
     TempSandbox() {
@@ -71,6 +80,66 @@ public:
 private:
     fs::path parent_;
     fs::path root_;
+};
+
+#pragma pack(push, 1)
+struct MountPointReparseBufferHeader final {
+    DWORD reparse_tag;
+    WORD reparse_data_length;
+    WORD reserved;
+    WORD substitute_name_offset;
+    WORD substitute_name_length;
+    WORD print_name_offset;
+    WORD print_name_length;
+};
+#pragma pack(pop)
+
+class ScopedDirectoryJunction final {
+public:
+    ScopedDirectoryJunction(const fs::path& link, const fs::path& target) : link_(link) {
+        if (!CreateDirectoryW(link_.c_str(), nullptr))
+            throw std::runtime_error("junction fixture directory could not be created");
+        const HANDLE handle = CreateFileW(link_.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            (void)RemoveDirectoryW(link_.c_str());
+            throw std::runtime_error("junction fixture directory could not be opened");
+        }
+        const std::wstring print_name = fs::absolute(target).lexically_normal().native();
+        const std::wstring substitute_name = L"\\??\\" + print_name;
+        const std::size_t substitute_bytes = substitute_name.size() * sizeof(wchar_t);
+        const std::size_t print_bytes = print_name.size() * sizeof(wchar_t);
+        const std::size_t path_bytes = substitute_bytes + sizeof(wchar_t) + print_bytes + sizeof(wchar_t);
+        const std::size_t reparse_data_length = 8U + path_bytes;
+        std::vector<unsigned char> buffer(8U + reparse_data_length, 0U);
+        auto* header = reinterpret_cast<MountPointReparseBufferHeader*>(buffer.data());
+        header->reparse_tag = IO_REPARSE_TAG_MOUNT_POINT;
+        header->reparse_data_length = static_cast<WORD>(reparse_data_length);
+        header->substitute_name_length = static_cast<WORD>(substitute_bytes);
+        header->print_name_offset = static_cast<WORD>(substitute_bytes + sizeof(wchar_t));
+        header->print_name_length = static_cast<WORD>(print_bytes);
+        auto* path_buffer = reinterpret_cast<wchar_t*>(buffer.data() + sizeof(MountPointReparseBufferHeader));
+        CopyMemory(path_buffer, substitute_name.data(), substitute_bytes);
+        auto* print_buffer = reinterpret_cast<wchar_t*>(buffer.data() + sizeof(MountPointReparseBufferHeader) +
+            header->print_name_offset);
+        CopyMemory(print_buffer, print_name.data(), print_bytes);
+        DWORD bytes_returned = 0;
+        const BOOL created = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, buffer.data(),
+            static_cast<DWORD>(buffer.size()), nullptr, 0, &bytes_returned, nullptr);
+        (void)CloseHandle(handle);
+        if (!created) {
+            const auto error = GetLastError();
+            (void)RemoveDirectoryW(link_.c_str());
+            throw std::runtime_error("junction fixture could not be established, win32=" + std::to_string(error));
+        }
+        active_ = true;
+    }
+    ~ScopedDirectoryJunction() { if (active_) (void)RemoveDirectoryW(link_.c_str()); }
+    ScopedDirectoryJunction(const ScopedDirectoryJunction&) = delete;
+    ScopedDirectoryJunction& operator=(const ScopedDirectoryJunction&) = delete;
+private:
+    fs::path link_;
+    bool active_{};
 };
 
 void WriteText(const fs::path& path, const std::string& text) {
@@ -125,16 +194,51 @@ std::string ReservationPayload(
 
 std::string StartPayload(
     std::string_view transaction_id = "0123456789abcdef0123456789abcdef",
-    std::string_view aliases = "[\"CAM-A\",\"CAM-B\"]") {
+    std::string_view aliases = "[\"CAM-A\",\"CAM-B\"]",
+    std::string_view transaction_directory = "C:/anonymous/pair") {
+    constexpr std::string_view body_a =
+        "{\"alias\":\"CAM-A\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
+        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
+        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
+        "\"vibrationReductionEnabled\":false}";
+    constexpr std::string_view body_b =
+        "{\"alias\":\"CAM-B\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
+        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
+        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
+        "\"vibrationReductionEnabled\":false}";
     return "{\"cameraMode\":\"DualCamera\",\"orderedRequiredAliases\":" +
         std::string(aliases) +
         ",\"transaction\":{\"transactionId\":\"" +
         std::string(transaction_id) +
-        "\",\"transactionDirectory\":\"C:/anonymous/pair\""
-        ",\"identitySnapshot\":{},\"captureProfileSnapshot\":{}"
-        ",\"rigProfileSnapshot\":{},\"operatorConfirmations\":{}"
+        "\",\"transactionDirectory\":\"" + std::string(transaction_directory) + "\""
+        ",\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"anonymous-test-ready\","
+        "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}"
+        ",\"captureProfileSnapshot\":{\"profileId\":\"anonymous-profile\",\"version\":\"1\","
+        "\"schemaVersion\":\"a0.hardware-dual-capture-profile.v1\",\"status\":\"Approved\","
+        "\"approvedAtUtc\":\"2026-08-13T00:00:00Z\",\"validUntilUtc\":\"2026-08-15T00:00:00Z\","
+        "\"bodies\":[" + std::string(body_a) + "," + std::string(body_b) + "]}"
+        ",\"rigProfileSnapshot\":{\"profileId\":\"anonymous-rig\",\"version\":\"1\","
+        "\"status\":\"Approved\",\"schemaVersion\":\"1.1.0\",\"provenance\":\"anonymous-test\","
+        "\"measuredAtUtc\":\"2026-08-12T00:00:00Z\",\"validUntilUtc\":\"2026-08-15T00:00:00Z\","
+        "\"assessedAtUtc\":\"2026-08-13T00:00:00Z\",\"expectedInputWidth\":7360,"
+        "\"expectedInputHeight\":4912,\"cameraBToCameraA\":[1,0,12,0,1,0,0,0,1],"
+        "\"layout\":\"camera-a-left-camera-b-right\",\"crop\":[1,1,1,1],"
+        "\"cameraAliases\":[\"CAM-A\",\"CAM-B\"]}"
+        ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
+        "\"rigProfileFrozen\":true,\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true}"
         ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
         ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
+}
+
+std::chrono::system_clock::time_point FixedNow() {
+    using namespace std::chrono;
+    return sys_days{year{2026}/August/14} + minutes{1};
+}
+
+DualHardwareCameraAgentDispatcher CreateFixedDispatcher(
+    std::shared_ptr<DualHardwarePairJournalStore> store = {}) {
+    return DualHardwareCameraAgentDispatcher(
+        std::move(store), [] { return FixedNow(); });
 }
 
 void CheckRejected(
@@ -151,7 +255,7 @@ void CheckRejected(
 }
 
 void TestCapabilitiesAndRecognizedOperations() {
-    DualHardwareCameraAgentDispatcher dispatcher;
+    auto dispatcher = CreateFixedDispatcher();
 
     const auto capabilities = dispatcher.Handle(Envelope(
         "get-dual-capabilities", "{\"cameraMode\":\"DualCamera\"}"));
@@ -295,9 +399,21 @@ void TestProtocolIdentityAndSafeTokens() {
 void TestTransactionAndAliasValidation() {
     DualHardwareCameraAgentDispatcher dispatcher;
 
+    const auto empty_identity = ReplaceOnce(StartPayload(),
+        "{\"status\":\"Ready\",\"reasonCode\":\"anonymous-test-ready\","
+        "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}",
+        "{}");
+    CheckRejected(dispatcher,
+        Envelope("start-reserved-pair", empty_identity),
+        "InvalidPairRequest",
+        "an empty identity snapshot must be rejected before pair dispatch");
+
     CheckRejected(dispatcher,
         Envelope("reserve-pair-transaction", ReservationPayload("abc")),
         "InvalidTransactionId", "short transaction IDs must be rejected");
+    CheckRejected(dispatcher,
+        Envelope("reserve-pair-transaction", ReservationPayload("00000000000000000000000000000000")),
+        "InvalidTransactionId", "an empty Guid transaction ID must be rejected");
     CheckRejected(dispatcher,
         Envelope("reserve-pair-transaction",
             ReservationPayload("0123456789abcdef0123456789abcdeg")),
@@ -318,6 +434,147 @@ void TestTransactionAndAliasValidation() {
         Envelope("get-pair-transaction-result",
             "{\"transactionId\":32}"),
         "InvalidFieldType", "transaction IDs with a wrong JSON type must be rejected");
+}
+
+void TestPairStartSemanticValidation() {
+    std::size_t clock_reads = 0;
+    DualHardwareCameraAgentDispatcher dispatcher({}, [&] {
+        ++clock_reads;
+        return FixedNow();
+    });
+    const auto valid = dispatcher.Handle(Envelope("start-reserved-pair", StartPayload(), "request-valid-start"));
+    CheckContains(valid, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "a complete safe request must reach only the disabled dispatcher boundary");
+    Check(clock_reads == 1, "a start request must read its injected UTC clock exactly once");
+    auto fractional_payload = ReplaceOnce(StartPayload(),
+        "\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\"",
+        "\"startedAtUtc\":\"2026-08-14T00:00:00.0000001Z\"");
+    fractional_payload = ReplaceOnce(std::move(fractional_payload),
+        "\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"",
+        "\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00.0000001Z\"");
+    const auto fractional = dispatcher.Handle(Envelope(
+        "start-reserved-pair", fractional_payload, "request-fractional-start"));
+    CheckContains(fractional, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "zero-offset RFC3339 timestamps with seven fractional digits must be accepted");
+
+    const auto top_bottom = dispatcher.Handle(Envelope("start-reserved-pair",
+        ReplaceOnce(StartPayload(),
+            "\"layout\":\"camera-a-left-camera-b-right\"",
+            "\"layout\":\"camera-a-top-camera-b-bottom\""),
+        "request-top-bottom-start"));
+    CheckContains(top_bottom, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "the approved top-bottom rig layout must reach the disabled dispatcher boundary");
+    const auto top_bottom_counters = dispatcher.SafetyCounters();
+    Check(top_bottom_counters.camera_access_count == 0 &&
+          top_bottom_counters.pair_dispatch_count == 0 &&
+          top_bottom_counters.automatic_retry_count == 0,
+        "top-bottom validation must perform zero camera, dispatch, or retry effects");
+
+    const std::vector<std::pair<std::string, std::string>> mutations = {
+        {"\"status\":\"Ready\"", "\"status\":\"Expired\""},
+        {"\"reasonCode\":\"anonymous-test-ready\"", "\"reasonCode\":\"   \""},
+        {"\"identitySnapshotApproved\":true", "\"identitySnapshotApproved\":false"},
+        {"\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"",
+            "\"watchdogDeadlineUtc\":\"2026-08-14T00:02:59+00:00\""},
+        {"\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\"",
+            "\"startedAtUtc\":\"2026-08-14T00:00:00+01:00\""},
+        {"\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\"",
+            "\"startedAtUtc\":\"2026-08-14T00:00:00.00000001Z\""},
+        {"\"imageArea\":\"FX\"", "\"imageArea\":\"DX\""},
+        {"\"cameraBToCameraA\":[1,0,12,0,1,0,0,0,1]",
+            "\"cameraBToCameraA\":[1,0,0,0,0,0,0,0,1]"},
+        {"\"layout\":\"camera-a-left-camera-b-right\"",
+            "\"layout\":\"camera-b-left-camera-a-right\""},
+        {"\"bothCardsConfirmedEmpty\":true", "\"bothCardsConfirmedEmpty\":false"},
+    };
+    for (const auto& [from, to] : mutations) {
+        const auto response = dispatcher.Handle(Envelope(
+            "start-reserved-pair", ReplaceOnce(StartPayload(), from, to), "request-invalid-start"));
+        CheckContains(response, "\"resultCode\":\"InvalidPairRequest\"",
+            "every malformed or unsafe frozen snapshot must fail closed");
+        CheckNotContains(response, "anonymous-test", "semantic rejection must not echo snapshot details");
+    }
+
+    for (const auto& unsafe_path : {"relative/pair", "C:/safe/../pair", "C:/safe/file:stream"}) {
+        const auto response = dispatcher.Handle(Envelope(
+            "start-reserved-pair", StartPayload("0123456789abcdef0123456789abcdef",
+                "[\"CAM-A\",\"CAM-B\"]", unsafe_path), "request-unsafe-path"));
+        CheckContains(response, "\"resultCode\":\"InvalidPairRequest\"",
+            "unsafe transaction paths must fail closed");
+        CheckNotContains(response, unsafe_path, "path rejection must not echo a local path");
+    }
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 && counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "semantic validation must retain all zero-side-effect counters");
+}
+
+void TestPairStartBoundaryAndPoisonStoreIsolation() {
+    TempSandbox sandbox;
+    const fs::path root = sandbox.Child("poison-store");
+    const fs::path journal = root / "active" / "pair-journal.json";
+    fs::create_directories(journal.parent_path());
+    WriteText(journal, "{\"malformed\":true}");
+    const auto original = ReadText(journal);
+    auto store = std::make_shared<DualHardwarePairJournalStore>(root);
+    auto dispatcher = CreateFixedDispatcher(store);
+
+    const auto accepted_boundary = dispatcher.Handle(Envelope(
+        "start-reserved-pair", StartPayload(), "request-boundary"));
+    CheckContains(accepted_boundary, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "now inside the exact 180-second interval must reach the disabled dispatcher boundary");
+    const auto expired = dispatcher.Handle(Envelope("start-reserved-pair",
+        ReplaceOnce(StartPayload(), "\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"",
+            "\"watchdogDeadlineUtc\":\"2026-08-14T00:01:00+00:00\""), "request-expired"));
+    CheckContains(expired, "\"resultCode\":\"InvalidPairRequest\"",
+        "now equal to the watchdog deadline must be rejected");
+    DualHardwareCameraAgentDispatcher exact_deadline({}, [] {
+        using namespace std::chrono;
+        return sys_days{year{2026}/August/14} + minutes{3};
+    });
+    const auto exact_deadline_response = exact_deadline.Handle(Envelope(
+        "start-reserved-pair", StartPayload(), "request-exact-deadline"));
+    CheckContains(exact_deadline_response, "\"resultCode\":\"InvalidPairRequest\"",
+        "the exact 180-second deadline boundary must be rejected");
+    Check(ReadText(journal) == original,
+        "start validation must not read through or rewrite a poisoned durable store");
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 && counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "boundary and poison-store checks must have zero camera/dispatch/retry effects");
+
+    const fs::path existing_file = sandbox.Child("not-a-directory");
+    WriteText(existing_file, "unchanged");
+    const auto file_path = dispatcher.Handle(Envelope("start-reserved-pair",
+        StartPayload("0123456789abcdef0123456789abcdef", "[\"CAM-A\",\"CAM-B\"]",
+            (existing_file / "child").generic_string()), "request-file-path"));
+    CheckContains(file_path, "\"resultCode\":\"InvalidPairRequest\"",
+        "an existing file in the transaction directory chain must be rejected");
+    Check(ReadText(existing_file) == "unchanged",
+        "file-path rejection must not alter the existing file");
+}
+
+void TestPairStartRejectsJunctionWithoutFollowingIt() {
+    TempSandbox sandbox;
+    const fs::path outside = sandbox.Child("outside-target");
+    fs::create_directories(outside);
+    WriteText(outside / "sentinel.txt", "unchanged");
+    const fs::path junction = sandbox.Child("transaction-junction");
+    ScopedDirectoryJunction fixture(junction, outside);
+    auto dispatcher = CreateFixedDispatcher();
+    const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+        StartPayload("0123456789abcdef0123456789abcdef", "[\"CAM-A\",\"CAM-B\"]",
+            junction.generic_string()), "request-junction"));
+    CheckContains(response, "\"resultCode\":\"InvalidPairRequest\"",
+        "a transaction directory containing a junction must fail closed");
+    CheckNotContains(response, junction.filename().string(),
+        "junction rejection must not reveal the local path");
+    Check(ReadText(outside / "sentinel.txt") == "unchanged",
+        "junction rejection must not follow or alter the outside target");
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.camera_access_count == 0 && counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "junction rejection must have zero camera/dispatch/retry effects");
 }
 
 void TestInjectedPairStoreReservationAndRestartQuery() {
@@ -413,7 +670,7 @@ void TestInjectedPairStoreReservationAndRestartQuery() {
     const fs::path start_root = sandbox.Child("start-store");
     auto start_store =
         std::make_shared<DualHardwarePairJournalStore>(start_root);
-    DualHardwareCameraAgentDispatcher start_dispatcher(start_store);
+    auto start_dispatcher = CreateFixedDispatcher(start_store);
     const auto start = start_dispatcher.Handle(Envelope(
         "start-reserved-pair", StartPayload(transaction_id), "request-start"));
     CheckContains(start, "\"resultCode\":\"PairDispatcherUnavailable\"",
@@ -545,6 +802,9 @@ int main() {
     TestStrictEnvelopeAndPayloadValidation();
     TestProtocolIdentityAndSafeTokens();
     TestTransactionAndAliasValidation();
+    TestPairStartSemanticValidation();
+    TestPairStartBoundaryAndPoisonStoreIsolation();
+    TestPairStartRejectsJunctionWithoutFollowingIt();
     TestInjectedPairStoreReservationAndRestartQuery();
     TestStoreFailureIsFixedAndRedacted();
     TestDispatcherOwnsInjectedStoreLifetime();

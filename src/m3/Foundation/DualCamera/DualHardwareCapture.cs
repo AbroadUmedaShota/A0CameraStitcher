@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace A0CameraStitcher.M3.Foundation.DualCamera;
 
 public sealed record HardwareDualOperatorConfirmations(
@@ -7,6 +9,7 @@ public sealed record HardwareDualOperatorConfirmations(
     bool LiveViewStoppedAndClosed,
     bool BothCardsConfirmedEmpty)
 {
+    [JsonIgnore]
     public bool AllConfirmed => IdentitySnapshotApproved && CaptureProfileFrozen && RigProfileFrozen &&
         LiveViewStoppedAndClosed && BothCardsConfirmedEmpty;
 }

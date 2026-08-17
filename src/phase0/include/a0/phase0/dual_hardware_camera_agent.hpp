@@ -1,6 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -36,7 +39,16 @@ struct DualHardwareCameraAgentRequest {
     DualHardwareCameraAgentOperation operation{
         DualHardwareCameraAgentOperation::get_dual_capabilities};
     std::string transaction_id;
+    std::int64_t identity_observed_at_100ns{};
+    std::int64_t identity_expires_at_100ns{};
+    std::int64_t capture_profile_valid_until_100ns{};
+    std::int64_t rig_profile_valid_until_100ns{};
+    std::int64_t started_at_100ns{};
+    std::int64_t watchdog_deadline_100ns{};
 };
+
+using DualHardwareUtcClock =
+    std::function<std::chrono::system_clock::time_point()>;
 
 struct DualHardwareCameraAgentSafetyCounters {
     std::size_t camera_access_count{};
@@ -54,6 +66,9 @@ public:
     DualHardwareCameraAgentDispatcher() noexcept = default;
     explicit DualHardwareCameraAgentDispatcher(
         std::shared_ptr<DualHardwarePairJournalStore> pair_store) noexcept;
+    DualHardwareCameraAgentDispatcher(
+        std::shared_ptr<DualHardwarePairJournalStore> pair_store,
+        DualHardwareUtcClock utc_clock);
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -64,6 +79,7 @@ private:
     // Shared ownership keeps the injected store alive for every Handle call.
     // A null store preserves the fail-closed PairStoreUnavailable behavior.
     std::shared_ptr<DualHardwarePairJournalStore> pair_store_;
+    DualHardwareUtcClock utc_clock_;
 };
 
 } // namespace a0::phase0
