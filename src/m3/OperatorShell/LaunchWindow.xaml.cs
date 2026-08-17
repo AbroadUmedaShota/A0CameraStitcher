@@ -22,11 +22,26 @@ public partial class LaunchWindow : Window
             : System.Windows.Media.Brushes.DarkRed;
     }
 
-    private void OnHardwareSingleClick(object sender, RoutedEventArgs eventArgs)
+    private void OnHardwareSingleClick(object sender, RoutedEventArgs eventArgs) =>
+        OpenAndClose(() => new HardwareSingleCameraWindow(_cameraAgentExecutablePath));
+
+    private void OnSimulatedClick(object sender, RoutedEventArgs eventArgs) =>
+        OpenAndClose(() => new MainWindow());
+
+    private void OnHardwareDualClick(object sender, RoutedEventArgs eventArgs) =>
+        OpenAndClose(() => new MainWindow(DualCameraExecutionEnvironment.HardwareDual));
+
+    // Every launch path is funneled through here so the exclusive hardware-operator
+    // session lease (acquired by HardwareSingleCameraWindow and, for HardwareDual, by
+    // MainWindow) has exactly one catch site. Without it, a busy lease throws
+    // HardwareSingleAppSessionBusyException out of the WPF click handler and crashes
+    // the whole process instead of showing the existing "already in use" dialog.
+    private void OpenAndClose(Func<Window> createWindow)
     {
+        Window nextWindow;
         try
         {
-            OpenAndClose(new HardwareSingleCameraWindow(_cameraAgentExecutablePath));
+            nextWindow = createWindow();
         }
         catch (HardwareSingleAppSessionBusyException exception)
         {
@@ -35,17 +50,8 @@ public partial class LaunchWindow : Window
                 "A0 Camera Stitcher — 実機操作は既に使用中",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+            return;
         }
-    }
-
-    private void OnSimulatedClick(object sender, RoutedEventArgs eventArgs) =>
-        OpenAndClose(new MainWindow());
-
-    private void OnHardwareDualClick(object sender, RoutedEventArgs eventArgs) =>
-        OpenAndClose(new MainWindow(DualCameraExecutionEnvironment.HardwareDual));
-
-    private void OpenAndClose(Window nextWindow)
-    {
         Application.Current.MainWindow = nextWindow;
         nextWindow.Show();
         Close();

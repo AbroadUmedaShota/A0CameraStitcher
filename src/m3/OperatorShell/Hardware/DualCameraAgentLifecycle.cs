@@ -169,9 +169,18 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
                 $"Dual Camera Agent が見つかりません: {_agentExecutablePath}");
         }
 
+        // Validate the local path chain (fixed drive, no reparse point/junction) before
+        // ever creating anything through it -- Directory.CreateDirectory silently
+        // follows an existing junction, so checking only afterward would let a planted
+        // reparse point redirect the create before the guard ever gets a chance to run.
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_pairJournalRootPath);
         Directory.CreateDirectory(_pairJournalRootPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(_approvedCaptureProfilePath)!);
-        Directory.CreateDirectory(Path.GetDirectoryName(_dualIdentityProofPath)!);
+        var captureProfileDirectory = Path.GetDirectoryName(_approvedCaptureProfilePath)!;
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(captureProfileDirectory);
+        Directory.CreateDirectory(captureProfileDirectory);
+        var identityProofDirectory = Path.GetDirectoryName(_dualIdentityProofPath)!;
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(identityProofDirectory);
+        Directory.CreateDirectory(identityProofDirectory);
 
         // Hard constraint (Issue #5 review / Issue #8 comment): a fresh, unique pipe
         // name every launch, in the same pattern as Single v2. Never connect to a
