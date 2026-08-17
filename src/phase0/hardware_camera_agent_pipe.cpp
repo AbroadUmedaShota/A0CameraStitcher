@@ -267,29 +267,23 @@ ProcessOneConnectionOutcome ProcessOneConnection(
 // Shared named-pipe accept/serve loop. Dispatcher is duck-typed exactly like
 // ProcessOneConnection above (only Handle/OnIdle/ShouldStop are required).
 //
-// lifetime_budget is the process's fixed self-termination bound (see the doc
-// comments on the two public entry points below for why the two hosts use it
-// differently). extend_lifetime_on_completed_delivery selects between the
-// two lifetime policies:
-//   - false (Single-camera host): server_deadline is computed once, at
-//     process start, and never recomputed. This preserves the exact
-//     behavior that existed before this loop was generalized.
-//   - true (Dual-camera host): server_deadline is recomputed to
-//     now + lifetime_budget every time a connection completes a full
-//     request/response round trip, giving the host a rolling idle timeout
-//     instead of a fixed one.
-// A delivery failure (dispatched_delivery_failed) always ends the loop
-// immediately in both policies, matching the pre-existing Single behavior:
-// a failed delivery indicates a pipe/transport problem, not routine idle
-// time, so it must never be treated as activity that extends the lease.
+// lifetime_budget is the process's fixed self-termination bound: computed
+// once from GetTickCount64() at the top of this function and never
+// recomputed, identically for both the Single- and Dual-camera hosts (see
+// the doc comments on the two public entry points below for the specific
+// budget each one uses). This preserves the exact behavior that existed
+// before this loop was generalized for Single, and gives Dual the same
+// documented "absolute lifetime cap from launch" contract instead of an
+// idle-activity-extended one, so an operator/CI cannot keep the process
+// alive indefinitely just by sending it a steady trickle of requests
+// (including rejected ones).
 template <typename Dispatcher, typename FailureInjection>
 int RunNamedPipeServerLoop(
     std::string_view pipe_name,
     Dispatcher& dispatcher,
     bool serve_once,
     const FailureInjection& failure_injection,
-    std::chrono::milliseconds lifetime_budget,
-    bool extend_lifetime_on_completed_delivery) {
+    std::chrono::milliseconds lifetime_budget) {
     if (!IsSafePipeName(pipe_name)) {
         throw std::invalid_argument("hardware Camera Agent pipe name is invalid");
     }
@@ -298,7 +292,7 @@ int RunNamedPipeServerLoop(
     CurrentLogonPipeSecurity security;
     const ULONGLONG lifetime_budget_ms = static_cast<ULONGLONG>(
         std::max(lifetime_budget, std::chrono::milliseconds(0)).count());
-    ULONGLONG server_deadline = GetTickCount64() + lifetime_budget_ms;
+    const ULONGLONG server_deadline = GetTickCount64() + lifetime_budget_ms;
 
     for (;;) {
         dispatcher.OnIdle();
@@ -370,10 +364,6 @@ int RunNamedPipeServerLoop(
         if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
             return kDispatchedDeliveryFailureExitCode;
         }
-        if (extend_lifetime_on_completed_delivery && !serve_once &&
-            outcome == ProcessOneConnectionOutcome::complete_delivery) {
-            server_deadline = GetTickCount64() + lifetime_budget_ms;
-        }
         if (serve_once) {
             return outcome == ProcessOneConnectionOutcome::complete_delivery
                 ? 0
@@ -401,8 +391,7 @@ int RunHardwareCameraAgentNamedPipeServer(
         dispatcher,
         serve_once,
         failure_injection,
-        std::chrono::minutes(10),
-        /*extend_lifetime_on_completed_delivery=*/false);
+        std::chrono::minutes(10));
 }
 
 int RunDualHardwareCameraAgentNamedPipeServer(
@@ -411,19 +400,24 @@ int RunDualHardwareCameraAgentNamedPipeServer(
     bool serve_once,
     DualHardwareCameraAgentPipeFailureInjectionForTesting failure_injection,
     std::optional<std::chrono::milliseconds> lifetime_budget_for_testing) {
-    // See the doc comment on this function's declaration in
-    // dual_hardware_camera_agent.hpp for the persistent multi-request
-    // lifetime policy. lifetime_budget_for_testing lets contract tests bound
-    // the wait for a natural (non-serve-once) deadline expiry instead of
+    // Same fixed-from-launch policy as RunHardwareCameraAgentNamedPipeServer
+    // (Orchestrator decision, 2026-08-17): a rolling/idle-extended deadline
+    // was considered but rejected as needlessly complex and because it let
+    // any steady trickle of requests -- rejected ones included -- keep the
+    // process alive indefinitely, which conflicts with the documented
+    // 600-second maximum lifetime this host must honor (see
+    // docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md). lifetime_budget_for_testing
+    // lets contract tests bound the wait for this deadline instead of
     // waiting out the real 600s production budget; production callers never
-    // pass it.
+    // pass it. Pipe-name uniqueness across launches is the launcher's
+    // responsibility (see the doc); this host just serves whatever safe
+    // pipe name it is given.
     return RunNamedPipeServerLoop(
         pipe_name,
         dispatcher,
         serve_once,
         failure_injection,
-        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)),
-        /*extend_lifetime_on_completed_delivery=*/true);
+        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)));
 }
 
 } // namespace a0::phase0

@@ -137,15 +137,22 @@ struct DualHardwareCameraAgentPipeFailureInjectionForTesting {
 // "dispatched but delivery failed" (exit kDispatchedDeliveryFailureExitCode)
 // without ever triggering a redispatch on the server side.
 //
-// Lifetime policy: unlike the Single-camera host (fixed 600s from launch),
-// the Dual host is designed for persistent multi-request use (capabilities /
+// Lifetime policy: identical to the Single-camera host -- a fixed absolute
+// deadline (600s by default) computed once at process start and never
+// extended, regardless of how much or how little the pipe is used
+// (Orchestrator decision, 2026-08-17; see
+// docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md). The Dual host is still designed
+// for persistent multi-request use within that window (capabilities /
 // reserve / start / same-ID query issued as separate pipe connections over
-// one long-running process). Serving each connection therefore extends a
-// rolling 600s idle deadline instead of a single fixed one: the process
-// exits after 600s with no *completed* request/response round trip, but
-// otherwise stays available for as long as the operator keeps using it.
-// serve_once mode (used by tests and one-shot invocations) is unaffected:
-// it always terminates after its single connection.
+// one long-running process); it just does not extend its own lifetime in
+// response to that use. A rolling/idle-extended deadline was considered and
+// rejected: it would let a steady trickle of requests, including rejected
+// ones, keep the process alive indefinitely, which conflicts with the
+// documented maximum-lifetime contract. Launching a Dual host with a fresh,
+// unique pipe name for each logical session is the launcher's
+// responsibility, not this function's. serve_once mode (used by tests and
+// one-shot invocations) is unaffected: it always terminates after its
+// single connection.
 [[nodiscard]] int RunDualHardwareCameraAgentNamedPipeServer(
     std::string_view pipe_name,
     DualHardwareCameraAgentDispatcher& dispatcher,
