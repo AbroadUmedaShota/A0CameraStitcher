@@ -752,8 +752,14 @@ void TestDurableJournalRecoveryContracts() {
             race_id,
             JournalJson(race_id, race_run, "FailedPartial", "capture_failed"));
         release_lease_promise.set_value();
-        continue_query_promise.set_value();
+        // Join before waking the query thread: join() synchronizes-with the
+        // owner thread's completion, so the lease destructor's ReleaseMutex is
+        // guaranteed to have finished. Waking the query first lets it reach the
+        // zero-wait lease acquisition while the mutex may still be held, which
+        // takes the camera_control_busy path instead of the post-acquisition
+        // reread this assertion exists to exercise.
         capture_owner.join();
+        continue_query_promise.set_value();
         const auto raced_result = query.get();
         Check(raced_result.terminal_state == "FailedPartial" &&
               raced_result.error_category == "capture_failed",
