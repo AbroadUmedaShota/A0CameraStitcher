@@ -2335,14 +2335,16 @@ sealed class WpfHardwareDualFakeOperations(
             evidence);
     }
 
-    public async Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+    public async Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken)
     {
         QueryCalls++;
         if (!responseUnknownOnce || QueryCalls < 2 || _unknownRequest is null)
-            return null;
-        return await CreateResultAsync(_unknownRequest, cancellationToken);
+            return new(DualHardwarePairQueryState.Reserved, null);
+        return new(
+            DualHardwarePairQueryState.Terminal,
+            await CreateResultAsync(_unknownRequest, cancellationToken));
     }
 }
 

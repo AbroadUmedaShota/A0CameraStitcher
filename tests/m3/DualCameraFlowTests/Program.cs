@@ -786,6 +786,13 @@ static async Task HardwareDualRestartRecoveryAsync()
         Check.Equal(1, operations.StartCalls);
         Check.Equal(1, operations.QueryCalls);
 
+        await Check.ThrowsCodeAsync(
+            DualCameraFailureCode.AgentResponseUnknown,
+            () => restartedProcess.RecoverAndStitchAsync(Guid.NewGuid()));
+        Check.Equal(1, operations.ReserveCalls);
+        Check.Equal(1, operations.StartCalls);
+        Check.Equal(1, operations.QueryCalls);
+
         var recovered = await restartedProcess.RecoverAndStitchAsync(transactionId);
         Check.Equal(DualCameraFailureCode.None, recovered.FailureCode);
         Check.Equal(2, recovered.Capture!.Originals.Count);
@@ -870,6 +877,7 @@ static async Task HardwareDualRestartMismatchAsync()
     {
         HardwareFakeScenario.TypedResponseUnknown,
         HardwareFakeScenario.TypedHardwarePending,
+        HardwareFakeScenario.QueryNotFound,
         HardwareFakeScenario.QueryThrowsOnRecovery,
     })
     {
@@ -966,6 +974,7 @@ enum HardwareFakeScenario
     DispatchThrows,
     TypedResponseUnknown,
     TypedHardwarePending,
+    QueryNotFound,
     QueryThrowsOnRecovery,
 }
 
@@ -1074,7 +1083,7 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
         return result;
     }
 
-    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+    public Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken)
     {
@@ -1086,8 +1095,14 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
             QueryCalls >= 2)
             throw new IOException("Synthetic query delivery failure.");
         if (scenario == HardwareFakeScenario.ResponseUnknown && QueryCalls >= 2 && _unknownRequest is not null)
-            return Task.FromResult<DualHardwareCaptureResult?>(CreateResult(_unknownRequest, RecoveryScenario));
-        return Task.FromResult<DualHardwareCaptureResult?>(null);
+        {
+            if (RecoveryScenario == HardwareFakeScenario.QueryNotFound)
+                return Task.FromResult(new DualHardwarePairQueryOutcome(DualHardwarePairQueryState.NotFound, null));
+            return Task.FromResult(new DualHardwarePairQueryOutcome(
+                DualHardwarePairQueryState.Terminal,
+                CreateResult(_unknownRequest, RecoveryScenario)));
+        }
+        return Task.FromResult(new DualHardwarePairQueryOutcome(DualHardwarePairQueryState.Reserved, null));
     }
 }
 
@@ -1166,8 +1181,8 @@ sealed class BlockingDualHardwareOperations : IDualHardwareCaptureOperations
         return new(DualHardwareDispatchState.Completed, result);
     }
 
-    public Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) =>
-        Task.FromResult<DualHardwareCaptureResult?>(null);
+    public Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(Guid transactionId, CancellationToken cancellationToken) =>
+        Task.FromResult(new DualHardwarePairQueryOutcome(DualHardwarePairQueryState.NotFound, null));
 }
 
 sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter

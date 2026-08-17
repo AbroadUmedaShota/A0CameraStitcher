@@ -228,7 +228,7 @@ public static class DualHardwareCameraAgentProtocolCodec
         return new(payload.DispatchState, payload.Result);
     }
 
-    public static DualHardwareCaptureResult? DeserializeQueryResponse(
+    public static DualHardwarePairQueryOutcome DeserializeQueryResponse(
         string json,
         string expectedRequestId,
         Guid expectedTransactionId)
@@ -238,14 +238,25 @@ public static class DualHardwareCameraAgentProtocolCodec
         ValidateTransactionMatch(payload.TransactionId, expectedTransactionId);
         if (!envelope.Success)
         {
-            if (envelope.ResultCode == "PairTransactionNotFound" && !payload.Found && payload.Result is null)
-                return null;
+            if (envelope.ResultCode == "PairTransactionNotFound")
+            {
+                if (payload.Found || payload.Result is not null)
+                    throw Violation("InvalidPairQuery", "A not-found pair query response is inconsistent.");
+                return new(DualHardwarePairQueryState.NotFound, null);
+            }
+            if (envelope.ResultCode == "PairTransactionReserved")
+            {
+                if (!payload.Found || payload.Result is not null)
+                    throw Violation("InvalidPairQuery", "A Reserved pair query response is inconsistent.");
+                return new(DualHardwarePairQueryState.Reserved, null);
+            }
             ThrowRemote(envelope);
         }
         if (envelope.ResultCode != "PairTransactionFound" || !payload.Found ||
-            payload.Result is null || payload.Result.TransactionId != expectedTransactionId)
+            payload.Result is null || payload.Result.TransactionId != expectedTransactionId ||
+            !IsActualTerminal(payload.Result.TerminalState))
             throw Violation("InvalidPairQuery", "The pair query response is inconsistent.");
-        return payload.Result;
+        return new(DualHardwarePairQueryState.Terminal, payload.Result);
     }
 
     private static DualHardwareCameraAgentRequestEnvelope CreateRequest<T>(
@@ -394,6 +405,12 @@ public static class DualHardwareCameraAgentProtocolCodec
 
     private static IReadOnlyList<string> OrderedAliases() => Array.AsReadOnly(["CAM-A", "CAM-B"]);
 
+    private static bool IsActualTerminal(DualHardwareCaptureTerminalState state) => state is
+        DualHardwareCaptureTerminalState.Succeeded or
+        DualHardwareCaptureTerminalState.Failed or
+        DualHardwareCaptureTerminalState.FailedPartial or
+        DualHardwareCaptureTerminalState.WatchdogExpired;
+
     private static bool IsSafeToken(string? value, int maximumLength) =>
         !string.IsNullOrEmpty(value) && value.Length <= maximumLength && value.All(character =>
             character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '-' or '_');
@@ -481,7 +498,7 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
             request.TransactionId);
     }
 
-    public async Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+    public async Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken)
     {

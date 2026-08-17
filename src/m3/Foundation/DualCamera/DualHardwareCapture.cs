@@ -135,6 +135,17 @@ public sealed record DualHardwareDispatchResult(
     DualHardwareDispatchState State,
     DualHardwareCaptureResult? Result);
 
+public enum DualHardwarePairQueryState
+{
+    NotFound,
+    Reserved,
+    Terminal,
+}
+
+public sealed record DualHardwarePairQueryOutcome(
+    DualHardwarePairQueryState State,
+    DualHardwareCaptureResult? Result);
+
 public interface IDualHardwareCaptureOperations
 {
     Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken);
@@ -143,7 +154,7 @@ public interface IDualHardwareCaptureOperations
         DualHardwareCaptureRequest request,
         CancellationToken cancellationToken);
 
-    Task<DualHardwareCaptureResult?> QueryPairTransactionAsync(
+    Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken);
 }
@@ -261,24 +272,25 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
         {
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent dispatch outcome is unknown; only the durable transaction may be queried.");
         }
-        DualHardwareCaptureResult? result;
+        DualHardwarePairQueryOutcome queryOutcome;
         try
         {
-            result = dispatch.State == DualHardwareDispatchState.Completed
-                ? dispatch.Result
+            queryOutcome = dispatch.State == DualHardwareDispatchState.Completed
+                ? new(DualHardwarePairQueryState.Terminal, dispatch.Result)
                 : await _operations.QueryPairTransactionAsync(request.TransactionId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent query outcome is unknown; no capture was reserved or dispatched again.");
         }
-        if (result is null)
+        if (queryOutcome.State != DualHardwarePairQueryState.Terminal ||
+            queryOutcome.Result is null || !IsActualTerminal(queryOutcome.Result.TerminalState))
         {
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent response is unknown; only this transaction may be queried and no new capture is allowed.");
         }
         return CompleteRecoveredResult(
             hardwareRequest,
-            result,
+            queryOutcome.Result,
             recoveryRequired: dispatch.State == DualHardwareDispatchState.ResponseUnknown);
     }
 
@@ -301,19 +313,20 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
             hardwareRequest = _responseUnknownRequest;
         }
 
-        DualHardwareCaptureResult? result;
+        DualHardwarePairQueryOutcome queryOutcome;
         try
         {
-            result = await _operations.QueryPairTransactionAsync(transactionId, cancellationToken).ConfigureAwait(false);
+            queryOutcome = await _operations.QueryPairTransactionAsync(transactionId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent query outcome remains unknown; no capture was reserved or dispatched again.");
         }
-        if (result is null)
+        if (queryOutcome.State != DualHardwarePairQueryState.Terminal ||
+            queryOutcome.Result is null || !IsActualTerminal(queryOutcome.Result.TerminalState))
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent response remains unknown; no capture was reserved or dispatched again.");
 
-        return CompleteRecoveredResult(hardwareRequest, result, recoveryRequired: true);
+        return CompleteRecoveredResult(hardwareRequest, queryOutcome.Result, recoveryRequired: true);
     }
 
     private DualCameraCaptureSourceResult CompleteRecoveredResult(
@@ -321,8 +334,7 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
         DualHardwareCaptureResult result,
         bool recoveryRequired)
     {
-        if (result.TerminalState is DualHardwareCaptureTerminalState.ResponseUnknown or
-            DualHardwareCaptureTerminalState.HardwarePending)
+        if (!IsActualTerminal(result.TerminalState))
         {
             return Failed(
                 DualCameraFailureCode.AgentResponseUnknown,
@@ -465,6 +477,12 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
         Crop = Array.AsReadOnly(profile.Crop.ToArray()),
         CameraAliases = Array.AsReadOnly(profile.CameraAliases.ToArray()),
     };
+
+    private static bool IsActualTerminal(DualHardwareCaptureTerminalState state) => state is
+        DualHardwareCaptureTerminalState.Succeeded or
+        DualHardwareCaptureTerminalState.Failed or
+        DualHardwareCaptureTerminalState.FailedPartial or
+        DualHardwareCaptureTerminalState.WatchdogExpired;
 
     private static void EnsureNoReparsePoint(string filePath, string transactionDirectory)
     {

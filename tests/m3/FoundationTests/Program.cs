@@ -130,9 +130,10 @@ static async Task DualHardwareAgentV2RoundTripAsync()
     Check.Equal(DualHardwareDispatchState.ResponseUnknown, dispatch.State);
     Check.True(dispatch.Result is null, "A response-unknown dispatch must not forge a terminal result.");
     var queried = await operations.QueryPairTransactionAsync(transactionId, default);
-    Check.True(queried is not null, "The same transaction query must return its terminal journal.");
-    Check.Equal(transactionId, queried!.TransactionId);
-    Check.Equal(DualHardwareCaptureTerminalState.Succeeded, queried.TerminalState);
+    Check.Equal(DualHardwarePairQueryState.Terminal, queried.State);
+    Check.True(queried.Result is not null, "The same transaction query must return its terminal journal.");
+    Check.Equal(transactionId, queried.Result!.TransactionId);
+    Check.Equal(DualHardwareCaptureTerminalState.Succeeded, queried.Result.TerminalState);
     Check.SequenceEqual(
         new[] { "get-dual-capabilities", "reserve-pair-transaction", "start-reserved-pair", "get-pair-transaction-result" },
         operationsSeen);
@@ -174,6 +175,88 @@ static async Task DualHardwareAgentV2NegativesAsync()
         found = false,
         result = (object?)null,
     });
+    var reserved = DualHardwareResponseJson(requestId, false, "PairTransactionReserved", new
+    {
+        transactionId = transactionId.ToString("N"),
+        found = true,
+        result = (object?)null,
+    });
+    var reservedOutcome = DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+        reserved,
+        requestId,
+        transactionId);
+    Check.Equal(DualHardwarePairQueryState.Reserved, reservedOutcome.State);
+    Check.True(reservedOutcome.Result is null, "A Reserved query must not forge a terminal result.");
+    var notFoundOutcome = DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+        validNotFound,
+        requestId,
+        transactionId);
+    Check.Equal(DualHardwarePairQueryState.NotFound, notFoundOutcome.State);
+    Check.True(notFoundOutcome.Result is null, "A not-found query must not forge a terminal result.");
+
+    var inconsistentReserved = DualHardwareResponseJson(requestId, false, "PairTransactionReserved", new
+    {
+        transactionId = transactionId.ToString("N"),
+        found = false,
+        result = (object?)null,
+    });
+    Check.ThrowsHardwareProtocol(
+        "InvalidPairQuery",
+        () => DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+            inconsistentReserved,
+            requestId,
+            transactionId));
+    var forgedTerminal = DualHardwareResponseJson(requestId, true, "PairTransactionFound", new
+    {
+        transactionId = transactionId.ToString("N"),
+        found = true,
+        result = (object?)null,
+    });
+    Check.ThrowsHardwareProtocol(
+        "InvalidPairQuery",
+        () => DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+            forgedTerminal,
+            requestId,
+            transactionId));
+    foreach (var (terminalState, failureCode) in new[]
+    {
+        (DualHardwareCaptureTerminalState.ResponseUnknown, DualCameraFailureCode.AgentResponseUnknown),
+        (DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.HardwarePending),
+    })
+    {
+        var nonTerminalResult = new DualHardwareCaptureResult(
+            transactionId,
+            Array.Empty<DualHardwareOriginalRecord>(),
+            terminalState,
+            failureCode,
+            new DualHardwareCaptureEvidence(
+                terminalState,
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady(),
+                "anonymous-capture-v2",
+                "v2",
+                "anonymous-rig-v2",
+                "v2",
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(180),
+                DateTimeOffset.UnixEpoch.AddSeconds(1),
+                false,
+                true,
+                false,
+                false,
+                0));
+        var forgedNonTerminal = DualHardwareResponseJson(requestId, true, "PairTransactionFound", new
+        {
+            transactionId = transactionId.ToString("N"),
+            found = true,
+            result = nonTerminalResult,
+        });
+        Check.ThrowsHardwareProtocol(
+            "InvalidPairQuery",
+            () => DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+                forgedNonTerminal,
+                requestId,
+                transactionId));
+    }
     var schemaField = $"\"schemaVersion\":\"{DualHardwareCameraAgentProtocol.SchemaVersion}\"";
     var duplicateField = validNotFound.Replace(
         schemaField,
