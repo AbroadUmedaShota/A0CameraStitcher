@@ -422,7 +422,12 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
             pipe_name, dispatcher, /*serve_once=*/false, {},
-            std::chrono::milliseconds(2500));
+            // Keep this budget under the 5000 ms accept-wait granularity: the loop
+            // only re-checks the deadline after an accept wait or a handled
+            // connection, so a budget >= 5000 ms delays shutdown by another
+            // full accept cycle and overruns the wait_for below. All requests
+            // except the last must complete within this window.
+            std::chrono::milliseconds(4500));
     });
 
     const std::string transaction_id = "10101010101010101010101010101010";
@@ -553,7 +558,12 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
             pipe_name, dispatcher, /*serve_once=*/false, {},
-            std::chrono::milliseconds(2500));
+            // Keep this budget under the 5000 ms accept-wait granularity: the loop
+            // only re-checks the deadline after an accept wait or a handled
+            // connection, so a budget >= 5000 ms delays shutdown by another
+            // full accept cycle and overruns the wait_for below. All requests
+            // except the last must complete within this window.
+            std::chrono::milliseconds(4500));
     });
 
     const std::string transaction_id = "20202020202020202020202020202020";
