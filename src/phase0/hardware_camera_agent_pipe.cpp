@@ -308,6 +308,17 @@ int RunHardwareCameraAgentNamedPipeServer(
 
         const ProcessOneConnectionOutcome outcome =
             ProcessOneConnection(pipe, dispatcher, failure_injection);
+        if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
+            // Bytes already handed to the pipe (for example a written
+            // response header) must survive teardown, or the client cannot
+            // classify the failure stage. DisconnectNamedPipe discards
+            // unread data, so drain here first. This is teardown, not a
+            // delivery step, so it is deliberately not subject to failure
+            // injection. If the client has already closed, the flush fails
+            // immediately, and if the buffer is already empty it returns
+            // immediately, so the exposure window matches the success path.
+            (void)FlushFileBuffers(pipe);
+        }
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
