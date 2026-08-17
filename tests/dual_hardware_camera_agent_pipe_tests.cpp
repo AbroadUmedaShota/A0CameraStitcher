@@ -407,9 +407,12 @@ void TestMalformedJsonBodyGetsTypedRejectionOverRealHost() {
 // proving: (a) the persistent multi-request contract, (b) capabilities/
 // reserve/query match the existing typed contract when served through the
 // real host, and (c) duplicate delivery of the same reservation is rejected
-// rather than silently re-accepted. The bounded lifetime_budget_for_testing
-// lets the host reach its own rolling idle deadline quickly instead of
-// waiting out the real 600s production budget.
+// rather than silently re-accepted. All four round trips must complete well
+// inside lifetime_budget_for_testing, which -- like production -- is a fixed
+// deadline computed once at launch and never extended by activity (see the
+// lifetime-policy doc comment on RunDualHardwareCameraAgentNamedPipeServer);
+// it lets the host reach that deadline quickly instead of waiting out the
+// real 600s production budget.
 // ---------------------------------------------------------------------
 void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     const fs::path root = MakeTempRoot("persistent");
@@ -419,7 +422,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
             pipe_name, dispatcher, /*serve_once=*/false, {},
-            std::chrono::milliseconds(1500));
+            std::chrono::milliseconds(2500));
     });
 
     const std::string transaction_id = "10101010101010101010101010101010";
@@ -471,20 +474,27 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
             "a same-ID query for a reserved transaction must report found:true");
     }
 
-    // The persistent-mode accept loop only re-checks the rolling deadline
+    // The persistent-mode accept loop only re-checks the fixed deadline
     // between connection attempts, and each attempt waits up to a fixed 5s
     // for a new connection before looping back (unchanged, shared behavior
     // -- see RunNamedPipeServerLoop). So the observed shutdown latency after
     // the last completed request is bounded by that ~5s accept-wait
-    // granularity, not by the shorter lifetime_budget_for_testing alone;
-    // 8s gives comfortable margin without waiting out the real 600s budget.
-    const auto completion = server.wait_for(std::chrono::seconds(8));
-    Check(completion == std::future_status::ready,
-        "the persistent Dual host must terminate at its rolling idle deadline");
-    if (completion == std::future_status::ready) {
-        Check(server.get() == 0,
-            "an idle-deadline shutdown after only completed deliveries must exit 0");
-    }
+    // granularity added to lifetime_budget_for_testing, not by the budget
+    // alone; 8s gives comfortable margin without waiting out the real 600s
+    // budget.
+    //
+    // server.get() is called unconditionally (not only when wait_for
+    // reported ready) precisely so the async task's completion is always
+    // waited for before this thread touches `dispatcher` again below:
+    // std::future::get() blocks until the task truly finishes, which is
+    // what establishes happens-before with the server thread's last write
+    // to dispatcher's internal state. Reading dispatcher.SafetyCounters()
+    // after only a timed-out wait_for(), without also unconditionally
+    // blocking on get(), would race with a still-running server thread.
+    Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
+        "the persistent Dual host must terminate at its fixed launch deadline");
+    Check(server.get() == 0,
+        "a fixed-deadline shutdown after only completed deliveries must exit 0");
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
@@ -530,7 +540,10 @@ void TestClientDisconnectBeforeFrameCompletesNeverDispatches() {
 // start-reserved-pair with PairDispatcherUnavailable only *after* running
 // the complete identity/capture-profile/rig-profile/confirmation preflight,
 // and must never touch pair_dispatch_count (store-before-side-effect
-// order). A repeated start attempt must behave identically.
+// order). A repeated start attempt must behave identically. All requests,
+// including the post-start query, are sent to the *same* still-running host
+// instance -- the query must run before the host is allowed to shut down,
+// not after (a shut-down host has no listener left to connect to).
 // ---------------------------------------------------------------------
 void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
     const fs::path root = MakeTempRoot("start-unavailable");
@@ -540,7 +553,7 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
             pipe_name, dispatcher, /*serve_once=*/false, {},
-            std::chrono::milliseconds(1200));
+            std::chrono::milliseconds(2500));
     });
 
     const std::string transaction_id = "20202020202020202020202020202020";
@@ -570,15 +583,26 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
                   std::string::npos,
         "a repeated start attempt must remain PairDispatcherUnavailable");
 
+    // This query must happen here, while the host is still up -- see the
+    // function-level comment above. It also completes the coverage that a
+    // failed-closed start leaves the transaction Reserved rather than
+    // silently terminal.
+    const auto queried = SendRequest(
+        pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-after-start"));
+    Check(queried.has_value(), "the post-start query must be delivered");
+    if (queried) {
+        CheckContains(*queried, "\"resultCode\":\"PairTransactionReserved\"",
+            "a failed-closed start must leave the transaction Reserved, not silently terminal");
+    }
+
     // See the matching comment in
     // TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery for why
-    // this waits well past lifetime_budget_for_testing alone.
-    const auto completion = server.wait_for(std::chrono::seconds(8));
-    Check(completion == std::future_status::ready,
-        "the start-unavailable host must terminate at its rolling idle deadline");
-    if (completion == std::future_status::ready) {
-        Check(server.get() == 0, "an idle-deadline shutdown must exit 0");
-    }
+    // this waits well past lifetime_budget_for_testing alone, and for why
+    // server.get() is called unconditionally before dispatcher is touched
+    // again below.
+    Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
+        "the start-unavailable host must terminate at its fixed launch deadline");
+    Check(server.get() == 0, "a fixed-deadline shutdown must exit 0");
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
@@ -588,14 +612,6 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
         "no camera/SDK/WPD access can occur without an injected backend");
     Check(counters.automatic_retry_count == 0,
         "a failed-closed start must never be retried automatically");
-
-    const auto queried = SendRequest(
-        pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-after-start"));
-    Check(queried.has_value(), "the post-start query must be delivered");
-    if (queried) {
-        CheckContains(*queried, "\"resultCode\":\"PairTransactionReserved\"",
-            "a failed-closed start must leave the transaction Reserved, not silently terminal");
-    }
 }
 
 // ---------------------------------------------------------------------
