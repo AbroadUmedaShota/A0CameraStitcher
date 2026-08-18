@@ -83,11 +83,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 ### .NET テスト件数の同期規則
 
-`scripts/Test-M3Simulated.ps1` はテスト件数をリテラル文字列で assert します。
-
-- `Foundation tests: 22/22 passed.`
-- `DualCamera flow tests: 18/18 passed.`
-- `Operator shell tests: 22/22 passed.`
+`scripts/Test-M3Simulated.ps1` は Foundation / DualCamera flow / Operator shell の各テスト件数をリテラル文字列（例: `Foundation tests: N/N passed.`）で assert します。現在の期待件数はこの文書には書きません。スクリプト内のリテラルが唯一の正です。
 
 .NET テストを追加または削除した PR は、同じ PR の中で `scripts/Test-M3Simulated.ps1` の期待件数を更新してください。更新しないと、テストが全部通っていてもこの assert で落ちます。
 
