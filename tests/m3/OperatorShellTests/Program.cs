@@ -294,6 +294,17 @@ catch (Exception exception)
 
 try
 {
+    await DualCameraAgentLifecycleRequiresExistingArtifactFilesAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle requires existing approved-capture-profile/dual-identity-proof files before launch");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle requires existing approved-capture-profile/dual-identity-proof files before launch");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle requires existing approved-capture-profile/dual-identity-proof files before launch: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleFakeHostHappyPathAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
 }
@@ -336,7 +347,18 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {28 - failures.Count}/28 passed.");
+try
+{
+    await DualCameraAgentLifecycleConnectFailureSurfacesExitDiagnosticsAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {30 - failures.Count}/30 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2245,6 +2267,24 @@ static string DualCameraAgentTestHostPath()
 static string DualCameraM2AdapterPath() =>
     Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
 
+// Native (and the fake host below, matched to the same strength) requires
+// --approved-capture-profile / --dual-identity-proof to already be existing
+// regular files. This writes test-only placeholder content -- DualCameraAgentLifecycle
+// and the fake host only ever check that the paths are existing regular files; neither
+// parses the contents in this harness. Never treat this as a stand-in for a real
+// approved capture profile or identity proof.
+static void WriteDualAgentTestArtifactFiles(string approvedCaptureProfilePath, string dualIdentityProofPath)
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(approvedCaptureProfilePath)!);
+    File.WriteAllText(
+        approvedCaptureProfilePath,
+        "{\"note\":\"test-only placeholder, not a real approved capture profile\"}");
+    Directory.CreateDirectory(Path.GetDirectoryName(dualIdentityProofPath)!);
+    File.WriteAllText(
+        dualIdentityProofPath,
+        "{\"note\":\"test-only placeholder, not a real dual identity proof\"}");
+}
+
 static async Task DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -2299,6 +2339,69 @@ static async Task DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync()
     }
 }
 
+static async Task DualCameraAgentLifecycleRequiresExistingArtifactFilesAsync()
+{
+    // Native requires --approved-capture-profile / --dual-identity-proof to already
+    // be existing regular files and exits 1 if either is missing. This class never
+    // fabricates those approval/proof artifacts, so a missing file must fail closed
+    // before any process launch (zero process, zero pipe) -- not silently create a
+    // placeholder and hand it to a real Native agent as if it were approved.
+    foreach (var missing in new[] { "capture-profile", "identity-proof" })
+    {
+        var root = CreateHardwareTestRoot();
+        try
+        {
+            var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
+            var identityProofPath = Path.Combine(root, "phase0", "dual-identity-proof.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(captureProfilePath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(identityProofPath)!);
+            if (missing != "capture-profile")
+            {
+                File.WriteAllText(captureProfilePath, "{\"note\":\"test-only placeholder\"}");
+            }
+            if (missing != "identity-proof")
+            {
+                File.WriteAllText(identityProofPath, "{\"note\":\"test-only placeholder\"}");
+            }
+
+            var journalRoot = Path.Combine(root, "agent-pair-journal");
+            await using var lifecycle = new DualCameraAgentLifecycle(
+                DualCameraAgentTestHostPath(),
+                journalRoot,
+                captureProfilePath,
+                identityProofPath);
+
+            HardwareCameraAgentLaunchException? caught = null;
+            try
+            {
+                await lifecycle.ReservePairTransactionAsync(Guid.NewGuid(), CancellationToken.None);
+            }
+            catch (HardwareCameraAgentLaunchException exception)
+            {
+                caught = exception;
+            }
+
+            Check.True(
+                caught is not null,
+                $"missing {missing}: reserve must fail closed with a typed exception before any process launch.");
+            Check.False(
+                caught!.RequestMayHaveBeenDispatched,
+                $"missing {missing}: nothing was ever dispatched -- the process never even started.");
+            var expectedMissingPath = missing == "capture-profile" ? captureProfilePath : identityProofPath;
+            Check.True(
+                caught.Message.Contains(expectedMissingPath, StringComparison.Ordinal),
+                $"missing {missing}: the exception must name the missing artifact path, was: {caught.Message}");
+            Check.False(
+                Directory.Exists(journalRoot),
+                $"missing {missing}: zero process/pipe means the pair journal directory must not be created either.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
 static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -2310,11 +2413,7 @@ static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "happy");
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
 
-        await using var lifecycle = new DualCameraAgentLifecycle(
-            DualCameraAgentTestHostPath(),
-            Path.Combine(root, "agent-pair-journal"),
-            Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
-            Path.Combine(root, "phase0", "dual-identity-proof.json"));
+        await using var lifecycle = CreateDualAgentTestLifecycle(root);
         var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
         var flow = new DualCameraProductFlow(
             Path.Combine(root, "products"),
@@ -2381,11 +2480,7 @@ static async Task DualCameraAgentLifecycleExitCodeClassificationAsync()
             Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", exitCode.ToString());
             Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
 
-            await using var lifecycle = new DualCameraAgentLifecycle(
-                DualCameraAgentTestHostPath(),
-                Path.Combine(root, "agent-pair-journal"),
-                Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
-                Path.Combine(root, "phase0", "dual-identity-proof.json"));
+            await using var lifecycle = CreateDualAgentTestLifecycle(root);
 
             var transactionId = Guid.NewGuid();
             Check.True(
@@ -2422,6 +2517,18 @@ static async Task DualCameraAgentLifecycleExitCodeClassificationAsync()
     }
 }
 
+static DualCameraAgentLifecycle CreateDualAgentTestLifecycle(string root)
+{
+    var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
+    var identityProofPath = Path.Combine(root, "phase0", "dual-identity-proof.json");
+    WriteDualAgentTestArtifactFiles(captureProfilePath, identityProofPath);
+    return new DualCameraAgentLifecycle(
+        DualCameraAgentTestHostPath(),
+        Path.Combine(root, "agent-pair-journal"),
+        captureProfilePath,
+        identityProofPath);
+}
+
 static DualHardwareCaptureRequest BuildDualAgentTestCaptureRequest(string root, Guid transactionId)
 {
     var startedAtUtc = DateTimeOffset.UtcNow;
@@ -2455,11 +2562,7 @@ static async Task DualCameraAgentLifecycleRestartRecoveryAsync()
             Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", exitCode.ToString());
             Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
 
-            await using var lifecycle = new DualCameraAgentLifecycle(
-                DualCameraAgentTestHostPath(),
-                Path.Combine(root, "agent-pair-journal"),
-                Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
-                Path.Combine(root, "phase0", "dual-identity-proof.json"));
+            await using var lifecycle = CreateDualAgentTestLifecycle(root);
             var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
             var flow = new DualCameraProductFlow(
                 Path.Combine(root, "products"),
@@ -2530,11 +2633,7 @@ static async Task DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync()
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "pipe-only-after-start");
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
 
-        await using var lifecycle = new DualCameraAgentLifecycle(
-            DualCameraAgentTestHostPath(),
-            Path.Combine(root, "agent-pair-journal"),
-            Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json"),
-            Path.Combine(root, "phase0", "dual-identity-proof.json"));
+        await using var lifecycle = CreateDualAgentTestLifecycle(root);
         var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
         var flow = new DualCameraProductFlow(
             Path.Combine(root, "products"),
@@ -2571,6 +2670,57 @@ static async Task DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync()
     {
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualCameraAgentLifecycleConnectFailureSurfacesExitDiagnosticsAsync()
+{
+    // When the Agent process fails before ever creating its pipe (e.g. an
+    // immediate startup failure), the client's connect attempt itself fails --
+    // this is a different failure path than an incomplete response, and it used to
+    // discard the process's exit code and stderr, leaving only a generic "connection
+    // failed" after the full connect timeout.
+    var root = CreateHardwareTestRoot();
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousExitCode = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "die-before-listen");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", "1");
+
+        await using var lifecycle = CreateDualAgentTestLifecycle(root);
+
+        HardwareCameraAgentLaunchException? caught = null;
+        try
+        {
+            await lifecycle.ReservePairTransactionAsync(Guid.NewGuid(), CancellationToken.None);
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            caught = exception;
+        }
+
+        Check.True(
+            caught is not null,
+            "A connect failure must classify as a typed launch exception, not a raw connect exception.");
+        Check.False(
+            caught!.RequestMayHaveBeenDispatched,
+            "A connect failure means the request was definitely never dispatched.");
+        Check.True(
+            caught.ProcessExitCode == 1,
+            $"The Native exit code must be surfaced instead of discarded, was {caught.ProcessExitCode?.ToString() ?? "null"}.");
+        Check.True(
+            caught.SanitizedStandardError.Length > 0,
+            "The Native failure reason must reach the operator instead of only a generic connect timeout.");
+        Check.False(
+            caught.SanitizedStandardError.Contains("super-secret", StringComparison.Ordinal),
+            "Native stderr must remain sanitized even when surfaced from a connect failure.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE", previousExitCode);
         Directory.Delete(root, recursive: true);
     }
 }
@@ -2618,10 +2768,32 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
     {
         return 1; // argument/launch failure
     }
+    // Matched to the same strength as the real Native contract
+    // (docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md, Issue #22): both paths must already be
+    // existing regular files, or exit 1. Previously these two values were extracted
+    // and only null-checked, never actually verified to exist -- so a client-side
+    // regression that stopped passing real files could never be caught here.
+    if (!File.Exists(approvedCaptureProfile) || !File.Exists(dualIdentityProof))
+    {
+        return 1;
+    }
 
     var tracePath = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
     var exitCodeText = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
     var dieExitCode = int.TryParse(exitCodeText, out var parsedExitCode) ? parsedExitCode : 3;
+
+    if (scenario == "die-before-listen")
+    {
+        // Simulates Native failing fast (e.g. on startup) before ever creating the
+        // pipe: the client's connect attempt fails outright rather than an
+        // in-flight request going unanswered. Exercises DualCameraAgentLifecycle's
+        // connect-failure diagnostics path (exit code + stderr), not the
+        // incomplete-response path the other scenarios cover.
+        await Console.Error.WriteLineAsync(
+            "synthetic dual agent failed before listening secret=super-secret");
+        return dieExitCode;
+    }
+
     Directory.CreateDirectory(pairJournalRoot);
 
     await using var pipe = new NamedPipeServerStream(
