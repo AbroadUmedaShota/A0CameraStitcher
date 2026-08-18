@@ -41,6 +41,11 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
     private readonly SemaphoreSlim _operationGate = new(1, 1);
 
     private Process? _process;
+
+    // Assigned and never read back: starting this read continuously drains the
+    // child's redirected stdout so its OS pipe buffer cannot fill and block the
+    // Agent process. Stdout is not used for diagnostics -- only stderr is captured
+    // and surfaced on failure (see CaptureExitDiagnosticsAsync).
     private Task<string>? _standardOutput;
     private Task<string>? _standardError;
     private string? _pipeName;
@@ -136,7 +141,17 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             {
                 return await operation(wireOperations, cancellationToken).ConfigureAwait(false);
             }
-            catch (IOException exception) when (exception is not HardwareCameraAgentConnectException)
+            catch (HardwareCameraAgentConnectException exception)
+            {
+                // A connect failure means the pipe was never reached, so unlike an
+                // incomplete response this is never ambiguous -- but if the process
+                // has already exited (e.g. Native failed fast on bad/missing
+                // arguments), its exit code and stderr are the only diagnosable
+                // reason available. Without this, the operator only ever sees a
+                // generic "connection failed" after the full connect timeout.
+                throw await CreateConnectFailureAsync(exception).ConfigureAwait(false);
+            }
+            catch (IOException exception)
             {
                 throw await CreatePipeFailureAsync(exception).ConfigureAwait(false);
             }
@@ -169,18 +184,25 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
                 $"Dual Camera Agent が見つかりません: {_agentExecutablePath}");
         }
 
+        // Native requires --approved-capture-profile and --dual-identity-proof to
+        // already be existing regular files, and exits 1 immediately if either is
+        // missing (docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md, Issue #22). Both are
+        // approval/proof artifacts -- an approved capture profile and a verified
+        // identity proof -- so this class never fabricates their contents. A missing
+        // file must stop here with zero process and zero pipe connections, not spawn
+        // a Native process that is guaranteed to fail closed on its own moments later.
+        EnsureRequiredArtifactFileExists(_approvedCaptureProfilePath, "承認済みcapture profile");
+        EnsureRequiredArtifactFileExists(_dualIdentityProofPath, "dual identity proof");
+
         // Validate the local path chain (fixed drive, no reparse point/junction) before
         // ever creating anything through it -- Directory.CreateDirectory silently
         // follows an existing junction, so checking only afterward would let a planted
         // reparse point redirect the create before the guard ever gets a chance to run.
+        // (The capture-profile/identity-proof directories need no separate guard-then-
+        // create pair: EnsureRequiredArtifactFileExists above already proved each file,
+        // and therefore its parent directory, exists safely.)
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_pairJournalRootPath);
         Directory.CreateDirectory(_pairJournalRootPath);
-        var captureProfileDirectory = Path.GetDirectoryName(_approvedCaptureProfilePath)!;
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(captureProfileDirectory);
-        Directory.CreateDirectory(captureProfileDirectory);
-        var identityProofDirectory = Path.GetDirectoryName(_dualIdentityProofPath)!;
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(identityProofDirectory);
-        Directory.CreateDirectory(identityProofDirectory);
 
         // Hard constraint (Issue #5 review / Issue #8 comment): a fresh, unique pipe
         // name every launch, in the same pattern as Single v2. Never connect to a
@@ -250,7 +272,59 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         return startInfo;
     }
 
+    private async Task<HardwareCameraAgentLaunchException> CreateConnectFailureAsync(
+        HardwareCameraAgentConnectException cause)
+    {
+        var (exitCode, sanitized) = await CaptureExitDiagnosticsAsync().ConfigureAwait(false);
+        var exitSummary = exitCode.HasValue ? exitCode.Value.ToString() : "unavailable";
+        var stderrSummary = string.IsNullOrEmpty(sanitized) ? "unavailable" : sanitized;
+
+        // A connect failure means the pipe was never reached, so -- unlike an
+        // incomplete response -- this is never ambiguous: the request was definitely
+        // never dispatched, regardless of what exit code (if any) the process shows.
+        return new HardwareCameraAgentLaunchException(
+            $"Dual Camera Agent へ接続できませんでした。ExitCode={exitSummary}; stderr={stderrSummary}",
+            cause,
+            requestMayHaveBeenDispatched: false,
+            processExitCode: exitCode,
+            sanitizedStandardError: sanitized);
+    }
+
     private async Task<HardwareCameraAgentLaunchException> CreatePipeFailureAsync(IOException cause)
+    {
+        var (exitCode, sanitized) = await CaptureExitDiagnosticsAsync().ConfigureAwait(false);
+        var responseFailureStage = (cause as HardwareCameraAgentIncompleteResponseException)?.FailureStage;
+
+        // Exit code contract (Native pipe protocol, Issue #5 -- unchanged):
+        //   0 = complete, including a natural max-lifetime exit
+        //   1 = argument/launch failure -> never reached the pipe, not dispatched
+        //   2 = failed_before_dispatch -> explicitly known not dispatched
+        //   3 = dispatched_delivery_failed -> ambiguous, may have been dispatched
+        // Any other exit code, or a still-unresolved process, is treated as
+        // ambiguous and fails closed: after start-reserved-pair's write completes,
+        // every subsequent transport failure may mean the pair was captured.
+        var requestMayHaveBeenDispatched = exitCode is not (1 or 2);
+        var exitSummary = exitCode.HasValue ? exitCode.Value.ToString() : "unavailable";
+        var responseStageSummary = responseFailureStage?.ToString() ?? "unavailable";
+        var stderrSummary = string.IsNullOrEmpty(sanitized) ? "unavailable" : sanitized;
+        return new HardwareCameraAgentLaunchException(
+            $"Dual Camera Agent pipe response was incomplete. Stage={responseStageSummary}; " +
+            $"ExitCode={exitSummary}; stderr={stderrSummary}",
+            cause,
+            requestMayHaveBeenDispatched: requestMayHaveBeenDispatched,
+            processExitCode: exitCode,
+            sanitizedStandardError: sanitized,
+            responseFailureStage: responseFailureStage);
+    }
+
+    /// <summary>
+    /// Waits briefly for the current process to reach a stable exited state and, if
+    /// it has, returns its exit code and sanitized stderr. Shared by both the connect-
+    /// failure and incomplete-response diagnostic paths so a Native process that
+    /// failed fast (e.g. bad arguments, a missing required artifact file) always
+    /// surfaces its exit code and reason instead of only a generic transport error.
+    /// </summary>
+    private async Task<(int? ExitCode, string SanitizedStandardError)> CaptureExitDiagnosticsAsync()
     {
         int? exitCode = null;
         var standardError = string.Empty;
@@ -278,34 +352,46 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             catch (Exception exception) when (
                 exception is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
             {
-                // The pipe failure remains authoritative when the child has not
-                // reached a stable exited state within the diagnostic bound.
+                // The underlying transport failure remains authoritative when the
+                // child has not reached a stable exited state within the diagnostic
+                // bound.
             }
         }
 
-        var sanitized = HardwareCameraAgentDiagnostic.SanitizeStandardError(standardError);
-        var responseFailureStage = (cause as HardwareCameraAgentIncompleteResponseException)?.FailureStage;
+        return (exitCode, HardwareCameraAgentDiagnostic.SanitizeStandardError(standardError));
+    }
 
-        // Exit code contract (Native pipe protocol, Issue #5 -- unchanged):
-        //   0 = complete, including a natural max-lifetime exit
-        //   1 = argument/launch failure -> never reached the pipe, not dispatched
-        //   2 = failed_before_dispatch -> explicitly known not dispatched
-        //   3 = dispatched_delivery_failed -> ambiguous, may have been dispatched
-        // Any other exit code, or a still-unresolved process, is treated as
-        // ambiguous and fails closed: after start-reserved-pair's write completes,
-        // every subsequent transport failure may mean the pair was captured.
-        var requestMayHaveBeenDispatched = exitCode is not (1 or 2);
-        var exitSummary = exitCode.HasValue ? exitCode.Value.ToString() : "unavailable";
-        var responseStageSummary = responseFailureStage?.ToString() ?? "unavailable";
-        var stderrSummary = string.IsNullOrEmpty(sanitized) ? "unavailable" : sanitized;
-        return new HardwareCameraAgentLaunchException(
-            $"Dual Camera Agent pipe response was incomplete. Stage={responseStageSummary}; " +
-            $"ExitCode={exitSummary}; stderr={stderrSummary}",
-            cause,
-            requestMayHaveBeenDispatched: requestMayHaveBeenDispatched,
-            processExitCode: exitCode,
-            sanitizedStandardError: sanitized,
-            responseFailureStage: responseFailureStage);
+    /// <summary>
+    /// Fails closed before any process launch if a required approval/proof artifact
+    /// is missing or is not a regular file. Never creates or fabricates the file --
+    /// only a real approval workflow may produce one.
+    /// </summary>
+    private static void EnsureRequiredArtifactFileExists(string path, string description)
+    {
+        try
+        {
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(path);
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new HardwareCameraAgentLaunchException(
+                $"{description}のパスを安全に検証できません(生成しません): {path}",
+                exception,
+                requestMayHaveBeenDispatched: false);
+        }
+        if (!File.Exists(path))
+        {
+            throw new HardwareCameraAgentLaunchException(
+                $"{description}が見つかりません。Native は既存の通常ファイルを要求します(自動生成はしません): {path}",
+                requestMayHaveBeenDispatched: false);
+        }
+        var attributes = File.GetAttributes(path);
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new HardwareCameraAgentLaunchException(
+                $"{description}は通常ファイルではありません: {path}",
+                requestMayHaveBeenDispatched: false);
+        }
     }
 
     private void DisposeExitedProcess()
