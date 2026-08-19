@@ -1,7 +1,7 @@
 name: UX review
 description: Request an operator-flow or wording decision
 title: "[ux-review] "
-labels: ["autodev:human-gate", "autodev:ux-review"]
+labels: ["human-gate", "ux-review"]
 body:
   - type: textarea
     id: workflow

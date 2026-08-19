@@ -1,7 +1,7 @@
 name: Requirements submit
 description: Submit or change a product requirement
 title: "[requirements] "
-labels: ["autodev:human-gate"]
+labels: ["human-gate"]
 body:
   - type: textarea
     id: need

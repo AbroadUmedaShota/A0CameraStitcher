@@ -1,0 +1,154 @@
+name: Implementation task
+description: 実装作業を 1 Issue = 1 branch = 1 Draft PR の単位で登録する
+title: "[implementation] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        作成前にリポジトリ直下の `CONTRIBUTING.md` を確認してください。
+        優先度・領域・環境・安全境界のラベルは作成後に手動で付けます。実在するラベル名だけを使ってください。
+  - type: textarea
+    id: purpose
+    attributes:
+      label: 目的と現在地
+      description: 解決する問題と、いま何がどこまでできているかを書く。
+      placeholder: |
+        （何を達成するか）
+        現状は（いまの状態と、それが不足である理由）。
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 対象範囲
+      description: この Issue で実装するものを列挙する。
+      value: |
+        -
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 対象外
+      description: 意図的にやらないこと。別 Issue へ回すものはここに書く。
+      value: |
+        -
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: ownership
+    attributes:
+      label: 所有領域
+      description: この Issue だけが変更するファイル・ディレクトリ。他 Issue が所有する shared file は同時編集しない。
+      placeholder: |
+        この Issue だけが `src/m3/Foundation/**` を変更します。`.github/workflows/**` と `docs/**` は変更しません。
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依存関係
+      description: 先に閉じる必要がある Issue、待っている human gate、開始基準のコミット。なければ「なし」と書く。
+      placeholder: |
+        なし。作業開始時点の最新 `codex/main-feature-integration` から開始します。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 完了条件
+      description: 観測可能な受入条件をチェックボックスで書く。「実装する」ではなく「何が確認できれば完了か」を書く。
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: 必須検証
+      description: 実行する試験と、期待される結果。既存テストの期待値を弱めて通すことは認めない。
+      value: |
+        - [ ] `pwsh -File .\scripts\Test-M3Simulated.ps1 -Configuration Release`
+        - [ ] `git diff --check`
+        - [ ] serial / credential / SDK 配布物 / licensed binary / 実画像を含まないことの確認
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 実行環境
+      description: 実 D810 への command を送るかどうか。`hardware-required` は human gate 必須。
+      options:
+        - software-only
+        - hardware-required
+    validations:
+      required: true
+  - type: dropdown
+    id: safety_class
+    attributes:
+      label: 安全境界クラス
+      options:
+        - "S1 — software-only または read-only"
+        - "S2 — 明示 gate と evidence を伴う実機操作"
+        - "S3 — release または破壊的リスクの決定 gate"
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: 安全境界
+      description: 触らないものを明記する。camera command、SDK/WPD session、実機、既存 evidence、licensed 資材のどれに触れないか。
+      placeholder: |
+        ドキュメントと software contract だけを変更し、camera command、SDK/WPD、実機、既存 evidence へアクセスしません。
+    validations:
+      required: true
+  - type: textarea
+    id: branch
+    attributes:
+      label: Branch / PR
+      value: |
+        - branch: `codex/issue-<number>-<slug>`
+        - Draft PR base: `codex/main-feature-integration`
+        - merge と push は Sol のみ
+    validations:
+      required: true
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Traceability
+      description: 要件 ID は `.autodev/requirements/normalized.json`、version は `.autodev/plan.json` に合わせる。
+      value: |
+        ```yaml
+        ar_key: AR-XX
+        dedupe_key:
+        safety_class: S1
+        environment: software-only
+        human_gate: false
+        plan_version: 2.10.0
+        requirements_version: 2.7.0
+        requirements:
+          -
+        ```
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: 参加ルールの確認
+      options:
+        - label: 1 Issue = 1 branch = 原則 1 Draft PR、base は `codex/main-feature-integration` にする
+          required: true
+        - label: 所有領域の外にある shared file を同時編集しない。必要になったら編集せず Issue へ記録する
+          required: true
+        - label: 修正 loop は原則 1 回にまとめる
+          required: true
+        - label: 実機操作・外部公開・破壊的操作は `human-gate` を付けて停止する
+          required: true
+        - label: serial、credential、SDK 配布物、licensed binary、実画像をコミットしない
+          required: true
+        - label: .NET テストを追加／削除する場合は `scripts/Test-M3Simulated.ps1` の期待件数を同じ PR で更新する
+          required: true
