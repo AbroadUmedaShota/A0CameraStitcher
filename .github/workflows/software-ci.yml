@@ -1,0 +1,154 @@
+# Windows software-only CI.
+#
+# Scope (see GitHub Issue #4):
+#   - SDK-less C++ Debug/Release (CMake + CTest)
+#   - M3 simulated foundation Debug/Release (scripts/Test-M3Simulated.ps1)
+#   - Formal WPF DualCamera flow, Release only (scripts/Test-DualCameraWpfFlow.ps1)
+#
+# Explicitly out of scope / not exercised by this workflow:
+#   - The licensed Nikon D810 SDK (NIKON_D810_SDK_ROOT is left unset, so all
+#     CMake configuration in this workflow builds the SDK-less stub).
+#   - Any physical camera, WPD device, or self-hosted hardware runner.
+#   - Branch protection configuration, product source changes, or weakening
+#     of any test expectation.
+#
+# A green run of this workflow is software-only regression evidence. It is
+# NOT a hardware acceptance signal and must not be read as camera/SDK/Phase 0
+# hardware readiness (see docs/PHASE0_TEST_PLAN.md for the hardware gates).
+name: Windows Software-Only CI
+
+on:
+  push:
+    branches:
+      - codex/main-feature-integration
+  pull_request:
+    branches:
+      - codex/main-feature-integration
+
+# Cancel a stale run on the same branch/PR when a newer one starts, without
+# touching runs that belong to other branches or PRs, so unrelated pushes
+# never race each other's build directories.
+concurrency:
+  group: software-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  software-only:
+    name: "Software-only build/test (no camera/SDK hardware)"
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+      # Left intentionally unset: NIKON_D810_SDK_ROOT.
+      # CMakeLists.txt treats an empty/unset root as SDK-less and never
+      # requires SDK headers, binaries, or a licensed camera credential.
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+
+      # No global.json is checked in, so the .NET SDK version is pinned
+      # explicitly here instead of being inferred from the repo.
+      - name: Setup .NET 10 SDK
+        id: setup-dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show toolchain versions
+        id: toolchain-info
+        run: |
+          dotnet --info
+          cmake --version
+          (Get-Command pwsh).Source
+
+      # Single multi-config (Visual Studio) configure, reused for both the
+      # Debug and Release native builds below. NIKON_D810_SDK_ROOT is not
+      # passed, so A0_NIKON_SDK_AVAILABLE stays OFF and the SDK-less stub is
+      # what gets built and tested.
+      - name: Configure CMake (SDK-less)
+        id: cxx-configure
+        run: cmake -S . -B build/sdkless -A x64
+
+      - name: Build SDK-less C++ (Debug)
+        id: cxx-debug-build
+        run: cmake --build build/sdkless --config Debug -- /m:1 /nodeReuse:false
+
+      - name: CTest SDK-less C++ (Debug)
+        id: cxx-debug-test
+        if: ${{ !cancelled() && steps.cxx-debug-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Debug -j 1 --output-on-failure
+
+      # Gated on the configure step only (not on the Debug build/test above),
+      # so a Debug-side failure does not hide whether Release still builds.
+      - name: Build SDK-less C++ (Release)
+        id: cxx-release-build
+        if: ${{ !cancelled() && steps.cxx-configure.outcome == 'success' }}
+        run: cmake --build build/sdkless --config Release -- /m:1 /nodeReuse:false
+
+      - name: CTest SDK-less C++ (Release)
+        id: cxx-release-test
+        if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
+        run: ctest --test-dir build/sdkless -C Release -j 1 --output-on-failure
+
+      # scripts/Test-M3Simulated.ps1 builds the M3 solution with
+      # --maxcpucount:1 --nodeReuse:false, builds the M2 adapter via CMake,
+      # and asserts the Foundation/DualCamera/OperatorShell test counts. It
+      # is not modified by this workflow.
+      #
+      # This script (and the two below) does its own CMake/MSBuild build and
+      # does not consume any artifact from the SDK-less C++ steps above, so
+      # it is gated only on checkout/setup-dotnet having succeeded -- not on
+      # the C++ steps or on each other. A CTest regression in the product
+      # defect tracked by Issue #17, or a failure in one of these three
+      # steps, must not hide whether the others still pass.
+      - name: M3 simulated foundation (Debug)
+        id: m3-debug
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        run: ./scripts/Test-M3Simulated.ps1 -Configuration Debug
+
+      - name: M3 simulated foundation (Release)
+        id: m3-release
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        run: ./scripts/Test-M3Simulated.ps1 -Configuration Release
+
+      # Kept as its own step (rather than folded into the step above) so
+      # that if the formal WPF composition cannot start under the runner's
+      # desktop/STA constraints, the failure is isolated to this exact step
+      # instead of being masked as part of a larger script run. Per Issue
+      # #4, a runner-constraint failure here must Block (fail the job), not
+      # be silently turned into a skip. Gated the same way as the M3 steps
+      # above: independent of their outcome and of the C++ steps.
+      - name: Formal WPF DualCamera flow (Release)
+        id: wpf-release
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        run: ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
+
+      - name: Software-only summary
+        if: always()
+        run: |
+          $rows = @(
+            @{ Name = 'SDK-less C++ Debug (CTest -j 1)';         Outcome = '${{ steps.cxx-debug-test.outcome }}' }
+            @{ Name = 'SDK-less C++ Release (CTest -j 1)';       Outcome = '${{ steps.cxx-release-test.outcome }}' }
+            @{ Name = 'M3 simulated foundation Debug';           Outcome = '${{ steps.m3-debug.outcome }}' }
+            @{ Name = 'M3 simulated foundation Release';         Outcome = '${{ steps.m3-release.outcome }}' }
+            @{ Name = 'Formal WPF DualCamera flow Release';      Outcome = '${{ steps.wpf-release.outcome }}' }
+          )
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Windows software-only CI'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'This run is software-only regression evidence (SDK-less C++, M3 simulated, and the formal WPF DualCamera flow, none of them touching a licensed SDK or a physical camera). It does **not** certify hardware acceptance, camera/SDK connectivity, or Phase 0 hardware readiness; those gates are tracked separately in docs/PHASE0_TEST_PLAN.md.'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| Stage | Outcome |'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| --- | --- |'
+          foreach ($row in $rows) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| $($row.Name) | $($row.Outcome) |"
+          }
