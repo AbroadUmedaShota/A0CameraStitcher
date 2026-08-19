@@ -93,6 +93,16 @@ else()
     target_compile_options(A0CameraStitcher.CameraAgent PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(A0CameraStitcher.DualCameraAgent
+    src/phase0/dual_hardware_camera_agent_main.cpp)
+target_link_libraries(A0CameraStitcher.DualCameraAgent PRIVATE a0_phase0_core)
+target_compile_definitions(A0CameraStitcher.DualCameraAgent PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.DualCameraAgent PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.DualCameraAgent PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_optical
     src/m2/optical_planner.cpp
 )
@@ -203,6 +213,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME dual_hardware_camera_agent_store_contracts
         COMMAND a0_dual_hardware_camera_agent_store_tests)
+
+    add_executable(a0_dual_hardware_camera_agent_pipe_tests
+        tests/dual_hardware_camera_agent_pipe_tests.cpp)
+    target_link_libraries(a0_dual_hardware_camera_agent_pipe_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_dual_hardware_camera_agent_pipe_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_dual_hardware_camera_agent_pipe_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME dual_hardware_camera_agent_pipe_contracts
+        COMMAND a0_dual_hardware_camera_agent_pipe_tests)
 
     add_executable(a0_m2_tests tests/m2_tests.cpp)
     target_link_libraries(a0_m2_tests PRIVATE a0_m2_optical)

@@ -4,17 +4,31 @@
 #include <Windows.h>
 
 #include "a0/phase0/hardware_camera_agent.hpp"
+#include "a0/phase0/dual_hardware_camera_agent.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+// This translation unit hosts ONE generic Windows named-pipe server loop
+// (RunNamedPipeServerLoop) shared by both the Single-camera host
+// (RunHardwareCameraAgentNamedPipeServer, declared in
+// hardware_camera_agent.hpp) and the Dual-camera host
+// (RunDualHardwareCameraAgentNamedPipeServer, declared in
+// dual_hardware_camera_agent.hpp). Framing, the current-logon pipe security
+// descriptor, and the Issue #17 teardown-drain-before-disconnect fix are all
+// dispatcher-independent and therefore live here exactly once. The two
+// dispatcher types are unrelated (no shared base class) and are connected
+// only structurally, via the template's use of dispatcher.Handle(),
+// dispatcher.OnIdle(), and dispatcher.ShouldStop().
 namespace a0::phase0 {
 namespace {
 
@@ -188,10 +202,17 @@ bool WriteExact(HANDLE pipe, const void* source, std::size_t bytes, DWORD timeou
     return true;
 }
 
+// Dispatcher and FailureInjection are duck-typed rather than sharing a base
+// class: Dispatcher only needs Handle(std::string_view) -> std::string, and
+// FailureInjection only needs the three bool members read below. This lets
+// HardwareCameraAgentDispatcher and DualHardwareCameraAgentDispatcher (two
+// unrelated final classes with independently evolving protocols) share this
+// transport-level function without either one depending on the other.
+template <typename Dispatcher, typename FailureInjection>
 ProcessOneConnectionOutcome ProcessOneConnection(
     HANDLE pipe,
-    HardwareCameraAgentDispatcher& dispatcher,
-    const HardwareCameraAgentPipeFailureInjectionForTesting& failure_injection) {
+    Dispatcher& dispatcher,
+    const FailureInjection& failure_injection) {
     std::array<unsigned char, 4> header{};
     if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs)) {
         return ProcessOneConnectionOutcome::failed_before_dispatch;
@@ -243,20 +264,35 @@ ProcessOneConnectionOutcome ProcessOneConnection(
     return ProcessOneConnectionOutcome::complete_delivery;
 }
 
-} // namespace
-
-int RunHardwareCameraAgentNamedPipeServer(
+// Shared named-pipe accept/serve loop. Dispatcher is duck-typed exactly like
+// ProcessOneConnection above (only Handle/OnIdle/ShouldStop are required).
+//
+// lifetime_budget is the process's fixed self-termination bound: computed
+// once from GetTickCount64() at the top of this function and never
+// recomputed, identically for both the Single- and Dual-camera hosts (see
+// the doc comments on the two public entry points below for the specific
+// budget each one uses). This preserves the exact behavior that existed
+// before this loop was generalized for Single, and gives Dual the same
+// documented "absolute lifetime cap from launch" contract instead of an
+// idle-activity-extended one, so an operator/CI cannot keep the process
+// alive indefinitely just by sending it a steady trickle of requests
+// (including rejected ones).
+template <typename Dispatcher, typename FailureInjection>
+int RunNamedPipeServerLoop(
     std::string_view pipe_name,
-    HardwareCameraAgentDispatcher& dispatcher,
+    Dispatcher& dispatcher,
     bool serve_once,
-    HardwareCameraAgentPipeFailureInjectionForTesting failure_injection) {
+    const FailureInjection& failure_injection,
+    std::chrono::milliseconds lifetime_budget) {
     if (!IsSafePipeName(pipe_name)) {
         throw std::invalid_argument("hardware Camera Agent pipe name is invalid");
     }
     const std::wstring full_name =
         L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
     CurrentLogonPipeSecurity security;
-    const ULONGLONG server_deadline = GetTickCount64() + 10ULL * 60ULL * 1000ULL;
+    const ULONGLONG lifetime_budget_ms = static_cast<ULONGLONG>(
+        std::max(lifetime_budget, std::chrono::milliseconds(0)).count());
+    const ULONGLONG server_deadline = GetTickCount64() + lifetime_budget_ms;
 
     for (;;) {
         dispatcher.OnIdle();
@@ -317,6 +353,10 @@ int RunHardwareCameraAgentNamedPipeServer(
             // injection. If the client has already closed, the flush fails
             // immediately, and if the buffer is already empty it returns
             // immediately, so the exposure window matches the success path.
+            //
+            // This is the Issue #17 teardown-drain fix. It is written once,
+            // in this shared loop, so both the Single- and Dual-camera hosts
+            // inherit it identically.
             (void)FlushFileBuffers(pipe);
         }
         DisconnectNamedPipe(pipe);
@@ -335,6 +375,49 @@ int RunHardwareCameraAgentNamedPipeServer(
                 : kFailedBeforeDispatchExitCode;
         }
     }
+}
+
+} // namespace
+
+int RunHardwareCameraAgentNamedPipeServer(
+    std::string_view pipe_name,
+    HardwareCameraAgentDispatcher& dispatcher,
+    bool serve_once,
+    HardwareCameraAgentPipeFailureInjectionForTesting failure_injection) {
+    // Unchanged from the pre-generalization behavior: a fixed 600s deadline
+    // computed once at process start, never extended.
+    return RunNamedPipeServerLoop(
+        pipe_name,
+        dispatcher,
+        serve_once,
+        failure_injection,
+        std::chrono::minutes(10));
+}
+
+int RunDualHardwareCameraAgentNamedPipeServer(
+    std::string_view pipe_name,
+    DualHardwareCameraAgentDispatcher& dispatcher,
+    bool serve_once,
+    DualHardwareCameraAgentPipeFailureInjectionForTesting failure_injection,
+    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing) {
+    // Same fixed-from-launch policy as RunHardwareCameraAgentNamedPipeServer
+    // (Orchestrator decision, 2026-08-17): a rolling/idle-extended deadline
+    // was considered but rejected as needlessly complex and because it let
+    // any steady trickle of requests -- rejected ones included -- keep the
+    // process alive indefinitely, which conflicts with the documented
+    // 600-second maximum lifetime this host must honor (see
+    // docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md). lifetime_budget_for_testing
+    // lets contract tests bound the wait for this deadline instead of
+    // waiting out the real 600s production budget; production callers never
+    // pass it. Pipe-name uniqueness across launches is the launcher's
+    // responsibility (see the doc); this host just serves whatever safe
+    // pipe name it is given.
+    return RunNamedPipeServerLoop(
+        pipe_name,
+        dispatcher,
+        serve_once,
+        failure_injection,
+        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)));
 }
 
 } // namespace a0::phase0

@@ -85,7 +85,7 @@ void ValidateExistingPathNoReparse(
     }
 }
 
-void ValidatePathChainNoReparse(const fs::path& path) {
+void ValidatePathChainNoReparse(const fs::path& path, std::string_view subject) {
     fs::path current = path.root_path();
     bool missing = false;
     DWORD attributes = AttributesOrMissing(current, missing);
@@ -93,7 +93,7 @@ void ValidatePathChainNoReparse(const fs::path& path) {
         (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         StoreFailure(
             "InvalidStoreRoot",
-            "pair journal drive root cannot be inspected as a reparse-free directory");
+            std::string(subject) + "'s drive cannot be inspected as a reparse-free directory");
     }
 
     const fs::path relative = path.lexically_relative(path.root_path());
@@ -104,12 +104,21 @@ void ValidatePathChainNoReparse(const fs::path& path) {
         if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             StoreFailure(
                 "InvalidStoreRoot",
-                "pair journal root path chain contains a reparse point");
+                std::string(subject) + "'s path chain contains a reparse point");
         }
     }
 }
 
-fs::path ValidateFixedLocalRoot(const fs::path& path) {
+// Shared fixed-local-path shape check: absolute, drive-qualified, no UNC/NT-
+// namespace prefix, no traversal components, resolves onto a DRIVE_FIXED
+// volume, and no reparse point anywhere along the existing chain (including
+// the leaf). Deliberately stops short of any file-vs-directory constraint --
+// ValidateFixedLocalRoot below layers its own "must be a directory if it
+// already exists" rule on top for the pair journal root, and
+// ValidateDualHardwareFixedLocalPath (public, declared in the header) is the
+// bare shape check other callers (for example the Named Pipe host's file
+// arguments) can build their own file/directory constraint on top of.
+fs::path ValidateFixedLocalPathShape(const fs::path& path, std::string_view subject) {
     const std::wstring input = path.native();
     const auto is_drive_letter = [](wchar_t value) noexcept {
         return (value >= L'A' && value <= L'Z') ||
@@ -125,32 +134,32 @@ fs::path ValidateFixedLocalRoot(const fs::path& path) {
         input.starts_with(L"\\\\") || input.starts_with(L"\\??\\")) {
         StoreFailure(
             "InvalidStoreRoot",
-            "pair journal root must be an absolute drive-qualified local path");
+            std::string(subject) + " must be an absolute drive-qualified local path");
     }
 
     for (const auto& component : path.relative_path()) {
         if (component == "." || component == "..") {
             StoreFailure(
                 "InvalidStoreRoot",
-                "pair journal root must not contain traversal components");
+                std::string(subject) + " must not contain traversal components");
         }
     }
 
     const DWORD required = GetFullPathNameW(input.c_str(), 0, nullptr, nullptr);
     if (required == 0) {
-        StoreFailure("InvalidStoreRoot", "pair journal root could not be normalized");
+        StoreFailure("InvalidStoreRoot", std::string(subject) + " could not be normalized");
     }
     std::wstring buffer(static_cast<std::size_t>(required), L'\0');
     const DWORD written = GetFullPathNameW(
         input.c_str(), required, buffer.data(), nullptr);
     if (written == 0 || written >= required) {
-        StoreFailure("InvalidStoreRoot", "pair journal root could not be normalized");
+        StoreFailure("InvalidStoreRoot", std::string(subject) + " could not be normalized");
     }
     buffer.resize(written);
     const fs::path normalized = fs::path(buffer).lexically_normal();
     if (normalized == normalized.root_path()) {
         StoreFailure(
-            "InvalidStoreRoot", "pair journal root cannot be the drive root");
+            "InvalidStoreRoot", std::string(subject) + " cannot be the drive root");
     }
 
     const std::wstring normalized_native = normalized.native();
@@ -158,10 +167,14 @@ fs::path ValidateFixedLocalRoot(const fs::path& path) {
         normalized_native[0], L':', L'\\'};
     if (GetDriveTypeW(drive_root.c_str()) != DRIVE_FIXED) {
         StoreFailure(
-            "InvalidStoreRoot", "pair journal root must reside on a fixed local drive");
+            "InvalidStoreRoot", std::string(subject) + " must reside on a fixed local drive");
     }
-    ValidatePathChainNoReparse(normalized);
+    ValidatePathChainNoReparse(normalized, subject);
+    return normalized;
+}
 
+fs::path ValidateFixedLocalRoot(const fs::path& path) {
+    const fs::path normalized = ValidateFixedLocalPathShape(path, "pair journal root");
     bool missing = false;
     const DWORD attributes = AttributesOrMissing(normalized, missing);
     if (!missing && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
@@ -552,6 +565,12 @@ void ClassifyExistingReservation(
 }
 
 } // namespace
+
+std::filesystem::path ValidateDualHardwareFixedLocalPath(
+    const std::filesystem::path& path,
+    std::string_view subject) {
+    return ValidateFixedLocalPathShape(path, subject);
+}
 
 DualHardwarePairJournalStoreError::DualHardwarePairJournalStoreError(
     std::string code,

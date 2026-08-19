@@ -1163,4 +1163,18 @@ DualHardwareCameraAgentDispatcher::SafetyCounters() const noexcept {
     return safety_counters_;
 }
 
+void DualHardwareCameraAgentDispatcher::OnIdle() noexcept {
+    // The Dual protocol has no continuous/idle-driven backend state (unlike
+    // Single's Live View heartbeat), so there is nothing to poll here. This
+    // method exists only to satisfy the shared named-pipe server loop's
+    // dispatcher contract (see hardware_camera_agent_pipe.cpp).
+}
+
+bool DualHardwareCameraAgentDispatcher::ShouldStop() const noexcept {
+    // The Dual protocol has no operation that asks the host to terminate
+    // (no close-agent-session equivalent). The host's lifetime is bounded
+    // solely by the named-pipe server loop's own deadline.
+    return false;
+}
+
 } // namespace a0::phase0
