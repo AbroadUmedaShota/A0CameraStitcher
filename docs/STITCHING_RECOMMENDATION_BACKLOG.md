@@ -15,7 +15,7 @@
 
 状態の意味:
 
-- `Done-local`: 現working treeで実装し、記載したsoftware-only検証がfreshに合格。未commit・未統合であり、L1や製品合格ではない
+- `Done-local`: 現working treeで実装し、記載したsoftware-only検証がfreshに合格。専用branchへcommit済み・統合未完了であり、L1や製品合格ではない
 - `Ready`: 現行承認の範囲内で次に着手可能
 - `Decision-required`: 技術案またはproduct decisionが先
 - `Authorization-required`: 対象と禁止操作を明示したoperatorまたはengineer-adminの個別承認が先
