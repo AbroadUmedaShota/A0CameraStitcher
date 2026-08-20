@@ -14,6 +14,11 @@ public sealed class OperatorShellViewModel : ObservableObject
     public const string HardwareDualPendingBanner = "HARDWARE DUAL / provider未接続 / 撮影禁止";
     private const string SingleModeLabel = "1台構成";
     private const string DualModeLabel = "2台構成";
+    private const string StageModeCameraALive = "CAM-A live";
+    private const string StageModeCameraBLive = "CAM-B live";
+    private const string StageModeCompositePreview = "合成プレビュー";
+    private const string StageProcessingPlaceholderMessage = "Live View 停止中（撮影シーケンス実行中）";
+    private const string StagePreviewNoteMessage = "プレビュー表示のみ・原画像／合成には不使用";
 
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
@@ -41,6 +46,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _selectedReadinessDemo = "自動補正範囲内";
     private string _selectedDiagnosticScenario = "正常完了";
     private string _selectedPage = "Dashboard";
+    private string _selectedStageMode = StageModeCompositePreview;
+    private readonly Dictionary<string, DateTimeOffset> _lastFinalFrameTimestamps = new(StringComparer.Ordinal);
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
     private string _statusMessage = "起動時の安全確認を行ってください。この画面は実機へ接続しません。";
     private string _technicalDetail = "error code: なし / log: ローカルsimulated journal";
@@ -206,6 +213,14 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(OverallStateText));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
+                OnPropertyChanged(nameof(CanChangeStageMode));
+                OnPropertyChanged(nameof(IsStageProcessingPlaceholder));
+                OnPropertyChanged(nameof(IsStageReviewMode));
+                OnPropertyChanged(nameof(IsStageLiveNoteVisible));
+                OnPropertyChanged(nameof(IsStageSingleLiveMode));
+                OnPropertyChanged(nameof(IsStageCompositePreviewMode));
+                OnPropertyChanged(nameof(StageReviewBadgeText));
+                OnPropertyChanged(nameof(ReadyStatusChipText));
                 RecalculateAvailability();
             }
         }
@@ -229,6 +244,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(CameraSelectionLabel));
             OnPropertyChanged(nameof(ProcessingResultLabel));
             OnPropertyChanged(nameof(DiagnosticScenarios));
+            OnPropertyChanged(nameof(StageCompositeApplicable));
+            OnPropertyChanged(nameof(StageReviewBadgeText));
+            OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
+            OnPropertyChanged(nameof(StageSingleLiveText));
             ResetProgress(CurrentCapturePlan);
             RebuildReadiness();
         }
@@ -245,6 +264,11 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(LiveViewButtonText));
                 OnPropertyChanged(nameof(OperatingModeDescription));
                 OnPropertyChanged(nameof(CaptureButtonText));
+                OnPropertyChanged(nameof(StageCompositeLiveAlias));
+                OnPropertyChanged(nameof(StageCompositeStillAlias));
+                OnPropertyChanged(nameof(StageCompositeFreshnessText));
+                OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
+                OnPropertyChanged(nameof(StageSingleLiveText));
                 if (IsSingleCameraMode)
                 {
                     SelectedDiagnosticScenario = "正常完了";
@@ -296,6 +320,64 @@ public sealed class OperatorShellViewModel : ObservableObject
             }
         }
     }
+    public IReadOnlyList<string> StageModeOptions { get; } = [StageModeCameraALive, StageModeCameraBLive, StageModeCompositePreview];
+
+    public string SelectedStageMode
+    {
+        get => _selectedStageMode;
+        set
+        {
+            if (value is not (StageModeCameraALive or StageModeCameraBLive or StageModeCompositePreview) ||
+                !SetProperty(ref _selectedStageMode, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsStageSingleLiveMode));
+            OnPropertyChanged(nameof(IsStageCompositePreviewMode));
+            OnPropertyChanged(nameof(StageSingleLiveAlias));
+            OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
+            OnPropertyChanged(nameof(StageSingleLiveText));
+        }
+    }
+
+    public bool CanChangeStageMode => UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
+    public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
+    public bool IsStageReviewMode => UiState == OperatorUiState.Review;
+    public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
+    public bool IsStageSingleLiveMode => IsStageLiveNoteVisible && SelectedStageMode != StageModeCompositePreview;
+    public bool IsStageCompositePreviewMode => IsStageLiveNoteVisible && SelectedStageMode == StageModeCompositePreview;
+    public string StageProcessingPlaceholderText => StageProcessingPlaceholderMessage;
+    public string StagePreviewNoteText => StagePreviewNoteMessage;
+    public string StageReviewBadgeText => IsSingleCameraMode ? "検証済み原本" : "合成結果";
+    public string CaptureAvailabilityText => CanCapture ? "撮影可" : "撮影不可";
+    public string ReadyStatusChipText => $"{OverallStateText} / {CaptureAvailabilityText}";
+
+    public string StageSingleLiveAlias => SelectedStageMode == StageModeCameraBLive ? "CAM-B" : "CAM-A";
+    public bool StageSingleLiveAliasInPlan =>
+        CurrentCapturePlan.RequiredCameraAliases.Contains(StageSingleLiveAlias, StringComparer.Ordinal);
+    public string StageSingleLiveText => StageSingleLiveAliasInPlan
+        ? $"{StageSingleLiveAlias}\n\nフルフレーム Simulated Live View placeholder 非実画像\n{StagePreviewNoteMessage}"
+        : $"{StageSingleLiveAlias}\n\n1台構成のため対象外（運用対象は{SelectedCamera}のみ）";
+
+    public bool StageCompositeApplicable => !IsSingleCameraMode;
+    public string StageCompositeLiveAlias => SelectedCamera;
+    public string StageCompositeStillAlias => SelectedCamera == "CAM-A" ? "CAM-B" : "CAM-A";
+    public string StageCompositeOverlapBandText => "重複帯\n幅px実測未接続";
+    public string StageCompositeFreshnessText
+    {
+        get
+        {
+            if (!_lastFinalFrameTimestamps.TryGetValue(StageCompositeStillAlias, out var capturedAt))
+            {
+                return "STILL 未取得";
+            }
+
+            var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - capturedAt).TotalSeconds);
+            return $"STILL {elapsedSeconds}秒前";
+        }
+    }
+
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public string TechnicalDetail { get => _technicalDetail; private set => SetProperty(ref _technicalDetail, value); }
     public string LastTransactionId { get => _lastTransactionId; private set => SetProperty(ref _lastTransactionId, value); }
@@ -696,6 +778,11 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "なし"
             : string.Join(" / ", originals.Select(original =>
                 $"{original.Alias}: original.jpg {original.SizeBytes} bytes SHA-256 {original.Sha256[..12]}…"));
+        foreach (var original in originals)
+        {
+            _lastFinalFrameTimestamps[original.Alias] = DateTimeOffset.UtcNow;
+        }
+        OnPropertyChanged(nameof(StageCompositeFreshnessText));
         if (state.Capture is not null)
         {
             _captureOutcome = new CaptureOutcome(
@@ -771,6 +858,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         _stitchOutcome = null;
         _exportOutcome = null;
         _captureOutcome = null;
+        _lastFinalFrameTimestamps.Clear();
+        OnPropertyChanged(nameof(StageCompositeFreshnessText));
         RebuildReadiness();
         return Task.CompletedTask;
     }
@@ -879,10 +968,19 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CameraSelectionLabel));
         OnPropertyChanged(nameof(ProcessingResultLabel));
         OnPropertyChanged(nameof(DiagnosticScenarios));
+        OnPropertyChanged(nameof(StageCompositeApplicable));
+        OnPropertyChanged(nameof(StageReviewBadgeText));
+        OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
+        OnPropertyChanged(nameof(StageSingleLiveText));
 
         LastTransactionId = result.TransactionId.ToString("N");
         CaptureResult = result.State.ToString();
         RetainedOriginals = result.RetainedOriginalAliases.Count == 0 ? "なし" : string.Join(", ", result.RetainedOriginalAliases) + "（simulated原画像）";
+        foreach (var alias in result.RetainedOriginalAliases)
+        {
+            _lastFinalFrameTimestamps[alias] = DateTimeOffset.UtcNow;
+        }
+        OnPropertyChanged(nameof(StageCompositeFreshnessText));
         _captureOutcome = new CaptureOutcome(
             result.TransactionId,
             resultPlan,
@@ -1016,6 +1114,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             hasExportableResult,
             canRestitch);
         OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CaptureAvailabilityText));
+        OnPropertyChanged(nameof(ReadyStatusChipText));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(CanUseLiveView));
         OnPropertyChanged(nameof(CanExport));
@@ -1029,7 +1129,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void RaiseReadinessProperties()
     {
-        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel) }) OnPropertyChanged(name);
+        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText) }) OnPropertyChanged(name);
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)
