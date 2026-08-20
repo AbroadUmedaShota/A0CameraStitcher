@@ -5,17 +5,51 @@
 
 #include <chrono>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+namespace a0::m2::detail {
+void PublishValidatedGeneratedJpeg(
+    const std::filesystem::path& partial,
+    const std::filesystem::path& destination,
+    std::uint32_t expected_width,
+    std::uint32_t expected_height);
+void SetInputLocksHeldTestHook(void (*hook)()) noexcept;
+void SetBeforePublishRenameTestHook(void (*hook)()) noexcept;
+}
 
 namespace {
 
 int failures = 0;
+HANDLE input_locks_held_event = nullptr;
+HANDLE release_input_locks_event = nullptr;
+std::filesystem::path publish_race_partial;
+std::filesystem::path publish_race_renamed;
+std::vector<std::uint8_t> publish_race_replacement;
+
+void WriteBytes(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes);
+
+void SignalInputLocksHeldAndWait() {
+    if (!SetEvent(input_locks_held_event)
+        || WaitForSingleObject(release_input_locks_event, 5'000) != WAIT_OBJECT_0) {
+        throw std::runtime_error("input lock synchronization failed");
+    }
+}
+
+void RenameVerifiedPartialAwayAndReplacePath() {
+    if (!MoveFileExW(publish_race_partial.c_str(), publish_race_renamed.c_str(), 0)) {
+        throw std::runtime_error("publish race could not rename verified partial away");
+    }
+    WriteBytes(publish_race_partial, publish_race_replacement);
+}
 
 void Check(const bool condition, const std::string& message) {
     if (!condition) {
@@ -203,6 +237,147 @@ a0::m2::FixedRigStitchProfile ApprovedProfile() {
         a0::m2::StitchLayout::camera_a_left_camera_b_right,
         {1, 1, 1, 1},
     };
+}
+
+a0::m2::FixedRigStitchProfile SnapshotStressProfile() {
+    auto profile = ApprovedProfile();
+    profile.expected_input_width = 2048;
+    profile.expected_input_height = 1024;
+    profile.camera_b_to_camera_a = {1.0, 0.0, 1536.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    profile.crop = {};
+    return profile;
+}
+
+void TestInputHandlesRemainImmutableThroughPublish(const std::filesystem::path& root) {
+    const auto a_directory = root / "snapshot-lock-a";
+    const auto b_directory = root / "snapshot-lock-b";
+    const auto job = root / "snapshot-lock-job";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 2048, 1024, 120, 40, 20);
+    WriteSolidJpeg(camera_b, 2048, 1024, 20, 40, 120);
+    const auto a_before = ReadBytes(camera_a);
+    const auto b_before = ReadBytes(camera_b);
+
+    input_locks_held_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    release_input_locks_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (input_locks_held_event == nullptr || release_input_locks_event == nullptr) {
+        if (input_locks_held_event != nullptr) CloseHandle(input_locks_held_event);
+        if (release_input_locks_event != nullptr) CloseHandle(release_input_locks_event);
+        throw std::runtime_error("input lock synchronization event creation failed");
+    }
+    a0::m2::detail::SetInputLocksHeldTestHook(&SignalInputLocksHeldAndWait);
+    std::exception_ptr worker_error;
+    std::thread worker([&] {
+        try {
+            (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, job, SnapshotStressProfile()});
+        } catch (...) {
+            worker_error = std::current_exception();
+        }
+    });
+
+    if (WaitForSingleObject(input_locks_held_event, 5'000) != WAIT_OBJECT_0) {
+        SetEvent(release_input_locks_event);
+        worker.join();
+        a0::m2::detail::SetInputLocksHeldTestHook(nullptr);
+        CloseHandle(input_locks_held_event);
+        CloseHandle(release_input_locks_event);
+        throw std::runtime_error("stitch did not reach the input-lock barrier");
+    }
+    HANDLE mutation = CreateFileW(
+        camera_a.c_str(),
+        GENERIC_WRITE | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    const bool mutable_handle_acquired = mutation != INVALID_HANDLE_VALUE;
+    if (mutable_handle_acquired) CloseHandle(mutation);
+    SetEvent(release_input_locks_event);
+    worker.join();
+    a0::m2::detail::SetInputLocksHeldTestHook(nullptr);
+    CloseHandle(input_locks_held_event);
+    CloseHandle(release_input_locks_event);
+    input_locks_held_event = nullptr;
+    release_input_locks_event = nullptr;
+
+    Check(!mutable_handle_acquired,
+        "CAM-A must remain locked against shared write and delete through completed publish");
+    Check(worker_error == nullptr,
+        "denied concurrent mutation must not prevent a valid immutable snapshot stitch");
+    Check(ReadBytes(camera_a) == a_before && ReadBytes(camera_b) == b_before,
+        "immutable snapshot stitching must preserve both originals byte-for-byte");
+    Check(std::filesystem::is_regular_file(job / "stitched.jpg")
+            && !std::filesystem::exists(job / "stitched.jpg.partial"),
+        "immutable snapshot stitching must publish exactly one completed output");
+}
+
+void TestStitchSnapshotFailurePreservation(const std::filesystem::path& root) {
+    const auto a_directory = root / "snapshot-failure-a";
+    const auto b_directory = root / "snapshot-failure-b";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 16, 8, 90, 30, 10);
+    WriteSolidJpeg(camera_b, 16, 8, 10, 30, 90);
+    const auto original_a = ReadBytes(camera_a);
+    const auto original_b = ReadBytes(camera_b);
+
+    HANDLE mutation = CreateFileW(
+        camera_b.c_str(),
+        GENERIC_WRITE | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (mutation == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("snapshot failure test mutation handle creation failed");
+    }
+    const auto locked_job = root / "snapshot-failure-locked-job";
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair(
+            {camera_a, camera_b, locked_job, ApprovedProfile()}); },
+        "cannot be locked",
+        "an input already open for shared write/delete must fail before snapshot or output");
+    CloseHandle(mutation);
+    Check(!std::filesystem::exists(locked_job / "stitched.jpg")
+            && !std::filesystem::exists(locked_job / "stitched.jpg.partial")
+            && ReadBytes(camera_a) == original_a && ReadBytes(camera_b) == original_b,
+        "input lock failure must publish zero and preserve both originals byte-for-byte");
+
+    auto truncated_b = original_b;
+    truncated_b.pop_back();
+    WriteBytes(camera_b, truncated_b);
+    const auto truncated_job = root / "snapshot-failure-truncated-job";
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair(
+            {camera_a, camera_b, truncated_job, ApprovedProfile()}); },
+        "complete JPEG",
+        "a truncated canonical input snapshot must fail full JPEG validation");
+    Check(!std::filesystem::exists(truncated_job / "stitched.jpg")
+            && !std::filesystem::exists(truncated_job / "stitched.jpg.partial")
+            && ReadBytes(camera_a) == original_a && ReadBytes(camera_b) == truncated_b,
+        "truncated input rejection must publish zero and leave both observed originals unchanged");
+
+    WriteBytes(camera_b, original_b);
+    const auto conflict_job = root / "snapshot-failure-existing-output";
+    std::filesystem::create_directories(conflict_job);
+    const auto conflict_output = conflict_job / "stitched.jpg";
+    const std::vector<std::uint8_t> sentinel{'k', 'e', 'e', 'p'};
+    WriteBytes(conflict_output, sentinel);
+    CheckRejected(
+        [&] { (void)a0::m2::StitchCanonicalPair(
+            {camera_a, camera_b, conflict_job, ApprovedProfile()}); },
+        "an existing completed stitch output must reject a non-replacing publish");
+    Check(ReadBytes(conflict_output) == sentinel
+            && !std::filesystem::exists(conflict_job / "stitched.jpg.partial")
+            && ReadBytes(camera_a) == original_a && ReadBytes(camera_b) == original_b,
+        "existing output rejection must preserve the output sentinel and both originals");
 }
 
 void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
@@ -475,6 +650,127 @@ void TestExportValidationFailures(const std::filesystem::path& root) {
         "explicit export must independently enforce the compressed JPEG byte limit");
 }
 
+void TestGeneratedPartialValidationAndNonReplacingPublish(const std::filesystem::path& root) {
+    const auto directory = root / "generated-publish";
+    std::filesystem::create_directories(directory);
+    const auto source = directory / "source.jpg";
+    WriteSolidJpeg(source, 16, 8, 80, 40, 20);
+    const auto valid_bytes = ReadBytes(source);
+
+    const auto valid_partial = directory / "valid.jpg.partial";
+    const auto valid_destination = directory / "valid.jpg";
+    WriteBytes(valid_partial, valid_bytes);
+    a0::m2::detail::PublishValidatedGeneratedJpeg(valid_partial, valid_destination, 16, 8);
+    const auto valid_decoded = DecodeJpeg(valid_destination);
+    Check(valid_decoded.width == 16 && valid_decoded.height == 8
+            && !std::filesystem::exists(valid_partial),
+        "validated generated JPEG must publish atomically with fixed dimensions");
+
+    auto truncated_bytes = valid_bytes;
+    truncated_bytes.pop_back();
+    const auto truncated_partial = directory / "truncated.jpg.partial";
+    const auto truncated_destination = directory / "truncated.jpg";
+    WriteBytes(truncated_partial, truncated_bytes);
+    CheckRejectedContains(
+        [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
+            truncated_partial, truncated_destination, 16, 8); },
+        "complete JPEG",
+        "a short write that leaves a truncated generated partial must fail before publish");
+    Check(!std::filesystem::exists(truncated_destination),
+        "truncated generated partial rejection must leave completed output zero");
+
+    const auto corrupt_partial = directory / "corrupt.jpg.partial";
+    const auto corrupt_destination = directory / "corrupt.jpg";
+    WriteBytes(corrupt_partial, {0xff, 0xd8, 0x00, 0xff, 0xd9});
+    CheckRejected(
+        [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
+            corrupt_partial, corrupt_destination, 16, 8); },
+        "a generated JPEG with markers but failed full decode must not publish");
+    Check(!std::filesystem::exists(corrupt_destination),
+        "generated decode failure must leave completed output zero");
+
+    const auto wrong_dimensions_partial = directory / "wrong-dimensions.jpg.partial";
+    const auto wrong_dimensions_destination = directory / "wrong-dimensions.jpg";
+    WriteSolidJpeg(wrong_dimensions_partial, 8, 8, 10, 20, 30);
+    CheckRejectedContains(
+        [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
+            wrong_dimensions_partial, wrong_dimensions_destination, 16, 8); },
+        "dimensions",
+        "generated JPEG dimensions must match the fixed stitched result before publish");
+    Check(!std::filesystem::exists(wrong_dimensions_destination),
+        "generated dimension mismatch must leave completed output zero");
+
+    const auto oversized_partial = directory / "oversized.jpg.partial";
+    const auto oversized_destination = directory / "oversized.jpg";
+    WriteBytes(oversized_partial, valid_bytes);
+    std::filesystem::resize_file(oversized_partial, a0::m2::kMaximumCompressedJpegBytes + 1);
+    CheckRejectedContains(
+        [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
+            oversized_partial, oversized_destination, 16, 8); },
+        "compressed JPEG byte size",
+        "generated partial must retain the existing compressed JPEG size ceiling");
+    Check(!std::filesystem::exists(oversized_destination),
+        "oversized generated partial must leave completed output zero");
+
+    const auto conflict_partial = directory / "conflict.jpg.partial";
+    const auto conflict_destination = directory / "conflict.jpg";
+    const std::vector<std::uint8_t> sentinel{'k', 'e', 'e', 'p'};
+    WriteBytes(conflict_partial, valid_bytes);
+    WriteBytes(conflict_destination, sentinel);
+    CheckRejectedContains(
+        [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
+            conflict_partial, conflict_destination, 16, 8); },
+        "publish",
+        "generated JPEG publish must reject an existing output or rename conflict");
+    Check(ReadBytes(conflict_destination) == sentinel,
+        "non-replacing publish must preserve the existing completed output byte-for-byte");
+
+    const auto race_partial = directory / "race.jpg.partial";
+    const auto race_renamed = directory / "race-renamed-away.jpg.partial";
+    const auto race_destination = directory / "race.jpg";
+    const std::vector<std::uint8_t> unverified_replacement{'n', 'o', 't', '-', 'j', 'p', 'e', 'g'};
+    WriteBytes(race_partial, valid_bytes);
+    publish_race_partial = race_partial;
+    publish_race_renamed = race_renamed;
+    publish_race_replacement = unverified_replacement;
+    a0::m2::detail::SetBeforePublishRenameTestHook(&RenameVerifiedPartialAwayAndReplacePath);
+    try {
+        a0::m2::detail::PublishValidatedGeneratedJpeg(
+            race_partial, race_destination, 16, 8);
+    } catch (...) {
+        a0::m2::detail::SetBeforePublishRenameTestHook(nullptr);
+        throw;
+    }
+    a0::m2::detail::SetBeforePublishRenameTestHook(nullptr);
+    Check(ReadBytes(race_destination) == valid_bytes,
+        "publish must rename the exact verified handle, never an unverified same-path replacement");
+    Check(ReadBytes(race_partial) == unverified_replacement
+            && !std::filesystem::exists(race_renamed),
+        "unverified same-path replacement must remain unpublished and the verified handle must move atomically");
+
+    const auto export_source = directory / "race-export-source.jpg";
+    const auto export_destination = directory / "race-export.jpg";
+    const auto export_partial = directory / "race-export.jpg.partial";
+    const auto export_renamed = directory / "race-export-renamed-away.jpg.partial";
+    WriteBytes(export_source, valid_bytes);
+    publish_race_partial = export_partial;
+    publish_race_renamed = export_renamed;
+    publish_race_replacement = unverified_replacement;
+    a0::m2::detail::SetBeforePublishRenameTestHook(&RenameVerifiedPartialAwayAndReplacePath);
+    try {
+        a0::m2::ExportStitchedJpeg(export_source, export_destination);
+    } catch (...) {
+        a0::m2::detail::SetBeforePublishRenameTestHook(nullptr);
+        throw;
+    }
+    a0::m2::detail::SetBeforePublishRenameTestHook(nullptr);
+    Check(ReadBytes(export_source) == valid_bytes && ReadBytes(export_destination) == valid_bytes,
+        "explicit export race must preserve its original and publish only the verified bytes");
+    Check(ReadBytes(export_partial) == unverified_replacement
+            && !std::filesystem::exists(export_renamed),
+        "explicit export must not publish an unverified same-path partial replacement");
+}
+
 } // namespace
 
 int main() {
@@ -497,6 +793,9 @@ int main() {
         TestProjectiveDomainContracts(root);
         TestCompressedJpegByteLimit(root);
         TestExportValidationFailures(root);
+        TestInputHandlesRemainImmutableThroughPublish(root);
+        TestStitchSnapshotFailurePreservation(root);
+        TestGeneratedPartialValidationAndNonReplacingPublish(root);
         std::filesystem::remove_all(root);
     } catch (const std::exception& error) {
         std::cerr << "UNEXPECTED: " << error.what() << '\n';
