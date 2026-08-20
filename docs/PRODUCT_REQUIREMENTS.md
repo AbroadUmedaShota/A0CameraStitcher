@@ -10,7 +10,7 @@
 - 被写体は平面に近い静止原稿。
 - カメラ、レンズ、原稿台、照明は固定する。
 - 操作者はactive transaction外で`SingleCamera`または`DualCamera`を明示選択する。接続台数からmodeを推定せず、`DualCamera`の一台不足を`SingleCamera`へ自動降格しない。
-- 初期`SingleCamera`運用は`CAM-A`専用とし、SDKとWPDの双方でD810が厳密に一台だけ列挙され、登録済みWPD serial digestと一致する構成に限定する。`DualCamera`は登録済みD810二台をWindows 11 x64 PCへUSB接続する。
+- 初期`SingleCamera`運用は`CAM-A`専用とし、SDKとWPDの双方でD810が厳密に一台だけ列挙され、登録済みWPD serial digestと一致する構成に限定する。`DualCamera`はD810二台をWindows 11 x64 PCへUSB接続し、Agent sessionごとに操作者がLive Viewを確認して`CAM-A`と`CAM-B`を明示割当する。
 - 撮影中に他のテザー撮影ソフトはカメラを占有しない。
 - active transaction中は操作者も物理シャッターを操作せず、active modeがその段階で処理するcameraをPhase 0ツールが排他的に使用する。
 - JPEG Fine Lを使用する。
@@ -22,13 +22,13 @@
 ### カメラ制御
 
 - `FR-MODE-001`: active transaction外で`SingleCamera`または`DualCamera`を明示選択し、mode、required camera aliases、profile IDをtransaction開始時に固定できる。active中のmode変更、接続台数からのmode推定、および`DualCamera`から`SingleCamera`への自動降格を禁止する。
-- `FR-CAP-001`: 接続されたD810を列挙し、active modeが要求するaliasをfail closedで解決できる。初期`SingleCamera`は`CAM-A`だけを対象とし、登録済みWPD serial digestとSDK/WPD各exactly-one current-session projectionを要求する。`DualCamera`は`CAM-A`と`CAM-B`の恒久bindingを要求する。
-- `FR-CAP-002`: `SingleCamera`はWPD serial digestを永続identity、SDKを`exactly-one-current-session`選択として扱い、SDKの衝突するName/Interfaceを永続化しない。`DualCamera`はSDK/WPDそれぞれのlocal identityを同じ物理D810へ対応付け、接続順やUSBポートに依存せず復元できる別の承認済みbindingを要求する。Single identityをDualへ流用しない。
-- `FR-CAP-003`: 2026-08-06に承認されたdedicated single-slot spoolをactive modeが要求する各cameraで使い、`SDK exactly-one card capture → WPD exact-one recovery → PC原本の再読込検証までの確定 → just-recovered object delete → empty-after確認`を完了する。`SingleCamera`は選択alias一台で完了し、`DualCamera`は`CAM-A`後に`CAM-B`を順次処理する。
-- `FR-CAP-004`: device datetime cutoffによる画像帰属は採用しない。専用empty/cleared cardをsingle-slot transient spoolとして使い、撮影前にJPEG・NEF・動画・generic fileなど全camera payload objectが0件であることを確認し、SDK one capture後の唯一のexact JPEG objectをWPDで回収できる。PC `.partial`、JPEG・size検証、SHA-256、atomic rename、`original.jpg`再読込検証後に限り、そのobjectだけを削除して全payload 0件を再確認する。候補0件・複数件・遅延・曖昧画像、download/persist/delete失敗は削除せず、PC原本があれば保持して`FailedPartial`にする。
+- `FR-CAP-001`: 接続されたD810を列挙し、active modeが要求するaliasをfail closedで解決できる。初期`SingleCamera`は`CAM-A`だけを対象とし、登録済みWPD serial digestとSDK/WPD各exactly-one current-session projectionを要求する。`DualCamera`はAgent session開始時にSDK candidate source objectが厳密に二つであることを確認し、二候補を同時表示せず一台ずつLive View表示して、操作者が各候補を`CAM-A`または`CAM-B`へexactly onceで明示割当する。同一候補の二重割当、候補数が二以外、alias不足、Live View停止またはSDK session closeを確認できない場合はbindingを拒否する。
+- `FR-CAP-002`: `SingleCamera`はWPD serial digestを永続identity、SDKを`exactly-one-current-session`選択として扱い、SDKの衝突するName/Interfaceを永続化しない。`DualCamera`の承認済みrelaxationは、candidate source object、candidate ordinal、列挙順、USB portを永続identityにせず、同じAgent sessionのmemory-only `DualIdentitySessionBinding`としてだけ`CAM-A/B`を保持する。Agent restart、USB reconnect、camera countまたはtopology変化、SDK manager再生成、任意のSDK errorで即時invalidにして、再binding完了までは`HardwarePending`とする。Single identityをDualへ流用しない。安定した`a0.camera-agent.hardware-dual.v2`は変更せず、binding専用`a0.camera-agent.hardware-dual-binding.v1`で`begin-binding`、`start-candidate-live-view`、`get-candidate-live-view-frame`、`confirm-alias`、`complete-binding`を提供する。
+- `FR-CAP-003`: 2026-08-06に承認されたdedicated single-slot spoolをactive modeが要求する各cameraで使い、`SDK exactly-one card capture → WPD exact-one recovery → PC原本の再読込検証までの確定 → just-recovered object delete → empty-after確認`を完了する。`SingleCamera`は選択alias一台で完了する。`DualCamera`は再列挙せずsession bindingが保持するsource objectを`CAM-A`後に`CAM-B`の順で処理し、各aliasに対応するWPD objectをexactly oneで回収する。
+- `FR-CAP-004`: device datetime cutoffによる画像帰属は採用しない。専用empty/cleared cardをsingle-slot transient spoolとして使い、撮影前にJPEG・NEF・動画・generic fileなど全camera payload objectが0件であることを確認し、SDK one capture後の唯一のexact JPEG objectをWPDで回収できる。PC `.partial`、JPEG・size検証、SHA-256、atomic rename、`original.jpg`再読込検証後に限り、そのobjectだけを削除して全payload 0件を再確認する。候補0件・複数件・遅延・曖昧画像、download/persist/delete失敗は削除せず、PC原本があれば保持して`FailedPartial`にする。`DualCamera`で対応するWPD aliasからexactly oneを回収できない場合も`FailedPartial`とし、他aliasの探索、他objectの削除、自動retryを行わない。
 - `FR-CAP-005`: modeにかかわらず同時に一つのcapture transaction、一つのSDK session、または一つのWPD sessionだけを開く。SDK/WPDを重複させず、SDK card captureとWPD recoveryの間には必ずfull closeを完了する。
 - `FR-CAP-006`: タイムアウト、USB切断、片側失敗、曖昧画像を検出し、自動再試行せず、取得済み原画像と診断情報を保持して`FailedPartial`で終了できる。
-- `FR-LV-001`: `SingleCamera`の`CAM-A`または`DualCamera`で選択した一台について、Nikon SDK経由の対話的Live View開始、継続frame取得、停止を実行できる。有限probeを継続Live Viewの合格証拠にせず、プレビュー画像は原画像・合成入力・撮影transactionの候補に使用しない。
+- `FR-LV-001`: `SingleCamera`の`CAM-A`または`DualCamera`で選択した一台について、Nikon SDK経由の対話的Live View開始、継続frame取得、停止を実行できる。Dual session bindingでは二候補を一台ずつ表示し、candidate ordinalはそのsession内だけで使用する。有限probeを継続Live Viewの合格証拠にせず、プレビュー画像は原画像・合成入力・撮影transactionの候補または保存証拠に使用しない。
 - `FR-LV-002`: 承認済みspool transaction前に選択中Live Viewの停止とSDK session closeを確認する。SDK one capture、WPD recovery、PC `original.jpg`の再読込検証までの確定、single-object delete、empty-after確認が成功した後だけ、操作者が選択していた一台のSDK Live Viewを再開できる。
 
 ### キャリブレーションと合成
@@ -54,15 +54,15 @@
 - `NFR-PLAT-001`: Windows 11 x64で動作する。
 - `NFR-PERF-001`: mode別に撮影開始から製品JPEG確定までのp95を測定する。`DualCamera`の暫定目標は10秒とする。`SingleCamera`はone-shot合格後の10回をcharacterizationとしてp95を算出し、その値をproduct ownerが承認するまで性能合格を宣言しない。
 - `NFR-REL-001`: `DualCamera`ではPhase 0Bで100件連続の二台撮影transactionを初回試行で完了し、失敗・誤pair・原画像消失・曖昧画像の自動採用・回復不能停止を0件とする。`SingleCamera`はp95目標承認後に100件連続の初回成功を要求し、二台結果から代用しない。
-- `NFR-OBS-001`: mode、required aliases、Live View開始・初回frame・停止、WPD baseline/open/close/reopen、SDK card capture/open/close、画像検出、転送、`.partial`、JPEG・size検証、SHA-256、原子的保存、再読込検証、single-object delete、empty-after、Live View再開、合成または`NotApplicable`理由、export、エラーの時刻を記録する。datetime診断結果、handoffの要求数・試行数・完了数・終端状態、WPD capture command未送信に加え、profile ID・版、baseline校正残差、提案・適用・拒否した一時補正量、拒否理由を確認可能にする。
-- `NFR-SEC-001`: 原画像と履歴をローカル保存し、MVPではクラウド送信しない。実識別子とSDK配布物をコミットしない。
+- `NFR-OBS-001`: mode、required aliases、Live View開始・初回frame・停止、WPD baseline/open/close/reopen、SDK card capture/open/close、画像検出、転送、`.partial`、JPEG・size検証、SHA-256、原子的保存、再読込検証、single-object delete、empty-after、Live View再開、合成または`NotApplicable`理由、export、エラーの時刻を記録する。datetime診断結果、handoffの要求数・試行数・完了数・終端状態、WPD capture command未送信に加え、profile ID・版、baseline校正残差、提案・適用・拒否した一時補正量、拒否理由を確認可能にする。Dual bindingの公開・保存可能な証拠は匿名alias、provider、version、`confirmedAt`、`invalidationReason`だけとする。
+- `NFR-SEC-001`: 原画像と履歴をローカル保存し、MVPではクラウド送信しない。実識別子とSDK配布物をコミットしない。Dual bindingのpreview、raw identifier、serial、source objectまたはcandidate ordinalを保存・公開しない。
 - `NFR-MEM-001`: 推奨32GB、最低16GBのPCでピークメモリを計測し、上限を実機PoCで確定する。
 
 ## 5. 制約
 
-- `CON-001`: USB接続したNikon D810を、明示modeに応じて厳密に一台または二台使用する。初期`SingleCamera`はSDK/WPD双方でexactly-one physical D810を要求し、`DualCamera`は二台を要求する。三台以上は対象外とする。
+- `CON-001`: USB接続したNikon D810を、明示modeに応じて厳密に一台または二台使用する。初期`SingleCamera`はSDK/WPD双方でexactly-one physical D810を要求する。`DualCamera`は同じAgent sessionで厳密に二候補を要求し、操作者によるmemory-only CAM-A/B bindingが完了している間だけ使用する。三台以上は対象外とする。
 - `CON-002`: ハードウェアシャッター同期を追加せず、実シャッター開口時刻差の上限を保証しない。
-- `CON-003`: attempted hybridのdevice datetime cutoffはhardware evidenceでRejectedであり、2026-08-06に承認された専用empty/cleared card single-slot spool以外の帰属・削除経路を実装・実行しない。SDK/WPD sessionは重複させず、vendor operation（`0x9207`を含む）、existing cardのbulk delete/format、retryは禁止する。deleteはPC原本の再読込検証後のexact just-recovered WPD objectだけとし、zero/multiple/late/invalid/download/persist/delete failureでは実行しない。二台接続時はSDK/WPD identityの同一実機bindingが完了するまでhandoffを許可しない。
+- `CON-003`: attempted hybridのdevice datetime cutoffはhardware evidenceでRejectedであり、2026-08-06に承認された専用empty/cleared card single-slot spool以外の帰属・削除経路を実装・実行しない。SDK/WPD sessionは重複させず、vendor operation（`0x9207`を含む）、existing cardのbulk delete/format、retryは禁止する。deleteはPC原本の再読込検証後のexact just-recovered WPD objectだけとし、zero/multiple/late/invalid/download/persist/delete failureでは実行しない。Dual binding完了時は全candidate Live View停止とSDK session full closeを確認してから内部`DualIdentitySessionBinding`を`Ready`にし、撮影中はbound source objectを再列挙しない。
 - `CON-004`: Nikon SDK、ライセンス対象バイナリ・資料、実カメラ識別子をリポジトリへ含めない。内部評価利用と製品再配布を別々に承認する。
 - `CON-005`: 動体、手持ち、近距離立体物、リアルタイム動画は対象外。
 
@@ -93,11 +93,11 @@ MVPの受入は、以下をすべて満たした時点で人間が判定する�
 1. 操作者が`SingleCamera`または`DualCamera`を明示選択でき、active中に変更されず、`DualCamera`が一台不足しても自動降格しない。
 2. 共通安全契約として、原画像を失わず、失敗時も取得済み画像を保持し、SDK/WPD非重複、exact-object cleanup、no retry、operator-session排他、180秒watchdogを満たす。
 3. `SingleCamera`では登録済みWPD serial digestとSDK/WPD各exactly-one current sessionから`CAM-A`一台だけを解決し、一操作で`7360×4912` canonical original一件を確定する。他aliasの処理とstitch jobを開始せず、`StitchOutcome=NotApplicable`を表示して、操作者が選択したfixed-local folderへbyte-identicalに明示保存できる。
-4. `DualCamera`では登録済みD810二台をSDK/WPD双方で同じ物理実機の`CAM-A`、`CAM-B`として識別し、一操作で両画像を順次取得して同一transactionとして確定できる。
+4. `DualCamera`ではAgent sessionごとに厳密に二候補を一台ずつLive View表示し、操作者が`CAM-A`、`CAM-B`を明示割当して全Live View停止とSDK full closeを確認する。そのmemory-only bindingが有効な間だけbound source objectを再列挙せず順次撮影し、対応WPD aliasから各画像をexactly oneで回収して同一transactionとして確定できる。
 5. `DualCamera`では承認済みテスト原稿で位置ずれ、二重像、色差、継ぎ目が合意済み基準内であり、再合成できる。
 6. mode別p95と耐久試験が合意済み目標内であり、USB再接続試験の結果が記録されている。SingleCameraは10回characterization後にp95目標を承認し、その後100件連続を合格させる。二台の100件結果を一台の合格へ読み替えない。
 7. 未解決の安全・SDK利用・再配布・mode別品質・リリースゲートがない。
 8. 一台選択式Live Viewが表示でき、撮影時にSDKとWPDを重複させず、安全に停止、WPD baseline、SDK一回card capture、WPD recovery、再開できる。
 9. active modeに対応する承認済みprofileを使って設置状態を判定し、範囲内の差だけを自動補正し、範囲外では成功扱いにせず物理調整または再キャリブレーションを案内できる。
 
-二台A0の数値品質基準は`HG-0001/0002`で確定する。一台の初期出力・profile・耐久run数はADR-0024で確定済みだが、p95目標の承認と実機証拠は`HG-0009`として残す。
+二台A0の数値品質基準は`HG-0001/0002`で確定する。`HG-0003B`はADR-0025のsession-local operator binding relaxationとして解消済みだが、Issue #9のcore・binding protocol・WPF・capture backendと実機1/10/100が合格するまでは`HardwarePending`であり、操作者の誤割当riskは残る。実シャッター同期は保証しない。一台の初期出力・profile・耐久run数はADR-0024で確定済みだが、p95目標の承認と実機証拠は`HG-0009`として残す。
