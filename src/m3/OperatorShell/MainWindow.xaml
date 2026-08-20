@@ -146,6 +146,9 @@
                                     <Image Source="{Binding StageSingleLiveImage}" Stretch="Uniform" Margin="8"
                                            Visibility="{Binding IsStageSingleLiveImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                            AutomationProperties.Name="ステージ Simulated疑似LVフレーム CAM-A CAM-B フルフレーム" />
+                                    <Image Source="{Binding StageSingleLivePeakingOverlay}" Stretch="Uniform" Margin="8" IsHitTestVisible="False"
+                                           Visibility="{Binding IsStageSingleLivePeakingOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="ステージ フォーカスピーキング エッジ強調オーバーレイ preview専用" />
                                     <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
                                                 Visibility="{Binding IsStageSingleLivePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Text="{Binding StageSingleLiveAlias}" Foreground="White" FontSize="26" FontWeight="Bold" TextAlignment="Center" />
@@ -167,6 +170,9 @@
                                         <Image Source="{Binding StageCompositeLiveImage}" Stretch="Uniform" Margin="4"
                                                Visibility="{Binding IsStageCompositeLiveImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                AutomationProperties.Name="ステージ 合成プレビュー ライブ側 Simulated疑似LVフレーム" />
+                                        <Image Source="{Binding StageCompositeLivePeakingOverlay}" Stretch="Uniform" Margin="4" IsHitTestVisible="False"
+                                               Visibility="{Binding IsStageCompositeLivePeakingOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                               AutomationProperties.Name="ステージ 合成プレビュー ライブ側 フォーカスピーキング エッジ強調オーバーレイ preview専用" />
                                         <StackPanel VerticalAlignment="Center"
                                                     Visibility="{Binding IsStageCompositeLivePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                             <TextBlock Text="{Binding StageCompositeLiveAlias}" Foreground="White" FontWeight="Bold" FontSize="18" TextAlignment="Center" />
@@ -314,6 +320,9 @@
                                             <Image Source="{Binding LoupeImage}" Stretch="Uniform"
                                                    Visibility="{Binding IsLoupeImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                    AutomationProperties.Name="拡大エリア Simulated疑似LVフレーム 等倍クロップ" />
+                                            <Image Source="{Binding LoupePeakingOverlay}" Stretch="Uniform" IsHitTestVisible="False"
+                                                   Visibility="{Binding IsLoupePeakingOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                   AutomationProperties.Name="拡大エリア フォーカスピーキング エッジ強調オーバーレイ preview専用" />
                                             <TextBlock Text="{Binding LoupePlaceholderText}" Foreground="#FFB9C2CB" TextAlignment="Center"
                                                        VerticalAlignment="Center" HorizontalAlignment="Center" Margin="14" TextWrapping="Wrap"
                                                        Visibility="{Binding IsLoupePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}"
@@ -346,9 +355,77 @@
                                                    AutomationProperties.Name="拡大エリア 表示ソースカメラ" />
                                     </StackPanel>
                                 </Border>
-                                <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10">
-                                    <TextBlock Text="フォーカス（次期Issueで実装）" Foreground="#FF8A96A3" FontStyle="Italic" TextAlignment="Center"
-                                               AutomationProperties.Name="フォーカス プレースホルダ枠 未実装" />
+                                <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10"
+                                        AutomationProperties.Name="フォーカスパネル AF実行 MFステップ ピーキング 固定状態チップ 撮影系操作">
+                                    <StackPanel>
+                                        <TextBlock Text="フォーカス" Style="{StaticResource SectionTitleStyle}" FontSize="17" />
+
+                                        <!-- 実機モード（HardwareDual）では承認までフォーカスパネル全体を無効表示し、
+                                             理由を併記する（#35 Option A・fail-closed）。UIとSIMULATEDだけ先行実装。 -->
+                                        <Border Margin="0,8,0,0" Padding="10" Background="#FFE8F2FF" BorderBrush="#FF2563A6" BorderThickness="1"
+                                                Visibility="{Binding IsFocusPanelUnavailable, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="フォーカスパネル 実機モードでは無効表示 fail-closed 理由">
+                                            <TextBlock Text="{Binding FocusPanelUnavailableReason}" TextWrapping="Wrap" Foreground="#FF174E87" FontSize="11" />
+                                        </Border>
+
+                                        <StackPanel Visibility="{Binding IsFocusPanelAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <DockPanel Margin="0,8,0,0">
+                                                <TextBlock DockPanel.Dock="Left" Text="対象カメラ（Live View中）" Foreground="#FF56616B" VerticalAlignment="Center" />
+                                                <TextBlock DockPanel.Dock="Right" Text="{Binding FocusPanelCameraAlias}" FontWeight="Bold" VerticalAlignment="Center"
+                                                           AutomationProperties.Name="フォーカス対象カメラ Live View中のカメラ" />
+                                            </DockPanel>
+
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <Border Padding="8,3" Margin="0,0,6,0" Background="White" BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="10">
+                                                    <TextBlock Text="{Binding CameraAFocusStatusText}" FontSize="11"
+                                                               AutomationProperties.Name="CAM-A フォーカス固定状態チップ" />
+                                                </Border>
+                                                <Border Padding="8,3" Background="White" BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="10">
+                                                    <TextBlock Text="{Binding CameraBFocusStatusText}" FontSize="11"
+                                                               AutomationProperties.Name="CAM-B フォーカス固定状態チップ" />
+                                                </Border>
+                                            </StackPanel>
+
+                                            <Button Content="{Binding SwitchLiveCameraButtonText}" Command="{Binding SwitchLiveCameraToTargetDomainCommand}"
+                                                    Margin="0,10,0,0" Padding="8,6" HorizontalAlignment="Stretch"
+                                                    Visibility="{Binding ShowSwitchLiveCameraButton, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="共通ターゲット□が非ライブ側カメラの担当域 ワンクリックでLive View切替 自動切替はしない" />
+
+                                            <Button Content="AF実行" Command="{Binding AutoFocusCommand}" IsEnabled="{Binding CanExecuteAutoFocus}"
+                                                    Margin="0,10,0,0" Padding="8,8" FontWeight="Bold" HorizontalAlignment="Stretch"
+                                                    Visibility="{Binding ShowAutoFocusButton, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="共通ターゲット□の位置でコントラストAFを実行" />
+                                            <TextBlock Text="{Binding FocusResultText}" Margin="0,6,0,0"
+                                                       AutomationProperties.LiveSetting="Polite"
+                                                       AutomationProperties.Name="AF実行結果 合焦OK NG 実行時刻 使用した□位置" />
+
+                                            <TextBlock Text="MFステップ（相対値・無次元）" FontWeight="Bold" Margin="0,12,0,0" />
+                                            <Grid Margin="0,6,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <Button Grid.Column="0" Content="◀◀粗" Command="{Binding MfCoarseBackwardCommand}" IsEnabled="{Binding CanUseFocusPanel}"
+                                                        Margin="0,0,2,0" AutomationProperties.Name="MF粗ステップ 後退" />
+                                                <Button Grid.Column="1" Content="◀微" Command="{Binding MfFineBackwardCommand}" IsEnabled="{Binding CanUseFocusPanel}"
+                                                        Margin="0,0,2,0" AutomationProperties.Name="MF微ステップ 後退" />
+                                                <Button Grid.Column="2" Content="微▶" Command="{Binding MfFineForwardCommand}" IsEnabled="{Binding CanUseFocusPanel}"
+                                                        Margin="2,0,0,0" AutomationProperties.Name="MF微ステップ 前進" />
+                                                <Button Grid.Column="3" Content="粗▶▶" Command="{Binding MfCoarseForwardCommand}" IsEnabled="{Binding CanUseFocusPanel}"
+                                                        Margin="2,0,0,0" AutomationProperties.Name="MF粗ステップ 前進" />
+                                            </Grid>
+                                            <TextBlock Text="{Binding FocusPositionText}" Margin="0,4,0,0" Foreground="#FF56616B" FontSize="11"
+                                                       AutomationProperties.Name="フォーカス状態値 read-only 相対インジケータ 絶対値スライダーではない" />
+
+                                            <DockPanel Margin="0,12,0,0">
+                                                <TextBlock DockPanel.Dock="Left" Text="フォーカスピーキング" FontWeight="Bold" VerticalAlignment="Center" />
+                                                <Button DockPanel.Dock="Right" Content="{Binding PeakingButtonText}" Command="{Binding TogglePeakingCommand}"
+                                                        AutomationProperties.Name="フォーカスピーキング LVフレームへのエッジ強調オーバーレイ preview専用 ON OFF切替" />
+                                            </DockPanel>
+                                        </StackPanel>
+                                    </StackPanel>
                                 </Border>
 
                                 <Border BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10"

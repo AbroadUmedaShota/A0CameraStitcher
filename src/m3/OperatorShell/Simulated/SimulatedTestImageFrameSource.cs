@@ -47,11 +47,14 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
             DrawScene(context, cameraAlias, pattern);
         }
 
+        var blurRadius = pattern == SimulatedFramePattern.BlurToFocusTransition
+            ? ComputeBlurRadius(sequenceNumber)
+            : 0.0;
         if (pattern == SimulatedFramePattern.BlurToFocusTransition)
         {
             sceneVisual.Effect = new BlurEffect
             {
-                Radius = ComputeBlurRadius(sequenceNumber),
+                Radius = blurRadius,
                 KernelType = KernelType.Gaussian,
             };
         }
@@ -92,6 +95,7 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
             Image = finalBitmap,
             Simulation = true,
             Marker = "Simulated",
+            BlurRadius = blurRadius,
         };
     }
 

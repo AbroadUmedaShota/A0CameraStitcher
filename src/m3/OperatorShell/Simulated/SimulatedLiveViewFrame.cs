@@ -25,4 +25,14 @@ public sealed record SimulatedLiveViewFrame
 
     /// <summary>Always "Simulated". See <see cref="Simulation"/>.</summary>
     public required string Marker { get; init; }
+
+    /// <summary>The Gaussian blur radius actually rendered into this frame (0 = sharp).
+    /// Always 0 for every pattern except <see cref="SimulatedFramePattern.BlurToFocusTransition"/>,
+    /// where it follows that pattern's ramp-down-then-hold-sharp cycle. Not required (defaults
+    /// to 0) so existing frame construction call sites — including the 1x1 test doubles used
+    /// by headless tests — keep compiling unchanged. Exists so consumers (issue #31's AF
+    /// execution and focus-peaking overlay) can read the source's own ground-truth sharpness
+    /// instead of re-deriving it from <see cref="SequenceNumber"/>/<see cref="Pattern"/> with a
+    /// duplicated formula.</summary>
+    public double BlurRadius { get; init; }
 }
