@@ -491,7 +491,51 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the focus panel stays disabled with a shown reason under the HardwareDual execution environment: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {42 - failures.Count}/42 passed.");
+try
+{
+    await CaptureWithAutoFocusSucceedsThenCapturesAsync();
+    Console.WriteLine("PASS 撮影+AF converges on every required camera then runs the unchanged existing capture flow");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF converges on every required camera then runs the unchanged existing capture flow");
+    Console.Error.WriteLine($"FAIL 撮影+AF converges on every required camera then runs the unchanged existing capture flow: {exception}");
+}
+
+try
+{
+    await CaptureWithAutoFocusStopsBeforeShutterOnNgAsync();
+    Console.WriteLine("PASS 撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG");
+    Console.Error.WriteLine($"FAIL 撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG: {exception}");
+}
+
+try
+{
+    await CaptureWithAutoFocusUnavailableUnderHardwareDualAsync();
+    Console.WriteLine("PASS 撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A)");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A)");
+    Console.Error.WriteLine($"FAIL 撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A): {exception}");
+}
+
+try
+{
+    await ActionZoneVisibilitySwitchesWithUiStateAsync();
+    Console.WriteLine("PASS the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果)");
+}
+catch (Exception exception)
+{
+    failures.Add("the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果)");
+    Console.Error.WriteLine($"FAIL the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {46 - failures.Count}/46 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3869,6 +3913,169 @@ static async Task FocusPanelDisabledInHardwareDualEnvironmentAsync()
             Directory.Delete(root, recursive: true);
         }
     }
+}
+
+static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusSuccessTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this issue #33 撮影+AF regression.");
+        Check.True(viewModel.CanCapture, "A ready Dual plan must allow capture.");
+        Check.True(viewModel.CanCaptureWithAutoFocus, "撮影+AF must be available in SIMULATED Dual mode (no HardwareDual gate active).");
+        Check.True(viewModel.IsActionZonePreparing, "The action zone must show state 1 (readiness card + capture buttons) while Ready.");
+        Check.False(viewModel.IsActionZoneProcessing, "The action zone must not show the progress strip before capture starts.");
+        Check.False(viewModel.IsActionZoneReview, "The action zone must not show the result panel before capture starts.");
+
+        viewModel.CaptureWithAutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy, "撮影+AF did not finish its capture.");
+
+        Check.Equal(OperatorUiState.Review, viewModel.UiState);
+        Check.True(viewModel.IsActionZoneReview, "The action zone must show state 3 (result panel) once Review is reached.");
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-A", StringComparison.Ordinal), "CAM-A original must be retained after a successful 撮影+AF.");
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-B", StringComparison.Ordinal), "CAM-B original must be retained after a successful 撮影+AF.");
+        Check.True(viewModel.StitchResult.Contains("自動合成完了", StringComparison.Ordinal), "A successful Dual 撮影+AF must still auto-stitch through the unchanged existing flow.");
+
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is not null, "The #31 pre-capture AF hook must have recorded an outcome (SIMULATED journal-equivalent record).");
+        Check.True(viewModel.LastPreCaptureAutoFocusResult!.Success, "The last recorded pre-capture AF outcome (CAM-B, the second required camera) must be 合焦OK.");
+        Check.Equal("CAM-B", viewModel.LastPreCaptureAutoFocusResult!.CameraAlias);
+        Check.Equal("CAM-B: 固定済", viewModel.CameraBFocusStatusText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task CaptureWithAutoFocusStopsBeforeShutterOnNgAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusNgTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        // The real frame source (not the fake) is used so the tick's BlurRadius actually follows
+        // SimulatedTestImageFrameSource's blur-to-focus ramp, mirroring
+        // AutoFocusReportsNgDuringBlurRampAsync's setup for issue #31's own "AF実行" button — the
+        // same NG scenario now exercised through the 撮影+AF pre-capture gate instead.
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this 撮影+AF regression.");
+        Check.Equal("CAM-A", viewModel.SelectedCamera);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        // sequenceNumber=0 sits at the start of the blur ramp (near-maximum blur radius), so
+        // CAM-A — the first camera modeが要求する — fails its pre-capture AF check.
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.BlurToFocusTransition, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(viewModel.CanCaptureWithAutoFocus, "撮影+AF must remain invocable even though CAM-A's live frame is currently blurred — SIMULATED AF is allowed to fail, not blocked outright.");
+
+        viewModel.CaptureWithAutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.UiState == OperatorUiState.FailedPartial, "撮影+AF did not stop with FailedPartial after CAM-A's pre-capture AF failure.");
+
+        Check.Equal(0, viewModel.TransactionStartCount);
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is not null, "The pre-capture AF hook must have recorded CAM-A's failed outcome.");
+        Check.False(viewModel.LastPreCaptureAutoFocusResult!.Success, "The recorded pre-capture AF outcome for CAM-A must be 合焦NG.");
+        Check.Equal("CAM-A", viewModel.LastPreCaptureAutoFocusResult!.CameraAlias);
+        Check.True(viewModel.CaptureResult.Contains("AF NG", StringComparison.Ordinal), "The result panel must show the shutter was never fired for this attempt.");
+        Check.True(viewModel.StatusMessage.Contains("シャッターを実行せず", StringComparison.Ordinal), "The status message must explain the fail-closed stop.");
+        Check.Equal("CAM-A: 未固定", viewModel.CameraAFocusStatusText);
+        Check.True(viewModel.IsActionZoneReview, "FailedPartial belongs to action zone state 3 (result panel with 新しい撮影を準備), not the capture buttons.");
+        Check.False(viewModel.CanCapture, "A FailedPartial stop must block another capture until 新しい撮影を準備 — the same contract every other failure point already uses.");
+        Check.True(viewModel.CanPrepareNewCapture, "The operator must be able to explicitly prepare a new transaction after a fail-closed 撮影+AF stop.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task CaptureWithAutoFocusUnavailableUnderHardwareDualAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusHardwareGateTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var hardwareFlow = DualCameraProductComposition.Create(
+            Path.Combine(root, "hardware-products"),
+            DualCameraExecutionEnvironment.HardwareDual);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            hardwareFlow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.False(viewModel.CanCaptureWithAutoFocus, "実機モード（HardwareDual）では撮影+AFを実行不可とする（#35 Option A・#31のIsFocusPanelAvailableゲートを流用）。");
+        Check.False(viewModel.CaptureWithAutoFocusCommand.CanExecute(null), "The bound command must agree with CanCaptureWithAutoFocus.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task ActionZoneVisibilitySwitchesWithUiStateAsync()
+{
+    var service = new BlockingTransactionService();
+    var viewModel = new OperatorShellViewModel(service);
+    await viewModel.InitializeAsync(CancellationToken.None);
+    viewModel.SelectedOperatingMode = "1台構成";
+    viewModel.SelectedCamera = "CAM-B";
+
+    Check.Equal(OperatorUiState.AwaitingSafetyAck, viewModel.UiState);
+    Check.True(viewModel.IsActionZonePreparing, "AwaitingSafetyAck must show action zone state 1 (readiness card + capture buttons).");
+    Check.False(viewModel.IsActionZoneProcessing, "AwaitingSafetyAck must not show the progress strip.");
+    Check.False(viewModel.IsActionZoneReview, "AwaitingSafetyAck must not show the result panel.");
+
+    viewModel.AcceptSafetyCommand.Execute(null);
+    Check.Equal(OperatorUiState.Ready, viewModel.UiState);
+    Check.True(viewModel.IsActionZonePreparing, "Ready must still show action zone state 1.");
+    Check.False(viewModel.IsActionZoneProcessing, "Ready must not show the progress strip.");
+    Check.False(viewModel.IsActionZoneReview, "Ready must not show the result panel.");
+
+    viewModel.CaptureCommand.Execute(null);
+    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.Equal(OperatorUiState.Capturing, viewModel.UiState);
+    Check.False(viewModel.IsActionZonePreparing, "Capturing must hide action zone state 1.");
+    Check.True(viewModel.IsActionZoneProcessing, "Capturing must show action zone state 2 (自動進捗ストリップ).");
+    Check.False(viewModel.IsActionZoneReview, "Capturing must hide action zone state 3.");
+
+    service.Release();
+    await WaitUntilAsync(() => !viewModel.IsBusy, "The blocking capture did not finish.");
+    Check.Equal(OperatorUiState.Review, viewModel.UiState);
+    Check.False(viewModel.IsActionZonePreparing, "Review must hide action zone state 1.");
+    Check.False(viewModel.IsActionZoneProcessing, "Review must hide action zone state 2.");
+    Check.True(viewModel.IsActionZoneReview, "Review must show action zone state 3 (結果パネル).");
 }
 
 static byte[] CopyPixelsBgra(BitmapSource bitmap)
