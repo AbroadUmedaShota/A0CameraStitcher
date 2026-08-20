@@ -139,6 +139,52 @@ public partial class MainWindow : Window
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs eventArgs) => Close();
 
+    // タイトルバーは 1920×1080 キャンバスの中にあり、ウィンドウ縮小率に応じて実際の高さが変わる。
+    // OS の caption 判定（WindowChrome.CaptionHeight）は物理座標で効くため実領域とずれる。
+    // そこで CaptionHeight=0 とし、移動・最大化の操作をここで受ける。
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs)
+    {
+        if (eventArgs.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (eventArgs.ClickCount == 2)
+        {
+            ToggleMaximizedState();
+            return;
+        }
+
+        if (WindowState == WindowState.Maximized)
+        {
+            // 最大化のままではドラッグで動かせないため、掴んだ位置の横比率を保ったまま復元する。
+            var grabRatio = eventArgs.GetPosition(this).X / Math.Max(1.0, ActualWidth);
+            WindowState = WindowState.Normal;
+            var cursor = PointToScreen(eventArgs.GetPosition(this));
+            Left = cursor.X - (Width * grabRatio);
+            Top = cursor.Y - (eventArgs.GetPosition(this).Y);
+        }
+
+        DragMove();
+    }
+
+    private void ToggleMaximizedState() =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void MinimizeWindow_Click(object sender, RoutedEventArgs eventArgs) =>
+        WindowState = WindowState.Minimized;
+
+    private void MaximizeWindow_Click(object sender, RoutedEventArgs eventArgs) => ToggleMaximizedState();
+
+    private void CloseWindow_Click(object sender, RoutedEventArgs eventArgs) => Close();
+
+    private void ToggleTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        var showing = TechnicalDetailRow.Visibility != Visibility.Visible;
+        TechnicalDetailRow.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
+        TechnicalDetailToggle.Content = showing ? "▾ 詳細情報" : "▸ 詳細情報";
+    }
+
     private void StageDragHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs) =>
         BeginTargetDrag(sender, eventArgs, StageDisplayArea, _viewModel.MoveTargetByStageDrag);
 

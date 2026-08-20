@@ -87,10 +87,14 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly RelayCommand _mfFineForwardCommand;
     private readonly RelayCommand _togglePeakingCommand;
     private readonly RelayCommand _switchLiveCameraToTargetDomainCommand;
+    private readonly RelayCommand _showConsentCommand;
 
     private CancellationToken _lifetimeToken;
     private bool _isBusy;
     private bool _safetyAcknowledged;
+    private bool _consentOverlayDismissed;
+    private bool _physicalShutterAckAccepted;
+    private bool _exclusiveUseAckAccepted;
     private bool _isLiveViewActive;
     private string _selectedOperatingMode = DualModeLabel;
     private string _selectedCamera = "CAM-A";
@@ -208,8 +212,12 @@ public sealed class OperatorShellViewModel : ObservableObject
             new("export", "明示export"),
         ];
 
-        _acceptSafetyCommand = new RelayCommand(AcceptSafety, () => !SafetyAcknowledged && !IsBusy);
+        // 同意は2項目の両方にチェックが入るまで押せない。読まずに流す操作を防ぐため。
+        _acceptSafetyCommand = new RelayCommand(
+            AcceptSafety,
+            () => !SafetyAcknowledged && !IsBusy && IsPhysicalShutterAckAccepted && IsExclusiveUseAckAccepted);
         _declineSafetyCommand = new RelayCommand(DeclineSafety, () => !SafetyAcknowledged && !IsBusy);
+        _showConsentCommand = new RelayCommand(ShowConsent, () => !SafetyAcknowledged && !IsBusy);
         _captureCommand = new AsyncRelayCommand(() => RunCaptureAsync("正常完了"), () => CanCapture, ShowUnexpectedFailure);
         _captureWithAutoFocusCommand = new AsyncRelayCommand(() => RunCaptureWithAutoFocusAsync("正常完了"), () => CanCaptureWithAutoFocus, ShowUnexpectedFailure);
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
@@ -269,6 +277,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         : "watchdog: 180秒契約（残り秒の実データは未接続のため静的表示・カウントダウンはしません）";
 
     public ICommand AcceptSafetyCommand => _acceptSafetyCommand;
+    public ICommand ShowConsentCommand => _showConsentCommand;
     public ICommand DeclineSafetyCommand => _declineSafetyCommand;
     public ICommand CaptureCommand => _captureCommand;
     public ICommand CaptureWithAutoFocusCommand => _captureWithAutoFocusCommand;
@@ -324,12 +333,47 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _safetyAcknowledged, value))
             {
                 OnPropertyChanged(nameof(SafetyAckText));
+                OnPropertyChanged(nameof(IsConsentOverlayVisible));
+                OnPropertyChanged(nameof(IsSafetyAckPending));
                 RebuildReadiness(preserveOutcomeState: UiState == OperatorUiState.FailedPartial);
             }
         }
     }
 
     public string SafetyAckText => SafetyAcknowledged ? "同意済み（アプリ終了時に破棄）" : "未同意 — 撮影禁止";
+
+    /// <summary>起動セッションの排他同意モーダルの表示可否。未同意の間だけ前面に出す。
+    /// 「同意しない」を選んだ場合は閲覧できるよう畳み、タイトルバーの再開ボタンから開き直す。</summary>
+    public bool IsConsentOverlayVisible => !SafetyAcknowledged && !_consentOverlayDismissed;
+
+    /// <summary>未同意であることをタイトルバーへ常時示すためのフラグ。</summary>
+    public bool IsSafetyAckPending => !SafetyAcknowledged;
+
+    /// <summary>同意チェック1: 撮影シーケンス中に物理シャッターへ触れないこと。</summary>
+    public bool IsPhysicalShutterAckAccepted
+    {
+        get => _physicalShutterAckAccepted;
+        set
+        {
+            if (SetProperty(ref _physicalShutterAckAccepted, value))
+            {
+                NotifyAllCommands();
+            }
+        }
+    }
+
+    /// <summary>同意チェック2: 他のカメラ撮影ソフトでカメラを占有しないこと。</summary>
+    public bool IsExclusiveUseAckAccepted
+    {
+        get => _exclusiveUseAckAccepted;
+        set
+        {
+            if (SetProperty(ref _exclusiveUseAckAccepted, value))
+            {
+                NotifyAllCommands();
+            }
+        }
+    }
     public string ActivityText => IsBusy ? "操作をロック中" : "操作受付中";
     public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
     public bool CanChangeOperatingMode => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
@@ -1566,7 +1610,17 @@ public sealed class OperatorShellViewModel : ObservableObject
     private void DeclineSafety()
     {
         StatusMessage = "同意しなかったため撮影は禁止されています。閲覧と終了のみ可能です。";
+        // 閲覧はできるようモーダルを畳む。撮影が禁止されたままであることは
+        // タイトルバーの未同意表示と Blocker が示し続ける。
+        _consentOverlayDismissed = true;
+        OnPropertyChanged(nameof(IsConsentOverlayVisible));
         UiState = OperatorUiState.AwaitingSafetyAck;
+    }
+
+    private void ShowConsent()
+    {
+        _consentOverlayDismissed = false;
+        OnPropertyChanged(nameof(IsConsentOverlayVisible));
     }
 
     private async Task RunCaptureAsync(string scenario)
@@ -2420,5 +2474,6 @@ public sealed class OperatorShellViewModel : ObservableObject
         _mfFineForwardCommand.NotifyCanExecuteChanged();
         _togglePeakingCommand.NotifyCanExecuteChanged();
         _switchLiveCameraToTargetDomainCommand.NotifyCanExecuteChanged();
+        _showConsentCommand.NotifyCanExecuteChanged();
     }
 }
