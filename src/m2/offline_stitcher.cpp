@@ -303,17 +303,26 @@ void WriteBytesToNewFile(
     }
 }
 
-Point Transform(const std::array<double, 9>& matrix, const Point point) {
-    const double denominator = matrix[6] * point.x + matrix[7] * point.y + matrix[8];
+double TransformDenominator(const std::array<double, 9>& matrix, const Point point) {
+    return matrix[6] * point.x + matrix[7] * point.y + matrix[8];
+}
+
+bool TryTransform(const std::array<double, 9>& matrix, const Point point, Point& transformed) {
+    const double denominator = TransformDenominator(matrix, point);
     if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
-        throw std::invalid_argument("fixed transform maps an image corner to infinity");
+        return false;
     }
-    const Point transformed{
+    transformed = {
         (matrix[0] * point.x + matrix[1] * point.y + matrix[2]) / denominator,
         (matrix[3] * point.x + matrix[4] * point.y + matrix[5]) / denominator,
     };
-    if (!std::isfinite(transformed.x) || !std::isfinite(transformed.y)) {
-        throw std::invalid_argument("fixed transform produces a non-finite coordinate");
+    return std::isfinite(transformed.x) && std::isfinite(transformed.y);
+}
+
+Point Transform(const std::array<double, 9>& matrix, const Point point) {
+    Point transformed{};
+    if (!TryTransform(matrix, point, transformed)) {
+        throw std::invalid_argument("fixed transform maps a coordinate to infinity");
     }
     return transformed;
 }
@@ -342,6 +351,31 @@ std::array<double, 9> Invert(const std::array<double, 9>& matrix) {
         (matrix[1] * matrix[6] - matrix[0] * matrix[7]) / determinant,
         (matrix[0] * matrix[4] - matrix[1] * matrix[3]) / determinant,
     };
+}
+
+void ValidateProjectiveDomain(
+    const std::array<double, 9>& matrix,
+    const std::uint32_t width,
+    const std::uint32_t height) {
+    const std::array<Point, 4> corners{{
+        {0.0, 0.0},
+        {static_cast<double>(width), 0.0},
+        {0.0, static_cast<double>(height)},
+        {static_cast<double>(width), static_cast<double>(height)},
+    }};
+    bool positive{};
+    for (std::size_t index = 0; index < corners.size(); ++index) {
+        const double denominator = TransformDenominator(matrix, corners[index]);
+        if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
+            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
+        }
+        const bool current_positive = denominator > 0.0;
+        if (index == 0) {
+            positive = current_positive;
+        } else if (current_positive != positive) {
+            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
+        }
+    }
 }
 
 Bounds TransformedBounds(const Image& image, const std::array<double, 9>& matrix) {
@@ -425,6 +459,10 @@ void ValidateProfile(const FixedRigStitchProfile& profile) {
         throw std::invalid_argument("rig profile expected input dimensions are required");
     }
     (void)Invert(profile.camera_b_to_camera_a);
+    ValidateProjectiveDomain(
+        profile.camera_b_to_camera_a,
+        profile.expected_input_width,
+        profile.expected_input_height);
 }
 
 void ValidateCanonicalPath(const std::filesystem::path& path, const char* alias) {
@@ -570,8 +608,12 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
             std::array<double, 3> pixel_a{};
             std::array<double, 3> pixel_b{};
             const bool has_a = SampleBilinear(camera_a, global_x, global_y, pixel_a);
-            const Point source_b = Transform(inverse_b, {global_x, global_y});
-            const bool has_b = SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
+            Point source_b{};
+            const bool has_b = TryTransform(inverse_b, {global_x, global_y}, source_b)
+                && SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
+            if (!has_a && !has_b) {
+                throw std::invalid_argument("approved crop contains an uncovered output pixel");
+            }
             const double b_weight = has_a && has_b
                 ? FeatherWeight(request.profile.layout, global_x, global_y, a_bounds, b_bounds)
                 : (has_b ? 1.0 : 0.0);

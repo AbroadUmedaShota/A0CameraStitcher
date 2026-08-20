@@ -273,6 +273,100 @@ void TestFailClosedContracts(const std::filesystem::path& root) {
         "output must not share a canonical input job directory");
 }
 
+void TestCoverageMaskContracts(const std::filesystem::path& root) {
+    const auto a_directory = root / "coverage-a";
+    const auto b_directory = root / "coverage-b";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 16, 8, 0, 0, 0);
+    WriteSolidJpeg(camera_b, 16, 8, 0, 0, 0);
+    const auto a_before = ReadBytes(camera_a);
+    const auto b_before = ReadBytes(camera_b);
+
+    const auto valid_black = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "coverage-valid-black", ApprovedProfile()});
+    Check(std::filesystem::is_regular_file(valid_black.stitched_jpeg),
+        "valid black source pixels must not be mistaken for uncovered output");
+
+    auto uncovered = ApprovedProfile();
+    uncovered.camera_b_to_camera_a = {
+        1.0, -0.5, 12.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+    const auto rejected_job = root / "coverage-reject-uncovered";
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, rejected_job, uncovered}); },
+        "uncovered output pixel",
+        "an approved crop containing a pixel from neither source must fail closed");
+    Check(!std::filesystem::exists(rejected_job / "stitched.jpg")
+            && !std::filesystem::exists(rejected_job / "stitched.jpg.partial"),
+        "coverage rejection must not publish a stitched JPEG or partial");
+    Check(ReadBytes(camera_a) == a_before && ReadBytes(camera_b) == b_before,
+        "coverage validation must preserve both canonical originals byte-for-byte");
+
+    auto cropped_wedge = uncovered;
+    cropped_wedge.crop = {0, 0, 4, 0};
+    const auto cropped = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "coverage-cropped-wedge", cropped_wedge});
+    Check(cropped.width == 24 && cropped.height == 8
+            && std::filesystem::is_regular_file(cropped.stitched_jpeg),
+        "a fixed crop that removes the complete uncovered wedge must remain accepted");
+}
+
+void TestProjectiveDomainContracts(const std::filesystem::path& root) {
+    const auto a_directory = root / "projective-a";
+    const auto b_directory = root / "projective-b";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 16, 8, 10, 20, 30);
+    WriteSolidJpeg(camera_b, 16, 8, 30, 20, 10);
+    const auto a_before = ReadBytes(camera_a);
+    const auto b_before = ReadBytes(camera_b);
+
+    auto crossing = ApprovedProfile();
+    crossing.camera_b_to_camera_a = {
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.2, 0.0, -1.0,
+    };
+    const auto rejected_job = root / "projective-reject-crossing";
+    CheckRejectedContains(
+        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, rejected_job, crossing}); },
+        "projective denominator crosses the input image",
+        "a fixed transform with an infinity line inside the input rectangle must fail preflight");
+    Check(!std::filesystem::exists(rejected_job),
+        "projective-domain preflight rejection must happen before output job creation");
+    Check(ReadBytes(camera_a) == a_before && ReadBytes(camera_b) == b_before,
+        "projective-domain preflight must preserve both canonical originals byte-for-byte");
+
+    auto negative_homogeneous_scale = ApprovedProfile();
+    for (double& value : negative_homogeneous_scale.camera_b_to_camera_a) {
+        value = -value;
+    }
+    const auto accepted = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "projective-negative-scale", negative_homogeneous_scale});
+    Check(accepted.width == 26 && accepted.height == 6
+            && std::filesystem::is_regular_file(accepted.stitched_jpeg),
+        "a valid fixed transform with consistently negative homogeneous scale must remain accepted");
+
+    auto inverse_pole_outside_b = ApprovedProfile();
+    inverse_pole_outside_b.camera_b_to_camera_a = {
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.1, 0.0, 1.0,
+    };
+    const auto a_only_accepted = a0::m2::StitchCanonicalPair(
+        {camera_a, camera_b, root / "projective-inverse-pole-a-only", inverse_pole_outside_b});
+    Check(a_only_accepted.width == 14 && a_only_accepted.height == 6
+            && std::filesystem::is_regular_file(a_only_accepted.stitched_jpeg),
+        "an inverse pole outside CAM-B coverage must not reject an otherwise valid CAM-A output pixel");
+}
+
 void TestCompressedJpegByteLimit(const std::filesystem::path& root) {
     const auto a_directory = root / "size-a";
     const auto b_directory = root / "size-b";
@@ -399,6 +493,8 @@ int main() {
         }
         TestStitchRecomposeAndExport(root);
         TestFailClosedContracts(root);
+        TestCoverageMaskContracts(root);
+        TestProjectiveDomainContracts(root);
         TestCompressedJpegByteLimit(root);
         TestExportValidationFailures(root);
         std::filesystem::remove_all(root);
