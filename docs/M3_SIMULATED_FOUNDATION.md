@@ -39,6 +39,14 @@ WPF shellのlocal stateは`%LOCALAPPDATA%\A0CameraStitcher\m3-simulated`へ置�
 
 DualCameraのapplication flowは、C++ identity proof結果を匿名JSON DTOから`Ready`、`Missing`、`Ambiguous`、`Collision`、`AliasMismatch`、`TransportMismatch`、`Expired`、`InvalidSchema`、`HardwarePending`へ変換する。`Ready`以外はWPFとflow APIの両方で撮影開始前に拒否し、SingleCameraへfallbackしない。active transactionは開始時snapshotを固定する。`TestSynthetic`だけが明示的な匿名Ready snapshotを注入し、実provider未確定の経路は`HardwarePending`を既定値として維持する。このsoftware-only adapterと契約試験は、実機identity readiness、SDK/WPD correlation、card access、capture、Live View、設定変更、削除を承認・実行するものではない。
 
+## 疑似LVフレームソース（SIMULATED）
+
+`src/m3/OperatorShell/Simulated/`は、CAM-A/CAM-B各1系統の疑似ライブビューフレームを実行時に描画生成する（ビットマップ資産・実写・顧客原稿は一切使わない）。`ISimulatedLiveViewFrameSource`（実装: `SimulatedTestImageFrameSource`）が正対原稿・傾き原稿（ROLL ±3°/±6°の4パターン）・ボケ→合焦遷移の各シーンをWPFの`DrawingVisual`/`RenderTargetBitmap`で描く。全フレームは`Simulation=true`/`Marker="Simulated"`を持ち、二段描画（背景シーンをレンダリング後、非ブラーの別パスで"SIMULATED"透かしとタイムスタンプ帯を上書き合成）により、どの合焦状態でも透かしが可読なまま残る。
+
+`ISimulatedLiveViewFramePump`（実装: `SimulatedLiveViewFramePump`、`System.Threading.Timer`駆動でDispatcher非依存）はLive View ON中だけ一定間隔（既定200ms・5fps。プレビュー用途で体感十分な更新頻度とCPU負荷のバランスを取った値）で「tick」（camera alias・pattern・sequence・generation・timestampのみを持つ軽量レコード`SimulatedLiveViewFrameTick`）を発火するだけで、実際のWPF描画（`ISimulatedLiveViewFrameSource.CreateFrame`）はしない。これにより、タイマーcallback自体はほぼ一瞬で完了し（tick同士のオーバーラップやスレッドプール各スレッドへのDispatcher蓄積のリスクを回避）、実際の描画は`OperatorShellViewModel`がtickを自分のSynchronizationContext経由でUIスレッドへ運んでから行う（＝全フレームが単一のDispatcherの上で生成される）。`Start()`はgeneration番号を返し、Live View OFF→同一カメラで再ONした場合でも、古いgenerationのtickは新しいgenerationと一致しないため破棄される（aliasだけの一致判定では検出できないOFF→同一alias→ON競合のガード）。
+
+`OperatorShellViewModel`はpumpとframe sourceの両方をコンストラクタ注入（既定null、両方揃って初めて`IsSimulatedFrameSourceAvailable=true`）で受け取り、`IsLiveViewActive`のON/OFFでStart/Stopを呼ぶだけで、タイマー自体はViewModelに持たせない。フレームは`StageSingleLiveImage`/`StageCompositeLiveImage`/`StageCompositeStillImage`へ反映され、フレーム未供給時は既存のSimulatedプレースホルダ文言を維持する。合成プレビューの非ライブ側（`StageCompositeStillImage`）は、そのaliasが直近にLive View対象だった時の最終フレームを凍結表示し、そのタイムスタンプ（capture由来の`_lastCapturedOriginalTimestamps`とLVフレーム由来の`_lastLiveFrameTimestamps`のうちより新しい方）が鮮度バッジ`StageCompositeFreshnessText`の実データ源になる。tick適用時はLive View状態・生成番号・alias一致・Simulated markerを検証し、いずれかを満たさない場合は例外を投げず（`SynchronizationContext.Post`内のthrowはWPFの未処理Dispatcher例外になるため）破棄してStatusMessageへ表示する。開発・検証用のパターン切替は「設置・校正」タブに置き、frame source未注入時は非表示になる。プレビュー専用でありoriginal/合成入力へは流用しない。
+
 ## 実行と検証
 
 ```powershell

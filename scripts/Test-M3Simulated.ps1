@@ -53,7 +53,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 30/30 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 50/50 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -81,6 +81,51 @@ try {
     Assert-Condition ($viewModelText.Contains('SimulatedWorkflowScenario.FailLiveViewStop')) 'Live View stop failure must remain routed through the durable simulated transaction facade.'
     Assert-Condition ($windowText.Contains('AutomationProperties.LiveSetting="Assertive"')) 'Blocking and result announcements must expose an assertive accessibility live region.'
     Assert-Condition (-not $viewModelText.Contains('DllImport')) 'Operator shell must not invoke native camera APIs.'
+
+    foreach ($marker in @('ISimulatedLiveViewFramePump', 'SimulatedFramePatternOptions', 'StageCompositeLiveImage', 'StageCompositeStillImage', 'StageSingleLiveImage', 'IsSimulatedFrameSourceAvailable')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required SIMULATED frame-source marker: $marker"
+    }
+    Assert-Condition ($viewModelText.Contains('!frame.Simulation') -and $viewModelText.Contains('!IsLiveViewActive')) 'Operator shell must guard applied SIMULATED live view frames the same way it guards capture results.'
+    foreach ($marker in @('疑似LVフレームソース パターン切替', 'StageCompositeLiveImage', 'StageCompositeStillImage', 'StageSingleLiveImage')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required SIMULATED frame-source binding/marker: $marker"
+    }
+
+    foreach ($marker in @('TargetX', 'TargetY', 'MoveTargetByStageDrag', 'MoveTargetByLoupeDrag', 'TargetFineDragScale', 'LoupeCameraAlias', 'LoupeImage', 'IsLoupeSourceLive', 'LoupeFreshnessText')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required target reticle / loupe marker (issue #30): $marker"
+    }
+    foreach ($marker in @('共通ターゲット□', '拡大エリア', 'LoupeDisplayArea', 'StageDisplayArea', 'FractionToMarginConverter')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required target reticle / loupe binding/marker (issue #30): $marker"
+    }
+    $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
+    Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'
+    Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')).Contains('MoveTargetByStageDrag')) 'MainWindow code-behind must wire stage drag input to the target reticle view model method.'
+
+    foreach ($marker in @('AutoFocusCommand', 'CanExecuteAutoFocus', 'IsFocusTargetOutsideLiveCameraDomain', 'IsFocusPanelAvailable', 'DualCameraExecutionEnvironment.HardwareDual', 'MfCoarseForwardCommand', 'MfFineForwardCommand', 'TogglePeakingCommand', 'FocusPeakingOverlayRenderer', 'SwitchLiveCameraToTargetDomainCommand', 'CameraAFocusStatusText', 'FocusExecutionResult', 'LastPreCaptureAutoFocusResult')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required focus panel marker (issue #31): $marker"
+    }
+    foreach ($marker in @('フォーカスパネル AF実行 MFステップ ピーキング 固定状態チップ 撮影系操作', 'フォーカスパネル 実機モードでは無効表示 fail-closed 理由', 'MF粗ステップ', 'MF微ステップ', 'フォーカスピーキング')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required focus panel binding/marker (issue #31): $marker"
+    }
+    $peakingRendererPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Simulated/FocusPeakingOverlayRenderer.cs'
+    Assert-Condition (Test-Path -LiteralPath $peakingRendererPath -PathType Leaf) 'FocusPeakingOverlayRenderer.cs must exist to render the preview-only focus peaking overlay (issue #31).'
+
+    foreach ($marker in @('CaptureWithAutoFocusCommand', 'CanCaptureWithAutoFocus', 'RunCaptureWithAutoFocusAsync', 'SimulatePreCaptureAutoFocus', 'IsActionZonePreparing', 'IsActionZoneProcessing', 'IsActionZoneReview', 'ProgressWatchdogText', 'RecordPreCaptureAutoFocusOutcome')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required action zone / 撮影+AF marker (issue #33): $marker"
+    }
+    foreach ($marker in @('アクションゾーン 状態駆動 設置判定撮影 自動進捗 結果', '従ボタン 撮影+AF', 'A→Bの順に撮影し、完了後に合成へ進みます', 'アクションゾーン state1 準備中 設置判定と撮影ボタン', 'アクションゾーン state2 自動進捗ストリップ', 'アクションゾーン state3 結果パネル')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required action zone binding/marker (issue #33): $marker"
+    }
+    Assert-Condition (-not $windowText.Contains('アクションゾーン 撮影と結果 暫定配置')) 'Issue #33 must replace the provisional single-block アクションゾーン layout with the state-driven 3-way one.'
+
+    foreach ($marker in @('DocumentTiltDetector', 'TiltRollDegrees', 'TiltRollDegreesText', 'CurrentLiveTiltSourceImage', 'TiltToleranceDegrees', 'TiltToleranceInputText', 'TiltToleranceChipText', 'IsGridOverlayEnabled', 'IsTombOverlayEnabled', 'IsOverlapBandOverlayEnabled', 'IsSafeMarginOverlayEnabled', 'IsOverlapBandVisible', '許容値未設定', '検出不能')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required alignment guide / tilt reading marker (issue #32): $marker"
+    }
+    $tiltDetectorPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Simulated/DocumentTiltDetector.cs'
+    Assert-Condition (Test-Path -LiteralPath $tiltDetectorPath -PathType Leaf) 'DocumentTiltDetector.cs must exist to compute the preview-only ROLL tilt reading (issue #32).'
+    Assert-Condition (-not (Get-Content -Raw -LiteralPath $tiltDetectorPath).Contains('CanCapture')) 'DocumentTiltDetector must stay a pure detection function with no reference back into capture/readiness state.'
+    foreach ($marker in @('設置ガイドオーバーレイ', '方眼グリッド', 'トンボ', '安全マージン', 'SAFE MARGIN', '傾き読み値 常駐行', '許容範囲チップ')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required alignment guide / tilt reading binding/marker (issue #32): $marker"
+    }
 
     [xml]$hardwareWindowXml = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath

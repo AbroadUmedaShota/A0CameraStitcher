@@ -209,26 +209,30 @@ void TestDeliveryAcknowledgmentIsRequired() {
                 "delivery-ack request must be writable");
             if (test_case != AckCase::unread) {
                 std::array<unsigned char, 4> response_header{};
-                Check(ReadAll(pipe, response_header.data(), response_header.size()),
-                    "delivery-ack response header must be readable");
-                const std::uint32_t response_length = ParseLengthHeader(response_header);
-                if (test_case == AckCase::partial_body) {
-                    unsigned char one_byte = 0;
-                    Check(ReadAll(pipe, &one_byte, 1U),
-                        "partial-body case must read one response byte");
-                } else if (test_case != AckCase::header_only) {
-                    std::string response(response_length, '\0');
-                    const bool body_read = ReadAll(pipe, response.data(), response.size());
-                    Check(body_read || test_case == AckCase::injected,
-                        "delivery-ack response body must be readable unless wait failure is injected");
-                    if (body_read && test_case == AckCase::invalid) {
-                        const unsigned char invalid = 0x15U;
-                        (void)WriteAll(pipe, &invalid, 1U);
-                    } else if (body_read && test_case == AckCase::late) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                        (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
-                    } else if (body_read && test_case == AckCase::injected) {
-                        (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
+                const bool header_read =
+                    ReadAll(pipe, response_header.data(), response_header.size());
+                Check(header_read || test_case == AckCase::injected,
+                    "delivery-ack response header must be readable unless ACK wait failure is injected");
+                if (header_read) {
+                    const std::uint32_t response_length = ParseLengthHeader(response_header);
+                    if (test_case == AckCase::partial_body) {
+                        unsigned char one_byte = 0;
+                        Check(ReadAll(pipe, &one_byte, 1U),
+                            "partial-body case must read one response byte");
+                    } else if (test_case != AckCase::header_only) {
+                        std::string response(response_length, '\0');
+                        const bool body_read = ReadAll(pipe, response.data(), response.size());
+                        Check(body_read || test_case == AckCase::injected,
+                            "delivery-ack response body must be readable unless wait failure is injected");
+                        if (body_read && test_case == AckCase::invalid) {
+                            const unsigned char invalid = 0x15U;
+                            (void)WriteAll(pipe, &invalid, 1U);
+                        } else if (body_read && test_case == AckCase::late) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                            (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
+                        } else if (body_read && test_case == AckCase::injected) {
+                            (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
+                        }
                     }
                 }
             }

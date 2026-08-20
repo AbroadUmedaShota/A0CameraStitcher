@@ -3,6 +3,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Buffers.Binary;
 using System.IO.Pipes;
@@ -358,7 +359,227 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {30 - failures.Count}/30 passed.");
+try
+{
+    SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern();
+    Console.WriteLine("PASS SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+    Console.Error.WriteLine($"FAIL SIMULATED test image frame source renders a frozen, watermarked frame for every pattern: {exception}");
+}
+
+try
+{
+    SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition();
+    Console.WriteLine("PASS SIMULATED test image frame source actually applies BlurEffect across the focus transition");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED test image frame source actually applies BlurEffect across the focus transition");
+    Console.Error.WriteLine($"FAIL SIMULATED test image frame source actually applies BlurEffect across the focus transition: {exception}");
+}
+
+try
+{
+    await SimulatedLiveViewFramePumpOnlyTicksBetweenStartAndStopAsync();
+    Console.WriteLine("PASS SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start");
+    Console.Error.WriteLine($"FAIL SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start: {exception}");
+}
+
+try
+{
+    await SimulatedFramePumpWiringAsync();
+    Console.WriteLine("PASS operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes");
+}
+catch (Exception exception)
+{
+    failures.Add("operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes");
+    Console.Error.WriteLine($"FAIL operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes: {exception}");
+}
+
+try
+{
+    TargetReticleDragMovesClampAndScale();
+    Console.WriteLine("PASS target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds");
+}
+catch (Exception exception)
+{
+    failures.Add("target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds");
+    Console.Error.WriteLine($"FAIL target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds: {exception}");
+}
+
+try
+{
+    await LoupeTracksTargetSideAndFreshnessBadgeAsync();
+    Console.WriteLine("PASS loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness");
+}
+catch (Exception exception)
+{
+    failures.Add("loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness");
+    Console.Error.WriteLine($"FAIL loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness: {exception}");
+}
+
+try
+{
+    await AutoFocusSuccessFixesFocusAndRecordsResultAsync();
+    Console.WriteLine("PASS AF execution on a sharp live frame reports 合焦OK, fixes focus, and records the target position used");
+}
+catch (Exception exception)
+{
+    failures.Add("AF execution on a sharp live frame reports 合焦OK, fixes focus, and records the target position used");
+    Console.Error.WriteLine($"FAIL AF execution on a sharp live frame reports 合焦OK, fixes focus, and records the target position used: {exception}");
+}
+
+try
+{
+    await AutoFocusReportsNgDuringBlurRampAsync();
+    Console.WriteLine("PASS AF execution during the blur-to-focus ramp reports 合焦NG and leaves focus unfixed");
+}
+catch (Exception exception)
+{
+    failures.Add("AF execution during the blur-to-focus ramp reports 合焦NG and leaves focus unfixed");
+    Console.Error.WriteLine($"FAIL AF execution during the blur-to-focus ramp reports 合焦NG and leaves focus unfixed: {exception}");
+}
+
+try
+{
+    await FocusTargetOutsideLiveDomainBlocksAfAndSwitchButtonRestoresItAsync();
+    Console.WriteLine("PASS a target outside the live camera's domain disables AF and offers a one-click switch that restores it");
+}
+catch (Exception exception)
+{
+    failures.Add("a target outside the live camera's domain disables AF and offers a one-click switch that restores it");
+    Console.Error.WriteLine($"FAIL a target outside the live camera's domain disables AF and offers a one-click switch that restores it: {exception}");
+}
+
+try
+{
+    await MfStepAdjustsRelativeValueAndUnfixesFocusAsync();
+    Console.WriteLine("PASS MF coarse/fine steps move the relative focus value and unfix a previously-fixed camera");
+}
+catch (Exception exception)
+{
+    failures.Add("MF coarse/fine steps move the relative focus value and unfix a previously-fixed camera");
+    Console.Error.WriteLine($"FAIL MF coarse/fine steps move the relative focus value and unfix a previously-fixed camera: {exception}");
+}
+
+try
+{
+    await FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelStateAsync();
+    Console.WriteLine("PASS focus peaking overlay highlights document edges and only renders while the toggle is on");
+}
+catch (Exception exception)
+{
+    failures.Add("focus peaking overlay highlights document edges and only renders while the toggle is on");
+    Console.Error.WriteLine($"FAIL focus peaking overlay highlights document edges and only renders while the toggle is on: {exception}");
+}
+
+try
+{
+    await FocusPanelDisabledInHardwareDualEnvironmentAsync();
+    Console.WriteLine("PASS the focus panel stays disabled with a shown reason under the HardwareDual execution environment");
+}
+catch (Exception exception)
+{
+    failures.Add("the focus panel stays disabled with a shown reason under the HardwareDual execution environment");
+    Console.Error.WriteLine($"FAIL the focus panel stays disabled with a shown reason under the HardwareDual execution environment: {exception}");
+}
+
+try
+{
+    await CaptureWithAutoFocusSucceedsThenCapturesAsync();
+    Console.WriteLine("PASS 撮影+AF converges on every required camera then runs the unchanged existing capture flow");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF converges on every required camera then runs the unchanged existing capture flow");
+    Console.Error.WriteLine($"FAIL 撮影+AF converges on every required camera then runs the unchanged existing capture flow: {exception}");
+}
+
+try
+{
+    await CaptureWithAutoFocusStopsBeforeShutterOnNgAsync();
+    Console.WriteLine("PASS 撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG");
+    Console.Error.WriteLine($"FAIL 撮影+AF stops fail-closed before the shutter when pre-capture AF reports 合焦NG: {exception}");
+}
+
+try
+{
+    await CaptureWithAutoFocusUnavailableUnderHardwareDualAsync();
+    Console.WriteLine("PASS 撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A)");
+}
+catch (Exception exception)
+{
+    failures.Add("撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A)");
+    Console.Error.WriteLine($"FAIL 撮影+AF stays unavailable under the HardwareDual execution environment (#35 Option A): {exception}");
+}
+
+try
+{
+    await ActionZoneVisibilitySwitchesWithUiStateAsync();
+    Console.WriteLine("PASS the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果)");
+}
+catch (Exception exception)
+{
+    failures.Add("the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果)");
+    Console.Error.WriteLine($"FAIL the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果): {exception}");
+}
+
+try
+{
+    DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable();
+    Console.WriteLine("PASS document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames");
+}
+catch (Exception exception)
+{
+    failures.Add("document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames");
+    Console.Error.WriteLine($"FAIL document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames: {exception}");
+}
+
+try
+{
+    await TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync();
+    Console.WriteLine("PASS the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32)");
+    Console.Error.WriteLine($"FAIL the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32): {exception}");
+}
+
+try
+{
+    await AlignmentGuideOverlayTogglesControlVisibilityAsync();
+    Console.WriteLine("PASS the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32)");
+    Console.Error.WriteLine($"FAIL the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32): {exception}");
+}
+
+try
+{
+    await TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync();
+    Console.WriteLine("PASS the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32)");
+    Console.Error.WriteLine($"FAIL the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {50 - failures.Count}/50 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3324,6 +3545,1143 @@ static async Task<object?> LoadDualAgentJournalCaptureResultPayloadAsync(string 
         transactionIdHex,
         root.GetProperty("camAPath").GetString()!,
         root.GetProperty("camBPath").GetString()!);
+}
+
+static void SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern()
+{
+    var source = new SimulatedTestImageFrameSource();
+    var capturedAt = DateTimeOffset.UtcNow;
+    foreach (var pattern in Enum.GetValues<SimulatedFramePattern>())
+    {
+        var frame = source.CreateFrame("CAM-A", pattern, sequenceNumber: 3, capturedAt);
+        Check.Equal("CAM-A", frame.CameraAlias);
+        Check.Equal(pattern, frame.Pattern);
+        Check.True(frame.Simulation, $"{pattern}: every SIMULATED frame must carry Simulation=true.");
+        Check.Equal("Simulated", frame.Marker);
+        Check.True(frame.Image.PixelWidth > 0 && frame.Image.PixelHeight > 0, $"{pattern}: the rendered frame must have real pixel dimensions.");
+        Check.True(frame.Image.IsFrozen, $"{pattern}: the rendered frame must be frozen for safe cross-thread hand-off.");
+
+        // The bottom-left timestamp/marker badge sits below the document rectangle (which is
+        // vertically centered and only ~74% of the canvas height), so this band is pure
+        // background unless the badge is actually painted there. A near-black rectangle plus
+        // white text must differ substantially from the background color in that band.
+        var pixels = CopyPixelsBgra(frame.Image);
+        var stride = frame.Image.PixelWidth * 4;
+        var bandTop = Math.Max(0, frame.Image.PixelHeight - 30);
+        var bandBottom = Math.Max(bandTop, frame.Image.PixelHeight - 4);
+        var bandRight = Math.Min(frame.Image.PixelWidth, 200);
+        var differingPixelCount = 0;
+        for (var y = bandTop; y < bandBottom; y++)
+        {
+            for (var x = 8; x < bandRight; x++)
+            {
+                var offset = (y * stride) + (x * 4);
+                var blue = pixels[offset];
+                var green = pixels[offset + 1];
+                var red = pixels[offset + 2];
+                var diff = Math.Abs(blue - 0x1F) + Math.Abs(green - 0x1A) + Math.Abs(red - 0x14);
+                if (diff > 24)
+                {
+                    differingPixelCount++;
+                }
+            }
+        }
+
+        Check.True(
+            differingPixelCount > 200,
+            $"{pattern}: the SIMULATED watermark/timestamp badge must paint visibly different pixels over the bottom-left background band (found {differingPixelCount} differing pixels).");
+    }
+}
+
+static void SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition()
+{
+    var source = new SimulatedTestImageFrameSource();
+    var capturedAt = DateTimeOffset.UtcNow;
+    // seq=0 sits at the start of the blur ramp (near-maximum blur radius) and seq=17 sits at
+    // the end of the ramp (fully sharp); holding camera/pattern/timestamp constant isolates
+    // the blur radius as the only thing that can differ between the two renders.
+    var blurredFrame = source.CreateFrame("CAM-A", SimulatedFramePattern.BlurToFocusTransition, sequenceNumber: 0, capturedAt);
+    var sharpFrame = source.CreateFrame("CAM-A", SimulatedFramePattern.BlurToFocusTransition, sequenceNumber: 17, capturedAt);
+
+    var blurredPixels = CopyPixelsBgra(blurredFrame.Image);
+    var sharpPixels = CopyPixelsBgra(sharpFrame.Image);
+    Check.Equal(blurredPixels.Length, sharpPixels.Length);
+
+    long totalDifference = 0;
+    for (var index = 0; index < blurredPixels.Length; index++)
+    {
+        totalDifference += Math.Abs(blurredPixels[index] - sharpPixels[index]);
+    }
+
+    Check.True(
+        totalDifference > 50_000,
+        "seq=0 (near-max blur) and seq=17 (sharp) must render visibly different pixels if BlurEffect is actually applied to the scene " +
+        $"(total abs BGRA diff = {totalDifference}). If this is at/near 0, RenderTargetBitmap.Render() is ignoring the Effect on the root visual again.");
+}
+
+static async Task SimulatedLiveViewFramePumpOnlyTicksBetweenStartAndStopAsync()
+{
+    using var pump = new SimulatedLiveViewFramePump(interval: TimeSpan.FromMilliseconds(20));
+    var ticks = new List<SimulatedLiveViewFrameTick>();
+    pump.Tick += (_, tick) => { lock (ticks) { ticks.Add(tick); } };
+
+    await Task.Delay(60);
+    Check.Equal(0, ticks.Count);
+
+    var generation = pump.Start("CAM-B", SimulatedFramePattern.TiltedDocumentRollPlus3);
+    Check.Equal(1, generation);
+    await WaitUntilAsync(
+        () => { lock (ticks) { return ticks.Count >= 2; } },
+        "The pump did not tick after Start().");
+    lock (ticks)
+    {
+        Check.True(ticks.All(tick => tick.CameraAlias == "CAM-B"), "Every tick must carry the started camera alias.");
+        Check.True(ticks.All(tick => tick.Pattern == SimulatedFramePattern.TiltedDocumentRollPlus3), "Every tick must carry the started pattern.");
+        Check.True(ticks.All(tick => tick.Generation == generation), "Every tick from this session must carry the generation Start() returned.");
+    }
+
+    pump.Stop();
+    // Stop() is intentionally non-blocking now (rendering was moved entirely out of the pump,
+    // so there is nothing expensive left in flight to wait for): tolerate at most one
+    // already-in-flight tick completing shortly after Stop() returns, then confirm the count
+    // stabilizes. That — plus the ViewModel-side generation/alias/IsLiveViewActive guard — is
+    // what "no frame supply while Live View is OFF" actually guarantees end to end.
+    await Task.Delay(40);
+    int countAfterGrace;
+    lock (ticks)
+    {
+        countAfterGrace = ticks.Count;
+    }
+    await Task.Delay(80);
+    lock (ticks)
+    {
+        Check.Equal(countAfterGrace, ticks.Count);
+    }
+
+    var secondGeneration = pump.Start("CAM-A", SimulatedFramePattern.FrontalDocument);
+    Check.Equal(2, secondGeneration);
+    pump.Stop();
+}
+
+static async Task SimulatedFramePumpWiringAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-SimulatedFramePumpTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.IsSimulatedFrameSourceAvailable, "A pump and frame source were both injected, so the frame source must report available.");
+        Check.True(viewModel.CanUseLiveView, "A safety-acknowledged, non-busy dual plan must allow Live View.");
+        Check.Equal(0, pump.StartCalls.Count);
+
+        // Rejecting an unrecognized pattern value must still re-announce the current value so
+        // a bound ComboBox reverts instead of keeping the rejected selection on screen.
+        var propertyChangedNames = new List<string>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is not null)
+            {
+                propertyChangedNames.Add(args.PropertyName);
+            }
+        };
+        viewModel.SelectedSimulatedFramePattern = "not-a-real-pattern";
+        Check.Equal(SimulatedFramePatternCatalog.DefaultLabel, viewModel.SelectedSimulatedFramePattern);
+        Check.True(
+            propertyChangedNames.Contains(nameof(OperatorShellViewModel.SelectedSimulatedFramePattern)),
+            "A rejected pattern value must still raise PropertyChanged so bound controls revert to the accepted value.");
+
+        viewModel.SelectedSimulatedFramePattern = "ボケ→合焦遷移";
+        Check.Equal(1, pump.PatternChanges.Count);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.PatternChanges[0]);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.True(viewModel.IsLiveViewActive, "Toggling Live View on must flip the flag.");
+        Check.Equal(1, pump.StartCalls.Count);
+        Check.Equal("CAM-A", pump.StartCalls[0].CameraAlias);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.StartCalls[0].Pattern);
+        Check.Equal(0, pump.StopCallCount);
+        var firstGeneration = pump.LastReturnedGeneration;
+
+        // A mismatched-alias tick (as if Stop()/an alias switch raced an in-flight timer
+        // tick) must not populate the composite preview's non-live "still" slot for that
+        // alias, and must not even reach the frame source.
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, firstGeneration, DateTimeOffset.UtcNow));
+        Check.True(viewModel.StageCompositeStillImage is null, "A stale tick for a non-active alias must be dropped.");
+        Check.Equal(0, frameSource.CallCount);
+
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.BlurToFocusTransition, 0, firstGeneration, DateTimeOffset.UtcNow));
+        Check.Equal(1, frameSource.CallCount);
+        Check.True(viewModel.StageCompositeLiveImage is not null, "A tick for the active alias must render and populate the live composite image.");
+        Check.False(
+            viewModel.IsStageSingleLiveImageVisible,
+            "Stage mode defaults to composite preview, so the single-live image must stay hidden even though a frame exists.");
+
+        // OFF -> back ON for the *same* camera alias is exactly the race a bare alias check
+        // cannot catch: toggle off, toggle on again (new generation), then raise a tick still
+        // carrying the OLD generation as if it had been in flight when Stop() was called.
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.Equal(1, pump.StopCallCount);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.Equal(2, pump.StartCalls.Count);
+        var secondGeneration = pump.LastReturnedGeneration;
+        Check.False(secondGeneration == firstGeneration, "Start() must return a new generation on every call.");
+
+        var frameSourceCallsBeforeStaleGenerationTick = frameSource.CallCount;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 5, firstGeneration, DateTimeOffset.UtcNow));
+        Check.Equal(frameSourceCallsBeforeStaleGenerationTick, frameSource.CallCount);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.False(viewModel.IsLiveViewActive, "Toggling Live View off must flip the flag back.");
+        Check.Equal(2, pump.StopCallCount);
+        Check.True(viewModel.StageCompositeLiveImage is null, "Stopping Live View must clear the live composite image even though the last frame is retained.");
+
+        viewModel.SelectedCamera = "CAM-B";
+        Check.True(
+            viewModel.StageCompositeFreshnessText.Contains("秒前", StringComparison.Ordinal),
+            "The frozen CAM-A frame must drive the freshness badge once CAM-B becomes the selected (still) alias.");
+
+        // A frame source that returns a frame missing the Simulated marker must be dropped —
+        // and must not throw (a throw inside the SynchronizationContext.Post callback used in
+        // production would become an unhandled Dispatcher exception, not something callable
+        // code here or in production could catch).
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var thirdGeneration = pump.LastReturnedGeneration;
+        frameSource.ReturnInvalidMarker = true;
+        var statusBeforeInvalidFrame = viewModel.StatusMessage;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, thirdGeneration, DateTimeOffset.UtcNow));
+        Check.False(
+            string.Equals(statusBeforeInvalidFrame, viewModel.StatusMessage, StringComparison.Ordinal),
+            "An invalid-marker frame must be surfaced through StatusMessage instead of silently doing nothing or throwing.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static void TargetReticleDragMovesClampAndScale()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TargetReticleTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        Check.True(IsClose(0.5, viewModel.TargetX), "The target reticle must default to the stage center on X.");
+        Check.True(IsClose(0.5, viewModel.TargetY), "The target reticle must default to the stage center on Y.");
+
+        // Stage drag: a direct (coarse) move — the normalized delta is applied unscaled.
+        viewModel.MoveTargetByStageDrag(0.2, -0.1);
+        Check.True(IsClose(0.7, viewModel.TargetX), "A stage drag must move the target by the full normalized delta on X.");
+        Check.True(IsClose(0.4, viewModel.TargetY), "A stage drag must move the target by the full normalized delta on Y.");
+
+        // Loupe drag: the same normalized delta must land only 1/4 as far — issue #30's
+        // "ルーペ表示内のドラッグ = 細かい移動" contract.
+        viewModel.SetTargetPosition(0.5, 0.5);
+        viewModel.MoveTargetByLoupeDrag(0.2, -0.1);
+        Check.True(IsClose(0.55, viewModel.TargetX), "A loupe drag must scale the delta by TargetFineDragScale on X.");
+        Check.True(IsClose(0.475, viewModel.TargetY), "A loupe drag must scale the delta by TargetFineDragScale on Y.");
+
+        // Boundary: dragging past either edge must clamp to 0/1, never overshoot or wrap.
+        viewModel.SetTargetPosition(0.95, 0.05);
+        viewModel.MoveTargetByStageDrag(1.0, -1.0);
+        Check.True(IsClose(1.0, viewModel.TargetX), "A drag past the right edge must clamp to 1.0, not overshoot.");
+        Check.True(IsClose(0.0, viewModel.TargetY), "A drag past the top edge must clamp to 0.0, not go negative.");
+
+        // Boundary: an out-of-range explicit placement must clamp the same way.
+        viewModel.SetTargetPosition(-5, 5);
+        Check.True(IsClose(0.0, viewModel.TargetX), "An explicit negative position must clamp to 0.0.");
+        Check.True(IsClose(1.0, viewModel.TargetY), "An explicit position past 1.0 must clamp to 1.0.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    static bool IsClose(double expected, double actual) => Math.Abs(expected - actual) < 1e-9;
+}
+
+static async Task LoupeTracksTargetSideAndFreshnessBadgeAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-LoupeSideTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // With no frame ever supplied anywhere, the loupe must show its "not yet acquired"
+        // placeholder rather than an empty-but-"available" image (the #30 "誤認させない" contract).
+        Check.True(viewModel.IsLoupePlaceholderVisible, "With no frame ever supplied, the loupe must show its placeholder.");
+        Check.False(viewModel.IsLoupeImageVisible, "With no frame ever supplied, the loupe must not claim an image is available.");
+
+        // CAM-A live (SelectedCamera defaults to CAM-A): move the target onto the composite
+        // preview's left (live) side — TargetX defaults to the exact 0.5 center, which
+        // IsTargetOnLiveSide resolves to the *still* side, so this must be explicit — then
+        // tick one frame and confirm the loupe picks it up live, with no freshness/STILL
+        // badge (nothing is frozen yet).
+        viewModel.SetTargetPosition(0.2, 0.5);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var cameraAGeneration = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 0, cameraAGeneration, DateTimeOffset.UtcNow));
+        Check.Equal("CAM-A", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupeImageVisible, "A live-ticked frame for the loupe's own alias must populate the loupe image without throwing on the tiny test bitmap.");
+        Check.True(viewModel.IsLoupeSourceLive, "The loupe must report live while its alias matches the streaming camera.");
+        Check.False(viewModel.IsLoupeFreshnessVisible, "A live loupe source must not show a freshness/STILL badge.");
+
+        // Move the target to the composite preview's still (right) side. CAM-B has never been
+        // captured or live-viewed, so this must fall back to the placeholder, not silently
+        // reuse CAM-A's frame for the wrong camera.
+        viewModel.SetTargetPosition(0.9, 0.5);
+        Check.Equal("CAM-B", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupePlaceholderVisible, "An alias with no captured/live frame yet must show the placeholder, not a stale image.");
+
+        // Give CAM-B a frame of its own, then hand Live View back to CAM-A: CAM-B's frame must
+        // freeze in place with a freshness badge — the composite preview's "非ライブ側は最終
+        // フレームの静止画" contract, extended to the loupe.
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-A live off (required before switching alias)
+        viewModel.SelectedCamera = "CAM-B";
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-B live on
+        var cameraBGeneration = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, cameraBGeneration, DateTimeOffset.UtcNow));
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-B live off
+        viewModel.SelectedCamera = "CAM-A";
+
+        Check.Equal("CAM-B", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupeImageVisible, "CAM-B's frozen last frame must still populate the loupe once it exists.");
+        Check.False(viewModel.IsLoupeSourceLive, "CAM-B is not the currently live camera, so the loupe must report it as frozen.");
+        Check.True(viewModel.IsLoupeFreshnessVisible, "A frozen loupe source with a known frame must show the STILL freshness badge.");
+        Check.True(viewModel.LoupeFreshnessText.Contains("秒前", StringComparison.Ordinal), "The freshness badge must report elapsed seconds.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task AutoFocusSuccessFixesFocusAndRecordsResultAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-AutoFocusSuccessTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.Equal("AF未実行", viewModel.FocusResultText);
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is null, "The pre-capture AF hook must start unset.");
+
+        // Default target (0.5, 0.5) falls in CAM-B's domain (TargetX is not < 0.5); place it
+        // squarely in CAM-A's domain so it matches the default selected/live camera.
+        viewModel.SetTargetPosition(0.2, 0.5);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.False(viewModel.IsFocusTargetOutsideLiveCameraDomain, "The target must sit inside CAM-A's domain once explicitly placed there.");
+        Check.True(viewModel.CanExecuteAutoFocus, "AF must be available once Live View is on, the panel is available, and the target is in-domain.");
+        Check.Equal("CAM-A: 未固定", viewModel.CameraAFocusStatusText);
+
+        viewModel.AutoFocusCommand.Execute(null);
+        Check.True(viewModel.IsAutoFocusRunning, "AF must report itself running immediately after Execute().");
+        await WaitUntilAsync(() => !viewModel.IsAutoFocusRunning, "AF execution did not complete.");
+
+        Check.True(viewModel.FocusResultText.Contains("合焦OK", StringComparison.Ordinal), "A sharp frame (BlurRadius defaults to 0 on the fake source) must report 合焦OK.");
+        Check.True(viewModel.FocusResultText.Contains("CAM-A", StringComparison.Ordinal), "The result must identify which camera AF ran on.");
+        Check.True(viewModel.FocusResultText.Contains("0.20", StringComparison.Ordinal), "The result must record the target □ position AF used.");
+        Check.Equal("CAM-A: 固定済", viewModel.CameraAFocusStatusText);
+        Check.False(viewModel.CautionText.Contains("CAM-A: フォーカス未固定", StringComparison.Ordinal), "A fixed camera must not still carry the未固定 Caution notice.");
+        Check.True(viewModel.CautionText.Contains("CAM-B: フォーカス未固定", StringComparison.Ordinal), "The still-unfixed CAM-B must remain a Caution notice (never a Blocker).");
+
+        var preCaptureResult = new FocusExecutionResult("CAM-B", true, DateTimeOffset.Now, 0.7, 0.3);
+        viewModel.RecordPreCaptureAutoFocusOutcome(preCaptureResult);
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is not null, "The pre-capture AF hook must store the recorded result.");
+        Check.Equal(preCaptureResult, viewModel.LastPreCaptureAutoFocusResult!);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task AutoFocusReportsNgDuringBlurRampAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-AutoFocusNgTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        // The real frame source (not the fake) is used here so the tick's BlurRadius actually
+        // follows SimulatedTestImageFrameSource's blur-to-focus ramp instead of the fake
+        // source's always-sharp default.
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        viewModel.SetTargetPosition(0.2, 0.5);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        // sequenceNumber=0 sits at the start of the blur ramp (near-maximum blur radius, see
+        // SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition above).
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.BlurToFocusTransition, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(viewModel.CanExecuteAutoFocus, "AF must remain invocable even though the live frame is currently blurred — SIMULATED AF is allowed to fail, not blocked outright.");
+        viewModel.AutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => !viewModel.IsAutoFocusRunning, "AF execution did not complete.");
+
+        Check.True(viewModel.FocusResultText.Contains("合焦NG", StringComparison.Ordinal), "AF executed mid-blur-ramp must report 合焦NG, tying the result to the pattern's sequence progression.");
+        Check.Equal("CAM-A: 未固定", viewModel.CameraAFocusStatusText);
+        Check.True(viewModel.CautionText.Contains("CAM-A: フォーカス未固定", StringComparison.Ordinal), "A failed AF must not fix the camera, so the未固定 Caution notice must remain.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task FocusTargetOutsideLiveDomainBlocksAfAndSwitchButtonRestoresItAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-FocusDomainSwitchTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this domain-split scenario.");
+        Check.Equal("CAM-A", viewModel.SelectedCamera);
+
+        // 0.8 sits in CAM-B's fixed document-half domain while CAM-A is selected/live: mismatch.
+        viewModel.SetTargetPosition(0.8, 0.5);
+        Check.True(viewModel.IsFocusTargetOutsideLiveCameraDomain, "A target in CAM-B's domain while CAM-A is live must be flagged out-of-domain.");
+        Check.True(viewModel.ShowSwitchLiveCameraButton, "The switch-to-live button must show when the target is out of the live camera's domain.");
+        Check.False(viewModel.ShowAutoFocusButton, "The AF button must hide (not just disable) while the switch button is shown.");
+        Check.Equal("CAM-B live に切替", viewModel.SwitchLiveCameraButtonText);
+        Check.False(viewModel.CanExecuteAutoFocus, "AF must stay disabled while the target is out of the live camera's domain.");
+        Check.True(viewModel.CanSwitchLiveCameraToTargetDomain, "The switch command must be available to resolve the mismatch.");
+
+        viewModel.SwitchLiveCameraToTargetDomainCommand.Execute(null);
+
+        Check.Equal("CAM-B", viewModel.SelectedCamera);
+        Check.True(viewModel.IsLiveViewActive, "The one-click switch must also start Live View for the newly-selected camera.");
+        Check.False(viewModel.IsFocusTargetOutsideLiveCameraDomain, "After switching to the domain-owning camera, the target must no longer be out-of-domain.");
+        Check.True(viewModel.ShowAutoFocusButton, "The AF button must reappear once the live camera matches the target's domain.");
+        Check.True(viewModel.CanExecuteAutoFocus, "AF must become available once the live camera matches the target's domain.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task MfStepAdjustsRelativeValueAndUnfixesFocusAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-MfStepTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        viewModel.SetTargetPosition(0.2, 0.5);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(IsClose(50.0, viewModel.FocusPositionValue), "MF position must default to the mid-range relative value (50/100) before any step.");
+
+        viewModel.MfCoarseForwardCommand.Execute(null);
+        Check.True(IsClose(60.0, viewModel.FocusPositionValue), "A coarse forward step must move the relative value by the coarse step size.");
+
+        viewModel.MfFineBackwardCommand.Execute(null);
+        Check.True(IsClose(58.0, viewModel.FocusPositionValue), "A fine backward step must move the relative value by the fine step size.");
+
+        // Clamping: drive far past the 0..100 bounds and confirm it holds at the edge.
+        for (var index = 0; index < 20; index++)
+        {
+            viewModel.MfCoarseForwardCommand.Execute(null);
+        }
+        Check.True(IsClose(100.0, viewModel.FocusPositionValue), "The relative focus value must clamp at 100, never overshoot.");
+
+        // AF-then-fix, then confirm a manual MF nudge un-fixes it again.
+        viewModel.AutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => !viewModel.IsAutoFocusRunning, "AF execution did not complete.");
+        Check.Equal("CAM-A: 固定済", viewModel.CameraAFocusStatusText);
+
+        viewModel.MfFineForwardCommand.Execute(null);
+        Check.Equal("CAM-A: 未固定", viewModel.CameraAFocusStatusText);
+        Check.True(viewModel.CautionText.Contains("CAM-A: フォーカス未固定", StringComparison.Ordinal), "A manual MF nudge after AF must restore the未固定 Caution notice.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    static bool IsClose(double expected, double actual) => Math.Abs(expected - actual) < 1e-9;
+}
+
+static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelStateAsync()
+{
+    // Renderer-level: a degenerate 1x1 frame (the shape the fake test frame source always
+    // returns) must never be highlighted — there is nothing meaningful to detect an edge in.
+    var source = new SimulatedTestImageFrameSource();
+    var degenerate = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, new byte[] { 1, 2, 3 }, 3);
+    degenerate.Freeze();
+    Check.True(FocusPeakingOverlayRenderer.BuildOverlay(degenerate) is null, "A degenerate 1x1 source must produce no overlay.");
+    Check.True(FocusPeakingOverlayRenderer.BuildOverlay(null) is null, "A null source must produce no overlay.");
+
+    // A real synthetic document frame has sharp line-art edges over a flat background: the
+    // overlay must actually highlight *some* pixels (not be entirely transparent).
+    var frame = source.CreateFrame("CAM-A", SimulatedFramePattern.FrontalDocument, sequenceNumber: 0, DateTimeOffset.UtcNow);
+    var overlay = FocusPeakingOverlayRenderer.BuildOverlay(frame.Image);
+    Check.True(overlay is not null, "A real document frame must produce a non-null overlay.");
+    var overlayPixels = CopyPixelsBgra(overlay!);
+    var highlightedPixelCount = 0;
+    for (var index = 3; index < overlayPixels.Length; index += 4)
+    {
+        if (overlayPixels[index] != 0)
+        {
+            highlightedPixelCount++;
+        }
+    }
+    Check.True(highlightedPixelCount > 0, "At least one pixel must be highlighted for a frame with real line-art edges.");
+
+    // ViewModel-level: the overlay must only be exposed while IsPeakingEnabled is true, and it
+    // must react to the live stage image the same way the base image bindings do.
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-PeakingToggleTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.Equal("ピーキング ON", viewModel.PeakingButtonText);
+        Check.True(viewModel.TogglePeakingCommand.CanExecute(null), "Peaking toggle must be available while the focus panel is available.");
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 0, generation, DateTimeOffset.UtcNow));
+        Check.True(viewModel.StageCompositeLiveImage is not null, "A live-ticked frame must populate the base composite live image first.");
+        Check.True(viewModel.StageCompositeLivePeakingOverlay is null, "The overlay must stay null while peaking is off, even with a base image present.");
+
+        viewModel.TogglePeakingCommand.Execute(null);
+        Check.True(viewModel.IsPeakingEnabled, "Toggling peaking must flip IsPeakingEnabled.");
+        Check.Equal("ピーキング OFF", viewModel.PeakingButtonText);
+        // The fake frame source always returns a 1x1 image, which BuildOverlay treats as
+        // degenerate — so the overlay itself is still null here, but the *gate* (IsPeakingEnabled)
+        // is what this asserts, matching the renderer-level assertions above for the real-image case.
+        Check.True(viewModel.StageCompositeLivePeakingOverlay is null, "The 1x1 fake frame stays degenerate even with peaking on — confirms BuildOverlay is actually being invoked through the gate, not bypassed.");
+
+        viewModel.TogglePeakingCommand.Execute(null);
+        Check.False(viewModel.IsPeakingEnabled, "Toggling peaking again must flip it back off.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task FocusPanelDisabledInHardwareDualEnvironmentAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-FocusPanelHardwareGateTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var hardwareFlow = DualCameraProductComposition.Create(
+            Path.Combine(root, "hardware-products"),
+            DualCameraExecutionEnvironment.HardwareDual);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            hardwareFlow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.False(viewModel.IsFocusPanelAvailable, "HardwareDual must disable the focus panel until hardware-required Issue + human gate approval (#35 Option A).");
+        Check.True(viewModel.IsFocusPanelUnavailable, "The inverse flag bound by XAML must agree with IsFocusPanelAvailable.");
+        Check.True(viewModel.FocusPanelUnavailableReason.Contains("実機", StringComparison.Ordinal), "The shown reason must explain the hardware-mode gate (fail-closed with a stated reason).");
+        Check.False(viewModel.CanUseFocusPanel, "MF/peaking must stay disabled while the focus panel itself is unavailable.");
+        Check.False(viewModel.CanExecuteAutoFocus, "AF must stay disabled while the focus panel itself is unavailable.");
+        Check.False(viewModel.CanSwitchLiveCameraToTargetDomain, "The switch-live-camera action must stay disabled while the focus panel itself is unavailable.");
+        Check.False(viewModel.TogglePeakingCommand.CanExecute(null), "Peaking toggle must stay disabled while the focus panel itself is unavailable.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusSuccessTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this issue #33 撮影+AF regression.");
+        Check.True(viewModel.CanCapture, "A ready Dual plan must allow capture.");
+        Check.True(viewModel.CanCaptureWithAutoFocus, "撮影+AF must be available in SIMULATED Dual mode (no HardwareDual gate active).");
+        Check.True(viewModel.IsActionZonePreparing, "The action zone must show state 1 (readiness card + capture buttons) while Ready.");
+        Check.False(viewModel.IsActionZoneProcessing, "The action zone must not show the progress strip before capture starts.");
+        Check.False(viewModel.IsActionZoneReview, "The action zone must not show the result panel before capture starts.");
+
+        viewModel.CaptureWithAutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy, "撮影+AF did not finish its capture.");
+
+        Check.Equal(OperatorUiState.Review, viewModel.UiState);
+        Check.True(viewModel.IsActionZoneReview, "The action zone must show state 3 (result panel) once Review is reached.");
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-A", StringComparison.Ordinal), "CAM-A original must be retained after a successful 撮影+AF.");
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-B", StringComparison.Ordinal), "CAM-B original must be retained after a successful 撮影+AF.");
+        Check.True(viewModel.StitchResult.Contains("自動合成完了", StringComparison.Ordinal), "A successful Dual 撮影+AF must still auto-stitch through the unchanged existing flow.");
+
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is not null, "The #31 pre-capture AF hook must have recorded an outcome (SIMULATED journal-equivalent record).");
+        Check.True(viewModel.LastPreCaptureAutoFocusResult!.Success, "The last recorded pre-capture AF outcome (CAM-B, the second required camera) must be 合焦OK.");
+        Check.Equal("CAM-B", viewModel.LastPreCaptureAutoFocusResult!.CameraAlias);
+        Check.Equal("CAM-B: 固定済", viewModel.CameraBFocusStatusText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task CaptureWithAutoFocusStopsBeforeShutterOnNgAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusNgTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        // The real frame source (not the fake) is used so the tick's BlurRadius actually follows
+        // SimulatedTestImageFrameSource's blur-to-focus ramp, mirroring
+        // AutoFocusReportsNgDuringBlurRampAsync's setup for issue #31's own "AF実行" button — the
+        // same NG scenario now exercised through the 撮影+AF pre-capture gate instead.
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this 撮影+AF regression.");
+        Check.Equal("CAM-A", viewModel.SelectedCamera);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        // sequenceNumber=0 sits at the start of the blur ramp (near-maximum blur radius), so
+        // CAM-A — the first camera modeが要求する — fails its pre-capture AF check.
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.BlurToFocusTransition, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(viewModel.CanCaptureWithAutoFocus, "撮影+AF must remain invocable even though CAM-A's live frame is currently blurred — SIMULATED AF is allowed to fail, not blocked outright.");
+
+        viewModel.CaptureWithAutoFocusCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.UiState == OperatorUiState.FailedPartial, "撮影+AF did not stop with FailedPartial after CAM-A's pre-capture AF failure.");
+
+        Check.Equal(0, viewModel.TransactionStartCount);
+        Check.True(viewModel.LastPreCaptureAutoFocusResult is not null, "The pre-capture AF hook must have recorded CAM-A's failed outcome.");
+        Check.False(viewModel.LastPreCaptureAutoFocusResult!.Success, "The recorded pre-capture AF outcome for CAM-A must be 合焦NG.");
+        Check.Equal("CAM-A", viewModel.LastPreCaptureAutoFocusResult!.CameraAlias);
+        Check.True(viewModel.CaptureResult.Contains("AF NG", StringComparison.Ordinal), "The result panel must show the shutter was never fired for this attempt.");
+        Check.True(viewModel.StatusMessage.Contains("シャッターを実行せず", StringComparison.Ordinal), "The status message must explain the fail-closed stop.");
+        Check.Equal("CAM-A: 未固定", viewModel.CameraAFocusStatusText);
+        Check.True(viewModel.IsActionZoneReview, "FailedPartial belongs to action zone state 3 (result panel with 新しい撮影を準備), not the capture buttons.");
+        Check.False(viewModel.CanCapture, "A FailedPartial stop must block another capture until 新しい撮影を準備 — the same contract every other failure point already uses.");
+        Check.True(viewModel.CanPrepareNewCapture, "The operator must be able to explicitly prepare a new transaction after a fail-closed 撮影+AF stop.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task CaptureWithAutoFocusUnavailableUnderHardwareDualAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-CaptureWithAutoFocusHardwareGateTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var hardwareFlow = DualCameraProductComposition.Create(
+            Path.Combine(root, "hardware-products"),
+            DualCameraExecutionEnvironment.HardwareDual);
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            hardwareFlow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.False(viewModel.CanCaptureWithAutoFocus, "実機モード（HardwareDual）では撮影+AFを実行不可とする（#35 Option A・#31のIsFocusPanelAvailableゲートを流用）。");
+        Check.False(viewModel.CaptureWithAutoFocusCommand.CanExecute(null), "The bound command must agree with CanCaptureWithAutoFocus.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task ActionZoneVisibilitySwitchesWithUiStateAsync()
+{
+    var service = new BlockingTransactionService();
+    var viewModel = new OperatorShellViewModel(service);
+    await viewModel.InitializeAsync(CancellationToken.None);
+    viewModel.SelectedOperatingMode = "1台構成";
+    viewModel.SelectedCamera = "CAM-B";
+
+    Check.Equal(OperatorUiState.AwaitingSafetyAck, viewModel.UiState);
+    Check.True(viewModel.IsActionZonePreparing, "AwaitingSafetyAck must show action zone state 1 (readiness card + capture buttons).");
+    Check.False(viewModel.IsActionZoneProcessing, "AwaitingSafetyAck must not show the progress strip.");
+    Check.False(viewModel.IsActionZoneReview, "AwaitingSafetyAck must not show the result panel.");
+
+    viewModel.AcceptSafetyCommand.Execute(null);
+    Check.Equal(OperatorUiState.Ready, viewModel.UiState);
+    Check.True(viewModel.IsActionZonePreparing, "Ready must still show action zone state 1.");
+    Check.False(viewModel.IsActionZoneProcessing, "Ready must not show the progress strip.");
+    Check.False(viewModel.IsActionZoneReview, "Ready must not show the result panel.");
+
+    viewModel.CaptureCommand.Execute(null);
+    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.Equal(OperatorUiState.Capturing, viewModel.UiState);
+    Check.False(viewModel.IsActionZonePreparing, "Capturing must hide action zone state 1.");
+    Check.True(viewModel.IsActionZoneProcessing, "Capturing must show action zone state 2 (自動進捗ストリップ).");
+    Check.False(viewModel.IsActionZoneReview, "Capturing must hide action zone state 3.");
+
+    service.Release();
+    await WaitUntilAsync(() => !viewModel.IsBusy, "The blocking capture did not finish.");
+    Check.Equal(OperatorUiState.Review, viewModel.UiState);
+    Check.False(viewModel.IsActionZonePreparing, "Review must hide action zone state 1.");
+    Check.False(viewModel.IsActionZoneProcessing, "Review must hide action zone state 2.");
+    Check.True(viewModel.IsActionZoneReview, "Review must show action zone state 3 (結果パネル).");
+}
+
+static void DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable()
+{
+    Check.True(DocumentTiltDetector.DetectRollDegrees(null) is null, "A null source must report 検出不能.");
+    var degenerate = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, new byte[] { 1, 2, 3 }, 3);
+    degenerate.Freeze();
+    Check.True(DocumentTiltDetector.DetectRollDegrees(degenerate) is null, "A degenerate 1x1 source (the fake frame source's shape) must report 検出不能.");
+
+    var source = new SimulatedTestImageFrameSource();
+    var frontal = source.CreateFrame("CAM-A", SimulatedFramePattern.FrontalDocument, 0, DateTimeOffset.UtcNow);
+    var frontalRoll = DocumentTiltDetector.DetectRollDegrees(frontal.Image);
+    Check.True(frontalRoll is not null, "A frontal (unrotated) document must be detected, not 検出不能.");
+    Check.True(Math.Abs(frontalRoll!.Value) < 0.1, $"A frontal document must read ~0°, got {frontalRoll.Value:F4}°.");
+
+    // Measured against the SIMULATED tilt test patterns' known rotation angles (see the
+    // implementation notes/PR description): absolute error stayed <=0.3° at both tested
+    // magnitudes (±3°, ±6°). The tolerance below is set with margin above that measured error —
+    // it documents a real, checked accuracy limit rather than claiming exact-degree precision.
+    const double toleranceDegrees = 0.5;
+    foreach (var (pattern, expectedDegrees) in new[]
+             {
+                 (SimulatedFramePattern.TiltedDocumentRollMinus6, -6.0),
+                 (SimulatedFramePattern.TiltedDocumentRollMinus3, -3.0),
+                 (SimulatedFramePattern.TiltedDocumentRollPlus3, 3.0),
+                 (SimulatedFramePattern.TiltedDocumentRollPlus6, 6.0),
+             })
+    {
+        var frame = source.CreateFrame("CAM-A", pattern, 0, DateTimeOffset.UtcNow);
+        var detected = DocumentTiltDetector.DetectRollDegrees(frame.Image);
+        Check.True(detected is not null, $"{pattern} must be detected, not 検出不能.");
+        Check.True(
+            Math.Abs(detected!.Value - expectedDegrees) <= toleranceDegrees,
+            $"{pattern}: expected ~{expectedDegrees}°, got {detected.Value:F4}° (tolerance ±{toleranceDegrees}°).");
+    }
+
+    // A frame with no matching document fill at all — the shape a non-live/未取得 preview would
+    // degrade toward — must fall back to 検出不能 rather than reporting a noise-driven angle.
+    var backgroundOnly = new WriteableBitmap(64, 64, 96, 96, PixelFormats.Bgra32, null);
+    var backgroundPixels = new byte[64 * 64 * 4];
+    for (var index = 0; index < backgroundPixels.Length; index += 4)
+    {
+        backgroundPixels[index] = 0x1F;
+        backgroundPixels[index + 1] = 0x1A;
+        backgroundPixels[index + 2] = 0x14;
+        backgroundPixels[index + 3] = 0xFF;
+    }
+    backgroundOnly.WritePixels(new System.Windows.Int32Rect(0, 0, 64, 64), backgroundPixels, 64 * 4, 0);
+    Check.True(DocumentTiltDetector.DetectRollDegrees(backgroundOnly) is null, "A frame with no document fill must report 検出不能, not a fabricated angle.");
+}
+
+static async Task TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TiltReadingTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.True(viewModel.TiltRollDegrees is null, "Before Live View starts, there is no frame to detect a tilt from.");
+        Check.Equal("傾き 検出不能", viewModel.TiltRollDegreesText);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.TiltedDocumentRollPlus6, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(viewModel.TiltRollDegrees is not null, "A live-ticked tilted document frame must produce a detected angle.");
+        Check.True(
+            Math.Abs(viewModel.TiltRollDegrees!.Value - 6.0) < 0.5,
+            $"The +6° pattern must be detected within test tolerance, got {viewModel.TiltRollDegrees.Value:F4}°.");
+        Check.True(viewModel.TiltRollDegreesText.StartsWith("傾き ", StringComparison.Ordinal), "The reading text must keep the 傾き label.");
+        Check.False(viewModel.TiltRollDegreesText.Contains("検出不能", StringComparison.Ordinal), "A successfully detected reading must not show 検出不能.");
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.True(viewModel.TiltRollDegrees is null, "Stopping Live View must revert the reading to 検出不能 — the non-live/frame-not-yet-obtained contract.");
+        Check.Equal("傾き 検出不能", viewModel.TiltRollDegreesText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task AlignmentGuideOverlayTogglesControlVisibilityAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-OverlayToggleTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // Grid/トンボ/安全マージン are newly introduced guide layers and must default off; 重複帯
+        // already displayed unconditionally before this issue made it toggleable, so its default
+        // must stay on to avoid silently hiding something operators already relied on.
+        Check.False(viewModel.IsGridOverlayEnabled, "Grid overlay must default off.");
+        Check.False(viewModel.IsTombOverlayEnabled, "Tomb overlay must default off.");
+        Check.False(viewModel.IsSafeMarginOverlayEnabled, "Safe margin overlay must default off.");
+        Check.True(viewModel.IsOverlapBandOverlayEnabled, "Overlap band overlay must default on (preserves pre-#32 behavior).");
+
+        Check.False(viewModel.IsGridOverlayVisible, "Grid overlay must stay hidden until enabled.");
+        viewModel.IsGridOverlayEnabled = true;
+        Check.True(viewModel.IsGridOverlayVisible, "Enabling the grid toggle must make it visible.");
+
+        viewModel.IsTombOverlayEnabled = true;
+        Check.True(viewModel.IsTombOverlayVisible, "Enabling the tomb toggle must make it visible.");
+
+        viewModel.IsSafeMarginOverlayEnabled = true;
+        Check.True(viewModel.IsSafeMarginOverlayVisible, "Enabling the safe-margin toggle must make it visible.");
+
+        Check.True(viewModel.IsOverlapBandVisible, "Overlap band must stay visible (Dual mode default) while its toggle is on.");
+        viewModel.IsOverlapBandOverlayEnabled = false;
+        Check.False(viewModel.IsOverlapBandVisible, "Disabling the overlap band toggle must hide it even in Dual mode.");
+        viewModel.IsOverlapBandOverlayEnabled = true;
+
+        viewModel.SelectedOperatingMode = "1台構成";
+        Check.False(viewModel.IsOverlapBandVisible, "The overlap band must stay hidden in SingleCamera mode regardless of the toggle (no composite to overlap).");
+        viewModel.SelectedOperatingMode = "2台構成";
+
+        // None of the four overlay toggles may ever reach CanCapture — the 常時禁止 "原稿エッジ
+        // 検出・傾き読み値による撮影可否の判定と自動補正への接続" guard applies to these guides too.
+        var captureBefore = viewModel.CanCapture;
+        viewModel.IsGridOverlayEnabled = false;
+        viewModel.IsTombOverlayEnabled = false;
+        viewModel.IsSafeMarginOverlayEnabled = false;
+        Check.Equal(captureBefore, viewModel.CanCapture);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    // Separately: the guide overlays must hide (not just the target reticle) while the stage
+    // shows the Capturing/Stitching processing placeholder — mirrors IsTargetOverlayVisible's
+    // own gate, using the same BlockingTransactionService pattern
+    // ActionZoneVisibilitySwitchesWithUiStateAsync uses to hold UiState at Capturing deterministically.
+    var service = new BlockingTransactionService();
+    var placeholderViewModel = new OperatorShellViewModel(service);
+    await placeholderViewModel.InitializeAsync(CancellationToken.None);
+    placeholderViewModel.SelectedOperatingMode = "1台構成";
+    placeholderViewModel.SelectedCamera = "CAM-B";
+    placeholderViewModel.AcceptSafetyCommand.Execute(null);
+    placeholderViewModel.IsGridOverlayEnabled = true;
+    placeholderViewModel.IsTombOverlayEnabled = true;
+    placeholderViewModel.IsSafeMarginOverlayEnabled = true;
+    Check.True(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must be visible before capture starts.");
+
+    placeholderViewModel.CaptureCommand.Execute(null);
+    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.Equal(OperatorUiState.Capturing, placeholderViewModel.UiState);
+    Check.False(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must hide during the Capturing processing placeholder.");
+    Check.False(placeholderViewModel.IsTombOverlayVisible, "Tomb overlay must hide during the Capturing processing placeholder.");
+    Check.False(placeholderViewModel.IsSafeMarginOverlayVisible, "Safe margin overlay must hide during the Capturing processing placeholder.");
+
+    service.Release();
+    await WaitUntilAsync(() => !placeholderViewModel.IsBusy, "The blocking capture did not finish.");
+}
+
+static async Task TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TiltToleranceTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // Unset by default — issue #32: "許容値は設定値とし、初期値の決定は実装時に操作者へ確認
+        // する（勝手に既定値を作らない）"。No operator was available to ask during this automated
+        // implementation, so it stays unset rather than guessing a number.
+        Check.True(viewModel.TiltToleranceDegrees is null, "Tolerance must start unset — no invented default.");
+        Check.Equal("許容値未設定", viewModel.TiltToleranceChipText);
+
+        // Invalid input must be rejected and must re-announce the previously accepted value so a
+        // bound TextBox reverts, matching the rejection pattern used elsewhere in this VM.
+        var propertyChangedNames = new List<string>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is not null)
+            {
+                propertyChangedNames.Add(args.PropertyName);
+            }
+        };
+        viewModel.TiltToleranceInputText = "not-a-number";
+        Check.Equal(string.Empty, viewModel.TiltToleranceInputText);
+        Check.True(viewModel.TiltToleranceDegrees is null, "A rejected input must not change the accepted tolerance.");
+        Check.True(
+            propertyChangedNames.Contains(nameof(OperatorShellViewModel.TiltToleranceInputText)),
+            "A rejected value must still raise PropertyChanged so the bound TextBox reverts.");
+
+        viewModel.TiltToleranceInputText = "0.50";
+        Check.True(
+            viewModel.TiltToleranceDegrees is { } tolerance && Math.Abs(tolerance - 0.5) < 1e-9,
+            "A valid numeric input must be accepted.");
+
+        // Set but nothing live yet: the reading is 検出不能, so the chip must say so instead of
+        // fabricating a within/exceeded judgment against a nonexistent angle.
+        Check.Equal("許容 ±0.50° 内 / 検出不能のため判定不可", viewModel.TiltToleranceChipText);
+
+        // A live ~+6° tilt frame against a tight ±0.50° tolerance must read as exceeded.
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.TiltedDocumentRollPlus6, 0, generation, DateTimeOffset.UtcNow));
+        Check.True(
+            viewModel.TiltToleranceChipText.Contains("許容超過", StringComparison.Ordinal),
+            $"A ~6° reading against a ±0.50° tolerance must read as exceeded, got: {viewModel.TiltToleranceChipText}");
+
+        // The same reading against a wide tolerance must read as within it.
+        viewModel.TiltToleranceInputText = "10.00";
+        Check.True(
+            viewModel.TiltToleranceChipText.Contains("許容内", StringComparison.Ordinal),
+            $"A ~6° reading against a ±10.00° tolerance must read as within it, got: {viewModel.TiltToleranceChipText}");
+
+        // Clearing the input must return to unset, not to some prior remembered default.
+        viewModel.TiltToleranceInputText = string.Empty;
+        Check.True(viewModel.TiltToleranceDegrees is null, "Clearing the input must unset the tolerance.");
+        Check.Equal("許容値未設定", viewModel.TiltToleranceChipText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static byte[] CopyPixelsBgra(BitmapSource bitmap)
+{
+    var stride = bitmap.PixelWidth * 4;
+    var buffer = new byte[stride * bitmap.PixelHeight];
+    bitmap.CopyPixels(buffer, stride, 0);
+    return buffer;
+}
+
+sealed class FakeSimulatedLiveViewFramePump : ISimulatedLiveViewFramePump
+{
+    public List<(string CameraAlias, SimulatedFramePattern Pattern)> StartCalls { get; } = [];
+    public List<SimulatedFramePattern> PatternChanges { get; } = [];
+    public int StopCallCount { get; private set; }
+    public int LastReturnedGeneration { get; private set; }
+
+    public event EventHandler<SimulatedLiveViewFrameTick>? Tick;
+
+    public int Start(string cameraAlias, SimulatedFramePattern pattern)
+    {
+        StartCalls.Add((cameraAlias, pattern));
+        LastReturnedGeneration++;
+        return LastReturnedGeneration;
+    }
+
+    public void Stop() => StopCallCount++;
+
+    public void SetPattern(SimulatedFramePattern pattern) => PatternChanges.Add(pattern);
+
+    public void RaiseTick(SimulatedLiveViewFrameTick tick) => Tick?.Invoke(this, tick);
+
+    public void Dispose()
+    {
+    }
+}
+
+sealed class FakeSimulatedLiveViewFrameSource : ISimulatedLiveViewFrameSource
+{
+    public bool ReturnInvalidMarker { get; set; }
+    public int CallCount { get; private set; }
+
+    public SimulatedLiveViewFrame CreateFrame(string cameraAlias, SimulatedFramePattern pattern, int sequenceNumber, DateTimeOffset capturedAtUtc)
+    {
+        CallCount++;
+        return new SimulatedLiveViewFrame
+        {
+            CameraAlias = cameraAlias,
+            Pattern = pattern,
+            SequenceNumber = sequenceNumber,
+            CapturedAtUtc = capturedAtUtc,
+            Image = CreateFakeFrameImage(),
+            Simulation = !ReturnInvalidMarker,
+            Marker = ReturnInvalidMarker ? "NotSimulated" : "Simulated",
+        };
+    }
+
+    private static BitmapSource CreateFakeFrameImage()
+    {
+        var pixels = new byte[] { 0x10, 0x20, 0x30 };
+        var bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
+        bitmap.Freeze();
+        return bitmap;
+    }
 }
 
 static class Check
