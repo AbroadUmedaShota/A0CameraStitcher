@@ -363,7 +363,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool StageCompositeApplicable => !IsSingleCameraMode;
     public string StageCompositeLiveAlias => SelectedCamera;
     public string StageCompositeStillAlias => SelectedCamera == "CAM-A" ? "CAM-B" : "CAM-A";
-    public string StageCompositeOverlapBandText => "重複帯\n目安120px";
+    public string StageCompositeOverlapBandText => "重複帯\n幅px実測未接続";
     public string StageCompositeFreshnessText
     {
         get
