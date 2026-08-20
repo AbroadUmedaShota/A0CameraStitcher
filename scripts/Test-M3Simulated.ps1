@@ -53,7 +53,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 46/46 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 50/50 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -116,6 +116,16 @@ try {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required action zone binding/marker (issue #33): $marker"
     }
     Assert-Condition (-not $windowText.Contains('アクションゾーン 撮影と結果 暫定配置')) 'Issue #33 must replace the provisional single-block アクションゾーン layout with the state-driven 3-way one.'
+
+    foreach ($marker in @('DocumentTiltDetector', 'TiltRollDegrees', 'TiltRollDegreesText', 'CurrentLiveTiltSourceImage', 'TiltToleranceDegrees', 'TiltToleranceInputText', 'TiltToleranceChipText', 'IsGridOverlayEnabled', 'IsTombOverlayEnabled', 'IsOverlapBandOverlayEnabled', 'IsSafeMarginOverlayEnabled', 'IsOverlapBandVisible', '許容値未設定', '検出不能')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required alignment guide / tilt reading marker (issue #32): $marker"
+    }
+    $tiltDetectorPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Simulated/DocumentTiltDetector.cs'
+    Assert-Condition (Test-Path -LiteralPath $tiltDetectorPath -PathType Leaf) 'DocumentTiltDetector.cs must exist to compute the preview-only ROLL tilt reading (issue #32).'
+    Assert-Condition (-not (Get-Content -Raw -LiteralPath $tiltDetectorPath).Contains('CanCapture')) 'DocumentTiltDetector must stay a pure detection function with no reference back into capture/readiness state.'
+    foreach ($marker in @('設置ガイドオーバーレイ', '方眼グリッド', 'トンボ', '安全マージン', 'SAFE MARGIN', '傾き読み値 常駐行', '許容範囲チップ')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required alignment guide / tilt reading binding/marker (issue #32): $marker"
+    }
 
     [xml]$hardwareWindowXml = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath

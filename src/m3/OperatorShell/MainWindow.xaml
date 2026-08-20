@@ -101,7 +101,9 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
                             <DockPanel Grid.Row="0">
@@ -112,12 +114,26 @@
                                           AutomationProperties.Name="ステージ表示モード切替 CAM-A live CAM-B live 合成プレビュー" />
                             </DockPanel>
 
-                            <TextBlock Grid.Row="1" Margin="0,10,0,10" Foreground="#FF174E87" FontWeight="SemiBold"
+                            <!-- 設置ガイドオーバーレイ（issue #32）: 方眼グリッド/トンボ/重複帯/安全マージンの個別トグル。
+                                 表示メニューからの操作は#34の対象。ここでは簡素なチェックボックス群で提供する。 -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0"
+                                        AutomationProperties.Name="設置ガイドオーバーレイ トグル群 グリッド トンボ 重複帯 安全マージン">
+                                <CheckBox Content="方眼グリッド" IsChecked="{Binding IsGridOverlayEnabled}" Margin="0,0,14,0"
+                                          AutomationProperties.Name="設置ガイド 方眼グリッド表示切替" />
+                                <CheckBox Content="トンボ" IsChecked="{Binding IsTombOverlayEnabled}" Margin="0,0,14,0"
+                                          AutomationProperties.Name="設置ガイド トンボ表示切替 四隅と辺中央の合わせマーク" />
+                                <CheckBox Content="重複帯" IsChecked="{Binding IsOverlapBandOverlayEnabled}" Margin="0,0,14,0"
+                                          AutomationProperties.Name="設置ガイド 重複帯表示切替" />
+                                <CheckBox Content="安全マージン" IsChecked="{Binding IsSafeMarginOverlayEnabled}"
+                                          AutomationProperties.Name="設置ガイド 安全マージン表示切替 SAFE MARGIN" />
+                            </StackPanel>
+
+                            <TextBlock Grid.Row="2" Margin="0,10,0,10" Foreground="#FF174E87" FontWeight="SemiBold"
                                        Text="{Binding StagePreviewNoteText}"
                                        Visibility="{Binding IsStageLiveNoteVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                        AutomationProperties.Name="Live Viewプレビュー注記 原画像非使用" />
 
-                            <Grid Grid.Row="2" x:Name="StageDisplayArea" MinHeight="420" Background="#FF1D252C"
+                            <Grid Grid.Row="3" x:Name="StageDisplayArea" MinHeight="420" Background="#FF1D252C"
                                   AutomationProperties.Name="ステージ表示エリア Simulatedプレースホルダ">
 
                                 <!-- 撮影/合成処理中: Live View停止プレースホルダ -->
@@ -181,7 +197,7 @@
                                     </Grid>
 
                                     <Border Grid.Column="1" Background="#FFDB9A16" CornerRadius="2"
-                                            Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            Visibility="{Binding IsOverlapBandVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Text="{Binding StageCompositeOverlapBandText}" Foreground="#FF1D252C" FontSize="10" FontWeight="Bold"
                                                    TextAlignment="Center" VerticalAlignment="Center"
                                                    AutomationProperties.Name="重複帯 幅pxプレースホルダ値 実測未接続" />
@@ -212,6 +228,60 @@
                                                Visibility="{Binding IsSingleCameraMode, Converter={StaticResource BoolToVisibilityConverter}}" />
                                 </Grid>
 
+                                <!-- 方眼グリッド overlay（issue #32）: DrawingBrushでタイル状に描画。ピクセル処理は不要。 -->
+                                <Rectangle IsHitTestVisible="False"
+                                           Visibility="{Binding IsGridOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="設置ガイド 方眼グリッドオーバーレイ">
+                                    <Rectangle.Fill>
+                                        <DrawingBrush TileMode="Tile" Viewport="0,0,40,40" ViewportUnits="Absolute">
+                                            <DrawingBrush.Drawing>
+                                                <GeometryDrawing>
+                                                    <GeometryDrawing.Pen>
+                                                        <Pen Brush="#55FFFFFF" Thickness="1" />
+                                                    </GeometryDrawing.Pen>
+                                                    <GeometryDrawing.Geometry>
+                                                        <GeometryGroup>
+                                                            <LineGeometry StartPoint="0,0" EndPoint="40,0" />
+                                                            <LineGeometry StartPoint="0,0" EndPoint="0,40" />
+                                                        </GeometryGroup>
+                                                    </GeometryDrawing.Geometry>
+                                                </GeometryDrawing>
+                                            </DrawingBrush.Drawing>
+                                        </DrawingBrush>
+                                    </Rectangle.Fill>
+                                </Rectangle>
+
+                                <!-- トンボ（四隅＋辺中央の合わせマーク・issue #32）: ステージ表示エリアの縁に沿った8点の位置合わせマーク。 -->
+                                <Grid IsHitTestVisible="False"
+                                      Visibility="{Binding IsTombOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                      AutomationProperties.Name="設置ガイド トンボ 四隅と辺中央の合わせマーク">
+                                    <Grid.Resources>
+                                        <Style TargetType="Path" x:Key="TombMarkStyle">
+                                            <Setter Property="Data" Value="M -9,0 L 9,0 M 0,-9 L 0,9" />
+                                            <Setter Property="Stroke" Value="White" />
+                                            <Setter Property="StrokeThickness" Value="2" />
+                                            <Setter Property="Margin" Value="12" />
+                                        </Style>
+                                    </Grid.Resources>
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Left" VerticalAlignment="Top" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Center" VerticalAlignment="Top" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Right" VerticalAlignment="Top" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Left" VerticalAlignment="Center" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Left" VerticalAlignment="Bottom" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Center" VerticalAlignment="Bottom" />
+                                    <Path Style="{StaticResource TombMarkStyle}" HorizontalAlignment="Right" VerticalAlignment="Bottom" />
+                                </Grid>
+
+                                <!-- 安全マージン（SAFE MARGIN 枠・issue #32） -->
+                                <Border Margin="28" BorderBrush="#FFF2C94C" BorderThickness="2" IsHitTestVisible="False"
+                                        Visibility="{Binding IsSafeMarginOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        AutomationProperties.Name="設置ガイド 安全マージン枠 SAFE MARGIN">
+                                    <Border Background="#FFF2C94C" CornerRadius="2" Padding="8,2" HorizontalAlignment="Left" VerticalAlignment="Top">
+                                        <TextBlock Text="SAFE MARGIN" Foreground="#FF1D252C" FontSize="10" FontWeight="Bold" />
+                                    </Border>
+                                </Border>
+
                                 <!-- 共通ターゲット□: ドラッグで粗く移動（issue #30）。ステージ表示エリア全体を
                                      覆う透明ハンドルがドラッグを受け、正規化座標(0..1)でVMのTargetX/TargetYを更新する。
                                      処理中プレースホルダ時は非表示・ドラッグ無効。 -->
@@ -235,6 +305,29 @@
                                     </Border.Margin>
                                 </Border>
                             </Grid>
+
+                            <!-- 傾き読み値（issue #32）: ステージ下部の常駐行。LV frameからの原稿エッジ検出による
+                                 面内回転（ROLL）角と許容範囲チップを示す。ガイドであり合否は判定しない
+                                 （docs/OPERATOR_UI_SPEC.md 設置ガイドオーバーレイと傾き読み値 節）。 -->
+                            <Border Grid.Row="4" Margin="0,10,0,0" Padding="10" Background="#FFF1F3F5" BorderBrush="#FFD7DDE3" BorderThickness="1"
+                                    AutomationProperties.Name="傾き読み値 常駐行 ROLL角 許容範囲チップ">
+                                <DockPanel LastChildFill="False">
+                                    <TextBlock DockPanel.Dock="Left" Text="{Binding TiltRollDegreesText}" FontWeight="Bold" VerticalAlignment="Center"
+                                               AutomationProperties.LiveSetting="Polite"
+                                               AutomationProperties.Name="傾き読み値 面内回転ROLL角 検出不能時は数値を出さない" />
+                                    <Border DockPanel.Dock="Left" Background="White" BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="10"
+                                            Padding="10,3" Margin="12,0,0,0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding TiltToleranceChipText}" FontSize="11"
+                                                   AutomationProperties.LiveSetting="Polite"
+                                                   AutomationProperties.Name="許容範囲チップ 許容値未設定なら判定を出さない" />
+                                    </Border>
+                                    <TextBlock DockPanel.Dock="Right" Text="PITCHは対象外" Foreground="#FF56616B" FontSize="11" VerticalAlignment="Center" />
+                                    <TextBlock DockPanel.Dock="Right" Text="許容値(°): " Margin="0,0,4,0" Foreground="#FF56616B" VerticalAlignment="Center" />
+                                    <TextBox DockPanel.Dock="Right" Width="64" Margin="0,0,10,0" VerticalAlignment="Center"
+                                             Text="{Binding TiltToleranceInputText, UpdateSourceTrigger=PropertyChanged}"
+                                             AutomationProperties.Name="許容範囲チップ 許容値入力 簡素な入力 未設定なら既定値を作らない" />
+                                </DockPanel>
+                            </Border>
                         </Grid>
                     </Border>
 
