@@ -42,6 +42,7 @@ enum class DualHardwareCameraAgentOperation {
     reserve_pair_transaction,
     start_reserved_pair,
     get_pair_transaction_result,
+    close_reserved_pair_transaction,
 };
 
 class DualHardwareCameraAgentProtocolError final : public std::runtime_error {

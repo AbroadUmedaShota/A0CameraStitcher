@@ -202,6 +202,15 @@ std::string QueryEnvelope(
         request_id);
 }
 
+std::string CloseEnvelope(
+    std::string_view transaction_id,
+    std::string_view request_id = "pipe-contract-close") {
+    return Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
+        request_id);
+}
+
 // Fixed clock/timestamps mirror dual_hardware_camera_agent_tests.cpp exactly,
 // so this file stays focused on transport/host behavior instead of
 // re-deriving the semantic-preflight math that file already covers. Using
@@ -403,7 +412,8 @@ void TestMalformedJsonBodyGetsTypedRejectionOverRealHost() {
 
 // ---------------------------------------------------------------------
 // One persistent (non-serve-once) host answers capabilities, reserve, a
-// duplicate reservation, and a same-ID query as separate pipe connections,
+// duplicate reservation, same-ID query, close, and close-tombstone query as
+// separate pipe connections,
 // proving: (a) the persistent multi-request contract, (b) capabilities/
 // reserve/query match the existing typed contract when served through the
 // real host, and (c) duplicate delivery of the same reservation is rejected
@@ -479,6 +489,26 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
             "a same-ID query for a reserved transaction must report found:true");
     }
 
+
+    const auto closed = SendRequest(
+        pipe_name, CloseEnvelope(transaction_id));
+    Check(closed.has_value(), "the exact close must be delivered over the real host");
+    if (closed) {
+        CheckContains(*closed, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "a real-host close must confirm the durable tombstone");
+        CheckContains(*closed, "\"closedBeforeDispatch\":true",
+            "a real-host close must not acknowledge before the tombstone reread");
+    }
+    const auto closed_query = SendRequest(
+        pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-closed"));
+    Check(closed_query.has_value(), "the close tombstone query must be delivered");
+    if (closed_query) {
+        CheckContains(*closed_query, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "restart-safe query must distinguish a closed reservation");
+        CheckContains(*closed_query, "\"found\":true,\"result\":null",
+            "a close tombstone must never forge a capture result");
+    }
+
     // The persistent-mode accept loop only re-checks the fixed deadline
     // between connection attempts, and each attempt waits up to a fixed 5s
     // for a new connection before looping back (unchanged, shared behavior
@@ -503,7 +533,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
-        "capabilities/reserve/duplicate/query must never touch pair_dispatch_count");
+        "capabilities/reserve/duplicate/query/close must never touch pair_dispatch_count");
     Check(counters.camera_access_count == 0,
         "the Dual host must perform zero camera access without a real backend");
 }

@@ -835,7 +835,8 @@ std::string CapabilitiesResponse(std::string_view request_id) {
         "\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"],"
         "\"supportedOperations\":[\"get-dual-capabilities\","
         "\"reserve-pair-transaction\",\"start-reserved-pair\","
-        "\"get-pair-transaction-result\"],\"pairJournalDurable\":true,"
+        "\"get-pair-transaction-result\",\"close-reserved-pair-transaction\"],"
+        "\"pairJournalDurable\":true,"
         "\"sameTransactionQueryOnly\":true,\"automaticRetryCount\":0}}";
 }
 
@@ -883,6 +884,18 @@ std::string QueryResponse(
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"found\":" + (found ? "true" : "false") +
         ",\"result\":null}}";
+}
+
+std::string CloseResponse(
+    std::string_view request_id,
+    std::string_view transaction_id,
+    bool success,
+    std::string_view result_code,
+    bool closed_before_dispatch) {
+    return ResponsePrefix(request_id, success, result_code) +
+        "{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"closedBeforeDispatch\":" +
+        (closed_before_dispatch ? "true" : "false") + "}}";
 }
 
 std::string ProtocolRejection(
@@ -1005,6 +1018,13 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
         request.transaction_id = ValidateTransactionId(payload);
         request.operation =
             DualHardwareCameraAgentOperation::get_pair_transaction_result;
+        return request;
+    }
+    if (operation == "close-reserved-pair-transaction") {
+        RequireExactFields(payload, {"transactionId"});
+        request.transaction_id = ValidateTransactionId(payload);
+        request.operation =
+            DualHardwareCameraAgentOperation::close_reserved_pair_transaction;
         return request;
     }
     ProtocolFailure(
@@ -1132,6 +1152,14 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             }
             try {
                 const auto record = pair_store_->Query(request.transaction_id);
+                if (record && record->state ==
+                    DualHardwarePairJournalState::closed_before_dispatch) {
+                    return ResponsePrefix(
+                               request.request_id, true,
+                               "PairTransactionClosedBeforeDispatch") +
+                        "{\"transactionId\":\"" + request.transaction_id +
+                        "\",\"found\":true,\"result\":null}}";
+                }
                 if (record && !record->terminal_result_json.empty()) {
                     return ResponsePrefix(request.request_id, true, "PairTransactionFound") +
                         "{\"transactionId\":\"" + request.transaction_id +
@@ -1147,6 +1175,33 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 return QueryResponse(
                     request.request_id, request.transaction_id,
                     "PairStoreFailure", false);
+            }
+        }
+        case DualHardwareCameraAgentOperation::close_reserved_pair_transaction: {
+            if (pair_store_ == nullptr) {
+                return CloseResponse(
+                    request.request_id, request.transaction_id, false,
+                    "PairStoreUnavailable", false);
+            }
+            try {
+                const auto closed =
+                    pair_store_->CloseReservedBeforeDispatch(
+                        request.transaction_id);
+                const bool confirmed =
+                    closed.transaction_id == request.transaction_id &&
+                    closed.state ==
+                        DualHardwarePairJournalState::closed_before_dispatch &&
+                    closed.automatic_retry_count == 0 &&
+                    closed.terminal_result_json.empty();
+                return CloseResponse(
+                    request.request_id, request.transaction_id, confirmed,
+                    confirmed ? "PairTransactionClosedBeforeDispatch" :
+                        "PairCloseRejected",
+                    confirmed);
+            } catch (const DualHardwarePairJournalStoreError&) {
+                return CloseResponse(
+                    request.request_id, request.transaction_id, false,
+                    "PairCloseRejected", false);
             }
         }
         }

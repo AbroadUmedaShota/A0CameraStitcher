@@ -64,7 +64,24 @@ answered `PairDispatcherUnavailable` after running its full preflight.
 | `get-dual-capabilities` | none | always succeeds |
 | `reserve-pair-transaction` | durable pair journal store | fails closed (`PairStoreUnavailable`) only if the store failed to construct |
 | `start-reserved-pair` | full preflight, then `PairDispatcherUnavailable` | preflight (identity/capture-profile/rig-profile/confirmations) always runs; no camera dispatch occurs |
-| `get-pair-transaction-result` | durable pair journal store | a same-ID query recovers a Reserved or terminal transaction |
+| `close-reserved-pair-transaction` | durable pair journal store | closes only the exact same-ID `Reserved` transaction before dispatch; missing, wrong-ID, `Dispatching`, and capture-terminal states are rejected |
+| `get-pair-transaction-result` | durable pair journal store | a same-ID query recovers a Reserved, `ClosedBeforeDispatch`, or capture-terminal transaction |
+
+Closing a reservation first atomically publishes a durable
+`ClosedBeforeDispatch` tombstone, rereads that tombstone, and only then removes
+the active `Reserved` record. A repeated same-ID close is idempotent and also
+finishes removal if a previous process stopped after publishing the tombstone.
+It never closes a transaction that reached `Dispatching` or a capture-terminal
+state.
+
+The .NET pending snapshot schema is v2 and records the recovery intent. A v1
+snapshot migrates fail-closed to `MayHaveDispatched`. Only a typed
+`ConfirmedUndispatched` start outcome may change the intent to
+`CloseReservedBeforeDispatch`, and the PC pending snapshot is cleared only
+after the Agent confirms the durable `ClosedBeforeDispatch` tombstone. If the
+close response is unknown or the process restarts, recovery uses only the
+frozen transaction ID for close/query operations: it does not reserve, start,
+redispatch, capture, or retry.
 
 ## Exit codes
 
@@ -73,7 +90,7 @@ answered `PairDispatcherUnavailable` after running its full preflight.
 | 0 | Graceful shutdown: `--serve-once` completed one connection, or the persistent loop reached its lifetime deadline with the last connection (if any) fully delivered |
 | 1 | Startup/argument failure caught in `wmain` (bad argv, an unsafe or missing `--pipe-name`, a required argument missing, an argument path that fails the fixed-local-path or existing-regular-file check, or pair journal store construction failure) |
 | 2 | `kFailedBeforeDispatchExitCode` -- a connection failed before any request was dispatched (oversized/zero-length/partial frame, accept timeout, client disconnect mid-frame) |
-| 3 | `kDispatchedDeliveryFailureExitCode` -- a request was dispatched and durably persisted, but the response could not be confirmed delivered to the client. The client must resolve this with a same-ID `get-pair-transaction-result` query, never by replaying `reserve-pair-transaction`/`start-reserved-pair` |
+| 3 | `kDispatchedDeliveryFailureExitCode` -- a request was dispatched and durably persisted, but the response could not be confirmed delivered to the client. The client must resolve this with a same-ID query or, for a persisted confirmed-undispatched cleanup intent, a same-ID close/query; it must never replay reserve/start |
 
 ## Lifetime policy
 
@@ -92,7 +109,7 @@ already documented for the Single v2 continuous Live View host (see
 `HARDWARE_CAMERA_AGENT_V2.md`, "the native process also enforces a
 600-second maximum lifetime"). The Dual host is still designed for
 persistent multi-request use within that fixed 600s window (capabilities /
-reserve / start / same-ID query issued as separate pipe connections over one
+reserve / start / same-ID close/query issued as separate pipe connections over one
 long-running process); it just does not extend its own lifetime in response
 to that use.
 
@@ -103,11 +120,12 @@ drive this host over a real Windows named pipe. They cover the 1 MiB frame
 boundary, zero-length and partial header/body frames, malformed JSON
 delivered as a typed dispatch-level rejection rather than a transport
 failure, persistent multi-request handling (capabilities/reserve/duplicate/
-query as separate connections against one running host), client disconnect
+close/query as separate connections against one running host), client disconnect
 mid-frame, the backend-unavailable `PairDispatcherUnavailable` contract after
 a full preflight, and the "response unknown" resilience contract
 (dispatched-but-undelivered response, recovered only via a same-ID query
-across a simulated host restart, with zero reservation replay). They do not
+across a simulated host restart, with zero reservation replay), and exact-ID
+reserved cleanup with a durable `ClosedBeforeDispatch` tombstone. They do not
 load or call a real camera; `A0CameraStitcher.DualCameraAgent.exe` never
 constructs a real SDK/WPD backend or the test-only fake orchestrator.
 
