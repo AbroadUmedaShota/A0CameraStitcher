@@ -374,11 +374,14 @@
                                 <TextBlock Text="表示シナリオ" FontWeight="Bold" />
                                 <ComboBox ItemsSource="{Binding ReadinessDemoOptions}" SelectedItem="{Binding SelectedReadinessDemo}" Width="260" HorizontalAlignment="Left" Margin="0,6,0,12" />
                                 <Border Padding="14" Background="#FFF1F3F5"><StackPanel><TextBlock Text="{Binding SetupStatusText}" FontSize="18" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,6,0,0" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel></Border>
-                                <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Bold" Margin="0,16,0,0" />
-                                <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。" Margin="0,4,0,6" Foreground="#FF56616B" TextWrapping="Wrap" MaxWidth="640" />
-                                <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
-                                          Width="260" HorizontalAlignment="Left" Margin="0,0,0,12"
-                                          AutomationProperties.Name="疑似LVフレームソース パターン切替 開発検証用" />
+                                <StackPanel Visibility="{Binding IsSimulatedFrameSourceAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Bold" Margin="0,16,0,0" />
+                                    <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。" Margin="0,4,0,6" Foreground="#FF56616B" TextWrapping="Wrap" MaxWidth="640" />
+                                    <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
+                                              IsEnabled="{Binding CanChangeSimulatedFramePattern}"
+                                              Width="260" HorizontalAlignment="Left" Margin="0,0,0,12"
+                                              AutomationProperties.Name="疑似LVフレームソース パターン切替 開発検証用" />
+                                </StackPanel>
                                 <Button Content="校正を開始（未実装・human gate待ち）" IsEnabled="False" Margin="0,14,0,0" HorizontalAlignment="Left" />
                             </StackPanel>
                         </Border>

@@ -14,8 +14,8 @@ public partial class MainWindow : Window
     private readonly OperatorShellViewModel _viewModel;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
-    private readonly ISimulatedLiveViewFramePump _liveViewFramePump =
-        new SimulatedLiveViewFramePump(new SimulatedTestImageFrameSource());
+    private readonly ISimulatedLiveViewFrameSource _liveViewFrameSource = new SimulatedTestImageFrameSource();
+    private readonly ISimulatedLiveViewFramePump _liveViewFramePump = new SimulatedLiveViewFramePump();
 
     public MainWindow(DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic)
     {
@@ -54,7 +54,8 @@ public partial class MainWindow : Window
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
-                liveViewFramePump: _liveViewFramePump);
+                liveViewFramePump: _liveViewFramePump,
+                liveViewFrameSource: _liveViewFrameSource);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closed += OnClosed;

@@ -26,6 +26,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly IDualCameraProductFlow? _dualCameraFlow;
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
     private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
+    private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
     private readonly AsyncRelayCommand _captureCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
@@ -51,7 +52,15 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _selectedPage = "Dashboard";
     private string _selectedStageMode = StageModeCompositePreview;
     private string _selectedSimulatedFramePattern = SimulatedFramePatternCatalog.DefaultLabel;
-    private readonly Dictionary<string, DateTimeOffset> _lastFinalFrameTimestamps = new(StringComparer.Ordinal);
+    private int _currentLiveViewFrameGeneration;
+    /// <summary>Timestamps of canonical captured originals (persisted by a completed
+    /// capture). Consulted by <see cref="StageCompositeFreshnessText"/> alongside
+    /// <see cref="_lastLiveFrameTimestamps"/> — the more recent of the two wins.</summary>
+    private readonly Dictionary<string, DateTimeOffset> _lastCapturedOriginalTimestamps = new(StringComparer.Ordinal);
+    /// <summary>Timestamps of the last SIMULATED live view frame rendered per alias (not a
+    /// capture) — separate from <see cref="_lastCapturedOriginalTimestamps"/> because the two
+    /// have different real-world meaning even though both can drive the same freshness badge.</summary>
+    private readonly Dictionary<string, DateTimeOffset> _lastLiveFrameTimestamps = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SimulatedLiveViewFrame> _lastLiveFrames = new(StringComparer.Ordinal);
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
     private string _statusMessage = "起動時の安全確認を行ってください。この画面は実機へ接続しません。";
@@ -81,12 +90,14 @@ public sealed class OperatorShellViewModel : ObservableObject
         ISimulatedTransactionService transactionService,
         IDualCameraProductFlow? dualCameraFlow,
         Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null,
-        ISimulatedLiveViewFramePump? liveViewFramePump = null)
+        ISimulatedLiveViewFramePump? liveViewFramePump = null,
+        ISimulatedLiveViewFrameSource? liveViewFrameSource = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
         _liveViewFramePump = liveViewFramePump;
+        _liveViewFrameSource = liveViewFrameSource;
         if (_dualCameraFlow is not null)
         {
             _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
@@ -94,7 +105,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         if (_liveViewFramePump is not null)
         {
-            _liveViewFramePump.FrameProduced += OnSimulatedFrameProduced;
+            _liveViewFramePump.Tick += OnSimulatedFrameTick;
         }
         ProgressSteps =
         [
@@ -170,6 +181,14 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
                 OnPropertyChanged(nameof(CanChangeExportDirectory));
+                OnPropertyChanged(nameof(CanChangeSimulatedFramePattern));
+                if (IsBusy)
+                {
+                    // Re-announce the current value so a pattern change attempted while busy
+                    // (rejected by the SelectedSimulatedFramePattern setter) doesn't leave the
+                    // ComboBox showing a value the ViewModel never actually accepted.
+                    OnPropertyChanged(nameof(SelectedSimulatedFramePattern));
+                }
             }
         }
     }
@@ -326,14 +345,18 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _isLiveViewActive, value))
             {
                 // The pump is the sole SIMULATED frame supply gate: it only runs between
-                // Start/Stop, so no frame is ever produced while Live View is OFF.
+                // Start/Stop, so no frame is ever produced while Live View is OFF. The
+                // generation Start() returns is remembered so a tick from a since-stopped
+                // session (including OFF then back ON for the same alias) can be told apart
+                // from one belonging to the session that is current right now.
                 if (value)
                 {
-                    _liveViewFramePump?.Start(SelectedCamera, CurrentSimulatedFramePattern);
+                    _currentLiveViewFrameGeneration = _liveViewFramePump?.Start(SelectedCamera, CurrentSimulatedFramePattern) ?? 0;
                 }
                 else
                 {
                     _liveViewFramePump?.Stop();
+                    _currentLiveViewFrameGeneration = 0;
                 }
                 OnPropertyChanged(nameof(LiveViewButtonText));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
@@ -367,18 +390,28 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public IReadOnlyList<string> SimulatedFramePatternOptions { get; } = SimulatedFramePatternCatalog.Labels;
 
-    public bool IsSimulatedFrameSourceAvailable => _liveViewFramePump is not null;
+    public bool IsSimulatedFrameSourceAvailable => _liveViewFramePump is not null && _liveViewFrameSource is not null;
+
+    public bool CanChangeSimulatedFramePattern => !IsBusy;
 
     public string SelectedSimulatedFramePattern
     {
         get => _selectedSimulatedFramePattern;
         set
         {
-            if (!IsBusy && SimulatedFramePatternCatalog.TryGetPattern(value, out var pattern) &&
-                SetProperty(ref _selectedSimulatedFramePattern, value))
+            if (CanChangeSimulatedFramePattern && SimulatedFramePatternCatalog.TryGetPattern(value, out var pattern))
             {
-                _liveViewFramePump?.SetPattern(pattern);
+                if (SetProperty(ref _selectedSimulatedFramePattern, value))
+                {
+                    _liveViewFramePump?.SetPattern(pattern);
+                }
+                return;
             }
+
+            // Rejected (busy, or a value that doesn't map to a known pattern somehow reached
+            // the binding): re-announce the current value so the ComboBox snaps back to it
+            // instead of silently displaying a selection the ViewModel never accepted.
+            OnPropertyChanged(nameof(SelectedSimulatedFramePattern));
         }
     }
 
@@ -414,12 +447,18 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         get
         {
-            if (!_lastFinalFrameTimestamps.TryGetValue(StageCompositeStillAlias, out var capturedAt))
+            // Either a completed capture or a SIMULATED live view frame can be the more
+            // recent "last known state" of the still alias; whichever is newer drives the
+            // badge (a live frame taken after the last capture is more current, and vice versa).
+            var hasCapturedOriginal = _lastCapturedOriginalTimestamps.TryGetValue(StageCompositeStillAlias, out var capturedAt);
+            var hasLiveFrame = _lastLiveFrameTimestamps.TryGetValue(StageCompositeStillAlias, out var liveFrameAt);
+            if (!hasCapturedOriginal && !hasLiveFrame)
             {
                 return "STILL 未取得";
             }
 
-            var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - capturedAt).TotalSeconds);
+            var mostRecent = hasCapturedOriginal && (!hasLiveFrame || capturedAt >= liveFrameAt) ? capturedAt : liveFrameAt;
+            var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - mostRecent).TotalSeconds);
             return $"STILL {elapsedSeconds}秒前";
         }
     }
@@ -815,33 +854,62 @@ public sealed class OperatorShellViewModel : ObservableObject
         RebuildReadiness(preserveOutcomeState: true);
     }
 
-    private void OnSimulatedFrameProduced(object? sender, SimulatedLiveViewFrame frame)
+    private void OnSimulatedFrameTick(object? sender, SimulatedLiveViewFrameTick tick)
     {
         if (_synchronizationContext is not null && SynchronizationContext.Current != _synchronizationContext)
         {
-            _synchronizationContext.Post(_ => ApplySimulatedFrame(frame), null);
+            // A callback posted through SynchronizationContext.Post that throws becomes an
+            // unhandled Dispatcher exception in WPF (it does not propagate back to the
+            // caller), so ApplySimulatedFrameTick must never throw — it wraps its own body in
+            // try/catch below, precisely so this posted lambda cannot surface an exception.
+            _synchronizationContext.Post(_ => ApplySimulatedFrameTick(tick), null);
             return;
         }
-        ApplySimulatedFrame(frame);
+        ApplySimulatedFrameTick(tick);
     }
 
-    private void ApplySimulatedFrame(SimulatedLiveViewFrame frame)
+    /// <summary>
+    /// Turns one pump tick into an actual rendered frame (the WPF rendering call itself
+    /// happens here, on whichever thread this runs on — the UI thread once marshalled via
+    /// SynchronizationContext.Post) and applies it, or drops it. A tick is dropped — without
+    /// throwing — when: Live View is OFF, the tick's camera alias no longer matches the
+    /// selected camera, the tick's generation no longer matches the current Live View
+    /// session's generation (guards the OFF-then-back-ON-for-the-same-alias race, which alias
+    /// and IsLiveViewActive alone cannot detect), the frame source produced a frame missing
+    /// the Simulated marker, or rendering itself threw.
+    /// </summary>
+    private void ApplySimulatedFrameTick(SimulatedLiveViewFrameTick tick)
     {
-        if (!frame.Simulation || !string.Equals(frame.Marker, "Simulated", StringComparison.Ordinal))
+        try
         {
-            throw new InvalidDataException("実機非接続shellはSimulated markerのないLive Viewフレームを表示できません。");
-        }
+            if (!IsLiveViewActive ||
+                tick.Generation != _currentLiveViewFrameGeneration ||
+                !string.Equals(tick.CameraAlias, SelectedCamera, StringComparison.Ordinal))
+            {
+                return;
+            }
 
-        if (!IsLiveViewActive || !string.Equals(frame.CameraAlias, SelectedCamera, StringComparison.Ordinal))
+            var frameSource = _liveViewFrameSource;
+            if (frameSource is null)
+            {
+                return;
+            }
+
+            var frame = frameSource.CreateFrame(tick.CameraAlias, tick.Pattern, tick.SequenceNumber, tick.CapturedAtUtc);
+            if (!frame.Simulation || !string.Equals(frame.Marker, "Simulated", StringComparison.Ordinal))
+            {
+                StatusMessage = "SIMULATED live view frame sourceがSimulated markerのないフレームを返したため破棄しました。";
+                return;
+            }
+
+            _lastLiveFrames[frame.CameraAlias] = frame;
+            _lastLiveFrameTimestamps[frame.CameraAlias] = frame.CapturedAtUtc;
+            RaiseStageFrameProperties();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            // Stale frame produced right after Stop()/an alias switch raced the timer tick;
-            // drop it instead of resurrecting a preview for a camera that is no longer live.
-            return;
+            StatusMessage = $"SIMULATED live view frameの生成に失敗したため破棄しました: {exception.GetType().Name}.";
         }
-
-        _lastLiveFrames[frame.CameraAlias] = frame;
-        _lastFinalFrameTimestamps[frame.CameraAlias] = frame.CapturedAtUtc;
-        RaiseStageFrameProperties();
     }
 
     private void ApplyFormalDualCameraState(DualCameraProductState state)
@@ -883,7 +951,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 $"{original.Alias}: original.jpg {original.SizeBytes} bytes SHA-256 {original.Sha256[..12]}…"));
         foreach (var original in originals)
         {
-            _lastFinalFrameTimestamps[original.Alias] = DateTimeOffset.UtcNow;
+            _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
         }
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
         if (state.Capture is not null)
@@ -961,7 +1029,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         _stitchOutcome = null;
         _exportOutcome = null;
         _captureOutcome = null;
-        _lastFinalFrameTimestamps.Clear();
+        _lastCapturedOriginalTimestamps.Clear();
+        _lastLiveFrameTimestamps.Clear();
         _lastLiveFrames.Clear();
         RaiseStageFrameProperties();
         RebuildReadiness();
@@ -1082,7 +1151,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         RetainedOriginals = result.RetainedOriginalAliases.Count == 0 ? "なし" : string.Join(", ", result.RetainedOriginalAliases) + "（simulated原画像）";
         foreach (var alias in result.RetainedOriginalAliases)
         {
-            _lastFinalFrameTimestamps[alias] = DateTimeOffset.UtcNow;
+            _lastCapturedOriginalTimestamps[alias] = DateTimeOffset.UtcNow;
         }
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
         _captureOutcome = new CaptureOutcome(

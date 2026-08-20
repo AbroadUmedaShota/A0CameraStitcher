@@ -19,7 +19,10 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
     private const int CanvasHeight = 400;
     private const int BlurCycleLength = 30;
     private const double MaxBlurRadius = 16.0;
-    private const double SharpHoldFraction = 0.6;
+
+    /// <summary>Fraction of <see cref="BlurCycleLength"/> spent ramping from
+    /// <see cref="MaxBlurRadius"/> down to sharp focus; the remainder is the sharp hold.</summary>
+    private const double BlurRampFraction = 0.6;
 
     private static readonly Color BackgroundColor = Color.FromRgb(0x14, 0x1A, 0x1F);
     private static readonly Color DocumentColor = Color.FromRgb(0xF3, 0xF0, 0xE6);
@@ -53,8 +56,19 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
             };
         }
 
+        // Older WPF (.NET Framework) has a documented quirk where RenderTargetBitmap.Render(visual)
+        // ignores an Effect set directly on the visual passed as the root, because Effect is
+        // applied by a PARENT compositing a child and a root has no such parent. Verified via
+        // SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition (pixel-diffs seq=0
+        // vs seq=17) that on this net10.0-windows WPF build the blur applies correctly either
+        // way — wrapping in a child-of-container made no measurable difference (diff ~4.81M
+        // BGRA units both with and without it). Kept anyway: it is the documented-safe pattern
+        // for that quirk on other WPF versions, costs nothing here, and the pixel-diff test
+        // guards against a regression regardless of which form is used.
+        var sceneContainer = new ContainerVisual();
+        sceneContainer.Children.Add(sceneVisual);
         var sceneBitmap = new RenderTargetBitmap(CanvasWidth, CanvasHeight, 96, 96, PixelFormats.Pbgra32);
-        sceneBitmap.Render(sceneVisual);
+        sceneBitmap.Render(sceneContainer);
 
         // Second pass: composite the (possibly blurred) scene with a crisp, unblurred
         // watermark and timestamp badge, so "Simulated" stays legible at every blur level.
@@ -187,7 +201,7 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
     private static double ComputeBlurRadius(int sequenceNumber)
     {
         var position = ((sequenceNumber % BlurCycleLength) + BlurCycleLength) % BlurCycleLength;
-        var rampLength = (int)(BlurCycleLength * SharpHoldFraction);
+        var rampLength = (int)(BlurCycleLength * BlurRampFraction);
         if (position >= rampLength)
         {
             return 0.0;
