@@ -535,7 +535,51 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the action zone's three exclusive displays switch with UiState (準備中/自動進捗/結果): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {46 - failures.Count}/46 passed.");
+try
+{
+    DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable();
+    Console.WriteLine("PASS document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames");
+}
+catch (Exception exception)
+{
+    failures.Add("document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames");
+    Console.Error.WriteLine($"FAIL document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames: {exception}");
+}
+
+try
+{
+    await TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync();
+    Console.WriteLine("PASS the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32)");
+    Console.Error.WriteLine($"FAIL the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32): {exception}");
+}
+
+try
+{
+    await AlignmentGuideOverlayTogglesControlVisibilityAsync();
+    Console.WriteLine("PASS the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32)");
+    Console.Error.WriteLine($"FAIL the four alignment guide overlay toggles default correctly, control their own visibility, and hide during the processing placeholder (issue #32): {exception}");
+}
+
+try
+{
+    await TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync();
+    Console.WriteLine("PASS the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32)");
+}
+catch (Exception exception)
+{
+    failures.Add("the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32)");
+    Console.Error.WriteLine($"FAIL the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {50 - failures.Count}/50 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -4076,6 +4120,262 @@ static async Task ActionZoneVisibilitySwitchesWithUiStateAsync()
     Check.False(viewModel.IsActionZonePreparing, "Review must hide action zone state 1.");
     Check.False(viewModel.IsActionZoneProcessing, "Review must hide action zone state 2.");
     Check.True(viewModel.IsActionZoneReview, "Review must show action zone state 3 (結果パネル).");
+}
+
+static void DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable()
+{
+    Check.True(DocumentTiltDetector.DetectRollDegrees(null) is null, "A null source must report 検出不能.");
+    var degenerate = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, new byte[] { 1, 2, 3 }, 3);
+    degenerate.Freeze();
+    Check.True(DocumentTiltDetector.DetectRollDegrees(degenerate) is null, "A degenerate 1x1 source (the fake frame source's shape) must report 検出不能.");
+
+    var source = new SimulatedTestImageFrameSource();
+    var frontal = source.CreateFrame("CAM-A", SimulatedFramePattern.FrontalDocument, 0, DateTimeOffset.UtcNow);
+    var frontalRoll = DocumentTiltDetector.DetectRollDegrees(frontal.Image);
+    Check.True(frontalRoll is not null, "A frontal (unrotated) document must be detected, not 検出不能.");
+    Check.True(Math.Abs(frontalRoll!.Value) < 0.1, $"A frontal document must read ~0°, got {frontalRoll.Value:F4}°.");
+
+    // Measured against the SIMULATED tilt test patterns' known rotation angles (see the
+    // implementation notes/PR description): absolute error stayed <=0.3° at both tested
+    // magnitudes (±3°, ±6°). The tolerance below is set with margin above that measured error —
+    // it documents a real, checked accuracy limit rather than claiming exact-degree precision.
+    const double toleranceDegrees = 0.5;
+    foreach (var (pattern, expectedDegrees) in new[]
+             {
+                 (SimulatedFramePattern.TiltedDocumentRollMinus6, -6.0),
+                 (SimulatedFramePattern.TiltedDocumentRollMinus3, -3.0),
+                 (SimulatedFramePattern.TiltedDocumentRollPlus3, 3.0),
+                 (SimulatedFramePattern.TiltedDocumentRollPlus6, 6.0),
+             })
+    {
+        var frame = source.CreateFrame("CAM-A", pattern, 0, DateTimeOffset.UtcNow);
+        var detected = DocumentTiltDetector.DetectRollDegrees(frame.Image);
+        Check.True(detected is not null, $"{pattern} must be detected, not 検出不能.");
+        Check.True(
+            Math.Abs(detected!.Value - expectedDegrees) <= toleranceDegrees,
+            $"{pattern}: expected ~{expectedDegrees}°, got {detected.Value:F4}° (tolerance ±{toleranceDegrees}°).");
+    }
+
+    // A frame with no matching document fill at all — the shape a non-live/未取得 preview would
+    // degrade toward — must fall back to 検出不能 rather than reporting a noise-driven angle.
+    var backgroundOnly = new WriteableBitmap(64, 64, 96, 96, PixelFormats.Bgra32, null);
+    var backgroundPixels = new byte[64 * 64 * 4];
+    for (var index = 0; index < backgroundPixels.Length; index += 4)
+    {
+        backgroundPixels[index] = 0x1F;
+        backgroundPixels[index + 1] = 0x1A;
+        backgroundPixels[index + 2] = 0x14;
+        backgroundPixels[index + 3] = 0xFF;
+    }
+    backgroundOnly.WritePixels(new System.Windows.Int32Rect(0, 0, 64, 64), backgroundPixels, 64 * 4, 0);
+    Check.True(DocumentTiltDetector.DetectRollDegrees(backgroundOnly) is null, "A frame with no document fill must report 検出不能, not a fabricated angle.");
+}
+
+static async Task TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TiltReadingTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        Check.True(viewModel.TiltRollDegrees is null, "Before Live View starts, there is no frame to detect a tilt from.");
+        Check.Equal("傾き 検出不能", viewModel.TiltRollDegreesText);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.TiltedDocumentRollPlus6, 0, generation, DateTimeOffset.UtcNow));
+
+        Check.True(viewModel.TiltRollDegrees is not null, "A live-ticked tilted document frame must produce a detected angle.");
+        Check.True(
+            Math.Abs(viewModel.TiltRollDegrees!.Value - 6.0) < 0.5,
+            $"The +6° pattern must be detected within test tolerance, got {viewModel.TiltRollDegrees.Value:F4}°.");
+        Check.True(viewModel.TiltRollDegreesText.StartsWith("傾き ", StringComparison.Ordinal), "The reading text must keep the 傾き label.");
+        Check.False(viewModel.TiltRollDegreesText.Contains("検出不能", StringComparison.Ordinal), "A successfully detected reading must not show 検出不能.");
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.True(viewModel.TiltRollDegrees is null, "Stopping Live View must revert the reading to 検出不能 — the non-live/frame-not-yet-obtained contract.");
+        Check.Equal("傾き 検出不能", viewModel.TiltRollDegreesText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task AlignmentGuideOverlayTogglesControlVisibilityAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-OverlayToggleTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // Grid/トンボ/安全マージン are newly introduced guide layers and must default off; 重複帯
+        // already displayed unconditionally before this issue made it toggleable, so its default
+        // must stay on to avoid silently hiding something operators already relied on.
+        Check.False(viewModel.IsGridOverlayEnabled, "Grid overlay must default off.");
+        Check.False(viewModel.IsTombOverlayEnabled, "Tomb overlay must default off.");
+        Check.False(viewModel.IsSafeMarginOverlayEnabled, "Safe margin overlay must default off.");
+        Check.True(viewModel.IsOverlapBandOverlayEnabled, "Overlap band overlay must default on (preserves pre-#32 behavior).");
+
+        Check.False(viewModel.IsGridOverlayVisible, "Grid overlay must stay hidden until enabled.");
+        viewModel.IsGridOverlayEnabled = true;
+        Check.True(viewModel.IsGridOverlayVisible, "Enabling the grid toggle must make it visible.");
+
+        viewModel.IsTombOverlayEnabled = true;
+        Check.True(viewModel.IsTombOverlayVisible, "Enabling the tomb toggle must make it visible.");
+
+        viewModel.IsSafeMarginOverlayEnabled = true;
+        Check.True(viewModel.IsSafeMarginOverlayVisible, "Enabling the safe-margin toggle must make it visible.");
+
+        Check.True(viewModel.IsOverlapBandVisible, "Overlap band must stay visible (Dual mode default) while its toggle is on.");
+        viewModel.IsOverlapBandOverlayEnabled = false;
+        Check.False(viewModel.IsOverlapBandVisible, "Disabling the overlap band toggle must hide it even in Dual mode.");
+        viewModel.IsOverlapBandOverlayEnabled = true;
+
+        viewModel.SelectedOperatingMode = "1台構成";
+        Check.False(viewModel.IsOverlapBandVisible, "The overlap band must stay hidden in SingleCamera mode regardless of the toggle (no composite to overlap).");
+        viewModel.SelectedOperatingMode = "2台構成";
+
+        // None of the four overlay toggles may ever reach CanCapture — the 常時禁止 "原稿エッジ
+        // 検出・傾き読み値による撮影可否の判定と自動補正への接続" guard applies to these guides too.
+        var captureBefore = viewModel.CanCapture;
+        viewModel.IsGridOverlayEnabled = false;
+        viewModel.IsTombOverlayEnabled = false;
+        viewModel.IsSafeMarginOverlayEnabled = false;
+        Check.Equal(captureBefore, viewModel.CanCapture);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    // Separately: the guide overlays must hide (not just the target reticle) while the stage
+    // shows the Capturing/Stitching processing placeholder — mirrors IsTargetOverlayVisible's
+    // own gate, using the same BlockingTransactionService pattern
+    // ActionZoneVisibilitySwitchesWithUiStateAsync uses to hold UiState at Capturing deterministically.
+    var service = new BlockingTransactionService();
+    var placeholderViewModel = new OperatorShellViewModel(service);
+    await placeholderViewModel.InitializeAsync(CancellationToken.None);
+    placeholderViewModel.SelectedOperatingMode = "1台構成";
+    placeholderViewModel.SelectedCamera = "CAM-B";
+    placeholderViewModel.AcceptSafetyCommand.Execute(null);
+    placeholderViewModel.IsGridOverlayEnabled = true;
+    placeholderViewModel.IsTombOverlayEnabled = true;
+    placeholderViewModel.IsSafeMarginOverlayEnabled = true;
+    Check.True(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must be visible before capture starts.");
+
+    placeholderViewModel.CaptureCommand.Execute(null);
+    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.Equal(OperatorUiState.Capturing, placeholderViewModel.UiState);
+    Check.False(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must hide during the Capturing processing placeholder.");
+    Check.False(placeholderViewModel.IsTombOverlayVisible, "Tomb overlay must hide during the Capturing processing placeholder.");
+    Check.False(placeholderViewModel.IsSafeMarginOverlayVisible, "Safe margin overlay must hide during the Capturing processing placeholder.");
+
+    service.Release();
+    await WaitUntilAsync(() => !placeholderViewModel.IsBusy, "The blocking capture did not finish.");
+}
+
+static async Task TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TiltToleranceTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new SimulatedTestImageFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // Unset by default — issue #32: "許容値は設定値とし、初期値の決定は実装時に操作者へ確認
+        // する（勝手に既定値を作らない）"。No operator was available to ask during this automated
+        // implementation, so it stays unset rather than guessing a number.
+        Check.True(viewModel.TiltToleranceDegrees is null, "Tolerance must start unset — no invented default.");
+        Check.Equal("許容値未設定", viewModel.TiltToleranceChipText);
+
+        // Invalid input must be rejected and must re-announce the previously accepted value so a
+        // bound TextBox reverts, matching the rejection pattern used elsewhere in this VM.
+        var propertyChangedNames = new List<string>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is not null)
+            {
+                propertyChangedNames.Add(args.PropertyName);
+            }
+        };
+        viewModel.TiltToleranceInputText = "not-a-number";
+        Check.Equal(string.Empty, viewModel.TiltToleranceInputText);
+        Check.True(viewModel.TiltToleranceDegrees is null, "A rejected input must not change the accepted tolerance.");
+        Check.True(
+            propertyChangedNames.Contains(nameof(OperatorShellViewModel.TiltToleranceInputText)),
+            "A rejected value must still raise PropertyChanged so the bound TextBox reverts.");
+
+        viewModel.TiltToleranceInputText = "0.50";
+        Check.True(
+            viewModel.TiltToleranceDegrees is { } tolerance && Math.Abs(tolerance - 0.5) < 1e-9,
+            "A valid numeric input must be accepted.");
+
+        // Set but nothing live yet: the reading is 検出不能, so the chip must say so instead of
+        // fabricating a within/exceeded judgment against a nonexistent angle.
+        Check.Equal("許容 ±0.50° 内 / 検出不能のため判定不可", viewModel.TiltToleranceChipText);
+
+        // A live ~+6° tilt frame against a tight ±0.50° tolerance must read as exceeded.
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var generation = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.TiltedDocumentRollPlus6, 0, generation, DateTimeOffset.UtcNow));
+        Check.True(
+            viewModel.TiltToleranceChipText.Contains("許容超過", StringComparison.Ordinal),
+            $"A ~6° reading against a ±0.50° tolerance must read as exceeded, got: {viewModel.TiltToleranceChipText}");
+
+        // The same reading against a wide tolerance must read as within it.
+        viewModel.TiltToleranceInputText = "10.00";
+        Check.True(
+            viewModel.TiltToleranceChipText.Contains("許容内", StringComparison.Ordinal),
+            $"A ~6° reading against a ±10.00° tolerance must read as within it, got: {viewModel.TiltToleranceChipText}");
+
+        // Clearing the input must return to unset, not to some prior remembered default.
+        viewModel.TiltToleranceInputText = string.Empty;
+        Check.True(viewModel.TiltToleranceDegrees is null, "Clearing the input must unset the tolerance.");
+        Check.Equal("許容値未設定", viewModel.TiltToleranceChipText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 static byte[] CopyPixelsBgra(BitmapSource bitmap)

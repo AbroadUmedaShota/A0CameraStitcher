@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
@@ -136,6 +137,14 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// otherwise be set by the downstream flow.</summary>
     private bool _isPreCaptureAutoFocusRunning;
     private bool _isPeakingEnabled;
+    /// <summary>Issue #32 設置ガイドオーバーレイ toggle state. See the "Alignment guide overlays
+    /// and tilt reading" region below for the derived visibility/text properties.</summary>
+    private bool _isGridOverlayEnabled;
+    private bool _isTombOverlayEnabled;
+    private bool _isOverlapBandOverlayEnabled = true;
+    private bool _isSafeMarginOverlayEnabled;
+    private string _tiltToleranceInputText = string.Empty;
+    private double? _tiltToleranceDegrees;
     private FocusExecutionResult? _lastFocusResult;
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
     private string _statusMessage = "起動時の安全確認を行ってください。この画面は実機へ接続しません。";
@@ -348,6 +357,9 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanSelectCamera));
                 OnPropertyChanged(nameof(CanChangeStageMode));
                 OnPropertyChanged(nameof(IsStageProcessingPlaceholder));
+                OnPropertyChanged(nameof(IsGridOverlayVisible));
+                OnPropertyChanged(nameof(IsTombOverlayVisible));
+                OnPropertyChanged(nameof(IsSafeMarginOverlayVisible));
                 OnPropertyChanged(nameof(IsStageReviewMode));
                 OnPropertyChanged(nameof(IsStageLiveNoteVisible));
                 OnPropertyChanged(nameof(IsStageSingleLiveMode));
@@ -404,6 +416,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(ProcessingResultLabel));
             OnPropertyChanged(nameof(DiagnosticScenarios));
             OnPropertyChanged(nameof(StageCompositeApplicable));
+            OnPropertyChanged(nameof(IsOverlapBandVisible));
             OnPropertyChanged(nameof(StageReviewBadgeText));
             OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
             OnPropertyChanged(nameof(StageSingleLiveText));
@@ -789,6 +802,140 @@ public sealed class OperatorShellViewModel : ObservableObject
 
         var targetPixel = targetFraction * imageExtent;
         return Math.Clamp((targetPixel - cropOrigin) / cropExtent, 0.0, 1.0);
+    }
+
+    // --- Alignment guide overlays and tilt reading (issue #32): grid/トンボ/overlap-band/safe-
+    // margin stage overlays and a bottom-of-stage ROLL tilt readout, both purely advisory per
+    // docs/OPERATOR_UI_SPEC.md's 設置ガイドオーバーレイと傾き読み値 section. Detection runs
+    // through DocumentTiltDetector, a pure BitmapSource->double? function. Neither the overlay
+    // toggle state nor the detected angle is ever read by RebuildReadiness/RecalculateAvailability
+    // or folded into CanCapture — the常時禁止 "原稿エッジ検出・傾き読み値による撮影可否の判定と
+    // 自動補正への接続" is enforced structurally by never wiring these properties into that path. ---
+
+    /// <summary>方眼グリッド overlay toggle. Off by default — a newly introduced guide layer the
+    /// operator opts into, not a change to any pre-existing stage display.</summary>
+    public bool IsGridOverlayEnabled
+    {
+        get => _isGridOverlayEnabled;
+        set { if (SetProperty(ref _isGridOverlayEnabled, value)) OnPropertyChanged(nameof(IsGridOverlayVisible)); }
+    }
+
+    /// <summary>トンボ（四隅＋辺中央の合わせマーク） overlay toggle. Off by default, same
+    /// reasoning as <see cref="IsGridOverlayEnabled"/>.</summary>
+    public bool IsTombOverlayEnabled
+    {
+        get => _isTombOverlayEnabled;
+        set { if (SetProperty(ref _isTombOverlayEnabled, value)) OnPropertyChanged(nameof(IsTombOverlayVisible)); }
+    }
+
+    /// <summary>重複帯 overlay toggle. On by default: the band display already existed
+    /// unconditionally before this issue made it toggleable
+    /// (<see cref="StageCompositeOverlapBandText"/>), so the default preserves that existing
+    /// behavior instead of silently hiding something operators already relied on.</summary>
+    public bool IsOverlapBandOverlayEnabled
+    {
+        get => _isOverlapBandOverlayEnabled;
+        set { if (SetProperty(ref _isOverlapBandOverlayEnabled, value)) OnPropertyChanged(nameof(IsOverlapBandVisible)); }
+    }
+
+    /// <summary>安全マージン（SAFE MARGIN 枠） overlay toggle. Off by default, same reasoning as
+    /// <see cref="IsGridOverlayEnabled"/>.</summary>
+    public bool IsSafeMarginOverlayEnabled
+    {
+        get => _isSafeMarginOverlayEnabled;
+        set { if (SetProperty(ref _isSafeMarginOverlayEnabled, value)) OnPropertyChanged(nameof(IsSafeMarginOverlayVisible)); }
+    }
+
+    public bool IsGridOverlayVisible => IsGridOverlayEnabled && !IsStageProcessingPlaceholder;
+    public bool IsTombOverlayVisible => IsTombOverlayEnabled && !IsStageProcessingPlaceholder;
+    public bool IsSafeMarginOverlayVisible => IsSafeMarginOverlayEnabled && !IsStageProcessingPlaceholder;
+
+    /// <summary>Combines the new #32 toggle with the pre-existing
+    /// <see cref="StageCompositeApplicable"/> gate the band's Border already used, so turning the
+    /// toggle off actually hides it instead of being overridden by the older binding.</summary>
+    public bool IsOverlapBandVisible => IsOverlapBandOverlayEnabled && StageCompositeApplicable;
+
+    /// <summary>The SIMULATED live camera's most recently rendered frame — the same "preview
+    /// only, never original/stitch input" source the stage image bindings already read from
+    /// (<see cref="StageSingleLiveImage"/>/<see cref="StageCompositeLiveImage"/>), reused here so
+    /// the tilt reading always reflects "Live View frameからの原稿エッジ検出" per
+    /// docs/OPERATOR_UI_SPEC.md, and only ever reflects the live camera — never a frozen still.</summary>
+    private BitmapSource? CurrentLiveTiltSourceImage =>
+        IsLiveViewActive && _lastLiveFrames.TryGetValue(SelectedCamera, out var liveFrame) ? liveFrame.Image : null;
+
+    /// <summary>The detected in-plane rotation (ROLL) of the live camera's current frame, or
+    /// null when there is nothing to detect from — not live, no frame yet, or
+    /// <see cref="DocumentTiltDetector"/> itself could not find the document
+    /// (<see cref="TiltRollDegreesText"/>'s 検出不能 case). This property and everything derived
+    /// from it are read-only display data: nothing in this VM feeds it back into
+    /// <see cref="CanCapture"/>, <see cref="RebuildReadiness"/>, or any other readiness/capture
+    /// path (docs/OPERATOR_UI_SPEC.md's 常時禁止).</summary>
+    public double? TiltRollDegrees => DocumentTiltDetector.DetectRollDegrees(CurrentLiveTiltSourceImage);
+
+    public string TiltRollDegreesText => TiltRollDegrees is { } degrees ? $"傾き {degrees:F2}°" : "傾き 検出不能";
+
+    /// <summary>Operator-entered tolerance, typed as free text (issue #32's "設定手段は簡素な
+    /// 入力" — a menu-based settings surface is #34's scope). Deliberately starts empty/unset:
+    /// the issue's own contract text says "許容値は設定値とし、初期値の決定は実装時に操作者へ
+    /// 確認する（勝手に既定値を作らない）" — with no operator available to ask during this
+    /// automated implementation, leaving it unset is the compliant choice docs/OPERATOR_UI_SPEC.md
+    /// itself allows ("本仕様では既定値を定めない"), not a stand-in default value.</summary>
+    public string TiltToleranceInputText
+    {
+        get => _tiltToleranceInputText;
+        set
+        {
+            var trimmed = value?.Trim() ?? string.Empty;
+            if (trimmed.Length == 0)
+            {
+                if (SetProperty(ref _tiltToleranceInputText, trimmed))
+                {
+                    _tiltToleranceDegrees = null;
+                    OnPropertyChanged(nameof(TiltToleranceDegrees));
+                    OnPropertyChanged(nameof(TiltToleranceChipText));
+                }
+                return;
+            }
+
+            if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed >= 0)
+            {
+                if (SetProperty(ref _tiltToleranceInputText, trimmed))
+                {
+                    _tiltToleranceDegrees = parsed;
+                    OnPropertyChanged(nameof(TiltToleranceDegrees));
+                    OnPropertyChanged(nameof(TiltToleranceChipText));
+                }
+                return;
+            }
+
+            // Reject: re-announce the last accepted value so the TextBox reverts, matching the
+            // rejection pattern used elsewhere in this VM (e.g. SelectedSimulatedFramePattern).
+            OnPropertyChanged(nameof(TiltToleranceInputText));
+        }
+    }
+
+    public double? TiltToleranceDegrees => _tiltToleranceDegrees;
+
+    /// <summary>The 許容範囲チップ text. While unset, this deliberately shows only "許容値未設定"
+    /// and never a 許容内/超過 judgment — docs/OPERATOR_UI_SPEC.md: "許容値は設定値とし、本仕様
+    /// では既定値を定めない" together with issue #32's "未設定の間はチップに『許容値未設定』と表示
+    /// し、判定（許容内/超過）を出さない". Once the operator sets a tolerance, this chip does
+    /// describe whether the current reading sits inside it — but purely as display text on this
+    /// VM's own properties; it is never read by CanCapture or any readiness path, so it stays a
+    /// guide-only annotation, not the Go/NoGo judgment (which remains ReadinessSnapshot's alone).</summary>
+    public string TiltToleranceChipText
+    {
+        get
+        {
+            if (TiltToleranceDegrees is not { } tolerance)
+            {
+                return "許容値未設定";
+            }
+
+            return TiltRollDegrees is { } degrees
+                ? $"許容 ±{tolerance:F2}° 内 / {(Math.Abs(degrees) <= tolerance ? "許容内" : "許容超過")}"
+                : $"許容 ±{tolerance:F2}° 内 / 検出不能のため判定不可";
+        }
     }
 
     // --- Focus panel (issue #31): AF execution, MF stepping, focus peaking, and per-camera
@@ -2059,6 +2206,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(IsStageSingleLivePeakingOverlayVisible));
         OnPropertyChanged(nameof(StageCompositeLivePeakingOverlay));
         OnPropertyChanged(nameof(IsStageCompositeLivePeakingOverlayVisible));
+        OnPropertyChanged(nameof(TiltRollDegrees));
+        OnPropertyChanged(nameof(TiltRollDegreesText));
+        OnPropertyChanged(nameof(TiltToleranceChipText));
         RaiseLoupeProperties();
     }
 
