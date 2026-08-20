@@ -579,7 +579,51 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {50 - failures.Count}/50 passed.");
+try
+{
+    await MenuNavigationSwitchesPagesAndLocksDuringCaptureAsync();
+    Console.WriteLine("PASS the menu bar's page-navigation commands switch SelectedPage/PageTitle and are locked to the dashboard during an active transaction (issue #34)");
+}
+catch (Exception exception)
+{
+    failures.Add("the menu bar's page-navigation commands switch SelectedPage/PageTitle and are locked to the dashboard during an active transaction (issue #34)");
+    Console.Error.WriteLine($"FAIL the menu bar's page-navigation commands switch SelectedPage/PageTitle and are locked to the dashboard during an active transaction (issue #34): {exception}");
+}
+
+try
+{
+    OperatingModeAndLoupeZoomMenuTogglesStaySynced();
+    Console.WriteLine("PASS the camera-menu operating-mode and view-menu loupe-zoom radio toggles stay mutually exclusive and synced with the underlying selection (issue #34)");
+}
+catch (Exception exception)
+{
+    failures.Add("the camera-menu operating-mode and view-menu loupe-zoom radio toggles stay mutually exclusive and synced with the underlying selection (issue #34)");
+    Console.Error.WriteLine($"FAIL the camera-menu operating-mode and view-menu loupe-zoom radio toggles stay mutually exclusive and synced with the underlying selection (issue #34): {exception}");
+}
+
+try
+{
+    TiltReadingVisibilityMenuToggleDefaultsVisibleAndTogglesIndependently();
+    Console.WriteLine("PASS the view menu's new tilt-reading visibility toggle defaults on and toggles independently of the other #32 overlay toggles (issue #34)");
+}
+catch (Exception exception)
+{
+    failures.Add("the view menu's new tilt-reading visibility toggle defaults on and toggles independently of the other #32 overlay toggles (issue #34)");
+    Console.Error.WriteLine($"FAIL the view menu's new tilt-reading visibility toggle defaults on and toggles independently of the other #32 overlay toggles (issue #34): {exception}");
+}
+
+try
+{
+    await DualCameraIdentityStatusMenuTextReflectsSnapshotAndOperatingModeAsync();
+    Console.WriteLine("PASS the camera menu's read-only identity status text reflects the DualCamera identity snapshot and goes 対象外 in SingleCamera mode (issue #34)");
+}
+catch (Exception exception)
+{
+    failures.Add("the camera menu's read-only identity status text reflects the DualCamera identity snapshot and goes 対象外 in SingleCamera mode (issue #34)");
+    Console.Error.WriteLine($"FAIL the camera menu's read-only identity status text reflects the DualCamera identity snapshot and goes 対象外 in SingleCamera mode (issue #34): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {54 - failures.Count}/54 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -4368,6 +4412,153 @@ static async Task TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync()
         viewModel.TiltToleranceInputText = string.Empty;
         Check.True(viewModel.TiltToleranceDegrees is null, "Clearing the input must unset the tolerance.");
         Check.Equal("許容値未設定", viewModel.TiltToleranceChipText);
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task MenuNavigationSwitchesPagesAndLocksDuringCaptureAsync()
+{
+    var service = new BlockingTransactionService();
+    var viewModel = new OperatorShellViewModel(service);
+    await viewModel.InitializeAsync(CancellationToken.None);
+    viewModel.SelectedOperatingMode = "1台構成";
+    viewModel.SelectedCamera = "CAM-B";
+
+    Check.Equal("Dashboard", viewModel.SelectedPage);
+    Check.Equal("撮影ダッシュボード", viewModel.PageTitle);
+    Check.True(viewModel.ShowSetupCommand.CanExecute(null), "設置・校正メニュー項目はactive transaction外なら有効でなければならない.");
+
+    viewModel.ShowSetupCommand.Execute(null);
+    Check.Equal("Setup", viewModel.SelectedPage);
+    Check.Equal("設置・校正", viewModel.PageTitle);
+
+    viewModel.ShowCameraSettingsCommand.Execute(null);
+    Check.Equal("CameraSettings", viewModel.SelectedPage);
+    Check.Equal("カメラ設定（read-only）", viewModel.PageTitle);
+
+    viewModel.ShowDiagnosticsCommand.Execute(null);
+    Check.Equal("Diagnostics", viewModel.SelectedPage);
+    Check.Equal("保存・診断", viewModel.PageTitle);
+
+    viewModel.ShowDashboardCommand.Execute(null);
+    Check.Equal("Dashboard", viewModel.SelectedPage);
+    Check.Equal("撮影ダッシュボード", viewModel.PageTitle);
+
+    viewModel.AcceptSafetyCommand.Execute(null);
+    viewModel.CaptureCommand.Execute(null);
+    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.Equal(OperatorUiState.Capturing, viewModel.UiState);
+    Check.False(viewModel.CanOpenMaintenance, "active transaction中は保守画面を開けてはならない.");
+    Check.False(viewModel.ShowSetupCommand.CanExecute(null), "設置・校正メニュー項目はCapturing中は無効化されなければならない.");
+    Check.False(viewModel.ShowCameraSettingsCommand.CanExecute(null), "カメラ設定メニュー項目はCapturing中は無効化されなければならない.");
+    Check.False(viewModel.ShowDiagnosticsCommand.CanExecute(null), "保存・診断メニュー項目はCapturing中は無効化されなければならない.");
+    Check.False(viewModel.CanChangeExportDirectory, "保存先変更はCapturing中は無効化されなければならない（メニュー経由も状態ゲートの例外にしない）.");
+    Check.False(viewModel.CanChangeOperatingMode, "運用構成の変更はCapturing中は無効化されなければならない.");
+
+    service.Release();
+    await WaitUntilAsync(() => !viewModel.IsBusy, "The blocking capture did not finish.");
+    Check.Equal(OperatorUiState.Review, viewModel.UiState);
+    Check.True(viewModel.ShowSetupCommand.CanExecute(null), "処理完了後は保守画面メニュー項目が再び有効化されなければならない.");
+}
+
+static void OperatingModeAndLoupeZoomMenuTogglesStaySynced()
+{
+    var viewModel = new OperatorShellViewModel(new BlockingTransactionService());
+
+    Check.True(viewModel.IsDualCameraModeChecked, "既定の運用構成はDualCameraのため、対応するラジオ項目は最初からチェック済みでなければならない.");
+    Check.False(viewModel.IsSingleCameraModeChecked, "既定がDualCameraである以上、SingleCamera側は最初は未チェックでなければならない.");
+
+    viewModel.IsSingleCameraModeChecked = true;
+    Check.Equal("1台構成", viewModel.SelectedOperatingMode);
+    Check.True(viewModel.IsSingleCameraModeChecked, "SingleCameraをチェックしたら選択されなければならない.");
+    Check.False(viewModel.IsDualCameraModeChecked, "SingleCameraをチェックしたらDualCamera側は連動して未チェックにならなければならない.");
+
+    viewModel.IsDualCameraModeChecked = true;
+    Check.Equal("2台構成", viewModel.SelectedOperatingMode);
+    Check.True(viewModel.IsDualCameraModeChecked, "DualCameraをチェックしたら選択されなければならない.");
+    Check.False(viewModel.IsSingleCameraModeChecked, "DualCameraをチェックしたらSingleCamera側は連動して未チェックにならなければならない.");
+
+    // MenuItemにはRadioButtonのGroupNameに相当する仕組みがないため、選択中の項目を直接
+    // falseへ外そうとする操作（もう一方をチェックするのではなく）は無視されなければならない —
+    // さもないとSelectedOperatingModeがどちらの値も表さない状態になり得る。
+    viewModel.IsDualCameraModeChecked = false;
+    Check.Equal("2台構成", viewModel.SelectedOperatingMode);
+    Check.True(viewModel.IsDualCameraModeChecked, "選択中の項目を直接外す操作は無視され、元の選択を維持しなければならない.");
+
+    Check.True(viewModel.IsLoupeZoom100Checked, "既定の拡大エリア倍率は100%のため、対応するラジオ項目は最初からチェック済みでなければならない.");
+    Check.False(viewModel.IsLoupeZoom200Checked, "既定が100%である以上、200%側は最初は未チェックでなければならない.");
+
+    viewModel.IsLoupeZoom200Checked = true;
+    Check.Equal("200%", viewModel.SelectedLoupeZoom);
+    Check.True(viewModel.IsLoupeZoom200Checked, "200%をチェックしたら選択されなければならない.");
+    Check.False(viewModel.IsLoupeZoom100Checked, "200%をチェックしたら100%側は連動して未チェックにならなければならない.");
+
+    viewModel.IsLoupeZoom100Checked = true;
+    Check.Equal("100%", viewModel.SelectedLoupeZoom);
+    Check.True(viewModel.IsLoupeZoom100Checked, "100%をチェックしたら選択されなければならない.");
+    Check.False(viewModel.IsLoupeZoom200Checked, "100%をチェックしたら200%側は連動して未チェックにならなければならない.");
+}
+
+static void TiltReadingVisibilityMenuToggleDefaultsVisibleAndTogglesIndependently()
+{
+    var viewModel = new OperatorShellViewModel(new BlockingTransactionService());
+
+    // 傾き常駐行は#32で追加済みの既存表示のため、#34で新設するこのトグルの既定値はON（表示）
+    // でなければならない — 新規トグルが既存表示を黙って隠してはならない。
+    Check.True(viewModel.IsTiltReadingVisible, "傾き読み値の表示トグルは既定でON（表示）でなければならない.");
+
+    viewModel.IsTiltReadingVisible = false;
+    Check.False(viewModel.IsTiltReadingVisible, "表示メニューのトグル操作でOFFへ切り替えられなければならない.");
+
+    // 表示(V)メニューに同居する#32の他トグルと独立していること。
+    Check.False(viewModel.IsGridOverlayEnabled, "グリッドトグルは既定でOFFのままでなければならない.");
+    viewModel.IsGridOverlayEnabled = true;
+    Check.True(viewModel.IsGridOverlayEnabled, "グリッドトグルは表示メニューから引き続き独立して切替できなければならない.");
+    Check.False(viewModel.IsTiltReadingVisible, "グリッドトグルの変更が傾き読み値トグルへ波及してはならない.");
+
+    viewModel.IsTiltReadingVisible = true;
+    Check.True(viewModel.IsTiltReadingVisible, "傾き読み値トグルはONへ戻せなければならない.");
+}
+
+static async Task DualCameraIdentityStatusMenuTextReflectsSnapshotAndOperatingModeAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-IdentityStatusMenuTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var bridge = new NeverCaptureDualBridge();
+        var flow = new DualCameraProductFlow(
+            Path.Combine(root, "products"),
+            bridge,
+            bridge,
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.HardwarePending()));
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            flow);
+        await viewModel.InitializeAsync(CancellationToken.None);
+
+        Check.True(
+            viewModel.DualCameraIdentityStatusText.Contains("HardwarePending", StringComparison.Ordinal),
+            "カメラメニューのidentity状態表示は現在のIdentitySnapshotを反映しなければならない.");
+
+        viewModel.SelectedOperatingMode = "1台構成";
+        Check.True(
+            viewModel.DualCameraIdentityStatusText.Contains("対象外", StringComparison.Ordinal),
+            "1台構成ではDualCamera identityは対象外と表示しなければならない.");
+
+        viewModel.SelectedOperatingMode = "2台構成";
+        Check.True(
+            viewModel.DualCameraIdentityStatusText.Contains("HardwarePending", StringComparison.Ordinal),
+            "2台構成へ戻したらidentity状態表示も復帰しなければならない.");
     }
     finally
     {
