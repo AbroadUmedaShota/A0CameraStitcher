@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
@@ -21,6 +22,19 @@ public sealed class OperatorShellViewModel : ObservableObject
     private const string StageModeCompositePreview = "合成プレビュー";
     private const string StageProcessingPlaceholderMessage = "Live View 停止中（撮影シーケンス実行中）";
     private const string StagePreviewNoteMessage = "プレビュー表示のみ・原画像／合成には不使用";
+    private const string LoupeZoom100 = "100%";
+    private const string LoupeZoom200 = "200%";
+    private const string LoupeUnavailableText = "フレーム未取得";
+
+    /// <summary>Scale applied to a drag delta captured inside the loupe, relative to the same
+    /// delta captured on the stage — the issue #30 "細かい移動" contract (loupe drags move the
+    /// target 1/4 as far as an equivalent stage drag, for fine positioning once roughly placed).</summary>
+    public const double TargetFineDragScale = 0.25;
+
+    /// <summary>Fraction of the source frame's smaller dimension the loupe crops at 100% zoom;
+    /// halved again at 200% so "zoom in" means "crop a smaller region and stretch it to fill
+    /// the same display area", not an additional transform on top of the crop.</summary>
+    private const double LoupeBaseCropFraction = 0.32;
 
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
@@ -52,6 +66,11 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _selectedPage = "Dashboard";
     private string _selectedStageMode = StageModeCompositePreview;
     private string _selectedSimulatedFramePattern = SimulatedFramePatternCatalog.DefaultLabel;
+    /// <summary>Normalized (0..1) position of the single shared target reticle, common to the
+    /// stage and the loupe (issue #30). Defaults to the stage center.</summary>
+    private double _targetX = 0.5;
+    private double _targetY = 0.5;
+    private string _selectedLoupeZoom = LoupeZoom100;
     private int _currentLiveViewFrameGeneration;
     /// <summary>Timestamps of canonical captured originals (persisted by a completed
     /// capture). Consulted by <see cref="StageCompositeFreshnessText"/> alongside
@@ -279,6 +298,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(StageReviewBadgeText));
             OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
             OnPropertyChanged(nameof(StageSingleLiveText));
+            RaiseLoupeProperties();
             ResetProgress(CurrentCapturePlan);
             RebuildReadiness();
         }
@@ -443,24 +463,216 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string StageCompositeLiveAlias => SelectedCamera;
     public string StageCompositeStillAlias => SelectedCamera == "CAM-A" ? "CAM-B" : "CAM-A";
     public string StageCompositeOverlapBandText => "重複帯\n幅px実測未接続";
-    public string StageCompositeFreshnessText
+    public string StageCompositeFreshnessText => FreshnessText(StageCompositeStillAlias);
+
+    /// <summary>Either a completed capture or a SIMULATED live view frame can be the more
+    /// recent "last known state" of <paramref name="alias"/>; whichever is newer drives the
+    /// freshness badge (a live frame taken after the last capture is more current, and vice
+    /// versa). Shared by the stage's composite "still" badge and the loupe badge so the two
+    /// never drift apart.</summary>
+    private string FreshnessText(string alias)
+    {
+        var hasCapturedOriginal = _lastCapturedOriginalTimestamps.TryGetValue(alias, out var capturedAt);
+        var hasLiveFrame = _lastLiveFrameTimestamps.TryGetValue(alias, out var liveFrameAt);
+        if (!hasCapturedOriginal && !hasLiveFrame)
+        {
+            return "STILL 未取得";
+        }
+
+        var mostRecent = hasCapturedOriginal && (!hasLiveFrame || capturedAt >= liveFrameAt) ? capturedAt : liveFrameAt;
+        var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - mostRecent).TotalSeconds);
+        return $"STILL {elapsedSeconds}秒前";
+    }
+
+    // --- Target reticle (□) and loupe (拡大エリア): issue #30. The reticle is a single
+    // shared position, common to the stage and the loupe; the loupe crops the same
+    // SIMULATED frame dictionary the stage already reads from (_lastLiveFrames), so it
+    // never needs its own frame supply or preview-image contract. ---
+
+    public double TargetX { get => _targetX; private set => SetProperty(ref _targetX, value); }
+    public double TargetY { get => _targetY; private set => SetProperty(ref _targetY, value); }
+
+    /// <summary>True once the reticle is left-of-center. In composite preview (and Review,
+    /// which shows the same left/right split frozen), the stage lays the live camera out on
+    /// the left and the still camera on the right — see MainWindow.xaml's Grid.Column 0/2 —
+    /// so this is the same left/right split used to decide which camera's frame the loupe
+    /// should crop. It is a simplified proxy for "which camera's physical capture area the
+    /// target sits in": the real A0 layout geometry (rotation, measured overlap) does not
+    /// exist yet (still a placeholder per StageCompositeOverlapBandText), so an exact
+    /// document-space boundary is not available to route on. ※要確認: Architect should confirm
+    /// this half-split proxy is acceptable until #29/#32 geometry lands.</summary>
+    public bool IsTargetOnLiveSide => TargetX < 0.5;
+
+    public bool CanAdjustTarget => !IsStageProcessingPlaceholder;
+    public bool IsTargetOverlayVisible => !IsStageProcessingPlaceholder;
+
+    /// <summary>Moves the target in response to a stage-area drag: a direct (coarse) move,
+    /// expressed as a delta already normalized to the drag surface's own size (0..1, same
+    /// space as <see cref="TargetX"/>/<see cref="TargetY"/>). The code-behind mouse handler
+    /// computes this normalization; this method only owns the resulting state change so it
+    /// stays testable without a live WPF visual tree.</summary>
+    public void MoveTargetByStageDrag(double normalizedDeltaX, double normalizedDeltaY) =>
+        SetTargetPosition(_targetX + normalizedDeltaX, _targetY + normalizedDeltaY);
+
+    /// <summary>Moves the target in response to a loupe-area drag: the same normalized delta
+    /// as <see cref="MoveTargetByStageDrag"/>, but scaled by <see cref="TargetFineDragScale"/>
+    /// so the same physical drag distance produces a finer position change — the issue #30
+    /// "ルーペ表示内のドラッグ = 細かい移動" contract.</summary>
+    public void MoveTargetByLoupeDrag(double normalizedDeltaX, double normalizedDeltaY) =>
+        SetTargetPosition(_targetX + (normalizedDeltaX * TargetFineDragScale), _targetY + (normalizedDeltaY * TargetFineDragScale));
+
+    /// <summary>Sets the target's normalized position directly, clamped to the 0..1 stage
+    /// bounds. Public (not just reachable via the drag deltas) so tests can place the target
+    /// exactly without simulating a drag gesture.</summary>
+    public void SetTargetPosition(double x, double y)
+    {
+        var changedX = SetProperty(ref _targetX, Math.Clamp(x, 0.0, 1.0), nameof(TargetX));
+        var changedY = SetProperty(ref _targetY, Math.Clamp(y, 0.0, 1.0), nameof(TargetY));
+        if (changedX || changedY)
+        {
+            RaiseLoupeProperties();
+        }
+    }
+
+    public IReadOnlyList<string> LoupeZoomOptions { get; } = [LoupeZoom100, LoupeZoom200];
+
+    public string SelectedLoupeZoom
+    {
+        get => _selectedLoupeZoom;
+        set
+        {
+            if (value is (LoupeZoom100 or LoupeZoom200) && SetProperty(ref _selectedLoupeZoom, value))
+            {
+                RaiseLoupeProperties();
+                return;
+            }
+
+            if (value is not (LoupeZoom100 or LoupeZoom200))
+            {
+                // Re-announce the current value so a bound ComboBox reverts instead of keeping
+                // an unrecognized selection on screen (same rejection pattern as
+                // SelectedSimulatedFramePattern).
+                OnPropertyChanged(nameof(SelectedLoupeZoom));
+            }
+        }
+    }
+
+    private double LoupeZoomFactor => SelectedLoupeZoom == LoupeZoom200 ? 2.0 : 1.0;
+
+    /// <summary>Which camera alias the loupe currently crops. Mirrors the stage's own mode
+    /// gating: a single-camera live stage mode (CAM-A live / CAM-B live) always shows that one
+    /// camera; composite preview and Review split left/right by <see cref="IsTargetOnLiveSide"/>,
+    /// matching the alias the stage itself renders on that side (<see cref="StageCompositeLiveAlias"/>
+    /// / <see cref="StageCompositeStillAlias"/>).</summary>
+    public string LoupeCameraAlias =>
+        IsSingleCameraMode
+            ? SelectedCamera
+            : IsStageCompositePreviewMode || IsStageReviewMode
+                ? (IsTargetOnLiveSide ? StageCompositeLiveAlias : StageCompositeStillAlias)
+                : StageSingleLiveAlias;
+
+    /// <summary>True only when the loupe's current alias is actually streaming right now
+    /// (Live View on, not paused for Review/processing, and it is the alias Live View is
+    /// bound to). False covers every "frozen" case: non-live composite side, Review (Live
+    /// View is always stopped by the time Review is reached), and the processing placeholder.</summary>
+    public bool IsLoupeSourceLive =>
+        !IsStageProcessingPlaceholder && !IsStageReviewMode && IsLiveViewActive &&
+        string.Equals(LoupeCameraAlias, SelectedCamera, StringComparison.Ordinal);
+
+    /// <summary>The full (uncropped) SIMULATED frame the loupe crops from — the same
+    /// preview-only frame dictionary the stage reads, looked up for <see cref="LoupeCameraAlias"/>
+    /// instead of the stage's own alias. Null whenever the stage itself would show a
+    /// placeholder for that alias (no frame ever supplied while not live, and not retained
+    /// across a "新しい撮影を準備" reset).</summary>
+    private BitmapSource? LoupeBaseImage =>
+        _lastLiveFrames.TryGetValue(LoupeCameraAlias, out var frame) ? frame.Image : null;
+
+    /// <summary>The crop rectangle (in <see cref="LoupeBaseImage"/> pixel space) centered on
+    /// the target, sized by <see cref="LoupeBaseCropFraction"/> / <see cref="LoupeZoomFactor"/>
+    /// and clamped so it always stays fully inside the source frame — including degenerate
+    /// tiny frames (down to 1x1, as used by headless tests), which is why this clamps the crop
+    /// size itself rather than assuming the frame is at least crop-sized.</summary>
+    private Int32Rect? LoupeCropRect
     {
         get
         {
-            // Either a completed capture or a SIMULATED live view frame can be the more
-            // recent "last known state" of the still alias; whichever is newer drives the
-            // badge (a live frame taken after the last capture is more current, and vice versa).
-            var hasCapturedOriginal = _lastCapturedOriginalTimestamps.TryGetValue(StageCompositeStillAlias, out var capturedAt);
-            var hasLiveFrame = _lastLiveFrameTimestamps.TryGetValue(StageCompositeStillAlias, out var liveFrameAt);
-            if (!hasCapturedOriginal && !hasLiveFrame)
+            var image = LoupeBaseImage;
+            if (image is null || image.PixelWidth <= 0 || image.PixelHeight <= 0)
             {
-                return "STILL 未取得";
+                return null;
             }
 
-            var mostRecent = hasCapturedOriginal && (!hasLiveFrame || capturedAt >= liveFrameAt) ? capturedAt : liveFrameAt;
-            var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - mostRecent).TotalSeconds);
-            return $"STILL {elapsedSeconds}秒前";
+            var fraction = LoupeBaseCropFraction / LoupeZoomFactor;
+            var cropWidth = Math.Clamp((int)Math.Round(image.PixelWidth * fraction), 1, image.PixelWidth);
+            var cropHeight = Math.Clamp((int)Math.Round(image.PixelHeight * fraction), 1, image.PixelHeight);
+            var x = Math.Clamp((int)Math.Round((TargetX * image.PixelWidth) - (cropWidth / 2.0)), 0, image.PixelWidth - cropWidth);
+            var y = Math.Clamp((int)Math.Round((TargetY * image.PixelHeight) - (cropHeight / 2.0)), 0, image.PixelHeight - cropHeight);
+            return new Int32Rect(x, y, cropWidth, cropHeight);
         }
+    }
+
+    public BitmapSource? LoupeImage
+    {
+        get
+        {
+            var image = LoupeBaseImage;
+            var cropRect = LoupeCropRect;
+            if (image is null || cropRect is null)
+            {
+                return null;
+            }
+
+            var cropped = new CroppedBitmap(image, cropRect.Value);
+            cropped.Freeze();
+            return cropped;
+        }
+    }
+
+    public bool IsLoupeImageVisible => LoupeImage is not null;
+    public bool IsLoupePlaceholderVisible => LoupeImage is null;
+    public string LoupePlaceholderText => LoupeUnavailableText;
+    public string LoupeSourceLabelText => IsLoupeSourceLive ? $"表示: {LoupeCameraAlias} / Live" : $"表示: {LoupeCameraAlias}";
+    public string LoupeFreshnessText => FreshnessText(LoupeCameraAlias);
+    public bool IsLoupeFreshnessVisible => IsLoupeImageVisible && !IsLoupeSourceLive;
+
+    /// <summary>Where the target sits within <see cref="LoupeCropRect"/>, as a 0..1 fraction
+    /// of the crop's own width/height. Equal to the crop's center (0.5, 0.5) except when the
+    /// target is near a frame edge and the crop had to be clamped to stay inside the source
+    /// frame — at which point the reticle drawn inside the loupe should shift off-center to
+    /// stay accurate, instead of silently pretending the target is still centered.</summary>
+    public double LoupeMarkerRelativeX
+    {
+        get
+        {
+            var image = LoupeBaseImage;
+            var cropRect = LoupeCropRect;
+            return image is null || cropRect is null
+                ? 0.5
+                : ComputeMarkerRelative(TargetX, image.PixelWidth, cropRect.Value.X, cropRect.Value.Width);
+        }
+    }
+
+    public double LoupeMarkerRelativeY
+    {
+        get
+        {
+            var image = LoupeBaseImage;
+            var cropRect = LoupeCropRect;
+            return image is null || cropRect is null
+                ? 0.5
+                : ComputeMarkerRelative(TargetY, image.PixelHeight, cropRect.Value.Y, cropRect.Value.Height);
+        }
+    }
+
+    private static double ComputeMarkerRelative(double targetFraction, int imageExtent, int cropOrigin, int cropExtent)
+    {
+        if (cropExtent <= 0)
+        {
+            return 0.5;
+        }
+
+        var targetPixel = targetFraction * imageExtent;
+        return Math.Clamp((targetPixel - cropOrigin) / cropExtent, 0.0, 1.0);
     }
 
     // Stage frame wiring: preview-only images sourced from the SIMULATED live view frame
@@ -954,6 +1166,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
         }
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseLoupeProperties();
         if (state.Capture is not null)
         {
             _captureOutcome = new CaptureOutcome(
@@ -1154,6 +1367,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             _lastCapturedOriginalTimestamps[alias] = DateTimeOffset.UtcNow;
         }
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseLoupeProperties();
         _captureOutcome = new CaptureOutcome(
             result.TransactionId,
             resultPlan,
@@ -1322,6 +1536,27 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(IsStageCompositeStillImageVisible));
         OnPropertyChanged(nameof(IsStageCompositeStillPlaceholderVisible));
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseLoupeProperties();
+    }
+
+    /// <summary>Refreshes every loupe binding at once. Called by <see cref="RaiseStageFrameProperties"/>
+    /// (so any change that could move a stage image also refreshes the loupe crop of it) and
+    /// directly by the target-position and zoom setters (which do not otherwise touch the
+    /// stage image properties).</summary>
+    private void RaiseLoupeProperties()
+    {
+        OnPropertyChanged(nameof(LoupeCameraAlias));
+        OnPropertyChanged(nameof(IsLoupeSourceLive));
+        OnPropertyChanged(nameof(LoupeImage));
+        OnPropertyChanged(nameof(IsLoupeImageVisible));
+        OnPropertyChanged(nameof(IsLoupePlaceholderVisible));
+        OnPropertyChanged(nameof(LoupeFreshnessText));
+        OnPropertyChanged(nameof(IsLoupeFreshnessVisible));
+        OnPropertyChanged(nameof(LoupeSourceLabelText));
+        OnPropertyChanged(nameof(LoupeMarkerRelativeX));
+        OnPropertyChanged(nameof(LoupeMarkerRelativeY));
+        OnPropertyChanged(nameof(IsTargetOverlayVisible));
+        OnPropertyChanged(nameof(CanAdjustTarget));
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)

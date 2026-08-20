@@ -1,12 +1,14 @@
 <Window x:Class="A0CameraStitcher.M3.OperatorShell.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:A0CameraStitcher.M3.OperatorShell.Converters"
         Title="A0 Camera Stitcher — SIMULATED / 実機未接続"
         AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"
         Width="1440" Height="920" MinWidth="1120" MinHeight="740"
         Background="#FFF4F6F8" FontFamily="Yu Gothic UI">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <converters:FractionToMarginConverter x:Key="FractionToMarginConverter" />
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
@@ -115,7 +117,7 @@
                                        Visibility="{Binding IsStageLiveNoteVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                        AutomationProperties.Name="Live Viewプレビュー注記 原画像非使用" />
 
-                            <Grid Grid.Row="2" MinHeight="420" Background="#FF1D252C"
+                            <Grid Grid.Row="2" x:Name="StageDisplayArea" MinHeight="420" Background="#FF1D252C"
                                   AutomationProperties.Name="ステージ表示エリア Simulatedプレースホルダ">
 
                                 <!-- 撮影/合成処理中: Live View停止プレースホルダ -->
@@ -203,6 +205,29 @@
                                                TextAlignment="Center" VerticalAlignment="Center"
                                                Visibility="{Binding IsSingleCameraMode, Converter={StaticResource BoolToVisibilityConverter}}" />
                                 </Grid>
+
+                                <!-- 共通ターゲット□: ドラッグで粗く移動（issue #30）。ステージ表示エリア全体を
+                                     覆う透明ハンドルがドラッグを受け、正規化座標(0..1)でVMのTargetX/TargetYを更新する。
+                                     処理中プレースホルダ時は非表示・ドラッグ無効。 -->
+                                <Border Background="Transparent"
+                                        Visibility="{Binding IsTargetOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        MouseLeftButtonDown="StageDragHandle_MouseLeftButtonDown"
+                                        MouseMove="TargetDragHandle_MouseMove"
+                                        MouseLeftButtonUp="TargetDragHandle_MouseLeftButtonUp"
+                                        AutomationProperties.Name="ステージ ドラッグで共通ターゲット□を粗く移動" />
+                                <Border Width="40" Height="40" BorderBrush="White" BorderThickness="3" Background="Transparent"
+                                        HorizontalAlignment="Left" VerticalAlignment="Top" IsHitTestVisible="False"
+                                        Visibility="{Binding IsTargetOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        AutomationProperties.Name="共通ターゲット□ 現在位置">
+                                    <Border.Margin>
+                                        <MultiBinding Converter="{StaticResource FractionToMarginConverter}" ConverterParameter="40">
+                                            <Binding Path="TargetX" />
+                                            <Binding Path="TargetY" />
+                                            <Binding ElementName="StageDisplayArea" Path="ActualWidth" />
+                                            <Binding ElementName="StageDisplayArea" Path="ActualHeight" />
+                                        </MultiBinding>
+                                    </Border.Margin>
+                                </Border>
                             </Grid>
                         </Grid>
                     </Border>
@@ -272,9 +297,54 @@
                                     </StackPanel>
                                 </Border>
 
-                                <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10">
-                                    <TextBlock Text="拡大エリア（次期Issueで実装）" Foreground="#FF8A96A3" FontStyle="Italic" TextAlignment="Center"
-                                               AutomationProperties.Name="拡大エリア プレースホルダ枠 未実装" />
+                                <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10"
+                                        AutomationProperties.Name="拡大エリア ルーペ 共通ターゲット□の等倍クロップ表示">
+                                    <StackPanel>
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Left" Text="拡大エリア" Style="{StaticResource SectionTitleStyle}" FontSize="15" VerticalAlignment="Center" />
+                                            <ComboBox DockPanel.Dock="Right" Width="90" HorizontalAlignment="Right"
+                                                      ItemsSource="{Binding LoupeZoomOptions}" SelectedItem="{Binding SelectedLoupeZoom}"
+                                                      AutomationProperties.Name="拡大エリア 倍率切替 100パーセント 200パーセント" />
+                                        </DockPanel>
+
+                                        <!-- ルーペ表示内ドラッグ = 細かい移動（issue #30）。透明ハンドルが領域全体を覆い、
+                                             正規化座標のデルタを1/4に減速してVMのMoveTargetByLoupeDragへ渡す。 -->
+                                        <Grid x:Name="LoupeDisplayArea" Height="220" Margin="0,8,0,0" Background="#FF1D252C"
+                                              AutomationProperties.Name="拡大エリア 等倍クロップ表示領域">
+                                            <Image Source="{Binding LoupeImage}" Stretch="Uniform"
+                                                   Visibility="{Binding IsLoupeImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                   AutomationProperties.Name="拡大エリア Simulated疑似LVフレーム 等倍クロップ" />
+                                            <TextBlock Text="{Binding LoupePlaceholderText}" Foreground="#FFB9C2CB" TextAlignment="Center"
+                                                       VerticalAlignment="Center" HorizontalAlignment="Center" Margin="14" TextWrapping="Wrap"
+                                                       Visibility="{Binding IsLoupePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                       AutomationProperties.Name="拡大エリア フレーム未取得プレースホルダ" />
+                                            <Border Background="Transparent"
+                                                    MouseLeftButtonDown="LoupeDragHandle_MouseLeftButtonDown"
+                                                    MouseMove="TargetDragHandle_MouseMove"
+                                                    MouseLeftButtonUp="TargetDragHandle_MouseLeftButtonUp"
+                                                    AutomationProperties.Name="拡大エリア ドラッグで共通ターゲット□を細かく移動" />
+                                            <Border Width="18" Height="18" BorderBrush="White" BorderThickness="2" Background="Transparent"
+                                                    HorizontalAlignment="Left" VerticalAlignment="Top" IsHitTestVisible="False"
+                                                    Visibility="{Binding IsLoupeImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="拡大エリア内 共通ターゲット□ 枠線">
+                                                <Border.Margin>
+                                                    <MultiBinding Converter="{StaticResource FractionToMarginConverter}" ConverterParameter="18">
+                                                        <Binding Path="LoupeMarkerRelativeX" />
+                                                        <Binding Path="LoupeMarkerRelativeY" />
+                                                        <Binding ElementName="LoupeDisplayArea" Path="ActualWidth" />
+                                                        <Binding ElementName="LoupeDisplayArea" Path="ActualHeight" />
+                                                    </MultiBinding>
+                                                </Border.Margin>
+                                            </Border>
+                                        </Grid>
+
+                                        <TextBlock Text="{Binding LoupeFreshnessText}" Margin="0,6,0,0" Foreground="#FF6C3B00" FontWeight="Bold"
+                                                   Visibility="{Binding IsLoupeFreshnessVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                   AutomationProperties.LiveSetting="Polite"
+                                                   AutomationProperties.Name="拡大エリア 鮮度バッジ 非ライブ側静止画" />
+                                        <TextBlock Text="{Binding LoupeSourceLabelText}" Margin="0,4,0,0" Foreground="#FF56616B" FontSize="11"
+                                                   AutomationProperties.Name="拡大エリア 表示ソースカメラ" />
+                                    </StackPanel>
                                 </Border>
                                 <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10">
                                     <TextBlock Text="フォーカス（次期Issueで実装）" Foreground="#FF8A96A3" FontStyle="Italic" TextAlignment="Center"
