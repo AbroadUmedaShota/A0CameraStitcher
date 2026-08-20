@@ -3,6 +3,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Buffers.Binary;
 using System.IO.Pipes;
@@ -358,7 +359,51 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {30 - failures.Count}/30 passed.");
+try
+{
+    SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern();
+    Console.WriteLine("PASS SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+    Console.Error.WriteLine($"FAIL SIMULATED test image frame source renders a frozen, watermarked frame for every pattern: {exception}");
+}
+
+try
+{
+    SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition();
+    Console.WriteLine("PASS SIMULATED test image frame source actually applies BlurEffect across the focus transition");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED test image frame source actually applies BlurEffect across the focus transition");
+    Console.Error.WriteLine($"FAIL SIMULATED test image frame source actually applies BlurEffect across the focus transition: {exception}");
+}
+
+try
+{
+    await SimulatedLiveViewFramePumpOnlyTicksBetweenStartAndStopAsync();
+    Console.WriteLine("PASS SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start");
+    Console.Error.WriteLine($"FAIL SIMULATED live view frame pump only ticks between Start and Stop, and stamps a fresh generation on each Start: {exception}");
+}
+
+try
+{
+    await SimulatedFramePumpWiringAsync();
+    Console.WriteLine("PASS operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes");
+}
+catch (Exception exception)
+{
+    failures.Add("operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes");
+    Console.Error.WriteLine($"FAIL operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {34 - failures.Count}/34 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3082,6 +3127,296 @@ static async Task<object?> LoadDualAgentJournalCaptureResultPayloadAsync(string 
         transactionIdHex,
         root.GetProperty("camAPath").GetString()!,
         root.GetProperty("camBPath").GetString()!);
+}
+
+static void SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern()
+{
+    var source = new SimulatedTestImageFrameSource();
+    var capturedAt = DateTimeOffset.UtcNow;
+    foreach (var pattern in Enum.GetValues<SimulatedFramePattern>())
+    {
+        var frame = source.CreateFrame("CAM-A", pattern, sequenceNumber: 3, capturedAt);
+        Check.Equal("CAM-A", frame.CameraAlias);
+        Check.Equal(pattern, frame.Pattern);
+        Check.True(frame.Simulation, $"{pattern}: every SIMULATED frame must carry Simulation=true.");
+        Check.Equal("Simulated", frame.Marker);
+        Check.True(frame.Image.PixelWidth > 0 && frame.Image.PixelHeight > 0, $"{pattern}: the rendered frame must have real pixel dimensions.");
+        Check.True(frame.Image.IsFrozen, $"{pattern}: the rendered frame must be frozen for safe cross-thread hand-off.");
+
+        // The bottom-left timestamp/marker badge sits below the document rectangle (which is
+        // vertically centered and only ~74% of the canvas height), so this band is pure
+        // background unless the badge is actually painted there. A near-black rectangle plus
+        // white text must differ substantially from the background color in that band.
+        var pixels = CopyPixelsBgra(frame.Image);
+        var stride = frame.Image.PixelWidth * 4;
+        var bandTop = Math.Max(0, frame.Image.PixelHeight - 30);
+        var bandBottom = Math.Max(bandTop, frame.Image.PixelHeight - 4);
+        var bandRight = Math.Min(frame.Image.PixelWidth, 200);
+        var differingPixelCount = 0;
+        for (var y = bandTop; y < bandBottom; y++)
+        {
+            for (var x = 8; x < bandRight; x++)
+            {
+                var offset = (y * stride) + (x * 4);
+                var blue = pixels[offset];
+                var green = pixels[offset + 1];
+                var red = pixels[offset + 2];
+                var diff = Math.Abs(blue - 0x1F) + Math.Abs(green - 0x1A) + Math.Abs(red - 0x14);
+                if (diff > 24)
+                {
+                    differingPixelCount++;
+                }
+            }
+        }
+
+        Check.True(
+            differingPixelCount > 200,
+            $"{pattern}: the SIMULATED watermark/timestamp badge must paint visibly different pixels over the bottom-left background band (found {differingPixelCount} differing pixels).");
+    }
+}
+
+static void SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition()
+{
+    var source = new SimulatedTestImageFrameSource();
+    var capturedAt = DateTimeOffset.UtcNow;
+    // seq=0 sits at the start of the blur ramp (near-maximum blur radius) and seq=17 sits at
+    // the end of the ramp (fully sharp); holding camera/pattern/timestamp constant isolates
+    // the blur radius as the only thing that can differ between the two renders.
+    var blurredFrame = source.CreateFrame("CAM-A", SimulatedFramePattern.BlurToFocusTransition, sequenceNumber: 0, capturedAt);
+    var sharpFrame = source.CreateFrame("CAM-A", SimulatedFramePattern.BlurToFocusTransition, sequenceNumber: 17, capturedAt);
+
+    var blurredPixels = CopyPixelsBgra(blurredFrame.Image);
+    var sharpPixels = CopyPixelsBgra(sharpFrame.Image);
+    Check.Equal(blurredPixels.Length, sharpPixels.Length);
+
+    long totalDifference = 0;
+    for (var index = 0; index < blurredPixels.Length; index++)
+    {
+        totalDifference += Math.Abs(blurredPixels[index] - sharpPixels[index]);
+    }
+
+    Check.True(
+        totalDifference > 50_000,
+        "seq=0 (near-max blur) and seq=17 (sharp) must render visibly different pixels if BlurEffect is actually applied to the scene " +
+        $"(total abs BGRA diff = {totalDifference}). If this is at/near 0, RenderTargetBitmap.Render() is ignoring the Effect on the root visual again.");
+}
+
+static async Task SimulatedLiveViewFramePumpOnlyTicksBetweenStartAndStopAsync()
+{
+    using var pump = new SimulatedLiveViewFramePump(interval: TimeSpan.FromMilliseconds(20));
+    var ticks = new List<SimulatedLiveViewFrameTick>();
+    pump.Tick += (_, tick) => { lock (ticks) { ticks.Add(tick); } };
+
+    await Task.Delay(60);
+    Check.Equal(0, ticks.Count);
+
+    var generation = pump.Start("CAM-B", SimulatedFramePattern.TiltedDocumentRollPlus3);
+    Check.Equal(1, generation);
+    await WaitUntilAsync(
+        () => { lock (ticks) { return ticks.Count >= 2; } },
+        "The pump did not tick after Start().");
+    lock (ticks)
+    {
+        Check.True(ticks.All(tick => tick.CameraAlias == "CAM-B"), "Every tick must carry the started camera alias.");
+        Check.True(ticks.All(tick => tick.Pattern == SimulatedFramePattern.TiltedDocumentRollPlus3), "Every tick must carry the started pattern.");
+        Check.True(ticks.All(tick => tick.Generation == generation), "Every tick from this session must carry the generation Start() returned.");
+    }
+
+    pump.Stop();
+    // Stop() is intentionally non-blocking now (rendering was moved entirely out of the pump,
+    // so there is nothing expensive left in flight to wait for): tolerate at most one
+    // already-in-flight tick completing shortly after Stop() returns, then confirm the count
+    // stabilizes. That — plus the ViewModel-side generation/alias/IsLiveViewActive guard — is
+    // what "no frame supply while Live View is OFF" actually guarantees end to end.
+    await Task.Delay(40);
+    int countAfterGrace;
+    lock (ticks)
+    {
+        countAfterGrace = ticks.Count;
+    }
+    await Task.Delay(80);
+    lock (ticks)
+    {
+        Check.Equal(countAfterGrace, ticks.Count);
+    }
+
+    var secondGeneration = pump.Start("CAM-A", SimulatedFramePattern.FrontalDocument);
+    Check.Equal(2, secondGeneration);
+    pump.Stop();
+}
+
+static async Task SimulatedFramePumpWiringAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-SimulatedFramePumpTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.IsSimulatedFrameSourceAvailable, "A pump and frame source were both injected, so the frame source must report available.");
+        Check.True(viewModel.CanUseLiveView, "A safety-acknowledged, non-busy dual plan must allow Live View.");
+        Check.Equal(0, pump.StartCalls.Count);
+
+        // Rejecting an unrecognized pattern value must still re-announce the current value so
+        // a bound ComboBox reverts instead of keeping the rejected selection on screen.
+        var propertyChangedNames = new List<string>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is not null)
+            {
+                propertyChangedNames.Add(args.PropertyName);
+            }
+        };
+        viewModel.SelectedSimulatedFramePattern = "not-a-real-pattern";
+        Check.Equal(SimulatedFramePatternCatalog.DefaultLabel, viewModel.SelectedSimulatedFramePattern);
+        Check.True(
+            propertyChangedNames.Contains(nameof(OperatorShellViewModel.SelectedSimulatedFramePattern)),
+            "A rejected pattern value must still raise PropertyChanged so bound controls revert to the accepted value.");
+
+        viewModel.SelectedSimulatedFramePattern = "ボケ→合焦遷移";
+        Check.Equal(1, pump.PatternChanges.Count);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.PatternChanges[0]);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.True(viewModel.IsLiveViewActive, "Toggling Live View on must flip the flag.");
+        Check.Equal(1, pump.StartCalls.Count);
+        Check.Equal("CAM-A", pump.StartCalls[0].CameraAlias);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.StartCalls[0].Pattern);
+        Check.Equal(0, pump.StopCallCount);
+        var firstGeneration = pump.LastReturnedGeneration;
+
+        // A mismatched-alias tick (as if Stop()/an alias switch raced an in-flight timer
+        // tick) must not populate the composite preview's non-live "still" slot for that
+        // alias, and must not even reach the frame source.
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, firstGeneration, DateTimeOffset.UtcNow));
+        Check.True(viewModel.StageCompositeStillImage is null, "A stale tick for a non-active alias must be dropped.");
+        Check.Equal(0, frameSource.CallCount);
+
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.BlurToFocusTransition, 0, firstGeneration, DateTimeOffset.UtcNow));
+        Check.Equal(1, frameSource.CallCount);
+        Check.True(viewModel.StageCompositeLiveImage is not null, "A tick for the active alias must render and populate the live composite image.");
+        Check.False(
+            viewModel.IsStageSingleLiveImageVisible,
+            "Stage mode defaults to composite preview, so the single-live image must stay hidden even though a frame exists.");
+
+        // OFF -> back ON for the *same* camera alias is exactly the race a bare alias check
+        // cannot catch: toggle off, toggle on again (new generation), then raise a tick still
+        // carrying the OLD generation as if it had been in flight when Stop() was called.
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.Equal(1, pump.StopCallCount);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.Equal(2, pump.StartCalls.Count);
+        var secondGeneration = pump.LastReturnedGeneration;
+        Check.False(secondGeneration == firstGeneration, "Start() must return a new generation on every call.");
+
+        var frameSourceCallsBeforeStaleGenerationTick = frameSource.CallCount;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 5, firstGeneration, DateTimeOffset.UtcNow));
+        Check.Equal(frameSourceCallsBeforeStaleGenerationTick, frameSource.CallCount);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.False(viewModel.IsLiveViewActive, "Toggling Live View off must flip the flag back.");
+        Check.Equal(2, pump.StopCallCount);
+        Check.True(viewModel.StageCompositeLiveImage is null, "Stopping Live View must clear the live composite image even though the last frame is retained.");
+
+        viewModel.SelectedCamera = "CAM-B";
+        Check.True(
+            viewModel.StageCompositeFreshnessText.Contains("秒前", StringComparison.Ordinal),
+            "The frozen CAM-A frame must drive the freshness badge once CAM-B becomes the selected (still) alias.");
+
+        // A frame source that returns a frame missing the Simulated marker must be dropped —
+        // and must not throw (a throw inside the SynchronizationContext.Post callback used in
+        // production would become an unhandled Dispatcher exception, not something callable
+        // code here or in production could catch).
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var thirdGeneration = pump.LastReturnedGeneration;
+        frameSource.ReturnInvalidMarker = true;
+        var statusBeforeInvalidFrame = viewModel.StatusMessage;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, thirdGeneration, DateTimeOffset.UtcNow));
+        Check.False(
+            string.Equals(statusBeforeInvalidFrame, viewModel.StatusMessage, StringComparison.Ordinal),
+            "An invalid-marker frame must be surfaced through StatusMessage instead of silently doing nothing or throwing.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static byte[] CopyPixelsBgra(BitmapSource bitmap)
+{
+    var stride = bitmap.PixelWidth * 4;
+    var buffer = new byte[stride * bitmap.PixelHeight];
+    bitmap.CopyPixels(buffer, stride, 0);
+    return buffer;
+}
+
+sealed class FakeSimulatedLiveViewFramePump : ISimulatedLiveViewFramePump
+{
+    public List<(string CameraAlias, SimulatedFramePattern Pattern)> StartCalls { get; } = [];
+    public List<SimulatedFramePattern> PatternChanges { get; } = [];
+    public int StopCallCount { get; private set; }
+    public int LastReturnedGeneration { get; private set; }
+
+    public event EventHandler<SimulatedLiveViewFrameTick>? Tick;
+
+    public int Start(string cameraAlias, SimulatedFramePattern pattern)
+    {
+        StartCalls.Add((cameraAlias, pattern));
+        LastReturnedGeneration++;
+        return LastReturnedGeneration;
+    }
+
+    public void Stop() => StopCallCount++;
+
+    public void SetPattern(SimulatedFramePattern pattern) => PatternChanges.Add(pattern);
+
+    public void RaiseTick(SimulatedLiveViewFrameTick tick) => Tick?.Invoke(this, tick);
+
+    public void Dispose()
+    {
+    }
+}
+
+sealed class FakeSimulatedLiveViewFrameSource : ISimulatedLiveViewFrameSource
+{
+    public bool ReturnInvalidMarker { get; set; }
+    public int CallCount { get; private set; }
+
+    public SimulatedLiveViewFrame CreateFrame(string cameraAlias, SimulatedFramePattern pattern, int sequenceNumber, DateTimeOffset capturedAtUtc)
+    {
+        CallCount++;
+        return new SimulatedLiveViewFrame
+        {
+            CameraAlias = cameraAlias,
+            Pattern = pattern,
+            SequenceNumber = sequenceNumber,
+            CapturedAtUtc = capturedAtUtc,
+            Image = CreateFakeFrameImage(),
+            Simulation = !ReturnInvalidMarker,
+            Marker = ReturnInvalidMarker ? "NotSimulated" : "Simulated",
+        };
+    }
+
+    private static BitmapSource CreateFakeFrameImage()
+    {
+        var pixels = new byte[] { 0x10, 0x20, 0x30 };
+        var bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
+        bitmap.Freeze();
+        return bitmap;
+    }
 }
 
 static class Check

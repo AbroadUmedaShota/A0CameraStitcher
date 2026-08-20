@@ -3,6 +3,7 @@ using System.Windows;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 
 namespace A0CameraStitcher.M3.OperatorShell;
@@ -13,6 +14,8 @@ public partial class MainWindow : Window
     private readonly OperatorShellViewModel _viewModel;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
+    private readonly ISimulatedLiveViewFrameSource _liveViewFrameSource = new SimulatedTestImageFrameSource();
+    private readonly ISimulatedLiveViewFramePump _liveViewFramePump = new SimulatedLiveViewFramePump();
 
     public MainWindow(DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic)
     {
@@ -50,13 +53,16 @@ public partial class MainWindow : Window
             // flipping this to Ready is explicitly out of scope for this change.
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
-                DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle));
+                DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
+                liveViewFramePump: _liveViewFramePump,
+                liveViewFrameSource: _liveViewFrameSource);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closed += OnClosed;
         }
         catch
         {
+            _liveViewFramePump.Dispose();
             _sessionLease?.Dispose();
             throw;
         }
@@ -96,6 +102,7 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _liveViewFramePump.Dispose();
             _lifetime.Dispose();
             _sessionLease?.Dispose();
         }
