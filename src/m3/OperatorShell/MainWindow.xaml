@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:converters="clr-namespace:A0CameraStitcher.M3.OperatorShell.Converters"
+        xmlns:controls="clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls"
         Title="A0 Camera Stitcher — SIMULATED / 実機未接続"
         AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"
         Width="1600" Height="900" MinWidth="1280" MinHeight="720"
@@ -205,9 +206,114 @@
                             </MenuItem>
                         </Menu>
 
+                        <!-- 表示設定のリセット。1回目は確認待ち、2回目で確定する。 -->
+                        <Button DockPanel.Dock="Right" Margin="0,0,8,0" Padding="10,0" MinHeight="22" VerticalAlignment="Center"
+                                Content="{Binding ResetButtonText}" Command="{Binding ResetViewCommand}"
+                                FontSize="{StaticResource FontSizeBody}"
+                                AutomationProperties.Name="表示設定のリセット 2回押しで確定">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsResetArmed}" Value="True">
+                                            <Setter Property="Foreground" Value="{StaticResource CautionBrush}" />
+                                            <Setter Property="BorderBrush" Value="{StaticResource CautionBorderBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+
+                        <!-- 構図グリッドの分割数。案件ごとに割り付けが違うので3分割固定にしない。 -->
+                        <ToggleButton x:Name="GridSettingsToggle" DockPanel.Dock="Right" Margin="0,0,8,0" MinHeight="22"
+                                      VerticalAlignment="Center"
+                                      AutomationProperties.Name="グリッド設定を開く 列数と行数の指定">
+                            <ToggleButton.Style>
+                                <Style TargetType="ToggleButton">
+                                    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border x:Name="Face" Background="{StaticResource ControlSunkenBrush}"
+                                                        BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1"
+                                                        Padding="10,0">
+                                                    <ContentPresenter VerticalAlignment="Center" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Face" Property="Background" Value="{StaticResource ControlHoverBrush}" />
+                                                        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsChecked" Value="True">
+                                                        <Setter TargetName="Face" Property="Background" Value="{StaticResource ControlHoverBrush}" />
+                                                        <Setter TargetName="Face" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ToggleButton.Style>
+                            <TextBlock VerticalAlignment="Center" FontSize="{StaticResource FontSizeBody}"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}">
+                                <Run Text="グリッド " /><Run Text="{Binding GridDivisionText, Mode=OneWay}" /><Run Text="  ⌄" />
+                            </TextBlock>
+                        </ToggleButton>
+
+                        <Popup PlacementTarget="{Binding ElementName=GridSettingsToggle}" Placement="Bottom"
+                               HorizontalOffset="-190" StaysOpen="False" AllowsTransparency="True"
+                               IsOpen="{Binding IsChecked, ElementName=GridSettingsToggle, Mode=TwoWay}">
+                            <Border Width="304" Padding="12" Margin="0,0,8,8"
+                                    Background="{StaticResource BarBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
+                                    BorderThickness="1" Effect="{StaticResource DropdownShadow}">
+                                <StackPanel>
+                                    <DockPanel LastChildFill="False">
+                                        <TextBlock DockPanel.Dock="Left" Text="構図グリッド" FontWeight="Medium"
+                                                   FontSize="{StaticResource FontSizeLabel}" />
+                                        <CheckBox DockPanel.Dock="Right" Content="表示する" VerticalAlignment="Center"
+                                                  IsChecked="{Binding IsGridOverlayEnabled, Mode=TwoWay}"
+                                                  FontSize="{StaticResource FontSizeCompact}"
+                                                  AutomationProperties.Name="方眼グリッドの表示切替" />
+                                    </DockPanel>
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Grid.Column="0" Content="3×3" Command="{Binding GridPreset3Command}"
+                                                Margin="0,0,1,0" FontFamily="{StaticResource MonoFontFamily}" />
+                                        <Button Grid.Column="1" Content="4×4" Command="{Binding GridPreset4Command}"
+                                                Margin="0,0,1,0" FontFamily="{StaticResource MonoFontFamily}" />
+                                        <Button Grid.Column="2" Content="5×5" Command="{Binding GridPreset5Command}"
+                                                FontFamily="{StaticResource MonoFontFamily}" />
+                                    </Grid>
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="列" VerticalAlignment="Center" Margin="0,0,8,0"
+                                                   Style="{StaticResource MutedTextStyle}" />
+                                        <TextBox Grid.Column="1" Text="{Binding GridColumns, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 AutomationProperties.Name="グリッドの列数 1から24" />
+                                        <TextBlock Grid.Column="2" Text="行" VerticalAlignment="Center" Margin="10,0,8,0"
+                                                   Style="{StaticResource MutedTextStyle}" />
+                                        <TextBox Grid.Column="3" Text="{Binding GridRows, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 AutomationProperties.Name="グリッドの行数 1から24" />
+                                    </Grid>
+                                    <TextBlock Text="1〜24 で指定します。位置合わせの目安で、撮影の可否には使いません。"
+                                               Margin="0,10,0,0" Style="{StaticResource MutedTextStyle}"
+                                               FontSize="{StaticResource FontSizeCompact}" />
+                                </StackPanel>
+                            </Border>
+                        </Popup>
+
                         <TextBlock DockPanel.Dock="Right" Margin="0,0,10,0" VerticalAlignment="Center"
                                    Style="{StaticResource MonoTextStyle}"
-                                   Text="{Binding ActivityText}" TextTrimming="CharacterEllipsis" MaxWidth="420"
+                                   Text="{Binding ActivityText}" TextTrimming="CharacterEllipsis" MaxWidth="300"
                                    AutomationProperties.LiveSetting="Polite"
                                    AutomationProperties.Name="現在の進行状況" />
                     </DockPanel>
@@ -441,28 +547,11 @@
                                         </Grid>
 
                                         <!-- ==================== 設置ガイドオーバーレイ ==================== -->
-                                        <!-- 方眼グリッド（issue #32）: DrawingBrushでタイル状に描画。ピクセル処理は不要。 -->
-                                        <Rectangle IsHitTestVisible="False"
-                                                   Visibility="{Binding IsGridOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                   AutomationProperties.Name="設置ガイドオーバーレイ 方眼グリッド">
-                                            <Rectangle.Fill>
-                                                <DrawingBrush TileMode="Tile" Viewport="0,0,64,64" ViewportUnits="Absolute">
-                                                    <DrawingBrush.Drawing>
-                                                        <GeometryDrawing>
-                                                            <GeometryDrawing.Pen>
-                                                                <Pen Brush="{StaticResource OverlayGridLineBrush}" Thickness="1" />
-                                                            </GeometryDrawing.Pen>
-                                                            <GeometryDrawing.Geometry>
-                                                                <GeometryGroup>
-                                                                    <LineGeometry StartPoint="0,0" EndPoint="64,0" />
-                                                                    <LineGeometry StartPoint="0,0" EndPoint="0,64" />
-                                                                </GeometryGroup>
-                                                            </GeometryDrawing.Geometry>
-                                                        </GeometryDrawing>
-                                                    </DrawingBrush.Drawing>
-                                                </DrawingBrush>
-                                            </Rectangle.Fill>
-                                        </Rectangle>
+                                        <!-- 方眼グリッド（issue #32）: ステージ表示領域を列数・行数でちょうど等分する。 -->
+                                        <controls:GridLinesOverlay Columns="{Binding GridColumns}" Rows="{Binding GridRows}"
+                                                                   LineBrush="{StaticResource OverlayGridLineBrush}"
+                                                                   Visibility="{Binding IsGridOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                                   AutomationProperties.Name="設置ガイドオーバーレイ 方眼グリッド" />
 
                                         <!-- トンボ（issue #32）: 四隅の合わせマーク。角を挟む2辺の短い罫で示す。 -->
                                         <Grid IsHitTestVisible="False" Margin="8"
@@ -551,10 +640,10 @@
                                                   AutomationProperties.Name="拡大エリア 等倍クロップ表示領域">
                                                 <Border Background="{StaticResource StageHatchBrush}"
                                                         Visibility="{Binding IsLoupePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}" />
-                                                <Image Source="{Binding LoupeImage}" Stretch="Uniform"
+                                                <Image Source="{Binding LoupeImage}" Stretch="UniformToFill"
                                                        Visibility="{Binding IsLoupeImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                        AutomationProperties.Name="拡大エリア Simulated疑似LVフレーム 等倍クロップ" />
-                                                <Image Source="{Binding LoupePeakingOverlay}" Stretch="Uniform" IsHitTestVisible="False"
+                                                <Image Source="{Binding LoupePeakingOverlay}" Stretch="UniformToFill" IsHitTestVisible="False"
                                                        Visibility="{Binding IsLoupePeakingOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                        AutomationProperties.Name="拡大エリア フォーカスピーキング エッジ強調オーバーレイ preview専用" />
                                                 <TextBlock Text="{Binding LoupePlaceholderText}" TextAlignment="Center"
@@ -603,6 +692,30 @@
                                                                AutomationProperties.Name="拡大エリア 鮮度バッジ 非ライブ側静止画" />
                                                 </Border>
                                             </Grid>
+                                        </Border>
+
+                                        <!-- 通知はステージ上端に出して、操作した直後の視線の先で気づけるようにする。 -->
+                                        <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,10,0,0"
+                                                Padding="14,6" Panel.ZIndex="4" IsHitTestVisible="False"
+                                                BorderThickness="1" Effect="{StaticResource NoticeShadow}"
+                                                Visibility="{Binding IsNoticeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="操作結果の通知">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{StaticResource CautionNoticeBrush}" />
+                                                    <Setter Property="BorderBrush" Value="{StaticResource CautionBorderBrush}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding NoticeKind}" Value="ok">
+                                                            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+                                                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding NoticeText}" FontWeight="Medium"
+                                                       FontSize="{StaticResource FontSizeBase}"
+                                                       Foreground="{StaticResource AccentOnStrongBrush}"
+                                                       AutomationProperties.LiveSetting="Polite" />
                                         </Border>
 
                                         <!-- 撮影・合成の進行中はステージ全面を覆う。ここで手を出せる操作は無い、と示すため。 -->
@@ -871,6 +984,40 @@
                                                      AutomationProperties.Name="操作者選択fixed-local export folder" />
                                             <TextBlock Text="{Binding OutputDirectory}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"
                                                        Style="{StaticResource MonoTextStyle}" />
+
+                                            <!-- 保存したファイルの控え。自動保存はしないので、ここが増えていれば
+                                                 操作者が保存を押したということ。 -->
+                                            <StackPanel Margin="0,10,0,0"
+                                                        Visibility="{Binding HasSavedFiles, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                <DockPanel LastChildFill="False">
+                                                    <TextBlock DockPanel.Dock="Left" Text="保存したファイル" VerticalAlignment="Center"
+                                                               Style="{StaticResource MutedTextStyle}"
+                                                               FontSize="{StaticResource FontSizeCompact}" />
+                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding SavedFileCountText}" VerticalAlignment="Center"
+                                                               Style="{StaticResource MonoTextStyle}" />
+                                                </DockPanel>
+                                                <ItemsControl ItemsSource="{Binding SavedFiles}" Margin="0,5,0,0"
+                                                              AutomationProperties.Name="保存したファイルの一覧 保存操作を行ったときだけ増えます">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Margin="0,0,0,2" Padding="8,4" Background="{StaticResource RightColumnBrush}"
+                                                                    BorderBrush="{StaticResource AccentBrush}" BorderThickness="2,0,0,0">
+                                                                <DockPanel>
+                                                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Time}" Margin="0,0,8,0"
+                                                                               FontFamily="{StaticResource MonoFontFamily}"
+                                                                               FontSize="{StaticResource FontSizeSmall}"
+                                                                               Foreground="{StaticResource TextMutedBrush}" />
+                                                                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
+                                                                               TextWrapping="NoWrap" ToolTip="{Binding Path}"
+                                                                               FontFamily="{StaticResource MonoFontFamily}"
+                                                                               FontSize="{StaticResource FontSizeCompact}"
+                                                                               Foreground="{StaticResource TextSecondaryBrush}" />
+                                                                </DockPanel>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Border>
 

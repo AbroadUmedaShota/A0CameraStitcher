@@ -13,6 +13,12 @@ namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
 public sealed record CameraSettingRow(string Setting, string RequiredProfile, string CameraA, string CameraB);
 
+/// <summary>保存したファイル1件の控え（保存時刻と実際の出力先）。表示専用。</summary>
+public sealed record SavedFileViewModel(string Time, string Path)
+{
+    public string FileName => System.IO.Path.GetFileName(Path);
+}
+
 /// <summary>One completed AF execution (issue #31 focus panel): which camera it ran on, its
 /// SIMULATED convergence result, when it ran, and the target reticle position used as the AF
 /// area — the fields the panel needs to show "合焦OK/NG・実行時刻・使用した□位置" per
@@ -38,6 +44,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     private const string LoupeZoom100 = "100%";
     private const string LoupeZoom200 = "200%";
     private const string LoupeUnavailableText = "フレーム未取得";
+    private const int DefaultGridDivision = 3;
+    private const int MinGridDivision = 1;
+    private const int MaxGridDivision = 24;
+    private const int NoticeVisibleMilliseconds = 3200;
+    private const int ResetArmedMilliseconds = 3000;
+    private const int MaxSavedFileRows = 6;
 
     /// <summary>Scale applied to a drag delta captured inside the loupe, relative to the same
     /// delta captured on the stage — the issue #30 "細かい移動" contract (loupe drags move the
@@ -88,6 +100,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly RelayCommand _togglePeakingCommand;
     private readonly RelayCommand _switchLiveCameraToTargetDomainCommand;
     private readonly RelayCommand _showConsentCommand;
+    private readonly RelayCommand _gridPreset3Command;
+    private readonly RelayCommand _gridPreset4Command;
+    private readonly RelayCommand _gridPreset5Command;
+    private readonly RelayCommand _resetViewCommand;
 
     private CancellationToken _lifetimeToken;
     private bool _isBusy;
@@ -95,6 +111,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool _consentOverlayDismissed;
     private bool _physicalShutterAckAccepted;
     private bool _exclusiveUseAckAccepted;
+    private int _gridColumns = DefaultGridDivision;
+    private int _gridRows = DefaultGridDivision;
+    private string _noticeText = string.Empty;
+    private string _noticeKind = "ok";
+    private int _noticeGeneration;
+    private bool _isResetArmed;
+    private int _resetArmGeneration;
     private bool _isLiveViewActive;
     private string _selectedOperatingMode = DualModeLabel;
     private string _selectedCamera = "CAM-A";
@@ -218,6 +241,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             () => !SafetyAcknowledged && !IsBusy && IsPhysicalShutterAckAccepted && IsExclusiveUseAckAccepted);
         _declineSafetyCommand = new RelayCommand(DeclineSafety, () => !SafetyAcknowledged && !IsBusy);
         _showConsentCommand = new RelayCommand(ShowConsent, () => !SafetyAcknowledged && !IsBusy);
+        _gridPreset3Command = new RelayCommand(() => ApplyGridPreset(3), () => !IsBusy);
+        _gridPreset4Command = new RelayCommand(() => ApplyGridPreset(4), () => !IsBusy);
+        _gridPreset5Command = new RelayCommand(() => ApplyGridPreset(5), () => !IsBusy);
+        _resetViewCommand = new RelayCommand(RequestResetView, () => !IsBusy);
         _captureCommand = new AsyncRelayCommand(() => RunCaptureAsync("正常完了"), () => CanCapture, ShowUnexpectedFailure);
         _captureWithAutoFocusCommand = new AsyncRelayCommand(() => RunCaptureWithAutoFocusAsync("正常完了"), () => CanCaptureWithAutoFocus, ShowUnexpectedFailure);
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
@@ -278,6 +305,10 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public ICommand AcceptSafetyCommand => _acceptSafetyCommand;
     public ICommand ShowConsentCommand => _showConsentCommand;
+    public ICommand GridPreset3Command => _gridPreset3Command;
+    public ICommand GridPreset4Command => _gridPreset4Command;
+    public ICommand GridPreset5Command => _gridPreset5Command;
+    public ICommand ResetViewCommand => _resetViewCommand;
     public ICommand DeclineSafetyCommand => _declineSafetyCommand;
     public ICommand CaptureCommand => _captureCommand;
     public ICommand CaptureWithAutoFocusCommand => _captureWithAutoFocusCommand;
@@ -995,6 +1026,180 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsGridOverlayVisible => IsGridOverlayEnabled && !IsStageProcessingPlaceholder;
     public bool IsTombOverlayVisible => IsTombOverlayEnabled && !IsStageProcessingPlaceholder;
     public bool IsSafeMarginOverlayVisible => IsSafeMarginOverlayEnabled && !IsStageProcessingPlaceholder;
+
+    /// <summary>構図グリッドの列数。ステージ表示領域をこの数でちょうど等分する。
+    /// 原稿サイズや割り付けは案件ごとに違うため、3分割固定にはしない。</summary>
+    public int GridColumns
+    {
+        get => _gridColumns;
+        set
+        {
+            if (SetProperty(ref _gridColumns, ClampGridDivision(value)))
+            {
+                OnPropertyChanged(nameof(GridDivisionText));
+            }
+        }
+    }
+
+    /// <summary>構図グリッドの行数。<see cref="GridColumns"/> の対。</summary>
+    public int GridRows
+    {
+        get => _gridRows;
+        set
+        {
+            if (SetProperty(ref _gridRows, ClampGridDivision(value)))
+            {
+                OnPropertyChanged(nameof(GridDivisionText));
+            }
+        }
+    }
+
+    public string GridDivisionText => $"{GridColumns} × {GridRows}";
+
+    /// <summary>入力欄からの直接指定を受けるため、範囲外はここで丸める（1未満・24超は作らない）。</summary>
+    private static int ClampGridDivision(int value) => Math.Clamp(value, MinGridDivision, MaxGridDivision);
+
+    public void ApplyGridPreset(int division)
+    {
+        GridColumns = division;
+        GridRows = division;
+        IsGridOverlayEnabled = true;
+    }
+
+    /// <summary>ステージ下部に一時的に出す通知。3.2秒で自然に消える。</summary>
+    public string NoticeText
+    {
+        get => _noticeText;
+        private set
+        {
+            if (SetProperty(ref _noticeText, value))
+            {
+                OnPropertyChanged(nameof(IsNoticeVisible));
+            }
+        }
+    }
+
+    public bool IsNoticeVisible => !string.IsNullOrEmpty(NoticeText);
+
+    /// <summary>通知の種別。"ok" は完了、"warn" は注意。色はXAML側でトークンへ解決する。</summary>
+    public string NoticeKind
+    {
+        get => _noticeKind;
+        private set => SetProperty(ref _noticeKind, value);
+    }
+
+    /// <summary>通知を出す。世代番号で上書きを判定するので、連続して出しても
+    /// 古い通知のタイマーが新しい通知を消してしまうことはない。</summary>
+    public void Notify(string text, bool succeeded)
+    {
+        NoticeKind = succeeded ? "ok" : "warn";
+        NoticeText = text;
+        var generation = ++_noticeGeneration;
+        _ = DismissNoticeAsync(generation);
+    }
+
+    private async Task DismissNoticeAsync(int generation)
+    {
+        try
+        {
+            await Task.Delay(NoticeVisibleMilliseconds, _lifetimeToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (_noticeGeneration == generation)
+        {
+            NoticeText = string.Empty;
+        }
+    }
+
+    /// <summary>表示設定の一括リセット。誤操作で構図やピント表示が消えると撮り直しになるため、
+    /// 1回目で確認待ちにし、2回目の押下で確定する。3秒放置で解除。</summary>
+    public bool IsResetArmed
+    {
+        get => _isResetArmed;
+        private set
+        {
+            if (SetProperty(ref _isResetArmed, value))
+            {
+                OnPropertyChanged(nameof(ResetButtonText));
+            }
+        }
+    }
+
+    public string ResetButtonText => IsResetArmed ? "もう一度で初期化" : "リセット";
+
+    private void RequestResetView()
+    {
+        if (!IsResetArmed)
+        {
+            IsResetArmed = true;
+            var generation = ++_resetArmGeneration;
+            _ = DisarmResetAsync(generation);
+            return;
+        }
+
+        _resetArmGeneration++;
+        IsResetArmed = false;
+        GridColumns = DefaultGridDivision;
+        GridRows = DefaultGridDivision;
+        IsGridOverlayEnabled = false;
+        IsTombOverlayEnabled = false;
+        IsSafeMarginOverlayEnabled = false;
+        IsOverlapBandOverlayEnabled = true;
+        IsTiltReadingVisible = true;
+        SelectedLoupeZoom = LoupeZoom100;
+        Notify("表示設定を初期状態へ戻しました（撮影データは変えていません）", true);
+    }
+
+    private async Task DisarmResetAsync(int generation)
+    {
+        try
+        {
+            await Task.Delay(ResetArmedMilliseconds, _lifetimeToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (_resetArmGeneration == generation)
+        {
+            IsResetArmed = false;
+        }
+    }
+
+    /// <summary>保存したファイルの控え。保存を押して実際に出力できたときだけ増える
+    /// （自動保存はしないので、ここが増えていれば操作者が保存したということ）。</summary>
+    public ObservableCollection<SavedFileViewModel> SavedFiles { get; } = [];
+
+    public bool HasSavedFiles => SavedFiles.Count > 0;
+
+    public string SavedFileCountText => $"このセッション {SavedFiles.Count} 件";
+
+    private void RecordSavedFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path == "未実行")
+        {
+            return;
+        }
+
+        if (SavedFiles.Any(saved => string.Equals(saved.Path, path, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        SavedFiles.Insert(0, new SavedFileViewModel(DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture), path));
+        while (SavedFiles.Count > MaxSavedFileRows)
+        {
+            SavedFiles.RemoveAt(SavedFiles.Count - 1);
+        }
+
+        OnPropertyChanged(nameof(HasSavedFiles));
+        OnPropertyChanged(nameof(SavedFileCountText));
+    }
 
     /// <summary>Combines the new #32 toggle with the pre-existing
     /// <see cref="StageCompositeApplicable"/> gate the band's Border already used, so turning the
@@ -2014,6 +2219,16 @@ public sealed class OperatorShellViewModel : ObservableObject
                 state.Export.OutputPath,
                 ExportResult,
                 state.Export.Succeeded ? null : state.Export.FailureCode.ToString());
+
+            if (state.Export.Succeeded)
+            {
+                RecordSavedFile(state.Export.OutputPath ?? string.Empty);
+                Notify("このPCのフォルダへ保存しました（画像は無加工）", true);
+            }
+            else
+            {
+                Notify("保存できませんでした。撮影データは保持しています", false);
+            }
         }
 
         var activeStage = state.Stages.FirstOrDefault(stage => stage.Status == DualCameraStageStatus.Active)?.Stage;
@@ -2141,6 +2356,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         LastExportPath = _exportOutcome.OutputPath ?? "未実行";
         ExportResult = _exportOutcome.OperatorMessage;
         StatusMessage = "保存が完了しました。原画像を上書き・削除していません。";
+        RecordSavedFile(LastExportPath);
+        Notify(message, true);
         RecalculateAvailability();
         await Task.CompletedTask;
     }
@@ -2475,5 +2692,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         _togglePeakingCommand.NotifyCanExecuteChanged();
         _switchLiveCameraToTargetDomainCommand.NotifyCanExecuteChanged();
         _showConsentCommand.NotifyCanExecuteChanged();
+        _gridPreset3Command.NotifyCanExecuteChanged();
+        _gridPreset4Command.NotifyCanExecuteChanged();
+        _gridPreset5Command.NotifyCanExecuteChanged();
+        _resetViewCommand.NotifyCanExecuteChanged();
     }
 }
