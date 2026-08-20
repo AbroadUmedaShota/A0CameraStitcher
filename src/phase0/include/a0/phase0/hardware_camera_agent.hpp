@@ -541,6 +541,7 @@ private:
 struct HardwareCameraAgentPipeFailureInjectionForTesting {
     bool fail_response_header_write{};
     bool fail_response_body_write{};
+    bool fail_delivery_ack_wait{};
     bool fail_response_flush{};
 };
 

@@ -615,6 +615,12 @@ static async Task WritePersistentTestFrameAsync(
     await stream.WriteAsync(header, cancellationToken);
     await stream.WriteAsync(payload, cancellationToken);
     await stream.FlushAsync(cancellationToken);
+    var acknowledgment = new byte[1];
+    await stream.ReadExactlyAsync(acknowledgment, cancellationToken);
+    if (acknowledgment[0] != 0x06)
+    {
+        throw new IOException("The test Camera Agent received an invalid delivery acknowledgment.");
+    }
 }
 
 static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
@@ -1102,19 +1108,94 @@ static async Task HardwareMalformedLocalStateFailsClosedAsync()
 
 static void HardwareLaunchOptionsAreExplicit()
 {
-    var baseDirectory = Path.Combine(Path.GetTempPath(), "A0CameraStitcher-launch");
-    var launcher = ApplicationLaunchOptions.Parse([], baseDirectory);
-    Check.Equal(ApplicationLaunchMode.Launcher, launcher.Mode);
-    var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", "C:\\agent\\A0CameraStitcher.CameraAgent.exe"], baseDirectory);
-    Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
-    var hardwareDual = ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory);
-    Check.Equal(ApplicationLaunchMode.HardwareDual, hardwareDual.Mode);
-    var simulated = ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory);
-    Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
-    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--hardware-single"], baseDirectory));
-    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual", "--hardware-single"], baseDirectory));
-    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual", "--camera-agent", "C:\\agent\\agent.exe"], baseDirectory));
-    Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--camera-agent", "C:\\agent\\agent.exe"], baseDirectory));
+    const string legacySingleAgentVariable = "A0_CAMERA_AGENT_PATH";
+    const string legacyDualAgentVariable = "A0_DUAL_CAMERA_AGENT_PATH";
+    var previousSingleAgent = Environment.GetEnvironmentVariable(legacySingleAgentVariable);
+    var previousDualAgent = Environment.GetEnvironmentVariable(legacyDualAgentVariable);
+    var root = Path.Combine(Path.GetTempPath(), "A0CameraStitcher-launch", Guid.NewGuid().ToString("N"));
+    var baseDirectory = Path.Combine(root, "app");
+    Directory.CreateDirectory(baseDirectory);
+    var singleAgent = Path.Combine(baseDirectory, "A0CameraStitcher.CameraAgent.exe");
+    var dualAgent = Path.Combine(baseDirectory, "A0CameraStitcher.DualCameraAgent.exe");
+    var explicitAgent = Path.Combine(baseDirectory, "explicit-agent.exe");
+    File.WriteAllBytes(singleAgent, [0x4d, 0x5a]);
+    File.WriteAllBytes(dualAgent, [0x4d, 0x5a]);
+    File.WriteAllBytes(explicitAgent, [0x4d, 0x5a]);
+    try
+    {
+        var launcher = ApplicationLaunchOptions.Parse([], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.Launcher, launcher.Mode);
+        Check.Equal(singleAgent, launcher.SingleCameraAgentExecutablePath);
+        Check.Equal(dualAgent, launcher.DualCameraAgentExecutablePath);
+        var launcherOverride = ApplicationLaunchOptions.Parse(["--camera-agent", explicitAgent], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.Launcher, launcherOverride.Mode);
+        Check.Equal(explicitAgent, launcherOverride.SingleCameraAgentExecutablePath);
+        Check.Equal(dualAgent, launcherOverride.DualCameraAgentExecutablePath);
+        var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", explicitAgent], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
+        Check.Equal(explicitAgent, hardware.SingleCameraAgentExecutablePath);
+        var hardwareDual = ApplicationLaunchOptions.Parse(["--hardware-dual", "--camera-agent", explicitAgent], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.HardwareDual, hardwareDual.Mode);
+        Check.Equal(explicitAgent, hardwareDual.DualCameraAgentExecutablePath);
+        var simulated = ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
+        File.Delete(singleAgent);
+        File.Delete(dualAgent);
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse([], baseDirectory));
+        Check.Equal(ApplicationLaunchMode.Simulated, ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory).Mode);
+        File.WriteAllBytes(singleAgent, [0x4d, 0x5a]);
+        File.WriteAllBytes(dualAgent, [0x4d, 0x5a]);
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--hardware-single"], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual", "--hardware-single"], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--camera-agent", explicitAgent], baseDirectory));
+        Environment.SetEnvironmentVariable(legacySingleAgentVariable, Path.Combine(root, "legacy-single.exe"));
+        Environment.SetEnvironmentVariable(legacyDualAgentVariable, Path.Combine(root, "legacy-dual.exe"));
+        Check.Equal(singleAgent, ApplicationLaunchOptions.Parse(["--hardware-single"], baseDirectory).SingleCameraAgentExecutablePath);
+        Check.Equal(dualAgent, ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory).DualCameraAgentExecutablePath);
+
+        foreach (var rejected in new[]
+                 {
+                     "relative.exe", "..\\outside.exe", "\\\\server\\share\\agent.exe",
+                     "\\\\?\\C:\\agent.exe", "C:\\agent.exe:stream", root + "-sibling\\agent.exe",
+                     Path.Combine(root, "outside.exe"), baseDirectory,
+                     Path.Combine(baseDirectory, "agent.dll"), Path.Combine(baseDirectory, "missing.exe"),
+                 })
+        {
+            try
+            {
+                _ = ApplicationLaunchOptions.Parse(["--hardware-dual", "--camera-agent", rejected], baseDirectory);
+                throw new InvalidOperationException("Expected a rejected Camera Agent path.");
+            }
+            catch (ArgumentException exception)
+            {
+                Check.False(exception.Message.Contains(rejected, StringComparison.Ordinal),
+                    "Camera Agent policy errors must not disclose the rejected raw path.");
+            }
+        }
+        Check.Throws<ArgumentException>(() => CameraAgentExecutablePolicy.Resolve(
+            baseDirectory, explicitAgent, _ => DriveType.Removable));
+        Check.Throws<ArgumentException>(() => CameraAgentExecutablePolicy.Resolve(
+            baseDirectory, explicitAgent, _ => DriveType.Fixed,
+            path => string.Equals(path, explicitAgent, StringComparison.OrdinalIgnoreCase)
+                ? FileAttributes.ReparsePoint
+                : FileAttributes.Directory));
+        foreach (var reparseDirectory in new[] { baseDirectory, root })
+        {
+            Check.Throws<ArgumentException>(() => CameraAgentExecutablePolicy.Resolve(
+                baseDirectory, explicitAgent, _ => DriveType.Fixed,
+                path => string.Equals(path, explicitAgent, StringComparison.OrdinalIgnoreCase)
+                    ? FileAttributes.Normal
+                    : string.Equals(path, reparseDirectory, StringComparison.OrdinalIgnoreCase)
+                        ? FileAttributes.Directory | FileAttributes.ReparsePoint
+                        : FileAttributes.Directory));
+        }
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(legacySingleAgentVariable, previousSingleAgent);
+        Environment.SetEnvironmentVariable(legacyDualAgentVariable, previousDualAgent);
+        Directory.Delete(root, recursive: true);
+    }
     Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve(string.Empty));
     Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve("relative-local-app-data"));
     var storagePaths = HardwareSingleStoragePaths.Resolve(Path.GetTempPath());

@@ -47,6 +47,7 @@ public sealed class HardwareCameraAgentIncompleteResponseException : EndOfStream
 
 public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgentTransport
 {
+    private const byte DeliveryAcknowledgment = 0x06;
     private readonly string _pipeName;
     private readonly TimeSpan _connectTimeout;
     private readonly TimeSpan _responseTimeout;
@@ -96,7 +97,10 @@ public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgent
         using var responseSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         responseSource.CancelAfter(_responseTimeout);
         await HardwarePipeFrameProtocol.WriteAsync(pipe, requestJson, responseSource.Token).ConfigureAwait(false);
-        return await HardwarePipeFrameProtocol.ReadAsync(pipe, responseSource.Token).ConfigureAwait(false);
+        var response = await HardwarePipeFrameProtocol.ReadAsync(pipe, responseSource.Token).ConfigureAwait(false);
+        await pipe.WriteAsync(new[] { DeliveryAcknowledgment }, responseSource.Token).ConfigureAwait(false);
+        await pipe.FlushAsync(responseSource.Token).ConfigureAwait(false);
+        return response;
     }
 
     private static void ValidatePipeName(string pipeName)

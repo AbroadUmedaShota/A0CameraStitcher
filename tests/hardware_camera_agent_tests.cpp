@@ -29,6 +29,7 @@ using namespace a0::phase0;
 namespace {
 
 int failures = 0;
+constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
 
 void Check(bool condition, std::string_view message) {
     if (!condition) {
@@ -1720,6 +1721,8 @@ void TestNamedPipeMaximumFrameBoundary() {
                 std::string response(response_length, '\0');
                 Check(ReadAll(pipe, response.data(), response.size()),
                     "limit-1 and limit named-pipe frames must receive a complete response body");
+                Check(WriteAll(pipe, &kDeliveryAcknowledgment, 1U),
+                    "limit-1 and limit named-pipe responses must be acknowledged");
             }
             CloseHandle(pipe);
         }
@@ -1735,10 +1738,11 @@ void TestNamedPipeMaximumFrameBoundary() {
 }
 
 void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
-    const std::array<HardwareCameraAgentPipeFailureInjectionForTesting, 3>
+    const std::array<HardwareCameraAgentPipeFailureInjectionForTesting, 4>
         failures_to_inject{{
         {.fail_response_header_write = true},
         {.fail_response_body_write = true},
+        {.fail_delivery_ack_wait = true},
         {.fail_response_flush = true},
     }};
     for (std::size_t index = 0; index < failures_to_inject.size(); ++index) {
@@ -1806,6 +1810,8 @@ void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
                     if (failures_to_inject[index].fail_response_body_write) {
                         Check(!body_received,
                             "injected body failure must truncate the response body");
+                    } else if (body_received) {
+                        (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
                     }
                 }
             }

@@ -24,7 +24,7 @@
 // hardware_camera_agent.hpp) and the Dual-camera host
 // (RunDualHardwareCameraAgentNamedPipeServer, declared in
 // dual_hardware_camera_agent.hpp). Framing, the current-logon pipe security
-// descriptor, and the Issue #17 teardown-drain-before-disconnect fix are all
+// descriptor, and the bounded response delivery-ACK contract are all
 // dispatcher-independent and therefore live here exactly once. The two
 // dispatcher types are unrelated (no shared base class) and are connected
 // only structurally, via the template's use of dispatcher.Handle(),
@@ -36,6 +36,7 @@ constexpr std::uint32_t kMaximumPipeFrameBytes = 1024U * 1024U;
 constexpr DWORD kAcceptTimeoutMs = 15000;
 constexpr DWORD kFrameReadTimeoutMs = 5000;
 constexpr DWORD kResponseWriteTimeoutMs = 1000;
+constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
 constexpr int kFailedBeforeDispatchExitCode = 2;
 constexpr int kDispatchedDeliveryFailureExitCode = 3;
 
@@ -204,7 +205,7 @@ bool WriteExact(HANDLE pipe, const void* source, std::size_t bytes, DWORD timeou
 
 // Dispatcher and FailureInjection are duck-typed rather than sharing a base
 // class: Dispatcher only needs Handle(std::string_view) -> std::string, and
-// FailureInjection only needs the three bool members read below. This lets
+// FailureInjection only needs the transport-failure bool members read below. This lets
 // HardwareCameraAgentDispatcher and DualHardwareCameraAgentDispatcher (two
 // unrelated final classes with independently evolving protocols) share this
 // transport-level function without either one depending on the other.
@@ -254,10 +255,15 @@ ProcessOneConnectionOutcome ProcessOneConnection(
         !WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs)) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
-    // DisconnectNamedPipe discards unread data.  Wait until the connected WPF
-    // client has consumed the complete frame before the server disconnects.
-    // If the client has already closed, FlushFileBuffers fails and the already
-    // dispatched operation remains authoritative without retry.
+    // A response is delivered only after the client confirms that it read and
+    // validated the complete frame. The same bounded OVERLAPPED read used by
+    // request framing makes timeout cancellation target this exact operation.
+    unsigned char acknowledgment = 0;
+    if (failure_injection.fail_delivery_ack_wait ||
+        !ReadExact(pipe, &acknowledgment, 1U, kResponseWriteTimeoutMs) ||
+        acknowledgment != kDeliveryAcknowledgment) {
+        return ProcessOneConnectionOutcome::dispatched_delivery_failed;
+    }
     if (failure_injection.fail_response_flush || !FlushFileBuffers(pipe)) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
@@ -344,21 +350,6 @@ int RunNamedPipeServerLoop(
 
         const ProcessOneConnectionOutcome outcome =
             ProcessOneConnection(pipe, dispatcher, failure_injection);
-        if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
-            // Bytes already handed to the pipe (for example a written
-            // response header) must survive teardown, or the client cannot
-            // classify the failure stage. DisconnectNamedPipe discards
-            // unread data, so drain here first. This is teardown, not a
-            // delivery step, so it is deliberately not subject to failure
-            // injection. If the client has already closed, the flush fails
-            // immediately, and if the buffer is already empty it returns
-            // immediately, so the exposure window matches the success path.
-            //
-            // This is the Issue #17 teardown-drain fix. It is written once,
-            // in this shared loop, so both the Single- and Dual-camera hosts
-            // inherit it identically.
-            (void)FlushFileBuffers(pipe);
-        }
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {

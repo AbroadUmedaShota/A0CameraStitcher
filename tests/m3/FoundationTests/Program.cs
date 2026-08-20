@@ -1738,6 +1738,7 @@ static async Task HardwareNamedPipeRoundtripAsync()
     Check.Equal("CAM-B", reply.Payload.CameraAlias);
     await serverTask;
 
+    await HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync();
     await HardwareConnectFailureIsTypedAsync();
     await HardwarePostDispatchCancellationIsNotConnectFailureAsync();
 }
@@ -1880,6 +1881,54 @@ static async Task ServeHardwareReadinessOnceAsync(string pipeName)
         pipe,
         HardwareResponseJson(request.RequestId, true, "SingleReady", ready),
         timeoutSource.Token);
+    var acknowledgment = new byte[1];
+    await ReadTestPipeExactlyAsync(pipe, acknowledgment, timeoutSource.Token);
+    Check.Equal((byte)0x06, acknowledgment[0]);
+}
+
+static async Task HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync()
+{
+    foreach (var invalidUtf8 in new[] { false, true })
+    {
+        var pipeName = $"a0-camera-stitcher-hardware-invalid-{Guid.NewGuid():N}";
+        var serverTask = ServeInvalidHardwareResponseOnceAsync(pipeName, invalidUtf8);
+        var transport = new NamedPipeHardwareCameraAgentTransport(
+            pipeName,
+            connectTimeout: TimeSpan.FromSeconds(5),
+            responseTimeout: TimeSpan.FromSeconds(5));
+        await Check.ThrowsAsync<IOException>(() => transport.SendAsync("{}"));
+        Check.False(await serverTask, "An invalid response frame must not receive a delivery acknowledgment.");
+    }
+}
+
+static async Task<bool> ServeInvalidHardwareResponseOnceAsync(string pipeName, bool invalidUtf8)
+{
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await pipe.WaitForConnectionAsync(timeoutSource.Token);
+    _ = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
+    var header = new byte[sizeof(int)];
+    BinaryPrimitives.WriteInt32LittleEndian(header, invalidUtf8 ? 1 : 1024 * 1024 + 1);
+    await pipe.WriteAsync(header, timeoutSource.Token);
+    if (invalidUtf8)
+    {
+        await pipe.WriteAsync(new byte[] { 0xff }, timeoutSource.Token);
+    }
+    await pipe.FlushAsync(timeoutSource.Token);
+    try
+    {
+        var acknowledgment = new byte[1];
+        return await pipe.ReadAsync(acknowledgment, timeoutSource.Token) == 1;
+    }
+    catch (IOException)
+    {
+        return false;
+    }
 }
 
 static async Task<string> ReadTestPipeFrameAsync(Stream stream, CancellationToken cancellationToken)

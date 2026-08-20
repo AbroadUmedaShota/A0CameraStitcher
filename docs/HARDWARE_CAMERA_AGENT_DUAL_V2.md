@@ -6,14 +6,34 @@ Schema: `a0.camera-agent.hardware-dual.v2`
 This document covers the production Native Named Pipe host process that serves
 the already-implemented Dual hardware v2 parser, durable pair journal store,
 and semantic preflight (see `dual_hardware_camera_agent.hpp`/`.cpp`). It
-reuses the framing, current-logon pipe access boundary, and Issue #17
-teardown-drain fix from the Single hardware v1/v2 host
+reuses the framing, current-logon pipe access boundary, and bounded delivery
+acknowledgment contract from the Single hardware v1/v2 host
 (`hardware_camera_agent_pipe.cpp`) via one shared, dispatcher-agnostic
 accept/serve loop.
 
 ## Process and named-pipe transport
 
 Build target: `A0CameraStitcher.DualCameraAgent.exe`.
+
+The WPF project builds this exact existing CMake target for the active Debug
+or Release configuration and copies the resulting executable into both build
+and publish output. A missing artifact fails the build. The formal WPF test
+compares SHA-256 values so the bundled/test copy must be byte-identical to the
+canonical CMake output.
+
+Production launches resolve the executable only from the application base
+directory, or from a mode-specific `--camera-agent` path that still resolves
+to a direct child of that directory. The path must be drive-qualified on a
+`DRIVE_FIXED` volume and name an existing regular `.exe`; UNC/device/ADS,
+relative/traversal/outside, removable, reparse, missing, and directory paths
+are rejected without echoing the raw path. There is no PATH, current-working-
+directory, user/temp-directory, or environment-variable fallback. Simulated/launcher modes reject
+an explicit Agent override.
+
+For production installation, the application directory and Agent executable
+ACL must grant `Administrators` and `SYSTEM` **Modify**, and standard users
+only **Read & execute**. Build and contract tests verify path and byte identity
+but deliberately do not modify machine ACLs.
 
 ```powershell
 .\A0CameraStitcher.DualCameraAgent.exe `
@@ -36,6 +56,16 @@ unpredictable `--pipe-name` per logical session. This Native process does not
 generate or randomize its own pipe name; it only validates the one it is
 given (ASCII letters/digits/`.`/`-`/`_`, 1-120 characters, checked before any
 filesystem access) and serves it.
+
+Each request and response uses a 4-byte little-endian length followed by a
+strict UTF-8 body, with a 1 MiB maximum. After reading and validating the full
+response frame, the .NET Single/Dual client writes one byte `0x06`. The server
+waits for that byte with a real overlapped `ReadFile` under the existing
+1-second response timeout. Timeout, close, invalid/late ACK, or injected wait
+failure cancels that exact OVERLAPPED operation with `CancelIoEx`, collects its
+completion, and returns exit 3. Only a valid ACK permits `FlushFileBuffers`
+and exit 0. Failure teardown never performs a second unbounded flush. An ACK
+write failure is response-unknown and never authorizes redispatch.
 
 `--pair-journal-root`, `--approved-capture-profile`, and
 `--dual-identity-proof` are all required and validated before the process
@@ -125,8 +155,12 @@ mid-frame, the backend-unavailable `PairDispatcherUnavailable` contract after
 a full preflight, and the "response unknown" resilience contract
 (dispatched-but-undelivered response, recovered only via a same-ID query
 across a simulated host restart, with zero reservation replay), and exact-ID
-reserved cleanup with a durable `ClosedBeforeDispatch` tombstone. They do not
-load or call a real camera; `A0CameraStitcher.DualCameraAgent.exe` never
+reserved cleanup with a durable `ClosedBeforeDispatch` tombstone. The
+transport cases include response-header-only, partial-body, full response
+without ACK, invalid ACK, late ACK, a completely unread response, normal ACK,
+and injected ACK-wait failure; each failure remains bounded and has zero
+redispatch. They do not load or call a real camera;
+`A0CameraStitcher.DualCameraAgent.exe` never
 constructs a real SDK/WPD backend or the test-only fake orchestrator.
 
 ## Known gaps (tracked, not fixed here)

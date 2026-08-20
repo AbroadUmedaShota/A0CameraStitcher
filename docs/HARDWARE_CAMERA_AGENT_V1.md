@@ -13,6 +13,18 @@ spool, exact-object delete, 180-second deadline, or no-retry contracts.
 
 Build target: `A0CameraStitcher.CameraAgent.exe`.
 
+The WPF project builds this exact existing CMake target for the active Debug
+or Release configuration and copies the canonical executable into build and
+publish output. Missing output fails the build, and formal WPF tests require
+the source, WPF, and test-output SHA-256 values to match.
+
+The launcher default and any `--camera-agent` override must resolve to an
+existing regular `.exe` directly below the application base directory on a
+fixed local drive with a reparse-free directory chain. UNC/device/ADS,
+relative/traversal/outside, removable, reparse, missing, and directory paths
+are rejected without echoing the raw path. Environment variables, PATH, the
+current directory, and user/temp directories are never executable fallbacks.
+
 The WPF launcher generates a new unpredictable ASCII pipe name for each
 operation, passes the same operator-approved local capture profile used for readiness and
 capture, and starts:
@@ -111,6 +123,16 @@ Each byte-mode pipe frame is:
 2. exactly that many UTF-8 JSON bytes.
 
 The transport maximum is 1 MiB; the hardware JSON contract maximum is 64 KiB.
+
+After the .NET client reads and validates the complete response frame, it
+writes the one-byte delivery acknowledgment `0x06`. The server waits for the
+ACK with an overlapped `ReadFile` under the existing 1-second response bound.
+A missing, invalid, late, or closed-pipe ACK cancels that exact I/O with
+`CancelIoEx`, collects completion, and exits 3. This means the request may
+already have been dispatched; the client must use same-transaction recovery
+and must never redispatch or automatically retry. Only a valid ACK permits the
+final `FlushFileBuffers` and exit 0. Failure teardown performs no second,
+unbounded flush.
 
 ## Envelope
 
