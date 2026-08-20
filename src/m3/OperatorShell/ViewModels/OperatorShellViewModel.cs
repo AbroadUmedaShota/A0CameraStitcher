@@ -32,15 +32,15 @@ public sealed record FocusExecutionResult(
 
 public sealed class OperatorShellViewModel : ObservableObject
 {
-    public const string SimulationBanner = "SIMULATED / 実機未接続";
-    public const string HardwareDualPendingBanner = "HARDWARE DUAL / provider未接続 / 撮影禁止";
+    public const string SimulationBanner = "模擬動作（実機未接続）";
+    public const string HardwareDualPendingBanner = "実機2台 / 機体照合の提供元が未接続 / 撮影禁止";
     private const string SingleModeLabel = "1台構成";
     private const string DualModeLabel = "2台構成";
     private const string StageModeCameraALive = "CAM-A live";
     private const string StageModeCameraBLive = "CAM-B live";
     private const string StageModeCompositePreview = "合成プレビュー";
-    private const string StageProcessingPlaceholderMessage = "Live View 停止中（撮影シーケンス実行中）";
-    private const string StagePreviewNoteMessage = "プレビュー表示のみ・原画像／合成には不使用";
+    private const string StageProcessingPlaceholderMessage = "ライブ表示は停止中（撮影を実行しています）";
+    private const string StagePreviewNoteMessage = "確認用の表示のみ・原画像／合成には使いません";
     private const string LoupeZoom100 = "100%";
     private const string LoupeZoom200 = "200%";
     private const string LoupeUnavailableText = "フレーム未取得";
@@ -225,14 +225,14 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         ProgressSteps =
         [
-            new("liveview", "Live View停止"),
+            new("liveview", "ライブ表示停止"),
             new("capture-a", "CAM-A撮影"),
-            new("persist-a", "CAM-A原本検証"),
+            new("persist-a", "CAM-A原画像の確認"),
             new("capture-b", "CAM-B撮影"),
-            new("persist-b", "CAM-B原本検証"),
-            new("stitch", "自動合成"),
+            new("persist-b", "CAM-B原画像の確認"),
+            new("stitch", "合成"),
             new("review", "結果確認"),
-            new("export", "明示export"),
+            new("export", "保存"),
         ];
 
         // 同意は2項目の両方にチェックが入るまで押せない。読まずに流す操作を防ぐため。
@@ -300,8 +300,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// 存在しない値をカウントダウン風に捏造しないため、実データがない今は契約値の静的表示に
     /// 留める。1台構成にはwatchdog契約自体が存在しないため対象外と明記する。</summary>
     public string ProgressWatchdogText => IsSingleCameraMode
-        ? "watchdog: 1台構成では対象外"
-        : "watchdog: 180秒契約（残り秒の実データは未接続のため静的表示・カウントダウンはしません）";
+        ? "制限時間: 1台構成では なし"
+        : "制限時間 180秒（残り秒の実データが未接続のため、数値は固定表示でカウントダウンしません）";
 
     public ICommand AcceptSafetyCommand => _acceptSafetyCommand;
     public ICommand ShowConsentCommand => _showConsentCommand;
@@ -416,7 +416,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
     public string CaptureButtonText => IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
-    public string CameraSelectionLabel => IsSingleCameraMode ? "撮影・Live View対象" : "一台選択式 Live View";
+    public string CameraSelectionLabel => IsSingleCameraMode ? "撮影・ライブ表示の対象" : "ライブ表示するカメラ（1台ずつ）";
     public string ProcessingResultLabel => IsSingleCameraMode ? "単体出力" : "合成";
     public string OverallStateText => UiState switch
     {
@@ -425,8 +425,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         OperatorUiState.Capturing => "撮影処理中",
         OperatorUiState.Stitching => "合成処理中",
         OperatorUiState.Review => "結果確認",
-        OperatorUiState.FailedPartial => "一部失敗",
-        OperatorUiState.Degraded => "要確認（Degraded）",
+        OperatorUiState.FailedPartial => "撮影失敗（再開不可）",
+        OperatorUiState.Degraded => "警告確認",
         OperatorUiState.CheckingReadiness => "状態確認中",
         _ => "撮影不可",
     };
@@ -613,8 +613,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
     public string SelectedPage { get => _selectedPage; private set { if (SetProperty(ref _selectedPage, value)) OnPropertyChanged(nameof(PageTitle)); } }
     public string PageTitle => SelectedPage switch { "Setup" => "設置・校正", "CameraSettings" => "カメラ設定（read-only）", "Diagnostics" => "保存・診断", _ => "撮影ダッシュボード" };
-    public string LiveViewPlaceholder => $"{SelectedCamera}\n\nSimulated Live View placeholder 非実画像\n原画像・合成入力には使用しません";
-    public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} Live Viewを停止" : $"{SelectedCamera} Live Viewを開始";
+    public string LiveViewPlaceholder => $"{SelectedCamera}\n\n模擬動作のライブ表示（実画像ではありません）\n原画像・合成入力には使いません";
+    public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} ライブ表示を停止" : $"{SelectedCamera} ライブ表示を開始";
     public bool IsLiveViewActive
     {
         get => _isLiveViewActive;
@@ -715,7 +715,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool StageSingleLiveAliasInPlan =>
         CurrentCapturePlan.RequiredCameraAliases.Contains(StageSingleLiveAlias, StringComparer.Ordinal);
     public string StageSingleLiveText => StageSingleLiveAliasInPlan
-        ? $"{StageSingleLiveAlias}\n\nフルフレーム Simulated Live View placeholder 非実画像\n{StagePreviewNoteMessage}"
+        ? $"{StageSingleLiveAlias}\n\n全画面の模擬ライブ表示（実画像ではありません）\n{StagePreviewNoteMessage}"
         : $"{StageSingleLiveAlias}\n\n1台構成のため対象外（運用対象は{SelectedCamera}のみ）";
 
     public bool StageCompositeApplicable => !IsSingleCameraMode;
@@ -735,12 +735,12 @@ public sealed class OperatorShellViewModel : ObservableObject
         var hasLiveFrame = _lastLiveFrameTimestamps.TryGetValue(alias, out var liveFrameAt);
         if (!hasCapturedOriginal && !hasLiveFrame)
         {
-            return "STILL 未取得";
+            return "静止画 未取得";
         }
 
         var mostRecent = hasCapturedOriginal && (!hasLiveFrame || capturedAt >= liveFrameAt) ? capturedAt : liveFrameAt;
         var elapsedSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - mostRecent).TotalSeconds);
-        return $"STILL {elapsedSeconds}秒前";
+        return $"静止画 {elapsedSeconds}秒前";
     }
 
     // --- Target reticle (□) and loupe (拡大エリア): issue #30. The reticle is a single
@@ -1537,7 +1537,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                     UiState = OperatorUiState.FailedPartial;
                     CaptureResult = $"未実行（{alias} 撮影直前AF NG）";
                     TechnicalDetail = $"error code: PreCaptureAutoFocusFailed / camera: {alias} / capture calls: 0 / automatic retry count: 0 / 撮影+AF: {string.Join(" / ", afSummaries)}";
-                    StatusMessage = $"撮影+AF: {alias}の撮影直前AFがNGのため、シャッターを実行せずFailedPartialで停止しました。{NoRetryMessage(capturePlan)}";
+                    StatusMessage = $"撮影+AF: {alias}の撮影直前AFが合焦しなかったため、シャッターを実行せず撮影失敗（再開不可）で停止しました。{NoRetryMessage(capturePlan)}";
                     break;
                 }
             }
@@ -1615,7 +1615,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         var targetAlias = TargetDomainCameraAlias;
-        StatusMessage = $"{targetAlias} のLive Viewへ切り替えます（操作者の明示クリックのみ・自動切替ではありません）。";
+        StatusMessage = $"{targetAlias} のライブ表示へ切り替えます（操作者の明示クリックのみ・自動切替ではありません）。";
         IsLiveViewActive = false;
         SelectedCamera = targetAlias;
         IsLiveViewActive = true;
@@ -1706,16 +1706,16 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public string ProfileText => $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
     public string OutputDirectory => _dualCameraFlow is not null && !IsSingleCameraMode
-        ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — fixed-local folderを明示入力" : FixedLocalExportDirectory)
+        ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — このPC内のフォルダを入力してください" : FixedLocalExportDirectory)
         : _readiness.OutputDirectory;
     public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
     public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
     public string SetupStatusText => _readiness.Setup.Summary;
     public string CorrectionText => _readiness.Setup.PlannedCorrections.Count == 0 ? "予定補正なし" : string.Join(" / ", _readiness.Setup.PlannedCorrections);
     public string PhysicalAdjustmentText => _readiness.Setup.PhysicalAdjustments.Count == 0 ? "物理調整なし" : string.Join(" / ", _readiness.Setup.PhysicalAdjustments);
-    public string BlockerText => FormatNotices(OperatorWarningSeverity.Blocker, "赤: Blockerなし");
-    public string CautionText => FormatNotices(OperatorWarningSeverity.Caution, "黄: Cautionなし");
-    public string InfoText => FormatNotices(OperatorWarningSeverity.Info, "青: PC原本を保持 / Live Viewは非原画像 / シャッター時刻差は非保証");
+    public string BlockerText => FormatNotices(OperatorWarningSeverity.Blocker, "撮影を止める要因はありません");
+    public string CautionText => FormatNotices(OperatorWarningSeverity.Caution, "注意する点はありません");
+    public string InfoText => FormatNotices(OperatorWarningSeverity.Info, "原画像はPCに保持 ／ ライブ表示は原画像ではありません ／ 2台のシャッター時刻差は保証しません");
     private bool HasRecoverableHardwareDualTransaction =>
         !IsSingleCameraMode &&
         _dualCameraFlow is
@@ -1735,10 +1735,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? "撮影+AF: 各カメラの撮影直前AFを実行中です。完了までお待ちください。"
         : CanCapture
         ? HasRecoverableHardwareDualTransaction
-            ? "既存transactionの結果だけを再照会します。新規撮影は開始しません。"
+            ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
         : !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
-            ? $"DualCamera identity: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
+            ? $"2台の機体照合: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
             : !IsSingleCameraMode && _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual &&
               _hardwareDualRequestProvider is null
                 ? "HardwareDual approved profiles and explicit operator confirmations are unavailable — 撮影禁止"
@@ -1764,7 +1764,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? "DualCamera未接続"
         : IsSingleCameraMode
             ? "1台構成のため対象外"
-            : $"identity: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
+            : $"機体照合: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
 
     public bool CanUseLiveView => _availability.LiveView.Allowed;
     public bool CanExport => _availability.Export.Allowed &&
@@ -1779,7 +1779,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         _lifetimeToken = cancellationToken;
         UiState = OperatorUiState.CheckingReadiness;
-        StatusMessage = "未完了SIMULATED journalを検査中です。自動再開はしません。";
+        StatusMessage = "未完了の記録を検査中です。自動再開はしません。";
         IsBusy = true;
         try
         {
@@ -1788,7 +1788,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 ApplyCaptureResult(recovered[^1]);
                 UiState = OperatorUiState.FailedPartial;
-                StatusMessage = $"FailedPartial transaction {recovered.Count}件を検出しました。同じtransactionは再開しません。";
+                StatusMessage = $"撮影失敗（再開不可）の撮影ID {recovered.Count}件を検出しました。同じ撮影IDは再開しません。";
             }
             else
             {
@@ -1808,7 +1808,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private void AcceptSafety()
     {
         SafetyAcknowledged = true;
-        StatusMessage = "排他使用へ同意しました。readinessを確認しました。";
+        StatusMessage = "排他使用へ同意しました。撮影できる状態かを確認しました。";
         RebuildReadiness(preserveOutcomeState: UiState == OperatorUiState.FailedPartial);
     }
 
@@ -1854,7 +1854,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _exportOutcome = null;
         ResetProgress(capturePlan);
         UiState = OperatorUiState.Capturing;
-        StatusMessage = $"{scenario}: 操作をロックし、選択中Live Viewを停止します。";
+        StatusMessage = $"{scenario}: 操作を受け付けず、表示中のライブ表示を停止します。";
 
         try
         {
@@ -1869,7 +1869,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 ApplyCaptureResult(liveViewFailure);
                 UiState = OperatorUiState.FailedPartial;
                 TechnicalDetail = $"error code: {liveViewFailure.TerminalReason} / capture calls: 0 / automatic retry count: {liveViewFailure.AutomaticRetryCount}";
-                StatusMessage = "Live Viewを安全に停止できなかったため、シャッターを切らず終了しました。";
+                StatusMessage = "ライブ表示を安全に停止できなかったため、シャッターを切らず終了しました。";
                 return;
             }
 
@@ -1896,14 +1896,14 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (!result.IsTerminal)
             {
                 UiState = OperatorUiState.FailedPartial;
-                StatusMessage = "擬似クラッシュで未完了journalを残しました。再起動時検査でFailedPartialへ閉じ、再開しません。";
+                StatusMessage = "擬似クラッシュで未完了の記録を残しました。再起動時の検査で撮影失敗（再開不可）として閉じ、再開しません。";
                 return;
             }
 
             if (result.State == SimulatedTransactionState.FailedPartial)
             {
                 UiState = OperatorUiState.FailedPartial;
-                StatusMessage = $"撮影をFailedPartialで終了しました。{NoRetryMessage(capturePlan)}";
+                StatusMessage = $"撮影を撮影失敗（再開不可）で終了しました。{NoRetryMessage(capturePlan)}";
                 return;
             }
 
@@ -1939,7 +1939,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 if (scenario == "Live View再開失敗")
                 {
                     _cameraInspectionRequired = true;
-                    StatusMessage = "単体原画像を保持しました。Live View再開失敗のためSDK状態確認まで新規撮影を禁止します。";
+                    StatusMessage = "単体の原画像を保持しました。ライブ表示を再開できなかったため、カメラの状態を確認するまで新しい撮影を禁止します。";
                     TechnicalDetail = "error code: LiveViewResumeFailed / single original retained: true";
                 }
                 else
@@ -1970,7 +1970,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (scenario == "Live View再開失敗")
             {
                 _cameraInspectionRequired = true;
-                StatusMessage = "撮影・合成結果を保持しました。Live View再開失敗のためSDK状態確認まで新規撮影を禁止します。";
+                StatusMessage = "撮影・合成結果を保持しました。ライブ表示を再開できなかったため、カメラの状態を確認するまで新しい撮影を禁止します。";
                 TechnicalDetail = "error code: LiveViewResumeFailed / result retained: true";
             }
             else
@@ -1982,7 +1982,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
         {
             UiState = OperatorUiState.FailedPartial;
-            StatusMessage = "アプリ終了により中断しました。次回起動時にjournalをFailedPartialへ閉じます。";
+            StatusMessage = "アプリ終了により中断しました。次回起動時に撮影失敗（再開不可）として閉じます。";
         }
         finally
         {
@@ -2011,7 +2011,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ResetProgress(CapturePlan.Dual());
         SetStep("liveview", scenario == "Live View停止失敗" ? "current" : "completed");
         UiState = OperatorUiState.Capturing;
-        StatusMessage = "CAM-A→CAM-Bを一回ずつ撮影し、各canonical original.jpgを検証します。";
+        StatusMessage = "CAM-A→CAM-Bを一回ずつ撮影し、それぞれの原画像を確認します。";
         try
         {
             DualCameraCaptureRequest? request = null;
@@ -2047,7 +2047,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 UiState = OperatorUiState.Degraded;
                 StatusMessage = scenario == "cleanup失敗"
                     ? "実JPEG製品結果は保持しましたが、TestSynthetic cleanup確認失敗として新規撮影を禁止します。"
-                    : "実JPEG製品結果は保持しましたが、Live View再開失敗として新規撮影を禁止します。";
+                    : "実JPEGの結果は保持しましたが、ライブ表示を再開できなかったため新しい撮影を禁止します。";
             }
         }
         finally
@@ -2211,7 +2211,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             LastExportPath = state.Export.OutputPath ?? "未公開";
             ExportResult = state.Export.Succeeded
-                ? "fixed-local folderへbyte-identical明示export完了"
+                ? "このPCのフォルダへ保存しました（画像は無加工）"
                 : $"export失敗: {state.Export.FailureReason}";
             _exportOutcome = new ExportOutcome(
                 state.Export.JobId,
@@ -2328,7 +2328,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         if (_dualCameraFlow is not null && _captureOutcome?.CapturePlan.OperatingMode == CameraOperatingMode.DualCamera)
         {
             IsBusy = true;
-            StatusMessage = "操作者選択fixed-local folderへ明示export中です。";
+            StatusMessage = "このPCの選んだフォルダへ保存しています。";
             try
             {
                 var state = await _dualCameraFlow.ExportAsync(FixedLocalExportDirectory, _lifetimeToken).ConfigureAwait(true);
@@ -2627,7 +2627,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private static string FormatCamera(CameraReadiness camera, bool required) =>
         required
-            ? $"構成対象 / {(camera.Connected ? "接続" : "未接続")} / identity {(camera.IdentityBound ? "OK" : "未登録")} / 設定 {(camera.SettingsMatch ? "整合" : "不整合")} / card {(camera.CardKnownEmpty ? "empty確認" : "要確認")} / Live View {(camera.LiveViewActive ? "ON" : "OFF")}"
+            ? $"構成対象 / {(camera.Connected ? "接続" : "未接続")} / 機体照合 {(camera.IdentityBound ? "済" : "未登録")} / 設定 {(camera.SettingsMatch ? "整合" : "不整合")} / カード {(camera.CardKnownEmpty ? "空を確認" : "要確認")} / ライブ表示 {(camera.LiveViewActive ? "ON" : "OFF")}"
             : "構成対象外 / 一台構成では接続しません";
 
     private void SetStep(string id, string state)

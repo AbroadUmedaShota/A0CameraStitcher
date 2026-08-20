@@ -4,8 +4,8 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:converters="clr-namespace:A0CameraStitcher.M3.OperatorShell.Converters"
         xmlns:controls="clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls"
-        Title="A0 Camera Stitcher — SIMULATED / 実機未接続"
-        AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"
+        Title="A0 Camera Stitcher — 模擬動作（実機未接続）"
+        AutomationProperties.Name="A0 Camera Stitcher 撮影画面 模擬動作 実機未接続"
         Width="1600" Height="900" MinWidth="1280" MinHeight="720"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource DesktopBrush}"
@@ -132,12 +132,12 @@
                     <DockPanel LastChildFill="False">
                         <Menu DockPanel.Dock="Left" Margin="8,0,0,0"
                               AutomationProperties.Name="メニューバー ファイル カメラ 表示 ツール ヘルプ">
-                            <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー 保存先指定 明示export 終了">
+                            <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー 保存先の指定 このPCのフォルダへ保存 終了">
                                 <MenuItem Header="保存先を指定(_L)..." Click="FocusExportDirectory_Click"
                                           IsEnabled="{Binding CanChangeExportDirectory}"
-                                          AutomationProperties.Name="ファイル 保存先を指定 fixed-local folderへフォーカス" />
-                                <MenuItem Header="明示export(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
-                                          AutomationProperties.Name="ファイル 明示export 確認済み単体原画像または合成結果を保存" />
+                                          AutomationProperties.Name="ファイル 保存先を指定 このPC内の保存先フォルダ入力欄へフォーカス" />
+                                <MenuItem Header="このPCのフォルダへ保存(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
+                                          AutomationProperties.Name="ファイル このPCのフォルダへ保存 確認済みの単体原画像または合成結果を保存" />
                                 <Separator />
                                 <MenuItem Header="終了(_X)" Click="ExitMenuItem_Click"
                                           AutomationProperties.Name="ファイル 終了 アプリケーションを終了" />
@@ -347,7 +347,7 @@
                                                VerticalAlignment="Center" />
                                     <TextBlock DockPanel.Dock="Left" Margin="12,0,0,0" VerticalAlignment="Center"
                                                Style="{StaticResource MutedTextStyle}" TextWrapping="NoWrap"
-                                               Text="ターゲットはドラッグで移動（画面上=粗い / 拡大内=細かい）" />
+                                               Text="ターゲットはドラッグで移動（画面上=粗い ／ 拡大内=細かい）" />
 
                                     <ListBox DockPanel.Dock="Right" Style="{StaticResource SegmentListStyle}"
                                              ItemsSource="{Binding StageModeOptions}" SelectedItem="{Binding SelectedStageMode}"
@@ -405,7 +405,7 @@
                                 <Border Grid.Row="2" Margin="0,10,0,0" Background="{StaticResource StageBrush}"
                                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                                     <Grid x:Name="StageDisplayArea" ClipToBounds="True"
-                                          AutomationProperties.Name="ステージ表示エリア Simulatedプレースホルダ">
+                                          AutomationProperties.Name="ステージ表示エリア 模擬動作の表示">
 
                                         <!-- 撮影/合成処理中: Live View停止プレースホルダ -->
                                         <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
@@ -440,7 +440,7 @@
                                                     Visibility="{Binding IsStageSingleLivePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}" />
                                             <Image Source="{Binding StageSingleLiveImage}" Stretch="Uniform" Margin="8"
                                                    Visibility="{Binding IsStageSingleLiveImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                   AutomationProperties.Name="ステージ Simulated疑似LVフレーム CAM-A CAM-B フルフレーム" />
+                                                   AutomationProperties.Name="ステージ 模擬ライブ表示のフレーム CAM-A CAM-B 全画面" />
                                             <Image Source="{Binding StageSingleLivePeakingOverlay}" Stretch="Uniform" Margin="8" IsHitTestVisible="False"
                                                    Visibility="{Binding IsStageSingleLivePeakingOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                    AutomationProperties.Name="ステージ フォーカスピーキング エッジ強調オーバーレイ preview専用" />
@@ -727,7 +727,7 @@
                                                            Style="{StaticResource MutedTextStyle}"
                                                            FontSize="{StaticResource FontSizeLabel}" />
                                                 <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,18,0,0"
-                                                              AutomationProperties.Name="自動進捗ストリップ Live View停止からCAM-A撮影CAM-A原本検証CAM-B撮影CAM-B原本検証自動合成までの現在位置">
+                                                              AutomationProperties.Name="撮影の進行状況 ライブ表示停止からCAM-A撮影CAM-A原画像の確認CAM-B撮影CAM-B原画像の確認合成までの現在位置">
                                                     <ItemsControl.ItemsPanel>
                                                         <ItemsPanelTemplate>
                                                             <StackPanel Orientation="Horizontal" />
@@ -981,7 +981,7 @@
                                                      Text="{Binding FixedLocalExportDirectory, UpdateSourceTrigger=PropertyChanged}"
                                                      IsEnabled="{Binding CanChangeExportDirectory}"
                                                      FontSize="{StaticResource FontSizeCompact}"
-                                                     AutomationProperties.Name="操作者選択fixed-local export folder" />
+                                                     AutomationProperties.Name="操作者が選ぶ保存先フォルダ このPC内のみ" />
                                             <TextBlock Text="{Binding OutputDirectory}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"
                                                        Style="{StaticResource MonoTextStyle}" />
 
@@ -1137,14 +1137,14 @@
                                                 <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,10,0,0" MinHeight="42"
                                                         FontSize="{StaticResource FontSizeSection}"
                                                         Content="このPCのフォルダへ保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
-                                                        AutomationProperties.Name="確認済み単体原画像または合成結果を明示保存 fixed-localへ明示export" />
+                                                        AutomationProperties.Name="確認済みの単体原画像または合成結果をこのPCのフォルダへ明示保存" />
                                                 <Grid Margin="0,8,0,0">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
                                                         <ColumnDefinition Width="8" />
                                                         <ColumnDefinition Width="*" />
                                                     </Grid.ColumnDefinitions>
-                                                    <Button Grid.Column="0" Content="再合成（別job）" Command="{Binding RestitchCommand}"
+                                                    <Button Grid.Column="0" Content="撮影済み画像で再合成" Command="{Binding RestitchCommand}"
                                                             IsEnabled="{Binding CanRestitch}"
                                                             FontSize="{StaticResource FontSizeBody}" />
                                                     <Button Grid.Column="2" Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}"
@@ -1212,7 +1212,7 @@
                                     AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
-                                    <TextBlock Text="設置・校正（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="設置・校正（模擬動作）" Style="{StaticResource SectionTitleStyle}" />
                                     <TextBlock Text="承認済みプロファイルの閾値を使い、補正不要・自動補正範囲内・物理調整必要を検証します。プロファイルを自動更新しません。"
                                                Margin="0,6,0,12" Style="{StaticResource MutedTextStyle}" />
                                     <TextBlock Text="表示シナリオ" FontWeight="Medium" />
@@ -1227,8 +1227,8 @@
                                         </StackPanel>
                                     </Border>
                                     <StackPanel Visibility="{Binding IsSimulatedFrameSourceAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
-                                        <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Medium" Margin="0,16,0,0" />
-                                        <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。"
+                                        <TextBlock Text="模擬ライブ表示のパターン（開発・検証用）" FontWeight="Medium" Margin="0,16,0,0" />
+                                        <TextBlock Text="正対・傾き（エッジ検出の確認用）・ボケ→合焦の遷移（ピーキングの確認用）を切り替えられます。ステージの CAM-A / CAM-B ライブ表示・合成プレビューへ即時反映されます。"
                                                    Margin="0,4,0,6" Style="{StaticResource MutedTextStyle}" MaxWidth="640" />
                                         <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
                                                   IsEnabled="{Binding CanChangeSimulatedFramePattern}"
@@ -1256,7 +1256,7 @@
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
                                     <TextBlock Text="カメラ設定（read-only）" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="write契約が実機証拠で承認されるまで、設定変更は実装しません。FX / JPEG Fine L / 固定露出 / 固定フォーカス / 固定WB / Auto ISOなし / VRなしを確認対象とします。"
+                                    <TextBlock Text="書き込みの契約が実機の証拠で承認されるまで、設定変更は実装しません。FX ／ JPEG Fine L ／ 固定露出 ／ 固定フォーカス ／ 固定WB ／ Auto ISOなし ／ VRなし を確認対象とします。"
                                                Margin="0,8,0,12" Style="{StaticResource MutedTextStyle}" />
                                     <DataGrid ItemsSource="{Binding CameraSettingRows}" IsReadOnly="True" AutoGenerateColumns="False"
                                               HeadersVisibility="Column" Height="230" CanUserAddRows="False" CanUserDeleteRows="False">
@@ -1283,8 +1283,8 @@
                                     AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
-                                    <TextBlock Text="保存・診断（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="失敗箇所の表示を確認します。撮影開始条件を満たす場合だけ実行でき、カード削除・format・vendor operation 0x9207は呼びません。"
+                                    <TextBlock Text="保存・診断（模擬動作）" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="失敗箇所の表示を確認します。撮影開始の条件を満たす場合だけ実行でき、カード削除・フォーマット・ベンダー操作 0x9207 は呼びません。"
                                                Margin="0,6,0,12" Style="{StaticResource MutedTextStyle}" />
                                     <DockPanel LastChildFill="False">
                                         <ComboBox DockPanel.Dock="Left" Width="250" ItemsSource="{Binding DiagnosticScenarios}"
@@ -1292,12 +1292,12 @@
                                         <Button DockPanel.Dock="Left" Content="診断シナリオを実行" Command="{Binding DiagnosticCommand}"
                                                 IsEnabled="{Binding CanCapture}" />
                                     </DockPanel>
-                                    <TextBlock Text="常時禁止: 同一transactionの再開・再試行 / 過去CAM-Bとの自動ペア / SDK・WPD重複 / 同時二台Live View / previewの原画像利用 / bulk delete / format / 0x9207 / PC原本検証前の削除 / active transaction中の変更 / 原画像の上書き・自動削除"
+                                    <TextBlock Text="常時禁止: 同じ撮影IDの再開・再試行 ／ 過去のCAM-Bとの自動ペア ／ SDK・WPDの重複接続 ／ 2台同時のライブ表示 ／ ライブ表示を原画像として使うこと ／ 一括削除 ／ フォーマット ／ ベンダー操作 0x9207 ／ PC側の原画像確認前の削除 ／ 撮影中の設定変更 ／ 原画像の上書き・自動削除"
                                                Margin="0,12,0,0" FontWeight="Medium" />
                                     <TextBlock Text="{Binding TechnicalDetail}" Margin="0,12,0,0" Padding="12"
                                                Background="{StaticResource CardBrush}" Style="{StaticResource MonoTextStyle}"
                                                TextWrapping="Wrap" />
-                                    <TextBlock Text="作成済みtransaction数（連打防止確認）" FontWeight="Medium" Margin="0,12,0,0" />
+                                    <TextBlock Text="作成済みの撮影ID数（連打防止の確認用）" FontWeight="Medium" Margin="0,12,0,0" />
                                     <TextBlock Text="{Binding TransactionStartCount}" FontSize="{StaticResource FontSizeDialogTitle}"
                                                FontFamily="{StaticResource MonoFontFamily}" />
                                 </StackPanel>
