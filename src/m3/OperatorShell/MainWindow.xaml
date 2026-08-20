@@ -9,9 +9,11 @@
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
         <converters:FractionToMarginConverter x:Key="FractionToMarginConverter" />
+        <converters:StringEqualsVisibilityConverter x:Key="StringEqualsVisibilityConverter" />
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -32,8 +34,92 @@
             </DockPanel>
         </Border>
 
+        <!-- メニューバー（issue #34）: ヘッダー直下・左ナビ廃止に伴う低頻度グローバル操作の集約先。
+             ファイル/カメラ/表示/ツール/ヘルプの5項目のみで構成し、編集メニューは設置しない
+             （原本は無加工・byte-identical保存が契約のため画像編集機能が設計上存在しない —
+             docs/OPERATOR_UI_SPEC.md メニューバー節）。各項目は既存の
+             OperatorActionAvailability連動プロパティ（CanChangeOperatingMode等）へそのまま
+             束縛し、メニュー経由の操作が状態ゲートの抜け穴にならないようにする。 -->
+        <Menu Grid.Row="1" Background="#FFEFF2F5" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1"
+              AutomationProperties.Name="メニューバー ファイル カメラ 表示 ツール ヘルプ">
+            <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー 保存先指定 明示export 終了">
+                <MenuItem Header="保存先を指定(_L)..." Click="FocusExportDirectory_Click"
+                          IsEnabled="{Binding CanChangeExportDirectory}"
+                          AutomationProperties.Name="ファイル 保存先を指定 fixed-local folderへフォーカス" />
+                <MenuItem Header="明示export(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
+                          AutomationProperties.Name="ファイル 明示export 確認済み単体原画像または合成結果を保存" />
+                <Separator />
+                <MenuItem Header="終了(_X)" Click="ExitMenuItem_Click"
+                          AutomationProperties.Name="ファイル 終了 アプリケーションを終了" />
+            </MenuItem>
+            <MenuItem Header="カメラ(_C)" AutomationProperties.Name="カメラメニュー 運用構成選択 カメラ設定read-only表示 identity状態 readiness再検査">
+                <MenuItem Header="運用構成(_M)" AutomationProperties.Name="カメラ 運用構成 SingleCamera DualCameraの選択">
+                    <MenuItem Header="1台構成（SingleCamera）" IsCheckable="True"
+                              IsChecked="{Binding IsSingleCameraModeChecked, Mode=TwoWay}"
+                              IsEnabled="{Binding CanChangeOperatingMode}"
+                              AutomationProperties.Name="運用構成 1台構成 SingleCameraを選択" />
+                    <MenuItem Header="2台構成（DualCamera）" IsCheckable="True"
+                              IsChecked="{Binding IsDualCameraModeChecked, Mode=TwoWay}"
+                              IsEnabled="{Binding CanChangeOperatingMode}"
+                              AutomationProperties.Name="運用構成 2台構成 DualCameraを選択" />
+                </MenuItem>
+                <MenuItem Header="カメラ設定を表示（read-only）(_S)" Command="{Binding ShowCameraSettingsCommand}" IsEnabled="{Binding CanOpenMaintenance}"
+                          AutomationProperties.Name="カメラ カメラ設定read-only表示 保守画面へ移動" />
+                <!-- 観測値の30日profile承認: このSIMULATEDシェル（OperatorShellViewModel）には
+                     承認フローそのものが実装されていない（30日profile承認は別ウィンドウの
+                     HardwareSingleCameraViewModelが保持する機能で、本issue #34の所有領域外）。
+                     「対象外: 各メニュー先の画面の中身の再設計をしない」との整理に基づき、
+                     存在しない機能を偽装せず、既存コードの慣例（校正未実装ボタン等）と同じ
+                     disabledプレースホルダとして構成のみ用意する。※要確認: Architect/PMで
+                     この解釈の是非を確認してほしい。 -->
+                <MenuItem Header="観測値の30日profile承認（本シェルでは未実装）" IsEnabled="False"
+                          AutomationProperties.Name="カメラ 観測値の30日profile承認 本SIMULATEDシェルでは未実装" />
+                <MenuItem Header="{Binding DualCameraIdentityStatusText}" IsEnabled="False"
+                          AutomationProperties.Name="カメラ identity状態 読み取り専用表示" />
+                <Separator />
+                <MenuItem Header="readiness再検査(_R)" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}"
+                          AutomationProperties.Name="カメラ readiness再検査 read-only 新しい撮影を準備" />
+            </MenuItem>
+            <MenuItem Header="表示(_V)" AutomationProperties.Name="表示メニュー オーバーレイトグル 拡大エリア倍率 傾き読み値表示切替">
+                <MenuItem Header="方眼グリッド" IsCheckable="True" IsChecked="{Binding IsGridOverlayEnabled, Mode=TwoWay}"
+                          AutomationProperties.Name="表示 方眼グリッド表示切替" />
+                <MenuItem Header="トンボ" IsCheckable="True" IsChecked="{Binding IsTombOverlayEnabled, Mode=TwoWay}"
+                          AutomationProperties.Name="表示 トンボ表示切替" />
+                <MenuItem Header="重複帯" IsCheckable="True" IsChecked="{Binding IsOverlapBandOverlayEnabled, Mode=TwoWay}"
+                          AutomationProperties.Name="表示 重複帯表示切替" />
+                <MenuItem Header="安全マージン" IsCheckable="True" IsChecked="{Binding IsSafeMarginOverlayEnabled, Mode=TwoWay}"
+                          AutomationProperties.Name="表示 安全マージン表示切替" />
+                <Separator />
+                <MenuItem Header="拡大エリア倍率" AutomationProperties.Name="表示 拡大エリア倍率切替 100パーセント 200パーセント">
+                    <MenuItem Header="100%" IsCheckable="True"
+                              IsChecked="{Binding IsLoupeZoom100Checked, Mode=TwoWay}"
+                              AutomationProperties.Name="拡大エリア倍率 100パーセントを選択" />
+                    <MenuItem Header="200%" IsCheckable="True"
+                              IsChecked="{Binding IsLoupeZoom200Checked, Mode=TwoWay}"
+                              AutomationProperties.Name="拡大エリア倍率 200パーセントを選択" />
+                </MenuItem>
+                <Separator />
+                <MenuItem Header="傾き読み値の表示" IsCheckable="True" IsChecked="{Binding IsTiltReadingVisible, Mode=TwoWay}"
+                          AutomationProperties.Name="表示 傾き読み値の表示切替" />
+            </MenuItem>
+            <MenuItem Header="ツール(_T)" AutomationProperties.Name="ツールメニュー 設置校正 再合成別job 保存診断">
+                <MenuItem Header="設置・校正(_S)" Command="{Binding ShowSetupCommand}" IsEnabled="{Binding CanOpenMaintenance}"
+                          AutomationProperties.Name="ツール 設置・校正 保守画面へ移動" />
+                <MenuItem Header="再合成（別job）(_R)" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}"
+                          AutomationProperties.Name="ツール 再合成 別job" />
+                <MenuItem Header="保存・診断(_D)" Command="{Binding ShowDiagnosticsCommand}" IsEnabled="{Binding CanOpenMaintenance}"
+                          AutomationProperties.Name="ツール 保存・診断 保守画面へ移動" />
+            </MenuItem>
+            <MenuItem Header="ヘルプ(_H)" AutomationProperties.Name="ヘルプメニュー 技術情報 バージョン">
+                <MenuItem Header="技術情報（error code・ログ位置）(_T)" Click="ShowTechnicalDetail_Click"
+                          AutomationProperties.Name="ヘルプ 技術情報 error code ログ位置" />
+                <MenuItem Header="バージョン(_V)" Click="ShowVersion_Click"
+                          AutomationProperties.Name="ヘルプ バージョン" />
+            </MenuItem>
+        </Menu>
+
         <!-- 状態チップ行: モード / Ready・撮影可否 / SIMULATED -->
-        <Border Grid.Row="1" Padding="18,8" Background="#FFEFF2F5" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1"
+        <Border Grid.Row="2" Padding="18,8" Background="#FFEFF2F5" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1"
                 AutomationProperties.Name="状態チップ行 モード Ready 撮影可否 SIMULATED">
             <StackPanel Orientation="Horizontal">
                 <Border Background="White" BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="12" Padding="12,4" Margin="0,0,10,0">
@@ -54,7 +140,7 @@
             </StackPanel>
         </Border>
 
-        <Border Grid.Row="2" Padding="18,10" Background="White" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1">
+        <Border Grid.Row="3" Padding="18,10" Background="White" BorderBrush="#FFD7DDE3" BorderThickness="0,0,0,1">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="2*" />
@@ -72,7 +158,8 @@
                 </StackPanel>
                 <StackPanel Grid.Column="2">
                     <TextBlock Text="明示export先（fixed-local folder）" Foreground="#FF56616B" />
-                    <TextBox Text="{Binding FixedLocalExportDirectory, UpdateSourceTrigger=PropertyChanged}"
+                    <TextBox x:Name="FixedLocalExportDirectoryTextBox"
+                             Text="{Binding FixedLocalExportDirectory, UpdateSourceTrigger=PropertyChanged}"
                              IsEnabled="{Binding CanChangeExportDirectory}"
                              AutomationProperties.Name="操作者選択fixed-local export folder" />
                     <TextBlock Text="{Binding OutputDirectory}" FontWeight="Bold" TextTrimming="CharacterEllipsis" />
@@ -86,8 +173,13 @@
             </Grid>
         </Border>
 
-        <TabControl Grid.Row="3" Margin="18" Background="Transparent" BorderThickness="0" TabStripPlacement="Left">
-            <TabItem Header="撮影ダッシュボード" AutomationProperties.Name="撮影ダッシュボード">
+        <!-- コンテンツ領域（issue #34）: 左タブ配置の旧TabControlナビを廃止し、
+             撮影ダッシュボードを常時表示のメイン領域とする。設置・校正/カメラ設定/保存・診断の
+             3保守画面はメニュー（ツール/カメラ）からのみ到達し、SelectedPageに応じて排他的に
+             表示を切り替える。各画面の中身自体は移設のみで再設計しない。 -->
+        <Grid Grid.Row="4" Margin="18">
+            <Grid Visibility="{Binding SelectedPage, Converter={StaticResource StringEqualsVisibilityConverter}, ConverterParameter=Dashboard}"
+                  AutomationProperties.Name="撮影ダッシュボード">
                 <Grid Margin="18,0,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" MinWidth="360" />
@@ -310,6 +402,7 @@
                                  面内回転（ROLL）角と許容範囲チップを示す。ガイドであり合否は判定しない
                                  （docs/OPERATOR_UI_SPEC.md 設置ガイドオーバーレイと傾き読み値 節）。 -->
                             <Border Grid.Row="4" Margin="0,10,0,0" Padding="10" Background="#FFF1F3F5" BorderBrush="#FFD7DDE3" BorderThickness="1"
+                                    Visibility="{Binding IsTiltReadingVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                     AutomationProperties.Name="傾き読み値 常駐行 ROLL角 許容範囲チップ">
                                 <DockPanel LastChildFill="False">
                                     <TextBlock DockPanel.Dock="Left" Text="{Binding TiltRollDegreesText}" FontWeight="Bold" VerticalAlignment="Center"
@@ -641,72 +734,83 @@
                         </ScrollViewer>
                     </Border>
                 </Grid>
-            </TabItem>
+            </Grid>
 
-            <TabItem Header="設置・校正" IsEnabled="{Binding CanOpenMaintenance}">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
-                        <Border Style="{StaticResource CardStyle}">
-                            <StackPanel>
-                                <TextBlock Text="設置・校正（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
-                                <TextBlock Text="承認済みプロファイルの閾値を使い、補正不要・自動補正範囲内・物理調整必要を検証します。プロファイルを自動更新しません。" Margin="0,6,0,12" />
-                                <TextBlock Text="表示シナリオ" FontWeight="Bold" />
-                                <ComboBox ItemsSource="{Binding ReadinessDemoOptions}" SelectedItem="{Binding SelectedReadinessDemo}" Width="260" HorizontalAlignment="Left" Margin="0,6,0,12" />
-                                <Border Padding="14" Background="#FFF1F3F5"><StackPanel><TextBlock Text="{Binding SetupStatusText}" FontSize="18" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,6,0,0" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel></Border>
-                                <StackPanel Visibility="{Binding IsSimulatedFrameSourceAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Bold" Margin="0,16,0,0" />
-                                    <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。" Margin="0,4,0,6" Foreground="#FF56616B" TextWrapping="Wrap" MaxWidth="640" />
-                                    <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
-                                              IsEnabled="{Binding CanChangeSimulatedFramePattern}"
-                                              Width="260" HorizontalAlignment="Left" Margin="0,0,0,12"
-                                              AutomationProperties.Name="疑似LVフレームソース パターン切替 開発検証用" />
-                                </StackPanel>
-                                <Button Content="校正を開始（未実装・human gate待ち）" IsEnabled="False" Margin="0,14,0,0" HorizontalAlignment="Left" />
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-
-            <TabItem Header="カメラ設定" IsEnabled="{Binding CanOpenMaintenance}">
+            <!-- 設置・校正（保守画面・移設のみ・中身は再設計しない）。ツール(T)メニューからのみ
+                 到達し、ダッシュボードへは「戻る」ボタン（ShowDashboardCommand・既存の
+                 CanOpenMaintenance連動）で戻る。 -->
+            <ScrollViewer Visibility="{Binding SelectedPage, Converter={StaticResource StringEqualsVisibilityConverter}, ConverterParameter=Setup}"
+                          VerticalScrollBarVisibility="Auto" AutomationProperties.Name="設置・校正 保守画面">
                 <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
+                    <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
+                            HorizontalAlignment="Left" Margin="0,0,0,10"
+                            AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="カメラ設定（read-only）" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="write契約が実機証拠で承認されるまで、設定変更は実装しません。FX / JPEG Fine L / 固定露出 / 固定フォーカス / 固定WB / Auto ISOなし / VRなしを確認対象とします。" Margin="0,8,0,12" />
-                            <DataGrid ItemsSource="{Binding CameraSettingRows}" IsReadOnly="True" AutoGenerateColumns="False" HeadersVisibility="Column" Height="230" CanUserAddRows="False" CanUserDeleteRows="False">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="設定" Binding="{Binding Setting}" Width="120" />
-                                    <DataGridTextColumn Header="要求profile" Binding="{Binding RequiredProfile}" Width="2*" />
-                                    <DataGridTextColumn Header="CAM-A" Binding="{Binding CameraA}" Width="*" />
-                                    <DataGridTextColumn Header="CAM-B" Binding="{Binding CameraB}" Width="*" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                            <Button Content="設定を書き込む（禁止）" IsEnabled="False" Margin="0,12,0,0" HorizontalAlignment="Left" />
+                            <TextBlock Text="設置・校正（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="承認済みプロファイルの閾値を使い、補正不要・自動補正範囲内・物理調整必要を検証します。プロファイルを自動更新しません。" Margin="0,6,0,12" />
+                            <TextBlock Text="表示シナリオ" FontWeight="Bold" />
+                            <ComboBox ItemsSource="{Binding ReadinessDemoOptions}" SelectedItem="{Binding SelectedReadinessDemo}" Width="260" HorizontalAlignment="Left" Margin="0,6,0,12" />
+                            <Border Padding="14" Background="#FFF1F3F5"><StackPanel><TextBlock Text="{Binding SetupStatusText}" FontSize="18" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,6,0,0" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel></Border>
+                            <StackPanel Visibility="{Binding IsSimulatedFrameSourceAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Bold" Margin="0,16,0,0" />
+                                <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。" Margin="0,4,0,6" Foreground="#FF56616B" TextWrapping="Wrap" MaxWidth="640" />
+                                <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
+                                          IsEnabled="{Binding CanChangeSimulatedFramePattern}"
+                                          Width="260" HorizontalAlignment="Left" Margin="0,0,0,12"
+                                          AutomationProperties.Name="疑似LVフレームソース パターン切替 開発検証用" />
+                            </StackPanel>
+                            <Button Content="校正を開始（未実装・human gate待ち）" IsEnabled="False" Margin="0,14,0,0" HorizontalAlignment="Left" />
                         </StackPanel>
                     </Border>
                 </StackPanel>
-            </TabItem>
+            </ScrollViewer>
 
-            <TabItem Header="保存・診断" IsEnabled="{Binding CanOpenMaintenance}">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
-                        <Border Style="{StaticResource CardStyle}">
-                            <StackPanel>
-                                <TextBlock Text="保存・診断（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
-                                <TextBlock Text="失敗箇所の表示を確認します。撮影開始条件を満たす場合だけ実行でき、カード削除・format・vendor operation 0x9207は呼びません。" Margin="0,6,0,12" />
-                                <DockPanel LastChildFill="False">
-                                    <ComboBox Width="250" ItemsSource="{Binding DiagnosticScenarios}" SelectedItem="{Binding SelectedDiagnosticScenario}" Margin="0,0,8,8" />
-                                    <Button Content="診断シナリオを実行" Command="{Binding DiagnosticCommand}" IsEnabled="{Binding CanCapture}" />
-                                </DockPanel>
-                                <TextBlock Text="常時禁止: 同一transactionの再開・再試行 / 過去CAM-Bとの自動ペア / SDK・WPD重複 / 同時二台Live View / previewの原画像利用 / bulk delete / format / 0x9207 / PC原本検証前の削除 / active transaction中の変更 / 原画像の上書き・自動削除" Margin="0,10,0,0" FontWeight="Bold" />
-                                <TextBlock Text="{Binding TechnicalDetail}" Margin="0,12,0,0" Padding="12" Background="#FFF1F3F5" />
-                                <TextBlock Text="作成済みtransaction数（連打防止確認）" FontWeight="Bold" Margin="0,12,0,0" /><TextBlock Text="{Binding TransactionStartCount}" FontSize="22" />
-                            </StackPanel>
-                        </Border>
+            <!-- カメラ設定（保守画面・read-only・移設のみ）。カメラ(C)メニューからのみ到達する。 -->
+            <StackPanel Visibility="{Binding SelectedPage, Converter={StaticResource StringEqualsVisibilityConverter}, ConverterParameter=CameraSettings}"
+                        Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left" AutomationProperties.Name="カメラ設定 保守画面">
+                <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
+                        HorizontalAlignment="Left" Margin="0,0,0,10"
+                        AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="カメラ設定（read-only）" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="write契約が実機証拠で承認されるまで、設定変更は実装しません。FX / JPEG Fine L / 固定露出 / 固定フォーカス / 固定WB / Auto ISOなし / VRなしを確認対象とします。" Margin="0,8,0,12" />
+                        <DataGrid ItemsSource="{Binding CameraSettingRows}" IsReadOnly="True" AutoGenerateColumns="False" HeadersVisibility="Column" Height="230" CanUserAddRows="False" CanUserDeleteRows="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="設定" Binding="{Binding Setting}" Width="120" />
+                                <DataGridTextColumn Header="要求profile" Binding="{Binding RequiredProfile}" Width="2*" />
+                                <DataGridTextColumn Header="CAM-A" Binding="{Binding CameraA}" Width="*" />
+                                <DataGridTextColumn Header="CAM-B" Binding="{Binding CameraB}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <Button Content="設定を書き込む（禁止）" IsEnabled="False" Margin="0,12,0,0" HorizontalAlignment="Left" />
                     </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-        </TabControl>
+                </Border>
+            </StackPanel>
+
+            <!-- 保存・診断（保守画面・移設のみ）。ツール(T)メニューからのみ到達する。 -->
+            <ScrollViewer Visibility="{Binding SelectedPage, Converter={StaticResource StringEqualsVisibilityConverter}, ConverterParameter=Diagnostics}"
+                          VerticalScrollBarVisibility="Auto" AutomationProperties.Name="保存・診断 保守画面">
+                <StackPanel Margin="18,0,0,0" MaxWidth="960" HorizontalAlignment="Left">
+                    <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
+                            HorizontalAlignment="Left" Margin="0,0,0,10"
+                            AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="保存・診断（SIMULATED）" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="失敗箇所の表示を確認します。撮影開始条件を満たす場合だけ実行でき、カード削除・format・vendor operation 0x9207は呼びません。" Margin="0,6,0,12" />
+                            <DockPanel LastChildFill="False">
+                                <ComboBox Width="250" ItemsSource="{Binding DiagnosticScenarios}" SelectedItem="{Binding SelectedDiagnosticScenario}" Margin="0,0,8,8" />
+                                <Button Content="診断シナリオを実行" Command="{Binding DiagnosticCommand}" IsEnabled="{Binding CanCapture}" />
+                            </DockPanel>
+                            <TextBlock Text="常時禁止: 同一transactionの再開・再試行 / 過去CAM-Bとの自動ペア / SDK・WPD重複 / 同時二台Live View / previewの原画像利用 / bulk delete / format / 0x9207 / PC原本検証前の削除 / active transaction中の変更 / 原画像の上書き・自動削除" Margin="0,10,0,0" FontWeight="Bold" />
+                            <TextBlock Text="{Binding TechnicalDetail}" Margin="0,12,0,0" Padding="12" Background="#FFF1F3F5" />
+                            <TextBlock Text="作成済みtransaction数（連打防止確認）" FontWeight="Bold" Margin="0,12,0,0" /><TextBlock Text="{Binding TransactionStartCount}" FontSize="22" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </Window>

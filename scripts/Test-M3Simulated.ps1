@@ -53,7 +53,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 50/50 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 54/54 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -126,6 +126,21 @@ try {
     foreach ($marker in @('設置ガイドオーバーレイ', '方眼グリッド', 'トンボ', '安全マージン', 'SAFE MARGIN', '傾き読み値 常駐行', '許容範囲チップ')) {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required alignment guide / tilt reading binding/marker (issue #32): $marker"
     }
+
+    # issue #34: menu bar replaces the left-nav TabControl. ファイル/カメラ/表示/ツール/ヘルプの
+    # 5メニューのみで構成し、左ナビ（TabStripPlacement="Left"）は削除され、編集メニューは
+    # 設置しない（原本の無加工・byte-identical保存契約のため画像編集機能が設計上存在しない）。
+    Assert-Condition ($windowText.Contains('<Menu ')) 'Operator shell window must add a WPF Menu element for the menu bar (issue #34).'
+    Assert-Condition (-not $windowText.Contains('TabStripPlacement="Left"')) 'Issue #34 must remove the left-nav TabControl (TabStripPlacement="Left").'
+    Assert-Condition (-not $windowText.Contains('Header="編集')) 'Issue #34 must not add an 編集 (Edit) top-level menu — no image-editing feature exists in this contract.'
+    foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', '明示export(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '保守画面から撮影ダッシュボードへ戻る')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required menu bar binding/marker (issue #34): $marker"
+    }
+    foreach ($marker in @('SelectedPage', 'PageTitle', 'ShowDashboardCommand', 'ShowSetupCommand', 'ShowCameraSettingsCommand', 'ShowDiagnosticsCommand', 'IsSingleCameraModeChecked', 'IsDualCameraModeChecked', 'IsLoupeZoom100Checked', 'IsLoupeZoom200Checked', 'IsTiltReadingVisible', 'DualCameraIdentityStatusText', 'AppVersionText')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required menu bar view model marker (issue #34): $marker"
+    }
+    $stringEqualsVisibilityConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/StringEqualsVisibilityConverter.cs'
+    Assert-Condition (Test-Path -LiteralPath $stringEqualsVisibilityConverterPath -PathType Leaf) 'StringEqualsVisibilityConverter.cs must exist to switch between the dashboard and maintenance pages without a TabControl (issue #34).'
 
     [xml]$hardwareWindowXml = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath
