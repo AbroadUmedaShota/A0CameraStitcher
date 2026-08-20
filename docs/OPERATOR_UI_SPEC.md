@@ -205,6 +205,7 @@
 - Hardware Single headless contractは、起動時全操作gate、同一transactionの結果照会、profile/alias/expiry/handoff相関、pre-dispatchと曖昧dispatchの分離、no retry、CAM-A identity-v3、30日profile、fixed-local preference、same-file-identity byte-identical exportに加え、継続Live View v2のmemory-only frame、stop-before-capture、停止不明時capture 0、verified success後だけrestartを含み、Operator Shell 17/17で確認した。C++側もSDK-less／licensed-SDK-enabled Release CTest各7/7を要求するが、camera commandは送っていない。有限v1 probeはv2受入へ読み替えない。
 - 一括検証は外部NuGetなし、SIMULATED常設表示、警告レベル、accessibility live region、Foundation facade以外のcamera API不使用を静的・headlessに確認する。2026-08-08のWindows UI Automationは旧Dual contractの履歴証拠であり、requirements 2.6.0のSingle実画面受入へ読み替えない。screen reader、キーボード、focus、実WPF Hardware Single操作、実Camera Agent/D810の各失敗点は未実施である。
 - 撮影画面リデザイン（4層構成、メニューバー、ステージ表示モード、ターゲット□と拡大エリア、設置ガイドオーバーレイと傾き読み値、フォーカスパネル、アクションゾーン、模擬frame source、同意モーダル、通知バー、保存控え、構図グリッドの分割指定）はSIMULATED境界まで実装済みで、`Test-M3Simulated.ps1`の静的マーカーとheadless VM検証で担保している。実画面のscreen reader・キーボード・focus検証と、実機での受入証拠は未取得である。フォーカス操作と`撮影+AF`の受入範囲はSIMULATED契約までとし、実機でのAF・MF実行、PCからのMFドライブ可否、継続Live View v2は未検証である。
+- ファイル名の命名ルール（接頭辞・接尾辞・連番／日付・桁数）は**実装していない**。保存されるファイル名は現在`DualCameraProductFlow.ExportAsync`が`a0-stitched-{exportJobId:N}.jpg`として決めており、名前の所有者が合成フローの側にある。操作者が指定した名前を画面に出しながら別名で保存すると表示が事実と食い違うため、UIだけを先に作らない。実装するなら、`ExportAsync`へ操作者指定のファイル名を渡す口を開け、durable stateに記録する`destination`と実ファイルを一致させたうえで、画面へ命名ルールカードを追加する。保存先フォルダの指定と保存控えの表示は先行して実装済みである。
 
 ## 要件追跡
 
