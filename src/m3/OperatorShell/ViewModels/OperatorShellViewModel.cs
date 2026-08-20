@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using A0CameraStitcher.M3.OperatorShell.Simulated;
 
 namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
@@ -23,6 +25,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
+    private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
     private readonly AsyncRelayCommand _captureCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
@@ -47,7 +50,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _selectedDiagnosticScenario = "正常完了";
     private string _selectedPage = "Dashboard";
     private string _selectedStageMode = StageModeCompositePreview;
+    private string _selectedSimulatedFramePattern = SimulatedFramePatternCatalog.DefaultLabel;
     private readonly Dictionary<string, DateTimeOffset> _lastFinalFrameTimestamps = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SimulatedLiveViewFrame> _lastLiveFrames = new(StringComparer.Ordinal);
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
     private string _statusMessage = "起動時の安全確認を行ってください。この画面は実機へ接続しません。";
     private string _technicalDetail = "error code: なし / log: ローカルsimulated journal";
@@ -75,15 +80,21 @@ public sealed class OperatorShellViewModel : ObservableObject
     public OperatorShellViewModel(
         ISimulatedTransactionService transactionService,
         IDualCameraProductFlow? dualCameraFlow,
-        Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null)
+        Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null,
+        ISimulatedLiveViewFramePump? liveViewFramePump = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
+        _liveViewFramePump = liveViewFramePump;
         if (_dualCameraFlow is not null)
         {
             _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
             _dualCameraFlow.IdentityChanged += OnDualCameraIdentityChanged;
+        }
+        if (_liveViewFramePump is not null)
+        {
+            _liveViewFramePump.FrameProduced += OnSimulatedFrameProduced;
         }
         ProgressSteps =
         [
@@ -221,6 +232,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsStageCompositePreviewMode));
                 OnPropertyChanged(nameof(StageReviewBadgeText));
                 OnPropertyChanged(nameof(ReadyStatusChipText));
+                RaiseStageFrameProperties();
                 RecalculateAvailability();
             }
         }
@@ -266,9 +278,9 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(CaptureButtonText));
                 OnPropertyChanged(nameof(StageCompositeLiveAlias));
                 OnPropertyChanged(nameof(StageCompositeStillAlias));
-                OnPropertyChanged(nameof(StageCompositeFreshnessText));
                 OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
                 OnPropertyChanged(nameof(StageSingleLiveText));
+                RaiseStageFrameProperties();
                 if (IsSingleCameraMode)
                 {
                     SelectedDiagnosticScenario = "正常完了";
@@ -313,9 +325,20 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             if (SetProperty(ref _isLiveViewActive, value))
             {
+                // The pump is the sole SIMULATED frame supply gate: it only runs between
+                // Start/Stop, so no frame is ever produced while Live View is OFF.
+                if (value)
+                {
+                    _liveViewFramePump?.Start(SelectedCamera, CurrentSimulatedFramePattern);
+                }
+                else
+                {
+                    _liveViewFramePump?.Stop();
+                }
                 OnPropertyChanged(nameof(LiveViewButtonText));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
+                RaiseStageFrameProperties();
                 RebuildReadiness();
             }
         }
@@ -338,8 +361,31 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(StageSingleLiveAlias));
             OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
             OnPropertyChanged(nameof(StageSingleLiveText));
+            RaiseStageFrameProperties();
         }
     }
+
+    public IReadOnlyList<string> SimulatedFramePatternOptions { get; } = SimulatedFramePatternCatalog.Labels;
+
+    public bool IsSimulatedFrameSourceAvailable => _liveViewFramePump is not null;
+
+    public string SelectedSimulatedFramePattern
+    {
+        get => _selectedSimulatedFramePattern;
+        set
+        {
+            if (!IsBusy && SimulatedFramePatternCatalog.TryGetPattern(value, out var pattern) &&
+                SetProperty(ref _selectedSimulatedFramePattern, value))
+            {
+                _liveViewFramePump?.SetPattern(pattern);
+            }
+        }
+    }
+
+    private SimulatedFramePattern CurrentSimulatedFramePattern =>
+        SimulatedFramePatternCatalog.TryGetPattern(_selectedSimulatedFramePattern, out var pattern)
+            ? pattern
+            : SimulatedFramePatternCatalog.DefaultPattern;
 
     public bool CanChangeStageMode => UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
     public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
@@ -377,6 +423,34 @@ public sealed class OperatorShellViewModel : ObservableObject
             return $"STILL {elapsedSeconds}秒前";
         }
     }
+
+    // Stage frame wiring: preview-only images sourced from the SIMULATED live view frame
+    // pump (see Simulated/). Every one of these falls back to null/false — and the
+    // existing text placeholders stay visible — when no pump was injected or no frame has
+    // arrived yet, so the headless ViewModel tests that construct this class without a pump
+    // keep behaving exactly as before.
+    public BitmapSource? StageSingleLiveImage =>
+        IsLiveViewActive && string.Equals(SelectedCamera, StageSingleLiveAlias, StringComparison.Ordinal) &&
+        _lastLiveFrames.TryGetValue(StageSingleLiveAlias, out var singleLiveFrame)
+            ? singleLiveFrame.Image
+            : null;
+    public bool IsStageSingleLiveImageVisible => IsStageSingleLiveMode && StageSingleLiveImage is not null;
+    public bool IsStageSingleLivePlaceholderVisible => IsStageSingleLiveMode && StageSingleLiveImage is null;
+
+    public BitmapSource? StageCompositeLiveImage =>
+        IsLiveViewActive && _lastLiveFrames.TryGetValue(StageCompositeLiveAlias, out var compositeLiveFrame)
+            ? compositeLiveFrame.Image
+            : null;
+    public bool IsStageCompositeLiveImageVisible => StageCompositeApplicable && StageCompositeLiveImage is not null;
+    public bool IsStageCompositeLivePlaceholderVisible => StageCompositeApplicable && StageCompositeLiveImage is null;
+
+    /// <summary>The still alias never receives live frames directly (Live View is
+    /// one-camera-at-a-time); this is simply the last frame captured while that alias was
+    /// selected, frozen in place — the "非ライブ側は最終フレームの静止画" contract.</summary>
+    public BitmapSource? StageCompositeStillImage =>
+        _lastLiveFrames.TryGetValue(StageCompositeStillAlias, out var compositeStillFrame) ? compositeStillFrame.Image : null;
+    public bool IsStageCompositeStillImageVisible => StageCompositeApplicable && StageCompositeStillImage is not null;
+    public bool IsStageCompositeStillPlaceholderVisible => StageCompositeApplicable && StageCompositeStillImage is null;
 
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public string TechnicalDetail { get => _technicalDetail; private set => SetProperty(ref _technicalDetail, value); }
@@ -741,6 +815,35 @@ public sealed class OperatorShellViewModel : ObservableObject
         RebuildReadiness(preserveOutcomeState: true);
     }
 
+    private void OnSimulatedFrameProduced(object? sender, SimulatedLiveViewFrame frame)
+    {
+        if (_synchronizationContext is not null && SynchronizationContext.Current != _synchronizationContext)
+        {
+            _synchronizationContext.Post(_ => ApplySimulatedFrame(frame), null);
+            return;
+        }
+        ApplySimulatedFrame(frame);
+    }
+
+    private void ApplySimulatedFrame(SimulatedLiveViewFrame frame)
+    {
+        if (!frame.Simulation || !string.Equals(frame.Marker, "Simulated", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("実機非接続shellはSimulated markerのないLive Viewフレームを表示できません。");
+        }
+
+        if (!IsLiveViewActive || !string.Equals(frame.CameraAlias, SelectedCamera, StringComparison.Ordinal))
+        {
+            // Stale frame produced right after Stop()/an alias switch raced the timer tick;
+            // drop it instead of resurrecting a preview for a camera that is no longer live.
+            return;
+        }
+
+        _lastLiveFrames[frame.CameraAlias] = frame;
+        _lastFinalFrameTimestamps[frame.CameraAlias] = frame.CapturedAtUtc;
+        RaiseStageFrameProperties();
+    }
+
     private void ApplyFormalDualCameraState(DualCameraProductState state)
     {
         if (state.Mode != CameraOperatingMode.DualCamera || _dualCameraFlow is null ||
@@ -859,7 +962,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         _exportOutcome = null;
         _captureOutcome = null;
         _lastFinalFrameTimestamps.Clear();
-        OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        _lastLiveFrames.Clear();
+        RaiseStageFrameProperties();
         RebuildReadiness();
         return Task.CompletedTask;
     }
@@ -1130,6 +1234,25 @@ public sealed class OperatorShellViewModel : ObservableObject
     private void RaiseReadinessProperties()
     {
         foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText) }) OnPropertyChanged(name);
+    }
+
+    /// <summary>
+    /// Refreshes every stage Image/placeholder-visibility binding at once. Called whenever
+    /// something that feeds those computed properties changes: Live View on/off, the
+    /// selected camera or stage mode, a newly produced SIMULATED frame, or a state reset.
+    /// </summary>
+    private void RaiseStageFrameProperties()
+    {
+        OnPropertyChanged(nameof(StageSingleLiveImage));
+        OnPropertyChanged(nameof(IsStageSingleLiveImageVisible));
+        OnPropertyChanged(nameof(IsStageSingleLivePlaceholderVisible));
+        OnPropertyChanged(nameof(StageCompositeLiveImage));
+        OnPropertyChanged(nameof(IsStageCompositeLiveImageVisible));
+        OnPropertyChanged(nameof(IsStageCompositeLivePlaceholderVisible));
+        OnPropertyChanged(nameof(StageCompositeStillImage));
+        OnPropertyChanged(nameof(IsStageCompositeStillImageVisible));
+        OnPropertyChanged(nameof(IsStageCompositeStillPlaceholderVisible));
+        OnPropertyChanged(nameof(StageCompositeFreshnessText));
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)

@@ -140,11 +140,16 @@
                                 </StackPanel>
 
                                 <!-- CAM-A live / CAM-B live: 当該カメラのフルフレーム表示 -->
-                                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
-                                            Visibility="{Binding IsStageSingleLiveMode, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <TextBlock Text="{Binding StageSingleLiveAlias}" Foreground="White" FontSize="26" FontWeight="Bold" TextAlignment="Center" />
-                                    <TextBlock Text="{Binding StageSingleLiveText}" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,10,0,0" />
-                                </StackPanel>
+                                <Grid Visibility="{Binding IsStageSingleLiveMode, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <Image Source="{Binding StageSingleLiveImage}" Stretch="Uniform" Margin="8"
+                                           Visibility="{Binding IsStageSingleLiveImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="ステージ Simulated疑似LVフレーム CAM-A CAM-B フルフレーム" />
+                                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
+                                                Visibility="{Binding IsStageSingleLivePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="{Binding StageSingleLiveAlias}" Foreground="White" FontSize="26" FontWeight="Bold" TextAlignment="Center" />
+                                        <TextBlock Text="{Binding StageSingleLiveText}" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,10,0,0" />
+                                    </StackPanel>
+                                </Grid>
 
                                 <!-- 合成プレビュー: A0レイアウトマッピング（ライブ側=動画 / 非ライブ側=最終フレーム静止画 + 重複帯） -->
                                 <Grid Margin="16"
@@ -155,11 +160,17 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
 
-                                    <StackPanel Grid.Column="0" VerticalAlignment="Center"
-                                                Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
-                                        <TextBlock Text="{Binding StageCompositeLiveAlias}" Foreground="White" FontWeight="Bold" FontSize="18" TextAlignment="Center" />
-                                        <TextBlock Text="ライブ動画（Simulatedプレースホルダ）" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,6,0,0" />
-                                    </StackPanel>
+                                    <Grid Grid.Column="0"
+                                          Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <Image Source="{Binding StageCompositeLiveImage}" Stretch="Uniform" Margin="4"
+                                               Visibility="{Binding IsStageCompositeLiveImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                               AutomationProperties.Name="ステージ 合成プレビュー ライブ側 Simulated疑似LVフレーム" />
+                                        <StackPanel VerticalAlignment="Center"
+                                                    Visibility="{Binding IsStageCompositeLivePlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock Text="{Binding StageCompositeLiveAlias}" Foreground="White" FontWeight="Bold" FontSize="18" TextAlignment="Center" />
+                                            <TextBlock Text="ライブ動画（Simulatedプレースホルダ）" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,6,0,0" />
+                                        </StackPanel>
+                                    </Grid>
 
                                     <Border Grid.Column="1" Background="#FFDB9A16" CornerRadius="2"
                                             Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
@@ -168,15 +179,25 @@
                                                    AutomationProperties.Name="重複帯 幅pxプレースホルダ値 実測未接続" />
                                     </Border>
 
-                                    <StackPanel Grid.Column="2" VerticalAlignment="Center"
-                                                Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
-                                        <TextBlock Text="{Binding StageCompositeStillAlias}" Foreground="White" FontWeight="Bold" FontSize="18" TextAlignment="Center" />
-                                        <TextBlock Text="最終フレーム静止画（Simulatedプレースホルダ）" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,6,0,0" />
-                                        <Border Background="#FF33404B" CornerRadius="10" Padding="10,3" Margin="0,10,0,0" HorizontalAlignment="Center">
+                                    <Grid Grid.Column="2"
+                                          Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Image Grid.Row="0" Source="{Binding StageCompositeStillImage}" Stretch="Uniform" Margin="4"
+                                               Visibility="{Binding IsStageCompositeStillImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                               AutomationProperties.Name="ステージ 合成プレビュー 非ライブ側 最終フレーム静止画" />
+                                        <StackPanel Grid.Row="0" VerticalAlignment="Center"
+                                                    Visibility="{Binding IsStageCompositeStillPlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock Text="{Binding StageCompositeStillAlias}" Foreground="White" FontWeight="Bold" FontSize="18" TextAlignment="Center" />
+                                            <TextBlock Text="最終フレーム静止画（Simulatedプレースホルダ）" Foreground="#FFB9C2CB" TextAlignment="Center" Margin="0,6,0,0" />
+                                        </StackPanel>
+                                        <Border Grid.Row="1" Background="#FF33404B" CornerRadius="10" Padding="10,3" Margin="0,10,0,0" HorizontalAlignment="Center">
                                             <TextBlock Text="{Binding StageCompositeFreshnessText}" Foreground="#FFFFD7D7" FontWeight="Bold"
                                                        AutomationProperties.Name="非ライブ側 鮮度バッジ 経過秒" AutomationProperties.LiveSetting="Polite" />
                                         </Border>
-                                    </StackPanel>
+                                    </Grid>
 
                                     <TextBlock Grid.Column="0" Grid.ColumnSpan="3" Text="合成対象外（1台構成）" Foreground="White" FontSize="18" FontWeight="Bold"
                                                TextAlignment="Center" VerticalAlignment="Center"
@@ -353,6 +374,11 @@
                                 <TextBlock Text="表示シナリオ" FontWeight="Bold" />
                                 <ComboBox ItemsSource="{Binding ReadinessDemoOptions}" SelectedItem="{Binding SelectedReadinessDemo}" Width="260" HorizontalAlignment="Left" Margin="0,6,0,12" />
                                 <Border Padding="14" Background="#FFF1F3F5"><StackPanel><TextBlock Text="{Binding SetupStatusText}" FontSize="18" FontWeight="Bold" /><TextBlock Text="{Binding CorrectionText}" Margin="0,6,0,0" /><TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" /></StackPanel></Border>
+                                <TextBlock Text="Simulated Live View パターン（開発・検証用）" FontWeight="Bold" Margin="0,16,0,0" />
+                                <TextBlock Text="正対・傾き（#32 エッジ検出検証用）・ボケ→合焦遷移（#31 ピーキング検証用）を切替できます。ステージのCAM-A/CAM-B live・合成プレビューへ即時反映されます。" Margin="0,4,0,6" Foreground="#FF56616B" TextWrapping="Wrap" MaxWidth="640" />
+                                <ComboBox ItemsSource="{Binding SimulatedFramePatternOptions}" SelectedItem="{Binding SelectedSimulatedFramePattern}"
+                                          Width="260" HorizontalAlignment="Left" Margin="0,0,0,12"
+                                          AutomationProperties.Name="疑似LVフレームソース パターン切替 開発検証用" />
                                 <Button Content="校正を開始（未実装・human gate待ち）" IsEnabled="False" Margin="0,14,0,0" HorizontalAlignment="Left" />
                             </StackPanel>
                         </Border>

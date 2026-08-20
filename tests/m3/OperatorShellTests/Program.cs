@@ -3,6 +3,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
+using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Buffers.Binary;
 using System.IO.Pipes;
@@ -358,7 +359,40 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle connect failure surfaces exit code and stderr diagnostics: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {30 - failures.Count}/30 passed.");
+try
+{
+    SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern();
+    Console.WriteLine("PASS SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED test image frame source renders a frozen, watermarked frame for every pattern");
+    Console.Error.WriteLine($"FAIL SIMULATED test image frame source renders a frozen, watermarked frame for every pattern: {exception}");
+}
+
+try
+{
+    await SimulatedLiveViewFramePumpOnlyProducesFramesBetweenStartAndStopAsync();
+    Console.WriteLine("PASS SIMULATED live view frame pump only produces frames between Start and Stop");
+}
+catch (Exception exception)
+{
+    failures.Add("SIMULATED live view frame pump only produces frames between Start and Stop");
+    Console.Error.WriteLine($"FAIL SIMULATED live view frame pump only produces frames between Start and Stop: {exception}");
+}
+
+try
+{
+    await SimulatedFramePumpWiringAsync();
+    Console.WriteLine("PASS operator shell starts/stops the SIMULATED frame pump exactly on Live View toggle and drops stale frames");
+}
+catch (Exception exception)
+{
+    failures.Add("operator shell starts/stops the SIMULATED frame pump exactly on Live View toggle and drops stale frames");
+    Console.Error.WriteLine($"FAIL operator shell starts/stops the SIMULATED frame pump exactly on Live View toggle and drops stale frames: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {33 - failures.Count}/33 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3082,6 +3116,162 @@ static async Task<object?> LoadDualAgentJournalCaptureResultPayloadAsync(string 
         transactionIdHex,
         root.GetProperty("camAPath").GetString()!,
         root.GetProperty("camBPath").GetString()!);
+}
+
+static void SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern()
+{
+    var source = new SimulatedTestImageFrameSource();
+    var capturedAt = DateTimeOffset.UtcNow;
+    foreach (var pattern in Enum.GetValues<SimulatedFramePattern>())
+    {
+        var frame = source.CreateFrame("CAM-A", pattern, sequenceNumber: 3, capturedAt);
+        Check.Equal("CAM-A", frame.CameraAlias);
+        Check.Equal(pattern, frame.Pattern);
+        Check.True(frame.Simulation, $"{pattern}: every SIMULATED frame must carry Simulation=true.");
+        Check.Equal("Simulated", frame.Marker);
+        Check.True(frame.Image.PixelWidth > 0 && frame.Image.PixelHeight > 0, $"{pattern}: the rendered frame must have real pixel dimensions.");
+        Check.True(frame.Image.IsFrozen, $"{pattern}: the rendered frame must be frozen for safe cross-thread hand-off.");
+    }
+}
+
+static async Task SimulatedLiveViewFramePumpOnlyProducesFramesBetweenStartAndStopAsync()
+{
+    using var pump = new SimulatedLiveViewFramePump(new SimulatedTestImageFrameSource(), interval: TimeSpan.FromMilliseconds(20));
+    var produced = new List<SimulatedLiveViewFrame>();
+    pump.FrameProduced += (_, frame) => { lock (produced) { produced.Add(frame); } };
+
+    await Task.Delay(60);
+    Check.Equal(0, produced.Count);
+
+    pump.Start("CAM-B", SimulatedFramePattern.TiltedDocumentRollPlus3);
+    await WaitUntilAsync(() => produced.Count >= 2, "The pump did not produce frames after Start().");
+    lock (produced)
+    {
+        Check.True(produced.All(frame => frame.CameraAlias == "CAM-B"), "Every produced frame must carry the started camera alias.");
+        Check.True(produced.All(frame => frame.Pattern == SimulatedFramePattern.TiltedDocumentRollPlus3), "Every produced frame must carry the started pattern.");
+    }
+
+    pump.Stop();
+    int countAtStop;
+    lock (produced)
+    {
+        countAtStop = produced.Count;
+    }
+    await Task.Delay(80);
+    lock (produced)
+    {
+        Check.Equal(countAtStop, produced.Count);
+    }
+}
+
+static async Task SimulatedFramePumpWiringAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-SimulatedFramePumpTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.IsSimulatedFrameSourceAvailable, "A pump was injected, so the frame source must report available.");
+        Check.True(viewModel.CanUseLiveView, "A safety-acknowledged, non-busy dual plan must allow Live View.");
+        Check.Equal(0, pump.StartCalls.Count);
+
+        viewModel.SelectedSimulatedFramePattern = "ボケ→合焦遷移";
+        Check.Equal(1, pump.PatternChanges.Count);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.PatternChanges[0]);
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.True(viewModel.IsLiveViewActive, "Toggling Live View on must flip the flag.");
+        Check.Equal(1, pump.StartCalls.Count);
+        Check.Equal("CAM-A", pump.StartCalls[0].CameraAlias);
+        Check.Equal(SimulatedFramePattern.BlurToFocusTransition, pump.StartCalls[0].Pattern);
+        Check.Equal(0, pump.StopCallCount);
+
+        // A mismatched-alias frame (as if Stop()/an alias switch raced an in-flight tick)
+        // must not populate the composite preview's non-live "still" slot for that alias.
+        pump.RaiseFrame(CreateFakeLiveViewFrame("CAM-B"));
+        Check.True(viewModel.StageCompositeStillImage is null, "A stale frame for a non-active alias must be dropped.");
+
+        pump.RaiseFrame(CreateFakeLiveViewFrame("CAM-A"));
+        Check.True(viewModel.StageCompositeLiveImage is not null, "A frame for the active alias must populate the live composite image.");
+        Check.False(
+            viewModel.IsStageSingleLiveImageVisible,
+            "Stage mode defaults to composite preview, so the single-live image must stay hidden even though a frame exists.");
+
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        Check.False(viewModel.IsLiveViewActive, "Toggling Live View off must flip the flag back.");
+        Check.Equal(1, pump.StopCallCount);
+        Check.True(viewModel.StageCompositeLiveImage is null, "Stopping Live View must clear the live composite image even though the last frame is retained.");
+
+        viewModel.SelectedCamera = "CAM-B";
+        Check.True(
+            viewModel.StageCompositeFreshnessText.Contains("秒前", StringComparison.Ordinal),
+            "The frozen CAM-A frame must drive the freshness badge once CAM-B becomes the selected (still) alias.");
+
+        Check.Throws<InvalidDataException>(() => pump.RaiseFrame(CreateFakeLiveViewFrame("CAM-B", simulation: false)));
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    await Task.CompletedTask;
+}
+
+static BitmapSource CreateFakeFrameImage()
+{
+    var pixels = new byte[] { 0x10, 0x20, 0x30 };
+    var bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
+    bitmap.Freeze();
+    return bitmap;
+}
+
+static SimulatedLiveViewFrame CreateFakeLiveViewFrame(
+    string cameraAlias,
+    int sequenceNumber = 0,
+    bool simulation = true,
+    string marker = "Simulated") =>
+    new()
+    {
+        CameraAlias = cameraAlias,
+        Pattern = SimulatedFramePattern.FrontalDocument,
+        SequenceNumber = sequenceNumber,
+        CapturedAtUtc = DateTimeOffset.UtcNow,
+        Image = CreateFakeFrameImage(),
+        Simulation = simulation,
+        Marker = marker,
+    };
+
+sealed class FakeSimulatedLiveViewFramePump : ISimulatedLiveViewFramePump
+{
+    public List<(string CameraAlias, SimulatedFramePattern Pattern)> StartCalls { get; } = [];
+    public List<SimulatedFramePattern> PatternChanges { get; } = [];
+    public int StopCallCount { get; private set; }
+
+    public event EventHandler<SimulatedLiveViewFrame>? FrameProduced;
+
+    public void Start(string cameraAlias, SimulatedFramePattern pattern) => StartCalls.Add((cameraAlias, pattern));
+
+    public void Stop() => StopCallCount++;
+
+    public void SetPattern(SimulatedFramePattern pattern) => PatternChanges.Add(pattern);
+
+    public void RaiseFrame(SimulatedLiveViewFrame frame) => FrameProduced?.Invoke(this, frame);
+
+    public void Dispose()
+    {
+    }
 }
 
 static class Check

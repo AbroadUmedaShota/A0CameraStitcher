@@ -39,6 +39,12 @@ WPF shellのlocal stateは`%LOCALAPPDATA%\A0CameraStitcher\m3-simulated`へ置�
 
 DualCameraのapplication flowは、C++ identity proof結果を匿名JSON DTOから`Ready`、`Missing`、`Ambiguous`、`Collision`、`AliasMismatch`、`TransportMismatch`、`Expired`、`InvalidSchema`、`HardwarePending`へ変換する。`Ready`以外はWPFとflow APIの両方で撮影開始前に拒否し、SingleCameraへfallbackしない。active transactionは開始時snapshotを固定する。`TestSynthetic`だけが明示的な匿名Ready snapshotを注入し、実provider未確定の経路は`HardwarePending`を既定値として維持する。このsoftware-only adapterと契約試験は、実機identity readiness、SDK/WPD correlation、card access、capture、Live View、設定変更、削除を承認・実行するものではない。
 
+## 疑似LVフレームソース（SIMULATED）
+
+`src/m3/OperatorShell/Simulated/`は、CAM-A/CAM-B各1系統の疑似ライブビューフレームを実行時に描画生成する（ビットマップ資産・実写・顧客原稿は一切使わない）。`ISimulatedLiveViewFrameSource`（実装: `SimulatedTestImageFrameSource`）が正対原稿・傾き原稿（ROLL ±3°/±6°の4パターン）・ボケ→合焦遷移の各シーンをWPFの`DrawingVisual`/`RenderTargetBitmap`で描き、`ISimulatedLiveViewFramePump`（実装: `SimulatedLiveViewFramePump`、`System.Threading.Timer`駆動でDispatcher非依存）がLive View ON中だけそれを一定間隔で供給する。全フレームは`Simulation=true`/`Marker="Simulated"`を持ち、二段描画（背景シーンをレンダリング後、非ブラーの別パスで"SIMULATED"透かしとタイムスタンプ帯を上書き合成）により、どの合焦状態でも透かしが可読なまま残る。
+
+`OperatorShellViewModel`はこのpumpをコンストラクタ注入（既定null）で受け取り、`IsLiveViewActive`のON/OFFでStart/Stopを呼ぶだけで、タイマー自体はViewModelに持たせない。フレームは`StageSingleLiveImage`/`StageCompositeLiveImage`/`StageCompositeStillImage`へ反映され、フレーム未供給時は既存のSimulatedプレースホルダ文言を維持する。合成プレビューの非ライブ側（`StageCompositeStillImage`）は、そのaliasが直近にLive View対象だった時の最終フレームを凍結表示し、そのタイムスタンプが鮮度バッジ`StageCompositeFreshnessText`の実データ源になる。フレーム受信時はSimulated markerを検証し、Live View OFF後またはalias切替後に届いた遅延フレームは破棄する。開発・検証用のパターン切替は「設置・校正」タブに置く。プレビュー専用でありoriginal/合成入力へは流用しない。
+
 ## 実行と検証
 
 ```powershell
