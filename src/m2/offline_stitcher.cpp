@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -18,6 +19,24 @@
 #include <string>
 #include <system_error>
 #include <vector>
+
+namespace a0::m2::detail {
+
+enum class OfflineStitchFaultPoint : std::uint32_t {
+    none = 0,
+    encode_failure = 1,
+    partial_short_write = 2,
+    partial_flush_failure = 3,
+    disk_full = 4,
+    publish_failure = 5,
+    interrupt_before_encode = 6,
+    interrupt_after_partial_write = 7,
+    interrupt_after_flush = 8,
+    interrupt_before_publish = 9,
+    interrupt_after_publish = 10,
+};
+
+} // namespace a0::m2::detail
 
 namespace a0::m2 {
 namespace {
@@ -28,7 +47,35 @@ constexpr double kMatrixEpsilon = 1e-12;
 
 using TestHook = void (*)();
 std::atomic<TestHook> input_locks_held_hook{};
+std::atomic<TestHook> before_encode_hook{};
+std::atomic<TestHook> before_partial_flush_hook{};
 std::atomic<TestHook> before_publish_rename_hook{};
+std::atomic<detail::OfflineStitchFaultPoint> offline_stitch_fault{};
+std::atomic<std::uint32_t> offline_stitch_fault_trigger_count{};
+
+class InjectedOfflineStitchFault final : public std::runtime_error {
+public:
+    explicit InjectedOfflineStitchFault(const char* code)
+        : std::runtime_error(std::string("m2_fault:") + code) {}
+};
+
+bool TriggerFault(const detail::OfflineStitchFaultPoint point) noexcept {
+    if (offline_stitch_fault.load(std::memory_order_acquire) != point) return false;
+    offline_stitch_fault_trigger_count.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void ThrowIfFault(
+    const detail::OfflineStitchFaultPoint point,
+    const char* code) {
+    if (TriggerFault(point)) throw InjectedOfflineStitchFault(code);
+}
+
+void InterruptIfFault(const detail::OfflineStitchFaultPoint point) noexcept {
+    if (!TriggerFault(point)) return;
+    (void)TerminateProcess(GetCurrentProcess(), 197);
+    std::terminate();
+}
 
 void InvokeTestHook(const std::atomic<TestHook>& hook) {
     if (const auto callback = hook.load(std::memory_order_acquire); callback != nullptr) {
@@ -611,6 +658,54 @@ void EncodeJpegPartial(
     stream.reset();
 }
 
+void TruncateGeneratedPartialForFault(
+    const std::filesystem::path& partial,
+    const bool disk_full) {
+    HANDLE handle = CreateFileW(
+        partial.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+    }
+    LARGE_INTEGER size{};
+    bool truncated = GetFileSizeEx(handle, &size) != FALSE && size.QuadPart > 1;
+    if (truncated) {
+        LARGE_INTEGER retained{};
+        retained.QuadPart = disk_full ? 1 : size.QuadPart / 2;
+        truncated = SetFilePointerEx(handle, retained, nullptr, FILE_BEGIN) != FALSE
+            && SetEndOfFile(handle) != FALSE;
+    }
+    const bool closed = CloseHandle(handle) != FALSE;
+    if (!truncated || !closed) {
+        throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+    }
+    throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+}
+
+void FlushGeneratedPartial(const std::filesystem::path& partial) {
+    HANDLE handle = CreateFileW(
+        partial.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("generated JPEG partial flush open failed");
+    }
+    const bool flushed = FlushFileBuffers(handle) != FALSE;
+    const bool closed = CloseHandle(handle) != FALSE;
+    if (!flushed || !closed) {
+        throw std::runtime_error("generated JPEG partial flush failed");
+    }
+}
+
 class PartialFileGuard final {
 public:
     explicit PartialFileGuard(std::filesystem::path path) : path_(std::move(path)) {}
@@ -639,8 +734,29 @@ void SetInputLocksHeldTestHook(void (*hook)()) noexcept {
     input_locks_held_hook.store(hook, std::memory_order_release);
 }
 
+void SetBeforeEncodeTestHook(void (*hook)()) noexcept {
+    before_encode_hook.store(hook, std::memory_order_release);
+}
+
+void SetBeforePartialFlushTestHook(void (*hook)()) noexcept {
+    before_partial_flush_hook.store(hook, std::memory_order_release);
+}
+
 void SetBeforePublishRenameTestHook(void (*hook)()) noexcept {
     before_publish_rename_hook.store(hook, std::memory_order_release);
+}
+
+void SetOfflineStitchFaultForTest(const OfflineStitchFaultPoint point) noexcept {
+    const auto value = static_cast<std::uint32_t>(point);
+    const auto bounded = value <= static_cast<std::uint32_t>(OfflineStitchFaultPoint::interrupt_after_publish)
+        ? point
+        : OfflineStitchFaultPoint::none;
+    offline_stitch_fault_trigger_count.store(0, std::memory_order_relaxed);
+    offline_stitch_fault.store(bounded, std::memory_order_release);
+}
+
+std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
+    return offline_stitch_fault_trigger_count.load(std::memory_order_acquire);
 }
 
 void PublishValidatedGeneratedJpeg(
@@ -660,6 +776,8 @@ void PublishValidatedGeneratedJpeg(
         throw std::invalid_argument("generated JPEG partial dimensions do not match the stitched result");
     }
     ValidateSnapshotHash(snapshot, locked_partial, "generated JPEG partial");
+    InterruptIfFault(OfflineStitchFaultPoint::interrupt_before_publish);
+    ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
     InvokeTestHook(before_publish_rename_hook);
     locked_partial.RenameToWithoutReplace(destination);
 }
@@ -683,8 +801,8 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     }
     const auto destination = job_path / L"stitched.jpg";
     const auto partial = job_path / L"stitched.jpg.partial";
-    if (std::filesystem::exists(destination) || std::filesystem::exists(partial)) {
-        throw std::invalid_argument("output job already contains a stitched JPEG or partial");
+    if (std::filesystem::exists(job_path)) {
+        throw std::invalid_argument("output job is already reserved or contains an unknown result");
     }
 
     ComApartment apartment;
@@ -709,8 +827,6 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         || camera_b.height != request.profile.expected_input_height) {
         throw std::invalid_argument("canonical JPEG dimensions do not match the approved rig profile");
     }
-    std::filesystem::create_directories(job_path);
-
     const auto inverse_b = Invert(request.profile.camera_b_to_camera_a);
     const Bounds a_bounds{0.0, 0.0, static_cast<double>(camera_a.width), static_cast<double>(camera_a.height)};
     const Bounds b_bounds = TransformedBounds(camera_b, request.profile.camera_b_to_camera_a);
@@ -763,10 +879,48 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         }
     }
 
+    std::error_code parent_error;
+    std::filesystem::create_directories(job_path.parent_path(), parent_error);
+    if (parent_error) {
+        throw std::runtime_error("output job parent creation failed");
+    }
+    std::error_code reservation_error;
+    const bool reserved = std::filesystem::create_directory(job_path, reservation_error);
+    if (!reserved) {
+        if (!reservation_error) {
+            throw std::invalid_argument("output job is already reserved or contains an unknown result");
+        }
+        throw std::runtime_error("output job reservation failed");
+    }
+
     PartialFileGuard partial_guard(partial);
-    EncodeJpegPartial(factory.get(), output, partial);
-    detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
-    partial_guard.Release();
+    try {
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
+        ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
+        InvokeTestHook(before_encode_hook);
+        EncodeJpegPartial(factory.get(), output, partial);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_partial_write);
+        if (TriggerFault(detail::OfflineStitchFaultPoint::partial_short_write)) {
+            TruncateGeneratedPartialForFault(partial, false);
+        }
+        if (TriggerFault(detail::OfflineStitchFaultPoint::disk_full)) {
+            TruncateGeneratedPartialForFault(partial, true);
+        }
+        ThrowIfFault(detail::OfflineStitchFaultPoint::partial_flush_failure, "partial-flush-failed");
+        InvokeTestHook(before_partial_flush_hook);
+        FlushGeneratedPartial(partial);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
+        detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
+        partial_guard.Release();
+    } catch (...) {
+        // Once the durable job reservation reaches encode/write/flush/verify/
+        // publish, injected and real I/O failures use the same orphan policy.
+        // Preserve the exact candidate left by the failed boundary; do not
+        // retry or clean it automatically.
+        partial_guard.Release();
+        throw;
+    }
     return {destination, output.width, output.height, request.profile.profile_id};
 }
 
