@@ -282,26 +282,8 @@
                                     </StackPanel>
                                 </Border>
 
-                                <Border Style="{StaticResource InsetStyle}" Margin="0,12,0,0">
-                                    <StackPanel>
-                                        <DockPanel>
-                                            <TextBlock Text="設置判定" Style="{StaticResource SectionTitleStyle}" FontSize="17" />
-                                            <TextBlock DockPanel.Dock="Right" Text="{Binding SetupStatusText}" FontWeight="Bold" TextAlignment="Right" />
-                                        </DockPanel>
-                                        <Border Margin="0,8,0,6" Padding="10" Background="#FFFFF7DF" BorderBrush="#FFD29B1B" BorderThickness="1">
-                                            <StackPanel>
-                                                <TextBlock Text="予定する自動補正" FontWeight="Bold" />
-                                                <TextBlock Text="{Binding CorrectionText}" Margin="0,4,0,0" />
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Padding="10" Background="#FFFFE8E8" BorderBrush="#FFC43A3A" BorderThickness="1">
-                                            <StackPanel>
-                                                <TextBlock Text="必要な物理調整" FontWeight="Bold" />
-                                                <TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" />
-                                            </StackPanel>
-                                        </Border>
-                                    </StackPanel>
-                                </Border>
+                                <!-- 設置判定カードは#33でアクションゾーン state 1（準備中）へ統合済み。
+                                     右カラム内の重複表示を避けるため、ここには単独配置しない。 -->
 
                                 <Border BorderBrush="#FFD7DDE3" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10"
                                         AutomationProperties.Name="拡大エリア ルーペ 共通ターゲット□の等倍クロップ表示">
@@ -428,61 +410,118 @@
                                     </StackPanel>
                                 </Border>
 
+                                <!-- アクションゾーン（issue #33）: 右カラム下部の単一領域。UI状態に応じて
+                                     設置判定+撮影ボタン／自動進捗ストリップ／結果パネルを排他的に入替える。
+                                     フェーズナビ・ウィザードは採用しない（docs/OPERATOR_UI_SPEC.md アクションゾーン節）。 -->
                                 <Border BorderBrush="#FFB7C0C9" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0" Padding="10"
-                                        AutomationProperties.Name="アクションゾーン 撮影と結果 暫定配置">
+                                        AutomationProperties.Name="アクションゾーン 状態駆動 設置判定撮影 自動進捗 結果">
                                     <StackPanel>
                                         <TextBlock Text="アクションゾーン" Style="{StaticResource SectionTitleStyle}" FontSize="17" />
-                                        <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,10,0,0">
-                                            <ItemsControl.ItemsPanel>
-                                                <ItemsPanelTemplate>
-                                                    <UniformGrid Columns="2" />
-                                                </ItemsPanelTemplate>
-                                            </ItemsControl.ItemsPanel>
-                                            <ItemsControl.ItemTemplate>
-                                                <DataTemplate>
-                                                    <Border Margin="0,0,4,4" Padding="6" MinHeight="56" Background="{Binding Background}" BorderBrush="{Binding BorderBrush}" BorderThickness="2">
-                                                        <StackPanel VerticalAlignment="Center">
-                                                            <TextBlock Text="{Binding Label}" FontWeight="Bold" TextAlignment="Center" FontSize="11" Foreground="{Binding Foreground}" />
-                                                            <TextBlock Text="{Binding StatusText}" Margin="0,3,0,0" TextAlignment="Center" FontSize="11" Foreground="{Binding Foreground}" />
-                                                        </StackPanel>
-                                                    </Border>
-                                                </DataTemplate>
-                                            </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
-                                        <Button Content="{Binding CaptureButtonText}" Command="{Binding CaptureCommand}" IsEnabled="{Binding CanCapture}" Margin="0,10,0,0" Padding="14,10" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" AutomationProperties.Name="確認なしで明示構成の新しい撮影を一回開始" />
-                                        <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0" Foreground="#FF6C3B00" AutomationProperties.LiveSetting="Polite" />
 
-                                        <Border Margin="0,12,0,0" Padding="10" Background="White" BorderBrush="#FFD7DDE3" BorderThickness="1">
-                                            <StackPanel>
-                                                <TextBlock Text="結果" Style="{StaticResource SectionTitleStyle}" FontSize="16" />
-                                                <TextBlock Text="{Binding StatusMessage}" Margin="0,8,0,10" FontWeight="Bold" AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="撮影と失敗の共通結果" />
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="96" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
-                                                    </Grid.RowDefinitions>
-                                                    <TextBlock Grid.Row="0" Text="Transaction" FontWeight="Bold" /><TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastTransactionId}" />
-                                                    <TextBlock Grid.Row="1" Text="撮影" FontWeight="Bold" /><TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureResult}" />
-                                                    <TextBlock Grid.Row="2" Text="保持原画像" FontWeight="Bold" /><TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RetainedOriginals}" />
-                                                    <TextBlock Grid.Row="3" Text="{Binding ProcessingResultLabel}" FontWeight="Bold" /><TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding StitchResult}" />
-                                                    <TextBlock Grid.Row="4" Text="保存" FontWeight="Bold" /><TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding ExportResult}" />
-                                                    <TextBlock Grid.Row="5" Text="出力先" FontWeight="Bold" /><TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastExportPath}" />
-                                                </Grid>
-                                                <WrapPanel Margin="0,10,0,0">
-                                                    <Button Content="fixed-localへ明示export" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}" AutomationProperties.Name="確認済み単体原画像または合成結果を明示保存" />
-                                                    <Button Content="再合成（別job）" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}" />
-                                                    <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}" AutomationProperties.Name="read-only readiness再検査" />
-                                                </WrapPanel>
-                                                <Expander Header="技術情報（error code・ログ位置）" Margin="0,6,0,0">
-                                                    <TextBlock Text="{Binding TechnicalDetail}" Padding="8" Background="#FFF1F3F5" />
-                                                </Expander>
-                                            </StackPanel>
-                                        </Border>
+                                        <!-- state 1: NotReady/Ready/ReadyWithCorrection（起動時のAwaitingSafetyAck/
+                                             CheckingReadinessもここに含む）: 設置判定カード＋撮影ボタン2種 -->
+                                        <StackPanel Margin="0,10,0,0"
+                                                    Visibility="{Binding IsActionZonePreparing, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="アクションゾーン state1 準備中 設置判定と撮影ボタン">
+                                            <DockPanel>
+                                                <TextBlock Text="設置判定" FontWeight="Bold" FontSize="14" />
+                                                <TextBlock DockPanel.Dock="Right" Text="{Binding SetupStatusText}" FontWeight="Bold" TextAlignment="Right" />
+                                            </DockPanel>
+                                            <Border Margin="0,8,0,6" Padding="10" Background="#FFFFF7DF" BorderBrush="#FFD29B1B" BorderThickness="1">
+                                                <StackPanel>
+                                                    <TextBlock Text="予定する自動補正" FontWeight="Bold" />
+                                                    <TextBlock Text="{Binding CorrectionText}" Margin="0,4,0,0" />
+                                                </StackPanel>
+                                            </Border>
+                                            <Border Padding="10" Background="#FFFFE8E8" BorderBrush="#FFC43A3A" BorderThickness="1">
+                                                <StackPanel>
+                                                    <TextBlock Text="必要な物理調整" FontWeight="Bold" />
+                                                    <TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,4,0,0" />
+                                                </StackPanel>
+                                            </Border>
 
-                                        <Border Margin="0,10,0,0" Padding="10" Background="#FFFFE8E8" BorderBrush="#FFB3261E" BorderThickness="2" AutomationProperties.Name="赤 Blocker警告">
+                                            <!-- 主ボタン（大）: 現在のフォーカス位置のまま撮影。序列は固定（#31方針どおりAF付きを主にしない） -->
+                                            <Button Content="{Binding CaptureButtonText}" Command="{Binding CaptureCommand}" IsEnabled="{Binding CanCapture}"
+                                                    Margin="0,14,0,0" Padding="14,10" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
+                                                    AutomationProperties.Name="主ボタン 確認なしで明示構成の新しい撮影を一回開始 現在のフォーカス位置のまま撮影" />
+                                            <TextBlock Text="A→Bの順に撮影し、完了後に合成へ進みます。" Margin="0,4,0,0" Foreground="#FF56616B" FontSize="11"
+                                                       Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                            <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0" Foreground="#FF6C3B00" AutomationProperties.LiveSetting="Polite" />
+
+                                            <!-- 従ボタン（小）: 撮影+AF。各カメラの撮影直前へAF段を挿入し、NGならシャッターへ進まずfail-closed停止する -->
+                                            <Button Content="撮影+AF" Command="{Binding CaptureWithAutoFocusCommand}" IsEnabled="{Binding CanCaptureWithAutoFocus}"
+                                                    Margin="0,10,0,0" Padding="10,8" FontSize="13" HorizontalAlignment="Stretch"
+                                                    AutomationProperties.Name="従ボタン 撮影+AF 各カメラの撮影直前にAFを実行してから撮影 AF失敗時はfail-closedで停止し自動リトライしない" />
+                                            <TextBlock Text="{Binding CaptureWithAutoFocusUnavailableReason}" Margin="0,4,0,0" Foreground="#FF174E87" FontSize="11" TextWrapping="Wrap"
+                                                       Visibility="{Binding IsCaptureWithAutoFocusUnavailableReasonVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                       AutomationProperties.Name="撮影+AF 実機モードでは実行不可 理由" />
+                                        </StackPanel>
+
+                                        <!-- state 2: Capturing/Stitching: 自動進捗ストリップ -->
+                                        <StackPanel Margin="0,10,0,0"
+                                                    Visibility="{Binding IsActionZoneProcessing, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="アクションゾーン state2 自動進捗ストリップ">
+                                            <TextBlock Text="{Binding OverallStateText}" FontWeight="Bold" FontSize="14"
+                                                       AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="自動進捗 現在の全体状態" />
+                                            <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,8,0,0"
+                                                          AutomationProperties.Name="自動進捗ストリップ Live View停止からCAM-A撮影CAM-A原本検証CAM-B撮影CAM-B原本検証自動合成までの現在位置">
+                                                <ItemsControl.ItemsPanel>
+                                                    <ItemsPanelTemplate>
+                                                        <UniformGrid Columns="2" />
+                                                    </ItemsPanelTemplate>
+                                                </ItemsControl.ItemsPanel>
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Margin="0,0,4,4" Padding="6" MinHeight="56" Background="{Binding Background}" BorderBrush="{Binding BorderBrush}" BorderThickness="2">
+                                                            <StackPanel VerticalAlignment="Center">
+                                                                <TextBlock Text="{Binding Label}" FontWeight="Bold" TextAlignment="Center" FontSize="11" Foreground="{Binding Foreground}" />
+                                                                <TextBlock Text="{Binding StatusText}" Margin="0,3,0,0" TextAlignment="Center" FontSize="11" Foreground="{Binding Foreground}" />
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <TextBlock Text="{Binding ProgressWatchdogText}" Margin="0,8,0,0" Foreground="#FF56616B" FontSize="11"
+                                                       AutomationProperties.Name="watchdog残り秒 実データ未接続時は180秒契約の静的表示" />
+                                        </StackPanel>
+
+                                        <!-- state 3: Review/FailedPartial/Degraded: 結果パネル -->
+                                        <StackPanel Margin="0,10,0,0"
+                                                    Visibility="{Binding IsActionZoneReview, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    AutomationProperties.Name="アクションゾーン state3 結果パネル">
+                                            <Border Padding="10" Background="White" BorderBrush="#FFD7DDE3" BorderThickness="1">
+                                                <StackPanel>
+                                                    <TextBlock Text="結果" Style="{StaticResource SectionTitleStyle}" FontSize="16" />
+                                                    <TextBlock Text="{Binding StatusMessage}" Margin="0,8,0,10" FontWeight="Bold" AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="撮影と失敗の共通結果" />
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="96" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Text="Transaction" FontWeight="Bold" /><TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastTransactionId}" />
+                                                        <TextBlock Grid.Row="1" Text="撮影" FontWeight="Bold" /><TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureResult}" />
+                                                        <TextBlock Grid.Row="2" Text="保持原画像" FontWeight="Bold" /><TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RetainedOriginals}" />
+                                                        <TextBlock Grid.Row="3" Text="{Binding ProcessingResultLabel}" FontWeight="Bold" /><TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding StitchResult}" />
+                                                        <TextBlock Grid.Row="4" Text="保存" FontWeight="Bold" /><TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding ExportResult}" />
+                                                        <TextBlock Grid.Row="5" Text="出力先" FontWeight="Bold" /><TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastExportPath}" />
+                                                    </Grid>
+                                                    <WrapPanel Margin="0,10,0,0">
+                                                        <Button Content="fixed-localへ明示export" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}" AutomationProperties.Name="確認済み単体原画像または合成結果を明示保存" />
+                                                        <Button Content="再合成（別job）" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}" />
+                                                        <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}" AutomationProperties.Name="read-only readiness再検査" />
+                                                    </WrapPanel>
+                                                    <Expander Header="技術情報（error code・ログ位置）" Margin="0,6,0,0">
+                                                        <TextBlock Text="{Binding TechnicalDetail}" Padding="8" Background="#FFF1F3F5" />
+                                                    </Expander>
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+
+                                        <!-- 警告3段カード + NO AUTO RETRY: 状態に関わらずアクションゾーン下の現在の位置のまま -->
+                                        <Border Margin="0,12,0,0" Padding="10" Background="#FFFFE8E8" BorderBrush="#FFB3261E" BorderThickness="2" AutomationProperties.Name="赤 Blocker警告">
                                             <StackPanel>
                                                 <TextBlock Text="赤 / Blocker" FontWeight="Bold" Foreground="#FF8E1712" />
                                                 <TextBlock Text="{Binding BlockerText}" Margin="0,4,0,0" AutomationProperties.LiveSetting="Assertive" />

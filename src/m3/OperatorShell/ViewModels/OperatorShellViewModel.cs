@@ -66,6 +66,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
     private readonly AsyncRelayCommand _captureCommand;
+    private readonly AsyncRelayCommand _captureWithAutoFocusCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
     private readonly AsyncRelayCommand _prepareNewCaptureCommand;
     private readonly RelayCommand _acceptSafetyCommand;
@@ -126,6 +127,14 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// しない" contract in docs/OPERATOR_UI_SPEC.md.</summary>
     private readonly Dictionary<string, double> _focusPositionValues = new(StringComparer.Ordinal);
     private bool _isAutoFocusRunning;
+    /// <summary>True only while the issue #33 "撮影+AF" pre-capture AF gate is running (the
+    /// stage between the button press and the point where the unchanged existing capture flow
+    /// — <see cref="RunCaptureAsync"/> / <see cref="RunFormalDualCameraCaptureAsync"/> — is
+    /// invoked). Folded into <see cref="CanCapture"/> so the primary capture button and this
+    /// command cannot both run at once, mirroring the standard operation order's "直ちに...全
+    /// 競合操作をロック" intent for the small window before <see cref="IsBusy"/> itself would
+    /// otherwise be set by the downstream flow.</summary>
+    private bool _isPreCaptureAutoFocusRunning;
     private bool _isPeakingEnabled;
     private FocusExecutionResult? _lastFocusResult;
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
@@ -188,6 +197,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _acceptSafetyCommand = new RelayCommand(AcceptSafety, () => !SafetyAcknowledged && !IsBusy);
         _declineSafetyCommand = new RelayCommand(DeclineSafety, () => !SafetyAcknowledged && !IsBusy);
         _captureCommand = new AsyncRelayCommand(() => RunCaptureAsync("正常完了"), () => CanCapture, ShowUnexpectedFailure);
+        _captureWithAutoFocusCommand = new AsyncRelayCommand(() => RunCaptureWithAutoFocusAsync("正常完了"), () => CanCaptureWithAutoFocus, ShowUnexpectedFailure);
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
         _prepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, ShowUnexpectedFailure);
         _toggleLiveViewCommand = new RelayCommand(ToggleLiveView, () => CanUseLiveView);
@@ -227,9 +237,21 @@ public sealed class OperatorShellViewModel : ObservableObject
     ];
     public ObservableCollection<ProgressStepViewModel> ProgressSteps { get; }
 
+    /// <summary>Issue #33 アクションゾーン state 2 (自動進捗ストリップ) の watchdog表示。この
+    /// シェルのSIMULATED経路（<see cref="ISimulatedTransactionService"/>直結、または
+    /// TestSynthetic経由の<see cref="IDualCameraProductFlow"/>）はwatchdog残り秒の実測値を一切
+    /// 保持しない — 180秒dispatch watchdogはHardwareDual専用の契約（
+    /// <c>src/m3/Foundation/DualCamera/DualHardwareCapture.cs</c>）であり、VMへ公開されていない。
+    /// 存在しない値をカウントダウン風に捏造しないため、実データがない今は契約値の静的表示に
+    /// 留める。1台構成にはwatchdog契約自体が存在しないため対象外と明記する。</summary>
+    public string ProgressWatchdogText => IsSingleCameraMode
+        ? "watchdog: 1台構成では対象外"
+        : "watchdog: 180秒契約（残り秒の実データは未接続のため静的表示・カウントダウンはしません）";
+
     public ICommand AcceptSafetyCommand => _acceptSafetyCommand;
     public ICommand DeclineSafetyCommand => _declineSafetyCommand;
     public ICommand CaptureCommand => _captureCommand;
+    public ICommand CaptureWithAutoFocusCommand => _captureWithAutoFocusCommand;
     public ICommand DiagnosticCommand => _diagnosticCommand;
     public ICommand PrepareNewCaptureCommand => _prepareNewCaptureCommand;
     public ICommand ToggleLiveViewCommand => _toggleLiveViewCommand;
@@ -290,9 +312,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string SafetyAckText => SafetyAcknowledged ? "同意済み（アプリ終了時に破棄）" : "未同意 — 撮影禁止";
     public string ActivityText => IsBusy ? "操作をロック中" : "操作受付中";
     public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
-    public bool CanChangeOperatingMode => !IsBusy && !IsLiveViewActive &&
+    public bool CanChangeOperatingMode => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
-    public bool CanSelectCamera => !IsBusy && !IsLiveViewActive &&
+    public bool CanSelectCamera => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
     public bool CanChangeExportDirectory => !IsBusy;
     public string OperatingModeDescription => IsSingleCameraMode
@@ -332,12 +354,36 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsStageCompositePreviewMode));
                 OnPropertyChanged(nameof(StageReviewBadgeText));
                 OnPropertyChanged(nameof(ReadyStatusChipText));
+                OnPropertyChanged(nameof(IsActionZonePreparing));
+                OnPropertyChanged(nameof(IsActionZoneProcessing));
+                OnPropertyChanged(nameof(IsActionZoneReview));
                 RaiseStageFrameProperties();
                 RaiseFocusPanelProperties();
                 RecalculateAvailability();
             }
         }
     }
+
+    /// <summary>Issue #33 アクションゾーン state 1 (設置判定カード＋撮影ボタン2種): every
+    /// pre-capture state, including the two states that precede readiness evaluation itself
+    /// (<see cref="OperatorUiState.AwaitingSafetyAck"/>/<see cref="OperatorUiState.CheckingReadiness"/>).
+    /// The issue's own state table only enumerates NotReady/Ready/ReadyWithCorrection for this
+    /// slot, but the action zone must show *something* in every <see cref="OperatorUiState"/>
+    /// value — folding these two earliest states in here (rather than leaving a fourth, unlisted
+    /// gap) matches their existing display today: a disabled capture button with
+    /// <see cref="CaptureDisabledReason"/> explaining why (未同意, checking, etc.), which is
+    /// exactly this state's shape. ※要確認: Designer should confirm this reading if a future spec
+    /// revision wants a distinct fourth "起動中" treatment instead.</summary>
+    public bool IsActionZonePreparing =>
+        UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or
+            OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
+
+    /// <summary>Issue #33 アクションゾーン state 2 (自動進捗ストリップ)。</summary>
+    public bool IsActionZoneProcessing => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
+
+    /// <summary>Issue #33 アクションゾーン state 3 (結果パネル)。</summary>
+    public bool IsActionZoneReview =>
+        UiState is OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded;
 
     public string SelectedOperatingMode
     {
@@ -942,6 +988,102 @@ public sealed class OperatorShellViewModel : ObservableObject
         IsAutoFocusRunning = false;
     }
 
+    /// <summary>Issue #33's "撮影+AF" 従ボタン: runs a SIMULATED pre-capture AF check for every
+    /// camera <see cref="CurrentCapturePlan"/> requires (A→B順, per docs/OPERATOR_UI_SPEC.md's
+    /// 標準操作順 5), then — only if every camera converges — calls the unchanged existing capture
+    /// entry point (<see cref="RunCaptureAsync"/>) exactly as the primary <see cref="CaptureCommand"/>
+    /// does. AF is deliberately prepended in front of the existing flow rather than woven into it
+    /// (a scoped simplification directed by the issue's own contract text: "撮影シーケンス・合成
+    /// ロジック自体を変更しない…AF段を前置してから既存フローを呼ぶ構造にする"), so the spec's more
+    /// precise technical description — this AF runs after each camera's own Live View stop, as a
+    /// phase-detection AF — is intentionally not modeled: this method's AF stage runs once, before
+    /// the (unmodified) flow performs its own single Live View stop. Any convergence failure stops
+    /// here with no shutter ever fired (fail-closed, no automatic retry) and never reaches
+    /// <see cref="RunCaptureAsync"/>.</summary>
+    private async Task RunCaptureWithAutoFocusAsync(string scenario)
+    {
+        if (!CanCaptureWithAutoFocus)
+        {
+            return;
+        }
+
+        var capturePlan = CurrentCapturePlan;
+        _isPreCaptureAutoFocusRunning = true;
+        RaisePreCaptureAutoFocusGateProperties();
+        var allFocused = true;
+        try
+        {
+            StatusMessage = "撮影+AF: 撮影直前AFを実行しています。合焦を確認するまでシャッターは切りません。";
+            var afSummaries = new List<string>();
+            foreach (var alias in capturePlan.RequiredCameraAliases)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(150), _lifetimeToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var afResult = SimulatePreCaptureAutoFocus(alias);
+                RecordPreCaptureAutoFocusOutcome(afResult);
+                afSummaries.Add($"{alias}:{(afResult.Success ? "合焦OK" : "合焦NG")}");
+                OnPropertyChanged(nameof(FocusResultText));
+                OnPropertyChanged(nameof(CameraAFocusStatusText));
+                OnPropertyChanged(nameof(CameraBFocusStatusText));
+
+                if (!afResult.Success)
+                {
+                    allFocused = false;
+                    UiState = OperatorUiState.FailedPartial;
+                    CaptureResult = $"未実行（{alias} 撮影直前AF NG）";
+                    TechnicalDetail = $"error code: PreCaptureAutoFocusFailed / camera: {alias} / capture calls: 0 / automatic retry count: 0 / 撮影+AF: {string.Join(" / ", afSummaries)}";
+                    StatusMessage = $"撮影+AF: {alias}の撮影直前AFがNGのため、シャッターを実行せずFailedPartialで停止しました。{NoRetryMessage(capturePlan)}";
+                    break;
+                }
+            }
+
+            if (allFocused)
+            {
+                TechnicalDetail = $"error code: なし / 撮影+AF: {string.Join(" / ", afSummaries)}";
+            }
+        }
+        finally
+        {
+            _isPreCaptureAutoFocusRunning = false;
+            RaisePreCaptureAutoFocusGateProperties();
+            RebuildReadiness(preserveOutcomeState: !allFocused);
+        }
+
+        if (allFocused)
+        {
+            await RunCaptureAsync(scenario).ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>SIMULATED stand-in for the 撮影+AF pre-capture phase-detection AF check (docs/
+    /// OPERATOR_UI_SPEC.md 標準操作順 5): unlike <see cref="ExecuteAutoFocusAsync"/> (contrast AF,
+    /// which requires <paramref name="alias"/> to currently be the live-streaming camera), this
+    /// does not require Live View to be active on <paramref name="alias"/> — matching the spec's
+    /// description of this AF running after Live View has stopped. It reuses whatever blur radius
+    /// was last recorded for that alias while it *was* live (defaulting to sharp/0 — this shell's
+    /// existing "no data recorded means sharp" convention — when the camera was never live-ticked),
+    /// so the same 合焦NG scenario used for the Focus panel's "AF実行" button (the blur-to-focus
+    /// ramp pattern on the live camera) also exercises a 撮影+AF failure.</summary>
+    private FocusExecutionResult SimulatePreCaptureAutoFocus(string alias)
+    {
+        var blurRadius = _lastLiveFrameBlurRadius.TryGetValue(alias, out var radius) ? radius : 0.0;
+        var success = blurRadius <= SharpBlurRadiusThreshold;
+        var result = new FocusExecutionResult(alias, success, DateTimeOffset.Now, TargetX, TargetY);
+        _lastFocusResult = result;
+        if (success)
+        {
+            _focusFixed[alias] = true;
+        }
+        return result;
+    }
+
     private void StepFocus(double delta)
     {
         if (!CanUseFocusPanel)
@@ -993,6 +1135,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanSwitchLiveCameraToTargetDomain));
         OnPropertyChanged(nameof(FocusPositionValue));
         OnPropertyChanged(nameof(FocusPositionText));
+        OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+        OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        NotifyAllCommands();
+    }
+
+    /// <summary>Refreshes every binding gated by <see cref="_isPreCaptureAutoFocusRunning"/> —
+    /// called when issue #33's "撮影+AF" pre-capture AF gate starts and ends, mirroring how
+    /// <see cref="IsBusy"/>'s own setter refreshes the equivalent set of dependent bindings.</summary>
+    private void RaisePreCaptureAutoFocusGateProperties()
+    {
+        OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+        OnPropertyChanged(nameof(CaptureDisabledReason));
+        OnPropertyChanged(nameof(CanChangeOperatingMode));
+        OnPropertyChanged(nameof(CanSelectCamera));
         NotifyAllCommands();
     }
 
@@ -1069,13 +1226,16 @@ public sealed class OperatorShellViewModel : ObservableObject
             Current: { FailureCode: DualCameraFailureCode.AgentResponseUnknown },
         };
 
-    public bool CanCapture => HasRecoverableHardwareDualTransaction ||
+    public bool CanCapture => !_isPreCaptureAutoFocusRunning &&
+        (HasRecoverableHardwareDualTransaction ||
         (_availability.Capture.Allowed &&
         (IsSingleCameraMode || _dualCameraFlow is null ||
             (_dualCameraFlow.IdentitySnapshot.IsReady &&
              (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
-              _hardwareDualRequestProvider is not null))));
-    public string CaptureDisabledReason => CanCapture
+              _hardwareDualRequestProvider is not null)))));
+    public string CaptureDisabledReason => _isPreCaptureAutoFocusRunning
+        ? "撮影+AF: 各カメラの撮影直前AFを実行中です。完了までお待ちください。"
+        : CanCapture
         ? HasRecoverableHardwareDualTransaction
             ? "既存transactionの結果だけを再照会します。新規撮影は開始しません。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
@@ -1085,6 +1245,19 @@ public sealed class OperatorShellViewModel : ObservableObject
               _hardwareDualRequestProvider is null
                 ? "HardwareDual approved profiles and explicit operator confirmations are unavailable — 撮影禁止"
             : _availability.Capture.DisabledReason;
+
+    /// <summary>Issue #33 従ボタン「撮影+AF」のゲート。撮影可否そのものは<see cref="CanCapture"/>
+    /// を完全に共有し、それに加えて#31の実機フォーカスゲート（<see cref="IsFocusPanelAvailable"/>）
+    /// を要求する。HardwareDualでは常にfalseになり、#35 Option Aの「実機モードでは撮影+AFを実行不可」
+    /// をこのVMの外へ一切コマンドを出さずに満たす。</summary>
+    public bool CanCaptureWithAutoFocus => CanCapture && IsFocusPanelAvailable;
+
+    /// <summary>主ボタンは押せる（<see cref="CanCapture"/>）のに「撮影+AF」だけがHardwareDualゲート
+    /// で無効な場合だけ表示する、撮影+AF専用の理由行。両方とも無効なときは共通の
+    /// <see cref="CaptureDisabledReason"/> が既に理由を説明しているため、二重表示しない。</summary>
+    public bool IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !IsFocusPanelAvailable;
+
+    public string CaptureWithAutoFocusUnavailableReason => FocusPanelUnavailableReason;
     public bool CanUseLiveView => _availability.LiveView.Allowed;
     public bool CanExport => _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
@@ -1845,6 +2018,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             hasExportableResult,
             canRestitch);
         OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+        OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
         OnPropertyChanged(nameof(CaptureAvailabilityText));
         OnPropertyChanged(nameof(ReadyStatusChipText));
         OnPropertyChanged(nameof(CaptureDisabledReason));
@@ -1964,6 +2139,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _acceptSafetyCommand.NotifyCanExecuteChanged();
         _declineSafetyCommand.NotifyCanExecuteChanged();
         _captureCommand.NotifyCanExecuteChanged();
+        _captureWithAutoFocusCommand.NotifyCanExecuteChanged();
         _diagnosticCommand.NotifyCanExecuteChanged();
         _prepareNewCaptureCommand.NotifyCanExecuteChanged();
         _toggleLiveViewCommand.NotifyCanExecuteChanged();

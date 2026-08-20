@@ -53,7 +53,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 42/42 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 46/46 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -108,6 +108,14 @@ try {
     }
     $peakingRendererPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Simulated/FocusPeakingOverlayRenderer.cs'
     Assert-Condition (Test-Path -LiteralPath $peakingRendererPath -PathType Leaf) 'FocusPeakingOverlayRenderer.cs must exist to render the preview-only focus peaking overlay (issue #31).'
+
+    foreach ($marker in @('CaptureWithAutoFocusCommand', 'CanCaptureWithAutoFocus', 'RunCaptureWithAutoFocusAsync', 'SimulatePreCaptureAutoFocus', 'IsActionZonePreparing', 'IsActionZoneProcessing', 'IsActionZoneReview', 'ProgressWatchdogText', 'RecordPreCaptureAutoFocusOutcome')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required action zone / 撮影+AF marker (issue #33): $marker"
+    }
+    foreach ($marker in @('アクションゾーン 状態駆動 設置判定撮影 自動進捗 結果', '従ボタン 撮影+AF', 'A→Bの順に撮影し、完了後に合成へ進みます', 'アクションゾーン state1 準備中 設置判定と撮影ボタン', 'アクションゾーン state2 自動進捗ストリップ', 'アクションゾーン state3 結果パネル')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required action zone binding/marker (issue #33): $marker"
+    }
+    Assert-Condition (-not $windowText.Contains('アクションゾーン 撮影と結果 暫定配置')) 'Issue #33 must replace the provisional single-block アクションゾーン layout with the state-driven 3-way one.'
 
     [xml]$hardwareWindowXml = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath
