@@ -121,6 +121,24 @@ public partial class MainWindow : Window
         }
     }
 
+    // メニューバー（issue #34）の code-behind ハンドラ。「保存先を指定」「技術情報」
+    // 「バージョン」「終了」はVMへ新しいコマンド/状態を追加しない純粋なUI操作（既存の
+    // 常時表示フィールドへフォーカスする・既存の読み取り専用テキストをダイアログで見せる・
+    // ウィンドウを閉じる）のため、既存のドラッグハンドラと同じくcode-behindに留める。
+    private void FocusExportDirectory_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        FixedLocalExportDirectoryTextBox.Focus();
+        FixedLocalExportDirectoryTextBox.SelectAll();
+    }
+
+    private void ShowTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs) =>
+        MessageBox.Show(this, _viewModel.TechnicalDetail, "技術情報（error code・ログ位置）", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void ShowVersion_Click(object sender, RoutedEventArgs eventArgs) =>
+        MessageBox.Show(this, OperatorShellViewModel.AppVersionText, "バージョン", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void ExitMenuItem_Click(object sender, RoutedEventArgs eventArgs) => Close();
+
     private void StageDragHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs) =>
         BeginTargetDrag(sender, eventArgs, StageDisplayArea, _viewModel.MoveTargetByStageDrag);
 

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
@@ -143,6 +144,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool _isTombOverlayEnabled;
     private bool _isOverlapBandOverlayEnabled = true;
     private bool _isSafeMarginOverlayEnabled;
+    /// <summary>issue #34 表示(V)メニューの「傾き読み値の表示切替」トグル。傾き常駐行は#32で
+    /// 追加済みの既存表示のため、既定値はON（<see cref="IsOverlapBandOverlayEnabled"/>と同じ
+    /// 理由で、新規トグルが既存表示を黙って隠さないようにする）。</summary>
+    private bool _isTiltReadingVisible = true;
     private string _tiltToleranceInputText = string.Empty;
     private double? _tiltToleranceDegrees;
     private FocusExecutionResult? _lastFocusResult;
@@ -230,6 +235,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string BannerText => _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
         ? HardwareDualPendingBanner
         : SimulationBanner;
+
+    /// <summary>ヘルプ(H)メニューの「バージョン」項目用（issue #34）。実装時点でセマンティック
+    /// バージョンの運用ルールは未確定のため、独自の番号を捏造せずビルド済みアセンブリのメタ
+    /// データをそのまま表示する。</summary>
+    public static string AppVersionText =>
+        $"A0 Camera Stitcher M3 OperatorShell — v{Assembly.GetExecutingAssembly().GetName().Version}";
     public IReadOnlyList<string> OperatingModeOptions { get; } = [SingleModeLabel, DualModeLabel];
     public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A", "CAM-B"];
     public IReadOnlyList<string> ReadinessDemoOptions { get; } = ["補正不要", "自動補正範囲内", "物理調整が必要", "CAM-A未接続", "CAM-B未接続", "カード状態要確認"];
@@ -410,6 +421,9 @@ public sealed class OperatorShellViewModel : ObservableObject
 
             SelectedDiagnosticScenario = "正常完了";
             OnPropertyChanged(nameof(IsSingleCameraMode));
+            OnPropertyChanged(nameof(IsSingleCameraModeChecked));
+            OnPropertyChanged(nameof(IsDualCameraModeChecked));
+            OnPropertyChanged(nameof(DualCameraIdentityStatusText));
             OnPropertyChanged(nameof(OperatingModeDescription));
             OnPropertyChanged(nameof(CaptureButtonText));
             OnPropertyChanged(nameof(CameraSelectionLabel));
@@ -424,6 +438,48 @@ public sealed class OperatorShellViewModel : ObservableObject
             RaiseFocusPanelProperties();
             ResetProgress(CurrentCapturePlan);
             RebuildReadiness();
+        }
+    }
+
+    /// <summary>カメラ(C)メニューの「運用構成」サブメニュー（issue #34）を、<see cref="SelectedOperatingMode"/>
+    /// と同じ一意選択の2つのチェック可能<see cref="System.Windows.Controls.MenuItem"/>として
+    /// バインドするための補助プロパティ。<see cref="System.Windows.Controls.MenuItem"/>には
+    /// <see cref="System.Windows.Controls.RadioButton.GroupName"/>のような相互排他の仕組みが
+    /// ないため、排他はこのプロパティのペア自体が担う: 読み取りは<see cref="IsSingleCameraMode"/>
+    /// をそのまま反映し、<c>true</c>への書き込みだけが<see cref="SelectedOperatingMode"/>を
+    /// 切り替える（もう一方は連動して自動的にfalseへ通知される）。ユーザーが選択中の項目を
+    /// 直接<c>false</c>へ外そうとした場合は無視し、WPFのローカル表示だけが先行して不一致に
+    /// ならないよう現在値を再通知して戻す。</summary>
+    public bool IsSingleCameraModeChecked
+    {
+        get => IsSingleCameraMode;
+        set
+        {
+            if (value)
+            {
+                SelectedOperatingMode = SingleModeLabel;
+            }
+            else
+            {
+                OnPropertyChanged(nameof(IsSingleCameraModeChecked));
+            }
+        }
+    }
+
+    /// <summary><see cref="IsSingleCameraModeChecked"/>の対（DualCamera側）。</summary>
+    public bool IsDualCameraModeChecked
+    {
+        get => !IsSingleCameraMode;
+        set
+        {
+            if (value)
+            {
+                SelectedOperatingMode = DualModeLabel;
+            }
+            else
+            {
+                OnPropertyChanged(nameof(IsDualCameraModeChecked));
+            }
         }
     }
 
@@ -688,6 +744,43 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private double LoupeZoomFactor => SelectedLoupeZoom == LoupeZoom200 ? 2.0 : 1.0;
 
+    /// <summary>表示(V)メニューの「拡大エリア倍率」サブメニュー（issue #34）を、
+    /// <see cref="SelectedLoupeZoom"/>と同じ一意選択の2つのチェック可能MenuItemペアとして
+    /// バインドするための補助プロパティ。<see cref="IsSingleCameraModeChecked"/>と同じ理由・
+    /// 同じ再通知パターンを使う。</summary>
+    public bool IsLoupeZoom100Checked
+    {
+        get => SelectedLoupeZoom == LoupeZoom100;
+        set
+        {
+            if (value)
+            {
+                SelectedLoupeZoom = LoupeZoom100;
+            }
+            else
+            {
+                OnPropertyChanged(nameof(IsLoupeZoom100Checked));
+            }
+        }
+    }
+
+    /// <summary><see cref="IsLoupeZoom100Checked"/>の対（200%側）。</summary>
+    public bool IsLoupeZoom200Checked
+    {
+        get => SelectedLoupeZoom == LoupeZoom200;
+        set
+        {
+            if (value)
+            {
+                SelectedLoupeZoom = LoupeZoom200;
+            }
+            else
+            {
+                OnPropertyChanged(nameof(IsLoupeZoom200Checked));
+            }
+        }
+    }
+
     /// <summary>Which camera alias the loupe currently crops. Mirrors the stage's own mode
     /// gating: a single-camera live stage mode (CAM-A live / CAM-B live) always shows that one
     /// camera; composite preview and Review split left/right by <see cref="IsTargetOnLiveSide"/>,
@@ -844,6 +937,15 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         get => _isSafeMarginOverlayEnabled;
         set { if (SetProperty(ref _isSafeMarginOverlayEnabled, value)) OnPropertyChanged(nameof(IsSafeMarginOverlayVisible)); }
+    }
+
+    /// <summary>表示(V)メニューの「傾き読み値の表示」トグル（issue #34）。ステージ下部の傾き
+    /// 読み値常駐行（#32で追加済み）自体の表示・非表示だけを切り替える — 検出結果や許容範囲の
+    /// 判定ロジックには一切触れない、純粋な表示トグル。</summary>
+    public bool IsTiltReadingVisible
+    {
+        get => _isTiltReadingVisible;
+        set => SetProperty(ref _isTiltReadingVisible, value);
     }
 
     public bool IsGridOverlayVisible => IsGridOverlayEnabled && !IsStageProcessingPlaceholder;
@@ -1405,6 +1507,16 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !IsFocusPanelAvailable;
 
     public string CaptureWithAutoFocusUnavailableReason => FocusPanelUnavailableReason;
+    /// <summary>カメラ(C)メニューの「identity状態」項目用（issue #34）の読み取り専用表示。
+    /// <see cref="CaptureDisabledReason"/>が既に読んでいる同じ<see cref="IDualCameraProductFlow.IdentitySnapshot"/>
+    /// を専用の表示文字列として公開するだけで、新しい業務ロジックは追加しない — 撮影失敗を
+    /// 待たずにidentity状態を確認できるようにする目的のみ。</summary>
+    public string DualCameraIdentityStatusText => _dualCameraFlow is null
+        ? "DualCamera未接続"
+        : IsSingleCameraMode
+            ? "1台構成のため対象外"
+            : $"identity: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
+
     public bool CanUseLiveView => _availability.LiveView.Allowed;
     public bool CanExport => _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
@@ -2182,7 +2294,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void RaiseReadinessProperties()
     {
-        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText) }) OnPropertyChanged(name);
+        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText), nameof(DualCameraIdentityStatusText) }) OnPropertyChanged(name);
     }
 
     /// <summary>
@@ -2232,6 +2344,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanAdjustTarget));
         OnPropertyChanged(nameof(LoupePeakingOverlay));
         OnPropertyChanged(nameof(IsLoupePeakingOverlayVisible));
+        OnPropertyChanged(nameof(IsLoupeZoom100Checked));
+        OnPropertyChanged(nameof(IsLoupeZoom200Checked));
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)
