@@ -11,6 +11,17 @@ namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
 public sealed record CameraSettingRow(string Setting, string RequiredProfile, string CameraA, string CameraB);
 
+/// <summary>One completed AF execution (issue #31 focus panel): which camera it ran on, its
+/// SIMULATED convergence result, when it ran, and the target reticle position used as the AF
+/// area — the fields the panel needs to show "合焦OK/NG・実行時刻・使用した□位置" per
+/// docs/OPERATOR_UI_SPEC.md's フォーカス操作 section.</summary>
+public sealed record FocusExecutionResult(
+    string CameraAlias,
+    bool Success,
+    DateTimeOffset ExecutedAt,
+    double TargetX,
+    double TargetY);
+
 public sealed class OperatorShellViewModel : ObservableObject
 {
     public const string SimulationBanner = "SIMULATED / 実機未接続";
@@ -36,6 +47,18 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// the same display area", not an additional transform on top of the crop.</summary>
     private const double LoupeBaseCropFraction = 0.32;
 
+    /// <summary>Blur radius (see <see cref="SimulatedLiveViewFrame.BlurRadius"/>) at or below
+    /// which SIMULATED AF execution reports 合焦OK. Always 0 outside
+    /// <see cref="SimulatedFramePattern.BlurToFocusTransition"/>, so AF only has a chance to
+    /// report NG while that pattern is selected and mid-ramp.</summary>
+    private const double SharpBlurRadiusThreshold = 1.0;
+
+    private const double MfCoarseStep = 10.0;
+    private const double MfFineStep = 2.0;
+    private const double MinFocusPositionValue = 0.0;
+    private const double MaxFocusPositionValue = 100.0;
+    private const double DefaultFocusPositionValue = 50.0;
+
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
@@ -54,6 +77,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly RelayCommand _showSetupCommand;
     private readonly RelayCommand _showCameraSettingsCommand;
     private readonly RelayCommand _showDiagnosticsCommand;
+    private readonly AsyncRelayCommand _autoFocusCommand;
+    private readonly RelayCommand _mfCoarseBackwardCommand;
+    private readonly RelayCommand _mfCoarseForwardCommand;
+    private readonly RelayCommand _mfFineBackwardCommand;
+    private readonly RelayCommand _mfFineForwardCommand;
+    private readonly RelayCommand _togglePeakingCommand;
+    private readonly RelayCommand _switchLiveCameraToTargetDomainCommand;
 
     private CancellationToken _lifetimeToken;
     private bool _isBusy;
@@ -81,6 +111,23 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// have different real-world meaning even though both can drive the same freshness badge.</summary>
     private readonly Dictionary<string, DateTimeOffset> _lastLiveFrameTimestamps = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SimulatedLiveViewFrame> _lastLiveFrames = new(StringComparer.Ordinal);
+    /// <summary>Blur radius of the last live-ticked frame per alias (issue #31), read by AF
+    /// execution to decide 合焦OK/NG. Populated alongside <see cref="_lastLiveFrames"/> in
+    /// <see cref="ApplySimulatedFrameTick"/>; never populated for a non-live/frozen alias.</summary>
+    private readonly Dictionary<string, double> _lastLiveFrameBlurRadius = new(StringComparer.Ordinal);
+    /// <summary>Per-camera "focus fixed" state (issue #31's A:固定済/B:未固定 chips). Starts
+    /// unfixed for both cameras; a successful AF execution fixes the camera it ran on, and any
+    /// manual MF step un-fixes it again (a manual nudge invalidates the AF-then-fixed
+    /// assumption). Read by <see cref="RebuildReadiness"/> to add a Caution notice — never a
+    /// Blocker, per the "撮影のハードゲートにしない" requirement.</summary>
+    private readonly Dictionary<string, bool> _focusFixed = new(StringComparer.Ordinal) { ["CAM-A"] = false, ["CAM-B"] = false };
+    /// <summary>Per-camera MF position (issue #31), a relative dimensionless 0..100 value —
+    /// never an absolute SDK focus position, per the "フォーカス位置の絶対値スライダーは提供
+    /// しない" contract in docs/OPERATOR_UI_SPEC.md.</summary>
+    private readonly Dictionary<string, double> _focusPositionValues = new(StringComparer.Ordinal);
+    private bool _isAutoFocusRunning;
+    private bool _isPeakingEnabled;
+    private FocusExecutionResult? _lastFocusResult;
     private OperatorUiState _uiState = OperatorUiState.AwaitingSafetyAck;
     private string _statusMessage = "起動時の安全確認を行ってください。この画面は実機へ接続しません。";
     private string _technicalDetail = "error code: なし / log: ローカルsimulated journal";
@@ -150,6 +197,13 @@ public sealed class OperatorShellViewModel : ObservableObject
         _showSetupCommand = new RelayCommand(() => SelectedPage = "Setup", () => CanOpenMaintenance);
         _showCameraSettingsCommand = new RelayCommand(() => SelectedPage = "CameraSettings", () => CanOpenMaintenance);
         _showDiagnosticsCommand = new RelayCommand(() => SelectedPage = "Diagnostics", () => CanOpenMaintenance);
+        _autoFocusCommand = new AsyncRelayCommand(ExecuteAutoFocusAsync, () => CanExecuteAutoFocus, ShowUnexpectedFailure);
+        _mfCoarseBackwardCommand = new RelayCommand(() => StepFocus(-MfCoarseStep), () => CanUseFocusPanel);
+        _mfCoarseForwardCommand = new RelayCommand(() => StepFocus(MfCoarseStep), () => CanUseFocusPanel);
+        _mfFineBackwardCommand = new RelayCommand(() => StepFocus(-MfFineStep), () => CanUseFocusPanel);
+        _mfFineForwardCommand = new RelayCommand(() => StepFocus(MfFineStep), () => CanUseFocusPanel);
+        _togglePeakingCommand = new RelayCommand(() => IsPeakingEnabled = !IsPeakingEnabled, () => IsFocusPanelAvailable);
+        _switchLiveCameraToTargetDomainCommand = new RelayCommand(SwitchLiveCameraToTargetDomain, () => CanSwitchLiveCameraToTargetDomain);
         RebuildReadiness();
         ResetProgress();
     }
@@ -185,6 +239,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     public ICommand ShowSetupCommand => _showSetupCommand;
     public ICommand ShowCameraSettingsCommand => _showCameraSettingsCommand;
     public ICommand ShowDiagnosticsCommand => _showDiagnosticsCommand;
+    public ICommand AutoFocusCommand => _autoFocusCommand;
+    public ICommand MfCoarseBackwardCommand => _mfCoarseBackwardCommand;
+    public ICommand MfCoarseForwardCommand => _mfCoarseForwardCommand;
+    public ICommand MfFineBackwardCommand => _mfFineBackwardCommand;
+    public ICommand MfFineForwardCommand => _mfFineForwardCommand;
+    public ICommand TogglePeakingCommand => _togglePeakingCommand;
+    public ICommand SwitchLiveCameraToTargetDomainCommand => _switchLiveCameraToTargetDomainCommand;
 
     public bool IsBusy
     {
@@ -201,6 +262,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanSelectCamera));
                 OnPropertyChanged(nameof(CanChangeExportDirectory));
                 OnPropertyChanged(nameof(CanChangeSimulatedFramePattern));
+                RaiseFocusPanelProperties();
                 if (IsBusy)
                 {
                     // Re-announce the current value so a pattern change attempted while busy
@@ -271,6 +333,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(StageReviewBadgeText));
                 OnPropertyChanged(nameof(ReadyStatusChipText));
                 RaiseStageFrameProperties();
+                RaiseFocusPanelProperties();
                 RecalculateAvailability();
             }
         }
@@ -299,6 +362,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
             OnPropertyChanged(nameof(StageSingleLiveText));
             RaiseLoupeProperties();
+            RaiseFocusPanelProperties();
             ResetProgress(CurrentCapturePlan);
             RebuildReadiness();
         }
@@ -320,6 +384,10 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
                 OnPropertyChanged(nameof(StageSingleLiveText));
                 RaiseStageFrameProperties();
+                RaiseFocusPanelProperties();
+                OnPropertyChanged(nameof(CameraAFocusStatusText));
+                OnPropertyChanged(nameof(CameraBFocusStatusText));
+                OnPropertyChanged(nameof(FocusResultText));
                 if (IsSingleCameraMode)
                 {
                     SelectedDiagnosticScenario = "正常完了";
@@ -382,6 +450,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
                 RaiseStageFrameProperties();
+                RaiseFocusPanelProperties();
                 RebuildReadiness();
             }
         }
@@ -531,6 +600,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         if (changedX || changedY)
         {
             RaiseLoupeProperties();
+            RaiseFocusPanelProperties();
         }
     }
 
@@ -673,6 +743,257 @@ public sealed class OperatorShellViewModel : ObservableObject
 
         var targetPixel = targetFraction * imageExtent;
         return Math.Clamp((targetPixel - cropOrigin) / cropExtent, 0.0, 1.0);
+    }
+
+    // --- Focus panel (issue #31): AF execution, MF stepping, focus peaking, and per-camera
+    // fixed-state chips. UI and SIMULATED (fake backend) only, per #35 Option A — the panel is
+    // disabled with a shown reason whenever the DualCamera flow's execution environment is
+    // HardwareDual (real hardware pending human-gate approval), regardless of the operating
+    // mode selected. No real AF/MF command is ever sent; every result below is derived from
+    // this shell's own SIMULATED state (target position, blur radius of the last live-ticked
+    // frame). ---
+
+    /// <summary>False whenever the DualCamera flow was composed against real hardware
+    /// (<see cref="DualCameraExecutionEnvironment.HardwareDual"/>) — mirrors the same check
+    /// <see cref="BannerText"/> uses. The focus panel is a 撮影系操作 per docs/OPERATOR_UI_SPEC.md
+    /// and must stay invisible/disabled here until a hardware-required Issue and human gate
+    /// approve real AF/MF wiring (#35 Option A); this VM never reaches that approval, so the
+    /// gate here is unconditional for HardwareDual.</summary>
+    public bool IsFocusPanelAvailable =>
+        _dualCameraFlow?.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual;
+
+    /// <summary>Inverse of <see cref="IsFocusPanelAvailable"/>, so XAML can bind both branches
+    /// (disabled-reason panel vs. interactive panel) through the one shared
+    /// <c>BoolToVisibilityConverter</c> already used everywhere else in this window, instead of
+    /// introducing a second inverse converter.</summary>
+    public bool IsFocusPanelUnavailable => !IsFocusPanelAvailable;
+
+    public string FocusPanelUnavailableReason =>
+        "実機モードでは、承認までフォーカスパネルを無効表示とします（fail-closed）。UIとSIMULATEDだけを先行実装しており、実機へのAF・MFコマンド配線はhardware-requiredの別Issueとhuman gate承認後にだけ有効化します。";
+
+    /// <summary>The camera the focus panel operates on — always the camera currently in Live
+    /// View, since SIMULATED contrast AF (like the real D810 capability table) only makes sense
+    /// while Live View is streaming.</summary>
+    public string FocusPanelCameraAlias => SelectedCamera;
+
+    /// <summary>Which camera alias physically owns the target reticle's current position, under
+    /// a fixed left-half=CAM-A / right-half=CAM-B document split. This is deliberately NOT
+    /// <see cref="IsTargetOnLiveSide"/>: that property is screen-column-relative (whichever
+    /// alias is live is always drawn in the left column, so X&lt;0.5 always means "the column
+    /// currently showing the live feed" and does not change when the live alias is switched) —
+    /// using it here would make the one-click switch button never actually resolve the block
+    /// (switching cameras would leave the target on the same screen-column-relative side).
+    /// This property instead anchors the split to a fixed alias, mirroring the physical rig
+    /// fact that CAM-A/CAM-B each cover a fixed half of the document regardless of which one
+    /// currently has Live View open. ※要確認: like <see cref="IsTargetOnLiveSide"/>, this is a
+    /// placeholder proxy for the real A0 layout geometry (#29/#32); Architect should confirm
+    /// the fixed-alias split (rather than the live-relative one) is the correct reading for AF
+    /// domain gating once that geometry lands.</summary>
+    private string TargetDomainCameraAlias => TargetX < 0.5 ? "CAM-A" : "CAM-B";
+
+    /// <summary>True when the shared target reticle (issue #30) sits in a document half owned
+    /// by the camera that is not currently live (see <see cref="TargetDomainCameraAlias"/>). AF
+    /// cannot aim at a domain the live camera cannot see, so AF execution is disabled and a
+    /// one-click switch-to-live button for the owning camera is offered instead. Always false in
+    /// SingleCamera mode, where there is only one camera and no domain split.</summary>
+    public bool IsFocusTargetOutsideLiveCameraDomain =>
+        !IsSingleCameraMode && !string.Equals(TargetDomainCameraAlias, SelectedCamera, StringComparison.Ordinal);
+
+    public bool ShowSwitchLiveCameraButton => IsFocusPanelAvailable && IsFocusTargetOutsideLiveCameraDomain;
+
+    public bool ShowAutoFocusButton => IsFocusPanelAvailable && !IsFocusTargetOutsideLiveCameraDomain;
+
+    public string SwitchLiveCameraButtonText => $"{TargetDomainCameraAlias} live に切替";
+
+    /// <summary>Base gate shared by AF and MF: the focus panel must be available (see
+    /// <see cref="IsFocusPanelAvailable"/>), Live View must actually be streaming (contrast AF
+    /// and MF stepping both operate on the live camera), no other lock (busy / in-flight AF /
+    /// the Capturing-Stitching processing placeholder) may be active.</summary>
+    public bool CanUseFocusPanel => IsFocusPanelAvailable && IsLiveViewActive && !IsBusy && !IsAutoFocusRunning && CanAdjustTarget;
+
+    public bool CanExecuteAutoFocus => CanUseFocusPanel && !IsFocusTargetOutsideLiveCameraDomain;
+
+    /// <summary>Mirrors <see cref="CanSelectCamera"/>'s UiState condition exactly (rather than
+    /// <see cref="CanAdjustTarget"/>'s looser one) because <see cref="SwitchLiveCameraToTargetDomain"/>
+    /// relies on <c>SelectedCamera</c>'s own setter succeeding once Live View is stopped — if
+    /// this were true while <see cref="CanSelectCamera"/> could still be false (e.g. UiState is
+    /// Review with Live View re-enabled ahead of a new capture), the camera switch would
+    /// silently no-op. Also requires <see cref="CanUseLiveView"/> directly: the switch writes
+    /// <see cref="IsLiveViewActive"/> straight through (bypassing <see cref="ToggleLiveViewCommand"/>'s
+    /// own CanExecute check), so this is the only thing stopping it from turning Live View back
+    /// on while it is blocked (e.g. <c>CameraStateRequiresInspection</c>).</summary>
+    public bool CanSwitchLiveCameraToTargetDomain =>
+        IsFocusPanelAvailable && !IsSingleCameraMode && !IsBusy && !IsAutoFocusRunning && CanUseLiveView &&
+        IsFocusTargetOutsideLiveCameraDomain &&
+        UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
+
+    public bool IsAutoFocusRunning
+    {
+        get => _isAutoFocusRunning;
+        private set
+        {
+            if (SetProperty(ref _isAutoFocusRunning, value))
+            {
+                RaiseFocusPanelProperties();
+            }
+        }
+    }
+
+    public string FocusResultText => _lastFocusResult is { } result
+        ? $"{(result.Success ? "合焦OK" : "合焦NG")} / {result.CameraAlias} / {result.ExecutedAt:HH:mm:ss} / □ ({result.TargetX:F2}, {result.TargetY:F2})"
+        : "AF未実行";
+
+    /// <summary>SIMULATED contract hook for issue #33's future "撮影+AF" action-zone button:
+    /// #33 can call <see cref="RecordPreCaptureAutoFocusOutcome"/> immediately before starting a
+    /// capture to record whether pre-capture AF ran and its outcome, giving the eventual
+    /// capture flow a typed result to write into its journal (AF実行の有無と結果) and to
+    /// fail-closed before opening the shutter if AF did not converge. This VM never calls it
+    /// itself and never gates capture on it — wiring an actual "撮影+AF" button, running AF for
+    /// each required camera in sequence, and stopping before the shutter on NG is #33's scope
+    /// (see issue #31's 対象外: "「撮影」「撮影+AF」ボタン自体の設置（#33）").</summary>
+    public FocusExecutionResult? LastPreCaptureAutoFocusResult { get; private set; }
+
+    public void RecordPreCaptureAutoFocusOutcome(FocusExecutionResult result)
+    {
+        LastPreCaptureAutoFocusResult = result ?? throw new ArgumentNullException(nameof(result));
+        OnPropertyChanged(nameof(LastPreCaptureAutoFocusResult));
+    }
+
+    public double FocusPositionValue =>
+        _focusPositionValues.TryGetValue(SelectedCamera, out var value) ? value : DefaultFocusPositionValue;
+
+    public string FocusPositionText => $"{FocusPositionValue:F0} / 100（相対値・無次元・read-only表示）";
+
+    public string CameraAFocusStatusText => FormatFocusChip("CAM-A");
+    public string CameraBFocusStatusText => FormatFocusChip("CAM-B");
+
+    private string FormatFocusChip(string alias) =>
+        $"{alias}: {(_focusFixed.TryGetValue(alias, out var fixedState) && fixedState ? "固定済" : "未固定")}";
+
+    public bool IsPeakingEnabled
+    {
+        get => _isPeakingEnabled;
+        private set
+        {
+            if (SetProperty(ref _isPeakingEnabled, value))
+            {
+                RaiseStageFrameProperties();
+            }
+        }
+    }
+
+    public string PeakingButtonText => IsPeakingEnabled ? "ピーキング OFF" : "ピーキング ON";
+
+    /// <summary>Preview-only edge-highlight overlay (see <see cref="FocusPeakingOverlayRenderer"/>)
+    /// for the stage's single-live full-frame image. Null whenever peaking is off or no base
+    /// image exists — never computed unless <see cref="IsPeakingEnabled"/>, so the per-tick cost
+    /// is zero while the toggle is off.</summary>
+    public BitmapSource? StageSingleLivePeakingOverlay =>
+        IsPeakingEnabled ? FocusPeakingOverlayRenderer.BuildOverlay(StageSingleLiveImage) : null;
+    public bool IsStageSingleLivePeakingOverlayVisible => StageSingleLivePeakingOverlay is not null;
+
+    public BitmapSource? StageCompositeLivePeakingOverlay =>
+        IsPeakingEnabled ? FocusPeakingOverlayRenderer.BuildOverlay(StageCompositeLiveImage) : null;
+    public bool IsStageCompositeLivePeakingOverlayVisible => StageCompositeLivePeakingOverlay is not null;
+
+    public BitmapSource? LoupePeakingOverlay =>
+        IsPeakingEnabled ? FocusPeakingOverlayRenderer.BuildOverlay(LoupeImage) : null;
+    public bool IsLoupePeakingOverlayVisible => LoupePeakingOverlay is not null;
+
+    private async Task ExecuteAutoFocusAsync()
+    {
+        if (!CanExecuteAutoFocus)
+        {
+            return;
+        }
+
+        var alias = SelectedCamera;
+        var targetX = TargetX;
+        var targetY = TargetY;
+        IsAutoFocusRunning = true;
+        StatusMessage = $"{alias}: AF実行中です（AFエリア＝□ {targetX:F2}, {targetY:F2}）。";
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(150), _lifetimeToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+        {
+            IsAutoFocusRunning = false;
+            return;
+        }
+
+        var blurRadius = _lastLiveFrameBlurRadius.TryGetValue(alias, out var radius) ? radius : 0.0;
+        var success = blurRadius <= SharpBlurRadiusThreshold;
+        _lastFocusResult = new FocusExecutionResult(alias, success, DateTimeOffset.Now, targetX, targetY);
+        if (success)
+        {
+            _focusFixed[alias] = true;
+            StatusMessage = $"{alias}: AF実行完了 — 合焦OK。原稿撮影の運用方針どおり撮影前固定として扱います。";
+        }
+        else
+        {
+            StatusMessage = $"{alias}: AF実行完了 — 合焦NGです（ボケ→合焦遷移パターンの遷移中に実行されました）。再実行してください。";
+        }
+
+        OnPropertyChanged(nameof(FocusResultText));
+        OnPropertyChanged(nameof(CameraAFocusStatusText));
+        OnPropertyChanged(nameof(CameraBFocusStatusText));
+        RebuildReadiness(preserveOutcomeState: true);
+        IsAutoFocusRunning = false;
+    }
+
+    private void StepFocus(double delta)
+    {
+        if (!CanUseFocusPanel)
+        {
+            return;
+        }
+
+        var alias = SelectedCamera;
+        var current = _focusPositionValues.TryGetValue(alias, out var value) ? value : DefaultFocusPositionValue;
+        var updated = Math.Clamp(current + delta, MinFocusPositionValue, MaxFocusPositionValue);
+        _focusPositionValues[alias] = updated;
+        // A manual nudge after AF invalidates the "AF実行後に固定" assumption until re-confirmed.
+        _focusFixed[alias] = false;
+        OnPropertyChanged(nameof(FocusPositionValue));
+        OnPropertyChanged(nameof(FocusPositionText));
+        OnPropertyChanged(nameof(CameraAFocusStatusText));
+        OnPropertyChanged(nameof(CameraBFocusStatusText));
+        StatusMessage = $"{alias}: MFステップ {(delta > 0 ? "+" : string.Empty)}{delta:F0} を適用しました（相対値 {updated:F0}/100）。";
+        RebuildReadiness(preserveOutcomeState: true);
+    }
+
+    /// <summary>Explicit, one-click operator action (never automatic — see docs/OPERATOR_UI_SPEC.md's
+    /// 常時禁止 "ターゲット□位置によるLive Viewカメラの自動切替"): stops Live View for the
+    /// currently selected camera, selects the other camera, then restarts Live View for it, so
+    /// a single click actually lands on the camera whose domain the target reticle sits in.</summary>
+    private void SwitchLiveCameraToTargetDomain()
+    {
+        if (!CanSwitchLiveCameraToTargetDomain)
+        {
+            return;
+        }
+
+        var targetAlias = TargetDomainCameraAlias;
+        StatusMessage = $"{targetAlias} のLive Viewへ切り替えます（操作者の明示クリックのみ・自動切替ではありません）。";
+        IsLiveViewActive = false;
+        SelectedCamera = targetAlias;
+        IsLiveViewActive = true;
+    }
+
+    private void RaiseFocusPanelProperties()
+    {
+        OnPropertyChanged(nameof(FocusPanelCameraAlias));
+        OnPropertyChanged(nameof(IsFocusTargetOutsideLiveCameraDomain));
+        OnPropertyChanged(nameof(ShowSwitchLiveCameraButton));
+        OnPropertyChanged(nameof(ShowAutoFocusButton));
+        OnPropertyChanged(nameof(SwitchLiveCameraButtonText));
+        OnPropertyChanged(nameof(CanUseFocusPanel));
+        OnPropertyChanged(nameof(CanExecuteAutoFocus));
+        OnPropertyChanged(nameof(CanSwitchLiveCameraToTargetDomain));
+        OnPropertyChanged(nameof(FocusPositionValue));
+        OnPropertyChanged(nameof(FocusPositionText));
+        NotifyAllCommands();
     }
 
     // Stage frame wiring: preview-only images sourced from the SIMULATED live view frame
@@ -1116,6 +1437,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
             _lastLiveFrames[frame.CameraAlias] = frame;
             _lastLiveFrameTimestamps[frame.CameraAlias] = frame.CapturedAtUtc;
+            _lastLiveFrameBlurRadius[frame.CameraAlias] = frame.BlurRadius;
             RaiseStageFrameProperties();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -1245,7 +1567,18 @@ public sealed class OperatorShellViewModel : ObservableObject
         _lastCapturedOriginalTimestamps.Clear();
         _lastLiveFrameTimestamps.Clear();
         _lastLiveFrames.Clear();
+        _lastLiveFrameBlurRadius.Clear();
+        _focusFixed["CAM-A"] = false;
+        _focusFixed["CAM-B"] = false;
+        _focusPositionValues.Clear();
+        _lastFocusResult = null;
+        LastPreCaptureAutoFocusResult = null;
         RaiseStageFrameProperties();
+        RaiseFocusPanelProperties();
+        OnPropertyChanged(nameof(FocusResultText));
+        OnPropertyChanged(nameof(CameraAFocusStatusText));
+        OnPropertyChanged(nameof(CameraBFocusStatusText));
+        OnPropertyChanged(nameof(LastPreCaptureAutoFocusResult));
         RebuildReadiness();
         return Task.CompletedTask;
     }
@@ -1458,6 +1791,17 @@ public sealed class OperatorShellViewModel : ObservableObject
             : SelectedReadinessDemo != "CAM-B未接続";
         var cardsKnownEmpty = SelectedReadinessDemo != "カード状態要確認" && !_cameraInspectionRequired;
         var outputDirectory = Path.Combine(Path.GetTempPath(), "A0CameraStitcher", "simulated-exports");
+        // Focus-not-fixed is Caution-only, never a Blocker (撮影のハードゲートにしない):
+        // OperatorReadinessEvaluator.BuildNotices concatenates snapshot.Notices verbatim and its
+        // Blocker gate is what CanCapture ultimately checks, so a Caution severity here cannot
+        // by itself disable capture — see docs/OPERATOR_UI_SPEC.md's フォーカス操作 section.
+        var focusNotices = capturePlan.RequiredCameraAliases
+            .Where(alias => !_focusFixed.TryGetValue(alias, out var fixedState) || !fixedState)
+            .Select(alias => new OperatorNotice(
+                OperatorWarningSeverity.Caution,
+                "FocusNotFixed",
+                $"{alias}: フォーカス未固定です。AF実行後の固定、または手動調整の確認を推奨します。"))
+            .ToArray();
         _readiness = new ReadinessSnapshot
         {
             SafetyAcknowledged = SafetyAcknowledged,
@@ -1473,7 +1817,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             OutputDirectoryValid = true,
             HasActiveTransaction = IsBusy,
             CameraStateRequiresInspection = _cameraInspectionRequired,
-            Notices = [],
+            Notices = focusNotices,
         };
         RecalculateAvailability();
         if (!preserveOutcomeState && UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching))
@@ -1536,6 +1880,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(IsStageCompositeStillImageVisible));
         OnPropertyChanged(nameof(IsStageCompositeStillPlaceholderVisible));
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        OnPropertyChanged(nameof(StageSingleLivePeakingOverlay));
+        OnPropertyChanged(nameof(IsStageSingleLivePeakingOverlayVisible));
+        OnPropertyChanged(nameof(StageCompositeLivePeakingOverlay));
+        OnPropertyChanged(nameof(IsStageCompositeLivePeakingOverlayVisible));
         RaiseLoupeProperties();
     }
 
@@ -1557,6 +1905,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(LoupeMarkerRelativeY));
         OnPropertyChanged(nameof(IsTargetOverlayVisible));
         OnPropertyChanged(nameof(CanAdjustTarget));
+        OnPropertyChanged(nameof(LoupePeakingOverlay));
+        OnPropertyChanged(nameof(IsLoupePeakingOverlayVisible));
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)
@@ -1623,5 +1973,12 @@ public sealed class OperatorShellViewModel : ObservableObject
         _showSetupCommand.NotifyCanExecuteChanged();
         _showCameraSettingsCommand.NotifyCanExecuteChanged();
         _showDiagnosticsCommand.NotifyCanExecuteChanged();
+        _autoFocusCommand.NotifyCanExecuteChanged();
+        _mfCoarseBackwardCommand.NotifyCanExecuteChanged();
+        _mfCoarseForwardCommand.NotifyCanExecuteChanged();
+        _mfFineBackwardCommand.NotifyCanExecuteChanged();
+        _mfFineForwardCommand.NotifyCanExecuteChanged();
+        _togglePeakingCommand.NotifyCanExecuteChanged();
+        _switchLiveCameraToTargetDomainCommand.NotifyCanExecuteChanged();
     }
 }

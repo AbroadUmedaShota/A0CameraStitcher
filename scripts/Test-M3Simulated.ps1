@@ -53,7 +53,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 36/36 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 42/42 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -99,6 +99,15 @@ try {
     $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
     Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'
     Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')).Contains('MoveTargetByStageDrag')) 'MainWindow code-behind must wire stage drag input to the target reticle view model method.'
+
+    foreach ($marker in @('AutoFocusCommand', 'CanExecuteAutoFocus', 'IsFocusTargetOutsideLiveCameraDomain', 'IsFocusPanelAvailable', 'DualCameraExecutionEnvironment.HardwareDual', 'MfCoarseForwardCommand', 'MfFineForwardCommand', 'TogglePeakingCommand', 'FocusPeakingOverlayRenderer', 'SwitchLiveCameraToTargetDomainCommand', 'CameraAFocusStatusText', 'FocusExecutionResult', 'LastPreCaptureAutoFocusResult')) {
+        Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required focus panel marker (issue #31): $marker"
+    }
+    foreach ($marker in @('フォーカスパネル AF実行 MFステップ ピーキング 固定状態チップ 撮影系操作', 'フォーカスパネル 実機モードでは無効表示 fail-closed 理由', 'MF粗ステップ', 'MF微ステップ', 'フォーカスピーキング')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required focus panel binding/marker (issue #31): $marker"
+    }
+    $peakingRendererPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Simulated/FocusPeakingOverlayRenderer.cs'
+    Assert-Condition (Test-Path -LiteralPath $peakingRendererPath -PathType Leaf) 'FocusPeakingOverlayRenderer.cs must exist to render the preview-only focus peaking overlay (issue #31).'
 
     [xml]$hardwareWindowXml = Get-Content -Raw -LiteralPath $hardwareWindowPath
     $hardwareWindowText = Get-Content -Raw -LiteralPath $hardwareWindowPath
