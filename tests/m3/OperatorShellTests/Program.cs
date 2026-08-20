@@ -403,7 +403,29 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL operator shell renders on tick, drops stale-generation/marker frames without throwing, and reverts rejected pattern changes: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {34 - failures.Count}/34 passed.");
+try
+{
+    TargetReticleDragMovesClampAndScale();
+    Console.WriteLine("PASS target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds");
+}
+catch (Exception exception)
+{
+    failures.Add("target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds");
+    Console.Error.WriteLine($"FAIL target reticle drag applies stage/loupe delta scaling and clamps to the 0..1 stage bounds: {exception}");
+}
+
+try
+{
+    await LoupeTracksTargetSideAndFreshnessBadgeAsync();
+    Console.WriteLine("PASS loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness");
+}
+catch (Exception exception)
+{
+    failures.Add("loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness");
+    Console.Error.WriteLine($"FAIL loupe follows the target's composite side, shows the not-yet-acquired placeholder, and badges a frozen frame's freshness: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {36 - failures.Count}/36 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3345,6 +3367,124 @@ static async Task SimulatedFramePumpWiringAsync()
         Check.False(
             string.Equals(statusBeforeInvalidFrame, viewModel.StatusMessage, StringComparison.Ordinal),
             "An invalid-marker frame must be surfaced through StatusMessage instead of silently doing nothing or throwing.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static void TargetReticleDragMovesClampAndScale()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-TargetReticleTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        Check.True(IsClose(0.5, viewModel.TargetX), "The target reticle must default to the stage center on X.");
+        Check.True(IsClose(0.5, viewModel.TargetY), "The target reticle must default to the stage center on Y.");
+
+        // Stage drag: a direct (coarse) move — the normalized delta is applied unscaled.
+        viewModel.MoveTargetByStageDrag(0.2, -0.1);
+        Check.True(IsClose(0.7, viewModel.TargetX), "A stage drag must move the target by the full normalized delta on X.");
+        Check.True(IsClose(0.4, viewModel.TargetY), "A stage drag must move the target by the full normalized delta on Y.");
+
+        // Loupe drag: the same normalized delta must land only 1/4 as far — issue #30's
+        // "ルーペ表示内のドラッグ = 細かい移動" contract.
+        viewModel.SetTargetPosition(0.5, 0.5);
+        viewModel.MoveTargetByLoupeDrag(0.2, -0.1);
+        Check.True(IsClose(0.55, viewModel.TargetX), "A loupe drag must scale the delta by TargetFineDragScale on X.");
+        Check.True(IsClose(0.475, viewModel.TargetY), "A loupe drag must scale the delta by TargetFineDragScale on Y.");
+
+        // Boundary: dragging past either edge must clamp to 0/1, never overshoot or wrap.
+        viewModel.SetTargetPosition(0.95, 0.05);
+        viewModel.MoveTargetByStageDrag(1.0, -1.0);
+        Check.True(IsClose(1.0, viewModel.TargetX), "A drag past the right edge must clamp to 1.0, not overshoot.");
+        Check.True(IsClose(0.0, viewModel.TargetY), "A drag past the top edge must clamp to 0.0, not go negative.");
+
+        // Boundary: an out-of-range explicit placement must clamp the same way.
+        viewModel.SetTargetPosition(-5, 5);
+        Check.True(IsClose(0.0, viewModel.TargetX), "An explicit negative position must clamp to 0.0.");
+        Check.True(IsClose(1.0, viewModel.TargetY), "An explicit position past 1.0 must clamp to 1.0.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    static bool IsClose(double expected, double actual) => Math.Abs(expected - actual) < 1e-9;
+}
+
+static async Task LoupeTracksTargetSideAndFreshnessBadgeAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-LoupeSideTests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(root),
+            dualCameraFlow: null,
+            liveViewFramePump: pump,
+            liveViewFrameSource: frameSource);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+
+        // With no frame ever supplied anywhere, the loupe must show its "not yet acquired"
+        // placeholder rather than an empty-but-"available" image (the #30 "誤認させない" contract).
+        Check.True(viewModel.IsLoupePlaceholderVisible, "With no frame ever supplied, the loupe must show its placeholder.");
+        Check.False(viewModel.IsLoupeImageVisible, "With no frame ever supplied, the loupe must not claim an image is available.");
+
+        // CAM-A live (SelectedCamera defaults to CAM-A): move the target onto the composite
+        // preview's left (live) side — TargetX defaults to the exact 0.5 center, which
+        // IsTargetOnLiveSide resolves to the *still* side, so this must be explicit — then
+        // tick one frame and confirm the loupe picks it up live, with no freshness/STILL
+        // badge (nothing is frozen yet).
+        viewModel.SetTargetPosition(0.2, 0.5);
+        viewModel.ToggleLiveViewCommand.Execute(null);
+        var cameraAGeneration = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-A", SimulatedFramePattern.FrontalDocument, 0, cameraAGeneration, DateTimeOffset.UtcNow));
+        Check.Equal("CAM-A", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupeImageVisible, "A live-ticked frame for the loupe's own alias must populate the loupe image without throwing on the tiny test bitmap.");
+        Check.True(viewModel.IsLoupeSourceLive, "The loupe must report live while its alias matches the streaming camera.");
+        Check.False(viewModel.IsLoupeFreshnessVisible, "A live loupe source must not show a freshness/STILL badge.");
+
+        // Move the target to the composite preview's still (right) side. CAM-B has never been
+        // captured or live-viewed, so this must fall back to the placeholder, not silently
+        // reuse CAM-A's frame for the wrong camera.
+        viewModel.SetTargetPosition(0.9, 0.5);
+        Check.Equal("CAM-B", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupePlaceholderVisible, "An alias with no captured/live frame yet must show the placeholder, not a stale image.");
+
+        // Give CAM-B a frame of its own, then hand Live View back to CAM-A: CAM-B's frame must
+        // freeze in place with a freshness badge — the composite preview's "非ライブ側は最終
+        // フレームの静止画" contract, extended to the loupe.
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-A live off (required before switching alias)
+        viewModel.SelectedCamera = "CAM-B";
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-B live on
+        var cameraBGeneration = pump.LastReturnedGeneration;
+        pump.RaiseTick(new SimulatedLiveViewFrameTick("CAM-B", SimulatedFramePattern.FrontalDocument, 0, cameraBGeneration, DateTimeOffset.UtcNow));
+        viewModel.ToggleLiveViewCommand.Execute(null); // CAM-B live off
+        viewModel.SelectedCamera = "CAM-A";
+
+        Check.Equal("CAM-B", viewModel.LoupeCameraAlias);
+        Check.True(viewModel.IsLoupeImageVisible, "CAM-B's frozen last frame must still populate the loupe once it exists.");
+        Check.False(viewModel.IsLoupeSourceLive, "CAM-B is not the currently live camera, so the loupe must report it as frozen.");
+        Check.True(viewModel.IsLoupeFreshnessVisible, "A frozen loupe source with a known frame must show the STILL freshness badge.");
+        Check.True(viewModel.LoupeFreshnessText.Contains("秒前", StringComparison.Ordinal), "The freshness badge must report elapsed seconds.");
     }
     finally
     {
