@@ -23,7 +23,11 @@ try {
     $hardwareWindowPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/HardwareSingleCameraWindow.xaml'
     $hardwareViewModelPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/ViewModels/HardwareSingleCameraViewModel.cs'
     $dualCompositionPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/DualCameraProductComposition.cs'
-    $nativeBuildDirectory = Join-Path $RepositoryRoot 'build/m3-simulated-native'
+    # OperatorShell.csproj の BuildM2Adapter と Test-DualCameraWpfFlow.ps1 が使うのと同じ
+    # ディレクトリを共有する。専用ディレクトリを持つと、同じ入力から同じアダプタを
+    # もう一度フルコンパイルすることになる（GitHub Issue #28）。下の cmake 呼び出しは
+    # 残してあり、csproj 側が増分判定で飛ばされた場合でもアダプタの存在を保証する。
+    $nativeBuildDirectory = Join-Path $RepositoryRoot 'build/wpf-m2-adapter'
 
     $dotnet = Get-Command dotnet -ErrorAction Stop
     & $dotnet.Source build $solutionPath --configuration $Configuration --nologo --maxcpucount:1 --nodeReuse:false -p:UseSharedCompilation=false
