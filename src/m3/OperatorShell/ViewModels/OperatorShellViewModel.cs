@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Simulated;
 
 namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
@@ -50,6 +51,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     private const int NoticeVisibleMilliseconds = 3200;
     private const int ResetArmedMilliseconds = 3000;
     private const int MaxSavedFileRows = 6;
+
+    /// <summary>ポインタ移動の再通知を間引く閾値。1px未満の揺れでクロップを作り直さない。</summary>
+    private const double PointerEpsilon = 0.0005;
 
     /// <summary>Scale applied to a drag delta captured inside the loupe, relative to the same
     /// delta captured on the stage — the issue #30 "細かい移動" contract (loupe drags move the
@@ -119,6 +123,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool _isResetArmed;
     private int _resetArmGeneration;
     private Guid? _lastNotifiedExportJobId;
+    private bool _isPointerOverStage;
+    private double _pointerX = 0.5;
+    private double _pointerY = 0.5;
     private bool _isLiveViewActive;
     private string _selectedOperatingMode = DualModeLabel;
     private string _selectedCamera = "CAM-A";
@@ -784,6 +791,47 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanAdjustTarget => !IsStageProcessingPlaceholder;
     public bool IsTargetOverlayVisible => !IsStageProcessingPlaceholder;
 
+    /// <summary>拡大エリアが切り出す中心。ステージにポインタが載っている間はその位置を、
+    /// 離れている間は共通ターゲット□の位置を使う。見たい場所へポインタを運べばそこが
+    /// 拡大されるという、原稿を覗き込む動作に一番近い形にするため。</summary>
+    public double LoupeFocusX => _isPointerOverStage ? _pointerX : TargetX;
+
+    public double LoupeFocusY => _isPointerOverStage ? _pointerY : TargetY;
+
+    /// <summary>拡大エリアを出すかどうか。ライブ表示中にポインタがステージ上にある間だけ。
+    /// 常時出しっぱなしにすると、見たい場所をルーペ自身が隠す。</summary>
+    public bool IsLoupeVisible => IsStageLiveNoteVisible && _isPointerOverStage;
+
+    /// <summary>ステージ上のポインタ位置を受け取る。位置そのものは撮影の可否や
+    /// ターゲット位置には影響しない（表示の中心が動くだけ）。</summary>
+    public void UpdatePointerPosition(double x, double y)
+    {
+        var clampedX = Math.Clamp(x, 0.0, 1.0);
+        var clampedY = Math.Clamp(y, 0.0, 1.0);
+        if (_isPointerOverStage && Math.Abs(_pointerX - clampedX) < PointerEpsilon && Math.Abs(_pointerY - clampedY) < PointerEpsilon)
+        {
+            return;
+        }
+
+        _pointerX = clampedX;
+        _pointerY = clampedY;
+        _isPointerOverStage = true;
+        RaiseLoupeProperties();
+    }
+
+    /// <summary>ポインタがステージから外れた。拡大エリアを畳み、切り出し中心を
+    /// ターゲット□へ戻す。</summary>
+    public void ClearPointerPosition()
+    {
+        if (!_isPointerOverStage)
+        {
+            return;
+        }
+
+        _isPointerOverStage = false;
+        RaiseLoupeProperties();
+    }
+
     /// <summary>Moves the target in response to a stage-area drag: a direct (coarse) move,
     /// expressed as a delta already normalized to the drag surface's own size (0..1, same
     /// space as <see cref="TargetX"/>/<see cref="TargetY"/>). The code-behind mouse handler
@@ -884,7 +932,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         IsSingleCameraMode
             ? SelectedCamera
             : IsStageCompositePreviewMode || IsStageReviewMode
-                ? (IsTargetOnLiveSide ? StageCompositeLiveAlias : StageCompositeStillAlias)
+                ? (LoupeFocusX < 0.5 ? StageCompositeLiveAlias : StageCompositeStillAlias)
                 : StageSingleLiveAlias;
 
     /// <summary>True only when the loupe's current alias is actually streaming right now
@@ -921,8 +969,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             var fraction = LoupeBaseCropFraction / LoupeZoomFactor;
             var cropWidth = Math.Clamp((int)Math.Round(image.PixelWidth * fraction), 1, image.PixelWidth);
             var cropHeight = Math.Clamp((int)Math.Round(image.PixelHeight * fraction), 1, image.PixelHeight);
-            var x = Math.Clamp((int)Math.Round((TargetX * image.PixelWidth) - (cropWidth / 2.0)), 0, image.PixelWidth - cropWidth);
-            var y = Math.Clamp((int)Math.Round((TargetY * image.PixelHeight) - (cropHeight / 2.0)), 0, image.PixelHeight - cropHeight);
+            var x = Math.Clamp((int)Math.Round((LoupeFocusX * image.PixelWidth) - (cropWidth / 2.0)), 0, image.PixelWidth - cropWidth);
+            var y = Math.Clamp((int)Math.Round((LoupeFocusY * image.PixelHeight) - (cropHeight / 2.0)), 0, image.PixelHeight - cropHeight);
             return new Int32Rect(x, y, cropWidth, cropHeight);
         }
     }
@@ -977,6 +1025,28 @@ public sealed class OperatorShellViewModel : ObservableObject
             return image is null || cropRect is null
                 ? 0.5
                 : ComputeMarkerRelative(TargetY, image.PixelHeight, cropRect.Value.Y, cropRect.Value.Height);
+        }
+    }
+
+    /// <summary>拡大エリア内にターゲット□の枠線を出すかどうか。切り出しはポインタ位置を
+    /// 中心にするので、ターゲットが切り出し範囲の外にあることがある。範囲外のときに枠線を
+    /// 端へ張り付けて描くと、そこにターゲットがあるように見えてしまうため出さない。</summary>
+    public bool IsLoupeMarkerVisible
+    {
+        get
+        {
+            var image = LoupeBaseImage;
+            var cropRect = LoupeCropRect;
+            if (image is null || cropRect is null)
+            {
+                return false;
+            }
+
+            var crop = cropRect.Value;
+            var targetPixelX = TargetX * image.PixelWidth;
+            var targetPixelY = TargetY * image.PixelHeight;
+            return targetPixelX >= crop.X && targetPixelX <= crop.X + crop.Width &&
+                   targetPixelY >= crop.Y && targetPixelY <= crop.Y + crop.Height;
         }
     }
 
@@ -1739,8 +1809,34 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public string ProfileText => $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
     public string OutputDirectory => _dualCameraFlow is not null && !IsSingleCameraMode
-        ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — このPC内のフォルダを入力してください" : FixedLocalExportDirectory)
+        ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — 「選択…」からフォルダを選んでください" : FixedLocalExportDirectory)
         : _readiness.OutputDirectory;
+
+    /// <summary>フォルダ選択ダイアログで選ばれた保存先を受け取る。ネットワーク共有・
+    /// リムーバブルメディア・reparse point 先はここで弾く。撮り終えてから保存に失敗すると
+    /// 撮り直しになるので、選んだ時点で判定して理由を返す。</summary>
+    public void ChangeExportDirectory(string folder)
+    {
+        if (!CanChangeExportDirectory || string.IsNullOrWhiteSpace(folder))
+        {
+            return;
+        }
+
+        string normalized;
+        try
+        {
+            normalized = Path.GetFullPath(folder);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+        }
+        catch (Exception exception) when (exception is IOException or ArgumentException or NotSupportedException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Notify("この場所は保存先にできません: " + exception.Message, false);
+            return;
+        }
+
+        FixedLocalExportDirectory = normalized;
+        Notify("保存先を設定しました", true);
+    }
     public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
     public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
     public string SetupStatusText => _readiness.Setup.Summary;
@@ -2657,6 +2753,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(IsLoupePeakingOverlayVisible));
         OnPropertyChanged(nameof(IsLoupeZoom100Checked));
         OnPropertyChanged(nameof(IsLoupeZoom200Checked));
+        OnPropertyChanged(nameof(LoupeFocusX));
+        OnPropertyChanged(nameof(LoupeFocusY));
+        OnPropertyChanged(nameof(IsLoupeVisible));
+        OnPropertyChanged(nameof(IsLoupeMarkerVisible));
     }
 
     private string FormatNotices(OperatorWarningSeverity severity, string emptyText)
