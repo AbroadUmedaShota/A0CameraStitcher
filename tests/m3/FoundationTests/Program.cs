@@ -33,6 +33,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("continuous hardware Live View v2 validates sessions and JPEG frames", ContinuousHardwareLiveViewV2Async),
     ("dual hardware Agent v2 reserves starts and queries one pair transaction", DualHardwareAgentV2RoundTripAsync),
     ("dual hardware Agent v2 rejects retry capability and mismatched journals", DualHardwareAgentV2NegativesAsync),
+    ("dual binding accepts exactly two candidates", DualBindingCandidateCardinalityAsync),
+    ("dual binding reaches Ready through the five operations", DualBindingFiveOperationsReachReadyAsync),
+    ("dual binding refuses duplicate candidate and alias assignments", DualBindingRefusesDuplicateAssignmentsAsync),
+    ("dual binding shows one candidate Live View at a time", DualBindingShowsOneLiveViewAtATimeAsync),
+    ("dual binding never reaches Ready with an unquiesced body", DualBindingQuiesceFailureNeverReachesReadyAsync),
+    ("dual binding invalidation forces a re-binding with its reason", DualBindingTypedInvalidationForcesRebindAsync),
+    ("dual binding refuses a session issued before an Agent restart", DualBindingRestartRefusesTheOldSessionAsync),
+    ("dual binding re-binding starts clean and completes", DualBindingRebindStartsCleanAsync),
+    ("dual binding previews are bounded and never truncated", DualBindingPreviewBoundsAsync),
+    ("dual binding rejects foreign protocol envelopes", DualBindingRejectsForeignEnvelopesAsync),
 };
 
 var failures = new List<string>();
@@ -2310,6 +2320,361 @@ static async Task WithTemporaryRootAsync(Func<string, Task> test)
             Directory.Delete(root, recursive: true);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dual binding v1 (ADR-0025, Issue #62). Every one of these drives the real
+// codec against the simulated agent, so a change to either side that breaks the
+// wire contract shows up here rather than on the screen.
+// ---------------------------------------------------------------------------
+
+static DualBindingSessionClient BindingClient(
+    SimulatedDualBindingOptions? options,
+    out SimulatedDualBindingAgent agent)
+{
+    agent = new SimulatedDualBindingAgent(options);
+    return new DualBindingSessionClient(new SimulatedDualBindingAgentTransport(agent));
+}
+
+static async Task<DualBindingSessionClient> BoundToBothAliasesAsync(
+    SimulatedDualBindingOptions? options,
+    Action<SimulatedDualBindingAgent>? inspect = null)
+{
+    var client = BindingClient(options, out var agent);
+    await client.BeginBindingAsync();
+    await client.StartCandidateLiveViewAsync(0);
+    await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
+    await client.StartCandidateLiveViewAsync(1);
+    await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB);
+    inspect?.Invoke(agent);
+    return client;
+}
+
+static async Task DualBindingCandidateCardinalityAsync()
+{
+    foreach (var count in new[] { 0, 1, 3 })
+    {
+        var client = BindingClient(new SimulatedDualBindingOptions { CandidateCount = count }, out _);
+        var reply = await client.BeginBindingAsync();
+        Check.False(reply.Succeeded, $"{count} candidates must not start a binding session.");
+        Check.Equal("CandidateCountNotTwo", reply.Refusal!.ResultCode);
+        Check.Equal(string.Empty, client.SessionId);
+        Check.False(client.IsReady, "A refused begin-binding must never be Ready.");
+    }
+
+    var two = BindingClient(null, out _);
+    var accepted = await two.BeginBindingAsync();
+    Check.True(accepted.Succeeded, "Exactly two candidates must start a binding session.");
+    Check.Equal(32, two.SessionId.Length);
+    Check.SequenceEqual(new[] { 0, 1 }, two.CandidateOrdinals);
+
+    foreach (var style in new[] { SimulatedSourceObjectTokenStyle.Duplicate, SimulatedSourceObjectTokenStyle.Empty })
+    {
+        var client = BindingClient(new SimulatedDualBindingOptions { SourceObjectTokenStyle = style }, out _);
+        var reply = await client.BeginBindingAsync();
+        Check.False(reply.Succeeded, $"{style} source objects must not start a binding session.");
+    }
+}
+
+static async Task DualBindingFiveOperationsReachReadyAsync()
+{
+    var responses = new List<string>();
+    var agent = new SimulatedDualBindingAgent();
+    var transport = new RecordingHardwareTransport(request =>
+    {
+        var response = agent.Handle(request);
+        responses.Add(response);
+        return response;
+    });
+    var client = new DualBindingSessionClient(transport);
+
+    var begun = await client.BeginBindingAsync();
+    Check.True(begun.Succeeded, "begin-binding must succeed with two candidates.");
+
+    Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded, "Live View must start.");
+    var frame = await client.GetCandidateLiveViewFrameAsync(0);
+    Check.True(frame.Succeeded, "A running Live View must produce a frame.");
+    Check.Equal(4096, frame.Value!.Frame.Length);
+    Check.Equal(frame.Value.FrameBytes, frame.Value.Frame.Length);
+
+    Check.True(
+        (await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA)).Succeeded,
+        "The first alias must confirm.");
+    Check.True((await client.StartCandidateLiveViewAsync(1)).Succeeded, "The second Live View must start.");
+    Check.True(
+        (await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB)).Succeeded,
+        "The second alias must confirm.");
+
+    var completed = await client.CompleteBindingAsync();
+    Check.True(completed.Succeeded, "A fully assigned and quiesced binding must complete.");
+    Check.True(client.IsReady, "A completed binding must be Ready.");
+    Check.Equal(2, client.Evidence.Count);
+    Check.SequenceEqual(
+        DualBindingCameraAgentProtocol.OrderedAliases,
+        client.Evidence.Select(evidence => evidence.CameraAlias).OrderBy(alias => alias, StringComparer.Ordinal));
+    Check.True(
+        client.Evidence.All(evidence => evidence.ProviderVersion == 1 && evidence.ConfirmedAtUtc.Length > 0),
+        "Every evidence record must name its provider version and confirmation time.");
+
+    // ADR-0025 excludes these because publishing any of them would re-create the belief that the
+    // app knows which physical body it is talking to.
+    foreach (var response in responses)
+    {
+        Check.False(
+            response.Contains("simulated-source-object", StringComparison.Ordinal),
+            "No binding response may carry an SDK source object token.");
+    }
+
+    Check.False(
+        responses[^1].Contains("frameBase64", StringComparison.Ordinal),
+        "A completed binding must publish no preview.");
+    Check.False(
+        responses[^1].Contains("candidateOrdinal", StringComparison.Ordinal),
+        "A completed binding must publish no candidate ordinal as evidence.");
+}
+
+static async Task DualBindingRefusesDuplicateAssignmentsAsync()
+{
+    var client = BindingClient(null, out _);
+    await client.BeginBindingAsync();
+    await client.StartCandidateLiveViewAsync(0);
+    await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
+
+    var duplicateAlias = await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasA);
+    Check.False(duplicateAlias.Succeeded, "CAM-A must not be assigned twice.");
+    Check.Equal("AliasAlreadyAssigned", duplicateAlias.Refusal!.ResultCode);
+
+    var duplicateCandidate = await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasB);
+    Check.False(duplicateCandidate.Succeeded, "One candidate must not take both aliases.");
+    Check.Equal("CandidateAlreadyAssigned", duplicateCandidate.Refusal!.ResultCode);
+
+    // The session is still usable after either refusal: the operator just picks again.
+    Check.False(client.RequiresRebinding, "A duplicate assignment must not force a re-binding.");
+    Check.True(
+        (await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB)).Succeeded,
+        "The remaining candidate must still be assignable.");
+}
+
+static async Task DualBindingShowsOneLiveViewAtATimeAsync()
+{
+    var client = BindingClient(null, out var agent);
+    await client.BeginBindingAsync();
+
+    await client.StartCandidateLiveViewAsync(0);
+    Check.Equal(1, agent.ActiveLiveViewCount);
+    Check.Equal(0, client.ActiveLiveViewOrdinal);
+
+    await client.StartCandidateLiveViewAsync(1);
+    Check.Equal(1, agent.ActiveLiveViewCount);
+    Check.Equal(1, client.ActiveLiveViewOrdinal);
+    Check.Equal(0, agent.ConcurrentLiveViewViolationCount);
+
+    var stale = await client.GetCandidateLiveViewFrameAsync(0);
+    Check.False(stale.Succeeded, "The candidate that stopped streaming must not produce a frame.");
+    Check.Equal("LiveViewNotActive", stale.Refusal!.ResultCode);
+
+    await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasA);
+    Check.Equal(null, client.ActiveLiveViewOrdinal);
+
+    var reopened = await client.StartCandidateLiveViewAsync(1);
+    Check.False(reopened.Succeeded, "An assigned candidate's Live View must not reopen.");
+    Check.Equal("CandidateAlreadyAssigned", reopened.Refusal!.ResultCode);
+    Check.Equal(0, agent.ActiveLiveViewCount);
+}
+
+static async Task DualBindingQuiesceFailureNeverReachesReadyAsync()
+{
+    var client = await BoundToBothAliasesAsync(
+        new SimulatedDualBindingOptions { FailCloseCandidateSession = true });
+
+    var completed = await client.CompleteBindingAsync();
+    Check.False(completed.Succeeded, "A body whose SDK session would not close must not complete.");
+    Check.Equal("CandidateNotQuiesced", completed.Refusal!.ResultCode);
+    Check.False(client.IsReady, "A binding with an unquiesced body must never be Ready.");
+    Check.True(completed.Refusal.RequiresRebinding, "The operator must be told to re-bind.");
+
+    var stuck = BindingClient(new SimulatedDualBindingOptions { FailStopLiveView = true }, out _);
+    await stuck.BeginBindingAsync();
+    await stuck.StartCandidateLiveViewAsync(0);
+    var quiesce = await stuck.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
+    Check.False(quiesce.Succeeded, "A Live View that will not stop must be reported at confirm time.");
+    Check.Equal("QuiesceIncomplete", quiesce.Refusal!.ResultCode);
+    Check.False(stuck.IsReady, "A body that may still be streaming must never reach Ready.");
+}
+
+static async Task DualBindingTypedInvalidationForcesRebindAsync()
+{
+    var reasons = new[]
+    {
+        DualBindingInvalidationReason.AgentRestart,
+        DualBindingInvalidationReason.UsbReconnect,
+        DualBindingInvalidationReason.CameraCountChanged,
+        DualBindingInvalidationReason.TopologyChanged,
+        DualBindingInvalidationReason.SdkManagerRecreated,
+        DualBindingInvalidationReason.SdkError,
+    };
+
+    foreach (var reason in reasons)
+    {
+        SimulatedDualBindingAgent? captured = null;
+        var client = await BoundToBothAliasesAsync(null, agent => captured = agent);
+        captured!.RaiseInvalidation(reason);
+
+        var completed = await client.CompleteBindingAsync();
+        Check.False(completed.Succeeded, $"{reason} must stop the binding from completing.");
+        Check.Equal("BindingInvalidated", completed.Refusal!.ResultCode);
+        Check.Equal(reason, completed.Refusal.InvalidationReason);
+        Check.True(client.RequiresRebinding, $"{reason} must require a re-binding.");
+        Check.Equal(reason, client.InvalidationReason);
+        Check.False(client.IsReady, $"{reason} must clear Ready, so capture cannot start.");
+
+        // Nothing from the invalidated session survives: not the assignments, not the preview,
+        // not the evidence.
+        Check.Equal(0, client.Assignments.Count);
+        Check.Equal(0, client.Evidence.Count);
+        Check.Equal(null, client.ActiveLiveViewOrdinal);
+    }
+}
+
+static async Task DualBindingRestartRefusesTheOldSessionAsync()
+{
+    var first = new SimulatedDualBindingAgent();
+    var client = new DualBindingSessionClient(new SimulatedDualBindingAgentTransport(first));
+    await client.BeginBindingAsync();
+    var oldSessionId = client.SessionId;
+    Check.Equal(32, oldSessionId.Length);
+
+    // A restarted Agent holds no session at all, whatever id the client still remembers.
+    var restarted = new SimulatedDualBindingAgent();
+    var afterRestart = new DualBindingSessionClient(new SimulatedDualBindingAgentTransport(restarted));
+    var raw = restarted.Handle(
+        DualBindingCameraAgentProtocolCodec.CreateStartLiveViewRequest("r-1", oldSessionId, 0));
+    Check.True(
+        raw.Contains("\"resultCode\":\"SessionMismatch\"", StringComparison.Ordinal),
+        "A restarted Agent must refuse the session the previous one issued.");
+
+    // And the client refuses locally before the wire when it holds no session of its own, so the
+    // operator is not shown "re-bind" for something that was never bound.
+    var withoutSession = await afterRestart.StartCandidateLiveViewAsync(0);
+    Check.False(withoutSession.Succeeded, "An unbound client must refuse a session-scoped request.");
+    Check.Equal("NoBindingSession", withoutSession.Refusal!.ResultCode);
+    Check.False(afterRestart.RequiresRebinding, "Never having bound is not the same as needing a re-bind.");
+}
+
+static async Task DualBindingRebindStartsCleanAsync()
+{
+    SimulatedDualBindingAgent? captured = null;
+    var client = await BoundToBothAliasesAsync(null, agent => captured = agent);
+    var firstSessionId = client.SessionId;
+    captured!.RaiseInvalidation(DualBindingInvalidationReason.UsbReconnect);
+    await client.CompleteBindingAsync();
+    Check.True(client.RequiresRebinding, "The invalidated session must require a re-binding.");
+
+    var rebound = await client.BeginBindingAsync();
+    Check.True(rebound.Succeeded, "Re-binding after an invalidation must start a usable session.");
+    Check.False(
+        string.Equals(client.SessionId, firstSessionId, StringComparison.Ordinal),
+        "A re-binding must produce a session ID the old one cannot be mistaken for.");
+    Check.Equal(DualBindingInvalidationReason.None, client.InvalidationReason);
+    Check.Equal(0, client.Assignments.Count);
+    Check.False(client.RequiresRebinding, "A fresh session must not still be asking for a re-binding.");
+
+    await client.StartCandidateLiveViewAsync(0);
+    await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
+    await client.StartCandidateLiveViewAsync(1);
+    await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB);
+    Check.True((await client.CompleteBindingAsync()).Succeeded, "The re-bound session must complete.");
+    Check.True(client.IsReady, "The re-bound session must reach Ready.");
+}
+
+static async Task DualBindingPreviewBoundsAsync()
+{
+    var empty = BindingClient(new SimulatedDualBindingOptions { LiveViewFrameBytes = 0 }, out _);
+    await empty.BeginBindingAsync();
+    await empty.StartCandidateLiveViewAsync(0);
+    var unavailable = await empty.GetCandidateLiveViewFrameAsync(0);
+    Check.False(unavailable.Succeeded, "An empty frame must be reported as unavailable.");
+    Check.Equal("LiveViewFrameUnavailable", unavailable.Refusal!.ResultCode);
+
+    var oversize = BindingClient(
+        new SimulatedDualBindingOptions
+        {
+            LiveViewFrameBytes = DualBindingCameraAgentProtocol.MaximumLiveViewFrameBytes + 1,
+        },
+        out _);
+    await oversize.BeginBindingAsync();
+    await oversize.StartCandidateLiveViewAsync(0);
+    var tooLarge = await oversize.GetCandidateLiveViewFrameAsync(0);
+    Check.False(tooLarge.Succeeded, "A frame above the bound must be refused, not truncated.");
+    Check.Equal("LiveViewFrameTooLarge", tooLarge.Refusal!.ResultCode);
+
+    // The largest allowed preview is the case that breaks a client which reuses the request-side
+    // 256 KiB bound for responses: base64 pushes it to roughly 342 KB, so a too-tight response
+    // bound would reject exactly the frames nobody checks by hand.
+    var atBound = new SimulatedDualBindingAgent(new SimulatedDualBindingOptions
+    {
+        LiveViewFrameBytes = DualBindingCameraAgentProtocol.MaximumLiveViewFrameBytes,
+    });
+    var client = new DualBindingSessionClient(new SimulatedDualBindingAgentTransport(atBound));
+    await client.BeginBindingAsync();
+    await client.StartCandidateLiveViewAsync(0);
+    var raw = atBound.Handle(
+        DualBindingCameraAgentProtocolCodec.CreateFrameRequest("r-1", client.SessionId, 0));
+    Check.True(
+        Encoding.UTF8.GetByteCount(raw) > 256 * 1024,
+        "The largest allowed preview response must exceed the request-side JSON bound.");
+    Check.True(
+        Encoding.UTF8.GetByteCount(raw) < 1024 * 1024,
+        "The largest allowed preview response must still fit one pipe frame.");
+
+    var accepted = await client.GetCandidateLiveViewFrameAsync(0);
+    Check.True(accepted.Succeeded, "A frame exactly at the bound must be accepted.");
+    Check.Equal(DualBindingCameraAgentProtocol.MaximumLiveViewFrameBytes, accepted.Value!.Frame.Length);
+}
+
+static Task DualBindingRejectsForeignEnvelopesAsync()
+{
+    var agent = new SimulatedDualBindingAgent();
+
+    var v2Marker = """
+        {"schemaVersion":"a0.camera-agent.hardware-dual-binding.v1","simulation":false,
+        "marker":"Hardware","requestId":"r-1","operation":"begin-binding",
+        "payload":{"cameraMode":"DualCamera"}}
+        """.Replace("\r", string.Empty, StringComparison.Ordinal)
+        .Replace("\n", string.Empty, StringComparison.Ordinal);
+    Check.True(
+        agent.Handle(v2Marker).Contains("DualBindingProtocolRequired", StringComparison.Ordinal),
+        "A request carrying the Dual v2 marker must be refused.");
+
+    var simulated = v2Marker
+        .Replace("\"marker\":\"Hardware\"", "\"marker\":\"HardwareBinding\"", StringComparison.Ordinal)
+        .Replace("\"simulation\":false", "\"simulation\":true", StringComparison.Ordinal);
+    Check.True(
+        agent.Handle(simulated).Contains("DualBindingProtocolRequired", StringComparison.Ordinal),
+        "A simulated request must be refused by the hardware binding protocol.");
+
+    Check.True(
+        agent.Handle("{ not json").Contains("MalformedEnvelope", StringComparison.Ordinal),
+        "A malformed envelope must be refused.");
+
+    // A Dual v2 response must never deserialize as a binding response, or a wiring mistake would
+    // surface as binding state instead of as an error.
+    var v2Response = """
+        {"schemaVersion":"a0.camera-agent.hardware-dual.v2","simulation":false,"marker":"Hardware",
+        "requestId":"r-1","success":true,"resultCode":"DualCapabilities","payload":{}}
+        """.Replace("\r", string.Empty, StringComparison.Ordinal)
+        .Replace("\n", string.Empty, StringComparison.Ordinal);
+    try
+    {
+        DualBindingCameraAgentProtocolCodec.DeserializeBeginBindingResponse(v2Response, "r-1");
+        throw new InvalidOperationException("A Dual v2 response must not parse as a binding response.");
+    }
+    catch (HardwareProtocolViolationException exception)
+    {
+        Check.Equal("DualBindingProtocolRequired", exception.ErrorCode);
+    }
+
+    return Task.CompletedTask;
 }
 
 sealed class RecordingHardwareTransport(
