@@ -134,6 +134,16 @@ else()
     target_compile_options(a0_m2_measurement PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(a0_m2_stitch_metrics
+    src/m2/stitch_metrics.cpp
+)
+target_include_directories(a0_m2_stitch_metrics PUBLIC src/m2/include)
+if(MSVC)
+    target_compile_options(a0_m2_stitch_metrics PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_stitch_metrics PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
 )
@@ -251,6 +261,17 @@ if(BUILD_TESTING)
         target_compile_options(m2_synthetic_measurement_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_synthetic_measurement_contracts COMMAND m2_synthetic_measurement_contracts)
+
+    add_executable(m2_stitch_metric_contracts tests/stitch_metrics_tests.cpp)
+    target_link_libraries(m2_stitch_metric_contracts PRIVATE a0_m2_stitch_metrics)
+    target_compile_definitions(m2_stitch_metric_contracts PRIVATE
+        A0_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(m2_stitch_metric_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_stitch_metric_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_stitch_metric_contracts COMMAND m2_stitch_metric_contracts)
 
     add_executable(m2_offline_stitcher_contracts tests/offline_stitcher_tests.cpp)
     target_link_libraries(m2_offline_stitcher_contracts PRIVATE a0_m2_offline_stitcher ole32 windowscodecs)
