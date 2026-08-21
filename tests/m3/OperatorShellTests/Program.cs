@@ -9,9 +9,11 @@ using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
 if (Environment.GetEnvironmentVariable(persistentChildScenarioVariable) is { Length: > 0 } childScenario)
@@ -27,6 +29,14 @@ if (Environment.GetEnvironmentVariable(dualChildScenarioVariable) is { Length: >
 {
     return await RunDualCameraAgentTestChildAsync(dualChildScenario, args);
 }
+
+// GitHub Issue #63: 描画に依存する試験の前提を実行のたびに記録する。落ちた報告が来たとき、
+// どのアパートメント・描画モード・描画ティアで起きたのかが分からないと切り分けられない。
+Console.WriteLine(
+    $"render preconditions: main apartment={Thread.CurrentThread.GetApartmentState()}" +
+    $" (render-dependent tests are hoisted to STA+Dispatcher)" +
+    $", ProcessRenderMode={RenderOptions.ProcessRenderMode}" +
+    $", RenderCapability.Tier={RenderCapability.Tier >> 16}");
 
 var failures = new List<string>();
 try
@@ -372,7 +382,7 @@ catch (Exception exception)
 
 try
 {
-    SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition();
+    RunSyncOnStaRenderThread(SimulatedTestImageFrameSourceAppliesBlurAcrossTheFocusTransition);
     Console.WriteLine("PASS SIMULATED test image frame source actually applies BlurEffect across the focus transition");
 }
 catch (Exception exception)
@@ -471,7 +481,7 @@ catch (Exception exception)
 
 try
 {
-    await FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelStateAsync();
+    RunOnStaRenderThread(FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelStateAsync);
     Console.WriteLine("PASS focus peaking overlay highlights document edges and only renders while the toggle is on");
 }
 catch (Exception exception)
@@ -537,7 +547,7 @@ catch (Exception exception)
 
 try
 {
-    DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable();
+    RunSyncOnStaRenderThread(DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable);
     Console.WriteLine("PASS document tilt detector measures known SIMULATED ROLL angles within tolerance and reports 検出不能 for degenerate/no-document frames");
 }
 catch (Exception exception)
@@ -548,7 +558,7 @@ catch (Exception exception)
 
 try
 {
-    await TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync();
+    RunOnStaRenderThread(TiltReadingReflectsLiveFrameAndShowsUndetectableWhenNotLiveAsync);
     Console.WriteLine("PASS the stage tilt reading follows the live camera's frame and reverts to 検出不能 when not live (issue #32)");
 }
 catch (Exception exception)
@@ -570,7 +580,7 @@ catch (Exception exception)
 
 try
 {
-    await TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync();
+    RunOnStaRenderThread(TiltToleranceInputSetsChipTextAndRejectsInvalidValuesAsync);
     Console.WriteLine("PASS the tilt tolerance input starts unset, rejects invalid text, and the chip only judges 許容内/超過 once both a tolerance and a reading exist (issue #32)");
 }
 catch (Exception exception)
@@ -3919,7 +3929,10 @@ static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelState
             highlightedPixelCount++;
         }
     }
-    Check.True(highlightedPixelCount > 0, "At least one pixel must be highlighted for a frame with real line-art edges.");
+    Check.True(
+        highlightedPixelCount > 0,
+        "At least one pixel must be highlighted for a frame with real line-art edges " +
+        $"(highlighted = {highlightedPixelCount}). 0 なら描画そのものが空で、blur/tilt も同時に落ちているはず。");
 
     // ViewModel-level: the overlay must only be exposed while IsPeakingEnabled is true, and it
     // must react to the live stage image the same way the base image bindings do.
@@ -4575,6 +4588,58 @@ static byte[] CopyPixelsBgra(BitmapSource bitmap)
     var buffer = new byte[stride * bitmap.PixelHeight];
     bitmap.CopyPixels(buffer, stride, 0);
     return buffer;
+}
+
+// GitHub Issue #63: WPF の描画（RenderTargetBitmap・BlurEffect・Typeface 解決）は STA スレッドを
+// 前提にする。このテストはトップレベルステートメントの Main で動くため既定が MTA で、描画を
+// サポート外のアパートメントで走らせていた。動く環境と動かない環境が分かれる入り口になるので、
+// 描画へ依存する試験だけをここで STA + Dispatcher の上へ持ち上げる。
+//
+// Dispatcher まで用意するのは、対象の試験が非同期で、await の継続がスレッドプール（MTA）へ
+// 逃げてしまうため。DispatcherSynchronizationContext を敷いて PushFrame で回すことで、
+// 試験の最初から最後まで同じ STA スレッドに留める。
+//
+// 前提を「たまたま満たされている」状態から「明示的に満たす」状態へ変えるのが目的で、
+// assert は一つも緩めていない。
+static void RunSyncOnStaRenderThread(Action body) =>
+    RunOnStaRenderThread(() =>
+    {
+        body();
+        return Task.CompletedTask;
+    });
+
+static void RunOnStaRenderThread(Func<Task> body)
+{
+    ExceptionDispatchInfo? captured = null;
+    var thread = new Thread(() =>
+    {
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
+        var frame = new DispatcherFrame();
+        _ = dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                await body().ConfigureAwait(true);
+            }
+            catch (Exception exception)
+            {
+                captured = ExceptionDispatchInfo.Capture(exception);
+            }
+            finally
+            {
+                frame.Continue = false;
+            }
+        });
+
+        Dispatcher.PushFrame(frame);
+        dispatcher.InvokeShutdown();
+    });
+
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    captured?.Throw();
 }
 
 sealed class FakeSimulatedLiveViewFramePump : ISimulatedLiveViewFramePump
