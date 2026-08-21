@@ -1,8 +1,9 @@
 # Dual session binding core と WPD alias proof — 設計（Issue #9）
 
-状態: 設計。実装未着手。
+状態: core 実装済み（#9・PR #73）。binding protocol も実装済み（#61）。
 正本: `docs/DECISIONS.md` ADR-0025（session-local operator binding）
-対象 Issue: #9（core）。後続: #61（binding protocol / fake SDK）、#62（確認UI）、#10（実capture backend）
+対象 Issue: #9（core）。後続: #61（binding protocol / fake SDK・完了）、#62（確認UI）、#10（実capture backend）
+protocol 側の正本: [../../HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md](../../HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md)
 
 ## 1. 何を作るか
 
@@ -112,16 +113,27 @@ fake seam は既存の `fake_camera_transport.{hpp,cpp}` の作り方に合わ�
 - capture seam が再列挙しないこと
 - camera command 0 回・card 操作 0 回・delete 0 回・retry 0 回
 
-最後の行は counter で確認する。既存の `DualHardwareCameraAgentSafetyCounters` と
-同じ考え方（数えて 0 を assert する）を踏襲する。
+最後の行は **counter では確認しない**（実装時に方針変更）。core も protocol も camera・
+card・WPD・SDK の型に一切依存していないため、これらの counter を増やせるコードパスが
+そもそも存在しない。「0 を assert する」試験は絶対に落ちず、カバレッジがあるように
+見えるだけになる。実際に動く counter（`source_object_reuse_count`、binding session 数、
+Live View 開始数など）だけを持ち、依存が無いこと自体は構造的性質としてヘッダに明記する
+方針にした。
+
+この判断は #61 で mutation check により裏付けが取れている: 実装をわざと壊すと該当試験が
+落ちることを確認した上で残している（詳細は protocol 側ドキュメントの「Quiesce is the
+binding core's decision」節）。
 
 ## 9. 未確定・確認したいこと
 
-1. **`DualIdentitySessionBinding` の置き場所**。`phase0` に置くのが既存の並び（agent 系は
-   すべて `src/phase0`）だが、名前空間 `a0::phase0` は「Phase 0 の検証コード」の含みがある。
-   製品 core として別名前空間へ分けるかは要判断
+1. ~~**`DualIdentitySessionBinding` の置き場所**~~ → **決着（#9 実装時）**。`a0::phase0` に
+   置いた。agent 系・pipe host・fake transport がすべてこの名前空間にあり、binding だけを
+   分けると #61 の protocol 層が二つの名前空間をまたぐことになる。名前空間の改称は
+   binding 単独ではなく `src/phase0` 全体の話なので、やるなら別 Issue
 2. **旧 `DualIdentityBindingProof` 系の扱い**。ADR-0025 で方式が置き換わったので、
    いずれ削除対象になるはず。今回は触らないが、二つの binding 概念が並存する期間が
-   できる。整理を別 Issue にするか
+   できる。整理を別 Issue にするか（#9・#61 とも未着手のまま。**要起票**）
 3. WPD alias proof が「今この session で見えている object」を数える具体的な API 面
-   （`WpdTransport` のどのメソッドを使うか）。実装時に既存 probe 系を読んで確定する
+   （`WpdTransport` のどのメソッドを使うか）。**未決**。`ProveExactlyOneWpdAliasObject` は
+   呼び出し側が alias で絞り込んだ観測列を受け取る形にしてあり、その観測をどう作るかは
+   実 WPD を触る #10 の担当

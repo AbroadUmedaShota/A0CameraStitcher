@@ -5,6 +5,7 @@
 
 #include "a0/phase0/hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
+#include "a0/phase0/dual_binding_camera_agent.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,6 +30,12 @@
 // dispatcher types are unrelated (no shared base class) and are connected
 // only structurally, via the template's use of dispatcher.Handle(),
 // dispatcher.OnIdle(), and dispatcher.ShouldStop().
+//
+// The binding host (RunDualBindingCameraAgentNamedPipeServer, declared in
+// dual_binding_camera_agent.hpp, GitHub Issue #61) is the third caller and was
+// added the same way: a wrapper, not a copy. Copying the loop is how the hosts
+// would drift into disagreeing about what an oversize frame or a missing
+// acknowledgment means.
 namespace a0::phase0 {
 namespace {
 
@@ -403,6 +410,24 @@ int RunDualHardwareCameraAgentNamedPipeServer(
     // pass it. Pipe-name uniqueness across launches is the launcher's
     // responsibility (see the doc); this host just serves whatever safe
     // pipe name it is given.
+    return RunNamedPipeServerLoop(
+        pipe_name,
+        dispatcher,
+        serve_once,
+        failure_injection,
+        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)));
+}
+
+int RunDualBindingCameraAgentNamedPipeServer(
+    std::string_view pipe_name,
+    DualBindingCameraAgentDispatcher& dispatcher,
+    bool serve_once,
+    DualBindingCameraAgentPipeFailureInjectionForTesting failure_injection,
+    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing) {
+    // Same fixed-from-launch lifetime as the other two hosts. Binding is if
+    // anything the one that most needs it: a session that stays addressable
+    // forever is a session an operator can confirm long after they stopped
+    // looking at the Live View that justified it.
     return RunNamedPipeServerLoop(
         pipe_name,
         dispatcher,
