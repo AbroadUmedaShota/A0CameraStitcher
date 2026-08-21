@@ -45,8 +45,8 @@ DualIdentitySessionBinding ReadyBinding() {
     DualIdentitySessionBinding binding;
     binding.BeginBinding(TwoCandidates());
     binding.ConfirmAlias(0, kDualIdentityCameraAliasA);
-    binding.ConfirmAlias(1, kDualIdentityCameraAliasB);
     binding.ConfirmCandidateQuiesced(0, true, true);
+    binding.ConfirmAlias(1, kDualIdentityCameraAliasB);
     binding.ConfirmCandidateQuiesced(1, true, true);
     binding.CompleteBinding("2026-08-21T00:00:00Z");
     return binding;
@@ -111,7 +111,8 @@ void IncompleteAliasAssignmentCannotComplete() {
     binding.BeginBinding(TwoCandidates());
     binding.ConfirmAlias(0, kDualIdentityCameraAliasA);
     binding.ConfirmCandidateQuiesced(0, true, true);
-    binding.ConfirmCandidateQuiesced(1, true, true);
+    // Candidate 1 is deliberately left unassigned: quiesce cannot be recorded
+    // for it, and the binding must not complete without CAM-B.
 
     CheckBindingError(
         "AliasAssignmentIncomplete",
@@ -227,9 +228,6 @@ void CaptureSeamRequiresReadyAndNeverReEnumerates() {
     Check(
         counters.source_object_reuse_count == 2,
         "Both capture lookups must be counted as reuse of the bound object.");
-    Check(
-        counters.enumeration_count == 0,
-        "Capture must never re-enumerate; ADR-0025 requires reuse of the bound object.");
 
     binding.Invalidate(DualIdentityInvalidationReason::AgentRestart);
     CheckBindingError(
@@ -293,15 +291,141 @@ void BeginningAgainDiscardsThePreviousSession() {
         "Ordinals from the discarded session must not resolve.");
 }
 
-void BindingCoreTouchesNoCameraCardOrDelete() {
+// A failed BeginBinding must not leave the previous binding usable. This is the
+// case that matters in the field: a third body gets plugged in, the re-bind is
+// refused, and capture must not keep using source objects from before that.
+void RefusedRebindDoesNotLeaveTheOldBindingUsable() {
     auto binding = ReadyBinding();
-    (void)binding.BoundSourceObjectForCapture(kDualIdentityCameraAliasA);
+    Check(binding.IsReady(), "Precondition: the binding starts Ready.");
 
-    const auto counters = binding.SafetyCounters();
-    Check(counters.camera_command_count == 0, "The binding core must send no camera command.");
-    Check(counters.card_access_count == 0, "The binding core must not access the card.");
-    Check(counters.delete_count == 0, "The binding core must delete nothing.");
-    Check(counters.automatic_retry_count == 0, "Automatic retry is fixed at zero.");
+    CheckBindingError(
+        "CandidateCountNotTwo",
+        [&] {
+            binding.BeginBinding(
+                {DualIdentityCandidate{0, "sdk-source-0"},
+                 DualIdentityCandidate{1, "sdk-source-1"},
+                 DualIdentityCandidate{2, "sdk-source-2"}});
+        },
+        "A three-candidate re-bind must be refused.");
+
+    Check(
+        binding.State() == DualIdentitySessionBindingState::None,
+        "A refused re-bind must discard the previous session, not keep it Ready.");
+    Check(!binding.IsReady(), "A refused re-bind must not leave the binding Ready.");
+    CheckBindingError(
+        "BindingNotReady",
+        [&] { (void)binding.BoundSourceObjectForCapture(kDualIdentityCameraAliasA); },
+        "Capture must not keep using source objects from before a refused re-bind.");
+    Check(
+        binding.PublishableEvidence().empty(),
+        "A discarded session must publish nothing.");
+}
+
+// Two candidates naming one source object is one body offered twice. Accepting
+// it binds both aliases to the same camera and still completes.
+void TwoCandidatesSharingOneSourceObjectAreRefused() {
+    DualIdentitySessionBinding binding;
+    CheckBindingError(
+        "DuplicateCandidateSourceObject",
+        [&] {
+            binding.BeginBinding(
+                {DualIdentityCandidate{0, "sdk-source-same"},
+                 DualIdentityCandidate{1, "sdk-source-same"}});
+        },
+        "Candidates sharing one SDK source object must be refused.");
+    Check(
+        binding.State() == DualIdentitySessionBindingState::None,
+        "A refused candidate set must not open a session.");
+}
+
+// Quiesce may only be reported for a candidate the operator has finished with.
+// Otherwise a flag recorded before assignment can later satisfy CompleteBinding
+// while that Live View is open again.
+void QuiesceRequiresTheCandidateToBeAssignedFirst() {
+    DualIdentitySessionBinding binding;
+    binding.BeginBinding(TwoCandidates());
+
+    CheckBindingError(
+        "CandidateNotAssigned",
+        [&] { binding.ConfirmCandidateQuiesced(0, true, true); },
+        "Quiesce must not be recorded before the candidate has an alias.");
+
+    binding.ConfirmAlias(0, kDualIdentityCameraAliasA);
+    binding.ConfirmCandidateQuiesced(0, true, true);
+    binding.ConfirmAlias(1, kDualIdentityCameraAliasB);
+    CheckBindingError(
+        "CandidateNotQuiesced",
+        [&] { binding.CompleteBinding("2026-08-21T00:00:00Z"); },
+        "The second candidate still has no quiesce confirmation.");
+
+    binding.ConfirmCandidateQuiesced(1, true, true);
+    binding.CompleteBinding("2026-08-21T00:00:00Z");
+    Check(binding.IsReady(), "The per-candidate operator flow must still reach Ready.");
+}
+
+// The confirmation UI (#62) shows these codes. "Assignment incomplete" would be
+// actively wrong for a binding a USB reconnect invalidated.
+void CompleteBindingReportsTheActualReasonPerState() {
+    DualIdentitySessionBinding not_started;
+    CheckBindingError(
+        "BindingNotStarted",
+        [&] { not_started.CompleteBinding("2026-08-21T00:00:00Z"); },
+        "Completing with no session must say so.");
+
+    auto invalidated = ReadyBinding();
+    invalidated.Invalidate(DualIdentityInvalidationReason::UsbReconnect);
+    CheckBindingError(
+        "BindingInvalidated",
+        [&] { invalidated.CompleteBinding("2026-08-21T00:00:00Z"); },
+        "An invalidated binding must not be reported as an unfinished assignment.");
+
+    auto already = ReadyBinding();
+    CheckBindingError(
+        "BindingAlreadyComplete",
+        [&] { already.CompleteBinding("2026-08-21T00:00:00Z"); },
+        "Completing twice must say the session is already complete.");
+}
+
+// A half-assigned session must publish nothing: its records would otherwise look
+// exactly like a confirmed binding apart from an empty confirmedAt.
+void UnfinishedSessionsPublishNoEvidence() {
+    DualIdentitySessionBinding binding;
+    binding.BeginBinding(TwoCandidates());
+    Check(
+        binding.PublishableEvidence().empty(),
+        "A session with no assignment must publish nothing.");
+
+    binding.ConfirmAlias(0, kDualIdentityCameraAliasA);
+    Check(
+        binding.PublishableEvidence().empty(),
+        "A half-assigned session must publish nothing.");
+
+    binding.ConfirmCandidateQuiesced(0, true, true);
+    binding.ConfirmAlias(1, kDualIdentityCameraAliasB);
+    binding.ConfirmCandidateQuiesced(1, true, true);
+    Check(
+        binding.PublishableEvidence().empty(),
+        "An assigned-but-not-completed session must still publish nothing.");
+
+    binding.CompleteBinding("2026-08-21T00:00:00Z");
+    Check(
+        binding.PublishableEvidence().size() == 2,
+        "Only a completed binding publishes evidence.");
+}
+
+// The bound token must survive a rebind of the object it came from. Returning a
+// reference into the candidate vector would leave the caller holding freed
+// memory once BeginBinding clears it.
+void BoundSourceObjectSurvivesARebind() {
+    auto binding = ReadyBinding();
+    const auto captured = binding.BoundSourceObjectForCapture(kDualIdentityCameraAliasA);
+    binding.Invalidate(DualIdentityInvalidationReason::UsbReconnect);
+    binding.BeginBinding(
+        {DualIdentityCandidate{9, "sdk-source-9"}, DualIdentityCandidate{10, "sdk-source-10"}});
+
+    Check(
+        captured == "sdk-source-0",
+        "A token handed to capture must stay valid after the session it came from is gone.");
 }
 
 void WpdAliasProofRequiresExactlyOneObject() {
@@ -336,6 +460,21 @@ void WpdAliasProofRequiresExactlyOneObject() {
     Check(
         missing_id.outcome == WpdAliasProofOutcome::Mismatch,
         "A single object without an id must not be treated as a successful recovery.");
+
+    const auto unattributed = ProveExactlyOneWpdAliasObject(
+        kDualIdentityCameraAliasA, {WpdAliasObjectObservation{"object-1", ""}});
+    Check(
+        unattributed.outcome == WpdAliasProofOutcome::Mismatch,
+        "An object nobody attributed must not be adopted as this alias's original.");
+
+    const auto no_alias = ProveExactlyOneWpdAliasObject(
+        "", {WpdAliasObjectObservation{"object-1", ""}});
+    Check(
+        no_alias.outcome == WpdAliasProofOutcome::Mismatch,
+        "An empty alias must not match an unattributed object and succeed.");
+    Check(
+        no_alias.object_id.empty(),
+        "A proof with no target alias must not hand back an object id.");
 
     const auto exactly_one = ProveExactlyOneWpdAliasObject(
         kDualIdentityCameraAliasA, {WpdAliasObjectObservation{"object-1", "CAM-A"}});
@@ -372,7 +511,12 @@ int main() {
     CaptureSeamRequiresReadyAndNeverReEnumerates();
     PublishedEvidenceIsLimitedToTheFiveAllowedFields();
     BeginningAgainDiscardsThePreviousSession();
-    BindingCoreTouchesNoCameraCardOrDelete();
+    RefusedRebindDoesNotLeaveTheOldBindingUsable();
+    TwoCandidatesSharingOneSourceObjectAreRefused();
+    QuiesceRequiresTheCandidateToBeAssignedFirst();
+    CompleteBindingReportsTheActualReasonPerState();
+    UnfinishedSessionsPublishNoEvidence();
+    BoundSourceObjectSurvivesARebind();
     WpdAliasProofRequiresExactlyOneObject();
     WpdAliasProofNeverWidensItsSearch();
 

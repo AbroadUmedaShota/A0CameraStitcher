@@ -49,9 +49,19 @@ DualIdentitySessionBindingState DualIdentitySessionBinding::State() const noexce
 
 void DualIdentitySessionBinding::BeginBinding(
     const std::vector<DualIdentityCandidate>& candidates) {
+    // Discard first, validate second. If validation threw before this reset, a
+    // refused re-bind would leave the previous Ready binding intact and capture
+    // would keep using source objects from before whatever caused the re-bind
+    // (a third body appearing, a reconnect). Failing closed to "nothing bound"
+    // is the only safe outcome for a binding attempt that did not succeed.
+    candidates_.clear();
+    confirmed_at_utc_.clear();
+    invalidation_reason_ = DualIdentityInvalidationReason::None;
+    state_ = DualIdentitySessionBindingState::None;
+
     if (candidates.size() != kDualIdentityRequiredCandidateCount) {
-        // Refused before anything is stored. Three connected bodies is not a
-        // situation where the app may quietly pick two.
+        // Three connected bodies is not a situation where the app may quietly
+        // pick two: the operator would have no way to know which two.
         throw DualIdentitySessionBindingError(
             "CandidateCountNotTwo",
             "A binding session requires exactly two SDK candidates.");
@@ -71,10 +81,17 @@ void DualIdentitySessionBinding::BeginBinding(
         }
     }
 
-    // Any partially assigned previous session is discarded rather than merged.
-    candidates_.clear();
-    confirmed_at_utc_.clear();
-    invalidation_reason_ = DualIdentityInvalidationReason::None;
+    if (candidates[0].source_object_token == candidates[1].source_object_token) {
+        // Two candidates naming the same source object means one physical body
+        // was offered twice. Accepting it would bind CAM-A and CAM-B to the same
+        // camera and still complete, so both halves of the A0 sheet would come
+        // from one body. The legacy correlation path rejects the same shape as
+        // an identity collision.
+        throw DualIdentitySessionBindingError(
+            "DuplicateCandidateSourceObject",
+            "Two candidates must not share one SDK source object.");
+    }
+
     for (const auto& candidate : candidates) {
         candidates_.push_back(
             Assignment{candidate.ordinal, candidate.source_object_token, {}, false, false});
@@ -149,6 +166,16 @@ void DualIdentitySessionBinding::ConfirmCandidateQuiesced(
             "The candidate ordinal does not belong to this binding session.");
     }
 
+    if (candidate->camera_alias.empty()) {
+        // The operator assigns a candidate while looking at its Live View, then
+        // stops it. A quiesce report for a candidate with no alias yet describes
+        // a Live View the operator has not finished with, and that stale flag
+        // could later satisfy CompleteBinding while the Live View is open again.
+        throw DualIdentitySessionBindingError(
+            "CandidateNotAssigned",
+            "A candidate must be assigned to an alias before its quiesce is recorded.");
+    }
+
     // Recorded as observed, including "not stopped". CompleteBinding is what
     // refuses; this call must not quietly upgrade a failed stop into a success.
     candidate->live_view_stopped = live_view_stopped;
@@ -156,6 +183,27 @@ void DualIdentitySessionBinding::ConfirmCandidateQuiesced(
 }
 
 void DualIdentitySessionBinding::CompleteBinding(std::string_view confirmed_at_utc) {
+    // Distinct codes per state: the confirmation UI (#62) shows this to the
+    // operator, and "assignment incomplete" would be actively wrong for a USB
+    // reconnect that invalidated an already finished binding.
+    if (state_ == DualIdentitySessionBindingState::Invalid) {
+        throw DualIdentitySessionBindingError(
+            "BindingInvalidated",
+            "The binding was invalidated (" +
+                std::string(DualIdentityInvalidationReasonName(invalidation_reason_)) +
+                "); a fresh binding session is required.");
+    }
+
+    if (state_ == DualIdentitySessionBindingState::None) {
+        throw DualIdentitySessionBindingError(
+            "BindingNotStarted", "No binding session is open.");
+    }
+
+    if (state_ == DualIdentitySessionBindingState::Ready) {
+        throw DualIdentitySessionBindingError(
+            "BindingAlreadyComplete", "This binding session is already complete.");
+    }
+
     if (state_ != DualIdentitySessionBindingState::AwaitingQuiesce) {
         throw DualIdentitySessionBindingError(
             "AliasAssignmentIncomplete",
@@ -199,7 +247,7 @@ bool DualIdentitySessionBinding::IsReady() const noexcept {
     return state_ == DualIdentitySessionBindingState::Ready;
 }
 
-const std::string& DualIdentitySessionBinding::BoundSourceObjectForCapture(
+std::string DualIdentitySessionBinding::BoundSourceObjectForCapture(
     std::string_view camera_alias) {
     if (state_ != DualIdentitySessionBindingState::Ready) {
         throw DualIdentitySessionBindingError(
@@ -221,6 +269,14 @@ const std::string& DualIdentitySessionBinding::BoundSourceObjectForCapture(
 std::vector<DualIdentitySessionBindingEvidence>
 DualIdentitySessionBinding::PublishableEvidence() const {
     std::vector<DualIdentitySessionBindingEvidence> evidence;
+    if (state_ != DualIdentitySessionBindingState::Ready &&
+        state_ != DualIdentitySessionBindingState::Invalid) {
+        // Nothing was confirmed yet. Emitting records here would produce
+        // something shaped exactly like a confirmed binding whose only tell is
+        // an empty confirmedAt.
+        return evidence;
+    }
+
     for (const auto& assignment : candidates_) {
         if (assignment.camera_alias.empty()) {
             continue;

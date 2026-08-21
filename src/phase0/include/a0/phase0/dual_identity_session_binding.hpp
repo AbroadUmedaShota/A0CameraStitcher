@@ -122,17 +122,21 @@ struct DualIdentitySessionBindingEvidence {
     std::string invalidation_reason;
 };
 
-// Counters a test can assert are zero. The binding core must never touch a
-// camera, a card, or delete anything, and must never retry.
+// The one counter here that can actually move.
+//
+// An earlier draft also carried camera_command_count / card_access_count /
+// delete_count / automatic_retry_count / enumeration_count and asserted they
+// stayed zero. Nothing in this translation unit could ever increment them, so
+// those assertions could not fail and only looked like coverage. The property
+// they claimed to check is structural instead: this header and its .cpp depend
+// on no camera, card, WPD or SDK type, so there is no call they could make. A
+// test that wants to guard that should check the dependency, not a counter that
+// is zero by construction.
 struct DualIdentitySessionBindingSafetyCounters {
-    std::size_t camera_command_count{};
-    std::size_t card_access_count{};
-    std::size_t delete_count{};
-    std::size_t automatic_retry_count{};
-    // Counts every time capture asked for a bound source object. Used to prove
-    // the capture seam never falls back to re-enumeration.
+    // Counts every time capture asked for a bound source object. Capture has no
+    // other way to obtain one, so a non-zero value here with no enumeration
+    // anywhere is what "capture reuses the bound object" means in practice.
     std::size_t source_object_reuse_count{};
-    std::size_t enumeration_count{};
 };
 
 class DualIdentitySessionBinding final {
@@ -141,9 +145,13 @@ public:
 
     [[nodiscard]] DualIdentitySessionBindingState State() const noexcept;
 
-    // Starts a session over exactly two candidates. Any other count is refused
-    // before anything is stored. Beginning again discards whatever came before:
-    // a half-finished assignment must never survive into a new session.
+    // Starts a session over exactly two candidates.
+    //
+    // The previous session is discarded first, before validation, so a refused
+    // BeginBinding cannot leave an older Ready binding in place. Validating
+    // first would mean that plugging in a third body and failing to re-bind
+    // leaves capture still using source objects from before the change --
+    // exactly the stale-attribution case this whole design exists to prevent.
     void BeginBinding(const std::vector<DualIdentityCandidate>& candidates);
 
     // Assigns one candidate to one alias, exactly once each way. Re-using a
@@ -154,6 +162,12 @@ public:
 
     // Records that a candidate's Live View is stopped and its SDK session is
     // fully closed. Both must be observed for every candidate before Ready.
+    //
+    // Only accepted once that candidate has an alias. The operator's flow is
+    // "view this body's Live View, assign it, stop it", so a quiesce report for
+    // an unassigned candidate would describe a Live View the operator has not
+    // finished with, and that stale flag could later satisfy CompleteBinding
+    // while a Live View is open again.
     void ConfirmCandidateQuiesced(
         std::size_t candidate_ordinal,
         bool live_view_stopped,
@@ -175,9 +189,16 @@ public:
     // re-enumerating, and only while Ready. Callers cannot reach a source
     // object any other way, which is what makes "capture never re-enumerates"
     // checkable rather than a convention.
-    [[nodiscard]] const std::string& BoundSourceObjectForCapture(
-        std::string_view camera_alias);
+    //
+    // Returned by value on purpose: a reference would point into the candidate
+    // vector, which BeginBinding clears, so a caller that held it across an
+    // invalidate-and-rebind would read freed memory.
+    [[nodiscard]] std::string BoundSourceObjectForCapture(std::string_view camera_alias);
 
+    // Only a completed binding (Ready, or a Ready one later invalidated) has
+    // evidence to publish. A half-assigned session would otherwise emit records
+    // shaped exactly like a confirmed binding, differing only by an empty
+    // confirmedAt, which a consumer could easily read as confirmed.
     [[nodiscard]] std::vector<DualIdentitySessionBindingEvidence> PublishableEvidence()
         const;
 

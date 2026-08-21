@@ -24,6 +24,15 @@ WpdAliasProofResult ProveExactlyOneWpdAliasObject(
     WpdAliasProofResult result;
     result.observed_count = observations.size();
 
+    if (camera_alias.empty()) {
+        // Without a target alias there is nothing to attribute the object to.
+        // Falling through would compare "" against an unattributed object,
+        // match, and adopt it as a canonical original for no alias at all.
+        result.outcome = WpdAliasProofOutcome::Mismatch;
+        result.failure_detail = "No camera alias was supplied to attribute an object to.";
+        return result;
+    }
+
     if (observations.empty()) {
         result.outcome = WpdAliasProofOutcome::Missing;
         result.failure_detail =
@@ -45,6 +54,15 @@ WpdAliasProofResult ProveExactlyOneWpdAliasObject(
     }
 
     const auto& only = observations.front();
+    if (only.attributed_alias.empty()) {
+        // An object nobody attributed is not evidence for this alias.
+        result.outcome = WpdAliasProofOutcome::Mismatch;
+        result.failure_detail =
+            "The single observed object carries no alias attribution; " +
+            std::string(camera_alias) + " cannot claim it.";
+        return result;
+    }
+
     if (only.attributed_alias != camera_alias) {
         result.outcome = WpdAliasProofOutcome::Mismatch;
         result.failure_detail =
