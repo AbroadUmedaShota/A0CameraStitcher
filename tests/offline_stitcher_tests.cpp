@@ -7,6 +7,7 @@
 #include <chrono>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -72,6 +73,22 @@ void RenameVerifiedPartialAwayAndReplacePath() {
         throw std::runtime_error("publish race could not rename verified partial away");
     }
     WriteBytes(publish_race_partial, publish_race_replacement);
+}
+
+// Fills the StitchJob identity every stitch now has to record. The values are
+// unique per call so no two jobs in one test run claim to be the same job, which
+// is also what a restitch does for real.
+a0::m2::OfflineStitchRequest WithRecordedIdentity(a0::m2::OfflineStitchRequest request) {
+    static std::atomic<unsigned int> sequence{};
+    const auto ordinal = ++sequence;
+    char job_id[33]{};
+    char transaction_id[33]{};
+    std::snprintf(job_id, sizeof(job_id), "%032x", ordinal);
+    std::snprintf(transaction_id, sizeof(transaction_id), "%032x", 0xC0FFEEU + ordinal);
+    request.stitch_job_id = job_id;
+    request.capture_transaction_id = transaction_id;
+    request.completed_at_utc = "2026-08-21T00:00:00Z";
+    return request;
 }
 
 void Check(const bool condition, const std::string& message) {
@@ -295,7 +312,7 @@ void TestInputHandlesRemainImmutableThroughPublish(const std::filesystem::path& 
     std::exception_ptr worker_error;
     std::thread worker([&] {
         try {
-            (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, job, SnapshotStressProfile()});
+            (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, job, SnapshotStressProfile()}));
         } catch (...) {
             worker_error = std::current_exception();
         }
@@ -363,8 +380,8 @@ void TestStitchSnapshotFailurePreservation(const std::filesystem::path& root) {
     }
     const auto locked_job = root / "snapshot-failure-locked-job";
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair(
-            {camera_a, camera_b, locked_job, ApprovedProfile()}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+            {camera_a, camera_b, locked_job, ApprovedProfile()})); },
         "cannot be locked",
         "an input already open for shared write/delete must fail before snapshot or output");
     CloseHandle(mutation);
@@ -378,8 +395,8 @@ void TestStitchSnapshotFailurePreservation(const std::filesystem::path& root) {
     WriteBytes(camera_b, truncated_b);
     const auto truncated_job = root / "snapshot-failure-truncated-job";
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair(
-            {camera_a, camera_b, truncated_job, ApprovedProfile()}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+            {camera_a, camera_b, truncated_job, ApprovedProfile()})); },
         "complete JPEG",
         "a truncated canonical input snapshot must fail full JPEG validation");
     Check(!std::filesystem::exists(truncated_job / "stitched.jpg")
@@ -394,8 +411,8 @@ void TestStitchSnapshotFailurePreservation(const std::filesystem::path& root) {
     const std::vector<std::uint8_t> sentinel{'k', 'e', 'e', 'p'};
     WriteBytes(conflict_output, sentinel);
     CheckRejected(
-        [&] { (void)a0::m2::StitchCanonicalPair(
-            {camera_a, camera_b, conflict_job, ApprovedProfile()}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+            {camera_a, camera_b, conflict_job, ApprovedProfile()})); },
         "an existing completed stitch output must reject a non-replacing publish");
     Check(ReadBytes(conflict_output) == sentinel
             && !std::filesystem::exists(conflict_job / "stitched.jpg.partial")
@@ -417,7 +434,7 @@ void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
     const auto a_before = ReadBytes(camera_a);
     const auto b_before = ReadBytes(camera_b);
 
-    const auto first = a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "stitch-job-001", ApprovedProfile()});
+    const auto first = a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "stitch-job-001", ApprovedProfile()}));
     Check(first.width == 26 && first.height == 6, "fixed translation, overlap, and crop must define output dimensions");
     Check(first.profile_id == "synthetic-approved-rig-v1", "result must retain the approved profile ID");
     Check(std::filesystem::is_regular_file(first.stitched_jpeg), "first job must atomically publish stitched.jpg");
@@ -431,7 +448,7 @@ void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
     Check(overlap[0] > 65 && overlap[2] > 65,
         "fixed overlap seam must feather contributions from both sources");
 
-    const auto second = a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "stitch-job-002", ApprovedProfile()});
+    const auto second = a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "stitch-job-002", ApprovedProfile()}));
     Check(second.stitched_jpeg != first.stitched_jpeg && std::filesystem::is_regular_file(second.stitched_jpeg),
         "recomposition must publish into a distinct output job");
     Check(ReadBytes(first.stitched_jpeg) == ReadBytes(second.stitched_jpeg),
@@ -459,15 +476,15 @@ void TestFailClosedContracts(const std::filesystem::path& root) {
 
     auto draft = ApprovedProfile();
     draft.trust.status = a0::m2::ProfileStatus::draft;
-    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "reject-draft", draft}); },
+    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "reject-draft", draft})); },
         "draft profile must be rejected before output");
 
     auto singular = ApprovedProfile();
     singular.camera_b_to_camera_a = {};
-    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "reject-singular", singular}); },
+    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "reject-singular", singular})); },
         "singular fixed transform must be rejected without estimation fallback");
 
-    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, a_directory, ApprovedProfile()}); },
+    CheckRejected([&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, a_directory, ApprovedProfile()})); },
         "output must not share a canonical input job directory");
 }
 
@@ -483,8 +500,8 @@ void TestCoverageMaskContracts(const std::filesystem::path& root) {
     const auto a_before = ReadBytes(camera_a);
     const auto b_before = ReadBytes(camera_b);
 
-    const auto valid_black = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "coverage-valid-black", ApprovedProfile()});
+    const auto valid_black = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "coverage-valid-black", ApprovedProfile()}));
     Check(std::filesystem::is_regular_file(valid_black.stitched_jpeg),
         "valid black source pixels must not be mistaken for uncovered output");
 
@@ -496,7 +513,7 @@ void TestCoverageMaskContracts(const std::filesystem::path& root) {
     };
     const auto rejected_job = root / "coverage-reject-uncovered";
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, rejected_job, uncovered}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, rejected_job, uncovered})); },
         "uncovered output pixel",
         "an approved crop containing a pixel from neither source must fail closed");
     Check(!std::filesystem::exists(rejected_job / "stitched.jpg")
@@ -507,8 +524,8 @@ void TestCoverageMaskContracts(const std::filesystem::path& root) {
 
     auto cropped_wedge = uncovered;
     cropped_wedge.crop = {0, 0, 4, 0};
-    const auto cropped = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "coverage-cropped-wedge", cropped_wedge});
+    const auto cropped = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "coverage-cropped-wedge", cropped_wedge}));
     Check(cropped.width == 24 && cropped.height == 8
             && std::filesystem::is_regular_file(cropped.stitched_jpeg),
         "a fixed crop that removes the complete uncovered wedge must remain accepted");
@@ -534,7 +551,7 @@ void TestProjectiveDomainContracts(const std::filesystem::path& root) {
     };
     const auto rejected_job = root / "projective-reject-crossing";
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, rejected_job, crossing}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, rejected_job, crossing})); },
         "projective denominator crosses the input image",
         "a fixed transform with an infinity line inside the input rectangle must fail preflight");
     Check(!std::filesystem::exists(rejected_job),
@@ -546,8 +563,8 @@ void TestProjectiveDomainContracts(const std::filesystem::path& root) {
     for (double& value : negative_homogeneous_scale.camera_b_to_camera_a) {
         value = -value;
     }
-    const auto accepted = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "projective-negative-scale", negative_homogeneous_scale});
+    const auto accepted = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "projective-negative-scale", negative_homogeneous_scale}));
     Check(accepted.width == 26 && accepted.height == 6
             && std::filesystem::is_regular_file(accepted.stitched_jpeg),
         "a valid fixed transform with consistently negative homogeneous scale must remain accepted");
@@ -558,8 +575,8 @@ void TestProjectiveDomainContracts(const std::filesystem::path& root) {
         0.0, 1.0, 0.0,
         0.1, 0.0, 1.0,
     };
-    const auto a_only_accepted = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "projective-inverse-pole-a-only", inverse_pole_outside_b});
+    const auto a_only_accepted = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "projective-inverse-pole-a-only", inverse_pole_outside_b}));
     Check(a_only_accepted.width == 14 && a_only_accepted.height == 6
             && std::filesystem::is_regular_file(a_only_accepted.stitched_jpeg),
         "an inverse pole outside CAM-B coverage must not reject an otherwise valid CAM-A output pixel");
@@ -580,20 +597,20 @@ void TestCompressedJpegByteLimit(const std::filesystem::path& root) {
     const auto valid_jpeg = ReadBytes(camera_b);
 
     std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes - 1);
-    const auto below = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "size-below-job", ApprovedProfile()});
+    const auto below = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "size-below-job", ApprovedProfile()}));
     Check(std::filesystem::is_regular_file(below.stitched_jpeg),
         "compressed JPEG one byte below the limit must reach WIC and remain accepted");
 
     std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes);
-    const auto exact = a0::m2::StitchCanonicalPair(
-        {camera_a, camera_b, root / "size-exact-job", ApprovedProfile()});
+    const auto exact = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "size-exact-job", ApprovedProfile()}));
     Check(std::filesystem::is_regular_file(exact.stitched_jpeg),
         "compressed JPEG exactly at the limit must remain accepted");
 
     std::filesystem::resize_file(camera_b, a0::m2::kMaximumCompressedJpegBytes + 1);
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, root / "size-over-job", ApprovedProfile()}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "size-over-job", ApprovedProfile()})); },
         "compressed JPEG byte size",
         "compressed JPEG one byte above the limit must fail before WIC decoder creation");
 
@@ -601,7 +618,7 @@ void TestCompressedJpegByteLimit(const std::filesystem::path& root) {
     Check(std::filesystem::file_size(metadata_jpeg) > a0::m2::kMaximumCompressedJpegBytes,
         "generated metadata JPEG must exceed the compressed byte limit");
     CheckRejectedContains(
-        [&] { (void)a0::m2::StitchCanonicalPair({camera_a, metadata_jpeg, root / "size-metadata-job", ApprovedProfile()}); },
+        [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, metadata_jpeg, root / "size-metadata-job", ApprovedProfile()})); },
         "compressed JPEG byte size",
         "oversized APP1 metadata JPEG must fail before WIC decoder creation");
 }
@@ -948,7 +965,7 @@ void TestDeterministicPublishFaultMatrix(const std::filesystem::path& root) {
         a0::m2::detail::SetOfflineStitchFaultForTest(fault.point);
         std::string error;
         try {
-            (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, job, ApprovedProfile()});
+            (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, job, ApprovedProfile()}));
         } catch (const std::exception& exception) {
             error = exception.what();
         }
@@ -971,8 +988,8 @@ void TestDeterministicPublishFaultMatrix(const std::filesystem::path& root) {
         if (fault.expect_partial) {
             const auto orphan_before_restart = ReadBytes(partial);
             CheckRejected(
-                [&] { (void)a0::m2::StitchCanonicalPair(
-                    {camera_a, camera_b, job, ApprovedProfile()}); },
+                [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                    {camera_a, camera_b, job, ApprovedProfile()})); },
                 "restart must not treat or clean an orphan partial as success");
             Check(ReadBytes(partial) == orphan_before_restart && !std::filesystem::exists(output)
                     && CountJobArtifacts(job) == 1,
@@ -981,8 +998,8 @@ void TestDeterministicPublishFaultMatrix(const std::filesystem::path& root) {
             Check(std::filesystem::is_directory(job) && CountJobArtifacts(job) == 0,
                 "a zero-file failure boundary must retain the durable job reservation");
             CheckRejected(
-                [&] { (void)a0::m2::StitchCanonicalPair(
-                    {camera_a, camera_b, job, ApprovedProfile()}); },
+                [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                    {camera_a, camera_b, job, ApprovedProfile()})); },
                 "restart must reject a reserved empty job instead of retrying encode");
             Check(std::filesystem::is_directory(job) && CountJobArtifacts(job) == 0
                     && !std::filesystem::exists(partial) && !std::filesystem::exists(output),
@@ -1003,8 +1020,8 @@ void TestDeterministicPublishFaultMatrix(const std::filesystem::path& root) {
         const std::vector<std::uint8_t> sentinel{'k', 'e', 'e', 'p'};
         WriteBytes(artifact, sentinel);
         CheckRejected(
-            [&] { (void)a0::m2::StitchCanonicalPair(
-                {camera_a, camera_b, job, ApprovedProfile()}); },
+            [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                {camera_a, camera_b, job, ApprovedProfile()})); },
             "existing partial or output must reject before encode");
         Check(ReadBytes(artifact) == sentinel && CountJobArtifacts(job) == 1,
             "existing output must never be replaced and existing partial must never be cleaned");
@@ -1049,8 +1066,8 @@ void TestCrashRestartFaultMatrix(const std::filesystem::path& root) {
         if (crash.expect_partial || crash.expect_output) {
             const auto artifact_before_restart = ReadBytes(artifact);
             CheckRejected(
-                [&] { (void)a0::m2::StitchCanonicalPair(
-                    {camera_a, camera_b, job, ApprovedProfile()}); },
+                [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                    {camera_a, camera_b, job, ApprovedProfile()})); },
                 "restart without a manifest must not infer success from an orphan file");
             Check(ReadBytes(artifact) == artifact_before_restart && CountJobArtifacts(job) == 1,
                 "restart must keep automatic cleanup and retry at zero while retaining diagnostics");
@@ -1058,8 +1075,8 @@ void TestCrashRestartFaultMatrix(const std::filesystem::path& root) {
             Check(std::filesystem::is_directory(job) && CountJobArtifacts(job) == 0,
                 "pre-encode interruption must leave a durable zero-file reservation");
             CheckRejected(
-                [&] { (void)a0::m2::StitchCanonicalPair(
-                    {camera_a, camera_b, job, ApprovedProfile()}); },
+                [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                    {camera_a, camera_b, job, ApprovedProfile()})); },
                 "restart after a zero-file interruption must not retry the same job");
             Check(std::filesystem::is_directory(job) && CountJobArtifacts(job) == 0,
                 "zero-file crash restart must retain its unknown reservation unchanged");
@@ -1114,7 +1131,7 @@ void TestActualIoFailuresUseSameOrphanPolicy(const std::filesystem::path& root) 
         failure.install_hook();
         std::string error;
         try {
-            (void)a0::m2::StitchCanonicalPair({camera_a, camera_b, job, ApprovedProfile()});
+            (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, job, ApprovedProfile()}));
         } catch (const std::exception& exception) {
             error = exception.what();
         }
@@ -1135,8 +1152,8 @@ void TestActualIoFailuresUseSameOrphanPolicy(const std::filesystem::path& root) 
 
         const auto partial_before_restart = ReadBytes(partial);
         CheckRejected(
-            [&] { (void)a0::m2::StitchCanonicalPair(
-                {camera_a, camera_b, job, ApprovedProfile()}); },
+            [&] { (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+                {camera_a, camera_b, job, ApprovedProfile()})); },
             std::string("actual ") + failure.name + " orphan must reject same-job restart");
         Check(ReadBytes(partial) == partial_before_restart
                 && std::filesystem::exists(output) == failure.expect_destination,
@@ -1155,12 +1172,12 @@ int RunFaultChildMode(const int argc, char* argv[]) {
     const std::filesystem::path case_root = argv[3];
     a0::m2::detail::SetOfflineStitchFaultForTest(point);
     try {
-        (void)a0::m2::StitchCanonicalPair({
+        (void)a0::m2::StitchCanonicalPair(WithRecordedIdentity({
             case_root / "a" / "original.jpg",
             case_root / "b" / "original.jpg",
             case_root / "job",
             ApprovedProfile(),
-        });
+        }));
     } catch (...) {
         return 195;
     }

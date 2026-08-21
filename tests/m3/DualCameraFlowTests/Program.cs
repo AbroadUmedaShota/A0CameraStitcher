@@ -1434,16 +1434,26 @@ sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
         return Task.FromResult(destinationPath);
     }
 
-    public Task<OfflineStitchArtifact> StitchAsync(IReadOnlyList<CanonicalJpegOriginal> originals, string outputJobDirectory, DualCameraRigProfile profile, CancellationToken cancellationToken)
+    public Task<OfflineStitchArtifact> StitchAsync(IReadOnlyList<CanonicalJpegOriginal> originals, string outputJobDirectory, DualCameraRigProfile profile, Guid stitchJobId, Guid captureTransactionId, DateTimeOffset completedAtUtc, CancellationToken cancellationToken)
     {
         _ = originals;
         cancellationToken.ThrowIfCancellationRequested();
         StitchCalls++;
         if (FailStitch) throw new InvalidOperationException("deterministic stitch failure");
+        _ = captureTransactionId;
+        _ = completedAtUtc;
         Directory.CreateDirectory(outputJobDirectory);
         var output = Path.Combine(outputJobDirectory, "stitched.jpg");
         File.WriteAllBytes(output, TestJpeg);
-        return Task.FromResult(new OfflineStitchArtifact(output, 1, 1, profile.ProfileId));
+        // A stitched file alone is not a completed job any more, so this fake
+        // records one too -- otherwise the flow's manifest check would reject a
+        // result the test means to be successful.
+        var manifestFileName = "stitch-job.manifest.json";
+        File.WriteAllText(
+            Path.Combine(outputJobDirectory, manifestFileName),
+            $"{{\"stitchJobId\":\"{stitchJobId:N}\"}}");
+        return Task.FromResult(
+            new OfflineStitchArtifact(output, 1, 1, profile.ProfileId, manifestFileName));
     }
 
     public Task ExportAsync(string stitchedJpeg, string destinationJpeg, CancellationToken cancellationToken)

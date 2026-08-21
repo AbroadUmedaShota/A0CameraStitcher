@@ -459,9 +459,24 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         SetStage(DualCameraProductStage.Stitch, DualCameraStageStatus.Active, $"stitch job {jobId:N}");
         try
         {
-            var artifact = await _stitcher.StitchAsync(originals, jobDirectory, profile, cancellationToken).ConfigureAwait(false);
+            var captureTransactionId = current.Capture?.TransactionId
+                ?? throw new DualCameraFlowException(
+                    DualCameraFailureCode.InvalidOriginal,
+                    "The CaptureTransaction this stitch consumes must be identified before it is recorded.");
+            var artifact = await _stitcher.StitchAsync(
+                originals,
+                jobDirectory,
+                profile,
+                jobId,
+                captureTransactionId,
+                DateTimeOffset.UtcNow,
+                cancellationToken).ConfigureAwait(false);
+            // The manifest is the commit point: without it this is a file on disk,
+            // not a completed job (Issue #39 decision).
             if (!string.Equals(Path.GetFileName(artifact.OutputPath), "stitched.jpg", StringComparison.OrdinalIgnoreCase) ||
                 !File.Exists(artifact.OutputPath) ||
+                artifact.ManifestFileName.Length == 0 ||
+                !File.Exists(Path.Combine(jobDirectory, artifact.ManifestFileName)) ||
                 !string.Equals(artifact.ProfileId, profile.ProfileId, StringComparison.Ordinal))
             {
                 throw new InvalidDataException("The offline stitcher did not publish the expected atomic stitched.jpg artifact.");

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-job-manifest.schema.json",
+  "title": "A0 Camera Stitcher StitchJob manifest",
+  "description": "The single durable commit point for a StitchJob (docs/DECISIONS.md ADR-0025 follow-up decision on GitHub Issue #39, implemented by Issue #40). A StitchJob is terminal-success only once this manifest has been published non-replacingly and re-read successfully. An output file existing on disk proves nothing on its own: a manifest that is missing, partial, schema-mismatched or hash-mismatched means the job did not succeed, and pre-v1 artifacts are refused rather than migrated. Absolute paths, serials, real identifiers and preview data are deliberately absent -- the output is named relative to the job directory so a manifest can be moved, read and verified without carrying anything about the machine that produced it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stitchJobId",
+    "captureTransactionId",
+    "inputs",
+    "rigProfile",
+    "engine",
+    "output",
+    "terminalResultState",
+    "completedAtUtc",
+    "automaticRetryCount"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-job-manifest.v1" },
+    "stitchJobId": {
+      "description": "Immutable identity of this stitch attempt. A restitch is a new StitchJob with a new ID and its own manifest; a terminal manifest is never rewritten.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "captureTransactionId": {
+      "description": "The CaptureTransaction whose retained originals this job consumed.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "inputs": {
+      "description": "The two canonical originals, in rig order. Ordered rather than keyed by alias so a manifest cannot be read as if CAM-A and CAM-B were interchangeable.",
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cameraAlias", "sha256", "encodedSizeBytes"],
+        "properties": {
+          "cameraAlias": { "enum": ["CAM-A", "CAM-B"] },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "encodedSizeBytes": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "rigProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileId", "version", "sha256"],
+      "properties": {
+        "profileId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "engine": {
+      "description": "What produced the output. Two manifests with identical inputs and profile but different engines are different results, and nothing may treat them as interchangeable.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engineId", "version"],
+      "properties": {
+        "engineId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "sha256", "widthPixels", "heightPixels", "encodedSizeBytes"],
+      "properties": {
+        "relativePath": {
+          "description": "Relative to the job directory. Absolute paths are excluded on purpose: they would tie a manifest to one machine and leak its layout.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "widthPixels": { "type": "integer", "minimum": 1 },
+        "heightPixels": { "type": "integer", "minimum": 1 },
+        "encodedSizeBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "terminalResultState": {
+      "description": "Only Succeeded is ever written. A failed job leaves no manifest at all, which is what makes 'manifest present and verified' the same statement as 'the job succeeded'.",
+      "const": "Succeeded"
+    },
+    "completedAtUtc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "automaticRetryCount": {
+      "description": "Fixed at zero across the product. Present so a reader can see it rather than having to know it.",
+      "const": 0
+    }
+  }
+}

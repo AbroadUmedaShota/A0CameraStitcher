@@ -338,9 +338,16 @@ int wmain(const int argc, wchar_t* argv[]) {
                     Required(options, L"camera-b"),
                     Required(options, L"job-directory"),
                     ParseProfile(options),
+                    Utf8(Required(options, L"stitch-job-id")),
+                    Utf8(Required(options, L"capture-transaction-id")),
+                    Utf8(Required(options, L"completed-at")),
                 });
+                // The manifest name is what a caller has to verify before calling
+                // this a success, so it is reported rather than left to be guessed.
                 std::cout << "result=stitched\nwidth=" << result.width << "\nheight=" << result.height
-                    << "\nprofileId=" << result.profile_id << '\n';
+                    << "\nprofileId=" << result.profile_id
+                    << "\nstitchJobId=" << result.stitch_job_id
+                    << "\nmanifest=" << result.manifest_path.filename().string() << '\n';
             } else if (operation == L"export") {
                 a0::m2::ExportStitchedJpeg(Required(options, L"source"), Required(options, L"destination"));
                 std::cout << "result=exported-byte-identical\n";
