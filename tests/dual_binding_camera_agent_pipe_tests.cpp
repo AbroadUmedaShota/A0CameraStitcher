@@ -186,9 +186,15 @@ void TestFullBindingSurvivesSeparateConnections() {
     auto adapter = std::make_shared<DualBindingFakeSdkAdapter>();
     DualBindingCameraAgentDispatcher dispatcher(adapter);
     const std::string pipe_name = PipeNameFor("full-binding");
+    // The budget bounds this test's wall clock, since the assertion at the end
+    // is that the host stops on its own deadline rather than on a request. Eight
+    // seconds is the smallest value with real margin: the seven round trips
+    // below take well under a second even on a loaded runner, so the host cannot
+    // expire mid-binding, and the test costs eight seconds instead of the
+    // production ten minutes.
     auto server = std::async(std::launch::async, [&] {
         return RunDualBindingCameraAgentNamedPipeServer(
-            pipe_name, dispatcher, false, {}, std::chrono::seconds(20));
+            pipe_name, dispatcher, false, {}, std::chrono::seconds(8));
     });
 
     const auto begin = SendRequest(
@@ -249,7 +255,7 @@ void TestFullBindingSurvivesSeparateConnections() {
         "the host's dispatcher holds the completed binding");
 
     Check(
-        server.wait_for(std::chrono::seconds(30)) == std::future_status::ready,
+        server.wait_for(std::chrono::seconds(20)) == std::future_status::ready,
         "the binding host terminates on its own lifetime bound");
     Check(server.get() == 0, "a fully delivered session ends the host cleanly");
 }
