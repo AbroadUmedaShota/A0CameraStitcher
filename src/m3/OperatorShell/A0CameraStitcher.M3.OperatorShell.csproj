@@ -27,7 +27,29 @@
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <Target Name="BuildM2Adapter" BeforeTargets="PrepareForBuild">
+  <!-- 操作画面のフォントは同梱する。実機PCへNoto Sans JP / JetBrains Monoが導入されていなくても
+       同じ字面・字送りで表示させるため、システムフォントへは依存させない。ライセンスはいずれも
+       SIL Open Font License 1.1（同フォルダの *-OFL.txt）。 -->
+  <ItemGroup>
+    <Resource Include="Assets\Fonts\NotoSansJP-Regular.otf" />
+    <Resource Include="Assets\Fonts\NotoSansJP-Medium.otf" />
+    <Resource Include="Assets\Fonts\NotoSansJP-Bold.otf" />
+    <Resource Include="Assets\Fonts\JetBrainsMono-Regular.ttf" />
+    <Resource Include="Assets\Fonts\JetBrainsMono-Medium.ttf" />
+    <Resource Include="Assets\Fonts\JetBrainsMono-Bold.ttf" />
+  </ItemGroup>
+
+  <!-- M2アダプタの入力。ここに挙げたものより成果物が新しければ BuildM2Adapter を丸ごと飛ばす。
+       これが無いと、シェルをビルドするたびに cmake の configure とビルドが起動し、
+       1回のCI内で同じアダプタを何度も作り直す（GitHub Issue #28）。 -->
+  <ItemGroup>
+    <M2AdapterInput Include="$(RepositoryRoot)\CMakeLists.txt" />
+    <M2AdapterInput Include="$(RepositoryRoot)\src\m2\**\*.cpp" />
+    <M2AdapterInput Include="$(RepositoryRoot)\src\m2\**\*.hpp" />
+  </ItemGroup>
+
+  <Target Name="BuildM2Adapter" BeforeTargets="PrepareForBuild"
+          Inputs="@(M2AdapterInput)" Outputs="$(M2AdapterSourcePath)">
     <Exec Command="cmake -S &quot;$(RepositoryRoot)&quot; -B &quot;$(M2AdapterBuildDirectory)&quot; -A x64" />
     <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.M2Adapter -- /m:1" />
     <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.CameraAgent -- /m:1" />

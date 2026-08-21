@@ -1949,7 +1949,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.True(hardwareViewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "HardwareDual WPF must retain CAM-B original.");
         hardwareViewModel.ExportCommand.Execute(null);
         await WaitUntilAsync(
-            () => !hardwareViewModel.IsBusy && hardwareViewModel.ExportResult.Contains("byte-identical", StringComparison.Ordinal),
+            () => !hardwareViewModel.IsBusy && hardwareViewModel.ExportResult.Contains("このPCのフォルダへ保存しました", StringComparison.Ordinal),
             "HardwareDual WPF fixed-local export did not finish.");
         Check.True(File.Exists(hardwareViewModel.LastExportPath), "HardwareDual WPF must publish the explicit fixed-local export.");
 
@@ -2105,7 +2105,7 @@ static async Task FormalDualCameraWpfFlowAsync()
 
         viewModel.ExportCommand.Execute(null);
         await WaitUntilAsync(
-            () => !viewModel.IsBusy && viewModel.ExportResult.Contains("byte-identical", StringComparison.Ordinal),
+            () => !viewModel.IsBusy && viewModel.ExportResult.Contains("このPCのフォルダへ保存しました", StringComparison.Ordinal),
             "Formal fixed-local export did not finish.");
         Check.True(File.Exists(viewModel.LastExportPath), "The formal WPF export must publish a JPEG.");
         Check.True(File.ReadAllBytes(viewModel.LastExportPath) is [0xff, 0xd8, .., 0xff, 0xd9], "The WPF export must be an actual JPEG.");
