@@ -666,7 +666,18 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the binding overlay reports the invalidation reason and drops every previous assignment (issue #62): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {57 - failures.Count}/57 passed.");
+try
+{
+    await DualBindingBlocksTheSingleCameraFallbackAsync();
+    Console.WriteLine("PASS an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62)");
+}
+catch (Exception exception)
+{
+    failures.Add("an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62)");
+    Console.Error.WriteLine($"FAIL an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {58 - failures.Count}/58 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2583,6 +2594,47 @@ static async Task DualBindingOverlayGatesCaptureAsync()
         Check.False(shell.DualBinding.IsOverlayVisible, "A Ready binding must uncover the screen.");
         Check.True(shell.CanCapture, "A confirmed binding must enable capture.");
         Check.Equal(1, agent.EnumerationCount);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualBindingBlocksTheSingleCameraFallbackAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agent = new SimulatedDualBindingAgent();
+        var shell = HardwareDualShellWithSimulatedBinding(root, agent);
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.AcceptSafetyCommand.Execute(null);
+        Check.False(shell.CanCapture, "The outstanding binding must block capture.");
+
+        // Switching the operating mode is the one route that could look like a way around an
+        // unfinished binding: one camera needs no CAM-A/CAM-B decision. It must not become one.
+        // A HardwareDual rig with an unconfirmed binding stays blocked whatever mode is selected,
+        // because the bodies attached to it are still indistinguishable.
+        Check.True(shell.CanChangeOperatingMode, "The operating mode must still be selectable.");
+        shell.IsSingleCameraModeChecked = true;
+        Check.True(shell.IsSingleCameraMode, "The shell must have switched to SingleCamera.");
+        Check.False(
+            shell.CanCapture,
+            "SingleCamera mode must not become a way to capture around an unconfirmed binding.");
+        Check.True(
+            shell.CaptureDisabledReason.Contains("機体照合", StringComparison.Ordinal),
+            "The blocker must still name the binding after the mode switch.");
+
+        // And it stays blocked at the command level, not only on the property the button binds to.
+        var startsBefore = shell.TransactionStartCount;
+        shell.CaptureCommand.Execute(null);
+        await Task.Delay(50);
+        Check.Equal(startsBefore, shell.TransactionStartCount);
+
+        shell.IsDualCameraModeChecked = true;
+        await CompleteDualBindingAsync(shell.DualBinding);
+        Check.True(shell.CanCapture, "A confirmed binding must enable capture again.");
     }
     finally
     {

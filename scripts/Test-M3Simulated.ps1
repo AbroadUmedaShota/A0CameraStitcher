@@ -57,7 +57,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 57/57 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 58/58 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -100,6 +100,25 @@ try {
     foreach ($marker in @('共通ターゲット□', '拡大エリア', 'LoupeDisplayArea', 'StageDisplayArea', 'FractionToMarginConverter')) {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required target reticle / loupe binding/marker (issue #30): $marker"
     }
+    # 機体照合オーバーレイ（issue #62・ADR-0025）
+    foreach ($marker in @('機体照合（CAM-A / CAM-B の割当）', 'DualBinding.IsOverlayVisible', 'DualBinding.ShowCandidateCommand', 'DualBinding.AssignCameraACommand', 'DualBinding.AssignCameraBCommand', 'DualBinding.CompleteBindingCommand', 'DualBinding.ResidualRiskText', 'DualBinding.InvalidationText', '機体照合を表示（模擬）')) {
+        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required dual binding overlay binding/marker (issue #62): $marker"
+    }
+    # キーボードだけで到達できることと、読み上げ名が付いていることを markup 段で固定する。
+    # WPF の Button は既定で Focusable かつ IsTabStop なので、守るべきなのは
+    # 「それを打ち消していないこと」と「名前が付いていること」の2点。
+    $bindingOverlayNode = @($windowXml.SelectNodes('//*[@*[local-name()="AutomationProperties.Name" and contains(., "機体照合（CAM-A / CAM-B の割当）")]]')) | Select-Object -First 1
+    Assert-Condition ($null -ne $bindingOverlayNode) 'The dual binding overlay must expose an accessibility name on its root (issue #62).'
+    $bindingButtons = @($bindingOverlayNode.SelectNodes('.//*[local-name()="Button"]'))
+    Assert-Condition ($bindingButtons.Count -ge 4) "The dual binding overlay must offer its actions as focusable buttons (issue #62); found $($bindingButtons.Count)."
+    foreach ($button in $bindingButtons) {
+        $automationName = $button.GetAttribute('AutomationProperties.Name')
+        Assert-Condition (-not [string]::IsNullOrWhiteSpace($automationName)) 'Every dual binding overlay button must carry an AutomationProperties.Name for screen readers (issue #62).'
+        Assert-Condition ($button.GetAttribute('IsTabStop') -ne 'False') 'A dual binding overlay button must never be removed from the tab order (issue #62).'
+        Assert-Condition ($button.GetAttribute('Focusable') -ne 'False') 'A dual binding overlay button must never be made unfocusable (issue #62).'
+    }
+    Assert-Condition ($windowText.Contains('AutomationProperties.LiveSetting="Assertive"')) 'The binding invalidation notice must announce itself assertively (issue #62).'
+
     $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
     Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'
     Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')).Contains('MoveTargetByStageDrag')) 'MainWindow code-behind must wire stage drag input to the target reticle view model method.'
