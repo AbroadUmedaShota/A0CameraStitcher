@@ -74,22 +74,34 @@ jobs:
       # Debug and Release native builds below. NIKON_D810_SDK_ROOT is not
       # passed, so A0_NIKON_SDK_AVAILABLE stays OFF and the SDK-less stub is
       # what gets built and tested.
+      #
+      # The directory is build/wpf-m2-adapter -- the same one the WPF shell's
+      # BuildM2Adapter target and Test-M3Simulated.ps1 use -- so the M3 steps
+      # below find a0_phase0_core, the m2 libraries and the three agent
+      # executables already built instead of compiling the whole chain a second
+      # time (GitHub Issue #28: measured at roughly 100-120s per run).
+      #
+      # Sharing is only safe because of the line above: this configure passes no
+      # SDK root, so what the M3 steps pick up is the same SDK-less build this
+      # job tested. A directory configured with a licensed SDK must never be
+      # shared this way -- the product would bundle SDK-linked agents while the
+      # evidence still said software-only.
       - name: Configure CMake (SDK-less)
         id: cxx-configure
-        run: cmake -S . -B build/sdkless -A x64
+        run: cmake -S . -B build/wpf-m2-adapter -A x64
 
       - name: Build SDK-less C++ (Debug)
         id: cxx-debug-build
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          cmake --build build/sdkless --config Debug -- /m:1 /nodeReuse:false
+          cmake --build build/wpf-m2-adapter --config Debug -- /m:1 /nodeReuse:false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "DURATION_CXX_DEBUG_BUILD=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: CTest SDK-less C++ (Debug)
         id: cxx-debug-test
         if: ${{ !cancelled() && steps.cxx-debug-build.outcome == 'success' }}
-        run: ctest --test-dir build/sdkless -C Debug -j 1 --output-on-failure
+        run: ctest --test-dir build/wpf-m2-adapter -C Debug -j 1 --output-on-failure
 
       # Gated on the configure step only (not on the Debug build/test above),
       # so a Debug-side failure does not hide whether Release still builds.
@@ -98,14 +110,14 @@ jobs:
         if: ${{ !cancelled() && steps.cxx-configure.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          cmake --build build/sdkless --config Release -- /m:1 /nodeReuse:false
+          cmake --build build/wpf-m2-adapter --config Release -- /m:1 /nodeReuse:false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "DURATION_CXX_RELEASE_BUILD=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: CTest SDK-less C++ (Release)
         id: cxx-release-test
         if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
-        run: ctest --test-dir build/sdkless -C Release -j 1 --output-on-failure
+        run: ctest --test-dir build/wpf-m2-adapter -C Release -j 1 --output-on-failure
 
       # scripts/Test-M3Simulated.ps1 builds the M3 solution with
       # --maxcpucount:1 --nodeReuse:false, builds the M2 adapter via CMake,
