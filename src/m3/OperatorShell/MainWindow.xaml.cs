@@ -1,6 +1,9 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -157,12 +160,23 @@ public partial class MainWindow : Window
 
         if (WindowState == WindowState.Maximized)
         {
-            // 最大化のままではドラッグで動かせないため、掴んだ位置の横比率を保ったまま復元する。
-            var grabRatio = eventArgs.GetPosition(this).X / Math.Max(1.0, ActualWidth);
+            // 最大化のままではドラッグで動かせないため、掴んだ位置の比率を保ったまま復元する。
+            // PointToScreen はデバイスピクセルを返すのに Left/Top は DIP なので、変換を挟まないと
+            // 150% 表示などで復元位置がカーソルから離れていく。復元後の寸法は RestoreBounds で取る
+            // （この時点の Width/Height はまだ最大化時の値のことがある）。
+            var grabPoint = eventArgs.GetPosition(this);
+            var grabRatioX = grabPoint.X / Math.Max(1.0, ActualWidth);
+            var grabRatioY = grabPoint.Y / Math.Max(1.0, ActualHeight);
+            var deviceToDip = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice
+                ?? Matrix.Identity;
+            var cursorOnScreen = deviceToDip.Transform(PointToScreen(grabPoint));
+            var restored = RestoreBounds;
+            var restoredWidth = restored.Width > 0 ? restored.Width : Width;
+            var restoredHeight = restored.Height > 0 ? restored.Height : Height;
+
             WindowState = WindowState.Normal;
-            var cursor = PointToScreen(eventArgs.GetPosition(this));
-            Left = cursor.X - (Width * grabRatio);
-            Top = cursor.Y - (eventArgs.GetPosition(this).Y);
+            Left = cursorOnScreen.X - (restoredWidth * grabRatioX);
+            Top = cursorOnScreen.Y - (restoredHeight * grabRatioY);
         }
 
         DragMove();
@@ -177,6 +191,40 @@ public partial class MainWindow : Window
     private void MaximizeWindow_Click(object sender, RoutedEventArgs eventArgs) => ToggleMaximizedState();
 
     private void CloseWindow_Click(object sender, RoutedEventArgs eventArgs) => Close();
+
+    // A / B で表示カメラを切り替え、F でAFを実行する（docs/OPERATOR_UI_SPEC.md キー操作）。
+    // Window.InputBindings に置くと修飾キーなしの1文字が文字入力より先に走り、保存先へ
+    // "F:\..." と打っただけでAFが動いてしまう。入力欄にフォーカスがある間は何もしない。
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.Handled ||
+            eventArgs.KeyboardDevice.Modifiers != ModifierKeys.None ||
+            Keyboard.FocusedElement is TextBoxBase or PasswordBox)
+        {
+            return;
+        }
+
+        switch (eventArgs.Key)
+        {
+            case Key.A:
+                _viewModel.SelectStageCamera("CAM-A");
+                break;
+            case Key.B:
+                _viewModel.SelectStageCamera("CAM-B");
+                break;
+            case Key.F:
+                if (_viewModel.AutoFocusCommand.CanExecute(null))
+                {
+                    _viewModel.AutoFocusCommand.Execute(null);
+                }
+
+                break;
+            default:
+                return;
+        }
+
+        eventArgs.Handled = true;
+    }
 
     private void ToggleTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs)
     {

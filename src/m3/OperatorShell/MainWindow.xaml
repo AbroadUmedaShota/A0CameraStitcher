@@ -10,7 +10,8 @@
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource DesktopBrush}"
         FontFamily="{DynamicResource SansFontFamily}"
-        UseLayoutRounding="True">
+        UseLayoutRounding="True"
+        PreviewKeyDown="Window_PreviewKeyDown">
 
     <!-- 撮影画面は 1920×1080 の固定キャンバスとして組み、ウィンドウ側では等比縮小だけを行う。
          操作者ごとに画面サイズが違ってもレイアウトが崩れず、要素の相対位置が撮影手順の記憶と
@@ -36,9 +37,6 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Window.InputBindings>
-        <KeyBinding Key="F" Command="{Binding AutoFocusCommand}" />
-    </Window.InputBindings>
 
     <Grid Background="{StaticResource DesktopBrush}">
         <Viewbox Stretch="Uniform">
@@ -407,16 +405,8 @@
                                     <Grid x:Name="StageDisplayArea" ClipToBounds="True"
                                           AutomationProperties.Name="ステージ表示エリア 模擬動作の表示">
 
-                                        <!-- 撮影/合成処理中: Live View停止プレースホルダ -->
-                                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
-                                                    Visibility="{Binding IsStageProcessingPlaceholder, Converter={StaticResource BoolToVisibilityConverter}}">
-                                            <TextBlock Text="{Binding StageProcessingPlaceholderText}"
-                                                       FontSize="{StaticResource FontSizeReading}" FontWeight="Medium"
-                                                       TextAlignment="Center" AutomationProperties.LiveSetting="Polite"
-                                                       AutomationProperties.Name="ステージ 撮影シーケンス実行中プレースホルダ" />
-                                            <TextBlock Text="{Binding OverallStateText}" Margin="0,10,0,0" TextAlignment="Center"
-                                                       Style="{StaticResource MutedTextStyle}" />
-                                        </StackPanel>
+                                        <!-- 撮影/合成処理中の表示は、下の進捗オーバーレイが一枚で受け持つ。
+                                             ここに同じ文言を置くと、半透明のオーバーレイ越しに二重像になる。 -->
 
                                         <!-- Review: 合成結果ビューア -->
                                         <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
@@ -725,7 +715,9 @@
                                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                                 <TextBlock Text="{Binding StageProcessingPlaceholderText}" TextAlignment="Center"
                                                            Style="{StaticResource MutedTextStyle}"
-                                                           FontSize="{StaticResource FontSizeLabel}" />
+                                                           FontSize="{StaticResource FontSizeLabel}"
+                                                           AutomationProperties.LiveSetting="Polite"
+                                                           AutomationProperties.Name="ステージ 撮影シーケンス実行中プレースホルダ" />
                                                 <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,18,0,0"
                                                               AutomationProperties.Name="撮影の進行状況 ライブ表示停止からCAM-A撮影CAM-A原画像の確認CAM-B撮影CAM-B原画像の確認合成までの現在位置">
                                                     <ItemsControl.ItemsPanel>
@@ -735,14 +727,48 @@
                                                     </ItemsControl.ItemsPanel>
                                                     <ItemsControl.ItemTemplate>
                                                         <DataTemplate>
+                                                            <!-- 色は段の状態キーからテーマのトークンへ解決する。
+                                                                 未着手は沈め、進行中だけを明るくして現在位置を1つに絞る。 -->
                                                             <StackPanel Width="148" Margin="3,0">
-                                                                <Border Height="4" Background="{Binding BorderBrush}" />
-                                                                <TextBlock Text="{Binding Label}" Margin="0,6,0,0" TextAlignment="Center"
+                                                                <StackPanel.Resources>
+                                                                    <Style x:Key="StepBarStyle" TargetType="Border">
+                                                                        <Setter Property="Height" Value="4" />
+                                                                        <Setter Property="Background" Value="{StaticResource BorderBrush}" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="completed">
+                                                                                <Setter Property="Background" Value="{StaticResource AccentDotBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="current">
+                                                                                <Setter Property="Background" Value="{StaticResource AccentBrightBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="failure">
+                                                                                <Setter Property="Background" Value="{StaticResource BlockerBrush}" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                    <Style x:Key="StepTextStyle" TargetType="TextBlock">
+                                                                        <Setter Property="TextAlignment" Value="Center" />
+                                                                        <Setter Property="Foreground" Value="{StaticResource TextDisabledBrush}" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="completed">
+                                                                                <Setter Property="Foreground" Value="{StaticResource AccentBrightBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="current">
+                                                                                <Setter Property="Foreground" Value="{StaticResource AccentOnStrongBrush}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding StateKey}" Value="failure">
+                                                                                <Setter Property="Foreground" Value="{StaticResource BlockerBrush}" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </StackPanel.Resources>
+                                                                <Border Style="{StaticResource StepBarStyle}" />
+                                                                <TextBlock Text="{Binding Label}" Margin="0,6,0,0"
                                                                            FontSize="{StaticResource FontSizeCompact}"
-                                                                           Foreground="{Binding Foreground}" />
-                                                                <TextBlock Text="{Binding StatusText}" Margin="0,2,0,0" TextAlignment="Center"
+                                                                           Style="{StaticResource StepTextStyle}" />
+                                                                <TextBlock Text="{Binding StatusText}" Margin="0,2,0,0"
                                                                            FontSize="{StaticResource FontSizeSmall}"
-                                                                           Foreground="{Binding Foreground}" />
+                                                                           Style="{StaticResource StepTextStyle}" />
                                                             </StackPanel>
                                                         </DataTemplate>
                                                     </ItemsControl.ItemTemplate>

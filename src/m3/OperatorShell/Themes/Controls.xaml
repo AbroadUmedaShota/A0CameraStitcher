@@ -628,6 +628,9 @@
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="Orientation" Value="Horizontal">
+                            <!-- 既定の Width=10 は縦用。横向きでは幅の固定を外さないと
+                                 10×10 のつまみになって掴めなくなる。 -->
+                            <Setter Property="Width" Value="Auto" />
                             <Setter Property="Height" Value="10" />
                             <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False" />
                         </Trigger>

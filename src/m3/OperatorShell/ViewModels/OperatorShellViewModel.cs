@@ -118,6 +118,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private int _noticeGeneration;
     private bool _isResetArmed;
     private int _resetArmGeneration;
+    private Guid? _lastNotifiedExportJobId;
     private bool _isLiveViewActive;
     private string _selectedOperatingMode = DualModeLabel;
     private string _selectedCamera = "CAM-A";
@@ -700,6 +701,24 @@ public sealed class OperatorShellViewModel : ObservableObject
             : SimulatedFramePatternCatalog.DefaultPattern;
 
     public bool CanChangeStageMode => UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
+
+    /// <summary>A / B キーからのステージ表示切替。表示モードを変えるだけで、
+    /// 撮影対象カメラ（<see cref="SelectedCamera"/>）やライブ表示の開閉には触らない。
+    /// 切替できない状態のときは黙って無視する（キーで状態ゲートを迂回させない）。</summary>
+    public void SelectStageCamera(string alias)
+    {
+        if (!CanChangeStageMode)
+        {
+            return;
+        }
+
+        if (alias == "CAM-B" && IsSingleCameraMode)
+        {
+            return;
+        }
+
+        SelectedStageMode = alias == "CAM-B" ? StageModeCameraBLive : StageModeCameraALive;
+    }
     public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
     public bool IsStageReviewMode => UiState == OperatorUiState.Review;
     public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
@@ -1034,9 +1053,17 @@ public sealed class OperatorShellViewModel : ObservableObject
         get => _gridColumns;
         set
         {
-            if (SetProperty(ref _gridColumns, ClampGridDivision(value)))
+            var clamped = ClampGridDivision(value);
+            var changed = SetProperty(ref _gridColumns, clamped);
+            if (changed)
             {
                 OnPropertyChanged(nameof(GridDivisionText));
+            }
+            else if (clamped != value)
+            {
+                // 範囲外の入力を丸めた結果が今の値と同じだと変更通知が出ず、
+                // 入力欄には拒否したはずの値が残ってしまう。丸めたことを必ず返す。
+                OnPropertyChanged(nameof(GridColumns));
             }
         }
     }
@@ -1047,9 +1074,15 @@ public sealed class OperatorShellViewModel : ObservableObject
         get => _gridRows;
         set
         {
-            if (SetProperty(ref _gridRows, ClampGridDivision(value)))
+            var clamped = ClampGridDivision(value);
+            var changed = SetProperty(ref _gridRows, clamped);
+            if (changed)
             {
                 OnPropertyChanged(nameof(GridDivisionText));
+            }
+            else if (clamped != value)
+            {
+                OnPropertyChanged(nameof(GridRows));
             }
         }
     }
@@ -2220,14 +2253,21 @@ public sealed class OperatorShellViewModel : ObservableObject
                 ExportResult,
                 state.Export.Succeeded ? null : state.Export.FailureCode.ToString());
 
-            if (state.Export.Succeeded)
+            // 直近のexportはこの後の状態（再合成など）へも引き継がれるため、
+            // job IDが変わったときだけ通知する。そうしないと再合成のたびに
+            // 保存していないのに「保存しました」と出てしまう。
+            if (_lastNotifiedExportJobId != state.Export.JobId)
             {
-                RecordSavedFile(state.Export.OutputPath ?? string.Empty);
-                Notify("このPCのフォルダへ保存しました（画像は無加工）", true);
-            }
-            else
-            {
-                Notify("保存できませんでした。撮影データは保持しています", false);
+                _lastNotifiedExportJobId = state.Export.JobId;
+                if (state.Export.Succeeded)
+                {
+                    RecordSavedFile(state.Export.OutputPath ?? string.Empty);
+                    Notify("このPCのフォルダへ保存しました（画像は無加工）", true);
+                }
+                else
+                {
+                    Notify("保存できませんでした。撮影データは保持しています", false);
+                }
             }
         }
 
