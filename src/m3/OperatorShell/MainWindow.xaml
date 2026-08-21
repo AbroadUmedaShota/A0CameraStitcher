@@ -162,6 +162,10 @@
                                           AutomationProperties.Name="カメラ 観測値の30日profile承認 本SIMULATEDシェルでは未実装" />
                                 <MenuItem Header="{Binding DualCameraIdentityStatusText}" IsEnabled="False"
                                           AutomationProperties.Name="カメラ identity状態 読み取り専用表示" />
+                                <!-- 模擬動作で機体照合の流れだけを確認するための表示切替。実機の合格判定ではない。
+                                     HardwareDual では起動時から必須なのでこの項目は無効になる。 -->
+                                <MenuItem Header="機体照合を表示（模擬）(_B)" Command="{Binding ShowBindingDemoCommand}"
+                                          AutomationProperties.Name="カメラ 機体照合を表示 模擬動作 実機の合格判定ではない" />
                                 <Separator />
                                 <MenuItem Header="readiness再検査(_R)" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}"
                                           AutomationProperties.Name="カメラ readiness再検査 read-only 新しい撮影を準備" />
@@ -1370,6 +1374,166 @@
                                    Text="このアプリだけがカメラを使用中" />
                     </DockPanel>
                 </Border>
+
+                <!-- ========================== 機体照合（binding） ==========================
+                     ADR-0025。2台のうち「いま表示している1台」を CAM-A / CAM-B のどちらかへ
+                     操作者が明示的に割り当てる。2台を同時に表示しないのは、並べて見比べる操作
+                     こそがこの画面の防ごうとしている取り違えそのものだから。
+                     割当が Ready になるまで撮影は開始できない（Single へのフォールバックも無い）。 -->
+                <Grid Grid.Row="0" Grid.RowSpan="4" Panel.ZIndex="9"
+                      Background="{StaticResource ModalScrimBrush}"
+                      Visibility="{Binding DualBinding.IsOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                      AutomationProperties.Name="機体照合（CAM-A / CAM-B の割当）">
+                    <Border Width="760" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="28"
+                            Background="{StaticResource BarBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
+                            BorderThickness="1" Effect="{StaticResource DropdownShadow}">
+                        <StackPanel>
+                            <DockPanel LastChildFill="False">
+                                <TextBlock DockPanel.Dock="Left" Text="{Binding DualBinding.HeadlineText}" FontWeight="Bold"
+                                           FontSize="{StaticResource FontSizeDialogTitle}"
+                                           AutomationProperties.LiveSetting="Polite" />
+                                <Border DockPanel.Dock="Right" Padding="8,2" VerticalAlignment="Center"
+                                        BorderThickness="1">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="BorderBrush" Value="{StaticResource CautionBrush}" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding DualBinding.HeadlineKind}" Value="Block">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource BlockerBrush}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding DualBinding.HeadlineKind}" Value="Info">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource InfoBrush}" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <!-- 色だけに頼らず必ず文字で状態を併記する（色覚・読み上げ両対応） -->
+                                    <TextBlock Text="{Binding DualBinding.HeadlineKind}"
+                                               Style="{StaticResource MonoTextStyle}"
+                                               AutomationProperties.Name="機体照合の状態区分" />
+                                </Border>
+                            </DockPanel>
+
+                            <TextBlock Margin="0,14,0,0" Style="{StaticResource MutedTextStyle}"
+                                       FontSize="{StaticResource FontSizeLabel}" LineHeight="20" TextWrapping="Wrap"
+                                       Text="{Binding DualBinding.ResidualRiskText, Mode=OneTime}"
+                                       AutomationProperties.Name="機体照合の残留リスク" />
+
+                            <Border Margin="0,14,0,0" Padding="10" BorderThickness="1"
+                                    BorderBrush="{StaticResource BlockerBrush}" Background="{StaticResource CardBrush}"
+                                    Visibility="{Binding DualBinding.IsInvalidationVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <TextBlock Text="{Binding DualBinding.InvalidationText}" TextWrapping="Wrap"
+                                           Foreground="{StaticResource BlockerBrush}"
+                                           AutomationProperties.LiveSetting="Assertive"
+                                           AutomationProperties.Name="再bindingが必要な理由" />
+                            </Border>
+
+                            <!-- 候補の選択。ListBox にしているのは矢印キーだけで候補を移動でき、
+                                 読み上げにも「候補1 未割当 表示中」がそのまま渡るため。 -->
+                            <ItemsControl Margin="0,16,0,0" ItemsSource="{Binding DualBinding.Candidates}"
+                                          Visibility="{Binding DualBinding.IsCandidateStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                          AutomationProperties.Name="binding 候補一覧">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Columns="2" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Margin="4" MinHeight="52" HorizontalContentAlignment="Left" Padding="12,6"
+                                                Command="{Binding DataContext.DualBinding.ShowCandidateCommand,
+                                                          RelativeSource={RelativeSource AncestorType=Window}}"
+                                                CommandParameter="{Binding}"
+                                                AutomationProperties.Name="{Binding AccessibleName}">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding DisplayName}" FontWeight="Bold"
+                                                           FontSize="{StaticResource FontSizeSection}" />
+                                                <TextBlock Text="{Binding AssignmentText}" Style="{StaticResource MonoTextStyle}" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- ライブ表示は常に1台ぶんだけ。取得できたフレームは表示のためだけに保持し、保存しない。 -->
+                            <Border Margin="0,12,0,0" Height="240" Background="{StaticResource StageBrush}"
+                                    BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1"
+                                    Visibility="{Binding DualBinding.IsCandidateStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <Grid>
+                                    <Image Source="{Binding DualBinding.PreviewImage}" Stretch="Uniform" Margin="6"
+                                           Visibility="{Binding DualBinding.IsPreviewVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="表示中の候補のライブ表示" />
+                                    <TextBlock Text="{Binding DualBinding.PreviewPlaceholderText}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Style="{StaticResource MutedTextStyle}"
+                                               Visibility="{Binding DualBinding.IsPreviewPlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                               AutomationProperties.Name="ライブ表示の代替説明" />
+                                    <TextBlock Margin="8" VerticalAlignment="Top" HorizontalAlignment="Left"
+                                               Style="{StaticResource MonoTextStyle}"
+                                               Text="{Binding DualBinding.SelectedCandidateName, StringFormat=表示中: {0}}"
+                                               AutomationProperties.Name="表示中の候補" />
+                                </Grid>
+                            </Border>
+
+                            <UniformGrid Columns="2" Margin="0,12,0,0"
+                                         Visibility="{Binding DualBinding.IsCandidateStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <Button Margin="0,0,4,0" MinHeight="46" Content="表示中を CAM-A にする"
+                                        Command="{Binding DualBinding.AssignCameraACommand}"
+                                        AutomationProperties.Name="表示中の候補を CAM-A に割り当てる" />
+                                <Button Margin="4,0,0,0" MinHeight="46" Content="表示中を CAM-B にする"
+                                        Command="{Binding DualBinding.AssignCameraBCommand}"
+                                        AutomationProperties.Name="表示中の候補を CAM-B に割り当てる" />
+                            </UniformGrid>
+
+                            <!-- 確定前の確認。ここを飛ばすと「押したら終わっていた」になる。 -->
+                            <Border Margin="0,14,0,0" Padding="12" Background="{StaticResource CardBrush}"
+                                    BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1"
+                                    Visibility="{Binding DualBinding.IsSummaryVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <StackPanel>
+                                    <TextBlock Text="この割当で確定します" FontWeight="Bold"
+                                               FontSize="{StaticResource FontSizeSection}" />
+                                    <ItemsControl Margin="0,8,0,0" ItemsSource="{Binding DualBinding.SummaryLines}"
+                                                  AutomationProperties.Name="確定する割当">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding}" Style="{StaticResource MonoTextStyle}" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+
+                            <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,14,0,0" MinHeight="46"
+                                    Content="機体照合を開始"
+                                    Command="{Binding DualBinding.BeginBindingCommand}"
+                                    AutomationProperties.Name="機体照合を開始する" />
+                            <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,10,0,0" MinHeight="46"
+                                    Content="この割当で確定する"
+                                    Command="{Binding DualBinding.CompleteBindingCommand}"
+                                    Visibility="{Binding DualBinding.IsSummaryVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                    AutomationProperties.Name="この割当で機体照合を確定する" />
+
+                            <TextBlock Margin="0,12,0,0" TextWrapping="Wrap"
+                                       Text="{Binding DualBinding.NoticeText}"
+                                       Visibility="{Binding DualBinding.IsNoticeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                       AutomationProperties.LiveSetting="Polite"
+                                       AutomationProperties.Name="機体照合の通知">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource MutedTextStyle}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding DualBinding.NoticeKind}" Value="block">
+                                                <Setter Property="Foreground" Value="{StaticResource BlockerBrush}" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding DualBinding.NoticeKind}" Value="caution">
+                                                <Setter Property="Foreground" Value="{StaticResource CautionBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
+                </Grid>
 
                 <!-- ============================ 起動時の同意 ============================ -->
                 <!-- 同意するまで撮影・設定・保存の全操作を無効にする。同意はこのセッション限りで、

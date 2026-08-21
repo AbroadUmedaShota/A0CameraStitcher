@@ -250,6 +250,40 @@ public sealed class DualBindingSessionClient
         return reply;
     }
 
+    /// <summary>
+    /// Asks the agent whether this binding is still the one it is serving, without changing
+    /// anything.
+    /// </summary>
+    /// <remarks>
+    /// The protocol is request/response with no server push, so a Ready binding cannot learn that
+    /// it was invalidated until something asks. Nothing does, between confirming the binding and
+    /// starting a capture -- which is exactly the window in which a body can be unplugged.
+    /// <para>
+    /// The probe re-issues <c>complete-binding</c>, which on a Ready session is refused with
+    /// <c>BindingAlreadyComplete</c> and changes no state, but which still runs the agent's session
+    /// identity check and invalidation poll first. So a pending invalidation surfaces here, before
+    /// a capture is dispatched against a binding that stopped being trustworthy.
+    /// </para>
+    /// </remarks>
+    public async Task<DualBindingRefusal?> VerifyBindingIsCurrentAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (RequireSession() is { } noSession)
+        {
+            return noSession;
+        }
+
+        var reply = await CompleteBindingAsync(cancellationToken).ConfigureAwait(false);
+        if (reply.Refusal is { ResultCode: "BindingAlreadyComplete" })
+        {
+            // Still Ready. CompleteBindingAsync's refusal handling leaves State untouched for this
+            // code, so nothing needs restoring.
+            return null;
+        }
+
+        return reply.Refusal;
+    }
+
     private DualBindingRefusal? RequireSession() =>
         SessionId.Length == 0
             ? new DualBindingRefusal

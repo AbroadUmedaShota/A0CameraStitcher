@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')),
     [ValidateSet('Debug', 'Release')]
@@ -36,7 +36,7 @@ try {
     Assert-Condition (Test-Path -LiteralPath $foundationTestExecutable -PathType Leaf) 'M3 foundation test executable was not produced by the solution build.'
     $testOutput = & $foundationTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 foundation tests failed: $($testOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 22/22 passed.')) 'M3 foundation test summary is missing or incomplete.'
+    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 32/32 passed.')) 'M3 foundation test summary is missing or incomplete.'
 
     $cmake = Get-Command cmake -ErrorAction Stop
     & $cmake.Source -S $RepositoryRoot -B $nativeBuildDirectory -A x64
@@ -57,7 +57,7 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 54/54 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 57/57 passed.')) 'M3 operator shell test summary is missing or incomplete.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath

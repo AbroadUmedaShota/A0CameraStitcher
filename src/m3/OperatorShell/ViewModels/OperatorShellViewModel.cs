@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Simulated;
 
@@ -104,6 +105,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly RelayCommand _togglePeakingCommand;
     private readonly RelayCommand _switchLiveCameraToTargetDomainCommand;
     private readonly RelayCommand _showConsentCommand;
+    private readonly RelayCommand _showBindingDemoCommand;
     private readonly RelayCommand _gridPreset3Command;
     private readonly RelayCommand _gridPreset4Command;
     private readonly RelayCommand _gridPreset5Command;
@@ -215,7 +217,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         IDualCameraProductFlow? dualCameraFlow,
         Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null,
         ISimulatedLiveViewFramePump? liveViewFramePump = null,
-        ISimulatedLiveViewFrameSource? liveViewFrameSource = null)
+        ISimulatedLiveViewFrameSource? liveViewFrameSource = null,
+        IHardwareCameraAgentTransport? dualBindingTransport = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
@@ -242,6 +245,23 @@ public sealed class OperatorShellViewModel : ObservableObject
             new("review", "結果確認"),
             new("export", "保存"),
         ];
+
+        // 機体照合（Dual session binding・ADR-0025）。HardwareDual では binding が Ready に
+        // なるまで撮影を開始できない。実機用の binding Agent host はまだ存在しないため、
+        // HardwareDual では接続に失敗し HardwarePending のまま止まる——これは仕様どおりで、
+        // 模擬 binding を実機の合格として見せないための意図的な状態。
+        var isHardwareDual =
+            _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual;
+        DualBinding = new DualBindingViewModel(
+            new DualBindingSessionClient(dualBindingTransport ?? (isHardwareDual
+                ? new NamedPipeHardwareCameraAgentTransport(
+                    DualBindingCameraAgentProtocol.DefaultPipeName)
+                : new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()))),
+            isRequired: isHardwareDual);
+        DualBinding.PropertyChanged += OnDualBindingChanged;
+        _showBindingDemoCommand = new RelayCommand(
+            () => DualBinding.IsRequired = true,
+            () => !DualBinding.IsRequired && !IsBusy);
 
         // 同意は2項目の両方にチェックが入るまで押せない。読まずに流す操作を防ぐため。
         _acceptSafetyCommand = new RelayCommand(
@@ -313,6 +333,17 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public ICommand AcceptSafetyCommand => _acceptSafetyCommand;
     public ICommand ShowConsentCommand => _showConsentCommand;
+
+    /// <summary>
+    /// 機体照合（Dual session binding）の状態。HardwareDual では Ready になるまで撮影を
+    /// 開始できない唯一のゲートで、Single へのフォールバックは無い。
+    /// </summary>
+    public DualBindingViewModel DualBinding { get; }
+
+    /// <summary>
+    /// 模擬動作で機体照合の流れを確認するための表示切替。実機の合格判定ではない。
+    /// </summary>
+    public ICommand ShowBindingDemoCommand => _showBindingDemoCommand;
     public ICommand GridPreset3Command => _gridPreset3Command;
     public ICommand GridPreset4Command => _gridPreset4Command;
     public ICommand GridPreset5Command => _gridPreset5Command;
@@ -1853,9 +1884,16 @@ public sealed class OperatorShellViewModel : ObservableObject
             Current: { FailureCode: DualCameraFailureCode.AgentResponseUnknown },
         };
 
+    // 新規撮影は、必要な機体照合が Ready になるまで開始できない。Single へのフォールバックも
+    // 無い——未確定の binding で 2 台を撮ると、片方の本体の画像がもう片方の alias として
+    // 記録され、後から誰も判別できない（ADR-0025）。
+    // ただし同一撮影IDの読み直し（HasRecoverableHardwareDualTransaction）はゲート対象外。
+    // これは新しい撮影を始めず、既に dispatch 済みの結果を read-only で確認するだけで、
+    // ここを塞ぐと曖昧な状態のまま操作者が確認手段を失う。
     public bool CanCapture => !_isPreCaptureAutoFocusRunning &&
         (HasRecoverableHardwareDualTransaction ||
-        (_availability.Capture.Allowed &&
+        ((!DualBinding.IsRequired || DualBinding.IsReady) &&
+        _availability.Capture.Allowed &&
         (IsSingleCameraMode || _dualCameraFlow is null ||
             (_dualCameraFlow.IdentitySnapshot.IsReady &&
              (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
@@ -1866,6 +1904,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? HasRecoverableHardwareDualTransaction
             ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
+        // binding が先に来る。identity が Pending でも、操作者にとっては「まず割当を終わらせる」
+        // が次の一手なので、そちらを名指しする。
+        : DualBinding.IsRequired && !DualBinding.IsReady
+            ? "機体照合（CAM-A / CAM-B の割当）が未完了です — 撮影禁止"
         : !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
             ? $"2台の機体照合: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
             : !IsSingleCameraMode && _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual &&
@@ -1961,6 +2003,18 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         if (!CanCapture)
         {
+            return;
+        }
+
+        // 機体照合が確定してからシャッターを切るまでの間にも本体は抜ける。request/response の
+        // protocol は誰かが訊ねるまで無効化を伝えられないので、撮影を始める直前にここで訊ねる。
+        // 同一撮影IDの読み直しは新しい撮影を始めないため対象外。
+        if (!HasRecoverableHardwareDualTransaction &&
+            !await DualBinding.VerifyBindingIsCurrentAsync().ConfigureAwait(true))
+        {
+            Notify("機体照合が無効になりました。撮影は開始していません。", false);
+            OnPropertyChanged(nameof(CanCapture));
+            OnPropertyChanged(nameof(CaptureDisabledReason));
             return;
         }
 
@@ -2194,6 +2248,36 @@ public sealed class OperatorShellViewModel : ObservableObject
             return;
         }
         ApplyFormalDualCameraState(state);
+    }
+
+    // 機体照合が Ready/未 Ready を跨いだ瞬間に撮影ボタンの可否が変わる。ここで拾わないと、
+    // binding 完了後もボタンが無効なまま残る。
+    private void OnDualBindingChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName is not (nameof(DualBindingViewModel.IsReady)
+            or nameof(DualBindingViewModel.IsRequired)
+            or nameof(DualBindingViewModel.Phase)))
+        {
+            return;
+        }
+
+        if (_synchronizationContext is not null && SynchronizationContext.Current != _synchronizationContext)
+        {
+            _synchronizationContext.Post(_ => NotifyBindingGateChanged(), null);
+            return;
+        }
+
+        NotifyBindingGateChanged();
+    }
+
+    private void NotifyBindingGateChanged()
+    {
+        OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CaptureDisabledReason));
+        _showBindingDemoCommand.NotifyCanExecuteChanged();
+        _captureCommand.NotifyCanExecuteChanged();
+        _captureWithAutoFocusCommand.NotifyCanExecuteChanged();
+        _diagnosticCommand.NotifyCanExecuteChanged();
     }
 
     private void OnDualCameraIdentityChanged(object? sender, DualCameraIdentitySnapshot snapshot)
@@ -2832,6 +2916,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _togglePeakingCommand.NotifyCanExecuteChanged();
         _switchLiveCameraToTargetDomainCommand.NotifyCanExecuteChanged();
         _showConsentCommand.NotifyCanExecuteChanged();
+        _showBindingDemoCommand.NotifyCanExecuteChanged();
         _gridPreset3Command.NotifyCanExecuteChanged();
         _gridPreset4Command.NotifyCanExecuteChanged();
         _gridPreset5Command.NotifyCanExecuteChanged();
