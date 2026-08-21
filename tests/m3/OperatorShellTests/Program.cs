@@ -2671,10 +2671,17 @@ static async Task DualBindingOverlayInvalidationRestartsTheFlowAsync()
         // that runs immediately before a capture is what asks, and it has to refuse before any
         // shutter is dispatched.
         agent.RaiseInvalidation(DualBindingInvalidationReason.TopologyChanged);
-        Check.False(
-            await shell.DualBinding.VerifyBindingIsCurrentAsync(),
+
+        // Driven through the capture command rather than the probe directly, because the thing
+        // that has to hold is "no shutter is dispatched", not "a method returns false". Calling the
+        // probe here would pass even if nothing on the capture path ever called it.
+        Check.True(shell.CanCapture, "Nothing has told the shell about the change yet.");
+        var startsBefore = shell.TransactionStartCount;
+        shell.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !shell.IsBusy && shell.DualBinding.RequiresRebindingText,
             "A body unplugged after the binding was confirmed must be caught before capture.");
-        Check.True(shell.DualBinding.RequiresRebindingText, "The overlay must ask for a re-binding.");
+        Check.Equal(startsBefore, shell.TransactionStartCount);
         Check.True(
             shell.DualBinding.InvalidationText.Contains("接続構成の変化", StringComparison.Ordinal),
             "The overlay must name the invalidation reason in words the operator can act on.");
