@@ -131,9 +131,9 @@
                         <Menu DockPanel.Dock="Left" Margin="8,0,0,0"
                               AutomationProperties.Name="メニューバー ファイル カメラ 表示 ツール ヘルプ">
                             <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー 保存先の指定 このPCのフォルダへ保存 終了">
-                                <MenuItem Header="保存先を指定(_L)..." Click="FocusExportDirectory_Click"
+                                <MenuItem Header="保存先を指定(_L)..." Click="ChooseExportDirectory_Click"
                                           IsEnabled="{Binding CanChangeExportDirectory}"
-                                          AutomationProperties.Name="ファイル 保存先を指定 このPC内の保存先フォルダ入力欄へフォーカス" />
+                                          AutomationProperties.Name="ファイル 保存先を指定 フォルダ選択ダイアログを開く このPC内のみ" />
                                 <MenuItem Header="このPCのフォルダへ保存(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
                                           AutomationProperties.Name="ファイル このPCのフォルダへ保存 確認済みの単体原画像または合成結果を保存" />
                                 <Separator />
@@ -577,6 +577,7 @@
                                                 MouseLeftButtonDown="StageDragHandle_MouseLeftButtonDown"
                                                 MouseMove="TargetDragHandle_MouseMove"
                                                 MouseLeftButtonUp="TargetDragHandle_MouseLeftButtonUp"
+                                                MouseLeave="StageHandle_MouseLeave"
                                                 AutomationProperties.Name="ステージ ドラッグで共通ターゲット□を粗く移動" />
 
                                         <Grid Width="92" Height="92" HorizontalAlignment="Left" VerticalAlignment="Top"
@@ -620,12 +621,13 @@
 
                                         <!-- 拡大エリア（ルーペ）: ステージ上に重ねる。撮影対象から目を離さずにピントを見る。
                                              ここでのドラッグはターゲット□の細かい移動になる（issue #30）。 -->
-                                        <Border Width="236" Height="236" HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                                                Margin="0,0,14,14" Background="{StaticResource StageBrush}"
+                                        <Border x:Name="LoupePanel" Width="236" Height="236"
+                                                HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                Background="{StaticResource StageBrush}"
                                                 BorderBrush="{StaticResource AccentBrightBrush}" BorderThickness="1"
                                                 Effect="{StaticResource LoupeShadow}"
-                                                Visibility="{Binding IsStageLiveNoteVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                AutomationProperties.Name="拡大エリア ルーペ 共通ターゲット□の等倍クロップ表示">
+                                                Visibility="{Binding IsLoupeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="拡大エリア ルーペ ポインタ位置の等倍クロップ表示">
                                             <Grid x:Name="LoupeDisplayArea" ClipToBounds="True"
                                                   AutomationProperties.Name="拡大エリア 等倍クロップ表示領域">
                                                 <Border Background="{StaticResource StageHatchBrush}"
@@ -651,7 +653,7 @@
                                                 <Border Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Top"
                                                         BorderBrush="{StaticResource AccentBrightBrush}" BorderThickness="1"
                                                         Background="Transparent" IsHitTestVisible="False"
-                                                        Visibility="{Binding IsLoupeImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                        Visibility="{Binding IsLoupeMarkerVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="拡大エリア内 共通ターゲット□ 枠線">
                                                     <Border.Margin>
                                                         <MultiBinding Converter="{StaticResource FractionToMarginConverter}" ConverterParameter="18">
@@ -1003,13 +1005,22 @@
                                             <TextBlock Text="保存先（このPC内のフォルダのみ）" Margin="0,10,0,0"
                                                        Style="{StaticResource MutedTextStyle}"
                                                        FontSize="{StaticResource FontSizeCompact}" />
-                                            <TextBox x:Name="FixedLocalExportDirectoryTextBox" Margin="0,4,0,0"
-                                                     Text="{Binding FixedLocalExportDirectory, UpdateSourceTrigger=PropertyChanged}"
-                                                     IsEnabled="{Binding CanChangeExportDirectory}"
-                                                     FontSize="{StaticResource FontSizeCompact}"
-                                                     AutomationProperties.Name="操作者が選ぶ保存先フォルダ このPC内のみ" />
-                                            <TextBlock Text="{Binding OutputDirectory}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"
-                                                       Style="{StaticResource MonoTextStyle}" />
+                                            <DockPanel Margin="0,4,0,0">
+                                                <Button DockPanel.Dock="Right" Content="選択…" Margin="8,0,0,0" Padding="12,4"
+                                                        Click="ChooseExportDirectory_Click"
+                                                        IsEnabled="{Binding CanChangeExportDirectory}"
+                                                        AutomationProperties.Name="操作者が選ぶ保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
+                                                <Border Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
+                                                        BorderThickness="1" Padding="7,5">
+                                                    <TextBlock Text="{Binding OutputDirectory}" TextTrimming="CharacterEllipsis"
+                                                               TextWrapping="NoWrap" ToolTip="{Binding OutputDirectory}"
+                                                               VerticalAlignment="Center"
+                                                               FontFamily="{StaticResource MonoFontFamily}"
+                                                               FontSize="{StaticResource FontSizeCompact}"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               AutomationProperties.Name="現在の保存先" />
+                                                </Border>
+                                            </DockPanel>
 
                                             <!-- 保存したファイルの控え。自動保存はしないので、ここが増えていれば
                                                  操作者が保存を押したということ。 -->

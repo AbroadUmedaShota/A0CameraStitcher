@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using Microsoft.Win32;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -32,6 +33,10 @@ public partial class MainWindow : Window
     private FrameworkElement? _targetDragReferenceArea;
     private Point _targetDragLastPoint;
     private Action<double, double>? _targetDragApply;
+
+    // 拡大エリアの一辺と、カーソルとの間隔。MainWindow.xaml の LoupePanel と合わせる。
+    private const double LoupePanelSize = 236;
+    private const double LoupeCursorGap = 24;
 
     public MainWindow(DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic)
     {
@@ -128,10 +133,31 @@ public partial class MainWindow : Window
     // 「バージョン」「終了」はVMへ新しいコマンド/状態を追加しない純粋なUI操作（既存の
     // 常時表示フィールドへフォーカスする・既存の読み取り専用テキストをダイアログで見せる・
     // ウィンドウを閉じる）のため、既存のドラッグハンドラと同じくcode-behindに留める。
-    private void FocusExportDirectory_Click(object sender, RoutedEventArgs eventArgs)
+    // 保存先はフォルダ選択ダイアログで選ぶ。手入力だと綴り違いや存在しないパスが
+    // そのまま撮影可否の判定材料になり、撮り終えてから保存で失敗することになる。
+    // 選んだ先がこのPC内かどうかは ViewModel 側で検証し、外部メディアや共有は拒否する。
+    private void ChooseExportDirectory_Click(object sender, RoutedEventArgs eventArgs)
     {
-        FixedLocalExportDirectoryTextBox.Focus();
-        FixedLocalExportDirectoryTextBox.SelectAll();
+        if (!_viewModel.CanChangeExportDirectory)
+        {
+            return;
+        }
+
+        var current = _viewModel.FixedLocalExportDirectory;
+        var dialog = new OpenFolderDialog
+        {
+            Title = "撮影結果の保存先を選択（このPC内のフォルダのみ）",
+            Multiselect = false,
+        };
+        if (!string.IsNullOrWhiteSpace(current) && Directory.Exists(current))
+        {
+            dialog.InitialDirectory = current;
+        }
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            _viewModel.ChangeExportDirectory(dialog.FolderName);
+        }
     }
 
     private void ShowTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs) =>
@@ -254,8 +280,67 @@ public partial class MainWindow : Window
         eventArgs.Handled = true;
     }
 
+    // 拡大エリアはポインタが指した場所を映す。ステージ上の移動をそのまま ViewModel の
+    // 切り出し中心へ渡し、パネル自体はカーソルの脇へ寄せて置く（カーソル直下に重ねると
+    // 見たい場所をルーペが隠す）。ドラッグ中は中心を動かさない — 拡大像が流れると
+    // ターゲットをどこへ動かしているのか分からなくなるため。
+    private void UpdateLoupeFollow(MouseEventArgs eventArgs)
+    {
+        if (_targetDragElement is not null || StageDisplayArea.ActualWidth <= 0 || StageDisplayArea.ActualHeight <= 0)
+        {
+            return;
+        }
+
+        var point = eventArgs.GetPosition(StageDisplayArea);
+        var width = StageDisplayArea.ActualWidth;
+        var height = StageDisplayArea.ActualHeight;
+        if (point.X < 0 || point.Y < 0 || point.X > width || point.Y > height)
+        {
+            _viewModel.ClearPointerPosition();
+            return;
+        }
+
+        _viewModel.UpdatePointerPosition(point.X / width, point.Y / height);
+
+        var left = point.X + LoupeCursorGap;
+        if (left + LoupePanelSize > width)
+        {
+            left = point.X - LoupeCursorGap - LoupePanelSize;
+        }
+
+        var top = point.Y + LoupeCursorGap;
+        if (top + LoupePanelSize > height)
+        {
+            top = point.Y - LoupeCursorGap - LoupePanelSize;
+        }
+
+        LoupePanel.Margin = new Thickness(
+            Math.Clamp(left, 0, Math.Max(0, width - LoupePanelSize)),
+            Math.Clamp(top, 0, Math.Max(0, height - LoupePanelSize)),
+            0,
+            0);
+    }
+
+    private void StageHandle_MouseLeave(object sender, MouseEventArgs eventArgs)
+    {
+        if (_targetDragElement is not null)
+        {
+            return;
+        }
+
+        // ステージ内の別要素へ移っただけの離脱では畳まない。実際にステージの外へ
+        // 出たときだけ拡大エリアを消す。
+        var point = eventArgs.GetPosition(StageDisplayArea);
+        if (point.X < 0 || point.Y < 0 || point.X > StageDisplayArea.ActualWidth || point.Y > StageDisplayArea.ActualHeight)
+        {
+            _viewModel.ClearPointerPosition();
+        }
+    }
+
     private void TargetDragHandle_MouseMove(object sender, MouseEventArgs eventArgs)
     {
+        UpdateLoupeFollow(eventArgs);
+
         if (_targetDragElement is null || _targetDragReferenceArea is null || _targetDragApply is null)
         {
             return;
