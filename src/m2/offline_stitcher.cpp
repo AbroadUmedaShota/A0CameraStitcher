@@ -1,11 +1,17 @@
 #include "a0/m2/offline_stitcher.hpp"
 
 #include <Windows.h>
+#include <bcrypt.h>
 #include <wincodec.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -14,12 +20,68 @@
 #include <system_error>
 #include <vector>
 
+namespace a0::m2::detail {
+
+enum class OfflineStitchFaultPoint : std::uint32_t {
+    none = 0,
+    encode_failure = 1,
+    partial_short_write = 2,
+    partial_flush_failure = 3,
+    disk_full = 4,
+    publish_failure = 5,
+    interrupt_before_encode = 6,
+    interrupt_after_partial_write = 7,
+    interrupt_after_flush = 8,
+    interrupt_before_publish = 9,
+    interrupt_after_publish = 10,
+};
+
+} // namespace a0::m2::detail
+
 namespace a0::m2 {
 namespace {
 
 constexpr std::uint64_t kMaximumDecodedPixels = 200'000'000;
 constexpr std::uint32_t kMaximumImageDimension = 32'768;
 constexpr double kMatrixEpsilon = 1e-12;
+
+using TestHook = void (*)();
+std::atomic<TestHook> input_locks_held_hook{};
+std::atomic<TestHook> before_encode_hook{};
+std::atomic<TestHook> before_partial_flush_hook{};
+std::atomic<TestHook> before_publish_rename_hook{};
+std::atomic<detail::OfflineStitchFaultPoint> offline_stitch_fault{};
+std::atomic<std::uint32_t> offline_stitch_fault_trigger_count{};
+
+class InjectedOfflineStitchFault final : public std::runtime_error {
+public:
+    explicit InjectedOfflineStitchFault(const char* code)
+        : std::runtime_error(std::string("m2_fault:") + code) {}
+};
+
+bool TriggerFault(const detail::OfflineStitchFaultPoint point) noexcept {
+    if (offline_stitch_fault.load(std::memory_order_acquire) != point) return false;
+    offline_stitch_fault_trigger_count.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void ThrowIfFault(
+    const detail::OfflineStitchFaultPoint point,
+    const char* code) {
+    if (TriggerFault(point)) throw InjectedOfflineStitchFault(code);
+}
+
+void InterruptIfFault(const detail::OfflineStitchFaultPoint point) noexcept {
+    if (!TriggerFault(point)) return;
+    (void)TerminateProcess(GetCurrentProcess(), 197);
+    std::terminate();
+}
+
+void InvokeTestHook(const std::atomic<TestHook>& hook) {
+    if (const auto callback = hook.load(std::memory_order_acquire); callback != nullptr) {
+        callback();
+    }
+}
 
 template <typename T>
 struct ComReleaser {
@@ -63,6 +125,12 @@ struct Image {
     std::vector<std::uint8_t> bgr;
 };
 
+struct JpegSnapshot {
+    std::vector<std::uint8_t> compressed;
+    std::array<std::uint8_t, 32> sha256{};
+    Image image;
+};
+
 struct Point {
     double x{};
     double y{};
@@ -80,7 +148,7 @@ public:
     explicit LockedReadFile(const std::filesystem::path& path, const bool allow_rename = false) {
         handle_ = CreateFileW(
             path.c_str(),
-            GENERIC_READ,
+            GENERIC_READ | (allow_rename ? DELETE : 0),
             FILE_SHARE_READ | (allow_rename ? FILE_SHARE_DELETE : 0),
             nullptr,
             OPEN_EXISTING,
@@ -113,6 +181,10 @@ public:
         if (size == 0 || size > kMaximumCompressedJpegBytes) {
             throw std::invalid_argument("compressed JPEG byte size is empty or exceeds the 64 MiB limit");
         }
+        LARGE_INTEGER beginning{};
+        if (!SetFilePointerEx(handle_, beginning, nullptr, FILE_BEGIN)) {
+            throw std::runtime_error("locked JPEG seek failed before snapshot read");
+        }
         std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
         std::size_t offset = 0;
         while (offset < bytes.size()) {
@@ -124,11 +196,110 @@ public:
             }
             offset += read;
         }
+        if (Size() != size) {
+            throw std::runtime_error("locked JPEG size changed during snapshot read");
+        }
         return bytes;
+    }
+
+    void RenameToWithoutReplace(const std::filesystem::path& destination) const {
+        const auto absolute_destination = std::filesystem::absolute(destination).lexically_normal();
+        const auto file_name = absolute_destination.native();
+        const auto file_name_bytes = file_name.size() * sizeof(wchar_t);
+        if (file_name_bytes > std::numeric_limits<DWORD>::max()) {
+            throw std::invalid_argument("atomic JPEG publish destination is too long");
+        }
+        std::vector<std::uint8_t> buffer(
+            sizeof(FILE_RENAME_INFO) + file_name_bytes);
+        auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+        rename->ReplaceIfExists = FALSE;
+        rename->RootDirectory = nullptr;
+        rename->FileNameLength = static_cast<DWORD>(file_name_bytes);
+        std::memcpy(rename->FileName, file_name.c_str(), file_name_bytes + sizeof(wchar_t));
+        const bool renamed = SetFileInformationByHandle(
+            handle_, FileRenameInfo, rename, static_cast<DWORD>(buffer.size())) != FALSE;
+        const DWORD rename_error = renamed ? ERROR_SUCCESS : GetLastError();
+        if (!renamed) {
+            throw std::runtime_error(
+                "atomic JPEG publish failed without replacing an existing output (Win32 "
+                + std::to_string(rename_error) + ")");
+        }
     }
 
 private:
     HANDLE handle_{INVALID_HANDLE_VALUE};
+};
+
+class Sha256Provider final {
+public:
+    Sha256Provider() {
+        module_ = LoadLibraryExW(L"bcrypt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (module_ == nullptr) {
+            throw std::runtime_error("SHA-256 provider load failed");
+        }
+        open_algorithm_ = Load<OpenAlgorithm>("BCryptOpenAlgorithmProvider");
+        hash_ = Load<Hash>("BCryptHash");
+        close_algorithm_ = Load<CloseAlgorithm>("BCryptCloseAlgorithmProvider");
+        if (!BCRYPT_SUCCESS(open_algorithm_(&algorithm_, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) {
+            FreeLibrary(module_);
+            module_ = nullptr;
+            throw std::runtime_error("SHA-256 provider initialization failed");
+        }
+    }
+
+    ~Sha256Provider() {
+        if (algorithm_ != nullptr) {
+            (void)close_algorithm_(algorithm_, 0);
+        }
+        if (module_ != nullptr) {
+            FreeLibrary(module_);
+        }
+    }
+
+    Sha256Provider(const Sha256Provider&) = delete;
+    Sha256Provider& operator=(const Sha256Provider&) = delete;
+
+    [[nodiscard]] std::array<std::uint8_t, 32> Compute(
+        const std::vector<std::uint8_t>& bytes) const {
+        if (bytes.size() > std::numeric_limits<ULONG>::max()) {
+            throw std::invalid_argument("SHA-256 input exceeds the supported byte count");
+        }
+        std::array<std::uint8_t, 32> digest{};
+        if (!BCRYPT_SUCCESS(hash_(
+                algorithm_,
+                nullptr,
+                0,
+                const_cast<PUCHAR>(bytes.data()),
+                static_cast<ULONG>(bytes.size()),
+                digest.data(),
+                static_cast<ULONG>(digest.size())))) {
+            throw std::runtime_error("SHA-256 calculation failed");
+        }
+        return digest;
+    }
+
+private:
+    using OpenAlgorithm = NTSTATUS (WINAPI*)(BCRYPT_ALG_HANDLE*, LPCWSTR, LPCWSTR, ULONG);
+    using Hash = NTSTATUS (WINAPI*)(
+        BCRYPT_ALG_HANDLE, PUCHAR, ULONG, PUCHAR, ULONG, PUCHAR, ULONG);
+    using CloseAlgorithm = NTSTATUS (WINAPI*)(BCRYPT_ALG_HANDLE, ULONG);
+
+    template <typename Function>
+    [[nodiscard]] Function Load(const char* name) {
+        const auto address = GetProcAddress(module_, name);
+        if (address == nullptr) {
+            FreeLibrary(module_);
+            module_ = nullptr;
+            throw std::runtime_error("SHA-256 provider entry point is unavailable");
+        }
+        return reinterpret_cast<Function>(address);
+    }
+
+    HMODULE module_{};
+    BCRYPT_ALG_HANDLE algorithm_{};
+    OpenAlgorithm open_algorithm_{};
+    Hash hash_{};
+    CloseAlgorithm close_algorithm_{};
 };
 
 [[noreturn]] void ThrowHresult(const std::string& operation, const HRESULT result) {
@@ -158,112 +329,88 @@ std::uint64_t PixelCount(const std::uint32_t width, const std::uint32_t height) 
     return count;
 }
 
-std::uint64_t ValidateCompressedJpegFileSize(const std::filesystem::path& path) {
-    std::error_code error;
-    const bool regular = std::filesystem::is_regular_file(path, error);
-    if (error || !regular) {
-        throw std::invalid_argument("JPEG input must be a regular file");
-    }
-    const auto size = std::filesystem::file_size(path, error);
-    if (error || size == 0 || size > kMaximumCompressedJpegBytes) {
-        throw std::invalid_argument("compressed JPEG byte size is empty or exceeds the 64 MiB limit");
-    }
-    return size;
-}
-
-Image DecodeJpeg(IWICImagingFactory* factory, const std::filesystem::path& path) {
-    // This regular-file and compressed-byte check intentionally occurs before
-    // WIC is asked to construct a decoder for attacker-controlled input.
-    (void)ValidateCompressedJpegFileSize(path);
-    IWICBitmapDecoder* decoder_raw = nullptr;
-    CheckHresult(factory->CreateDecoderFromFilename(
-        path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder_raw),
-        "JPEG decoder creation");
-    ComPtr<IWICBitmapDecoder> decoder(decoder_raw);
-
-    GUID container{};
-    CheckHresult(decoder->GetContainerFormat(&container), "JPEG container inspection");
-    if (container != GUID_ContainerFormatJpeg) {
-        throw std::invalid_argument("canonical input must be a JPEG container");
-    }
-
-    UINT frame_count = 0;
-    CheckHresult(decoder->GetFrameCount(&frame_count), "JPEG frame count");
-    if (frame_count != 1) {
-        throw std::invalid_argument("canonical JPEG must contain exactly one frame");
-    }
-
-    IWICBitmapFrameDecode* frame_raw = nullptr;
-    CheckHresult(decoder->GetFrame(0, &frame_raw), "JPEG frame decode");
-    ComPtr<IWICBitmapFrameDecode> frame(frame_raw);
-
-    UINT width = 0;
-    UINT height = 0;
-    CheckHresult(frame->GetSize(&width, &height), "JPEG dimensions");
-    const auto pixels = PixelCount(width, height);
-
-    IWICFormatConverter* converter_raw = nullptr;
-    CheckHresult(factory->CreateFormatConverter(&converter_raw), "JPEG pixel converter creation");
-    ComPtr<IWICFormatConverter> converter(converter_raw);
-    CheckHresult(converter->Initialize(
-        frame.get(), GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, nullptr, 0.0,
-        WICBitmapPaletteTypeCustom), "JPEG pixel conversion");
-
-    Image image{width, height, std::vector<std::uint8_t>(static_cast<std::size_t>(pixels * 3))};
-    const auto stride = width * 3U;
-    CheckHresult(converter->CopyPixels(nullptr, stride, static_cast<UINT>(image.bgr.size()), image.bgr.data()),
-        "JPEG pixel read");
-    return image;
-}
-
-void ValidateLockedJpegSnapshot(
+Image DecodeJpegSnapshot(
     IWICImagingFactory* factory,
-    std::vector<std::uint8_t>& bytes) {
+    const std::vector<std::uint8_t>& bytes,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    const std::array<std::uint8_t, 2> eoi{0xff, 0xd9};
+    const auto eoi_position = bytes.size() >= 4
+        ? std::find_end(bytes.begin() + 2, bytes.end(), eoi.begin(), eoi.end())
+        : bytes.end();
     if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8
-        || bytes[bytes.size() - 2] != 0xff || bytes.back() != 0xd9) {
-        throw std::invalid_argument("export source is not a complete JPEG byte stream");
+        || eoi_position == bytes.end()
+        || (require_terminal_eoi && eoi_position + 2 != bytes.end())) {
+        throw std::invalid_argument(description + " is not a complete JPEG byte stream");
     }
 
     IWICStream* stream_raw = nullptr;
-    CheckHresult(factory->CreateStream(&stream_raw), "export JPEG memory stream creation");
+    CheckHresult(factory->CreateStream(&stream_raw), description + " memory stream creation");
     ComPtr<IWICStream> stream(stream_raw);
-    CheckHresult(stream->InitializeFromMemory(bytes.data(), static_cast<DWORD>(bytes.size())),
-        "export JPEG memory stream initialization");
+    CheckHresult(stream->InitializeFromMemory(
+        const_cast<BYTE*>(bytes.data()), static_cast<DWORD>(bytes.size())),
+        description + " memory stream initialization");
 
     IWICBitmapDecoder* decoder_raw = nullptr;
     CheckHresult(factory->CreateDecoderFromStream(
         stream.get(), nullptr, WICDecodeMetadataCacheOnLoad, &decoder_raw),
-        "export JPEG decoder creation");
+        description + " decoder creation");
     ComPtr<IWICBitmapDecoder> decoder(decoder_raw);
     GUID container{};
-    CheckHresult(decoder->GetContainerFormat(&container), "export JPEG container inspection");
+    CheckHresult(decoder->GetContainerFormat(&container), description + " container inspection");
     if (container != GUID_ContainerFormatJpeg) {
-        throw std::invalid_argument("export source must be a JPEG container");
+        throw std::invalid_argument(description + " must be a JPEG container");
     }
     UINT frame_count = 0;
-    CheckHresult(decoder->GetFrameCount(&frame_count), "export JPEG frame count");
+    CheckHresult(decoder->GetFrameCount(&frame_count), description + " frame count");
     if (frame_count != 1) {
-        throw std::invalid_argument("export JPEG must contain exactly one frame");
+        throw std::invalid_argument(description + " must contain exactly one frame");
     }
 
     IWICBitmapFrameDecode* frame_raw = nullptr;
-    CheckHresult(decoder->GetFrame(0, &frame_raw), "export JPEG frame decode");
+    CheckHresult(decoder->GetFrame(0, &frame_raw), description + " frame decode");
     ComPtr<IWICBitmapFrameDecode> frame(frame_raw);
     UINT width = 0;
     UINT height = 0;
-    CheckHresult(frame->GetSize(&width, &height), "export JPEG dimensions");
+    CheckHresult(frame->GetSize(&width, &height), description + " dimensions");
     const auto pixels = PixelCount(width, height);
 
     IWICFormatConverter* converter_raw = nullptr;
-    CheckHresult(factory->CreateFormatConverter(&converter_raw), "export JPEG pixel converter creation");
+    CheckHresult(factory->CreateFormatConverter(&converter_raw), description + " pixel converter creation");
     ComPtr<IWICFormatConverter> converter(converter_raw);
     CheckHresult(converter->Initialize(
         frame.get(), GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, nullptr, 0.0,
-        WICBitmapPaletteTypeCustom), "export JPEG pixel conversion");
-    std::vector<std::uint8_t> decoded(static_cast<std::size_t>(pixels * 3));
+        WICBitmapPaletteTypeCustom), description + " pixel conversion");
+    Image image{width, height, std::vector<std::uint8_t>(static_cast<std::size_t>(pixels * 3))};
     CheckHresult(converter->CopyPixels(
-        nullptr, width * 3U, static_cast<UINT>(decoded.size()), decoded.data()),
-        "export JPEG complete pixel read");
+        nullptr, width * 3U, static_cast<UINT>(image.bgr.size()), image.bgr.data()),
+        description + " complete pixel read");
+    return image;
+}
+
+JpegSnapshot ReadJpegSnapshot(
+    IWICImagingFactory* factory,
+    const LockedReadFile& locked_file,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    JpegSnapshot snapshot;
+    snapshot.compressed = locked_file.ReadAll();
+    Sha256Provider sha256;
+    snapshot.sha256 = sha256.Compute(snapshot.compressed);
+    snapshot.image = DecodeJpegSnapshot(
+        factory, snapshot.compressed, description, require_terminal_eoi);
+    return snapshot;
+}
+
+void ValidateSnapshotHash(
+    const JpegSnapshot& snapshot,
+    const LockedReadFile& locked_file,
+    const std::string& description) {
+    const auto reread = locked_file.ReadAll();
+    Sha256Provider sha256;
+    if (sha256.Compute(reread) != snapshot.sha256 || reread != snapshot.compressed) {
+        throw std::runtime_error(description + " SHA-256 or bytes changed on locked reread");
+    }
 }
 
 void WriteBytesToNewFile(
@@ -303,17 +450,26 @@ void WriteBytesToNewFile(
     }
 }
 
-Point Transform(const std::array<double, 9>& matrix, const Point point) {
-    const double denominator = matrix[6] * point.x + matrix[7] * point.y + matrix[8];
+double TransformDenominator(const std::array<double, 9>& matrix, const Point point) {
+    return matrix[6] * point.x + matrix[7] * point.y + matrix[8];
+}
+
+bool TryTransform(const std::array<double, 9>& matrix, const Point point, Point& transformed) {
+    const double denominator = TransformDenominator(matrix, point);
     if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
-        throw std::invalid_argument("fixed transform maps an image corner to infinity");
+        return false;
     }
-    const Point transformed{
+    transformed = {
         (matrix[0] * point.x + matrix[1] * point.y + matrix[2]) / denominator,
         (matrix[3] * point.x + matrix[4] * point.y + matrix[5]) / denominator,
     };
-    if (!std::isfinite(transformed.x) || !std::isfinite(transformed.y)) {
-        throw std::invalid_argument("fixed transform produces a non-finite coordinate");
+    return std::isfinite(transformed.x) && std::isfinite(transformed.y);
+}
+
+Point Transform(const std::array<double, 9>& matrix, const Point point) {
+    Point transformed{};
+    if (!TryTransform(matrix, point, transformed)) {
+        throw std::invalid_argument("fixed transform maps a coordinate to infinity");
     }
     return transformed;
 }
@@ -342,6 +498,31 @@ std::array<double, 9> Invert(const std::array<double, 9>& matrix) {
         (matrix[1] * matrix[6] - matrix[0] * matrix[7]) / determinant,
         (matrix[0] * matrix[4] - matrix[1] * matrix[3]) / determinant,
     };
+}
+
+void ValidateProjectiveDomain(
+    const std::array<double, 9>& matrix,
+    const std::uint32_t width,
+    const std::uint32_t height) {
+    const std::array<Point, 4> corners{{
+        {0.0, 0.0},
+        {static_cast<double>(width), 0.0},
+        {0.0, static_cast<double>(height)},
+        {static_cast<double>(width), static_cast<double>(height)},
+    }};
+    bool positive{};
+    for (std::size_t index = 0; index < corners.size(); ++index) {
+        const double denominator = TransformDenominator(matrix, corners[index]);
+        if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
+            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
+        }
+        const bool current_positive = denominator > 0.0;
+        if (index == 0) {
+            positive = current_positive;
+        } else if (current_positive != positive) {
+            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
+        }
+    }
 }
 
 Bounds TransformedBounds(const Image& image, const std::array<double, 9>& matrix) {
@@ -425,6 +606,10 @@ void ValidateProfile(const FixedRigStitchProfile& profile) {
         throw std::invalid_argument("rig profile expected input dimensions are required");
     }
     (void)Invert(profile.camera_b_to_camera_a);
+    ValidateProjectiveDomain(
+        profile.camera_b_to_camera_a,
+        profile.expected_input_width,
+        profile.expected_input_height);
 }
 
 void ValidateCanonicalPath(const std::filesystem::path& path, const char* alias) {
@@ -436,11 +621,10 @@ void ValidateCanonicalPath(const std::filesystem::path& path, const char* alias)
     }
 }
 
-void EncodeJpegAtomic(
+void EncodeJpegPartial(
     IWICImagingFactory* factory,
     Image& image,
-    const std::filesystem::path& partial,
-    const std::filesystem::path& destination) {
+    const std::filesystem::path& partial) {
     IWICStream* stream_raw = nullptr;
     CheckHresult(factory->CreateStream(&stream_raw), "JPEG output stream creation");
     ComPtr<IWICStream> stream(stream_raw);
@@ -472,11 +656,53 @@ void EncodeJpegAtomic(
     frame.reset();
     encoder.reset();
     stream.reset();
+}
 
-    std::error_code error;
-    std::filesystem::rename(partial, destination, error);
-    if (error) {
-        throw std::runtime_error("atomic JPEG publish failed: " + error.message());
+void TruncateGeneratedPartialForFault(
+    const std::filesystem::path& partial,
+    const bool disk_full) {
+    HANDLE handle = CreateFileW(
+        partial.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+    }
+    LARGE_INTEGER size{};
+    bool truncated = GetFileSizeEx(handle, &size) != FALSE && size.QuadPart > 1;
+    if (truncated) {
+        LARGE_INTEGER retained{};
+        retained.QuadPart = disk_full ? 1 : size.QuadPart / 2;
+        truncated = SetFilePointerEx(handle, retained, nullptr, FILE_BEGIN) != FALSE
+            && SetEndOfFile(handle) != FALSE;
+    }
+    const bool closed = CloseHandle(handle) != FALSE;
+    if (!truncated || !closed) {
+        throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+    }
+    throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
+}
+
+void FlushGeneratedPartial(const std::filesystem::path& partial) {
+    HANDLE handle = CreateFileW(
+        partial.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("generated JPEG partial flush open failed");
+    }
+    const bool flushed = FlushFileBuffers(handle) != FALSE;
+    const bool closed = CloseHandle(handle) != FALSE;
+    if (!flushed || !closed) {
+        throw std::runtime_error("generated JPEG partial flush failed");
     }
 }
 
@@ -502,6 +728,62 @@ std::filesystem::path NormalizedAbsolute(const std::filesystem::path& path) {
 
 } // namespace
 
+namespace detail {
+
+void SetInputLocksHeldTestHook(void (*hook)()) noexcept {
+    input_locks_held_hook.store(hook, std::memory_order_release);
+}
+
+void SetBeforeEncodeTestHook(void (*hook)()) noexcept {
+    before_encode_hook.store(hook, std::memory_order_release);
+}
+
+void SetBeforePartialFlushTestHook(void (*hook)()) noexcept {
+    before_partial_flush_hook.store(hook, std::memory_order_release);
+}
+
+void SetBeforePublishRenameTestHook(void (*hook)()) noexcept {
+    before_publish_rename_hook.store(hook, std::memory_order_release);
+}
+
+void SetOfflineStitchFaultForTest(const OfflineStitchFaultPoint point) noexcept {
+    const auto value = static_cast<std::uint32_t>(point);
+    const auto bounded = value <= static_cast<std::uint32_t>(OfflineStitchFaultPoint::interrupt_after_publish)
+        ? point
+        : OfflineStitchFaultPoint::none;
+    offline_stitch_fault_trigger_count.store(0, std::memory_order_relaxed);
+    offline_stitch_fault.store(bounded, std::memory_order_release);
+}
+
+std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
+    return offline_stitch_fault_trigger_count.load(std::memory_order_acquire);
+}
+
+void PublishValidatedGeneratedJpeg(
+    const std::filesystem::path& partial,
+    const std::filesystem::path& destination,
+    const std::uint32_t expected_width,
+    const std::uint32_t expected_height) {
+    // Keep the partial immutable while it is snapshotted, decoded, hashed, and
+    // renamed. FILE_SHARE_DELETE permits this process's atomic rename only;
+    // writers remain excluded and a competing rename/delete makes ours fail.
+    LockedReadFile locked_partial(partial, true);
+    ComApartment apartment;
+    auto factory = CreateFactory();
+    const auto snapshot = ReadJpegSnapshot(
+        factory.get(), locked_partial, "generated JPEG partial", true);
+    if (snapshot.image.width != expected_width || snapshot.image.height != expected_height) {
+        throw std::invalid_argument("generated JPEG partial dimensions do not match the stitched result");
+    }
+    ValidateSnapshotHash(snapshot, locked_partial, "generated JPEG partial");
+    InterruptIfFault(OfflineStitchFaultPoint::interrupt_before_publish);
+    ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
+    InvokeTestHook(before_publish_rename_hook);
+    locked_partial.RenameToWithoutReplace(destination);
+}
+
+} // namespace detail
+
 OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     ValidateProfile(request.profile);
     ValidateCanonicalPath(request.camera_a_original, "CAM-A");
@@ -517,24 +799,34 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         || resolved_job_path == std::filesystem::canonical(camera_b_path.parent_path())) {
         throw std::invalid_argument("stitched output must use a separate job directory");
     }
-    std::filesystem::create_directories(job_path);
     const auto destination = job_path / L"stitched.jpg";
     const auto partial = job_path / L"stitched.jpg.partial";
-    if (std::filesystem::exists(destination) || std::filesystem::exists(partial)) {
-        throw std::invalid_argument("output job already contains a stitched JPEG or partial");
+    if (std::filesystem::exists(job_path)) {
+        throw std::invalid_argument("output job is already reserved or contains an unknown result");
     }
 
     ComApartment apartment;
     auto factory = CreateFactory();
-    const Image camera_a = DecodeJpeg(factory.get(), camera_a_path);
-    const Image camera_b = DecodeJpeg(factory.get(), camera_b_path);
+    // Acquire both handles before snapshotting either input and keep them alive
+    // through publish. FILE_SHARE_READ excludes concurrent source write,
+    // replacement, and deletion for the complete operation.
+    LockedReadFile locked_camera_a(camera_a_path);
+    LockedReadFile locked_camera_b(camera_b_path);
+    InvokeTestHook(input_locks_held_hook);
+    const auto camera_a_snapshot = ReadJpegSnapshot(
+        factory.get(), locked_camera_a, "CAM-A canonical JPEG", false);
+    const auto camera_b_snapshot = ReadJpegSnapshot(
+        factory.get(), locked_camera_b, "CAM-B canonical JPEG", false);
+    ValidateSnapshotHash(camera_a_snapshot, locked_camera_a, "CAM-A canonical JPEG");
+    ValidateSnapshotHash(camera_b_snapshot, locked_camera_b, "CAM-B canonical JPEG");
+    const Image& camera_a = camera_a_snapshot.image;
+    const Image& camera_b = camera_b_snapshot.image;
     if (camera_a.width != request.profile.expected_input_width
         || camera_a.height != request.profile.expected_input_height
         || camera_b.width != request.profile.expected_input_width
         || camera_b.height != request.profile.expected_input_height) {
         throw std::invalid_argument("canonical JPEG dimensions do not match the approved rig profile");
     }
-
     const auto inverse_b = Invert(request.profile.camera_b_to_camera_a);
     const Bounds a_bounds{0.0, 0.0, static_cast<double>(camera_a.width), static_cast<double>(camera_a.height)};
     const Bounds b_bounds = TransformedBounds(camera_b, request.profile.camera_b_to_camera_a);
@@ -570,8 +862,12 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
             std::array<double, 3> pixel_a{};
             std::array<double, 3> pixel_b{};
             const bool has_a = SampleBilinear(camera_a, global_x, global_y, pixel_a);
-            const Point source_b = Transform(inverse_b, {global_x, global_y});
-            const bool has_b = SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
+            Point source_b{};
+            const bool has_b = TryTransform(inverse_b, {global_x, global_y}, source_b)
+                && SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
+            if (!has_a && !has_b) {
+                throw std::invalid_argument("approved crop contains an uncovered output pixel");
+            }
             const double b_weight = has_a && has_b
                 ? FeatherWeight(request.profile.layout, global_x, global_y, a_bounds, b_bounds)
                 : (has_b ? 1.0 : 0.0);
@@ -583,9 +879,48 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         }
     }
 
+    std::error_code parent_error;
+    std::filesystem::create_directories(job_path.parent_path(), parent_error);
+    if (parent_error) {
+        throw std::runtime_error("output job parent creation failed");
+    }
+    std::error_code reservation_error;
+    const bool reserved = std::filesystem::create_directory(job_path, reservation_error);
+    if (!reserved) {
+        if (!reservation_error) {
+            throw std::invalid_argument("output job is already reserved or contains an unknown result");
+        }
+        throw std::runtime_error("output job reservation failed");
+    }
+
     PartialFileGuard partial_guard(partial);
-    EncodeJpegAtomic(factory.get(), output, partial, destination);
-    partial_guard.Release();
+    try {
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
+        ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
+        InvokeTestHook(before_encode_hook);
+        EncodeJpegPartial(factory.get(), output, partial);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_partial_write);
+        if (TriggerFault(detail::OfflineStitchFaultPoint::partial_short_write)) {
+            TruncateGeneratedPartialForFault(partial, false);
+        }
+        if (TriggerFault(detail::OfflineStitchFaultPoint::disk_full)) {
+            TruncateGeneratedPartialForFault(partial, true);
+        }
+        ThrowIfFault(detail::OfflineStitchFaultPoint::partial_flush_failure, "partial-flush-failed");
+        InvokeTestHook(before_partial_flush_hook);
+        FlushGeneratedPartial(partial);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
+        detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
+        partial_guard.Release();
+    } catch (...) {
+        // Once the durable job reservation reaches encode/write/flush/verify/
+        // publish, injected and real I/O failures use the same orphan policy.
+        // Preserve the exact candidate left by the failed boundary; do not
+        // retry or clean it automatically.
+        partial_guard.Release();
+        throw;
+    }
     return {destination, output.width, output.height, request.profile.profile_id};
 }
 
@@ -612,23 +947,22 @@ void ExportStitchedJpeg(
     // Keep this handle alive through validation, partial verification, and
     // rename. FILE_SHARE_READ prevents source write, replacement, or deletion.
     LockedReadFile locked_source(stitched_jpeg);
-    auto source_bytes = locked_source.ReadAll();
     ComApartment apartment;
     auto factory = CreateFactory();
-    ValidateLockedJpegSnapshot(factory.get(), source_bytes);
+    const auto source_snapshot = ReadJpegSnapshot(factory.get(), locked_source, "export source", true);
+    ValidateSnapshotHash(source_snapshot, locked_source, "export source");
 
     PartialFileGuard partial_guard(partial);
-    WriteBytesToNewFile(partial, source_bytes);
+    WriteBytesToNewFile(partial, source_snapshot.compressed);
     LockedReadFile locked_partial(partial, true);
-    const auto partial_bytes = locked_partial.ReadAll();
-    if (partial_bytes != source_bytes) {
+    const auto partial_snapshot = ReadJpegSnapshot(factory.get(), locked_partial, "export partial", true);
+    ValidateSnapshotHash(partial_snapshot, locked_partial, "export partial");
+    if (partial_snapshot.sha256 != source_snapshot.sha256
+        || partial_snapshot.compressed != source_snapshot.compressed) {
         throw std::runtime_error("explicit export partial reread is not byte-identical");
     }
-    std::error_code error;
-    std::filesystem::rename(partial, destination_jpeg, error);
-    if (error) {
-        throw std::runtime_error("atomic explicit export failed: " + error.message());
-    }
+    InvokeTestHook(before_publish_rename_hook);
+    locked_partial.RenameToWithoutReplace(destination_jpeg);
     partial_guard.Release();
 }
 

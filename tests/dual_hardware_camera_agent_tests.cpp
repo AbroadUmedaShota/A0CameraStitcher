@@ -311,8 +311,8 @@ void TestCapabilitiesAndRecognizedOperations() {
     CheckContains(capabilities, "\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"]",
         "capabilities must freeze the CAM-A then CAM-B alias order");
     CheckContains(capabilities,
-        "\"supportedOperations\":[\"get-dual-capabilities\",\"reserve-pair-transaction\",\"start-reserved-pair\",\"get-pair-transaction-result\"]",
-        "capabilities must advertise the four operations in stable order");
+        "\"supportedOperations\":[\"get-dual-capabilities\",\"reserve-pair-transaction\",\"start-reserved-pair\",\"get-pair-transaction-result\",\"close-reserved-pair-transaction\"]",
+        "capabilities must advertise the five operations in stable order");
     CheckContains(capabilities, "\"pairJournalDurable\":true",
         "capabilities must require a durable pair journal");
     CheckContains(capabilities, "\"sameTransactionQueryOnly\":true",
@@ -342,6 +342,14 @@ void TestCapabilitiesAndRecognizedOperations() {
         "\"payload\":{\"transactionId\":\"0123456789abcdef0123456789abcdef\",\"found\":false,\"result\":null}",
         "query rejection must remain compatible with the application payload");
 
+    const auto close = dispatcher.Handle(Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"0123456789abcdef0123456789abcdef\"}"));
+    CheckContains(close, "\"resultCode\":\"PairStoreUnavailable\"",
+        "close must be recognized and fail typed while the store is absent");
+    CheckContains(close, "\"closedBeforeDispatch\":false",
+        "unavailable close must never claim that the reservation was closed");
+
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.camera_access_count == 0,
         "the contract skeleton must perform zero camera access");
@@ -349,6 +357,70 @@ void TestCapabilitiesAndRecognizedOperations() {
         "the contract skeleton must perform zero pair dispatches");
     Check(counters.automatic_retry_count == 0,
         "the contract skeleton must perform zero automatic retries");
+}
+
+void TestCloseReservedPairOperationIsExactAndDurable() {
+    TempSandbox sandbox;
+    const std::string transaction_id = "56565656565656565656565656565656";
+    const std::string other_id = "67676767676767676767676767676767";
+    const fs::path root = sandbox.Child("close-reserved-dispatcher");
+    auto store = std::make_shared<DualHardwarePairJournalStore>(root);
+    DualHardwareCameraAgentDispatcher dispatcher(store);
+
+    const auto missing = dispatcher.Handle(Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-close-missing"));
+    CheckContains(missing, "\"resultCode\":\"PairCloseRejected\"",
+        "a missing reservation must not be forged closed");
+
+    (void)dispatcher.Handle(Envelope(
+        "reserve-pair-transaction", ReservationPayload(transaction_id),
+        "request-close-reserve"));
+    const auto wrong = dispatcher.Handle(Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"" + other_id + "\"}",
+        "request-close-wrong"));
+    CheckContains(wrong, "\"resultCode\":\"PairCloseRejected\"",
+        "another transaction ID must not close the active reservation");
+
+    const auto closed = dispatcher.Handle(Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-close-exact"));
+    CheckContains(closed, "\"success\":true",
+        "the exact Reserved transaction must close successfully");
+    CheckContains(closed, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+        "the close response must carry the durable tombstone result code");
+    CheckContains(closed, "\"closedBeforeDispatch\":true",
+        "the close response must confirm the reread tombstone");
+    Check(!fs::exists(root / "active"),
+        "close response must not be emitted before active state is removed");
+
+    DualHardwareCameraAgentDispatcher restarted(
+        std::make_shared<DualHardwarePairJournalStore>(root));
+    const auto queried = restarted.Handle(Envelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-query-closed"));
+    CheckContains(queried, "\"success\":true",
+        "restart query must confirm the close tombstone");
+    CheckContains(queried, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+        "restart query must distinguish ClosedBeforeDispatch from capture terminal");
+    CheckContains(queried, "\"found\":true,\"result\":null",
+        "close tombstone query must never forge a capture result");
+
+    const auto retried = restarted.Handle(Envelope(
+        "close-reserved-pair-transaction",
+        "{\"transactionId\":\"" + transaction_id + "\"}",
+        "request-close-retry"));
+    CheckContains(retried, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+        "same-ID close after a lost response must be idempotent");
+    const auto counters = restarted.SafetyCounters();
+    Check(counters.camera_access_count == 0 &&
+          counters.pair_dispatch_count == 0 &&
+          counters.automatic_retry_count == 0,
+        "close/query recovery must have zero camera, dispatch, and retry effects");
 }
 
 void TestStrictEnvelopeAndPayloadValidation() {
@@ -1007,6 +1079,7 @@ int main() {
     TestPairStartBoundaryAndPoisonStoreIsolation();
     TestPairStartRejectsJunctionWithoutFollowingIt();
     TestInjectedPairStoreReservationAndRestartQuery();
+    TestCloseReservedPairOperationIsExactAndDurable();
     TestFakePairBackendSuccessAndRestartQuery();
     TestFakePairBackendFailuresAndDeadlineAreNoRetry();
     TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch();

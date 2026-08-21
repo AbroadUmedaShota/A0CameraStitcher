@@ -17,12 +17,14 @@ public static class DualHardwareCameraAgentProtocol
         public const string ReservePairTransaction = "reserve-pair-transaction";
         public const string StartReservedPair = "start-reserved-pair";
         public const string GetPairTransactionResult = "get-pair-transaction-result";
+        public const string CloseReservedPairTransaction = "close-reserved-pair-transaction";
 
         public static IReadOnlyList<string> Required { get; } = Array.AsReadOnly([
             GetCapabilities,
             ReservePairTransaction,
             StartReservedPair,
             GetPairTransactionResult,
+            CloseReservedPairTransaction,
         ]);
     }
 }
@@ -103,6 +105,17 @@ public sealed record DualHardwarePairQueryResult
     public required DualHardwareCaptureResult? Result { get; init; }
 }
 
+public sealed record DualHardwarePairCloseRequest
+{
+    public required string TransactionId { get; init; }
+}
+
+public sealed record DualHardwarePairCloseResult
+{
+    public required string TransactionId { get; init; }
+    public required bool ClosedBeforeDispatch { get; init; }
+}
+
 public static class DualHardwareCameraAgentProtocolCodec
 {
     private const int MaximumProtocolJsonBytes = 256 * 1024;
@@ -167,6 +180,20 @@ public static class DualHardwareCameraAgentProtocolCodec
             requestId);
     }
 
+    public static DualHardwareCameraAgentRequestEnvelope CreateCloseRequest(
+        Guid transactionId,
+        string? requestId = null)
+    {
+        ValidateTransactionId(transactionId);
+        return CreateRequest(
+            DualHardwareCameraAgentProtocol.Operations.CloseReservedPairTransaction,
+            new DualHardwarePairCloseRequest
+            {
+                TransactionId = transactionId.ToString("N"),
+            },
+            requestId);
+    }
+
     public static string SerializeRequest(DualHardwareCameraAgentRequestEnvelope request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -222,7 +249,8 @@ public static class DualHardwareCameraAgentProtocolCodec
             ThrowRemote(envelope);
         var payload = DeserializePayload<DualHardwarePairDispatchResult>(envelope.Payload);
         ValidateTransactionMatch(payload.TransactionId, expectedTransactionId);
-        if ((payload.DispatchState == DualHardwareDispatchState.Completed) != (payload.Result is not null) ||
+        if (payload.DispatchState is not (DualHardwareDispatchState.Completed or DualHardwareDispatchState.ResponseUnknown) ||
+            (payload.DispatchState == DualHardwareDispatchState.Completed) != (payload.Result is not null) ||
             (payload.Result is not null && payload.Result.TransactionId != expectedTransactionId))
             throw Violation("InvalidPairDispatch", "The pair dispatch state and result are inconsistent.");
         return new(payload.DispatchState, payload.Result);
@@ -252,11 +280,35 @@ public static class DualHardwareCameraAgentProtocolCodec
             }
             ThrowRemote(envelope);
         }
+        if (envelope.ResultCode == "PairTransactionClosedBeforeDispatch")
+        {
+            if (!payload.Found || payload.Result is not null)
+                throw Violation("InvalidPairQuery", "A ClosedBeforeDispatch pair query response is inconsistent.");
+            return new(DualHardwarePairQueryState.ClosedBeforeDispatch, null);
+        }
         if (envelope.ResultCode != "PairTransactionFound" || !payload.Found ||
             payload.Result is null || payload.Result.TransactionId != expectedTransactionId ||
             !IsActualTerminal(payload.Result.TerminalState))
             throw Violation("InvalidPairQuery", "The pair query response is inconsistent.");
         return new(DualHardwarePairQueryState.Terminal, payload.Result);
+    }
+
+    public static DualHardwareCloseState DeserializeCloseResponse(
+        string json,
+        string expectedRequestId,
+        Guid expectedTransactionId)
+    {
+        var envelope = DeserializeResponse(json, expectedRequestId);
+        var payload = DeserializePayload<DualHardwarePairCloseResult>(envelope.Payload);
+        ValidateTransactionMatch(payload.TransactionId, expectedTransactionId);
+        if (!envelope.Success)
+            ThrowRemote(envelope);
+        if (envelope.ResultCode != "PairTransactionClosedBeforeDispatch" ||
+            !payload.ClosedBeforeDispatch)
+            throw Violation(
+                "ForgedPairClose",
+                "A successful pair close response did not confirm the durable ClosedBeforeDispatch tombstone.");
+        return DualHardwareCloseState.ClosedBeforeDispatch;
     }
 
     private static DualHardwareCameraAgentRequestEnvelope CreateRequest<T>(
@@ -508,6 +560,21 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
             DualHardwareCameraAgentProtocolCodec.SerializeRequest(request),
             cancellationToken).ConfigureAwait(false);
         return DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+            response,
+            request.RequestId,
+            transactionId);
+    }
+
+    public async Task<DualHardwareCloseState> CloseReservedPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        var request = DualHardwareCameraAgentProtocolCodec.CreateCloseRequest(transactionId);
+        var response = await _transport.SendAsync(
+            DualHardwareCameraAgentProtocolCodec.SerializeRequest(request),
+            cancellationToken).ConfigureAwait(false);
+        return DualHardwareCameraAgentProtocolCodec.DeserializeCloseResponse(
             response,
             request.RequestId,
             transactionId);

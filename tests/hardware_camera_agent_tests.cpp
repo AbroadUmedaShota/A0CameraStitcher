@@ -29,6 +29,7 @@ using namespace a0::phase0;
 namespace {
 
 int failures = 0;
+constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
 
 void Check(bool condition, std::string_view message) {
     if (!condition) {
@@ -1720,6 +1721,8 @@ void TestNamedPipeMaximumFrameBoundary() {
                 std::string response(response_length, '\0');
                 Check(ReadAll(pipe, response.data(), response.size()),
                     "limit-1 and limit named-pipe frames must receive a complete response body");
+                Check(WriteAll(pipe, &kDeliveryAcknowledgment, 1U),
+                    "limit-1 and limit named-pipe responses must be acknowledged");
             }
             CloseHandle(pipe);
         }
@@ -1735,10 +1738,11 @@ void TestNamedPipeMaximumFrameBoundary() {
 }
 
 void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
-    const std::array<HardwareCameraAgentPipeFailureInjectionForTesting, 3>
+    const std::array<HardwareCameraAgentPipeFailureInjectionForTesting, 4>
         failures_to_inject{{
         {.fail_response_header_write = true},
         {.fail_response_body_write = true},
+        {.fail_delivery_ack_wait = true},
         {.fail_response_flush = true},
     }};
     for (std::size_t index = 0; index < failures_to_inject.size(); ++index) {
@@ -1792,8 +1796,10 @@ void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
                 Check(!header_received,
                     "injected header failure must not deliver a response header");
             } else {
-                Check(header_received,
-                    "body and flush failure injection must deliver the response header");
+                // Failure teardown deliberately performs no second unbounded
+                // flush. The server may therefore disconnect before buffered
+                // header/body bytes become observable; only exit 3, bounded
+                // termination, and exactly-once dispatch are contractual.
                 if (header_received) {
                     const std::uint32_t response_length =
                         static_cast<std::uint32_t>(response_header[0]) |
@@ -1801,11 +1807,8 @@ void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
                         (static_cast<std::uint32_t>(response_header[2]) << 16U) |
                         (static_cast<std::uint32_t>(response_header[3]) << 24U);
                     std::string response(response_length, '\0');
-                    const bool body_received =
-                        ReadAll(pipe, response.data(), response.size());
-                    if (failures_to_inject[index].fail_response_body_write) {
-                        Check(!body_received,
-                            "injected body failure must truncate the response body");
+                    if (ReadAll(pipe, response.data(), response.size())) {
+                        (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
                     }
                 }
             }

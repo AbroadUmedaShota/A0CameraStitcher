@@ -16,8 +16,32 @@ try {
     $operatorTestExecutable = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.M3.OperatorShellTests.exe"
     $wpfAdapterPath = Join-Path $RepositoryRoot "src/m3/OperatorShell/bin/$Configuration/net10.0-windows/A0CameraStitcher.M2Adapter.exe"
     $operatorTestAdapterPath = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.M2Adapter.exe"
+    $singleAgentSourcePath = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.CameraAgent.exe"
+    $wpfSingleAgentPath = Join-Path $RepositoryRoot "src/m3/OperatorShell/bin/$Configuration/net10.0-windows/A0CameraStitcher.CameraAgent.exe"
+    $operatorTestSingleAgentPath = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.CameraAgent.exe"
+    $dualAgentSourcePath = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.DualCameraAgent.exe"
+    $wpfDualAgentPath = Join-Path $RepositoryRoot "src/m3/OperatorShell/bin/$Configuration/net10.0-windows/A0CameraStitcher.DualCameraAgent.exe"
+    $operatorTestDualAgentPath = Join-Path $RepositoryRoot "tests/m3/OperatorShellTests/bin/$Configuration/net10.0-windows/A0CameraStitcher.DualCameraAgent.exe"
     if (-not (Test-Path -LiteralPath $wpfAdapterPath -PathType Leaf)) { throw 'Formal WPF output does not contain A0CameraStitcher.M2Adapter.exe.' }
     if (-not (Test-Path -LiteralPath $operatorTestAdapterPath -PathType Leaf)) { throw 'Formal WPF test output does not contain the transitive M2 adapter artifact.' }
+    if (-not (Test-Path -LiteralPath $singleAgentSourcePath -PathType Leaf)) { throw 'The canonical Single Camera Agent target was not produced.' }
+    if (-not (Test-Path -LiteralPath $wpfSingleAgentPath -PathType Leaf)) { throw 'Formal WPF output does not contain A0CameraStitcher.CameraAgent.exe.' }
+    if (-not (Test-Path -LiteralPath $operatorTestSingleAgentPath -PathType Leaf)) { throw 'Formal WPF test output does not contain the transitive Single Camera Agent artifact.' }
+    if (-not (Test-Path -LiteralPath $dualAgentSourcePath -PathType Leaf)) { throw 'The canonical Dual Camera Agent target was not produced.' }
+    if (-not (Test-Path -LiteralPath $wpfDualAgentPath -PathType Leaf)) { throw 'Formal WPF output does not contain A0CameraStitcher.DualCameraAgent.exe.' }
+    if (-not (Test-Path -LiteralPath $operatorTestDualAgentPath -PathType Leaf)) { throw 'Formal WPF test output does not contain the transitive Dual Camera Agent artifact.' }
+    $sourceHash = (Get-FileHash -LiteralPath $dualAgentSourcePath -Algorithm SHA256).Hash
+    foreach ($copiedAgent in @($wpfDualAgentPath, $operatorTestDualAgentPath)) {
+        if ((Get-FileHash -LiteralPath $copiedAgent -Algorithm SHA256).Hash -ne $sourceHash) {
+            throw 'A bundled Dual Camera Agent does not match the canonical CMake build artifact.'
+        }
+    }
+    $singleSourceHash = (Get-FileHash -LiteralPath $singleAgentSourcePath -Algorithm SHA256).Hash
+    foreach ($copiedAgent in @($wpfSingleAgentPath, $operatorTestSingleAgentPath)) {
+        if ((Get-FileHash -LiteralPath $copiedAgent -Algorithm SHA256).Hash -ne $singleSourceHash) {
+            throw 'A bundled Single Camera Agent does not match the canonical CMake build artifact.'
+        }
+    }
     $previousAdapterPath = $env:A0_M2_ADAPTER_PATH
     try {
         $env:A0_M2_ADAPTER_PATH = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.M2Adapter.exe"

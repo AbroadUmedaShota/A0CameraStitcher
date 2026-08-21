@@ -1637,10 +1637,10 @@ public sealed class OperatorShellViewModel : ObservableObject
                 if (!afResult.Success)
                 {
                     allFocused = false;
-                    UiState = OperatorUiState.FailedPartial;
                     CaptureResult = $"未実行（{alias} 撮影直前AF NG）";
                     TechnicalDetail = $"error code: PreCaptureAutoFocusFailed / camera: {alias} / capture calls: 0 / automatic retry count: 0 / 撮影+AF: {string.Join(" / ", afSummaries)}";
                     StatusMessage = $"撮影+AF: {alias}の撮影直前AFが合焦しなかったため、シャッターを実行せず撮影失敗（再開不可）で停止しました。{NoRetryMessage(capturePlan)}";
+                    UiState = OperatorUiState.FailedPartial;
                     break;
                 }
             }

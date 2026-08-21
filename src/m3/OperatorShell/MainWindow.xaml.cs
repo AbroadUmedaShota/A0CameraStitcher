@@ -38,7 +38,9 @@ public partial class MainWindow : Window
     private const double LoupePanelSize = 236;
     private const double LoupeCursorGap = 24;
 
-    public MainWindow(DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic)
+    public MainWindow(
+        DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,
+        string? dualCameraAgentExecutablePath = null)
     {
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
         // hardware operator window (Single or Dual) may be open in this Windows logon
@@ -62,7 +64,11 @@ public partial class MainWindow : Window
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
             {
                 _dualAgentLifecycle = new DualCameraAgentLifecycle(
-                    ResolveDualCameraAgentExecutablePath(),
+                    CameraAgentExecutablePolicy.Resolve(
+                        AppContext.BaseDirectory,
+                        dualCameraAgentExecutablePath ?? Path.Combine(
+                            AppContext.BaseDirectory,
+                            "A0CameraStitcher.DualCameraAgent.exe")),
                     Path.Combine(dualProductRoot, "agent-pair-journal"),
                     Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json"),
                     Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json"));
@@ -87,14 +93,6 @@ public partial class MainWindow : Window
             _sessionLease?.Dispose();
             throw;
         }
-    }
-
-    private static string ResolveDualCameraAgentExecutablePath()
-    {
-        var configuredPath = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_PATH");
-        return string.IsNullOrWhiteSpace(configuredPath)
-            ? Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.DualCameraAgent.exe")
-            : Path.GetFullPath(configuredPath);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs eventArgs)

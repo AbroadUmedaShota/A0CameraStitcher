@@ -15,6 +15,8 @@ is never reported as a continuous session.
   Live View is running. It never overlaps WPD.
 - A request/response gate permits only one outstanding frame or control request,
   providing backpressure.
+- Every response uses the v1 framing and bounded `0x06` delivery-ACK contract;
+  see `HARDWARE_CAMERA_AGENT_V1.md`.
 - Frame activity or `live-view-heartbeat` refreshes a 20-second idle deadline.
   The native process also enforces a 600-second maximum lifetime.
 - `close-agent-session` orders shutdown. The app never force-kills an agent after

@@ -145,6 +145,15 @@ static async Task DualHardwareAgentV2RoundTripAsync()
                 found = true,
                 result = terminal,
             }),
+            "close-reserved-pair-transaction" => DualHardwareResponseJson(
+                requestId,
+                true,
+                "PairTransactionClosedBeforeDispatch",
+                new
+                {
+                    transactionId = payload.GetProperty("transactionId").GetString(),
+                    closedBeforeDispatch = true,
+                }),
             _ => throw new InvalidOperationException($"Unexpected Dual Agent operation: {operation}"),
         };
     });
@@ -159,8 +168,69 @@ static async Task DualHardwareAgentV2RoundTripAsync()
     Check.True(queried.Result is not null, "The same transaction query must return its terminal journal.");
     Check.Equal(transactionId, queried.Result!.TransactionId);
     Check.Equal(DualHardwareCaptureTerminalState.Succeeded, queried.Result.TerminalState);
+    var closed = await operations.CloseReservedPairTransactionAsync(transactionId, default);
+    Check.Equal(DualHardwareCloseState.ClosedBeforeDispatch, closed);
+
+    var closeRequestId = "request-negative-close";
+    var rejectedClose = DualHardwareResponseJson(
+        closeRequestId,
+        false,
+        "PairCloseRejected",
+        new
+        {
+            transactionId = transactionId.ToString("N"),
+            closedBeforeDispatch = false,
+        });
+    Check.Throws<HardwareCameraAgentRemoteException>(() =>
+        DualHardwareCameraAgentProtocolCodec.DeserializeCloseResponse(
+            rejectedClose, closeRequestId, transactionId));
+    var mismatchedClose = DualHardwareResponseJson(
+        closeRequestId,
+        true,
+        "PairTransactionClosedBeforeDispatch",
+        new
+        {
+            transactionId = Guid.ParseExact("22222222222222222222222222222222", "N").ToString("N"),
+            closedBeforeDispatch = true,
+        });
+    Check.ThrowsHardwareProtocol("TransactionIdMismatch", () =>
+        DualHardwareCameraAgentProtocolCodec.DeserializeCloseResponse(
+            mismatchedClose, closeRequestId, transactionId));
+    foreach (var forged in new[]
+    {
+        DualHardwareResponseJson(
+            closeRequestId,
+            true,
+            "PairTransactionClosedBeforeDispatch",
+            new
+            {
+                transactionId = transactionId.ToString("N"),
+                closedBeforeDispatch = false,
+            }),
+        DualHardwareResponseJson(
+            closeRequestId,
+            true,
+            "PairTransactionFound",
+            new
+            {
+                transactionId = transactionId.ToString("N"),
+                closedBeforeDispatch = true,
+            }),
+    })
+    {
+        Check.ThrowsHardwareProtocol("ForgedPairClose", () =>
+            DualHardwareCameraAgentProtocolCodec.DeserializeCloseResponse(
+                forged, closeRequestId, transactionId));
+    }
     Check.SequenceEqual(
-        new[] { "get-dual-capabilities", "reserve-pair-transaction", "start-reserved-pair", "get-pair-transaction-result" },
+        new[]
+        {
+            "get-dual-capabilities",
+            "reserve-pair-transaction",
+            "start-reserved-pair",
+            "get-pair-transaction-result",
+            "close-reserved-pair-transaction",
+        },
         operationsSeen);
 }
 
@@ -218,6 +288,22 @@ static async Task DualHardwareAgentV2NegativesAsync()
         transactionId);
     Check.Equal(DualHardwarePairQueryState.NotFound, notFoundOutcome.State);
     Check.True(notFoundOutcome.Result is null, "A not-found query must not forge a terminal result.");
+    var closedQuery = DualHardwareResponseJson(
+        requestId,
+        true,
+        "PairTransactionClosedBeforeDispatch",
+        new
+        {
+            transactionId = transactionId.ToString("N"),
+            found = true,
+            result = (object?)null,
+        });
+    var closedOutcome = DualHardwareCameraAgentProtocolCodec.DeserializeQueryResponse(
+        closedQuery,
+        requestId,
+        transactionId);
+    Check.Equal(DualHardwarePairQueryState.ClosedBeforeDispatch, closedOutcome.State);
+    Check.True(closedOutcome.Result is null, "A close tombstone query must not forge a capture result.");
 
     var inconsistentReserved = DualHardwareResponseJson(requestId, false, "PairTransactionReserved", new
     {
@@ -307,6 +393,7 @@ static string DualHardwareCapabilitiesResponseJson(string requestId, int automat
             "reserve-pair-transaction",
             "start-reserved-pair",
             "get-pair-transaction-result",
+            "close-reserved-pair-transaction",
         },
         pairJournalDurable = true,
         sameTransactionQueryOnly = true,
@@ -1651,6 +1738,7 @@ static async Task HardwareNamedPipeRoundtripAsync()
     Check.Equal("CAM-B", reply.Payload.CameraAlias);
     await serverTask;
 
+    await HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync();
     await HardwareConnectFailureIsTypedAsync();
     await HardwarePostDispatchCancellationIsNotConnectFailureAsync();
 }
@@ -1793,6 +1881,54 @@ static async Task ServeHardwareReadinessOnceAsync(string pipeName)
         pipe,
         HardwareResponseJson(request.RequestId, true, "SingleReady", ready),
         timeoutSource.Token);
+    var acknowledgment = new byte[1];
+    await ReadTestPipeExactlyAsync(pipe, acknowledgment, timeoutSource.Token);
+    Check.Equal((byte)0x06, acknowledgment[0]);
+}
+
+static async Task HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync()
+{
+    foreach (var invalidUtf8 in new[] { false, true })
+    {
+        var pipeName = $"a0-camera-stitcher-hardware-invalid-{Guid.NewGuid():N}";
+        var serverTask = ServeInvalidHardwareResponseOnceAsync(pipeName, invalidUtf8);
+        var transport = new NamedPipeHardwareCameraAgentTransport(
+            pipeName,
+            connectTimeout: TimeSpan.FromSeconds(5),
+            responseTimeout: TimeSpan.FromSeconds(5));
+        await Check.ThrowsAsync<IOException>(() => transport.SendAsync("{}"));
+        Check.False(await serverTask, "An invalid response frame must not receive a delivery acknowledgment.");
+    }
+}
+
+static async Task<bool> ServeInvalidHardwareResponseOnceAsync(string pipeName, bool invalidUtf8)
+{
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await pipe.WaitForConnectionAsync(timeoutSource.Token);
+    _ = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
+    var header = new byte[sizeof(int)];
+    BinaryPrimitives.WriteInt32LittleEndian(header, invalidUtf8 ? 1 : 1024 * 1024 + 1);
+    await pipe.WriteAsync(header, timeoutSource.Token);
+    if (invalidUtf8)
+    {
+        await pipe.WriteAsync(new byte[] { 0xff }, timeoutSource.Token);
+    }
+    await pipe.FlushAsync(timeoutSource.Token);
+    try
+    {
+        var acknowledgment = new byte[1];
+        return await pipe.ReadAsync(acknowledgment, timeoutSource.Token) == 1;
+    }
+    catch (IOException)
+    {
+        return false;
+    }
 }
 
 static async Task<string> ReadTestPipeFrameAsync(Stream stream, CancellationToken cancellationToken)

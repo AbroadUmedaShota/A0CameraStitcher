@@ -24,6 +24,7 @@ enum class DualHardwarePairJournalState {
     failed,
     failed_partial,
     watchdog_expired,
+    closed_before_dispatch,
 };
 
 struct DualHardwarePairJournalRecord {
@@ -79,6 +80,8 @@ public:
     [[nodiscard]] std::optional<DualHardwarePairJournalRecord> Query(
         std::string_view transaction_id) const;
     [[nodiscard]] DualHardwarePairJournalRecord BeginDispatch(
+        std::string_view transaction_id);
+    [[nodiscard]] DualHardwarePairJournalRecord CloseReservedBeforeDispatch(
         std::string_view transaction_id);
     [[nodiscard]] DualHardwarePairJournalRecord CompleteTerminal(
         std::string_view transaction_id,

@@ -114,12 +114,26 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             (operations, token) => operations.ReservePairTransactionAsync(transactionId, token),
             cancellationToken);
 
-    public Task<DualHardwareDispatchResult> StartReservedPairAsync(
+    public async Task<DualHardwareDispatchResult> StartReservedPairAsync(
         DualHardwareCaptureRequest request,
-        CancellationToken cancellationToken) =>
-        RunSerializedAsync(
-            (operations, token) => operations.StartReservedPairAsync(request, token),
-            cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.StartReservedPairAsync(request, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            return new(
+                exception.RequestMayHaveBeenDispatched
+                    ? DualHardwareDispatchState.ResponseUnknown
+                    : DualHardwareDispatchState.ConfirmedUndispatched,
+                null);
+        }
+    }
 
     public Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
@@ -127,6 +141,25 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         RunSerializedAsync(
             (operations, token) => operations.QueryPairTransactionAsync(transactionId, token),
             cancellationToken);
+
+    public async Task<DualHardwareCloseState> CloseReservedPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.CloseReservedPairTransactionAsync(
+                        transactionId,
+                        token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException)
+        {
+            return DualHardwareCloseState.ResponseUnknown;
+        }
+    }
 
     private async Task<T> RunSerializedAsync<T>(
         Func<DualHardwareCameraAgentOperations, CancellationToken, Task<T>> operation,

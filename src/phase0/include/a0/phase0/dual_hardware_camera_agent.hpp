@@ -42,6 +42,7 @@ enum class DualHardwareCameraAgentOperation {
     reserve_pair_transaction,
     start_reserved_pair,
     get_pair_transaction_result,
+    close_reserved_pair_transaction,
 };
 
 class DualHardwareCameraAgentProtocolError final : public std::runtime_error {
@@ -123,16 +124,17 @@ private:
 struct DualHardwareCameraAgentPipeFailureInjectionForTesting {
     bool fail_response_header_write{};
     bool fail_response_body_write{};
+    bool fail_delivery_ack_wait{};
     bool fail_response_flush{};
 };
 
 // Serves the Dual hardware v2 protocol over one dedicated local named pipe,
 // reusing the exact same framing, current-logon access boundary, and
-// teardown-drain semantics as RunHardwareCameraAgentNamedPipeServer (see
+// bounded delivery-ACK semantics as RunHardwareCameraAgentNamedPipeServer (see
 // hardware_camera_agent.hpp): 4-byte little-endian length prefix + UTF-8 JSON
-// body, capped at kMaximumPipeFrameBytes (1 MiB), and a FlushFileBuffers
-// drain before DisconnectNamedPipe whenever a response was already dispatched
-// but delivery failed (Issue #17 teardown-drain fix), so a client can always
+// body, capped at kMaximumPipeFrameBytes (1 MiB), followed by a bounded
+// one-byte delivery acknowledgment from the client. A missing, invalid, or
+// late acknowledgment is a delivery failure, so a client can always
 // distinguish "never dispatched" (exit kFailedBeforeDispatchExitCode) from
 // "dispatched but delivery failed" (exit kDispatchedDeliveryFailureExitCode)
 // without ever triggering a redispatch on the server side.

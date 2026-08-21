@@ -32,9 +32,11 @@ public partial class App : Application
             window = options.Mode switch
             {
                 ApplicationLaunchMode.Simulated => new MainWindow(),
-                ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(options.CameraAgentExecutablePath),
-                ApplicationLaunchMode.HardwareDual => new MainWindow(DualCameraExecutionEnvironment.HardwareDual),
-                _ => new LaunchWindow(options.CameraAgentExecutablePath),
+                ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(options.SingleCameraAgentExecutablePath),
+                ApplicationLaunchMode.HardwareDual => new MainWindow(
+                    DualCameraExecutionEnvironment.HardwareDual,
+                    options.DualCameraAgentExecutablePath),
+                _ => new LaunchWindow(options.SingleCameraAgentExecutablePath),
             };
         }
         catch (HardwareSingleAppSessionBusyException exception)
@@ -62,7 +64,8 @@ public enum ApplicationLaunchMode
 
 public sealed record ApplicationLaunchOptions(
     ApplicationLaunchMode Mode,
-    string CameraAgentExecutablePath)
+    string SingleCameraAgentExecutablePath,
+    string DualCameraAgentExecutablePath)
 {
     public static ApplicationLaunchOptions Parse(IReadOnlyList<string> arguments, string baseDirectory)
     {
@@ -119,20 +122,23 @@ public sealed record ApplicationLaunchOptions(
             }
         }
 
-        if (configuredAgent is not null && mode is ApplicationLaunchMode.Simulated or ApplicationLaunchMode.HardwareDual)
+        if (configuredAgent is not null && mode == ApplicationLaunchMode.Simulated)
         {
-            throw new ArgumentException("--camera-agent は実機一台構成または起動選択画面でのみ指定できます。HardwareDual providerは未接続です。");
+            throw new ArgumentException("--camera-agent はSIMULATEDモードでは指定できません。");
         }
 
-        var agentPath = configuredAgent is null
-            ? Path.Combine(Path.GetFullPath(baseDirectory), "A0CameraStitcher.CameraAgent.exe")
-            : Path.GetFullPath(configuredAgent);
-        if (agentPath.StartsWith("\\\\", StringComparison.Ordinal) ||
-            agentPath.StartsWith("//", StringComparison.Ordinal))
-        {
-            throw new ArgumentException("Camera Agentはローカルドライブ上の実行ファイルを指定してください。");
-        }
-
-        return new ApplicationLaunchOptions(mode, agentPath);
+        var normalizedBase = Path.GetFullPath(baseDirectory);
+        var singleDefault = Path.Combine(normalizedBase, "A0CameraStitcher.CameraAgent.exe");
+        var dualDefault = Path.Combine(normalizedBase, "A0CameraStitcher.DualCameraAgent.exe");
+        var singlePath = mode is ApplicationLaunchMode.HardwareSingle or ApplicationLaunchMode.Launcher
+            ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? singleDefault)
+            : singleDefault;
+        var dualPath = mode == ApplicationLaunchMode.HardwareDual
+            ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? dualDefault)
+            : dualDefault;
+        return new ApplicationLaunchOptions(
+            mode,
+            singlePath,
+            dualPath);
     }
 }
