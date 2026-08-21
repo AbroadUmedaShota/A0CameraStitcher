@@ -42,8 +42,16 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         IReadOnlyList<CanonicalJpegOriginal> originals,
         string outputJobDirectory,
         DualCameraRigProfile profile,
+        Guid stitchJobId,
+        Guid captureTransactionId,
+        DateTimeOffset completedAtUtc,
         CancellationToken cancellationToken)
     {
+        if (completedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("The StitchJob completion time must be UTC.", nameof(completedAtUtc));
+        }
+
         var cameraA = originals.Single(original => original.Alias == "CAM-A");
         var cameraB = originals.Single(original => original.Alias == "CAM-B");
         var arguments = new List<string>
@@ -64,6 +72,9 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
             "--matrix", string.Join(',', profile.CameraBToCameraA.Select(value => value.ToString("R", CultureInfo.InvariantCulture))),
             "--layout", profile.Layout,
             "--crop", string.Join(',', profile.Crop.Select(value => value.ToString(CultureInfo.InvariantCulture))),
+            "--stitch-job-id", stitchJobId.ToString("N"),
+            "--capture-transaction-id", captureTransactionId.ToString("N"),
+            "--completed-at", completedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
         };
         var output = await RunAsync(arguments, cancellationToken).ConfigureAwait(false);
         var values = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
@@ -76,11 +87,25 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         {
             throw new InvalidDataException("The M2 adapter returned an invalid stitch response.");
         }
+
+        // The job the adapter says it recorded has to be the job that was asked
+        // for. A response naming a different StitchJob would leave this process
+        // pointing at someone else's manifest.
+        var manifestFileName = values.GetValueOrDefault("manifest") ?? string.Empty;
+        if (!string.Equals(values.GetValueOrDefault("stitchJobId"), stitchJobId.ToString("N"), StringComparison.Ordinal) ||
+            manifestFileName.Length == 0 ||
+            !File.Exists(Path.Combine(Path.GetFullPath(outputJobDirectory), manifestFileName)))
+        {
+            throw new InvalidDataException(
+                "The M2 adapter did not publish a StitchJob manifest for the requested job.");
+        }
+
         return new OfflineStitchArtifact(
             Path.Combine(Path.GetFullPath(outputJobDirectory), "stitched.jpg"),
             width,
             height,
-            values.GetValueOrDefault("profileId") ?? string.Empty);
+            values.GetValueOrDefault("profileId") ?? string.Empty,
+            manifestFileName);
     }
 
     public async Task ValidateCanonicalJpegAsync(

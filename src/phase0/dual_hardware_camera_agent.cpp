@@ -1,6 +1,6 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 
-#include "../protocol_json.hpp"
+#include "a0/common/protocol_json.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 
 #include <Windows.h>
@@ -27,11 +27,11 @@ namespace {
 // the binding protocol (Issue #61) can share one parser. These aliases bind the
 // shared templates to this protocol's error type, which is why every call site
 // below still reads exactly as it did before the move.
-using protocol_json::JsonKind;
-using protocol_json::JsonValue;
-using protocol_json::kMaximumProtocolJsonBytes;
-using protocol_json::kMaximumProtocolJsonDepth;
-using protocol_json::JsonEscape;
+using ::a0::common::protocol_json::JsonKind;
+using ::a0::common::protocol_json::JsonValue;
+using ::a0::common::protocol_json::kMaximumProtocolJsonBytes;
+using ::a0::common::protocol_json::kMaximumProtocolJsonDepth;
+using ::a0::common::protocol_json::JsonEscape;
 
 [[noreturn]] void ProtocolFailure(std::string code, std::string message);
 
@@ -41,15 +41,15 @@ struct DualHardwareJsonFailure {
     }
 };
 
-using JsonParser = protocol_json::BasicJsonParser<DualHardwareJsonFailure>;
+using JsonParser = ::a0::common::protocol_json::BasicJsonParser<DualHardwareJsonFailure>;
 
 [[nodiscard]] inline const JsonValue& RequireField(
     const JsonValue& object, std::string_view name, JsonKind kind) {
-    return protocol_json::RequireFieldWith<DualHardwareJsonFailure>(object, name, kind);
+    return ::a0::common::protocol_json::RequireFieldWith<DualHardwareJsonFailure>(object, name, kind);
 }
 
 [[nodiscard]] inline std::string SerializeJson(const JsonValue& value) {
-    return protocol_json::SerializeJsonWith<DualHardwareJsonFailure>(value);
+    return ::a0::common::protocol_json::SerializeJsonWith<DualHardwareJsonFailure>(value);
 }
 
 constexpr std::string_view kCameraMode = "DualCamera";

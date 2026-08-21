@@ -315,8 +315,8 @@ L3で既存の権利処理済み実画像や、アプリ外の承認済み手順
 - cancellation後のchild process、orphan partial、temp directoryの扱い
 - publish後のJPEG再読込、hash、quality結果の永続化
 - candidate生成、pre-encode quality、`.partial` encode、full decode、post-encode quality、manifest作成、product commitの厳密な順序
-- immutable job directoryで、hashを結合したmanifestまたは`COMMITTED` markerのどちらか一つを唯一のcommit pointとして選ぶこと。選定前は未決事項とし、`stitched.jpg`の存在だけを成功としない
-- 選んだ単一commit pointについて、output/manifestのflush、atomic publish、state反映、crash後terminal判定の順序を固定すること
+- immutable job directoryで、hashを結合したmanifestまたは`COMMITTED` markerのどちらか一つを唯一のcommit pointとして選ぶこと。→ **決着（[DECISIONS.md](DECISIONS.md) ADR-0026）**。`a0.stitch-job-manifest.v1`のnon-replacing atomic publishと直後の再読込検証を採用し、`stitched.jpg`の存在だけを成功としない扱いを実装済み（Issue #40）
+- 選んだ単一commit pointについて、output/manifestのflush、atomic publish、state反映、crash後terminal判定の順序を固定すること → **決着（ADR-0026のcommit順序①〜⑥）**
 - quality rejectは`stitched.jpg`としてpublishせず、`REJECTED`状態のdiagnostic candidateとして隔離すること
 - restitchが原本や過去resultを置換しないこと
 - exportが完成JPEGのbyte-identical copyであること

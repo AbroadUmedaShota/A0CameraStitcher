@@ -5543,6 +5543,9 @@ sealed class NeverCaptureDualBridge : ITestSyntheticCamera, IOfflineStitcherAdap
         IReadOnlyList<CanonicalJpegOriginal> originals,
         string outputJobDirectory,
         DualCameraRigProfile profile,
+        Guid stitchJobId,
+        Guid captureTransactionId,
+        DateTimeOffset completedAtUtc,
         CancellationToken cancellationToken) =>
         Task.FromException<OfflineStitchArtifact>(new InvalidOperationException("Identity gate was bypassed."));
 
@@ -5578,8 +5581,13 @@ sealed class BlockingFailedExportBridge(M2OfflineStitcherProcessAdapter inner) :
         IReadOnlyList<CanonicalJpegOriginal> originals,
         string outputJobDirectory,
         DualCameraRigProfile profile,
+        Guid stitchJobId,
+        Guid captureTransactionId,
+        DateTimeOffset completedAtUtc,
         CancellationToken cancellationToken) =>
-        inner.StitchAsync(originals, outputJobDirectory, profile, cancellationToken);
+        inner.StitchAsync(
+            originals, outputJobDirectory, profile, stitchJobId, captureTransactionId,
+            completedAtUtc, cancellationToken);
 
     public async Task ExportAsync(
         string stitchedJpeg,

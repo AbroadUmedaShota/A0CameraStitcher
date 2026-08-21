@@ -1,6 +1,6 @@
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 
-#include "../protocol_json.hpp"
+#include "a0/common/protocol_json.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -15,8 +15,8 @@
 namespace a0::phase0 {
 namespace {
 
-using protocol_json::JsonKind;
-using protocol_json::JsonValue;
+using ::a0::common::protocol_json::JsonKind;
+using ::a0::common::protocol_json::JsonValue;
 
 [[noreturn]] void ProtocolFailure(std::string code, std::string message);
 
@@ -26,11 +26,11 @@ struct DualBindingJsonFailure {
     }
 };
 
-using JsonParser = protocol_json::BasicJsonParser<DualBindingJsonFailure>;
+using JsonParser = ::a0::common::protocol_json::BasicJsonParser<DualBindingJsonFailure>;
 
 [[nodiscard]] const JsonValue& RequireField(
     const JsonValue& object, std::string_view name, JsonKind kind) {
-    return protocol_json::RequireFieldWith<DualBindingJsonFailure>(object, name, kind);
+    return ::a0::common::protocol_json::RequireFieldWith<DualBindingJsonFailure>(object, name, kind);
 }
 
 [[noreturn]] void ProtocolFailure(std::string code, std::string message) {
@@ -202,7 +202,7 @@ std::string ProtocolRejection(
     std::string_view request_id, std::string_view code, std::string_view message) {
     std::ostringstream output;
     output << ResponsePrefix(request_id, false, code) << "{\"detail\":\""
-           << protocol_json::JsonEscape(message) << "\"}}";
+           << ::a0::common::protocol_json::JsonEscape(message) << "\"}}";
     return output.str();
 }
 
@@ -704,7 +704,7 @@ std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     output << ResponsePrefix(request.request_id, true, "CandidateAliasConfirmed")
            << "{\"sessionId\":\"" << session_id_ << "\",\"candidateOrdinal\":"
            << request.candidate_ordinal << ",\"cameraAlias\":\""
-           << protocol_json::JsonEscape(request.camera_alias) << "\",\"state\":\""
+           << ::a0::common::protocol_json::JsonEscape(request.camera_alias) << "\",\"state\":\""
            << StateName(binding_.State()) << "\"}}";
     return output.str();
 }
@@ -723,13 +723,13 @@ std::string DualBindingCameraAgentDispatcher::HandleCompleteBinding(
     const auto evidence = binding_.PublishableEvidence();
     for (std::size_t index = 0; index < evidence.size(); ++index) {
         if (index > 0) output << ',';
-        output << "{\"cameraAlias\":\"" << protocol_json::JsonEscape(evidence[index].camera_alias)
-               << "\",\"providerId\":\"" << protocol_json::JsonEscape(evidence[index].provider_id)
+        output << "{\"cameraAlias\":\"" << ::a0::common::protocol_json::JsonEscape(evidence[index].camera_alias)
+               << "\",\"providerId\":\"" << ::a0::common::protocol_json::JsonEscape(evidence[index].provider_id)
                << "\",\"providerVersion\":" << evidence[index].provider_version
                << ",\"confirmedAtUtc\":\""
-               << protocol_json::JsonEscape(evidence[index].confirmed_at_utc)
+               << ::a0::common::protocol_json::JsonEscape(evidence[index].confirmed_at_utc)
                << "\",\"invalidationReason\":\""
-               << protocol_json::JsonEscape(evidence[index].invalidation_reason) << "\"}";
+               << ::a0::common::protocol_json::JsonEscape(evidence[index].invalidation_reason) << "\"}";
     }
     output << "]}}";
     return output.str();

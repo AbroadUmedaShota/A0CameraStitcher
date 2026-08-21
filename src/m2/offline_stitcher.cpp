@@ -1,5 +1,7 @@
 #include "a0/m2/offline_stitcher.hpp"
 
+#include "a0/m2/stitch_job_manifest.hpp"
+
 #include <Windows.h>
 #include <bcrypt.h>
 #include <wincodec.h>
@@ -13,8 +15,10 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -584,6 +588,51 @@ double FeatherWeight(
     return std::clamp((coordinate - start) / (end - start), 0.0, 1.0);
 }
 
+std::string ToLowerHex(const std::array<std::uint8_t, 32>& digest) {
+    static constexpr std::string_view digits = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(digest.size() * 2U);
+    for (const auto byte : digest) {
+        hex.push_back(digits[(byte >> 4U) & 0x0FU]);
+        hex.push_back(digits[byte & 0x0FU]);
+    }
+    return hex;
+}
+
+// Hashes the profile as it was actually applied, field by field, rather than
+// trusting a hash the caller supplies alongside the values. A caller that sent
+// one profile and a hash of another would otherwise produce a manifest that
+// records a transform the output was not produced with, and nothing downstream
+// could notice.
+std::string ProfileFingerprint(const FixedRigStitchProfile& profile) {
+    std::ostringstream canonical;
+    canonical << "profileId=" << profile.profile_id
+              << ";schemaVersion=" << profile.trust.schema_version
+              << ";status=" << (profile.trust.status == ProfileStatus::approved ? "approved" : "draft")
+              << ";provenance=" << profile.trust.provenance
+              << ";measuredAt=" << profile.trust.measured_at.time_since_epoch().count()
+              << ";validUntil=" << profile.trust.valid_until.time_since_epoch().count()
+              << ";assessedAt=" << profile.trust.assessed_at.time_since_epoch().count()
+              << ";width=" << profile.expected_input_width
+              << ";height=" << profile.expected_input_height
+              << ";layout="
+              << (profile.layout == StitchLayout::camera_a_left_camera_b_right
+                      ? "camera-a-left-camera-b-right"
+                      : "camera-a-top-camera-b-bottom")
+              << ";crop=" << profile.crop.left << ',' << profile.crop.top << ','
+              << profile.crop.right << ',' << profile.crop.bottom << ";matrix=";
+    for (std::size_t index = 0; index < profile.camera_b_to_camera_a.size(); ++index) {
+        if (index > 0) canonical << ',';
+        // Round-trippable spelling: a shortened one would let two different
+        // transforms fingerprint identically.
+        canonical << std::setprecision(17) << profile.camera_b_to_camera_a[index];
+    }
+    const auto text = canonical.str();
+    const std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    Sha256Provider sha256;
+    return ToLowerHex(sha256.Compute(bytes));
+}
+
 void ValidateProfile(const FixedRigStitchProfile& profile) {
     if (profile.profile_id.find_first_not_of(" \t\r\n") == std::string::npos) {
         throw std::invalid_argument("approved rig profile ID is required");
@@ -786,6 +835,14 @@ void PublishValidatedGeneratedJpeg(
 
 OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     ValidateProfile(request.profile);
+    // Refused up front, before any file is created. A job that cannot be
+    // recorded must not leave a stitched output behind for someone to later
+    // mistake for a completed one.
+    if (request.stitch_job_id.empty() || request.capture_transaction_id.empty()
+        || request.completed_at_utc.empty()) {
+        throw std::invalid_argument(
+            "a StitchJob ID, CaptureTransaction ID and completion time are required to record the result");
+    }
     ValidateCanonicalPath(request.camera_a_original, "CAM-A");
     ValidateCanonicalPath(request.camera_b_original, "CAM-B");
     const auto camera_a_path = NormalizedAbsolute(request.camera_a_original);
@@ -921,7 +978,47 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         partial_guard.Release();
         throw;
     }
-    return {destination, output.width, output.height, request.profile.profile_id};
+    // Steps 4-6 of the commit protocol. Until the manifest is published and read
+    // back, this job is not terminal-success no matter how complete the JPEG on
+    // disk looks. A crash between the two leaves both artifacts and no claim.
+    std::error_code published_size_error;
+    const auto published_size = std::filesystem::file_size(destination, published_size_error);
+    if (published_size_error || published_size == 0) {
+        throw std::runtime_error("the published stitched JPEG could not be measured for the manifest");
+    }
+
+    StitchJobManifest manifest;
+    manifest.stitch_job_id = request.stitch_job_id;
+    manifest.capture_transaction_id = request.capture_transaction_id;
+    manifest.inputs[0] = {"CAM-A", ToLowerHex(camera_a_snapshot.sha256), camera_a_snapshot.compressed.size()};
+    manifest.inputs[1] = {"CAM-B", ToLowerHex(camera_b_snapshot.sha256), camera_b_snapshot.compressed.size()};
+    manifest.rig_profile = {
+        request.profile.profile_id,
+        request.profile.trust.schema_version,
+        ProfileFingerprint(request.profile),
+    };
+    manifest.engine = {
+        std::string(kOfflineStitcherEngineId),
+        std::string(kOfflineStitcherEngineVersion),
+    };
+    manifest.output = {
+        "stitched.jpg",
+        ComputeFileSha256Hex(destination),
+        output.width,
+        output.height,
+        published_size,
+    };
+    manifest.completed_at_utc = request.completed_at_utc;
+    PublishAndVerifyStitchJobManifest(job_path, manifest);
+
+    return {
+        destination,
+        output.width,
+        output.height,
+        request.profile.profile_id,
+        job_path / std::filesystem::path(kStitchJobManifestFileName),
+        request.stitch_job_id,
+    };
 }
 
 void ExportStitchedJpeg(

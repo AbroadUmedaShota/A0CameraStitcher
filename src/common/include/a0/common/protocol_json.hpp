@@ -24,7 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace a0::phase0::protocol_json {
+namespace a0::common::protocol_json {
 
 constexpr std::size_t kMaximumProtocolJsonBytes = 256U * 1024U;
 constexpr int kMaximumProtocolJsonDepth = 32;
@@ -442,4 +442,4 @@ std::string SerializeJsonWith(const JsonValue& value) {
 }
 
 
-} // namespace a0::phase0::protocol_json
+} // namespace a0::common::protocol_json

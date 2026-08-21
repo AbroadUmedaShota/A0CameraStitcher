@@ -208,7 +208,11 @@ public sealed record OfflineStitchArtifact(
     string OutputPath,
     int Width,
     int Height,
-    string ProfileId);
+    string ProfileId,
+    // File name of the published StitchJob manifest. Its presence, verified by
+    // the stitcher re-reading it, is what makes this a completed job; the JPEG
+    // beside it proves nothing on its own.
+    string ManifestFileName);
 
 public sealed record DualCameraStitchResult(
     Guid JobId,
@@ -315,10 +319,22 @@ public interface IOfflineStitcherAdapter
         int expectedHeight,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Stitches the pair and records the result as a StitchJob manifest.
+    /// </summary>
+    /// <remarks>
+    /// The identity arguments are not bookkeeping. A stitched file with no
+    /// recorded identity is the "the file is there, so it worked" state the
+    /// manifest exists to abolish (Issue #39 decision), so there is no overload
+    /// that omits them.
+    /// </remarks>
     Task<OfflineStitchArtifact> StitchAsync(
         IReadOnlyList<CanonicalJpegOriginal> originals,
         string outputJobDirectory,
         DualCameraRigProfile profile,
+        Guid stitchJobId,
+        Guid captureTransactionId,
+        DateTimeOffset completedAtUtc,
         CancellationToken cancellationToken);
 
     Task ExportAsync(string stitchedJpeg, string destinationJpeg, CancellationToken cancellationToken);

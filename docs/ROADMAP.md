@@ -2,7 +2,7 @@
 
 ## 現在の進め方
 
-MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`をCAM-A、WPD-digest＋exact-one identity-v3、byte-identical `7360×4912` export、30日read-only profileへ固定した。identity/profile/exportと継続Live View v2のsoftware実装は追加済みだが、実機受入は未完了である。Dualのidentity collisionはDual laneだけをBlockする。空カードが必要なM1Aは`Deferred`のままとする。
+MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`をCAM-A、WPD-digest＋exact-one identity-v3、byte-identical `7360×4912` export、30日read-only profileへ固定した。identity/profile/exportと継続Live View v2のsoftware実装は追加済みだが、実機受入は未完了である。Dualのidentity collisionはADR-0025のsession-local operator bindingへ置換済みで、core・protocol・確認UIまでsoftware実装した（Issue #9 / #61 / #62）。残るのは実capture backend（#10）と実機受入で、DualCameraは`HardwarePending`を維持する。空カードが必要なM1Aは`Deferred`のままとする。
 
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
