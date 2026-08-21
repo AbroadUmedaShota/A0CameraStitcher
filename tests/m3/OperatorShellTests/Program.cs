@@ -633,7 +633,40 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the camera menu's read-only identity status text reflects the DualCamera identity snapshot and goes 対象外 in SingleCamera mode (issue #34): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {54 - failures.Count}/54 passed.");
+try
+{
+    await DualBindingOverlayGatesCaptureAsync();
+    Console.WriteLine("PASS the binding overlay covers the screen and gates capture until the operator confirms both aliases (issue #62)");
+}
+catch (Exception exception)
+{
+    failures.Add("the binding overlay covers the screen and gates capture until the operator confirms both aliases (issue #62)");
+    Console.Error.WriteLine($"FAIL the binding overlay covers the screen and gates capture until the operator confirms both aliases (issue #62): {exception}");
+}
+
+try
+{
+    await DualBindingOverlayAccessibilityAndBusyLockAsync();
+    Console.WriteLine("PASS the binding overlay names every control for a screen reader and locks while a request is in flight (issue #62)");
+}
+catch (Exception exception)
+{
+    failures.Add("the binding overlay names every control for a screen reader and locks while a request is in flight (issue #62)");
+    Console.Error.WriteLine($"FAIL the binding overlay names every control for a screen reader and locks while a request is in flight (issue #62): {exception}");
+}
+
+try
+{
+    await DualBindingOverlayInvalidationRestartsTheFlowAsync();
+    Console.WriteLine("PASS the binding overlay reports the invalidation reason and drops every previous assignment (issue #62)");
+}
+catch (Exception exception)
+{
+    failures.Add("the binding overlay reports the invalidation reason and drops every previous assignment (issue #62)");
+    Console.Error.WriteLine($"FAIL the binding overlay reports the invalidation reason and drops every previous assignment (issue #62): {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {57 - failures.Count}/57 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -1931,10 +1964,19 @@ static async Task FormalDualCameraWpfFlowAsync()
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
         var noRequestProviderViewModel = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "hardware-no-request-provider-journals")),
-            hardwareFlow);
+            hardwareFlow,
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
         await noRequestProviderViewModel.InitializeAsync(CancellationToken.None);
         noRequestProviderViewModel.FixedLocalExportDirectory = exportRoot;
         noRequestProviderViewModel.AcceptSafetyCommand.Execute(null);
+        Check.False(noRequestProviderViewModel.CanCapture, "Ready identity alone must not bypass approved profile and explicit confirmation injection.");
+        // The binding is named first while it is outstanding, because finishing it is the operator's
+        // actual next action -- the modal is in front of them. A missing request boundary is a
+        // configuration fault they cannot act on from this screen.
+        Check.True(
+            noRequestProviderViewModel.CaptureDisabledReason.Contains("機体照合", StringComparison.Ordinal),
+            "An outstanding binding must be the blocker the operator is shown first.");
+        await CompleteDualBindingAsync(noRequestProviderViewModel.DualBinding);
         Check.False(noRequestProviderViewModel.CanCapture, "Ready identity alone must not bypass approved profile and explicit confirmation injection.");
         Check.True(noRequestProviderViewModel.CaptureDisabledReason.Contains("explicit operator confirmations", StringComparison.Ordinal), "The WPF blocker must identify the missing HardwareDual request boundary.");
         var hardwareViewModel = new OperatorShellViewModel(
@@ -1944,10 +1986,18 @@ static async Task FormalDualCameraWpfFlowAsync()
                 DualCameraRigProfile.ApprovedSynthetic(),
                 HardwareDualCaptureProfile.ApprovedSynthetic(),
                 new HardwareDualOperatorConfirmations(true, true, true, true, true),
-                Guid.NewGuid()));
+                Guid.NewGuid()),
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
         await hardwareViewModel.InitializeAsync(CancellationToken.None);
         hardwareViewModel.FixedLocalExportDirectory = exportRoot;
         hardwareViewModel.AcceptSafetyCommand.Execute(null);
+        // HardwareDual now requires a confirmed session binding before capture (ADR-0025, #62).
+        // Everything else about this flow is unchanged; what changed is that a Ready identity and
+        // approved profiles are no longer sufficient on their own.
+        Check.False(
+            hardwareViewModel.CanCapture,
+            "HardwareDual must not start a capture before the operator has confirmed the binding.");
+        await CompleteDualBindingAsync(hardwareViewModel.DualBinding);
         Check.True(hardwareViewModel.CanCapture, "Explicit fake Agent, Ready identity, approved profiles, and confirmations must enable the software-only HardwareDual path.");
         hardwareViewModel.CaptureCommand.Execute(null);
         await WaitUntilAsync(
@@ -1984,9 +2034,11 @@ static async Task FormalDualCameraWpfFlowAsync()
                     HardwareDualCaptureProfile.ApprovedSynthetic(),
                     new HardwareDualOperatorConfirmations(true, true, true, true, true),
                     Guid.NewGuid());
-            });
+            },
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
         await recoveryViewModel.InitializeAsync(CancellationToken.None);
         recoveryViewModel.AcceptSafetyCommand.Execute(null);
+        await CompleteDualBindingAsync(recoveryViewModel.DualBinding);
         recoveryViewModel.CaptureCommand.Execute(null);
         await WaitUntilAsync(
             () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
@@ -2430,6 +2482,263 @@ static async Task LiveViewStopFailureWorkflowAsync()
             Directory.Delete(root, recursive: true);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dual binding confirmation UI (ADR-0025, Issue #62)
+// ---------------------------------------------------------------------------
+
+static OperatorShellViewModel HardwareDualShellWithSimulatedBinding(
+    string root,
+    SimulatedDualBindingAgent agent)
+{
+    var adapter = new M2OfflineStitcherProcessAdapter(
+        Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe"));
+    return new OperatorShellViewModel(
+        new SimulationFoundationService(Path.Combine(root, "binding-journals")),
+        new DualCameraProductFlow(
+            Path.Combine(root, "binding-products"),
+            new HardwareDualCaptureSource(new WpfHardwareDualFakeOperations(adapter)),
+            adapter,
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady())),
+        () => DualCameraCaptureRequest.CreateHardwareDual(
+            DualCameraRigProfile.ApprovedSynthetic(),
+            HardwareDualCaptureProfile.ApprovedSynthetic(),
+            new HardwareDualOperatorConfirmations(true, true, true, true, true),
+            Guid.NewGuid()),
+        dualBindingTransport: new SimulatedDualBindingAgentTransport(agent));
+}
+
+static async Task DualBindingOverlayGatesCaptureAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agent = new SimulatedDualBindingAgent();
+        var shell = HardwareDualShellWithSimulatedBinding(root, agent);
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.AcceptSafetyCommand.Execute(null);
+
+        Check.True(shell.DualBinding.IsRequired, "HardwareDual must require a binding.");
+        Check.True(shell.DualBinding.IsOverlayVisible, "The binding overlay must cover the screen until Ready.");
+        Check.False(shell.CanCapture, "Capture must not start before the binding is confirmed.");
+        Check.True(
+            shell.CaptureDisabledReason.Contains("機体照合", StringComparison.Ordinal),
+            "The disabled reason must name the outstanding binding.");
+
+        shell.DualBinding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(
+            () => shell.DualBinding.Candidates.Count == 2 && !shell.DualBinding.IsBusy,
+            "The binding session did not offer two candidates.");
+        Check.Equal("候補1", shell.DualBinding.Candidates[0].DisplayName);
+        Check.Equal("候補2", shell.DualBinding.Candidates[1].DisplayName);
+
+        // One preview at a time, never two. Comparing them side by side is the mistake this flow
+        // exists to prevent.
+        shell.DualBinding.ShowCandidateCommand.Execute(shell.DualBinding.Candidates[0]);
+        await WaitUntilAsync(() => !shell.DualBinding.IsBusy, "Showing the first candidate did not settle.");
+        Check.Equal(1, agent.ActiveLiveViewCount);
+        shell.DualBinding.ShowCandidateCommand.Execute(shell.DualBinding.Candidates[1]);
+        await WaitUntilAsync(
+            () => shell.DualBinding.SelectedCandidate == shell.DualBinding.Candidates[1] && !shell.DualBinding.IsBusy,
+            "Switching candidates did not settle.");
+        Check.Equal(1, agent.ActiveLiveViewCount);
+        Check.Equal(0, agent.ConcurrentLiveViewViolationCount);
+
+        // The simulated agent returns generated bytes, so the screen says so instead of drawing
+        // something that could be mistaken for a camera frame.
+        Check.True(
+            shell.DualBinding.IsPreviewPlaceholderVisible,
+            "A frame that is not a decodable image must fall back to a labelled placeholder.");
+        Check.True(
+            shell.DualBinding.PreviewPlaceholderText.Contains("カメラ画像ではありません", StringComparison.Ordinal),
+            "The placeholder must say it is not a camera image.");
+
+        shell.DualBinding.AssignCameraACommand.Execute(null);
+        await WaitUntilAsync(
+            () => shell.DualBinding.Candidates[1].AssignedAlias == "CAM-A" && !shell.DualBinding.IsBusy,
+            "The first alias was not assigned.");
+        Check.False(shell.CanCapture, "One assignment must not enable capture.");
+        Check.False(
+            shell.DualBinding.AssignCameraACommand.CanExecute(null),
+            "CAM-A must not be offered twice.");
+
+        shell.DualBinding.ShowCandidateCommand.Execute(shell.DualBinding.Candidates[0]);
+        await WaitUntilAsync(() => !shell.DualBinding.IsBusy, "Showing the remaining candidate did not settle.");
+        shell.DualBinding.AssignCameraBCommand.Execute(null);
+        await WaitUntilAsync(
+            () => shell.DualBinding.Phase == DualBindingPhase.Summary,
+            "Both assignments did not reach the confirmation summary.");
+
+        // The summary exists so the operator sees what they chose before it is committed.
+        Check.Equal(2, shell.DualBinding.SummaryLines.Count);
+        Check.True(
+            shell.DualBinding.SummaryLines[0].StartsWith("CAM-A", StringComparison.Ordinal),
+            "The summary must list the aliases in rig order.");
+        Check.False(shell.CanCapture, "The summary is not a confirmed binding.");
+
+        shell.DualBinding.CompleteBindingCommand.Execute(null);
+        await WaitUntilAsync(() => shell.DualBinding.IsReady, "The binding did not complete.");
+        Check.False(shell.DualBinding.IsOverlayVisible, "A Ready binding must uncover the screen.");
+        Check.True(shell.CanCapture, "A confirmed binding must enable capture.");
+        Check.Equal(1, agent.EnumerationCount);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualBindingOverlayAccessibilityAndBusyLockAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agent = new SimulatedDualBindingAgent();
+        var shell = HardwareDualShellWithSimulatedBinding(root, agent);
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.AcceptSafetyCommand.Execute(null);
+        shell.DualBinding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(
+            () => shell.DualBinding.Candidates.Count == 2 && !shell.DualBinding.IsBusy,
+            "The binding session did not offer two candidates.");
+
+        // Read aloud instead of the colour, and it has to change as the state does -- a name that
+        // never updates is worse than none, because it reports the wrong state confidently.
+        var candidate = shell.DualBinding.Candidates[0];
+        Check.Equal("候補1 未割当", candidate.AccessibleName);
+        shell.DualBinding.ShowCandidateCommand.Execute(candidate);
+        await WaitUntilAsync(() => !shell.DualBinding.IsBusy, "Showing the candidate did not settle.");
+        Check.Equal("候補1 未割当 表示中", candidate.AccessibleName);
+        shell.DualBinding.AssignCameraACommand.Execute(null);
+        await WaitUntilAsync(
+            () => candidate.IsAssigned && !shell.DualBinding.IsBusy,
+            "The alias was not assigned.");
+        Check.Equal("候補1 CAM-A", candidate.AccessibleName);
+        Check.Equal("assigned", candidate.StateKey);
+
+        // Block / Caution / Info in words, so the state survives a screen reader and a monochrome
+        // display.
+        Check.True(
+            shell.DualBinding.HeadlineKind is "Block" or "Caution" or "Info",
+            "The headline must carry a written severity, not only a colour.");
+        Check.True(
+            DualBindingViewModel.ResidualRiskText.Contains("自動検出できません", StringComparison.Ordinal) &&
+            DualBindingViewModel.ResidualRiskText.Contains("HardwarePending", StringComparison.Ordinal) &&
+            DualBindingViewModel.ResidualRiskText.Contains("同期は保証しません", StringComparison.Ordinal),
+            "The overlay must state the misassignment risk, HardwarePending, and the shutter-sync limit.");
+
+        // The busy lock is what stops a double-click issuing two Agent requests against a session
+        // whose state the first one is still changing.
+        var gate = new TaskCompletionSource();
+        var gatedShell = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "gated-journals")),
+            null,
+            dualBindingTransport: new GatedDualBindingTransport(agent, gate.Task));
+        gatedShell.DualBinding.IsRequired = true;
+        gatedShell.DualBinding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(() => gatedShell.DualBinding.IsBusy, "The binding request did not start.");
+        Check.False(
+            gatedShell.DualBinding.BeginBindingCommand.CanExecute(null),
+            "A second binding request must be refused while the first is in flight.");
+        gate.SetResult();
+        await WaitUntilAsync(() => !gatedShell.DualBinding.IsBusy, "The gated binding request did not finish.");
+        Check.True(
+            gatedShell.DualBinding.BeginBindingCommand.CanExecute(null) ||
+            gatedShell.DualBinding.Phase == DualBindingPhase.Collecting,
+            "The lock must release once the request completes.");
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualBindingOverlayInvalidationRestartsTheFlowAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agent = new SimulatedDualBindingAgent();
+        var shell = HardwareDualShellWithSimulatedBinding(root, agent);
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.AcceptSafetyCommand.Execute(null);
+        await CompleteDualBindingAsync(shell.DualBinding);
+        Check.True(shell.CanCapture, "The confirmed binding must enable capture.");
+
+        // A Ready binding cannot learn it was invalidated on its own -- nothing pushes. The probe
+        // that runs immediately before a capture is what asks, and it has to refuse before any
+        // shutter is dispatched.
+        agent.RaiseInvalidation(DualBindingInvalidationReason.TopologyChanged);
+
+        // Driven through the capture command rather than the probe directly, because the thing
+        // that has to hold is "no shutter is dispatched", not "a method returns false". Calling the
+        // probe here would pass even if nothing on the capture path ever called it.
+        Check.True(shell.CanCapture, "Nothing has told the shell about the change yet.");
+        var startsBefore = shell.TransactionStartCount;
+        shell.CaptureCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !shell.IsBusy && shell.DualBinding.RequiresRebindingText,
+            "A body unplugged after the binding was confirmed must be caught before capture.");
+        Check.Equal(startsBefore, shell.TransactionStartCount);
+        Check.True(
+            shell.DualBinding.InvalidationText.Contains("接続構成の変化", StringComparison.Ordinal),
+            "The overlay must name the invalidation reason in words the operator can act on.");
+        Check.False(shell.CanCapture, "An invalidated binding must block capture immediately.");
+        Check.True(shell.DualBinding.IsOverlayVisible, "The overlay must cover the screen again.");
+
+        shell.DualBinding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(
+            () => !shell.DualBinding.IsBusy && shell.DualBinding.Candidates.Count == 2,
+            "Re-binding after a topology change did not offer candidates again.");
+
+        // Re-binding enumerates again rather than reusing anything from the previous session: the
+        // ordinals, the preview and the assignments were all specific to a topology that changed.
+        Check.Equal(2, agent.EnumerationCount);
+        Check.True(
+            shell.DualBinding.Candidates.All(item => !item.IsAssigned),
+            "A re-binding must start with no assignment carried over.");
+        Check.Equal(0, shell.DualBinding.SummaryLines.Count);
+        Check.False(shell.DualBinding.IsPreviewVisible, "A re-binding must start with no preview.");
+        Check.False(shell.CanCapture, "Capture must be blocked again until the new binding completes.");
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+// Drives the binding overlay the way an operator would: start a session, look at each candidate,
+// assign it, then confirm the summary. Commands are used rather than the client underneath, so a
+// test that reaches Ready has proven the screen can get there too.
+static async Task CompleteDualBindingAsync(DualBindingViewModel binding)
+{
+    binding.BeginBindingCommand.Execute(null);
+    await WaitUntilAsync(
+        () => binding.Candidates.Count == 2 && !binding.IsBusy,
+        "The binding session did not offer two candidates.");
+
+    foreach (var alias in new[] { "CAM-A", "CAM-B" })
+    {
+        var candidate = binding.Candidates.First(item => !item.IsAssigned);
+        binding.ShowCandidateCommand.Execute(candidate);
+        await WaitUntilAsync(
+            () => binding.SelectedCandidate == candidate && !binding.IsBusy,
+            $"The binding screen did not show {candidate.DisplayName}.");
+
+        var assign = alias == "CAM-A" ? binding.AssignCameraACommand : binding.AssignCameraBCommand;
+        assign.Execute(null);
+        await WaitUntilAsync(
+            () => candidate.AssignedAlias == alias && !binding.IsBusy,
+            $"{candidate.DisplayName} was not assigned to {alias}.");
+    }
+
+    await WaitUntilAsync(
+        () => binding.Phase == DualBindingPhase.Summary,
+        "The binding screen did not reach the confirmation summary.");
+    binding.CompleteBindingCommand.Execute(null);
+    await WaitUntilAsync(() => binding.IsReady, "The binding did not complete.");
 }
 
 static async Task WaitUntilAsync(Func<bool> predicate, string message)
@@ -5056,6 +5365,20 @@ static class HardwareTestData
             WhiteBalanceMode = Setting("profile-match"),
             FocusMode = Setting("profile-match"),
         };
+    }
+}
+
+/// <summary>
+/// Holds one request open so a test can observe the busy lock. Without it the lock is invisible:
+/// the in-process simulated transport completes before a second click could ever arrive.
+/// </summary>
+sealed class GatedDualBindingTransport(SimulatedDualBindingAgent agent, Task gate)
+    : IHardwareCameraAgentTransport
+{
+    public async Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return agent.Handle(requestJson);
     }
 }
 
