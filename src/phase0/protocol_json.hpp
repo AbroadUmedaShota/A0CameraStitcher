@@ -42,11 +42,15 @@ struct JsonValue {
     JsonKind kind{JsonKind::null_value};
     std::map<std::string, JsonValue> object;
     std::vector<JsonValue> array;
+    // For JsonKind::number this holds the raw lexeme, not a converted value.
+    // Callers convert it themselves, which is what lets them refuse "1.0" or
+    // "1e0" where only a whole number is meaningful -- a distinction a double
+    // would have already thrown away.
     std::string string;
     bool boolean{};
 };
 
-void AppendUtf8(std::string& output, std::uint32_t code_point) {
+inline void AppendUtf8(std::string& output, std::uint32_t code_point) {
     if (code_point <= 0x7FU) {
         output.push_back(static_cast<char>(code_point));
     } else if (code_point <= 0x7FFU) {
@@ -385,7 +389,10 @@ const JsonValue& RequireFieldWith(
     return found->second;
 }
 
-std::string JsonEscape(std::string_view value) {
+// Not a template, unlike everything around it: escaping has no failure mode to
+// route through a policy. It needs `inline` because more than one translation
+// unit includes this header.
+inline std::string JsonEscape(std::string_view value) {
     std::ostringstream output;
     for (unsigned char character : value) {
         switch (character) {
