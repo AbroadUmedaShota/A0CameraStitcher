@@ -65,7 +65,7 @@
 | 項目 | 理由 | 再開条件 |
 |---|---|---|
 | M1A one-shot、10/10、fault、handoff | 操作者がカード作業を保留。最後の証拠は90 payload | empty cardへの交換または手動backup/clearの報告と明示再開 |
-| M1B二台試験 | 二台接続時にSDK identity collision。Dual identity strategyだけがBlockedで、Single identity-v3は流用しない | `HG-0003B`でdocumented unique SDK propertyまたは安全なSDK/WPD相関方法を決定する |
+| M1B二台試験 | 二台接続時のSDK identity collisionは、2026-08-20のADR-0025でsession-local operator bindingへ置換して解消した。恒久的な機体識別は作らず、割当はAgent process内のmemory-onlyで、Single identity-v3は流用しない | core（#9）・binding Agent protocol（#61）・確認UI（#62）はsoftware実装済み。実capture backend（#10）と実機受入が残り、DualCameraは`HardwarePending` |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
 | SingleCamera製品受入 | identity/profile/export/継続Live View v2 softwareは実装済み。実D810・actual JPEG・10回handoff・10回p95・100件耐久は未実行 | empty spoolと明示再開、実Live View v2/handoff、10回後の`HG-0009`承認、100件実WPF受入 |
 | 配布 | native dependency再配布未承認 | `HG-0005` |

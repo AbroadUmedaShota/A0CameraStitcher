@@ -4,7 +4,7 @@
 
 ## 現在の段階
 
-総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持し、SDK identity collisionにより別laneでBlockedです。
+総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持します。二台のSDK identity collisionは2026-08-20のADR-0025でsession-local operator bindingへ置換され、binding core・binding Agent protocol・確認UIまでsoftware実装済みです（Issue #9 / #61 / #62）。恒久的な機体識別を作ったわけではなく、操作者がLive Viewを一台ずつ見て割り当てる方式であり、取り違えriskは受容した残留riskです。実capture backendと実機受入が残るためDualCameraは`HardwarePending`のままです。
 
 DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。ただしproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、既定経路は`PairDispatcherUnavailable`／`HardwarePending`のままです。
 
