@@ -23,7 +23,11 @@ try {
     $hardwareWindowPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/HardwareSingleCameraWindow.xaml'
     $hardwareViewModelPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/ViewModels/HardwareSingleCameraViewModel.cs'
     $dualCompositionPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/DualCameraProductComposition.cs'
-    $nativeBuildDirectory = Join-Path $RepositoryRoot 'build/m3-simulated-native'
+    # OperatorShell.csproj の BuildM2Adapter と Test-DualCameraWpfFlow.ps1 が使うのと同じ
+    # ディレクトリを共有する。専用ディレクトリを持つと、同じ入力から同じアダプタを
+    # もう一度フルコンパイルすることになる（GitHub Issue #28）。下の cmake 呼び出しは
+    # 残してあり、csproj 側が増分判定で飛ばされた場合でもアダプタの存在を保証する。
+    $nativeBuildDirectory = Join-Path $RepositoryRoot 'build/wpf-m2-adapter'
 
     $dotnet = Get-Command dotnet -ErrorAction Stop
     & $dotnet.Source build $solutionPath --configuration $Configuration --nologo --maxcpucount:1 --nodeReuse:false -p:UseSharedCompilation=false
@@ -68,9 +72,9 @@ try {
     [xml]$windowXml = Get-Content -Raw -LiteralPath $windowPath
     $windowText = Get-Content -Raw -LiteralPath $windowPath
     $viewModelText = Get-Content -Raw -LiteralPath $viewModelPath
-    Assert-Condition ($windowXml.Window.Title.Contains('SIMULATED') -and $windowXml.Window.Title.Contains('実機未接続')) 'Window title must remain visibly simulated.'
-    Assert-Condition ($windowText.Contains('AutomationProperties.Name="A0 Camera Stitcher SIMULATED operator shell 実機未接続"')) 'Window accessibility name must remain visibly simulated.'
-    foreach ($marker in @('SIMULATED / 実機未接続', 'NO AUTO RETRY', 'Simulated Live View placeholder 非実画像', 'FailedPartial', '新しい撮影を準備', '確認なし', 'read-only', '1台構成', '2台構成', 'SelectedOperatingMode', 'CaptureButtonText')) {
+    Assert-Condition ($windowXml.Window.Title.Contains('模擬動作') -and $windowXml.Window.Title.Contains('実機未接続')) 'Window title must remain visibly simulated.'
+    Assert-Condition ($windowText.Contains('AutomationProperties.Name="A0 Camera Stitcher 撮影画面 模擬動作 実機未接続"')) 'Window accessibility name must remain visibly simulated.'
+    foreach ($marker in @('模擬動作（実機未接続）', 'NO AUTO RETRY', '模擬動作のライブ表示（実画像ではありません）', 'FailedPartial', '新しい撮影を準備', '確認なし', 'read-only', '1台構成', '2台構成', 'SelectedOperatingMode', 'CaptureButtonText')) {
         Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required marker: $marker"
     }
     Assert-Condition ($viewModelText.Contains('ISimulatedTransactionService')) 'Operator shell must retain the SingleCamera and diagnostic simulated transaction facade.'
@@ -133,7 +137,7 @@ try {
     Assert-Condition ($windowText.Contains('<Menu ')) 'Operator shell window must add a WPF Menu element for the menu bar (issue #34).'
     Assert-Condition (-not $windowText.Contains('TabStripPlacement="Left"')) 'Issue #34 must remove the left-nav TabControl (TabStripPlacement="Left").'
     Assert-Condition (-not $windowText.Contains('Header="編集')) 'Issue #34 must not add an 編集 (Edit) top-level menu — no image-editing feature exists in this contract.'
-    foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', '明示export(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '保守画面から撮影ダッシュボードへ戻る')) {
+    foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', 'このPCのフォルダへ保存(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '保守画面から撮影ダッシュボードへ戻る')) {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required menu bar binding/marker (issue #34): $marker"
     }
     foreach ($marker in @('SelectedPage', 'PageTitle', 'ShowDashboardCommand', 'ShowSetupCommand', 'ShowCameraSettingsCommand', 'ShowDiagnosticsCommand', 'IsSingleCameraModeChecked', 'IsDualCameraModeChecked', 'IsLoupeZoom100Checked', 'IsLoupeZoom200Checked', 'IsTiltReadingVisible', 'DualCameraIdentityStatusText', 'AppVersionText')) {
@@ -155,7 +159,7 @@ try {
     Assert-Condition ($hardwareViewModelText.Contains('GetTransactionResultAsync')) 'Hardware recovery must query the existing transaction without recapture.'
     Assert-Condition (-not $hardwareViewModelText.Contains('DllImport')) 'Hardware shell must not invoke native camera APIs in-process.'
 
-    foreach ($marker in @('CAM-A原本検証', 'CAM-B原本検証', 'fixed-local folder', '実JPEG合成完了', 'DualCameraExecutionEnvironment.TestSynthetic')) {
+    foreach ($marker in @('CAM-A原画像の確認', 'CAM-B原画像の確認', 'このPCのフォルダへ保存', '実JPEG合成完了', 'DualCameraExecutionEnvironment.TestSynthetic')) {
         Assert-Condition (($windowText + $viewModelText + $dualCompositionText).Contains($marker)) "Formal DualCamera WPF flow is missing required marker: $marker"
     }
     Assert-Condition ($dualCompositionText.Contains('DualCameraProductFlow')) 'WPF composition must use the typed DualCamera application flow.'
