@@ -499,6 +499,55 @@ void FramesAreBoundedAndNeverTruncated() {
         "an empty frame is reported as unavailable rather than as a preview");
 }
 
+// The preview is the only binary payload this protocol carries, and the whole
+// operator decision rests on seeing it correctly. Asserting the frame is
+// "non-empty" would pass for an encoder that emits the wrong alphabet, drops the
+// padding, or mangles the tail -- all of which produce an image the operator
+// cannot read, from an agent reporting success. So the bytes are pinned against
+// known values instead, including both partial-tail cases.
+void ThePreviewEncodingIsPinnedToKnownBytes() {
+    // The fake fills byte i of candidate 0's frame with i, so the expected
+    // base64 is the standard encoding of 00 01 02 ... for each length.
+    const std::pair<std::size_t, std::string_view> vectors[]{
+        {3, "AAEC"},        // exact multiple of three, no padding
+        {4, "AAECAw=="},    // one byte over, two padding characters
+        {5, "AAECAwQ="},    // two bytes over, one padding character
+    };
+    for (const auto& [length, expected] : vectors) {
+        DualBindingFakeSdkOptions options;
+        options.live_view_frame_bytes = length;
+        Harness harness(options);
+        const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+        (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+        const std::string frame = harness.dispatcher.Handle(FrameRequest(session, 0));
+
+        Check(
+            StringFieldOf(frame, "frameBase64") == expected,
+            "a " + std::to_string(length) + " byte preview encodes to its known base64");
+        Check(
+            frame.find("\"frameBytes\":" + std::to_string(length)) != std::string::npos,
+            "the declared byte count is the raw length, not the encoded one");
+    }
+}
+
+void SessionIdsAreShapedTheWayClientsValidateThem() {
+    Harness harness;
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+    Check(session.size() == 32, "a session ID is 32 characters");
+    Check(
+        session.find_first_not_of("0123456789abcdef") == std::string::npos,
+        "a session ID is lowercase hex, which is what the parser accepts back");
+    Check(
+        session.find_first_not_of('0') != std::string::npos,
+        "a session ID is never the all-zero value the parser refuses");
+
+    // Handing the agent back its own session ID has to work, or the shape the
+    // agent emits and the shape it accepts would have drifted apart.
+    Check(
+        Succeeded(harness.dispatcher.Handle(StartLiveViewRequest(session, 0))),
+        "the agent accepts the session ID it issued");
+}
+
 // ---------------------------------------------------------------------------
 // Alias assignment
 // ---------------------------------------------------------------------------
@@ -828,6 +877,8 @@ int main() {
     AFailedStopPreventsASecondLiveView();
     ARefusedLiveViewStartIsNotRecordedAsRunning();
     FramesAreBoundedAndNeverTruncated();
+    ThePreviewEncodingIsPinnedToKnownBytes();
+    SessionIdsAreShapedTheWayClientsValidateThem();
     AnAliasAndACandidateAreEachAssignedOnce();
     CompletionNeedsBothAliasesAndBothQuiesced();
     AnUnclosableSdkSessionBlocksCompletion();
