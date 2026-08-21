@@ -13,11 +13,17 @@
     <RepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\..'))</RepositoryRoot>
     <M2AdapterBuildDirectory>$(RepositoryRoot)\build\wpf-m2-adapter</M2AdapterBuildDirectory>
     <M2AdapterSourcePath>$(M2AdapterBuildDirectory)\$(Configuration)\A0CameraStitcher.M2Adapter.exe</M2AdapterSourcePath>
+    <SingleCameraAgentSourcePath>$(M2AdapterBuildDirectory)\$(Configuration)\A0CameraStitcher.CameraAgent.exe</SingleCameraAgentSourcePath>
+    <DualCameraAgentSourcePath>$(M2AdapterBuildDirectory)\$(Configuration)\A0CameraStitcher.DualCameraAgent.exe</DualCameraAgentSourcePath>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Foundation\A0CameraStitcher.M3.Foundation.csproj" />
     <Content Include="$(M2AdapterSourcePath)" Link="A0CameraStitcher.M2Adapter.exe"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(SingleCameraAgentSourcePath)" Link="A0CameraStitcher.CameraAgent.exe"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(DualCameraAgentSourcePath)" Link="A0CameraStitcher.DualCameraAgent.exe"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
@@ -46,6 +52,10 @@
           Inputs="@(M2AdapterInput)" Outputs="$(M2AdapterSourcePath)">
     <Exec Command="cmake -S &quot;$(RepositoryRoot)&quot; -B &quot;$(M2AdapterBuildDirectory)&quot; -A x64" />
     <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.M2Adapter -- /m:1" />
+    <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.CameraAgent -- /m:1" />
+    <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.DualCameraAgent -- /m:1" />
     <Error Condition="!Exists('$(M2AdapterSourcePath)')" Text="A0CameraStitcher.M2Adapter.exe was not produced." />
+    <Error Condition="!Exists('$(SingleCameraAgentSourcePath)')" Text="A0CameraStitcher.CameraAgent.exe was not produced." />
+    <Error Condition="!Exists('$(DualCameraAgentSourcePath)')" Text="A0CameraStitcher.DualCameraAgent.exe was not produced." />
   </Target>
 </Project>

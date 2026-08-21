@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-metric-definition.schema.json",
+  "title": "A0 stitch metric definition v1",
+  "description": "Reproducible measurement semantics only. Product acceptance values are deliberately outside this contract. Successful result rounding uses a binary64 representation-safety contract: decimalPlaces is 0 through 9, and the result schemas require the exact scaled magnitude |rawValue * 10^decimalPlaces| to be at most 2^39. This is a numeric representability boundary, not a product-quality limit; JSON Schema states the per-decimal-place raw/value ranges and runtime validation rechecks the scaled value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "definitionVersion", "metricId", "domain", "unit",
+    "coordinateSystem", "mask", "sampling", "aggregation", "rounding", "boundary",
+    "confidence", "uncertainty", "outcomePolicy"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-metric-definition.v1" },
+    "definitionVersion": { "const": 1 },
+    "metricId": { "$ref": "#/$defs/token" },
+    "domain": { "enum": ["Image", "Resource"] },
+    "unit": { "enum": ["pixels", "degrees", "ratio", "percent", "ev", "delta-e-2000", "seconds", "milliseconds", "bytes", "MiB"] },
+    "coordinateSystem": { "oneOf": [{ "$ref": "#/$defs/coordinateSystem" }, { "type": "null" }] },
+    "mask": { "oneOf": [{ "$ref": "#/$defs/mask" }, { "type": "null" }] },
+    "sampling": { "oneOf": [{ "$ref": "#/$defs/sampling" }, { "type": "null" }] },
+    "aggregation": { "$ref": "#/$defs/aggregation" },
+    "rounding": { "$ref": "#/$defs/rounding" },
+    "boundary": { "oneOf": [{ "$ref": "#/$defs/boundary" }, { "type": "null" }] },
+    "confidence": { "$ref": "#/$defs/confidenceDefinition" },
+    "uncertainty": { "$ref": "#/$defs/uncertaintyDefinition" },
+    "outcomePolicy": { "$ref": "#/$defs/outcomePolicy" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "domain": { "const": "Image" } }, "required": ["domain"] },
+      "then": {
+        "properties": {
+          "unit": { "enum": ["pixels", "degrees", "ratio", "percent", "ev", "delta-e-2000"] },
+          "coordinateSystem": { "$ref": "#/$defs/coordinateSystem" },
+          "mask": { "$ref": "#/$defs/mask" },
+          "sampling": { "$ref": "#/$defs/sampling" },
+          "boundary": { "$ref": "#/$defs/boundary" },
+          "outcomePolicy": {
+            "properties": {
+              "allowedFailureCodes": {
+                "properties": { "NotApplicable": { "maxItems": 0 } }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "domain": { "const": "Resource" } }, "required": ["domain"] },
+      "then": {
+        "properties": {
+          "unit": { "enum": ["seconds", "milliseconds", "bytes", "MiB", "ratio", "percent"] },
+          "coordinateSystem": { "const": null },
+          "mask": { "const": null },
+          "sampling": { "const": null },
+          "boundary": { "const": null },
+          "outcomePolicy": {
+            "properties": {
+              "allowedFailureCodes": {
+                "properties": { "NotApplicable": { "minItems": 1 } }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "coordinateSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "xAxis", "yAxis", "reference"],
+      "properties": {
+        "origin": { "enum": ["TopLeftPixelCenter", "OpticalCenter"] },
+        "xAxis": { "const": "Right" },
+        "yAxis": { "const": "Down" },
+        "reference": { "enum": ["CAM-A", "CAM-B", "StitchedOutput"] }
+      }
+    },
+    "mask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "includedValue", "excludedValue"],
+      "properties": {
+        "kind": { "const": "BinaryValidity" },
+        "source": { "enum": ["CAM-AValidSamples", "CAM-BValidSamples", "IntersectionOfValidSamples", "UnionOfValidSamples", "StitchedOutputValidity"] },
+        "includedValue": { "const": 1 },
+        "excludedValue": { "const": 0 }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "outOfBounds", "invalidSample"],
+      "properties": {
+        "method": { "enum": ["Nearest", "Bilinear", "Area"] },
+        "outOfBounds": { "const": "Exclude" },
+        "invalidSample": { "const": "Exclude" }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imageEdge", "maskEdge", "intervalClosure"],
+      "properties": {
+        "imageEdge": { "enum": ["ExcludeIncompleteKernel", "ClampToImage"] },
+        "maskEdge": { "enum": ["RequireAllSamplesValid", "RequireCenterSampleValid"] },
+        "intervalClosure": { "enum": ["LowerInclusiveUpperExclusive", "Closed"] }
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "percentile", "algorithm", "percentileInterpolation", "medianEvenRule"],
+      "properties": {
+        "method": { "enum": ["Mean", "Median", "Minimum", "Maximum", "Percentile"] },
+        "percentile": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "algorithm": { "enum": ["PairwiseArithmeticMean", "SortedMiddle", "SortedFirst", "SortedLast", "SortedOrderStatistic"] },
+        "percentileInterpolation": { "enum": ["LinearR7", null] },
+        "medianEvenRule": { "enum": ["MeanOfMiddlePair", null] }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "Mean" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "PairwiseArithmeticMean" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Median" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedMiddle" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": "MeanOfMiddlePair" } } } },
+        { "if": { "properties": { "method": { "const": "Minimum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedFirst" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Maximum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedLast" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Percentile" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "type": "number" }, "algorithm": { "const": "SortedOrderStatistic" }, "percentileInterpolation": { "const": "LinearR7" }, "medianEvenRule": { "const": null } } } }
+      ]
+    },
+    "rounding": {
+      "type": "object",
+      "description": "Rounding is defined only inside the exact-safe binary64 range documented above. The result schemas apply the decimalPlaces-specific rawValue/value ranges; runtime validation additionally checks the exact decimal scaled value.",
+      "additionalProperties": false,
+      "required": ["mode", "decimalPlaces", "order"],
+      "properties": {
+        "mode": { "enum": ["HalfToEven", "HalfAwayFromZero", "TowardZero"] },
+        "decimalPlaces": { "type": "integer", "minimum": 0, "maximum": 9 },
+        "order": { "const": "AggregateThenRound" }
+      }
+    },
+    "confidenceDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "level"],
+      "properties": {
+        "method": { "enum": ["None", "BootstrapPercentile", "AnalyticNormal"] },
+        "level": { "type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "level": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["BootstrapPercentile", "AnalyticNormal"] } }, "required": ["method"] }, "then": { "properties": { "level": { "type": "number" } } } }
+      ]
+    },
+    "uncertaintyDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "unitMode"],
+      "properties": {
+        "method": { "enum": ["None", "StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] },
+        "unitMode": { "enum": ["SameAsMetric", "Dimensionless"] }
+      }
+    },
+    "outcomePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedFailureCodes", "noResultRule"],
+      "properties": {
+        "allowedFailureCodes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["NoResult", "NotApplicable", "Invalid"],
+          "properties": {
+            "NoResult": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "enum": ["insufficient-valid-samples", "zero-valid-results"] } },
+            "NotApplicable": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "enum": ["not-applicable-for-metric-domain", "metric-not-applicable"] } },
+            "Invalid": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "enum": ["invalid-source-contract", "definition-mismatch"] } }
+          }
+        },
+        "noResultRule": { "const": "ZeroValidSamples" }
+      }
+    }
+  }
+}

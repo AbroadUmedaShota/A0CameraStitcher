@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-statistical-result.schema.json",
+  "title": "A0 stitch statistical result v1",
+  "description": "Aggregated evidence bound at runtime to an exact metric definition. It defines calculation semantics but no product acceptance value. Successful rawValue and value use an exact-safe binary64 rounding contract: |rawValue * 10^decimalPlaces| must be finite and at most 2^39. The conditional ranges below are the schema-side raw/value projection of that scaled rule; runtime validation performs the strict scaled check. Nonnegative integer counters are bounded by 2^53-1 for exact binary64 interoperability. These are representability boundaries, not product-quality limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "definitionVersion", "metricId", "metricDomain", "outcome", "aggregation",
+    "populationCount", "validResultCount", "rawValue", "value", "rounding", "confidence",
+    "uncertainty", "failureCode"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-statistical-result.v1" },
+    "definitionVersion": { "const": 1 },
+    "metricId": { "$ref": "#/$defs/token" },
+    "metricDomain": { "enum": ["Image", "Resource"] },
+    "outcome": { "enum": ["Success", "NoResult", "NotApplicable", "Invalid"] },
+    "aggregation": { "$ref": "#/$defs/aggregation" },
+    "populationCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "validResultCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "rawValue": { "type": ["number", "null"] },
+    "value": { "type": ["number", "null"] },
+    "rounding": { "$ref": "#/$defs/rounding" },
+    "confidence": { "$ref": "#/$defs/confidenceResult" },
+    "uncertainty": { "$ref": "#/$defs/uncertaintyResult" },
+    "failureCode": {
+      "enum": [
+        null, "insufficient-valid-samples", "zero-valid-results",
+        "not-applicable-for-metric-domain", "metric-not-applicable",
+        "invalid-source-contract", "definition-mismatch"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "Success" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "populationCount": { "minimum": 1 },
+          "validResultCount": { "minimum": 1 },
+          "rawValue": { "type": "number" },
+          "value": { "type": "number" },
+          "failureCode": { "const": null }
+        }
+      },
+      "else": {
+        "properties": {
+          "rawValue": { "const": null },
+          "value": { "const": null },
+          "confidence": {
+            "properties": {
+              "method": { "const": "None" }, "level": { "const": null },
+              "lower": { "const": null }, "upper": { "const": null }
+            }
+          },
+          "uncertainty": { "properties": { "method": { "const": "None" }, "value": { "const": null } } },
+          "failureCode": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "NoResult" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "validResultCount": { "const": 0 },
+          "failureCode": { "enum": ["insufficient-valid-samples", "zero-valid-results"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "NotApplicable" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "metricDomain": { "const": "Resource" },
+          "failureCode": { "enum": ["not-applicable-for-metric-domain", "metric-not-applicable"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Invalid" } }, "required": ["outcome"] },
+      "then": { "properties": { "failureCode": { "enum": ["invalid-source-contract", "definition-mismatch"] } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 0 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp0" }, "value": { "$ref": "#/$defs/exactSafeNumberDp0" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 1 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp1" }, "value": { "$ref": "#/$defs/exactSafeNumberDp1" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 2 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp2" }, "value": { "$ref": "#/$defs/exactSafeNumberDp2" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 3 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp3" }, "value": { "$ref": "#/$defs/exactSafeNumberDp3" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 4 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp4" }, "value": { "$ref": "#/$defs/exactSafeNumberDp4" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 5 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp5" }, "value": { "$ref": "#/$defs/exactSafeNumberDp5" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 6 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp6" }, "value": { "$ref": "#/$defs/exactSafeNumberDp6" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 7 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp7" }, "value": { "$ref": "#/$defs/exactSafeNumberDp7" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 8 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp8" }, "value": { "$ref": "#/$defs/exactSafeNumberDp8" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 9 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/exactSafeNumberDp9" }, "value": { "$ref": "#/$defs/exactSafeNumberDp9" } } }
+    }
+  ],
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "exactSafeNumberDp0": { "type": "number", "minimum": -549755813888, "maximum": 549755813888, "description": "Exact-safe result number when decimalPlaces is 0; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp1": { "type": "number", "minimum": -54975581388.8, "maximum": 54975581388.8, "description": "Exact-safe result number when decimalPlaces is 1; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp2": { "type": "number", "minimum": -5497558138.88, "maximum": 5497558138.88, "description": "Exact-safe result number when decimalPlaces is 2; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp3": { "type": "number", "minimum": -549755813.888, "maximum": 549755813.888, "description": "Exact-safe result number when decimalPlaces is 3; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp4": { "type": "number", "minimum": -54975581.3888, "maximum": 54975581.3888, "description": "Exact-safe result number when decimalPlaces is 4; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp5": { "type": "number", "minimum": -5497558.13888, "maximum": 5497558.13888, "description": "Exact-safe result number when decimalPlaces is 5; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp6": { "type": "number", "minimum": -549755.813888, "maximum": 549755.813888, "description": "Exact-safe result number when decimalPlaces is 6; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp7": { "type": "number", "minimum": -54975.5813888, "maximum": 54975.5813888, "description": "Exact-safe result number when decimalPlaces is 7; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp8": { "type": "number", "minimum": -5497.55813888, "maximum": 5497.55813888, "description": "Exact-safe result number when decimalPlaces is 8; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp9": { "type": "number", "minimum": -549.755813888, "maximum": 549.755813888, "description": "Exact-safe result number when decimalPlaces is 9; scaled magnitude is at most 2^39." },
+    "aggregation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "percentile", "algorithm", "percentileInterpolation", "medianEvenRule"],
+      "properties": {
+        "method": { "enum": ["Mean", "Median", "Minimum", "Maximum", "Percentile"] },
+        "percentile": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "algorithm": { "enum": ["PairwiseArithmeticMean", "SortedMiddle", "SortedFirst", "SortedLast", "SortedOrderStatistic"] },
+        "percentileInterpolation": { "enum": ["LinearR7", null] },
+        "medianEvenRule": { "enum": ["MeanOfMiddlePair", null] }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "Mean" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "PairwiseArithmeticMean" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Median" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedMiddle" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": "MeanOfMiddlePair" } } } },
+        { "if": { "properties": { "method": { "const": "Minimum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedFirst" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Maximum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedLast" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Percentile" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "type": "number" }, "algorithm": { "const": "SortedOrderStatistic" }, "percentileInterpolation": { "const": "LinearR7" }, "medianEvenRule": { "const": null } } } }
+      ]
+    },
+    "rounding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "decimalPlaces", "order"],
+      "properties": {
+        "mode": { "enum": ["HalfToEven", "HalfAwayFromZero", "TowardZero"] },
+        "decimalPlaces": { "type": "integer", "minimum": 0, "maximum": 9 },
+        "order": { "const": "AggregateThenRound" }
+      }
+    },
+    "confidenceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "level", "lower", "upper"],
+      "properties": {
+        "method": { "enum": ["None", "BootstrapPercentile", "AnalyticNormal"] },
+        "level": { "type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "lower": { "type": ["number", "null"] },
+        "upper": { "type": ["number", "null"] }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "level": { "const": null }, "lower": { "const": null }, "upper": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["BootstrapPercentile", "AnalyticNormal"] } }, "required": ["method"] }, "then": { "properties": { "level": { "type": "number" }, "lower": { "type": "number" }, "upper": { "type": "number" } } } }
+      ]
+    },
+    "uncertaintyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "value"],
+      "properties": {
+        "method": { "enum": ["None", "StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] },
+        "value": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "value": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] } }, "required": ["method"] }, "then": { "properties": { "value": { "type": "number" } } } }
+      ]
+    }
+  }
+}

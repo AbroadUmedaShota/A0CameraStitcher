@@ -7,10 +7,20 @@ namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 
 internal static class HardwareDualTransactionSnapshotProtocol
 {
-    public const string SchemaVersion = "a0.hardware-dual-transaction-snapshot.v1";
+    public const string SchemaVersion = "a0.hardware-dual-transaction-snapshot.v2";
+    public const string LegacySchemaVersion = "a0.hardware-dual-transaction-snapshot.v1";
 }
 
 internal sealed record HardwareDualDurableSnapshot
+{
+    public required string SchemaVersion { get; init; }
+
+    public required DualHardwareRecoveryIntent RecoveryIntent { get; init; }
+
+    public required DualHardwareCaptureRequest? PendingRequest { get; init; }
+}
+
+internal sealed record HardwareDualDurableSnapshotV1
 {
     public required string SchemaVersion { get; init; }
 
@@ -30,6 +40,7 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
         RespectRequiredConstructorParameters = true,
         WriteIndented = true,
         MaxDepth = 16,
+        Converters = { new JsonStringEnumConverter() },
     };
 
     private readonly string _artifactRoot;
@@ -69,8 +80,38 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
         WriteState(new HardwareDualDurableSnapshot
         {
             SchemaVersion = HardwareDualTransactionSnapshotProtocol.SchemaVersion,
-            DispatchMayHaveOccurred = true,
+            RecoveryIntent = DualHardwareRecoveryIntent.MayHaveDispatched,
             PendingRequest = request,
+        });
+    }
+
+    public DualHardwareRecoveryIntent LoadPendingIntent(Guid expectedTransactionId)
+    {
+        if (expectedTransactionId == Guid.Empty)
+            throw new InvalidDataException("The expected HardwareDual transaction ID is invalid.");
+        if (!Directory.Exists(_stateDirectory))
+            throw new InvalidOperationException("No HardwareDual transaction snapshot is pending.");
+        EnsureDirectoryIsSafe();
+        using var stateLock = AcquireStateLock();
+        var state = LoadCore();
+        if (state?.PendingRequest?.TransactionId != expectedTransactionId)
+            throw new InvalidOperationException("The expected HardwareDual transaction is no longer pending.");
+        return state.RecoveryIntent;
+    }
+
+    public void MarkCloseReservedBeforeDispatch(Guid expectedTransactionId)
+    {
+        if (expectedTransactionId == Guid.Empty)
+            throw new InvalidDataException("The expected HardwareDual transaction ID is invalid.");
+        EnsureDirectoryIsSafe();
+        using var stateLock = AcquireStateLock();
+        var state = LoadCore();
+        if (state?.PendingRequest?.TransactionId != expectedTransactionId)
+            throw new InvalidOperationException("The expected HardwareDual transaction is no longer pending.");
+        WriteState(state with
+        {
+            SchemaVersion = HardwareDualTransactionSnapshotProtocol.SchemaVersion,
+            RecoveryIntent = DualHardwareRecoveryIntent.CloseReservedBeforeDispatch,
         });
     }
 
@@ -88,7 +129,7 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
         WriteState(new HardwareDualDurableSnapshot
         {
             SchemaVersion = HardwareDualTransactionSnapshotProtocol.SchemaVersion,
-            DispatchMayHaveOccurred = false,
+            RecoveryIntent = DualHardwareRecoveryIntent.MayHaveDispatched,
             PendingRequest = null,
         });
     }
@@ -103,8 +144,40 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
         try
         {
             RejectDuplicatePropertyNames(bytes);
-            var state = JsonSerializer.Deserialize<HardwareDualDurableSnapshot>(bytes, JsonOptions)
-                ?? throw new InvalidDataException("HardwareDual transaction snapshot is empty.");
+            using var document = JsonDocument.Parse(bytes);
+            if (!document.RootElement.TryGetProperty("schemaVersion", out var schemaElement) ||
+                schemaElement.ValueKind != JsonValueKind.String)
+                throw new InvalidDataException("HardwareDual transaction snapshot schema is missing.");
+            var schemaVersion = schemaElement.GetString();
+            HardwareDualDurableSnapshot state;
+            if (string.Equals(
+                    schemaVersion,
+                    HardwareDualTransactionSnapshotProtocol.SchemaVersion,
+                    StringComparison.Ordinal))
+            {
+                state = JsonSerializer.Deserialize<HardwareDualDurableSnapshot>(bytes, JsonOptions)
+                    ?? throw new InvalidDataException("HardwareDual transaction snapshot is empty.");
+            }
+            else if (string.Equals(
+                         schemaVersion,
+                         HardwareDualTransactionSnapshotProtocol.LegacySchemaVersion,
+                         StringComparison.Ordinal))
+            {
+                var legacy = JsonSerializer.Deserialize<HardwareDualDurableSnapshotV1>(bytes, JsonOptions)
+                    ?? throw new InvalidDataException("Legacy HardwareDual transaction snapshot is empty.");
+                if (legacy.DispatchMayHaveOccurred != (legacy.PendingRequest is not null))
+                    throw new InvalidDataException("Legacy HardwareDual transaction snapshot dispatch state is invalid.");
+                state = new HardwareDualDurableSnapshot
+                {
+                    SchemaVersion = HardwareDualTransactionSnapshotProtocol.SchemaVersion,
+                    RecoveryIntent = DualHardwareRecoveryIntent.MayHaveDispatched,
+                    PendingRequest = legacy.PendingRequest,
+                };
+            }
+            else
+            {
+                throw new InvalidDataException("HardwareDual transaction snapshot schema is unsupported.");
+            }
             ValidateState(state);
             return state;
         }
@@ -143,7 +216,9 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
     private void ValidateState(HardwareDualDurableSnapshot state)
     {
         if (!string.Equals(state.SchemaVersion, HardwareDualTransactionSnapshotProtocol.SchemaVersion, StringComparison.Ordinal) ||
-            state.DispatchMayHaveOccurred != (state.PendingRequest is not null))
+            (state.PendingRequest is null &&
+             state.RecoveryIntent != DualHardwareRecoveryIntent.MayHaveDispatched) ||
+            !Enum.IsDefined(state.RecoveryIntent))
             throw new InvalidDataException("HardwareDual transaction snapshot schema or dispatch state is invalid.");
         if (state.PendingRequest is not null) ValidateRequest(state.PendingRequest);
     }

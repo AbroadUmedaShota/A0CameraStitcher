@@ -2,8 +2,8 @@
 // server (Issue #5). These tests exercise RunDualHardwareCameraAgentNamedPipeServer
 // end to end over a real Windows named pipe: framing, the dedicated
 // current-logon access boundary (implicitly, since these tests run as the
-// same logon session that creates the pipe), the shared Issue #17
-// teardown-drain fix, persistent multi-request handling, and the
+// same logon session that creates the pipe), the shared bounded delivery-ACK
+// contract, persistent multi-request handling, and the
 // backend-unavailable / response-unknown resilience contracts described in
 // GitHub Issue #5.
 //
@@ -41,6 +41,7 @@ using namespace a0::phase0;
 namespace {
 
 int failures = 0;
+constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
 
 void Check(bool condition, std::string_view message) {
     if (!condition) {
@@ -167,8 +168,87 @@ std::optional<std::string> SendRequest(
         CloseHandle(pipe);
         return std::nullopt;
     }
+    if (!WriteAll(pipe, &kDeliveryAcknowledgment, 1U)) {
+        CloseHandle(pipe);
+        return std::nullopt;
+    }
     CloseHandle(pipe);
     return response;
+}
+
+std::chrono::system_clock::time_point FixedNow();
+std::string CapabilitiesEnvelope(std::string_view request_id);
+
+void TestDeliveryAcknowledgmentIsRequired() {
+    enum class AckCase { header_only, partial_body, full_no_ack, invalid, late, unread, injected };
+    for (const AckCase test_case : {
+             AckCase::header_only,
+             AckCase::partial_body,
+             AckCase::full_no_ack,
+             AckCase::invalid,
+             AckCase::late,
+             AckCase::unread,
+             AckCase::injected}) {
+        const std::string pipe_name = PipeNameFor("delivery-ack");
+        DualHardwareCameraAgentDispatcher dispatcher;
+        auto server = std::async(std::launch::async, [&] {
+            return RunDualHardwareCameraAgentNamedPipeServer(
+                pipe_name,
+                dispatcher,
+                true,
+                DualHardwareCameraAgentPipeFailureInjectionForTesting{
+                    .fail_delivery_ack_wait = test_case == AckCase::injected});
+        });
+        const HANDLE pipe = ConnectClient(pipe_name, std::chrono::seconds(5));
+        Check(pipe != INVALID_HANDLE_VALUE, "delivery-ack client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const std::string request = CapabilitiesEnvelope("delivery-ack-required");
+            const auto header = LengthHeader(static_cast<std::uint32_t>(request.size()));
+            Check(WriteAll(pipe, header.data(), header.size()) &&
+                    WriteAll(pipe, request.data(), request.size()),
+                "delivery-ack request must be writable");
+            if (test_case != AckCase::unread) {
+                std::array<unsigned char, 4> response_header{};
+                const bool header_read =
+                    ReadAll(pipe, response_header.data(), response_header.size());
+                Check(header_read || test_case == AckCase::injected,
+                    "delivery-ack response header must be readable unless ACK wait failure is injected");
+                if (header_read) {
+                    const std::uint32_t response_length = ParseLengthHeader(response_header);
+                    if (test_case == AckCase::partial_body) {
+                        unsigned char one_byte = 0;
+                        Check(ReadAll(pipe, &one_byte, 1U),
+                            "partial-body case must read one response byte");
+                    } else if (test_case != AckCase::header_only) {
+                        std::string response(response_length, '\0');
+                        const bool body_read = ReadAll(pipe, response.data(), response.size());
+                        Check(body_read || test_case == AckCase::injected,
+                            "delivery-ack response body must be readable unless wait failure is injected");
+                        if (body_read && test_case == AckCase::invalid) {
+                            const unsigned char invalid = 0x15U;
+                            (void)WriteAll(pipe, &invalid, 1U);
+                        } else if (body_read && test_case == AckCase::late) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                            (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
+                        } else if (body_read && test_case == AckCase::injected) {
+                            (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1U);
+                        }
+                    }
+                }
+            }
+            Check(server.wait_for(std::chrono::seconds(3)) == std::future_status::ready,
+                "missing, partial, invalid, late, unread, or injected ACK must terminate within the bound");
+            CloseHandle(pipe);
+        }
+        if (server.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+            Check(server.get() == 3,
+                "delivery ACK failure after dispatch must exit with code 3");
+        } else {
+            Check(false, "delivery ACK failure server must terminate");
+        }
+        Check(dispatcher.SafetyCounters().pair_dispatch_count == 0,
+            "delivery ACK failures must never redispatch a pair");
+    }
 }
 
 std::string Envelope(
@@ -198,6 +278,15 @@ std::string QueryEnvelope(
     std::string_view request_id = "pipe-contract-query") {
     return Envelope(
         "get-pair-transaction-result",
+        "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
+        request_id);
+}
+
+std::string CloseEnvelope(
+    std::string_view transaction_id,
+    std::string_view request_id = "pipe-contract-close") {
+    return Envelope(
+        "close-reserved-pair-transaction",
         "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
         request_id);
 }
@@ -284,6 +373,8 @@ void TestMaximumFrameBoundaryMatchesSingleContract() {
                 std::string response(response_length, '\0');
                 Check(ReadAll(pipe, response.data(), response.size()),
                     "limit-1 and limit frames must receive a complete response body");
+                Check(WriteAll(pipe, &kDeliveryAcknowledgment, 1U),
+                    "limit-1 and limit responses must be acknowledged");
             }
             CloseHandle(pipe);
         }
@@ -403,7 +494,8 @@ void TestMalformedJsonBodyGetsTypedRejectionOverRealHost() {
 
 // ---------------------------------------------------------------------
 // One persistent (non-serve-once) host answers capabilities, reserve, a
-// duplicate reservation, and a same-ID query as separate pipe connections,
+// duplicate reservation, same-ID query, close, and close-tombstone query as
+// separate pipe connections,
 // proving: (a) the persistent multi-request contract, (b) capabilities/
 // reserve/query match the existing typed contract when served through the
 // real host, and (c) duplicate delivery of the same reservation is rejected
@@ -479,6 +571,26 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
             "a same-ID query for a reserved transaction must report found:true");
     }
 
+
+    const auto closed = SendRequest(
+        pipe_name, CloseEnvelope(transaction_id));
+    Check(closed.has_value(), "the exact close must be delivered over the real host");
+    if (closed) {
+        CheckContains(*closed, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "a real-host close must confirm the durable tombstone");
+        CheckContains(*closed, "\"closedBeforeDispatch\":true",
+            "a real-host close must not acknowledge before the tombstone reread");
+    }
+    const auto closed_query = SendRequest(
+        pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-closed"));
+    Check(closed_query.has_value(), "the close tombstone query must be delivered");
+    if (closed_query) {
+        CheckContains(*closed_query, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "restart-safe query must distinguish a closed reservation");
+        CheckContains(*closed_query, "\"found\":true,\"result\":null",
+            "a close tombstone must never forge a capture result");
+    }
+
     // The persistent-mode accept loop only re-checks the fixed deadline
     // between connection attempts, and each attempt waits up to a fixed 5s
     // for a new connection before looping back (unchanged, shared behavior
@@ -503,7 +615,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
-        "capabilities/reserve/duplicate/query must never touch pair_dispatch_count");
+        "capabilities/reserve/duplicate/query/close must never touch pair_dispatch_count");
     Check(counters.camera_access_count == 0,
         "the Dual host must perform zero camera access without a real backend");
 }
@@ -627,9 +739,8 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
 // ---------------------------------------------------------------------
 // The full "response unknown" resilience contract: a reservation is
 // dispatched and durably persisted, but its response never reaches the
-// client (injected body-write failure -- also confirms the Issue #17
-// teardown-drain fix still fires for the Dual host, since the response
-// header must still have been written before teardown drains it). Two
+// client (injected body-write failure; failure teardown deliberately performs
+// no second unbounded flush, so a partially written header is not promised). Two
 // further host instances against the *same* --pair-journal-root (modelling
 // a process restart) prove: the same-ID query recovers the durable state,
 // and a replayed reserve-pair-transaction is rejected rather than replayed.
@@ -661,9 +772,6 @@ void TestResponseUnknownRecoveryHasZeroReplayAcrossHostRestarts() {
             std::array<unsigned char, 4> response_header{};
             const bool header_received =
                 ReadAll(pipe, response_header.data(), response_header.size());
-            Check(header_received,
-                "an injected body-write failure must still deliver the response header "
-                "(Issue #17 teardown-drain contract, generalized to the Dual host)");
             if (header_received) {
                 const std::uint32_t response_length = ParseLengthHeader(response_header);
                 std::string response(response_length, '\0');
@@ -737,6 +845,7 @@ void TestResponseUnknownRecoveryHasZeroReplayAcrossHostRestarts() {
 } // namespace
 
 int main() {
+    TestDeliveryAcknowledgmentIsRequired();
     TestMaximumFrameBoundaryMatchesSingleContract();
     TestZeroLengthAndPartialFramesFailClosedWithoutDispatch();
     TestMalformedJsonBodyGetsTypedRejectionOverRealHost();

@@ -220,6 +220,100 @@ void TestDispatchAndTerminalTransitionsAreDurable() {
     }, "a historical terminal must reject only the same transaction ID");
 }
 
+void TestCloseReservedBeforeDispatchIsDurableAndExact() {
+    TempSandbox sandbox;
+    const fs::path root = sandbox.Child("close-reserved-store");
+    const std::string transaction_id = "55555555555555555555555555555555";
+    const std::string other_id = "66666666666666666666666666666666";
+
+    DualHardwarePairJournalStore store(root);
+    CheckStoreError("TransactionIdMismatch", [&] {
+        (void)store.CloseReservedBeforeDispatch(transaction_id);
+    }, "closing a missing reservation must fail closed");
+
+    (void)store.Reserve(transaction_id);
+    CheckStoreError("TransactionIdMismatch", [&] {
+        (void)store.CloseReservedBeforeDispatch(other_id);
+    }, "closing another transaction ID must not alter the active reservation");
+
+    const auto closed = store.CloseReservedBeforeDispatch(transaction_id);
+    Check(closed.transaction_id == transaction_id &&
+          closed.state == DualHardwarePairJournalState::closed_before_dispatch &&
+          closed.automatic_retry_count == 0 &&
+          closed.terminal_result_json.empty(),
+        "exact Reserved close must return a reread ClosedBeforeDispatch tombstone");
+    Check(!fs::exists(root / "active") &&
+          fs::is_regular_file(TerminalPath(root, transaction_id)),
+        "active state must be removed only after the close tombstone is durable");
+
+    DualHardwarePairJournalStore restarted(root);
+    const auto recovered = restarted.Query(transaction_id);
+    Check(recovered &&
+          recovered->state == DualHardwarePairJournalState::closed_before_dispatch,
+        "restart query must recover the exact ClosedBeforeDispatch tombstone");
+    const auto idempotent = restarted.CloseReservedBeforeDispatch(transaction_id);
+    Check(idempotent.state == DualHardwarePairJournalState::closed_before_dispatch,
+        "same-ID close retry after an unknown response must be idempotent");
+
+    (void)restarted.Reserve(other_id);
+    (void)restarted.BeginDispatch(other_id);
+    CheckStoreError("DispatchAlreadyStarted", [&] {
+        (void)restarted.CloseReservedBeforeDispatch(other_id);
+    }, "Dispatching must never be downgraded to ClosedBeforeDispatch");
+
+    const std::string terminal_result =
+        "{\"transactionId\":\"" + other_id +
+        "\",\"originals\":[],\"terminalState\":\"Failed\","
+        "\"failureCode\":\"CaptureCameraA\","
+        "\"evidence\":{\"automaticRetryCount\":0}}";
+    const auto capture_terminal = restarted.CompleteTerminal(
+        other_id, DualHardwarePairJournalState::failed, terminal_result);
+    CheckStoreError("DispatchAlreadyStarted", [&] {
+        (void)restarted.CloseReservedBeforeDispatch(other_id);
+    }, "a capture-terminal same-ID close must be rejected");
+    const auto unchanged_terminal = restarted.Query(other_id);
+    Check(unchanged_terminal &&
+          unchanged_terminal->state == capture_terminal.state &&
+          unchanged_terminal->terminal_result_json == terminal_result,
+        "capture-terminal evidence must remain unchanged after close rejection");
+
+    const fs::path partial_root = sandbox.Child("partial-close-store");
+    const std::string partial_id = "77777777777777777777777777777777";
+    const std::string next_id = "88888888888888888888888888888888";
+    DualHardwarePairJournalStore partial_store(partial_root);
+    (void)partial_store.Reserve(partial_id);
+    const HANDLE active_lock = CreateFileW(
+        JournalPath(partial_root).c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (active_lock == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("test could not lock the active journal");
+    }
+    CheckStoreError("StoreIoFailure", [&] {
+        (void)partial_store.CloseReservedBeforeDispatch(partial_id);
+    }, "active deletion failure after tombstone publication must fail closed");
+    Check(fs::is_regular_file(TerminalPath(partial_root, partial_id)) &&
+          fs::is_regular_file(JournalPath(partial_root)),
+        "partial close failure must retain both tombstone and active reservation");
+    (void)CloseHandle(active_lock);
+
+    DualHardwarePairJournalStore partial_restarted(partial_root);
+    const auto recovered_close =
+        partial_restarted.CloseReservedBeforeDispatch(partial_id);
+    Check(recovered_close.state ==
+              DualHardwarePairJournalState::closed_before_dispatch &&
+          !fs::exists(partial_root / "active"),
+        "restart exact close must finish active removal from the tombstone");
+    const auto next_reserved = partial_restarted.Reserve(next_id);
+    Check(next_reserved.transaction_id == next_id &&
+          next_reserved.state == DualHardwarePairJournalState::reserved,
+        "a different transaction may reserve only after partial close recovery");
+}
+
 void TestLegacyV1ReservedJournalRemainsReadable() {
     TempSandbox sandbox;
     const fs::path root = sandbox.Child("legacy-v1-store");
@@ -525,6 +619,7 @@ int main() {
     try {
         TestReserveAndRestartQuery();
         TestDispatchAndTerminalTransitionsAreDurable();
+        TestCloseReservedBeforeDispatchIsDurableAndExact();
         TestLegacyV1ReservedJournalRemainsReadable();
         TestIdsAndRootScopeAreStrict();
         TestMalformedOversizedAndNonRegularJournalsFailClosed();

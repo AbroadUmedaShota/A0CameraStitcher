@@ -93,6 +93,7 @@ public enum DualHardwareDispatchState
 {
     Completed,
     ResponseUnknown,
+    ConfirmedUndispatched,
 }
 
 public sealed record DualHardwareOriginalRecord(
@@ -142,7 +143,14 @@ public enum DualHardwarePairQueryState
 {
     NotFound,
     Reserved,
+    ClosedBeforeDispatch,
     Terminal,
+}
+
+public enum DualHardwareCloseState
+{
+    ClosedBeforeDispatch,
+    ResponseUnknown,
 }
 
 public sealed record DualHardwarePairQueryOutcome(
@@ -160,6 +168,17 @@ public interface IDualHardwareCaptureOperations
     Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken);
+
+    Task<DualHardwareCloseState> CloseReservedPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(DualHardwareCloseState.ResponseUnknown);
+}
+
+public enum DualHardwareRecoveryIntent
+{
+    MayHaveDispatched,
+    CloseReservedBeforeDispatch,
 }
 
 public interface IDualHardwareRecoveryStore
@@ -167,6 +186,13 @@ public interface IDualHardwareRecoveryStore
     DualHardwareCaptureRequest? LoadPending();
 
     void SavePending(DualHardwareCaptureRequest request);
+
+    DualHardwareRecoveryIntent LoadPendingIntent(Guid expectedTransactionId) =>
+        DualHardwareRecoveryIntent.MayHaveDispatched;
+
+    void MarkCloseReservedBeforeDispatch(Guid expectedTransactionId) =>
+        throw new NotSupportedException(
+            "The recovery store cannot persist a pre-dispatch close intent.");
 
     void ClearPending(Guid expectedTransactionId);
 }
@@ -181,6 +207,8 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
     private readonly HashSet<Guid> _seenTransactions = [];
     private Guid? _responseUnknownTransactionId;
     private DualHardwareCaptureRequest? _responseUnknownRequest;
+    private DualHardwareRecoveryIntent _recoveryIntent =
+        DualHardwareRecoveryIntent.MayHaveDispatched;
 
     public HardwareDualCaptureSource(
         IDualHardwareCaptureOperations? operations,
@@ -195,6 +223,7 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
         {
             _responseUnknownTransactionId = pending.TransactionId;
             _responseUnknownRequest = pending;
+            _recoveryIntent = recoveryStore!.LoadPendingIntent(pending.TransactionId);
             _seenTransactions.Add(pending.TransactionId);
         }
     }
@@ -275,6 +304,14 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
         {
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent dispatch outcome is unknown; only the durable transaction may be queried.");
         }
+        if (dispatch.State == DualHardwareDispatchState.ConfirmedUndispatched)
+        {
+            return await CloseConfirmedUndispatchedAsync(
+                    hardwareRequest,
+                    persistIntent: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
         DualHardwarePairQueryOutcome queryOutcome;
         try
         {
@@ -307,6 +344,7 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
                 : Failed(DualCameraFailureCode.HardwarePending, "HardwareDual provider and Agent operation are not connected.");
 
         DualHardwareCaptureRequest hardwareRequest;
+        DualHardwareRecoveryIntent recoveryIntent;
         lock (_sync)
         {
             if (_responseUnknownTransactionId != transactionId || _responseUnknownRequest is null)
@@ -314,6 +352,16 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
                     DualCameraFailureCode.AgentResponseUnknown,
                     "No response-unknown transaction snapshot is saved for recovery.");
             hardwareRequest = _responseUnknownRequest;
+            recoveryIntent = _recoveryIntent;
+        }
+
+        if (recoveryIntent == DualHardwareRecoveryIntent.CloseReservedBeforeDispatch)
+        {
+            return await CloseConfirmedUndispatchedAsync(
+                    hardwareRequest,
+                    persistIntent: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         DualHardwarePairQueryOutcome queryOutcome;
@@ -330,6 +378,65 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
             return Failed(DualCameraFailureCode.AgentResponseUnknown, "Agent response remains unknown; no capture was reserved or dispatched again.");
 
         return CompleteRecoveredResult(hardwareRequest, queryOutcome.Result, recoveryRequired: true);
+    }
+
+    private async Task<DualCameraCaptureSourceResult> CloseConfirmedUndispatchedAsync(
+        DualHardwareCaptureRequest hardwareRequest,
+        bool persistIntent,
+        CancellationToken cancellationToken)
+    {
+        if (persistIntent)
+        {
+            if (_recoveryStore is null)
+            {
+                return Failed(
+                    DualCameraFailureCode.AgentResponseUnknown,
+                    "The confirmed-undispatched cleanup intent has no durable recovery store; the reservation remains locked and no close was attempted.");
+            }
+            try
+            {
+                _recoveryStore.MarkCloseReservedBeforeDispatch(
+                    hardwareRequest.TransactionId);
+            }
+            catch (Exception)
+            {
+                return Failed(
+                    DualCameraFailureCode.AgentResponseUnknown,
+                    "The confirmed-undispatched cleanup intent could not be persisted; the reservation remains locked and no close was attempted.");
+            }
+            lock (_sync)
+            {
+                _recoveryIntent =
+                    DualHardwareRecoveryIntent.CloseReservedBeforeDispatch;
+            }
+        }
+
+        DualHardwareCloseState closeState;
+        try
+        {
+            closeState = await _operations!
+                .CloseReservedPairTransactionAsync(
+                    hardwareRequest.TransactionId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            closeState = DualHardwareCloseState.ResponseUnknown;
+        }
+        if (closeState != DualHardwareCloseState.ClosedBeforeDispatch)
+        {
+            return Failed(
+                DualCameraFailureCode.AgentResponseUnknown,
+                "The exact Reserved transaction close is unconfirmed; only the same transaction close may be retried.");
+        }
+        if (!TryClearPending(hardwareRequest.TransactionId, out var clearFailure))
+        {
+            return Failed(DualCameraFailureCode.AgentResponseUnknown, clearFailure!);
+        }
+        return Failed(
+            DualCameraFailureCode.HardwarePending,
+            "Agent start failed before dispatch; the exact Reserved transaction was durably closed without capture.");
     }
 
     private DualCameraCaptureSourceResult CompleteRecoveredResult(
@@ -418,6 +525,7 @@ public sealed class HardwareDualCaptureSource : IDualCameraCaptureSource, IRecov
             {
                 _responseUnknownTransactionId = null;
                 _responseUnknownRequest = null;
+                _recoveryIntent = DualHardwareRecoveryIntent.MayHaveDispatched;
             }
         }
         failureReason = null;
