@@ -59,7 +59,7 @@ add_library(a0_phase0_core
     src/phase0/wpd_alias_proof.cpp
     src/phase0/wpd_transport.cpp
 )
-target_include_directories(a0_phase0_core PUBLIC src/phase0/include)
+target_include_directories(a0_phase0_core PUBLIC src/phase0/include src/common/include)
 target_compile_definitions(a0_phase0_core PRIVATE UNICODE _UNICODE NOMINMAX)
 target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 PortableDeviceGuids)
 
@@ -149,9 +149,10 @@ endif()
 
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
+    src/m2/stitch_job_manifest.cpp
 )
-target_include_directories(a0_m2_offline_stitcher PUBLIC src/m2/include)
-target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup PRIVATE ole32 windowscodecs)
+target_include_directories(a0_m2_offline_stitcher PUBLIC src/m2/include src/common/include)
+target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup PRIVATE ole32 windowscodecs bcrypt)
 target_compile_definitions(a0_m2_offline_stitcher PRIVATE UNICODE _UNICODE NOMINMAX)
 if(MSVC)
     target_compile_options(a0_m2_offline_stitcher PRIVATE /W4 /permissive- /EHsc)
@@ -237,6 +238,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME dual_identity_session_binding_contracts
         COMMAND a0_dual_identity_session_binding_tests)
+
+    add_executable(a0_stitch_job_manifest_tests
+        tests/stitch_job_manifest_tests.cpp)
+    target_link_libraries(a0_stitch_job_manifest_tests PRIVATE a0_m2_offline_stitcher)
+    if(MSVC)
+        target_compile_options(a0_stitch_job_manifest_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_stitch_job_manifest_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_stitch_job_manifest_contracts
+        COMMAND a0_stitch_job_manifest_tests)
 
     add_executable(a0_dual_binding_camera_agent_tests
         tests/dual_binding_camera_agent_tests.cpp)
