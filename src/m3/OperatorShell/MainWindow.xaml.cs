@@ -1,6 +1,9 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -138,6 +141,97 @@ public partial class MainWindow : Window
         MessageBox.Show(this, OperatorShellViewModel.AppVersionText, "バージョン", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs eventArgs) => Close();
+
+    // タイトルバーは 1920×1080 キャンバスの中にあり、ウィンドウ縮小率に応じて実際の高さが変わる。
+    // OS の caption 判定（WindowChrome.CaptionHeight）は物理座標で効くため実領域とずれる。
+    // そこで CaptionHeight=0 とし、移動・最大化の操作をここで受ける。
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs)
+    {
+        if (eventArgs.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (eventArgs.ClickCount == 2)
+        {
+            ToggleMaximizedState();
+            return;
+        }
+
+        if (WindowState == WindowState.Maximized)
+        {
+            // 最大化のままではドラッグで動かせないため、掴んだ位置の比率を保ったまま復元する。
+            // PointToScreen はデバイスピクセルを返すのに Left/Top は DIP なので、変換を挟まないと
+            // 150% 表示などで復元位置がカーソルから離れていく。復元後の寸法は RestoreBounds で取る
+            // （この時点の Width/Height はまだ最大化時の値のことがある）。
+            var grabPoint = eventArgs.GetPosition(this);
+            var grabRatioX = grabPoint.X / Math.Max(1.0, ActualWidth);
+            var grabRatioY = grabPoint.Y / Math.Max(1.0, ActualHeight);
+            var deviceToDip = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice
+                ?? Matrix.Identity;
+            var cursorOnScreen = deviceToDip.Transform(PointToScreen(grabPoint));
+            var restored = RestoreBounds;
+            var restoredWidth = restored.Width > 0 ? restored.Width : Width;
+            var restoredHeight = restored.Height > 0 ? restored.Height : Height;
+
+            WindowState = WindowState.Normal;
+            Left = cursorOnScreen.X - (restoredWidth * grabRatioX);
+            Top = cursorOnScreen.Y - (restoredHeight * grabRatioY);
+        }
+
+        DragMove();
+    }
+
+    private void ToggleMaximizedState() =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void MinimizeWindow_Click(object sender, RoutedEventArgs eventArgs) =>
+        WindowState = WindowState.Minimized;
+
+    private void MaximizeWindow_Click(object sender, RoutedEventArgs eventArgs) => ToggleMaximizedState();
+
+    private void CloseWindow_Click(object sender, RoutedEventArgs eventArgs) => Close();
+
+    // A / B で表示カメラを切り替え、F でAFを実行する（docs/OPERATOR_UI_SPEC.md キー操作）。
+    // Window.InputBindings に置くと修飾キーなしの1文字が文字入力より先に走り、保存先へ
+    // "F:\..." と打っただけでAFが動いてしまう。入力欄にフォーカスがある間は何もしない。
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.Handled ||
+            eventArgs.KeyboardDevice.Modifiers != ModifierKeys.None ||
+            Keyboard.FocusedElement is TextBoxBase or PasswordBox)
+        {
+            return;
+        }
+
+        switch (eventArgs.Key)
+        {
+            case Key.A:
+                _viewModel.SelectStageCamera("CAM-A");
+                break;
+            case Key.B:
+                _viewModel.SelectStageCamera("CAM-B");
+                break;
+            case Key.F:
+                if (_viewModel.AutoFocusCommand.CanExecute(null))
+                {
+                    _viewModel.AutoFocusCommand.Execute(null);
+                }
+
+                break;
+            default:
+                return;
+        }
+
+        eventArgs.Handled = true;
+    }
+
+    private void ToggleTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        var showing = TechnicalDetailRow.Visibility != Visibility.Visible;
+        TechnicalDetailRow.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
+        TechnicalDetailToggle.Content = showing ? "▾ 詳細情報" : "▸ 詳細情報";
+    }
 
     private void StageDragHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs eventArgs) =>
         BeginTargetDrag(sender, eventArgs, StageDisplayArea, _viewModel.MoveTargetByStageDrag);

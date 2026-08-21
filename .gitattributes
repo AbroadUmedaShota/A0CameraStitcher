@@ -8,3 +8,7 @@
 *.sln text eol=crlf
 *.csproj text eol=crlf
 *.vcxproj text eol=crlf
+
+# Embedded UI fonts: keep byte-identical, never line-ending normalized
+*.otf binary
+*.ttf binary

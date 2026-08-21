@@ -130,7 +130,7 @@ public static class OperatorReadinessEvaluator
             }
             else if (!camera.IdentityBound)
             {
-                notices.Add(new(OperatorWarningSeverity.Blocker, "IdentityUnbound", $"{camera.Alias} のidentity bindingが未完了です。"));
+                notices.Add(new(OperatorWarningSeverity.Blocker, "IdentityUnbound", $"{camera.Alias} の機体照合が未完了です。"));
             }
 
             if (!camera.SettingsMatch)
@@ -140,7 +140,7 @@ public static class OperatorReadinessEvaluator
 
             if (!camera.CardKnownEmpty)
             {
-                notices.Add(new(OperatorWarningSeverity.Blocker, "CardNotKnownEmpty", $"{camera.Alias} のカードがempty-spoolと確認できません。"));
+                notices.Add(new(OperatorWarningSeverity.Blocker, "CardNotKnownEmpty", $"{camera.Alias} のカードが空であることを確認できません。"));
             }
         }
 
@@ -176,22 +176,22 @@ public static class OperatorReadinessEvaluator
 
         if (snapshot.HasActiveTransaction)
         {
-            notices.Add(new(OperatorWarningSeverity.Blocker, "ActiveTransaction", "別のtransactionが処理中です。"));
+            notices.Add(new(OperatorWarningSeverity.Blocker, "ActiveTransaction", "別の撮影IDが処理中です。"));
         }
 
         if (snapshot.CameraStateRequiresInspection)
         {
-            notices.Add(new(OperatorWarningSeverity.Blocker, "CameraInspectionRequired", "カードまたはSDK状態の安全確認が必要です。"));
+            notices.Add(new(OperatorWarningSeverity.Blocker, "CameraInspectionRequired", "カードまたはカメラの状態の安全確認が必要です。"));
         }
 
-        notices.Add(new(OperatorWarningSeverity.Info, "PreviewIsNotOriginal", "Live Viewはプレビューであり、原画像や合成入力には使用しません。"));
+        notices.Add(new(OperatorWarningSeverity.Info, "PreviewIsNotOriginal", "ライブ表示は確認用で、原画像や合成入力には使いません。"));
         if (snapshot.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera)
         {
             notices.Add(new(OperatorWarningSeverity.Info, "SingleCameraOutput", "一台構成では選択カメラの検証済み原画像を出力し、合成は行いません。"));
         }
         else
         {
-            notices.Add(new(OperatorWarningSeverity.Info, "NoShutterSync", "二台の実シャッター時刻差は保証しません。"));
+            notices.Add(new(OperatorWarningSeverity.Info, "NoShutterSync", "2台のシャッターの時刻差は保証しません。"));
         }
         return notices.Concat(snapshot.Notices).ToArray();
     }
@@ -228,7 +228,7 @@ public static class OperatorReadinessEvaluator
             Capture = capture,
             LiveView = !active && snapshot.SafetyAcknowledged && !snapshot.CameraStateRequiresInspection
                 ? OperatorActionDecision.Permit()
-                : OperatorActionDecision.Block(active ? "処理中はLive Viewを変更できません。" : "排他同意またはSDK状態確認が必要です。"),
+                : OperatorActionDecision.Block(active ? "処理中はライブ表示を変更できません。" : "排他同意またはカメラの状態確認が必要です。"),
             Export = !active && state == OperatorUiState.Review && hasExportableResult
                 ? OperatorActionDecision.Permit()
                 : OperatorActionDecision.Block("検証済みの撮影または合成結果を確認してから保存できます。"),
@@ -240,7 +240,7 @@ public static class OperatorReadinessEvaluator
                 : OperatorActionDecision.Block(active ? "処理完了まで待ってください。" : "結果確定後に使用できます。"),
             OpenMaintenance = !active
                 ? OperatorActionDecision.Permit()
-                : OperatorActionDecision.Block("active transaction中は保守画面を開けません。"),
+                : OperatorActionDecision.Block("撮影の処理中は保守画面を開けません。"),
         };
     }
 }
