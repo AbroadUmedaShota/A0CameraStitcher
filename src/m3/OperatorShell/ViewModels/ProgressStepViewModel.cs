@@ -1,13 +1,15 @@
-using System.Windows.Media;
-
 namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
 public sealed class ProgressStepViewModel(string id, string label) : ObservableObject
 {
     private string _statusText = "待機";
-    private Brush _background = Brushes.White;
-    private Brush _foreground = Brushes.Black;
-    private Brush _borderBrush = Brushes.LightGray;
+    private string _stateKey = PendingState;
+
+    public const string PendingState = "pending";
+    public const string CompletedState = "completed";
+    public const string CurrentState = "current";
+    public const string FailureState = "failure";
+    public const string SkippedState = "skipped";
 
     public string Id { get; } = id;
 
@@ -15,27 +17,24 @@ public sealed class ProgressStepViewModel(string id, string label) : ObservableO
 
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
 
-    public Brush Background { get => _background; private set => SetProperty(ref _background, value); }
+    /// <summary>段の状態。色はここでは決めず、画面側がテーマのトークンへ解決する。
+    /// ViewModel が Brush を持つと、画面の配色を変えるたびに ViewModel を触ることになり、
+    /// 明色前提の値が暗い背景の上へそのまま出る事故が起きる。</summary>
+    public string StateKey { get => _stateKey; private set => SetProperty(ref _stateKey, value); }
 
-    public Brush Foreground { get => _foreground; private set => SetProperty(ref _foreground, value); }
+    public void SetPending() => SetVisual("待機", PendingState);
 
-    public Brush BorderBrush { get => _borderBrush; private set => SetProperty(ref _borderBrush, value); }
+    public void SetCompleted() => SetVisual("完了", CompletedState);
 
-    public void SetPending() => SetVisual("待機", Brushes.White, Brushes.Black, Brushes.LightGray);
+    public void SetCurrent() => SetVisual("処理中", CurrentState);
 
-    public void SetCompleted() => SetVisual("完了", Brushes.Honeydew, Brushes.DarkGreen, Brushes.SeaGreen);
+    public void SetFailure() => SetVisual("失敗", FailureState);
 
-    public void SetCurrent() => SetVisual("処理中", Brushes.LightGoldenrodYellow, Brushes.Black, Brushes.DarkOrange);
+    public void SetSkipped() => SetVisual("対象外", SkippedState);
 
-    public void SetFailure() => SetVisual("失敗", Brushes.MistyRose, Brushes.DarkRed, Brushes.Firebrick);
-
-    public void SetSkipped() => SetVisual("対象外", Brushes.Gainsboro, Brushes.DimGray, Brushes.DarkGray);
-
-    private void SetVisual(string status, Brush background, Brush foreground, Brush border)
+    private void SetVisual(string status, string stateKey)
     {
         StatusText = status;
-        Background = background;
-        Foreground = foreground;
-        BorderBrush = border;
+        StateKey = stateKey;
     }
 }

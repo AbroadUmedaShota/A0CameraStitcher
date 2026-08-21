@@ -80,7 +80,11 @@ jobs:
 
       - name: Build SDK-less C++ (Debug)
         id: cxx-debug-build
-        run: cmake --build build/sdkless --config Debug -- /m:1 /nodeReuse:false
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cmake --build build/sdkless --config Debug -- /m:1 /nodeReuse:false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_CXX_DEBUG_BUILD=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: CTest SDK-less C++ (Debug)
         id: cxx-debug-test
@@ -92,7 +96,11 @@ jobs:
       - name: Build SDK-less C++ (Release)
         id: cxx-release-build
         if: ${{ !cancelled() && steps.cxx-configure.outcome == 'success' }}
-        run: cmake --build build/sdkless --config Release -- /m:1 /nodeReuse:false
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cmake --build build/sdkless --config Release -- /m:1 /nodeReuse:false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_CXX_RELEASE_BUILD=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: CTest SDK-less C++ (Release)
         id: cxx-release-test
@@ -113,12 +121,20 @@ jobs:
       - name: M3 simulated foundation (Debug)
         id: m3-debug
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
-        run: ./scripts/Test-M3Simulated.ps1 -Configuration Debug
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Test-M3Simulated.ps1 -Configuration Debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_M3_DEBUG=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: M3 simulated foundation (Release)
         id: m3-release
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
-        run: ./scripts/Test-M3Simulated.ps1 -Configuration Release
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Test-M3Simulated.ps1 -Configuration Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_M3_RELEASE=$([int]$sw.Elapsed.TotalSeconds)"
 
       # Kept as its own step (rather than folded into the step above) so
       # that if the formal WPF composition cannot start under the runner's
@@ -130,25 +146,37 @@ jobs:
       - name: Formal WPF DualCamera flow (Release)
         id: wpf-release
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
-        run: ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_WPF_RELEASE=$([int]$sw.Elapsed.TotalSeconds)"
 
       - name: Software-only summary
         if: always()
         run: |
+          # 秒数は Issue #28 の退化防止用。ビルド重複が戻ると、まずここが伸びる。
+          function Format-Duration([string]$Seconds) {
+            if ([string]::IsNullOrWhiteSpace($Seconds)) { return '-' }
+            return "$Seconds s"
+          }
+
           $rows = @(
-            @{ Name = 'SDK-less C++ Debug (CTest -j 1)';         Outcome = '${{ steps.cxx-debug-test.outcome }}' }
-            @{ Name = 'SDK-less C++ Release (CTest -j 1)';       Outcome = '${{ steps.cxx-release-test.outcome }}' }
-            @{ Name = 'M3 simulated foundation Debug';           Outcome = '${{ steps.m3-debug.outcome }}' }
-            @{ Name = 'M3 simulated foundation Release';         Outcome = '${{ steps.m3-release.outcome }}' }
-            @{ Name = 'Formal WPF DualCamera flow Release';      Outcome = '${{ steps.wpf-release.outcome }}' }
+            @{ Name = 'SDK-less C++ Debug (CTest -j 1)';         Outcome = '${{ steps.cxx-debug-test.outcome }}';   Duration = Format-Duration $env:DURATION_CXX_DEBUG_BUILD }
+            @{ Name = 'SDK-less C++ Release (CTest -j 1)';       Outcome = '${{ steps.cxx-release-test.outcome }}'; Duration = Format-Duration $env:DURATION_CXX_RELEASE_BUILD }
+            @{ Name = 'M3 simulated foundation Debug';           Outcome = '${{ steps.m3-debug.outcome }}';         Duration = Format-Duration $env:DURATION_M3_DEBUG }
+            @{ Name = 'M3 simulated foundation Release';         Outcome = '${{ steps.m3-release.outcome }}';       Duration = Format-Duration $env:DURATION_M3_RELEASE }
+            @{ Name = 'Formal WPF DualCamera flow Release';      Outcome = '${{ steps.wpf-release.outcome }}';      Duration = Format-Duration $env:DURATION_WPF_RELEASE }
           )
 
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Windows software-only CI'
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'This run is software-only regression evidence (SDK-less C++, M3 simulated, and the formal WPF DualCamera flow, none of them touching a licensed SDK or a physical camera). It does **not** certify hardware acceptance, camera/SDK connectivity, or Phase 0 hardware readiness; those gates are tracked separately in docs/PHASE0_TEST_PLAN.md.'
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| Stage | Outcome |'
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| --- | --- |'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| Stage | Outcome | Build/test time |'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '| --- | --- | --- |'
           foreach ($row in $rows) {
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| $($row.Name) | $($row.Outcome) |"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| $($row.Name) | $($row.Outcome) | $($row.Duration) |"
           }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Build/test time はステップの実測秒数（失敗したステップは `-`）。Issue #28 のビルド重複が再発すると、まずこの数字が伸びる。'
