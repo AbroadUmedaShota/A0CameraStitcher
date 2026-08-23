@@ -10,10 +10,10 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 | 一台・非破壊 M1N | Active / Partial | identity-v3登録後のalias解決defectはsoftware修正済み。実D810 `sdk-status` v5をread-only再実行し、未広告・opaque値の扱いを確認 |
 | オフラインpre-gate M2P | Active / WI-0022C software complete | `HG-0001/HG-0002`承認後に実リグ値・品質作業へ進む |
 | simulated統合 M3P | Complete / Software-only | requirements 2.7.0の明示mode、CAM-A-only、no-auto-fallback、Single original一件、stitch N/A、local profile/exportをfresh contractで維持 |
-| Dual schema `a0.camera-agent.hardware-dual.v2` software slice | Complete / Fake backend only | 4操作、durable予約／terminal journal、strict preflight、CAM-A→CAM-B、180秒、retry 0、same-ID restart queryを維持。production pipe／実camera／WPF実撮影は未接続 |
+| Dual schema／session binding software slice | Complete / Fake provider・backend only | `hardware-dual.v2`の4操作、durable予約／terminal journal、strict preflightに加え、`hardware-dual-binding.v1`のcore・Agent IPC・WPF確認UIを実装。実SDK candidate provider、実capture/recovery、WPF実撮影は未接続 |
 | 一台製品mode M1A/M3 | Identity/Profile/Export/Live View v2 Software Implemented / Hardware Deferred | empty spool、CAM-A one-shot、10回handoff、10回p95承認、100件実WPF受入 |
-| 二台 Phase 0 M1B | Identity Strategy Blocked | CAM-B identity-v2 checkpointとfake安全契約は確認済みだが、二台接続時にSDK `identity_collision`。documentedな本体固有SDK propertyまたは安全なSDK/WPD相関が見つかるまで、binding、pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断は開始しない |
-| 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0003B/HG-0005/HG-0009`と先行実機証拠 |
+| 二台 Phase 0 M1B | Binding Software Complete / HardwarePending | ADR-0025のsession-local operator binding core・Agent protocol・WPF UIは実装済み。#10実capture backend、WPD exact-alias recovery、実機1/10/100とfault受入が残る |
+| 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0005/HG-0009`と先行実機証拠 |
 
 現在の詳細は[CURRENT_STATUS.md](CURRENT_STATUS.md)、機能単位の検証キューは[FEATURE_VERIFICATION_PLAN.md](FEATURE_VERIFICATION_PLAN.md)を正本とする。
 
@@ -23,7 +23,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 1. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
 2. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
-3. Dualは`HG-0003B`解決後だけCAM-A/B bindingとM1Bへ進む
+3. Dualは#10の実capture backendを実装し、session bindingとWPD exact-alias recoveryを接続後にM1B実機1/10/100へ進む
 4. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
 
 ## M0: D810/SDK安全基盤
@@ -45,7 +45,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 - SDK status、Live View状態、JPEG/露出/ISO/WB/focus capabilityのreadback
 - 撮影設定capabilityへのwrite、capture、Live View開始、WPD、deleteがないことをnative command traceで検証
 
-実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。操作者報告では実D810一台のexactly-oneとCAM-A identity-v3登録はcamera mutation 0でPassした。登録直後の`sdk-status`がlegacy mapへ誤routingしたdefectと、WPD digest照合前にSDKを列挙していたQA findingは、identity file→WPD exact-one/model/digest→SDK executor factory/enumerate/open/probeの二段階software contractへ修正済みである。前段失敗時はSDK call 0。実D810 v5再実行は未検証、Dual identity-v2 collisionは`HG-0003B`として残る。
+実装状態: inventoryと設定readback実機runは完了し、設定readbackは9項目中8項目を取得、`FileType=not-advertised`、focusはopaque値1である。WI-0010A contractに加え、SingleCamera用identity-v3を実装した。CAM-A、WPD serial digest、`exactly-one-current-session` SDK policyだけをfixed-local stateへ保存し、SDK Name/Interfaceを永続化しない。strict parser、上書き拒否、unsafe path、CAM-B、extra-camera、digest不一致をsoftware testでfail closedにする。操作者報告では実D810一台のexactly-oneとCAM-A identity-v3登録はcamera mutation 0でPassした。登録直後の`sdk-status`がlegacy mapへ誤routingしたdefectと、WPD digest照合前にSDKを列挙していたQA findingは、identity file→WPD exact-one/model/digest→SDK executor factory/enumerate/open/probeの二段階software contractへ修正済みである。前段失敗時はSDK call 0。実D810 v5再実行は未検証である。Dual identity-v2はproduction identityに使わず、ADR-0025のsession-local bindingへ置換済みである。
 
 ## M2P: オフラインpre-gate
 
@@ -53,6 +53,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 - rights-cleared synthetic fixtureと品質metric contract
 - versioned rig-profile schemaとruntime trust検証
 - `ready`、`ready-auto-correction`、`physical-adjustment-required`の純粋判定
+- ADR-0026の`a0.stitch-job-manifest.v1`を唯一のStitchJob commit pointとし、non-replacing atomic publish・再読込・same-ID read-only recoveryを実装済み。残る4 artifact typeは別decision待ち
 - known synthetic差分から測定値を生成し、profile上限内だけ補正候補にするcontract
 
 実装状態: 光学計算、schema、fixture、三状態setup-assessment、`WI-0022C`のsynthetic画像測定からprofile-bounded correction proposalへの接続はsoftware-only合格。測定値は決定的に保持され、over-limit、malformed、profile-mismatch、unapproved profileはfail closedし、profileを変更しない。最終リグ、承認済み閾値、実写A0品質、実機性能は証明しない。
@@ -67,7 +68,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-enabled Release CTest各7/7、.NET Release build 0 warning/0 error、Foundation 19/19、Operator Shell 16/16、M3 boundary scriptに合格した。後続sliceで長寿命Camera Agent、strict `hardware.v2`、memory-only frame、heartbeat/max lifetime/backpressure、WPF start/stop、stop-before-v1-capture、成功後だけrestartをsoftware実装した。最終fresh結果はFoundation 20/20、Operator Shell 17/17、C++全CTest 7/7を記録し、実機受入は未検証のまま残す。
 
-2026-08-17のDual専用schema `a0.camera-agent.hardware-dual.v2` sliceでは、4操作、durable pair store、予約済み開始、同一ID typed recovery、strict semantic preflight、fake backend限定CAM-A→CAM-B orchestrator、複数terminal journalを実装した。A失敗時B 0、B失敗時A原本保持、共有180秒deadline、自動retry 0、terminal atomic publish後だけCompleted応答を契約化している。fresh結果はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release CTest各10/10、M3 Release/Debug、正式DualCamera WPF flow Passである。production Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、defaultはunavailable／`HardwarePending`を維持する。
+Dual専用schema `a0.camera-agent.hardware-dual.v2`では、4操作、durable pair store、予約済み開始、同一ID typed recovery、strict semantic preflight、fake backend限定CAM-A→CAM-B orchestrator、複数terminal journalを実装した。ADR-0025の`a0.camera-agent.hardware-dual-binding.v1`もcore、Agent IPC、WPF確認UIまでsoftware接続し、候補0/1/2/3、二重alias、close失敗、再起動・topology変化等をfail closedにする。実SDK candidate provider、実SDK・WPD capture/recovery backend、実WPF撮影は未接続で、`HardwarePending`を維持する。
 
 ## M1A: D810一台・物理撮影／SingleCamera transport受入 Phase 0
 
@@ -85,7 +86,7 @@ requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-en
 - `CAM-A → CAM-B`順次transaction 10件
 - 100/100、二台異常系、最終transport判断
 
-現在: D810 PnP/SDK/WPD各2台、read-only inventory、実機`hybrid-capture-pair` software contractを確認済み。CAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、100組集計、p50/p95/max匿名時間統計、CAM-A後の途中停止recovery診断がSDK有無各CTest 5/5で合格した。旧SDK source-ID mapは無効化してdocumented MAID Source `Name`/`Interface` identity-v2へ修正し、WPDもPnP IDから本体報告serial identity-v2へ強化した。しかし二台接続時のSDK identity-v2は衝突し、read-only SDK headers/docs調査でも本体固有propertyまたは安全なSDK/WPD相関は得られなかった。現在のfirmware V1.11個体のCAM-B checkpointは恒久的なDual identity証明ではなく、identity strategyがBlocked。物理power-cycle/rebootと実power-off復旧はN/A。抜線、CAM-A再登録、接続順・port確認、二台readiness、1/10/100 pairはhuman decisionまで保留する。
+現在: D810 PnP/SDK/WPD各2台とread-only inventoryの履歴証拠がある。旧`hybrid-capture-pair` software contractはCAM-A→CAM-B、共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、統計と途中停止recoveryを検証したが、旧identity-v2／provider-proof経路はproduction bindingに使用しない。ADR-0025のsession-local binding core・Agent protocol・WPF UIはsoftware実装済みである。#10で実SDK source objectと対応WPD alias recoveryを接続し、binding無効化、1/10/100 pair、USB/topology異常を実機受入するまで`HardwarePending`を維持する。物理power-cycle/rebootと実power-off復旧はN/Aである。
 
 ## M2: 実リグ・オフライン合成PoC
 

@@ -6,7 +6,7 @@
 
 総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持します。二台のSDK identity collisionは2026-08-20のADR-0025でsession-local operator bindingへ置換され、binding core・binding Agent protocol・確認UIまでsoftware実装済みです（Issue #9 / #61 / #62）。恒久的な機体識別を作ったわけではなく、操作者がLive Viewを一台ずつ見て割り当てる方式であり、取り違えriskは受容した残留riskです。実capture backendと実機受入が残るためDualCameraは`HardwarePending`のままです。
 
-DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。ただしproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、既定経路は`PairDispatcherUnavailable`／`HardwarePending`のままです。
+DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。`a0.camera-agent.hardware-dual-binding.v1`のAgent IPCとWPF確認UIもsoftware接続済みですが、SDK candidate providerとcapture backendはfake限定です。実SDK・WPDによるcapture/recoveryと実機受入は未接続で、製品状態は`HardwarePending`のままです。
 
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。committed済みの匿名証拠には一台接続時の記録がありますが、これは現在のlive接続状態を断定するものではありません。実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 
@@ -60,17 +60,16 @@ build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 
 
 Phase 0Bの旧identity-v2登録は履歴診断用checkpointとしてのみ保持します。列挙順、USB port、衝突するSDK Name/Interface digest、旧mapを二台のproduction binding根拠にしません。
 
-`inventory`はread-onlyであり、未登録個体を`CAM-A/B`へ自動割当てしません。`bind-cross-transport-identity`と旧identity-v2 mapはlegacy diagnostic／checkpointであり、production `Ready`の登録手順ではありません。`HG-0003B`でdocumented providerが承認され、CAM-A/Bそれぞれのlocal proofと二台inventoryのeach alias exactly onceが一致するまではdefault `Blocked / identity_strategy_unresolved`です。
+`inventory`はread-onlyであり、未登録個体を`CAM-A/B`へ自動割当てしません。`bind-cross-transport-identity`と旧identity-v2 mapはlegacy diagnostic／checkpointであり、production `Ready`の登録手順ではありません。DualCameraはADR-0025で承認されたAgent-session限定bindingを使用し、二つのSDK candidateを一台ずつLive View表示して操作者が`CAM-A/B`へexactly onceで割り当てます。割当はmemory-onlyで、再起動、再接続、topology変化、SDK manager再生成またはSDK error時に無効化され、再binding完了まで`HardwarePending`です。
 
 ```powershell
 build\Debug\A0CameraStitcher.Phase0.exe bind-cross-transport-identity --alias CAM-A --single-camera-connected-confirmed # legacy diagnostic only
-# production ReadyにはHG-0003B承認provider、CAM-A/B local proof、each alias exactly onceが別途必要
-build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity # legacy map diagnostic; identity_strategy_unresolved until HG-0003B provider approval
-# identity合格後、二台の専用spoolが双方emptyかread-only確認
+build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity # legacy map diagnostic only; production session bindingの代替ではない
+# session binding完了かつ実capture backend接続後、二台の専用spoolが双方emptyかread-only確認
 build\Debug\A0CameraStitcher.Phase0.exe verify-dual-spools
 ```
 
-`HG-0003B`承認provider、CAM-A/B local proof、each alias exactly once、二台の専用empty spool、全安全確認が揃った後だけ、実機pairを次の順で段階実行します。
+同じAgent session内のCAM-A/B binding、実capture backend、対応するWPD alias proof、二台の専用empty spool、全安全確認が揃った後だけ、実機pairを次の順で段階実行します。操作者の誤割当を自動的な同一個体証明で防ぐ方式ではなく、実シャッター同期も保証しません。
 
 ```powershell
 build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 1 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
@@ -78,7 +77,7 @@ build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 10 --exclusi
 build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 100 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
 ```
 
-`hybrid-capture-pair`は最初に共通のdual identity検証を必ず実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名の事前確認証跡を残し、card accessとcaptureを行わずexit 5で停止します。合格後は各pairを一つの180秒watchdogで管理し、CAM-Aのverified PC originalとexact cleanupが完了した後だけCAM-Bを開始します。A/Bいずれかの失敗で直ちに停止し、自動retryは0です。匿名summaryは全attempted pairの所要時間sample数とnearest-rank p50/p95/maxをmsで保存しますが、Phase 0の合否には使いません。二台は順次撮影であり、実シャッター同期は保証しません。
+現行`hybrid-capture-pair`の旧provider/proof preflightは履歴software contractであり、ADR-0025のsession bindingを利用する実capture backendは#10で接続するまで実行しません。接続後もbinding Ready、対応WPD alias、両専用empty spoolのいずれかが欠ければcard accessとcapture前に停止します。各pairは一つの180秒watchdogで管理し、CAM-Aのverified PC originalとexact cleanupが完了した後だけCAM-Bを開始します。A/Bいずれかの失敗で直ちに停止し、自動retryは0です。匿名summaryのp50/p95/maxはPhase 0の合否には使いません。二台は順次撮影であり、実シャッター同期は保証しません。
 
 二台異常系は、両カードをemptyと確認したうえで`hybrid-fault-pair`を使います。`--alias CAM-A|CAM-B`は省略不可です。選択bodyのSDK card captureと完全close後、WPD recovery open前にoperator gateがreadyとなった時だけ指定bodyのUSB切断または電源断を行います。CAM-A異常ではCAM-Bを開始せず、CAM-B異常ではCAM-Aの検証済みPC原本を保持します。いずれも未確定bodyの原本化・削除・自動retryを行わず、新しいrun IDのtransactionを要求します。
 
