@@ -459,6 +459,16 @@ bool WpdDeviceClockAdvanced(
         *cutoff_device_time > *initial_device_time;
 }
 
+void ValidateWpdStreamReadLength(
+    std::size_t reported_bytes,
+    std::size_t requested_bytes) {
+    if (reported_bytes > requested_bytes) {
+        throw TransportError(
+            "download_failed",
+            "WPD JPEG stream returned more bytes than requested");
+    }
+}
+
 class WpdTransport::Impl {
 public:
     explicit Impl(WpdCommandTargetPolicy command_target_policy, WpdTransport::BeforeCommandCallback before_command)
@@ -1184,8 +1194,9 @@ private:
             ULONG read = 0;
             const HRESULT result = stream->Read(buffer.data(), chunk_size, &read);
             if (FAILED(result)) Check(result, "download_failed", "read WPD JPEG stream");
+            ValidateWpdStreamReadLength(read, chunk_size);
             if (read != 0) {
-                if (output.size() + read > kMaximumJpegBytes) {
+                if (read > kMaximumJpegBytes - output.size()) {
                     throw TransportError("invalid_jpeg", "WPD JPEG exceeds the safety size limit");
                 }
                 output.insert(output.end(), buffer.begin(), buffer.begin() + read);

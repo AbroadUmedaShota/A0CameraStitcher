@@ -2580,6 +2580,31 @@ void TestWpdObjectDateCorrelationFailsClosed() {
         "the baseline cutoff must be a strict device-clock tick after the initial quiet snapshot");
 }
 
+void TestWpdStreamReadLengthValidationFailsClosed() {
+    ValidateWpdStreamReadLength(0, 0);
+    ValidateWpdStreamReadLength(32, 64);
+    ValidateWpdStreamReadLength(64, 64);
+
+    bool oversized_read_rejected = false;
+    try {
+        ValidateWpdStreamReadLength(65, 64);
+    } catch (const TransportError& error) {
+        oversized_read_rejected = error.Category() == "download_failed" &&
+            std::string(error.what()).find("more bytes than requested") != std::string::npos;
+    }
+    Check(oversized_read_rejected,
+        "an IStream provider that over-reports bytes read must fail closed before buffer access");
+
+    bool maximum_read_rejected = false;
+    try {
+        ValidateWpdStreamReadLength(std::numeric_limits<std::uint32_t>::max(), 4U * 1024U * 1024U);
+    } catch (const TransportError& error) {
+        maximum_read_rejected = error.Category() == "download_failed";
+    }
+    Check(maximum_read_rejected,
+        "a maximally over-reported IStream byte count must retain the download failure category");
+}
+
 void TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry() {
     const auto run_case = [](std::string_view name,
                              std::vector<ImageCandidate> candidates,
@@ -2734,6 +2759,7 @@ int main() {
         TestHybridInvalidCandidatesAndMissingTokenNeverDelete();
         TestHybridCaptureArgumentConfirmations();
         TestWpdObjectDateCorrelationFailsClosed();
+        TestWpdStreamReadLengthValidationFailsClosed();
         TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry();
         TestHybridCaptureFailureAndObservationTokenAreFailClosed();
     } catch (const std::exception& error) {

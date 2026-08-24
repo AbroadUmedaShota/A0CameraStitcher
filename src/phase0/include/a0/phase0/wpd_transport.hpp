@@ -2,6 +2,7 @@
 
 #include "a0/phase0/phase0.hpp"
 
+#include <cstddef>
 #include <guiddef.h>
 #include <memory>
 #include <functional>
@@ -84,6 +85,13 @@ struct WpdVendorOpcodeDiagnostic {
 [[nodiscard]] bool WpdDeviceClockAdvanced(
     std::optional<double> initial_device_time,
     std::optional<double> cutoff_device_time) noexcept;
+
+// IStream::Read reports its byte count through an untrusted provider-owned
+// out parameter. Reject over-reporting before the count is used as an iterator
+// offset or persisted as canonical image evidence.
+void ValidateWpdStreamReadLength(
+    std::size_t reported_bytes,
+    std::size_t requested_bytes);
 
 class WpdTransport final : public ICameraTransport, public IPostCardObservationTransport, public ICorrelationObservationTransport {
 public:
