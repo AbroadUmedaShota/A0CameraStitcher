@@ -946,6 +946,8 @@ void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
         "CAM-B spool-not-empty must be typed SpoolNotEmpty");
     CheckContains(partial_response, "\"bothSpoolsEmptyAfter\":false",
         "a partial (CAM-A only) terminal must never claim both spools empty");
+    CheckContains(partial_response, "\"exactDeleteConfirmedForEveryRetainedOriginal\":false",
+        "a partial (CAM-A only) terminal must never claim complete exact-delete evidence");
 }
 
 void TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch() {
