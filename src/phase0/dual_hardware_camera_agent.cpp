@@ -428,10 +428,20 @@ std::string BuildTerminalResult(
             ",\"spoolEmptyAfterDelete\":" + (outcome.spool_empty_after_delete ? "true" : "false") + "}";
     }
     original_json += "]";
-    const bool exact = std::all_of(originals.begin(), originals.end(), [](const auto& item) {
+    // GitHub Issue #87: 両カメラの検証済み結果が揃っていない終端(SpoolNotEmpty 失敗や
+    // 片系のみ成功した FailedPartial など)で、空範囲/部分集合に対する all_of が true を
+    // 返し「bothSpoolsEmptyAfter:true」「exactDeleteConfirmedForEveryRetainedOriginal:true」
+    // という矛盾した証拠になっていた。集計フラグは CAM-A/CAM-B 双方の結果が揃ったときのみ
+    // true にする(成功経路では従来どおり両カメラが present なので挙動不変)。
+    const auto covers = [&originals](std::string_view alias) {
+        return std::any_of(originals.begin(), originals.end(),
+            [&alias](const auto& item) { return item.first == alias; });
+    };
+    const bool complete = covers("CAM-A") && covers("CAM-B");
+    const bool exact = complete && std::all_of(originals.begin(), originals.end(), [](const auto& item) {
         return item.second.exact_recovered_object_deleted;
     });
-    const bool empty = std::all_of(originals.begin(), originals.end(), [](const auto& item) {
+    const bool empty = complete && std::all_of(originals.begin(), originals.end(), [](const auto& item) {
         return item.second.spool_empty_after_delete;
     });
     return "{\"transactionId\":\"" + std::string(transaction_id) +
