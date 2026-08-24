@@ -3407,6 +3407,10 @@ public:
         if (live_view_blocks_capture) {
             SingleCameraCaptureResult blocked;
             blocked.camera_alias = request.camera_alias;
+            // Blocked も他の終端結果と同じく有効な run_id を持たねば
+            // IsCaptureResultStructurallyValid を通らず、本来の
+            // continuous_live_view_active が InvalidBackendResult に化ける。
+            blocked.run_id = NewRunId();
             blocked.transaction_id = request.transaction_id;
             blocked.capture_profile_id = request.expected_capture_profile_id;
             blocked.capture_profile_version = request.expected_capture_profile_version;
