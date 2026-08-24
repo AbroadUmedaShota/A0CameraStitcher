@@ -7,11 +7,14 @@ namespace A0CameraStitcher.M3.Foundation.DualCamera;
 public sealed class DualCameraProductFlow : IDualCameraProductFlow
 {
     public const long MaximumCompressedJpegBytes = 64L * 1024L * 1024L;
+    public static readonly TimeSpan DefaultFailedOriginalDiscoveryTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaximumFailedOriginalDiscoveryTimeout = TimeSpan.FromMinutes(5);
     private readonly string _rootDirectory;
     private readonly IDualCameraCaptureSource _captureSource;
     private readonly IOfflineStitcherAdapter _stitcher;
     private readonly IDualCameraIdentitySnapshotSource _identitySource;
     private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _failedOriginalDiscoveryTimeout;
     private readonly object _sync = new();
     private readonly Dictionary<DualCameraProductStage, DualCameraStageRecord> _stages = [];
     private readonly List<DualCameraStitchResult> _stitchJobs = [];
@@ -44,6 +47,17 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         IOfflineStitcherAdapter stitcher,
         IDualCameraIdentitySnapshotSource identitySource,
         TimeProvider? timeProvider = null)
+        : this(rootDirectory, camera, stitcher, identitySource, timeProvider, DefaultFailedOriginalDiscoveryTimeout)
+    {
+    }
+
+    public DualCameraProductFlow(
+        string rootDirectory,
+        ITestSyntheticCamera camera,
+        IOfflineStitcherAdapter stitcher,
+        IDualCameraIdentitySnapshotSource identitySource,
+        TimeProvider? timeProvider,
+        TimeSpan failedOriginalDiscoveryTimeout)
     {
         if (string.IsNullOrWhiteSpace(rootDirectory))
         {
@@ -55,6 +69,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
         _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _failedOriginalDiscoveryTimeout = ValidateFailedOriginalDiscoveryTimeout(failedOriginalDiscoveryTimeout);
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
         RestorePendingRecovery();
@@ -66,6 +81,17 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         IOfflineStitcherAdapter stitcher,
         IDualCameraIdentitySnapshotSource identitySource,
         TimeProvider? timeProvider = null)
+        : this(rootDirectory, captureSource, stitcher, identitySource, timeProvider, DefaultFailedOriginalDiscoveryTimeout)
+    {
+    }
+
+    public DualCameraProductFlow(
+        string rootDirectory,
+        IDualCameraCaptureSource captureSource,
+        IOfflineStitcherAdapter stitcher,
+        IDualCameraIdentitySnapshotSource identitySource,
+        TimeProvider? timeProvider,
+        TimeSpan failedOriginalDiscoveryTimeout)
     {
         if (string.IsNullOrWhiteSpace(rootDirectory))
         {
@@ -76,6 +102,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         _stitcher = stitcher ?? throw new ArgumentNullException(nameof(stitcher));
         _identitySource = identitySource ?? throw new ArgumentNullException(nameof(identitySource));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _failedOriginalDiscoveryTimeout = ValidateFailedOriginalDiscoveryTimeout(failedOriginalDiscoveryTimeout);
         _identitySource.SnapshotChanged += OnIdentitySnapshotChanged;
         Directory.CreateDirectory(_rootDirectory);
         RestorePendingRecovery();
@@ -152,15 +179,15 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
         catch (OperationCanceledException exception)
         {
-            return FailOperation(DualCameraFailureCode.Interrupted, "The active product flow was interrupted; no automatic retry was attempted.", exception);
+            return await FailOperationAsync(DualCameraFailureCode.Interrupted, "The active product flow was interrupted; no automatic retry was attempted.", exception).ConfigureAwait(false);
         }
         catch (DualCameraFlowException exception)
         {
-            return FailOperation(exception.Code, exception.Message, exception);
+            return await FailOperationAsync(exception.Code, exception.Message, exception).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            return FailOperation(DualCameraFailureCode.StitchFailed, exception.Message, exception);
+            return await FailOperationAsync(DualCameraFailureCode.StitchFailed, exception.Message, exception).ConfigureAwait(false);
         }
     }
 
@@ -182,15 +209,15 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
         catch (OperationCanceledException exception)
         {
-            return FailOperation(DualCameraFailureCode.Interrupted, "The transaction query was interrupted; no capture was reserved or dispatched again.", exception);
+            return await FailOperationAsync(DualCameraFailureCode.Interrupted, "The transaction query was interrupted; no capture was reserved or dispatched again.", exception).ConfigureAwait(false);
         }
         catch (DualCameraFlowException exception)
         {
-            return FailOperation(exception.Code, exception.Message, exception);
+            return await FailOperationAsync(exception.Code, exception.Message, exception).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            return FailOperation(DualCameraFailureCode.StitchFailed, exception.Message, exception);
+            return await FailOperationAsync(DualCameraFailureCode.StitchFailed, exception.Message, exception).ConfigureAwait(false);
         }
     }
 
@@ -273,11 +300,11 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
         catch (OperationCanceledException exception)
         {
-            return FailOperation(DualCameraFailureCode.Interrupted, "The stitch job was interrupted; no automatic retry was attempted.", exception);
+            return await FailOperationAsync(DualCameraFailureCode.Interrupted, "The stitch job was interrupted; no automatic retry was attempted.", exception).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            return FailOperation(DualCameraFailureCode.StitchFailed, exception.Message, exception);
+            return await FailOperationAsync(DualCameraFailureCode.StitchFailed, exception.Message, exception).ConfigureAwait(false);
         }
     }
 
@@ -642,9 +669,20 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         return state;
     }
 
-    private DualCameraProductState FailOperation(DualCameraFailureCode code, string reason, Exception exception)
+    private async Task<DualCameraProductState> FailOperationAsync(DualCameraFailureCode code, string reason, Exception exception)
     {
         _ = exception;
+        Guid? transactionId;
+        DualCameraRigProfile? profile;
+        lock (_sync)
+        {
+            transactionId = _current?.Capture is null ? _current?.TransactionId : null;
+            profile = transactionId.HasValue ? _profile : null;
+        }
+
+        var originals = transactionId.HasValue && profile is not null
+            ? await DiscoverValidatedOriginalsAsync(transactionId.Value, profile).ConfigureAwait(false)
+            : [];
         DualCameraProductState state;
         lock (_sync)
         {
@@ -652,7 +690,6 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             var capture = _current?.Capture;
             if (capture is null && _current is not null)
             {
-                var originals = DiscoverValidatedOriginals(_current.TransactionId);
                 capture = new(_current.TransactionId, originals, false, code);
             }
             var activeStage = _stages.Values.FirstOrDefault(record => record.Status == DualCameraStageStatus.Active);
@@ -669,13 +706,14 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
 
     private DualCameraProductState FailExport(Guid jobId, string destination, DualCameraFailureCode code, string reason)
     {
+        var outputPath = File.Exists(destination) ? destination : null;
         DualCameraProductState state;
         lock (_sync)
         {
             _active = false;
             _stages[DualCameraProductStage.Export] = new(DualCameraProductStage.Export, DualCameraStageStatus.Failed, reason);
             _current = Snapshot(
-                export: new DualCameraExportResult(jobId, File.Exists(destination) ? destination : null, false, code, reason),
+                export: new DualCameraExportResult(jobId, outputPath, false, code, reason),
                 failureCode: code,
                 failureReason: reason);
             state = _current;
@@ -718,28 +756,56 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         }
     }
 
-    private IReadOnlyList<CanonicalJpegOriginal> DiscoverValidatedOriginals(Guid transactionId)
+    private async Task<IReadOnlyList<CanonicalJpegOriginal>> DiscoverValidatedOriginalsAsync(
+        Guid transactionId,
+        DualCameraRigProfile profile)
     {
         var originals = new List<CanonicalJpegOriginal>();
+        using var timeout = new CancellationTokenSource(_failedOriginalDiscoveryTimeout);
         foreach (var alias in new[] { "CAM-A", "CAM-B" })
         {
+            if (timeout.IsCancellationRequested) break;
             var path = Path.Combine(_rootDirectory, "transactions", transactionId.ToString("N"), alias, "original.jpg");
-            if (!File.Exists(path)) continue;
+            Task<CanonicalJpegOriginal>? validation = null;
             try
             {
-                var profile = _profile ?? throw new InvalidOperationException("Profile snapshot is unavailable.");
-                originals.Add(ValidateCanonicalOriginalAsync(
+                validation = ValidateCanonicalOriginalAsync(
                     alias,
                     path,
                     profile.ExpectedInputWidth,
                     profile.ExpectedInputHeight,
-                    CancellationToken.None).GetAwaiter().GetResult());
+                    timeout.Token);
+                originals.Add(await validation.WaitAsync(timeout.Token).ConfigureAwait(false));
             }
-            catch (DualCameraFlowException)
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
+                if (validation is not null) ObserveFault(validation);
+                break;
+            }
+            catch (Exception)
+            {
+                // Original discovery is best-effort only. A failed, canceled, or timed-out
+                // revalidation must not prevent terminal failure publication.
             }
         }
         return new ReadOnlyCollection<CanonicalJpegOriginal>(originals);
+    }
+
+    private static TimeSpan ValidateFailedOriginalDiscoveryTimeout(TimeSpan? timeout)
+    {
+        var effective = timeout ?? DefaultFailedOriginalDiscoveryTimeout;
+        if (effective <= TimeSpan.Zero || effective > MaximumFailedOriginalDiscoveryTimeout)
+            throw new ArgumentOutOfRangeException(nameof(timeout), "The failed-original discovery timeout must be greater than zero and no more than five minutes.");
+        return effective;
+    }
+
+    private static void ObserveFault(Task task)
+    {
+        _ = task.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static (int Width, int Height) ReadJpegDimensions(ReadOnlySpan<byte> bytes)

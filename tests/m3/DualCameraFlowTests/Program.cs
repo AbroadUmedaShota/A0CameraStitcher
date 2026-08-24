@@ -1,5 +1,45 @@
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using System.Diagnostics;
+
+var m2TestChildMode = Environment.GetEnvironmentVariable("A0_M2_TEST_CHILD_MODE");
+if (!string.IsNullOrWhiteSpace(m2TestChildMode) && args.Contains("validate-canonical-jpeg", StringComparer.Ordinal))
+{
+    if (string.Equals(m2TestChildMode, "hang", StringComparison.Ordinal))
+    {
+        var hangChildPidFile = Environment.GetEnvironmentVariable("A0_M2_HANG_CHILD_PID_FILE")
+            ?? throw new InvalidOperationException("The M2 hang-child PID file is unavailable.");
+        var publicationDelayText = Environment.GetEnvironmentVariable("A0_M2_HANG_CHILD_PID_DELAY_MS");
+        if (int.TryParse(publicationDelayText, out var publicationDelayMilliseconds) && publicationDelayMilliseconds > 0)
+            await Task.Delay(publicationDelayMilliseconds);
+        var pendingPidFile = hangChildPidFile + ".pending";
+        await File.WriteAllTextAsync(pendingPidFile, Environment.ProcessId.ToString());
+        File.Move(pendingPidFile, hangChildPidFile, overwrite: true);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            Console.Out.Write(new string('o', 4096));
+            Console.Error.Write(new string('e', 4096));
+            await Task.Delay(10);
+        }
+        return 0;
+    }
+
+    if (string.Equals(m2TestChildMode, "excessive-error", StringComparison.Ordinal))
+    {
+        Console.Error.Write(new string('e', 1024 * 1024));
+        return 7;
+    }
+
+    if (string.Equals(m2TestChildMode, "brief-success", StringComparison.Ordinal))
+    {
+        await Task.Delay(20);
+        Console.Out.WriteLine("result=validated-canonical-jpeg");
+        return 0;
+    }
+
+    throw new InvalidOperationException($"Unknown M2 test child mode: {m2TestChildMode}");
+}
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -393,6 +433,262 @@ static async Task CaptureFailuresAsync()
             Check.Equal(0, bridge.StitchCalls);
             Check.Equal(0, result.AutomaticRetryCount);
         });
+    }
+    await BoundedFailureDiscoveryAsync();
+}
+
+static async Task BoundedFailureDiscoveryAsync()
+{
+    AssertFailureDiscoveryConstructorContract();
+
+    await WithRootAsync(async root =>
+    {
+        var source = new FailureDiscoveryCaptureSource();
+        var stitcher = new FailureDiscoveryStitcher();
+        var flow = new DualCameraProductFlow(
+            root,
+            source,
+            stitcher,
+            SyntheticIdentitySource(),
+            null,
+            TimeSpan.FromMilliseconds(100));
+        var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic());
+        var capture = flow.CaptureAndStitchAsync(request);
+        try
+        {
+            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            source.ReleaseFailure.TrySetResult();
+            await stitcher.ValidationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var current = await Task.Run(() => flow.Current).WaitAsync(TimeSpan.FromSeconds(2));
+            Check.True(current!.IsActive);
+            await Check.ThrowsCodeAsync(DualCameraFailureCode.DuplicateStart, () => flow.CaptureAndStitchAsync(request));
+
+            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            Check.Equal(DualCameraFailureCode.CaptureCameraB, result.FailureCode);
+            Check.False(result.IsActive);
+            Check.False(result.Capture!.Succeeded);
+            Check.Equal(0, result.Capture.Originals.Count);
+            Check.True(result.Stitch is null);
+            Check.Equal(0, result.AutomaticRetryCount);
+        }
+        finally
+        {
+            source.ReleaseFailure.TrySetResult();
+            stitcher.Release.TrySetResult();
+        }
+    });
+
+    await WithRootAsync(async root =>
+    {
+        var source = new FailureDiscoveryCaptureSource();
+        var stitcher = new FailureDiscoveryStitcher { IgnoreCancellation = true };
+        var flow = new DualCameraProductFlow(
+            root,
+            source,
+            stitcher,
+            SyntheticIdentitySource(),
+            null,
+            TimeSpan.FromMilliseconds(100));
+        try
+        {
+            var capture = flow.CaptureAndStitchAsync(
+                DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            source.ReleaseFailure.TrySetResult();
+            await stitcher.ValidationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var current = await Task.Run(() => flow.Current).WaitAsync(TimeSpan.FromSeconds(2));
+            Check.True(current!.IsActive);
+            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            Check.False(result.IsActive);
+            Check.Equal(0, result.Capture!.Originals.Count);
+            Check.Equal(0, result.AutomaticRetryCount);
+        }
+        finally
+        {
+            source.ReleaseFailure.TrySetResult();
+            stitcher.Release.TrySetResult();
+        }
+        var later = await flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+        Check.Equal(DualCameraFailureCode.CaptureCameraB, later.FailureCode);
+        Check.False(later.IsActive);
+    });
+
+    await WithRootAsync(async root =>
+    {
+        var source = new FailureDiscoveryCaptureSource();
+        var flow = new DualCameraProductFlow(
+            root,
+            source,
+            new FailureDiscoveryStitcher { ThrowValidationIOException = true },
+            SyntheticIdentitySource(),
+            null,
+            TimeSpan.FromMilliseconds(100));
+        var capture = flow.CaptureAndStitchAsync(
+            DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+        try
+        {
+            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            source.ReleaseFailure.TrySetResult();
+            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            Check.Equal(DualCameraFailureCode.CaptureCameraB, result.FailureCode);
+            Check.Equal(0, result.Capture!.Originals.Count);
+            Check.Equal(0, result.AutomaticRetryCount);
+        }
+        finally
+        {
+            source.ReleaseFailure.TrySetResult();
+        }
+    });
+
+    await M2AdapterCancellationBoundsAsync();
+}
+
+static async Task M2AdapterCancellationBoundsAsync()
+{
+    if (!OperatingSystem.IsWindows()) return;
+    await WithRootAsync(async root =>
+    {
+        var pidFile = Path.Combine(Path.GetTempPath(), $"A0CameraStitcher-m2-hang-{Guid.NewGuid():N}.pid");
+        var assembly = System.Reflection.Assembly.GetEntryAssembly()?.Location
+            ?? throw new InvalidOperationException("The test assembly path is unavailable.");
+        var appHost = Path.ChangeExtension(assembly, ".exe");
+        var previousMode = Environment.GetEnvironmentVariable("A0_M2_TEST_CHILD_MODE");
+        var previousPidFile = Environment.GetEnvironmentVariable("A0_M2_HANG_CHILD_PID_FILE");
+        var previousPidDelay = Environment.GetEnvironmentVariable("A0_M2_HANG_CHILD_PID_DELAY_MS");
+        Check.True(File.Exists(appHost));
+        Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", "hang");
+        Environment.SetEnvironmentVariable("A0_M2_HANG_CHILD_PID_FILE", pidFile);
+        Environment.SetEnvironmentVariable("A0_M2_HANG_CHILD_PID_DELAY_MS", "250");
+        var adapter = new M2OfflineStitcherProcessAdapter(appHost);
+        using var cancellation = new CancellationTokenSource();
+        var validation = adapter.ValidateCanonicalJpegAsync("ignored.jpg", 16, 8, cancellation.Token);
+        int childPid = 0;
+        try
+        {
+            childPid = await ReadPublishedProcessIdAsync(pidFile, TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            var canceled = false;
+            try { await validation.WaitAsync(TimeSpan.FromSeconds(8)); }
+            catch (OperationCanceledException) { canceled = true; }
+            Check.True(canceled);
+            await WaitForProcessExitAsync(childPid, TimeSpan.FromSeconds(5));
+            await Task.Delay(100);
+        }
+        finally
+        {
+            try
+            {
+                cancellation.Cancel();
+                try { await validation.WaitAsync(TimeSpan.FromSeconds(8)); }
+                catch (Exception) { }
+                if (childPid == 0)
+                {
+                    try { childPid = await ReadPublishedProcessIdAsync(pidFile, TimeSpan.FromSeconds(1)); }
+                    catch (TimeoutException) { }
+                }
+                try
+                {
+                    if (childPid != 0)
+                    {
+                        try
+                        {
+                            using var child = Process.GetProcessById(childPid);
+                            if (!child.HasExited) child.Kill(entireProcessTree: true);
+                        }
+                        catch (Exception)
+                        {
+                            // The normal outcome is that adapter cleanup already reaped it.
+                        }
+                        await WaitForProcessExitAsync(childPid, TimeSpan.FromSeconds(5));
+                    }
+                }
+                finally
+                {
+                    await DeleteTestFileAsync(pidFile, TimeSpan.FromSeconds(2));
+                    await DeleteTestFileAsync(pidFile + ".pending", TimeSpan.FromSeconds(2));
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", previousMode);
+                Environment.SetEnvironmentVariable("A0_M2_HANG_CHILD_PID_FILE", previousPidFile);
+                Environment.SetEnvironmentVariable("A0_M2_HANG_CHILD_PID_DELAY_MS", previousPidDelay);
+            }
+        }
+
+        try
+        {
+            Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", "excessive-error");
+            var excessiveOutput = new M2OfflineStitcherProcessAdapter(appHost);
+            InvalidOperationException? failure = null;
+            try
+            {
+                await excessiveOutput.ValidateCanonicalJpegAsync("ignored.jpg", 16, 8, CancellationToken.None);
+            }
+            catch (InvalidOperationException exception)
+            {
+                failure = exception;
+            }
+            Check.True(failure is not null);
+            Check.True(failure!.Message.Contains("[output truncated]", StringComparison.Ordinal));
+            Check.True(failure.Message.Length < 66 * 1024);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", previousMode);
+        }
+
+        try
+        {
+            Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", "brief-success");
+            var raceAdapter = new M2OfflineStitcherProcessAdapter(appHost);
+            for (var attempt = 0; attempt < 12; attempt++)
+            {
+                using var raceCancellation = new CancellationTokenSource();
+                raceCancellation.CancelAfter(TimeSpan.FromMilliseconds(attempt % 3 == 0 ? 1 : 25));
+                try
+                {
+                    await raceAdapter.ValidateCanonicalJpegAsync("ignored.jpg", 16, 8, raceCancellation.Token)
+                        .WaitAsync(TimeSpan.FromSeconds(7));
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation may win; cleanup must not replace it with another failure.
+                }
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("A0_M2_TEST_CHILD_MODE", previousMode);
+        }
+    });
+}
+
+static void AssertFailureDiscoveryConstructorContract()
+{
+    var flowType = typeof(DualCameraProductFlow);
+    Check.True(flowType.GetConstructor([
+        typeof(string), typeof(ITestSyntheticCamera), typeof(IOfflineStitcherAdapter),
+        typeof(IDualCameraIdentitySnapshotSource), typeof(TimeProvider)]) is not null);
+    Check.True(flowType.GetConstructor([
+        typeof(string), typeof(IDualCameraCaptureSource), typeof(IOfflineStitcherAdapter),
+        typeof(IDualCameraIdentitySnapshotSource), typeof(TimeProvider)]) is not null);
+
+    var bridge = new FailureBridge();
+    var identity = SyntheticIdentitySource();
+    var root = Path.Combine(Path.GetTempPath(), "A0CameraStitcher-DualCameraFlowTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        _ = new DualCameraProductFlow(root, bridge, bridge, identity, null, TimeSpan.FromMinutes(5));
+        Check.Throws<ArgumentOutOfRangeException>(() =>
+            _ = new DualCameraProductFlow(root, bridge, bridge, identity, null, TimeSpan.Zero));
+        Check.Throws<ArgumentOutOfRangeException>(() =>
+            _ = new DualCameraProductFlow(root, bridge, bridge, identity, null, TimeSpan.FromMinutes(5).Add(TimeSpan.FromTicks(1))));
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -1110,6 +1406,54 @@ static async Task WithRootAsync(Func<string, Task> action)
     finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 }
 
+static async Task<int> ReadPublishedProcessIdAsync(string path, TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow + timeout;
+    while (DateTime.UtcNow < deadline)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                var text = await File.ReadAllTextAsync(path);
+                if (int.TryParse(text, out var processId) && processId > 0) return processId;
+            }
+        }
+        catch (IOException)
+        {
+            // Atomic publication should avoid this, but retry keeps cleanup robust on AV scans.
+        }
+        await Task.Delay(25);
+    }
+    throw new TimeoutException($"Timed out waiting for a published process ID in {path}.");
+}
+
+static async Task DeleteTestFileAsync(string path, TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow + timeout;
+    while (File.Exists(path) && DateTime.UtcNow < deadline)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (File.Exists(path)) await Task.Delay(25);
+    }
+    if (File.Exists(path)) throw new IOException($"Test cleanup could not delete {path}.");
+}
+
+static async Task WaitForProcessExitAsync(int processId, TimeSpan timeout)
+{
+    try
+    {
+        using var process = Process.GetProcessById(processId);
+        await process.WaitForExitAsync().WaitAsync(timeout);
+    }
+    catch (ArgumentException)
+    {
+        // The process was already reaped before it could be opened.
+    }
+}
+
 static IDualCameraIdentitySnapshotSource SyntheticIdentitySource() =>
     new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
 
@@ -1391,6 +1735,69 @@ sealed class BlockingDualHardwareOperations : IDualHardwareCaptureOperations
         Task.FromResult(new DualHardwarePairQueryOutcome(DualHardwarePairQueryState.NotFound, null));
 }
 
+sealed class FailureDiscoveryCaptureSource : IDualCameraCaptureSource
+{
+    public DualCameraExecutionEnvironment Environment => DualCameraExecutionEnvironment.TestSynthetic;
+    public TaskCompletionSource FailureReady { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseFailure { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async Task<DualCameraCaptureSourceResult> CapturePairAsync(
+        DualCameraCaptureSourceRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = Path.Combine(request.TransactionDirectory, "CAM-A", "original.jpg");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, TestJpegBytes.Value);
+        FailureReady.TrySetResult();
+        await ReleaseFailure.Task.WaitAsync(cancellationToken);
+        throw new DualCameraFlowException(
+            DualCameraFailureCode.CaptureCameraB,
+            "Synthetic capture source failed after CAM-A original creation.");
+    }
+}
+
+sealed class FailureDiscoveryStitcher : IOfflineStitcherAdapter
+{
+    public TaskCompletionSource ValidationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool ThrowValidationIOException { get; init; }
+    public bool IgnoreCancellation { get; init; }
+
+    public async Task ValidateCanonicalJpegAsync(
+        string jpegPath,
+        int expectedWidth,
+        int expectedHeight,
+        CancellationToken cancellationToken)
+    {
+        _ = jpegPath;
+        _ = expectedWidth;
+        _ = expectedHeight;
+        if (ThrowValidationIOException)
+            throw new IOException("Synthetic original validation I/O failure.");
+        ValidationStarted.TrySetResult();
+        if (IgnoreCancellation)
+        {
+            await Release.Task;
+            return;
+        }
+        await Release.Task.WaitAsync(cancellationToken);
+    }
+
+    public Task<OfflineStitchArtifact> StitchAsync(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        string outputJobDirectory,
+        DualCameraRigProfile profile,
+        Guid stitchJobId,
+        Guid captureTransactionId,
+        DateTimeOffset completedAtUtc,
+        CancellationToken cancellationToken) =>
+        Task.FromException<OfflineStitchArtifact>(new InvalidOperationException("Stitching is not expected during failed-original discovery."));
+
+    public Task ExportAsync(string stitchedJpeg, string destinationJpeg, CancellationToken cancellationToken) =>
+        Task.FromException(new InvalidOperationException("Export is not expected during failed-original discovery."));
+}
+
 sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
 {
     private static readonly byte[] TestJpeg = TestJpegBytes.Value;
@@ -1599,6 +2006,13 @@ static class Check
     {
         if (EqualityComparer<T>.Default.Equals(unexpected, actual))
             throw new InvalidOperationException($"Did not expect {actual}.");
+    }
+    public static void Throws<TException>(Action action)
+        where TException : Exception
+    {
+        try { action(); }
+        catch (TException) { return; }
+        throw new InvalidOperationException($"Expected {typeof(TException).Name} rejection.");
     }
     public static async Task ThrowsCodeAsync(DualCameraFailureCode code, Func<Task<DualCameraProductState>> action)
     {

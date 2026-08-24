@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 
 namespace A0CameraStitcher.M3.Foundation.DualCamera;
 
 public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOfflineStitcherAdapter
 {
+    private const int MaximumRetainedDiagnosticCharacters = 64 * 1024;
+    private static readonly TimeSpan TerminationAndDrainTimeout = TimeSpan.FromSeconds(5);
     private readonly string _executablePath;
 
     public M2OfflineStitcherProcessAdapter(string executablePath)
@@ -160,27 +163,115 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         {
             throw new InvalidOperationException("The M2 adapter process did not start.");
         }
-        var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
+        var standardOutput = ReadBoundedAsync(process.StandardOutput);
+        var standardError = ReadBoundedAsync(process.StandardError);
         try
         {
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            }
+            await TerminateAndDrainAsync(process, standardOutput, standardError).ConfigureAwait(false);
             throw;
         }
-        var output = await standardOutput.ConfigureAwait(false);
-        var error = await standardError.ConfigureAwait(false);
+        var (output, error) = await DrainOutputAsync(standardOutput, standardError).ConfigureAwait(false);
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException($"M2 adapter failed with exit code {process.ExitCode}: {error.Trim()}");
         }
         return output;
+    }
+
+    private static async Task<(string Output, string Error)> DrainOutputAsync(
+        Task<string> standardOutput,
+        Task<string> standardError)
+    {
+        using var timeout = new CancellationTokenSource(TerminationAndDrainTimeout);
+        try
+        {
+            await Task.WhenAll(standardOutput, standardError).WaitAsync(timeout.Token).ConfigureAwait(false);
+            return (await standardOutput.ConfigureAwait(false), await standardError.ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            ObserveFault(standardOutput);
+            ObserveFault(standardError);
+            throw new TimeoutException("The M2 adapter output drain exceeded the bounded termination window.");
+        }
+    }
+
+    private static async Task TerminateAndDrainAsync(
+        Process process,
+        Task<string> standardOutput,
+        Task<string> standardError)
+    {
+        using var timeout = new CancellationTokenSource(TerminationAndDrainTimeout);
+        try
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch (Exception)
+            {
+                // Cleanup is best-effort and must never replace the caller's cancellation.
+                // A natural-exit race and platform kill failures are both handled by the
+                // independently bounded wait below.
+            }
+
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Preserve the original OperationCanceledException from RunAsync.
+            }
+
+            try
+            {
+                await Task.WhenAll(standardOutput, standardError).WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // A closed or faulting redirected stream is cleanup evidence only.
+            }
+        }
+        finally
+        {
+            ObserveFault(standardOutput);
+            ObserveFault(standardError);
+        }
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader)
+    {
+        var retained = new StringBuilder();
+        var buffer = new char[4096];
+        var truncated = false;
+        while (true)
+        {
+            var read = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
+            if (read == 0) break;
+            var remaining = MaximumRetainedDiagnosticCharacters - retained.Length;
+            if (remaining <= 0)
+            {
+                truncated = true;
+                continue;
+            }
+            retained.Append(buffer, 0, Math.Min(remaining, read));
+            truncated |= read > remaining;
+        }
+        if (truncated) retained.Append("\n[output truncated]");
+        return retained.ToString();
+    }
+
+    private static void ObserveFault(Task task)
+    {
+        _ = task.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }
