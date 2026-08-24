@@ -3017,6 +3017,20 @@ void TestProductionContinuousLiveViewContracts() {
                   !fs::exists(root / "close-failure" / "transactions" /
                       capture.transaction_id),
                 "residual Live View after client close failure must block capture before reservation");
+
+            // GitHub Issue #91: バックエンドを直接叩くのではなくディスパッチャ経由で確認する。
+            // 以前は Blocked 結果が run_id を持たず IsCaptureResultStructurallyValid を
+            // 通らないため、本来の continuous_live_view_active が InvalidBackendResult に
+            // 化けてオペレータへ対処法が届かなかった。
+            HardwareCameraAgentDispatcher residual_dispatcher(backend);
+            const std::string dispatched_blocked = residual_dispatcher.Handle(
+                CaptureEnvelope("dddddddddddddddddddddddddddddddd"));
+            Check(dispatched_blocked.find("continuous_live_view_active") != std::string::npos &&
+                  dispatched_blocked.find("\"resultCode\":\"InvalidBackendResult\"") ==
+                      std::string::npos &&
+                  dispatched_blocked.find("\"runId\":\"\"") == std::string::npos,
+                "dispatcher must surface continuous_live_view_active (not InvalidBackendResult) "
+                "and the Blocked result must carry a valid run ID");
         }
     } catch (const std::exception& error) {
         ++failures;
