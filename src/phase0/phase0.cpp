@@ -1011,6 +1011,9 @@ fs::path PersistHybridCaptureSummary(
     const fs::path output = run_root / "hybrid-capture-summary.json";
     const fs::path partial = run_root / "hybrid-capture-summary.json.partial";
     fs::create_directories(run_root);
+    if (fs::exists(output) || fs::exists(partial)) {
+        throw std::runtime_error("refusing to overwrite a hybrid capture summary");
+    }
     std::ofstream stream(partial, std::ios::binary | std::ios::trunc);
     if (!stream) throw std::runtime_error("cannot write hybrid capture summary");
     stream << "{\n  \"schemaVersion\": \"phase0.hybrid-capture-summary.v3\",\n"
