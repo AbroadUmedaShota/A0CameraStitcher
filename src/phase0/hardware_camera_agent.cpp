@@ -4340,7 +4340,16 @@ private:
 
     bool TryStopAndCloseContinuousLiveView(
         std::chrono::seconds timeout) noexcept {
-        if (!live_view_sdk_) return !residual_live_view_unsafe_;
+        if (!live_view_sdk_) {
+            // GitHub Issue #97: SDK 生成失敗(factory が nullptr / コンストラクタ throw)時、
+            // 直前の :StartContinuousLiveView で取得済みの lease が解放されず、カメラ制御
+            // mutex を次の Start まで(最大プロセス寿命まで)保持して他 Phase0 プロセスを
+            // camera_control_busy にしていた。lease は SDK 生成の直前でしか取得しないため、
+            // sdk が無いのに lease が残っているのは「失敗した Start」だけであり、ここで
+            // 解放するのは安全(保持していなければ no-op)。
+            live_view_lease_.reset();
+            return !residual_live_view_unsafe_;
+        }
         bool stopped = true;
         bool closed = true;
         try {
