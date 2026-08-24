@@ -13,6 +13,7 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 | Dual schema／session binding software slice | Complete / Fake provider・backend only | `hardware-dual.v2`の4操作、durable予約／terminal journal、strict preflightに加え、`hardware-dual-binding.v1`のcore・Agent IPC・WPF確認UIを実装。実SDK candidate provider、実capture/recovery、WPF実撮影は未接続 |
 | 一台製品mode M1A/M3 | Identity/Profile/Export/Live View v2 Software Implemented / Hardware Deferred | empty spool、CAM-A one-shot、10回handoff、10回p95承認、100件実WPF受入 |
 | 二台 Phase 0 M1B | Binding Software Complete / HardwarePending | ADR-0025のsession-local operator binding core・Agent protocol・WPF UIは実装済み。#10実capture backend、WPD exact-alias recovery、実機1/10/100とfault受入が残る |
+| 2026-08-24 code review remediation | Active / P0 Software Blocked | #85〜#88をrelease／実機再開前に修正。PR #104の#89/#90/#92/#95/#98は欠陥別回帰試験とexact CI待ち |
 | 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0005/HG-0009`と先行実機証拠 |
 
 現在の詳細は[CURRENT_STATUS.md](CURRENT_STATUS.md)、機能単位の検証キューは[FEATURE_VERIFICATION_PLAN.md](FEATURE_VERIFICATION_PLAN.md)を正本とする。
@@ -21,10 +22,11 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffはQA revise済みsoftware checkpointとして完了している。次工程は以下である。
 
-1. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
-2. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
-3. Dualは#10の実capture backendを実装し、session bindingとWPD exact-alias recoveryを接続後にM1B実機1/10/100へ進む
-4. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
+1. PR #104の欠陥別回帰試験を追加し、P0 #85〜#88を修正してintegration exact CIを確定する
+2. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
+3. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
+4. Dualは#10の実capture backendを実装し、session bindingとWPD exact-alias recoveryを接続後にM1B実機1/10/100へ進む
+5. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
 
 ## M0: D810/SDK安全基盤
 

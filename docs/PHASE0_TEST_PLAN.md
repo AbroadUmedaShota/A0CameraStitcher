@@ -8,6 +8,7 @@
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
 - Phase 0Bのidentity decision `HG-0003B`は2026-08-20のADR-0025で解消済みである。恒久的なSDK body identityは作らず、同じAgent sessionの二候補を一台ずつLive View表示し、操作者がCAM-A/Bへexactly onceで割り当てる。core、binding Agent protocol、WPF確認UIはsoftware実装済みだが、実SDK candidate provider、実capture backend、対応WPD alias recovery、実機1/10/100は未検証であるため`HardwarePending`を維持する。
+- Phase 0A/Bの実機再開前に、2026-08-24レビューのP0 #85〜#88を修正し、PR #104の#89/#90/#92/#95/#98に欠陥別回帰試験を追加して、最新integration exact SHAのsoftware-only CIを成功させる。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 

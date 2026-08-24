@@ -54,6 +54,7 @@
 
 ## Partial
 
+- 2026-08-24のコードレビューIssue #84〜#102を受領した。P0の#85（Dual binding pipe同一性）、#86（非整数rig profileのpixel境界）、#87（SpoolNotEmpty証拠矛盾）、#88（Reserve crash recovery欠落）は未修正であり、software release blockerとして扱う。PR #104で#89/#90/#92/#95/#98の修正はintegrationへ入ったが、本文が要求する欠陥別回帰試験は未追加である。exact integration CIと直接回帰試験が揃うまで各IssueをCloseしない。
 - setting readback: native MAID command-traceとSingle identity-v3対応`sdk-status` process-routing software contractは実装・fresh test済み。identity-v3登録後の実D810 v5再実行、focus値の意味、FileType未広告の扱いは未検証／未確定。
 - Live View: standaloneは合格だが、実撮影を含むhandoff 10回は未実施。
 - identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。SingleCamera CAM-AはWPD digest＋exactly-one current SDK/WPDのidentity-v3を実装し、操作者報告の一台登録はPassした。旧v2 mapへ自動fallbackせず、欠落・破損・digest不一致・0台／複数台をstatus open前に拒否する。Dualは恒久identityを作らず、ADR-0025のmemory-only session bindingを使用する。Single identity-v3はDualへ流用せず、操作者の誤割当は残留riskである。
@@ -75,10 +76,12 @@
 
 ## 次の安全な順番
 
-1. 明示的な実機再開後に一台CAM-Aの`sdk-status` v5をidentity-v3経路でread-only再実行し、設定・capture・Live View・card操作0を確認する
-2. empty dedicated spoolの用意と明示再開後だけ、one-shot、10回handoff／characterizationへ進む
-3. 10回の実測p95を`HG-0009`で承認後、SingleCamera 100件受入を行う
-4. Dualは#10の実capture backendを実装し、session binding UI・対応WPD alias proof・専用empty spoolを揃えた後だけ実機1/10/100へ進む
+1. integration exact SHAのCIを確定し、PR #104の#89/#90/#92/#95/#98に欠陥別回帰試験を追加する
+2. P0 #85〜#88を所有領域ごとに直列化して修正・検証する
+3. 明示的な実機再開後に一台CAM-Aの`sdk-status` v5をidentity-v3経路でread-only再実行し、設定・capture・Live View・card操作0を確認する
+4. empty dedicated spoolの用意と明示再開後だけ、one-shot、10回handoff／characterizationへ進む
+5. 10回の実測p95を`HG-0009`で承認後、SingleCamera 100件受入を行う
+6. Dualは#10の実capture backendを実装し、session binding UI・対応WPD alias proof・専用empty spoolを揃えた後だけ実機1/10/100へ進む
 
 ## Open human gates
 

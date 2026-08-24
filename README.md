@@ -8,6 +8,8 @@
 
 DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。`a0.camera-agent.hardware-dual-binding.v1`のAgent IPCとWPF確認UIもsoftware接続済みですが、SDK candidate providerとcapture backendはfake限定です。実SDK・WPDによるcapture/recoveryと実機受入は未接続で、製品状態は`HardwarePending`のままです。
 
+2026-08-24のコードレビューでP0のsoftware欠陥#85〜#88（binding pipe同一性、非整数profileのpixel境界、spool証拠整合、pair journal crash recovery）が追加されました。#89/#90/#92/#95/#98の修正はintegrationへ入っていますが、各欠陥を直接再現する回帰試験が未追加です。exact integration CIと回帰試験が揃うまでrelease／hardware Readyへ進めません。
+
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。committed済みの匿名証拠には一台接続時の記録がありますが、これは現在のlive接続状態を断定するものではありません。実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
 
 PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証を完了した`original.jpg`だけを製品上の正本とします。カメラカードは一過性の転送元で、永続保持を要件にしません。承認済みの専用empty/cleared card single-slot spoolでは、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、その後にjust-recovered WPD objectだけを削除して再びpayload 0件を確認します。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にします。existing cardのbulk delete/format、vendor operation、retryは禁止です。
