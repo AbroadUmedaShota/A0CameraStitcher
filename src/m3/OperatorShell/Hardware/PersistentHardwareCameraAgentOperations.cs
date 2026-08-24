@@ -169,7 +169,8 @@ public sealed class PersistentHardwareCameraAgentOperations :
                 _captureMayBeActive = reply.Payload.TerminalState is "Reserved" or "InProgress";
                 return reply;
             },
-            cancellationToken);
+            cancellationToken,
+            allowWhileCaptureMayBeActive: true);
 
     public string CreateSessionId() => HardwareContinuousLiveViewClient.CreateSessionId();
 
@@ -212,13 +213,15 @@ public sealed class PersistentHardwareCameraAgentOperations :
     private Task<T> RunV1Async<T>(
         TimeSpan responseTimeout,
         Func<HardwareCameraAgentClient, CancellationToken, Task<T>> operation,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        bool allowWhileCaptureMayBeActive = false) =>
         RunSerializedAsync(
             responseTimeout,
             (pipeName, token) => operation(
                 new HardwareCameraAgentClient(pipeName, ConnectTimeout, responseTimeout),
                 token),
-            cancellationToken);
+            cancellationToken,
+            allowWhileCaptureMayBeActive);
 
     private Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> RunV2Async(
         Func<HardwareContinuousLiveViewClient, CancellationToken,
@@ -250,13 +253,14 @@ public sealed class PersistentHardwareCameraAgentOperations :
     private async Task<T> RunSerializedAsync<T>(
         TimeSpan responseTimeout,
         Func<string, CancellationToken, Task<T>> operation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowWhileCaptureMayBeActive = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var pipeName = EnsureProcessStarted();
+            var pipeName = EnsureProcessStarted(allowWhileCaptureMayBeActive);
             try
             {
                 return await operation(pipeName, cancellationToken).ConfigureAwait(false);
@@ -321,13 +325,19 @@ public sealed class PersistentHardwareCameraAgentOperations :
             responseFailureStage: responseFailureStage);
     }
 
-    private string EnsureProcessStarted()
+    private string EnsureProcessStarted(bool allowWhileCaptureMayBeActive)
     {
         if (_process is { HasExited: false } && _pipeName is not null)
         {
             return _pipeName;
         }
-        if (_captureMayBeActive)
+        // GitHub Issue #93: capture が未確定(_captureMayBeActive)でも、結果を確認する
+        // 読み取り専用の get-transaction-result だけは新しい agent を起動して照会できる
+        // 必要がある(照会は durable journal を読むだけで capture を再実行しない)。これを
+        // ブロックすると、capture 送信中に例外が出て agent プロセスも落ちた場合、アプリ
+        // 再起動以外に pending transaction を解消する手段が無くなる。capture / Live View は
+        // 従来どおりゲートする(allowWhileCaptureMayBeActive=false)。
+        if (_captureMayBeActive && !allowWhileCaptureMayBeActive)
         {
             throw new HardwareCameraAgentLaunchException(
                 "前のCamera Agent captureが未確定のため、新しいagent processを開始しません。",
