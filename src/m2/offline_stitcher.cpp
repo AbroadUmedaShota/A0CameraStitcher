@@ -549,8 +549,15 @@ Bounds TransformedBounds(const Image& image, const std::array<double, 9>& matrix
 }
 
 bool SampleBilinear(const Image& image, const double x, const double y, std::array<double, 3>& pixel) {
-    if (x < 0.0 || y < 0.0 || x > static_cast<double>(image.width - 1)
-        || y > static_cast<double>(image.height - 1)) {
+    // GitHub Issue #86: 被覆判定はキャンバス寸法・バウンディング(コーナーモデル:
+    // 画像は [0,width)×[0,height) を占める)と揃える。従来は pixel-center モデルの
+    // [0,width-1] のみを有効域とし、コーナーモデルで採番された縁 1px 強(例: 純平行移動
+    // +50.5px)が「被覆済みキャンバスなのにサンプル不可」となって uncovered pixel 例外で
+    // stitch が必ず失敗していた。整数座標では x>width-1 と x>=width は同値なので既存の
+    // 整数フィクスチャは不変で、非整数の (width-1, width) の縁のみ端列へクランプして
+    // 被覆する(x1 = min(x0+1, width-1) の既存クランプがそのまま効く)。
+    if (x < 0.0 || y < 0.0 || x >= static_cast<double>(image.width)
+        || y >= static_cast<double>(image.height)) {
         return false;
     }
     const auto x0 = static_cast<std::uint32_t>(std::floor(x));
