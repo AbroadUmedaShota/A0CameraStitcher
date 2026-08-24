@@ -13,12 +13,19 @@ internal static class DualCameraProductComposition
         IDualCameraIdentitySnapshotSource? hardwareIdentitySource = null)
     {
         var configuredPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
-        var adapterPath = string.IsNullOrWhiteSpace(configuredPath)
+        var candidatePath = string.IsNullOrWhiteSpace(configuredPath)
             ? Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe")
-            : Path.GetFullPath(configuredPath);
-        if (!File.Exists(adapterPath))
+            : configuredPath;
+        string adapterPath;
+        try
         {
-            return new UnavailableDualCameraProductFlow(adapterPath, environment);
+            // 環境変数由来のパスも既定パスも同じローカルEXE検証を通す。無効/不在なら
+            // DualCamera を無効化する (SingleCamera や平文シミュレーションへはフォールバックしない)。
+            adapterPath = CameraAgentExecutablePolicy.ResolveLocalExecutable(candidatePath);
+        }
+        catch (ArgumentException)
+        {
+            return new UnavailableDualCameraProductFlow(candidatePath, environment);
         }
         var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
         return environment switch
