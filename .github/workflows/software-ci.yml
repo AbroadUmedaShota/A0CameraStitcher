@@ -20,9 +20,11 @@ name: Windows Software-Only CI
 on:
   push:
     branches:
+      - main
       - codex/main-feature-integration
   pull_request:
     branches:
+      - main
       - codex/main-feature-integration
 
 # Cancel a stale run on the same branch/PR when a newer one starts, without
