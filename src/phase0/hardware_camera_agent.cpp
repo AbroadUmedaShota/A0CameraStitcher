@@ -1790,6 +1790,12 @@ void ReserveTransaction(
     std::error_code create_error;
     const bool created = fs::create_directory(directory, create_error);
     if (!created) {
+        if (create_error) {
+            throw TransportError(
+                "transaction_state_scope_invalid",
+                "hardware Camera Agent could not create the transaction directory: " +
+                    create_error.message());
+        }
         throw HardwareCameraAgentProtocolError(
             "DuplicateTransactionId",
             "transactionId is already reserved and capture will not be repeated");
@@ -4256,7 +4262,12 @@ public:
                 result.error_detail =
                     "Camera Agent ended after reservation but before camera access; capture will not be retried";
             } else {
-                result.retained_original = RecoverRetainedOriginal(config_.artifacts_root, result);
+                try {
+                    result.retained_original =
+                        RecoverRetainedOriginal(config_.artifacts_root, result);
+                } catch (const std::exception&) {
+                    result.retained_original.reset();
+                }
                 result.error_category = "process_interrupted";
                 result.error_detail = result.retained_original
                     ? "Camera Agent ended before terminal journal commit; one verified PC original was retained and capture will not be retried"
