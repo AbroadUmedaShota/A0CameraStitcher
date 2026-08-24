@@ -51,3 +51,6 @@ logs/
 !.autodev/runs/.gitkeep
 .autodev/execution/*
 !.autodev/execution/.gitkeep
+# Stop/SubagentStop hook が応答ごとに追記する作業ログ。ユーザー指示の原文と
+# 触ったファイルのパスがそのまま入るため、ローカル完結でリモートへ出さない。
+/worklog/
