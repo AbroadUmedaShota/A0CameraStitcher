@@ -1099,7 +1099,13 @@ private:
             NkMAIDString value{};
             RunCompleted(source, kNkMAIDCommand_CapGet, kNkMAIDCapability_Firmware,
                 kNkMAIDDataType_StringPtr, reinterpret_cast<NKPARAM>(&value), deadline, category);
-            return reinterpret_cast<const char*>(value.str);
+            const char* const begin = reinterpret_cast<const char*>(value.str);
+            const char* const end = begin + sizeof(value.str);
+            const char* const terminator = std::find(begin, end, '\0');
+            if (terminator == begin || terminator == end) {
+                return "unknown";
+            }
+            return std::string(begin, static_cast<std::size_t>(terminator - begin));
         }
         if (cap->ulType == kNkMAIDCapType_Unsigned) {
             std::ostringstream text;
