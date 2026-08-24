@@ -66,6 +66,71 @@ internal static class CameraAgentExecutablePolicy
         }
     }
 
+    // M2 オフラインスティッチャのアダプタEXE向け検証。Resolve と同じパス形状の防御
+    // (UNC/デバイスパス・代替データストリーム・トラバーサル・非固定ドライブ・非.exe・
+    // リパースポイント連鎖) を課すが、baseDirectory 直下という封じ込めは要求しない。
+    // アダプタはテストハーネスがビルドツリー配下 (アプリ配置先の外) を指すため、
+    // 封じ込めを課すと正当なテスト経路まで塞いでしまう。
+    internal static string ResolveLocalExecutable(
+        string candidate,
+        Func<string, DriveType>? driveTypeResolver = null,
+        Func<string, FileAttributes>? attributesResolver = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(candidate) ||
+                !Path.IsPathFullyQualified(candidate) ||
+                IsNetworkOrDevicePath(candidate) ||
+                HasAlternateDataStream(candidate) ||
+                HasTraversalSegment(candidate))
+            {
+                throw Invalid();
+            }
+
+            var normalizedCandidate = Path.GetFullPath(candidate);
+            if (!string.Equals(Path.GetExtension(normalizedCandidate), ".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                throw Invalid();
+            }
+
+            var root = Path.GetPathRoot(normalizedCandidate);
+            if (string.IsNullOrEmpty(root) ||
+                (driveTypeResolver ?? (path => new DriveInfo(path).DriveType))(root) != DriveType.Fixed)
+            {
+                throw Invalid();
+            }
+
+            var readAttributes = attributesResolver ?? File.GetAttributes;
+            if (!File.Exists(normalizedCandidate))
+            {
+                throw Invalid();
+            }
+
+            var directory = Path.GetDirectoryName(normalizedCandidate);
+            if (string.IsNullOrEmpty(directory))
+            {
+                throw Invalid();
+            }
+            EnsureReparseFreeDirectoryChain(directory, readAttributes);
+
+            var fileAttributes = readAttributes(normalizedCandidate);
+            if ((fileAttributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+            {
+                throw Invalid();
+            }
+
+            return normalizedCandidate;
+        }
+        catch (ArgumentException exception) when (exception.Message == InvalidExecutableMessage)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException or System.Security.SecurityException)
+        {
+            throw Invalid();
+        }
+    }
+
     private static bool IsNetworkOrDevicePath(string value) =>
         value.StartsWith("\\\\", StringComparison.Ordinal) ||
         value.StartsWith("//", StringComparison.Ordinal) ||
