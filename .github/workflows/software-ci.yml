@@ -109,6 +109,15 @@ jobs:
         if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
         run: ctest --test-dir build/sdkless -C Release -j 1 --output-on-failure
 
+      - name: Camera Agent incremental packaging regression (SDK-less)
+        id: camera-agent-packaging
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          ./scripts/Test-CameraAgentPackagingIncremental.ps1 -Configuration Debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "DURATION_CAMERA_AGENT_PACKAGING=$([int]$sw.Elapsed.TotalSeconds)"
+
       # scripts/Test-M3Simulated.ps1 builds the M3 solution with
       # --maxcpucount:1 --nodeReuse:false, builds the M2 adapter via CMake,
       # and asserts the Foundation/DualCamera/OperatorShell test counts. It
@@ -166,6 +175,7 @@ jobs:
           $rows = @(
             @{ Name = 'SDK-less C++ Debug (CTest -j 1)';         Outcome = '${{ steps.cxx-debug-test.outcome }}';   Duration = Format-Duration $env:DURATION_CXX_DEBUG_BUILD }
             @{ Name = 'SDK-less C++ Release (CTest -j 1)';       Outcome = '${{ steps.cxx-release-test.outcome }}'; Duration = Format-Duration $env:DURATION_CXX_RELEASE_BUILD }
+            @{ Name = 'Camera Agent incremental packaging';      Outcome = '${{ steps.camera-agent-packaging.outcome }}'; Duration = Format-Duration $env:DURATION_CAMERA_AGENT_PACKAGING }
             @{ Name = 'M3 simulated foundation Debug';           Outcome = '${{ steps.m3-debug.outcome }}';         Duration = Format-Duration $env:DURATION_M3_DEBUG }
             @{ Name = 'M3 simulated foundation Release';         Outcome = '${{ steps.m3-release.outcome }}';       Duration = Format-Duration $env:DURATION_M3_RELEASE }
             @{ Name = 'Formal WPF DualCamera flow Release';      Outcome = '${{ steps.wpf-release.outcome }}';      Duration = Format-Duration $env:DURATION_WPF_RELEASE }
