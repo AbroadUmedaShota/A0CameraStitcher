@@ -927,6 +927,27 @@ void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
         "incomplete exact-delete evidence must never generate Succeeded");
     Check(spool_backend->aliases == std::vector<std::string>{"CAM-A"},
         "incomplete CAM-A spool evidence must prevent CAM-B");
+    // GitHub Issue #87: originals が空のまま SpoolNotEmpty で終端した場合に、空範囲の
+    // all_of が true を返して集計フラグが矛盾しないこと。
+    CheckContains(spool_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "incomplete CAM-A exact-delete evidence must be typed SpoolNotEmpty");
+    CheckContains(spool_response, "\"bothSpoolsEmptyAfter\":false",
+        "a SpoolNotEmpty terminal with no retained originals must not claim both spools empty");
+    CheckContains(spool_response, "\"exactDeleteConfirmedForEveryRetainedOriginal\":false",
+        "a SpoolNotEmpty terminal with no retained originals must not claim exact-delete confirmed");
+
+    // GitHub Issue #87: CAM-A のみ retained な FailedPartial で、部分集合に対する all_of が
+    // bothSpoolsEmptyAfter を誤って true にしないこと。
+    auto [partial_sandbox, partial_response, partial_backend, partial_root] = run(
+        "b-spool", {{true, true, true}, {true, true, false}}, "", normal_times);
+    CheckContains(partial_response, "\"terminalState\":\"FailedPartial\"",
+        "CAM-B spool-not-empty must be FailedPartial");
+    CheckContains(partial_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "CAM-B spool-not-empty must be typed SpoolNotEmpty");
+    CheckContains(partial_response, "\"bothSpoolsEmptyAfter\":false",
+        "a partial (CAM-A only) terminal must never claim both spools empty");
+    CheckContains(partial_response, "\"exactDeleteConfirmedForEveryRetainedOriginal\":false",
+        "a partial (CAM-A only) terminal must never claim complete exact-delete evidence");
 }
 
 void TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch() {
