@@ -72,11 +72,15 @@ public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgent
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(requestJson);
+        // GitHub Issue #85: CurrentUserOnly により、別ユーザーが先回りして同名パイプを
+        // 作成する named pipe squatting を遮断する(クライアントはサーバ側パイプの所有者が
+        // 現在のユーザーであることを検証してから接続する)。正規の Agent は同一ユーザーの
+        // 子プロセスがパイプを作成するため影響しない。
         await using var pipe = new NamedPipeClientStream(
             serverName: ".",
             _pipeName,
             PipeDirection.InOut,
-            PipeOptions.Asynchronous);
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
         using (var connectSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
