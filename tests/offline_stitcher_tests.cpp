@@ -464,6 +464,33 @@ void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
         "explicit export must never overwrite an existing destination");
 }
 
+// GitHub Issue #86: 非整数の平行移動を含むリグプロファイルでは、被覆判定(pixel-center)と
+// キャンバス寸法/バウンディング(pixel-corner)の不整合により、幾何学的には全面被覆されて
+// いても縁 1px 強が uncovered pixel と誤判定され stitch 全体が例外で失敗していた。整数
+// フィクスチャ(+12.0)だけを使う既存テストでは再現しなかった回帰。
+void TestNonIntegerTransformStitchesWithoutUncoveredPixel(const std::filesystem::path& root) {
+    const auto a_directory = root / "noninteger-a";
+    const auto b_directory = root / "noninteger-b";
+    std::filesystem::create_directories(a_directory);
+    std::filesystem::create_directories(b_directory);
+    const auto camera_a = a_directory / "original.jpg";
+    const auto camera_b = b_directory / "original.jpg";
+    WriteSolidJpeg(camera_a, 16, 8, 220, 20, 20);
+    WriteSolidJpeg(camera_b, 16, 8, 20, 20, 220);
+    auto profile = ApprovedProfile();
+    // +12.5px の純平行移動。b_bounds x=[12.5,28.5] → canvas_width=29、最右列(global_x=28)は
+    // CAM-A の範囲外かつ inverse_b で source_x=15.5(=width-0.5)となり、従来の [0,width-1] 判定で
+    // has_a/has_b とも false になって uncovered pixel 例外を投げていた。
+    profile.camera_b_to_camera_a = {1.0, 0.0, 12.5, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    profile.crop = {0, 0, 0, 0};
+    const auto result = a0::m2::StitchCanonicalPair(
+        WithRecordedIdentity({camera_a, camera_b, root / "noninteger-job", profile}));
+    Check(result.width == 29 && result.height == 8,
+        "non-integer +12.5 translation must size the canvas to 29x8 without an uncovered-pixel failure");
+    Check(std::filesystem::is_regular_file(result.stitched_jpeg),
+        "non-integer transform must publish a stitched result instead of throwing uncovered-pixel");
+}
+
 void TestFailClosedContracts(const std::filesystem::path& root) {
     const auto a_directory = root / "reject-a";
     const auto b_directory = root / "reject-b";
@@ -1205,6 +1232,7 @@ int main(const int argc, char* argv[]) {
             throw std::runtime_error("unique synthetic test directory already exists");
         }
         TestStitchRecomposeAndExport(root);
+        TestNonIntegerTransformStitchesWithoutUncoveredPixel(root);
         TestFailClosedContracts(root);
         TestCoverageMaskContracts(root);
         TestProjectiveDomainContracts(root);
