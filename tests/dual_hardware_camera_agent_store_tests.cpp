@@ -615,9 +615,62 @@ void TestReparsePointsAreRejected() {
 
 } // namespace
 
+// GitHub Issue #88: Reserve() の "active/ 作成後・MoveFileEx 前" のクラッシュで残る不完全予約
+// (空 active/ もしくは孤立 .partial)からストアが自己修復し、恒久使用不能にならないこと。
+void TestReserveRecoversFromInterruptedReservation() {
+    const std::string transaction_id = "0123456789abcdef0123456789abcdef";
+    const std::string other_id = "fedcba9876543210fedcba9876543210";
+
+    // Case A: active/ を作成した直後・.partial 書き込み前にクラッシュした状態(空 active/)。
+    {
+        TempSandbox sandbox;
+        const fs::path root = sandbox.Child("empty-active");
+        fs::create_directories(root / "active");
+        DualHardwarePairJournalStore store(root);
+        const auto reserved = store.Reserve(transaction_id);
+        Check(reserved.transaction_id == transaction_id &&
+              reserved.state == DualHardwarePairJournalState::reserved,
+            "reserve must recover from an empty active/ left by a crashed reservation");
+        Check(fs::is_regular_file(JournalPath(root)),
+            "recovery must let the reservation publish a real journal (empty active/)");
+    }
+
+    // Case B: .partial を書いた後・MoveFileEx 前にクラッシュした状態(孤立 .partial)。
+    {
+        TempSandbox sandbox;
+        const fs::path root = sandbox.Child("orphan-partial");
+        fs::create_directories(root / "active");
+        WriteText(root / "active" / "pair-journal.json.partial", "interrupted-reservation");
+        DualHardwarePairJournalStore store(root);
+        const auto reserved = store.Reserve(transaction_id);
+        Check(reserved.state == DualHardwarePairJournalState::reserved,
+            "reserve must recover from an orphan .partial left by a crashed reservation");
+        Check(!fs::exists(root / "active" / "pair-journal.json.partial"),
+            "recovery must remove the orphan partial before publishing");
+        Check(fs::is_regular_file(JournalPath(root)),
+            "recovery must let the reservation publish a real journal (orphan partial)");
+    }
+
+    // Negative: 完成した有効な journal は復旧対象にせず、誤って削除しないこと。
+    {
+        TempSandbox sandbox;
+        const fs::path root = sandbox.Child("valid-active");
+        DualHardwarePairJournalStore store(root);
+        (void)store.Reserve(transaction_id);
+        const std::string original = ReadText(JournalPath(root));
+        DualHardwarePairJournalStore restarted(root);
+        CheckStoreError("ActiveTransactionExists", [&] {
+            (void)restarted.Reserve(other_id);
+        }, "recovery must never delete a valid active journal");
+        Check(ReadText(JournalPath(root)) == original,
+            "a valid journal must remain byte-identical after a recovery pass");
+    }
+}
+
 int main() {
     try {
         TestReserveAndRestartQuery();
+        TestReserveRecoversFromInterruptedReservation();
         TestDispatchAndTerminalTransitionsAreDurable();
         TestCloseReservedBeforeDispatchIsDurableAndExact();
         TestLegacyV1ReservedJournalRemainsReadable();

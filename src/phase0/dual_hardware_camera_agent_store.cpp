@@ -478,6 +478,43 @@ std::optional<DualHardwarePairJournalRecord> TryReadActiveRecord(
     return ReadActiveRecord(root);
 }
 
+// GitHub Issue #88: Reserve() は active/ を作成 → .partial を書き → MoveFileEx で journal へ
+// 原子的に publish する。作成後・rename 前にクラッシュすると、空の active/ か孤立した
+// .partial だけが残り、以後 ReadActiveRecord が JournalInvalid を投げ続けてストアが恒久的に
+// 使用不能になっていた(復旧手段が無かった)。完成した journal は原子的 rename でしか現れない
+// ため、journal が存在しない不完全予約(空 active/ もしくは .partial のみ)に限って安全に除去し、
+// 次の Reserve が新規に予約できるようにする。有効な journal や未知の内容には一切触れない。
+void RecoverIncompleteReservation(const fs::path& root) {
+    bool root_missing = false;
+    (void)AttributesOrMissing(root, root_missing);
+    if (root_missing) return;
+    ValidateRootDirectory(root);
+
+    const fs::path active = ActiveDirectory(root);
+    bool active_missing = false;
+    (void)AttributesOrMissing(active, active_missing);
+    if (active_missing) return;
+    ValidateExistingPathNoReparse(active, true, "StoreScopeInvalid");
+
+    const auto partial_name = PartialJournalPath(root).filename();
+    std::error_code error;
+    bool only_incomplete = true;
+    for (const auto& entry : fs::directory_iterator(active, error)) {
+        if (error) return;  // 読めないなら触らず、後続処理の fail-loud に委ねる
+        // 完成 journal や .partial 以外の未知エントリがあれば復旧対象にしない
+        if (entry.path().filename() != partial_name) {
+            only_incomplete = false;
+            break;
+        }
+    }
+    if (error || !only_incomplete) return;
+
+    // ここに来るのは「空の active/」または「孤立 .partial のみ」= 不完全予約。
+    std::error_code remove_error;
+    (void)fs::remove_all(active, remove_error);
+    // 除去に失敗しても後続の Reserve が従来どおり失敗を報告する(サイレント継続はしない)。
+}
+
 std::optional<DualHardwarePairJournalRecord> TryReadTerminalRecord(
     const fs::path& root, std::string_view transaction_id) {
     (void)ValidateFixedLocalRoot(root);
@@ -599,6 +636,9 @@ DualHardwarePairJournalStore::DualHardwarePairJournalStore(fs::path root)
 DualHardwarePairJournalRecord DualHardwarePairJournalStore::Reserve(
     std::string_view transaction_id) {
     ValidateTransactionId(transaction_id);
+    // 直前のクラッシュで残った不完全予約(空 active/ もしくは孤立 .partial)を先に自己修復し、
+    // ストアが JournalInvalid で恒久使用不能になるのを防ぐ (#88)。
+    RecoverIncompleteReservation(root_);
     if (const auto active = TryReadActiveRecord(root_)) {
         ClassifyExistingReservation(*active, transaction_id);
     }
