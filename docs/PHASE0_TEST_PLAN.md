@@ -7,7 +7,8 @@
 ## 開始条件
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
-- Phase 0B前: `HG-0003B`の解消が必要。2026-08-08にD810 PnP、SDK inventory、WPD inventoryを各2台確認した。17:31 JSTのCAM-A SDK bindingは、物理入替後もCAM-Aへ誤一致したため無効化した。原因のephemeral MAID source IDを排除しSource `Name`/`Interface` identity-v2へ修正、SDK有無各CTest 5/5とCAM-B一台checkpointは合格したが、二台接続時のSDK identity-v2は`identity_collision`となった。licensed SDK headers/docsとWPD相関設計のread-only診断ではdocumentedな本体固有propertyまたは安全なcross-transport anchorを確認できなかったため、identity strategyがsoftware-blockedである。CAM-A SDK v2再登録、抜線、再接続、port交換、二台同時readiness、実機Phase 0B撮影はhuman decisionまで開始しない。
+- Phase 0Bのidentity decision `HG-0003B`は2026-08-20のADR-0025で解消済みである。恒久的なSDK body identityは作らず、同じAgent sessionの二候補を一台ずつLive View表示し、操作者がCAM-A/Bへexactly onceで割り当てる。core、binding Agent protocol、WPF確認UIはsoftware実装済みだが、実SDK candidate provider、実capture backend、対応WPD alias recovery、実機1/10/100は未検証であるため`HardwarePending`を維持する。
+- Phase 0A/Bの実機再開前に、2026-08-24レビューのP0 #85〜#88を修正し、PR #104の#89/#90/#92/#95/#98に欠陥別回帰試験を追加して、最新integration exact SHAのsoftware-only CIを成功させる。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
@@ -36,7 +37,7 @@ ADR-0024以後、Phase 0AはCAM-A専用`SingleCamera`実機transport受入の先
 
 合格: D810を安定して選択aliasとして識別でき、実識別子がcommit対象へ出ない。
 
-2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。二台接続時のidentity-v2衝突とread-only SDK資料診断を受け、P0-A1のSDK identity continuityは再接続・port試験ではなく、まずdocumented identity strategyと明示migration/invalidationの決定が必要である。実識別子とmap hashはcommit対象へ含めない。
+2026-08-05のreadiness、SDK inventory、WPD inventoryはいずれもD810一台を列挙した。読み取り専用`run-1785903488159-1`はレリーズ`S`、静止画／動画セレクター`photo`、Live View `off`、prohibit mask `0`、SDK session close、設定変更なしを匿名記録し、firmwareはWPD標準propertyから`V1.14`を取得した。電源再投入後の[identity continuity summary](evidence/phase0/run-1785917466375-1/identity-continuity-summary.json)はWPD側CAM-A continuityの履歴として保持するが、SDK側は後にephemeral MAID source IDを使用していたと判明したため無効である。SingleCameraはidentity-v3のWPD digest＋SDK/WPD exactly-one current-sessionを使用し、DualCameraはADR-0025のsession-local bindingを使用する。実識別子とmap hashはcommit対象へ含めない。
 
 2026-08-07の設定read-only [run-1786040075194-1](evidence/phase0/run-1786040075194-1/report.md)は、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を匿名記録した。FileTypeはnot-advertisedだったが、CompressionLevelとImageSizeは取得できた。撮影設定write、capture、Live View開始、WPD、deleteは行わず、sessionを閉じた。MAID session確立時のcontrol-plane callback登録とModuleModeは既存`CapSet`を使い得るため、設定read-onlyは「撮影設定capabilityを書き換えない」という意味である。native command-trace自動試験とfocus値の意味確定が未完了のため、設定比較項目はPartialとする。
 
@@ -103,20 +104,19 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 ### P0-B1: 二台識別
 
 - 旧`bind-cross-transport-identity`／`bind-identity --transport`とidentity-v2 mapは匿名診断・明示的なinvalid化判断のためだけに残す。現行SDKの衝突するName/Interface digest、enumeration order、USB port、ephemeral Source IDを恒久bindingまたは同一実機相関の証拠へ読み替えない。
-- `verify-dual-identity`、`verify-dual-spools`、`hybrid-capture-pair`は同じproduction preflightを使用する。provider configは`--dual-identity-provider`、CAM-A/B proofは`--dual-identity-proof`を2回指定する明示opt-inで、いずれもstrictなfixed-local file loaderを通す。未指定、legacy identity-v2 map、未実装のNikon production inventory providerからは`Ready`へ昇格せず、default/legacyは`Blocked/identity_strategy_unresolved`・exit 5を維持する。
-- 将来の合格候補は、一台だけを接続した状態で操作者がCAM-A/Bごとに作成したlocal-only proof、documented provider ID/version、proof schema/version・有効期間・confirmation、二台inventoryのeach alias exactly once、unbound/duplicate/collision各0がすべて一致し、typed `DualIdentityReady`を返すsoftware contractに限定する。この契約試験はproviderの承認・接続または実機Readyを意味しない。
-- typed Readyはproduction public callerへ接続済みだが、現時点のReady証拠はapproved anonymous provider/proof/exactly-two fake inventoryによるsoftware-only contract testに限定する。実CLIはproduction inventory projectionをraw identifier、serial、USB port、enumeration order、legacy mapから生成せず、Nikon providerは`Vendor clarification required`のままとする。したがって実CLIのpreflight Ready、hardware Ready、実体同一性、card/spool/capture受入れを証明したとは扱わない。Block時はcard inspection、WPD/SDK session、capture、Live View、設定write、delete、format、vendor operation、retryをすべて0のまま停止する。
-- reparse path negativeは、Windowsがunprivileged symlink作成を許可する環境では公開`LoadDualIdentityBindingProof` seamで拒否を直接確認する。権限またはDeveloper Mode不足時は、同じ公開seamのrelative/UNC/device/non-fixed-local拒否と既存fixed-local path-chain契約をsoftware evidenceとし、reparse実体作成を未検証として残す。権限回避やproduction policy緩和は行わない。
-- documented provider実装・proof作成手順・production caller接続が承認された後に限り、各aliasのLive View停止・SDK close後のhybrid transactionが同じ物理D810のシャッターとPC原本になることを一回ずつ確認する。
-- 接続順変更3回、各カメラのUSBポート交換後も別名が維持されることを確認する。
+- `a0.camera-agent.hardware-dual-binding.v1`で`begin-binding`、`start-candidate-live-view`、`get-candidate-live-view-frame`、`confirm-alias`、`complete-binding`を順に実行する。候補は厳密に二つとし、同時表示せず、一候補ごとにLive View停止とSDK session closeを確認してから次へ進む。
+- 同一candidateの二重割当、CAM-A/B不足、候補0/1/3、期限切れ、Live View停止・SDK close未確認を拒否する。Agent再起動、USB再接続、台数・topology変化、SDK manager再生成または任意のSDK errorでbindingを即時無効化し、再binding前は`HardwarePending`とする。
+- candidate source object、candidate ordinal、enumeration order、USB portを永続identityにしない。公開・保存可能な証拠は匿名alias、provider/version、確認時刻、無効化理由だけとし、preview、raw ID、serialを保存しない。
+- capture時はbinding済みsource objectを再列挙せず使用し、対応するWPD aliasでexact-one recoveryできなければ`FailedPartial`とする。別alias探索、別aliasからの削除、自動retryは行わない。
+- 操作者の誤割当は自動的な同一個体証明では防げない残留riskである。接続順またはUSB portの継続性をalias証拠にせず、変化時は無効化と再bindingを確認する。
 
 ### P0-B2: 順次二台transaction
 
-アプリ側のsoftware-only準備として、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約済みpair開始、同一ID結果照会、.NET Reserved／terminal recovery、strict semantic preflightを実装済みである。fake backend限定ではCAM-A→CAM-Bを各最大一回、共有180秒deadline、自動retry 0で実行し、A失敗時B 0、B失敗時A原本保持、transaction ID別terminal journalの再起動照会まで合格した。これはproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影の接続証拠ではない。既定経路は`PairDispatcherUnavailable`／`HardwarePending`であり、`HG-0003B`解消前に実機Readyへ昇格しない。
+アプリ側のsoftware-only準備として、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約済みpair開始、同一ID結果照会、.NET Reserved／terminal recovery、strict semantic preflightを実装済みである。fake backend限定ではCAM-A→CAM-Bを各最大一回、共有180秒deadline、自動retry 0で実行し、A失敗時B 0、B失敗時A原本保持、transaction ID別terminal journalの再起動照会まで合格した。binding Agent protocolとWPF確認UIもfake SDKで合格済みだが、実SDK candidate providerと実capture/recovery backendは未接続である。したがって実機Readyへ昇格せず`HardwarePending`を維持する。
 
 - `CAM-A`でWPD baseline/close、SDK one card capture/close、WPD recovery、PC保存を完了する。
 - 次に`CAM-B`で同じhybrid処理を完了する。
-- `hybrid-capture-pair`を`--dual-dedicated-spools-confirmed`を含む全安全確認付きで使用する。コマンド自身も共通dual identity検証を先頭で実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名証跡を残してcard access・capture前にexit 5とする。合格後はpair全体で一つの180秒deadline、operator-session-wide lease、CAM-A→CAM-Bの固定順序を維持する。
+- #10でsession binding対応の実capture backendを接続した後、binding Ready、対応WPD alias、`--dual-dedicated-spools-confirmed`を含む全安全確認をcard access前に要求する。合格後はpair全体で一つの180秒deadline、operator-session-wide lease、CAM-A→CAM-Bの固定順序を維持する。
 - CAM-Aのverified canonical PC original、exact-object delete、empty-afterが完了した場合だけCAM-Bを開始する。CAM-A失敗時はCAM-Bを開始しない。
 - CAM-B失敗時はCAM-Aの確定済みPC原本を保持し、pairを`FailedPartial`として次pairを開始しない。
 - 両方が確定した場合だけpairを`Complete`とする。順次撮影であり、実シャッター同期は保証しない。
@@ -161,7 +161,7 @@ active中の実USB切断には`hybrid-fault-pair --alias CAM-A|CAM-B --scenario 
 
 `WI-0021A`と`WI-0022B`の依存を満たした`WI-0022C`は、実機を使わないbounded software sliceとして完了した。rights-clearedな合成画像fixtureからshift、rotation、scale、exposure、colorを決定的に測定し、測定値とfixture/profile provenanceを保持するproposalへ接続する。承認済みprofile envelope内の一時補正だけを受理し、target／automatic-correction上限のboundary、over-limit、malformed、profile-mismatch、unapproved profile、入力不整合をfail closedする。profileの自動学習・更新はない。
 
-最新のsoftware-only回帰はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release全CTest各10/10、`Test-M3Simulated.ps1` Release/Debug、正式DualCamera WPF flowに合格した。このsoftware contractは最終リグ、承認済みA0閾値、実写品質、実機性能、identity strategyの解決を証明しない。identity strategyはBlocked、`HG-0003B`は未解消、実D810 v5 runと実機capture 1/10/100は未検証のままである。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsliceで実行していない。
+2026-08-21のintegration `66731cfd`はWindows software-only CIに合格した。StitchJob manifest追加時のfocused結果はSDK-less Debug/Release CTest各16/16、M3 simulated Release、正式DualCamera WPF flow、.NET Release build警告0である。これは最終リグ、承認済みA0閾値、実写品質、実機性能、実D810 v5 runまたは実機capture 1/10/100を証明しない。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsoftware-only checkpointで実行していない。
 
 ## P0判定
 
