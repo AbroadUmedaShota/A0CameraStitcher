@@ -12,6 +12,8 @@ public partial class HardwareSingleCameraWindow : Window
     private readonly HardwareSingleAppSessionLease _sessionLease;
     private readonly PersistentHardwareCameraAgentOperations _operations;
     private readonly HardwareSingleCameraViewModel _viewModel;
+    private bool _shutdownStarted;
+    private bool _shutdownComplete;
 
     public HardwareSingleCameraWindow(string cameraAgentExecutablePath)
     {
@@ -35,7 +37,7 @@ public partial class HardwareSingleCameraWindow : Window
                 profileStore);
             DataContext = _viewModel;
             Loaded += OnLoaded;
-            Closed += OnClosed;
+            Closing += OnClosing;
         }
         catch
         {
@@ -72,8 +74,26 @@ public partial class HardwareSingleCameraWindow : Window
         }
     }
 
-    private async void OnClosed(object? sender, EventArgs eventArgs)
+    // GitHub Issue #94: 以前は async void の Closed ハンドラで await していたが、最後の
+    // ウィンドウの Closed 後は WPF(既定 ShutdownMode=OnLastWindowClose)が即
+    // Application.Shutdown() を呼び、Dispatcher が停止して await 以降の継続が二度と
+    // 実行されなかった(Live View の Close 送信・_operations.DisposeAsync・各 Dispose が
+    // 飛び、ネイティブ Agent がカメラを最大寿命まで保持)。Closing でいったんキャンセルして
+    // ウィンドウ(と Dispatcher)を生かしたまま非同期シャットダウンを完走させ、完了後に
+    // 改めて Close() する。
+    private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs eventArgs)
     {
+        if (_shutdownComplete)
+        {
+            return;
+        }
+        eventArgs.Cancel = true;
+        if (_shutdownStarted)
+        {
+            return;
+        }
+        _shutdownStarted = true;
+        IsEnabled = false;
         _lifetime.Cancel();
         try
         {
@@ -101,6 +121,8 @@ public partial class HardwareSingleCameraWindow : Window
             _lifetime.Dispose();
             _viewModel.Dispose();
             _sessionLease.Dispose();
+            _shutdownComplete = true;
+            Close();
         }
     }
 }

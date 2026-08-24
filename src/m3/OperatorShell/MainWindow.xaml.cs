@@ -33,6 +33,8 @@ public partial class MainWindow : Window
     private FrameworkElement? _targetDragReferenceArea;
     private Point _targetDragLastPoint;
     private Action<double, double>? _targetDragApply;
+    private bool _shutdownStarted;
+    private bool _shutdownComplete;
 
     // 拡大エリアの一辺と、カーソルとの間隔。MainWindow.xaml の LoupePanel と合わせる。
     private const double LoupePanelSize = 236;
@@ -85,7 +87,7 @@ public partial class MainWindow : Window
                 liveViewFrameSource: _liveViewFrameSource);
             DataContext = _viewModel;
             Loaded += OnLoaded;
-            Closed += OnClosed;
+            Closing += OnClosing;
         }
         catch
         {
@@ -101,8 +103,25 @@ public partial class MainWindow : Window
         await _viewModel.InitializeAsync(_lifetime.Token);
     }
 
-    private async void OnClosed(object? sender, EventArgs eventArgs)
+    // GitHub Issue #94: 以前は async void の Closed ハンドラで await していたが、最後の
+    // ウィンドウの Closed 後は WPF(既定 ShutdownMode=OnLastWindowClose)が即
+    // Application.Shutdown() を呼び、Dispatcher が停止して await 以降の継続が二度と
+    // 実行されなかった(_dualAgentLifecycle.DisposeAsync・_liveViewFramePump.Dispose 等が
+    // 飛ぶ)。Closing でいったんキャンセルしてウィンドウ(と Dispatcher)を生かしたまま
+    // 非同期シャットダウンを完走させ、完了後に改めて Close() する。
+    private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs eventArgs)
     {
+        if (_shutdownComplete)
+        {
+            return;
+        }
+        eventArgs.Cancel = true;
+        if (_shutdownStarted)
+        {
+            return;
+        }
+        _shutdownStarted = true;
+        IsEnabled = false;
         _lifetime.Cancel();
         try
         {
@@ -124,6 +143,8 @@ public partial class MainWindow : Window
             _liveViewFramePump.Dispose();
             _lifetime.Dispose();
             _sessionLease?.Dispose();
+            _shutdownComplete = true;
+            Close();
         }
     }
 
