@@ -1,1 +1,13 @@
-{"schema_version":"autodev.promotion-log.v1","entries":[]}
+{
+  "schema_version": "autodev.promotion-log.v1",
+  "entries": [
+    {
+      "timestamp": "2026-08-24T17:28:42+09:00",
+      "run_id": "manual-20260824-wednesday-test-readiness",
+      "plan_version": "2.12.0",
+      "result": "waiting-for-existing-critical-path",
+      "promoted_issue": null,
+      "reason": "No new execution Issue was promoted. GitHub Issues 7, 94, and 131 already cover the active hardware, shutdown, and WPD evidence-integrity critical path; the exact-SHA candidate is billing-blocked, and physical one-shot work is S2 and operator-gated."
+    }
+  ]
+}

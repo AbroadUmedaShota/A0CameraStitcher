@@ -1,1 +1,95 @@
-{"schema_version":"autodev.backlog.v1","generated_at":"2026-08-03","items":[],"summary":{"draft_count":0,"promotable_count":0,"ux_review_count":0,"spec_decision_count":0}}
+{
+  "schema_version": "autodev.backlog.v1",
+  "generated_at": "2026-08-24",
+  "plan_version": "2.12.0",
+  "items": [
+    {
+      "id": "BL-20260826-01",
+      "candidate_type": "implementation-candidate",
+      "source": "plan-gap",
+      "title": "Prepare the Wednesday SingleCamera WPF test flow",
+      "dedupe_key": "wednesday-singlecamera-wpf-test-flow",
+      "work_item_ids": ["WI-0036"],
+      "safety_class": "S1",
+      "status": "draft",
+      "ux_review_required": false,
+      "dependencies": ["WI-0032", "WI-0033", "GitHub Issue 94", "GitHub Issue 131"],
+      "acceptance_criteria": [
+        "SingleCamera connect, readiness, Live View, capture, review, export, failure, and close states are operable and truthful",
+        "unfinished Dual paths remain visibly HardwarePending and disabled",
+        "no mode inference, automatic fallback, automatic retry, or simulated success is introduced"
+      ],
+      "score": {
+        "safety": 5,
+        "verifiability": 5,
+        "locality": 4,
+        "confidence": 4,
+        "dependency_risk": 2
+      },
+      "promotion": "not-promoted",
+      "blocked_reason": "Existing critical-path Issues 94 and 131 remain active; the repository permits at most one active promoted implementation issue."
+    },
+    {
+      "id": "BL-20260826-02",
+      "candidate_type": "implementation-candidate",
+      "source": "plan-gap",
+      "title": "Assemble and verify the exact-SHA Wednesday Windows candidate",
+      "dedupe_key": "wednesday-exact-sha-windows-candidate",
+      "work_item_ids": ["WI-0038"],
+      "safety_class": "S1",
+      "status": "blocked",
+      "ux_review_required": false,
+      "dependencies": ["WI-0036", "WI-0037", "GitHub Actions billing and runner availability"],
+      "acceptance_criteria": [
+        "Candidate commit SHA, executable hashes, toolchain, test commands, outcomes, and limitations are recorded",
+        "SDK-less C++ Debug and Release, M3 simulated Debug and Release, and formal WPF flow pass for the candidate when CI is available",
+        "Billing or runner failure remains an environment block and is not reported as a code PASS"
+      ],
+      "score": {
+        "safety": 5,
+        "verifiability": 5,
+        "locality": 4,
+        "confidence": 4,
+        "dependency_risk": 1
+      },
+      "promotion": "not-promoted",
+      "blocked_reason": "GitHub Actions jobs currently do not start because of the repository billing or spending-limit condition."
+    },
+    {
+      "id": "BL-20260826-03",
+      "candidate_type": "implementation-candidate",
+      "source": "plan-gap",
+      "title": "Run the controlled Wednesday SingleCamera one-shot",
+      "dedupe_key": "wednesday-singlecamera-one-shot",
+      "work_item_ids": ["WI-0039"],
+      "safety_class": "S2",
+      "status": "human-gated",
+      "ux_review_required": false,
+      "required_role": "operator",
+      "human_gate_category": "ops",
+      "dependencies": ["WI-0011", "WI-0038", "GitHub Issue 7", "explicit operator resume", "dedicated zero-payload spool"],
+      "acceptance_criteria": [
+        "Exactly one D810 passes identity-v3 read-only preflight with no capture, Live View, card write, or delete",
+        "Dedicated spool reports zero payload objects before the first capture",
+        "At most one no-retry capture proves verified canonical-original persistence and exact cleanup, or stops as FailedPartial"
+      ],
+      "score": {
+        "safety": 2,
+        "verifiability": 5,
+        "locality": 3,
+        "confidence": 3,
+        "dependency_risk": 1
+      },
+      "promotion": "not-promoted",
+      "blocked_reason": "S2 physical hardware work is not auto-promotable and is already governed by GitHub Issue 7 and the operator-resume gate."
+    }
+  ],
+  "summary": {
+    "draft_count": 1,
+    "blocked_count": 1,
+    "human_gated_count": 1,
+    "promotable_count": 0,
+    "ux_review_count": 0,
+    "spec_decision_count": 0
+  }
+}

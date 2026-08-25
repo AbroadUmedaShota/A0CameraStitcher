@@ -1,30 +1,30 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.10.0",
-  "base_plan_version": "2.8.1",
-  "generated_at": "2026-08-10",
-  "summary": "Add explicit SingleCamera product operation without weakening DualCamera A0 stitching: no mode inference or automatic fallback, initial SingleCamera exactly-one D810, canonical-original explicit export, Stitch NotApplicable, and read-only settings.",
-  "added_milestones": [],
-  "changed_milestones": ["M0", "M1A", "M3P", "M3", "M4"],
-  "removed_milestones": [],
-  "added_work_items": [],
-  "changed_work_items": ["WI-0001", "WI-0010", "WI-0011", "WI-0012", "WI-0030A", "WI-0032A", "WI-0033A", "WI-0031", "WI-0032", "WI-0033", "WI-0035", "WI-0042"],
-  "removed_work_items": [],
-  "breaking_changes": [
-    "legacy capture-single, capture-pair, and stability commands are fake-only and cannot open SDK or WPD hardware transports",
-    "all real-camera Phase 0 CLI commands now require one operator-session-wide named OS lease in addition to per-session guards; other user sessions and services are outside the MVP operating contract",
-    "SingleCamera and DualCamera are explicit immutable transaction modes and connected count never selects or downgrades the mode",
-    "initial SingleCamera requires exactly one SDK and WPD D810 projection and does not operate one selected body while two are connected",
-    "SingleCamera produces one canonical original with Stitch NotApplicable and explicit byte-identical export; camera settings remain read-only"
+  "plan_version": "2.12.0",
+  "base_plan_version": "2.11.0",
+  "generated_at": "2026-08-24",
+  "summary": "Add a bounded 2026-08-26 internal SingleCamera test-readiness milestone with separate UI, safety-blocker, exact-SHA candidate, and operator-controlled one-shot work. Keep Dual hardware capture, A0 quality acceptance, durability, packaging, and release outside the Wednesday completion claim.",
+  "added_milestones": [
+    "M3T"
   ],
+  "changed_milestones": [],
+  "removed_milestones": [],
+  "added_work_items": [
+    "WI-0036",
+    "WI-0037",
+    "WI-0038",
+    "WI-0039"
+  ],
+  "changed_work_items": [],
+  "removed_work_items": [],
+  "breaking_changes": [],
   "non_completion_guards": [
-    "existing software, simulated, and one-camera Phase 0 evidence does not prove the new SingleCamera WPF workflow, real Camera Agent integration, real one-camera capture and export, two-camera operation, approved A0 quality, or release readiness",
-    "DualCamera camera shortage must remain a blocker and must never trigger SingleCamera automatic fallback",
-    "SingleCamera target size, DPI, crop, future processing, performance, and durability remain gated by HG-0009",
-    "one-camera setting readback remains Partial until WI-0010A records native SDK command trace and resolves or explicitly preserves opaque capability meanings",
-    "synthetic measurement in WI-0022C must not introduce unapproved product thresholds or mutate a rig profile",
-    "dedicated empty-card capture and physical fault operations remain deferred until the operator explicitly resumes them",
-    "the known 90-object spool state must not be rechecked repeatedly without a reported physical state change",
-    "existing camera-card objects, bulk deletion, formatting, vendor operation 0x9207, and automatic retry remain prohibited"
+    "M3T completion is internal test readiness only and does not complete M1A, M3, M4, MVP acceptance, packaging, or release",
+    "the Wednesday physical lane is exactly-one SingleCamera only; incomplete Dual capture, binding, and stitch paths remain HardwarePending and disabled",
+    "GitHub billing or runner failure blocks an exact-SHA CI claim and must not be converted into a code PASS or release PASS",
+    "Issue 94 shutdown and Issue 131 WPD read-bound fixes must be verified before a real one-shot; unresolved Issue 130 keeps Dual disabled",
+    "real camera work still requires explicit operator resume, identity-v3 read-only readiness, one D810, and a dedicated spool with zero payload objects",
+    "one successful capture does not prove ten-run characterization, HG-0009 p95, 100-run acceptance, Dual hardware operation, stitching, or A0 output quality",
+    "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"
   ]
 }
