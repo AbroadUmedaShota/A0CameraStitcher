@@ -1251,12 +1251,20 @@ bool IsReparsePoint(const fs::path& path) noexcept {
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
     }
-    // GitHub Issue #144: パスが本当に存在しない場合のみ「reparse point ではない」
-    // と判定してよい。アクセス拒否・共有違反・パス長超過・切れた symlink など
-    // それ以外の理由で属性取得に失敗した場合は検査できなかっただけなので、
-    // reparse point とみなして fail-closed にする(fail-open で安全と誤判定
-    // しない)。dual_hardware_camera_agent_store.cpp の AttributesOrMissing と
-    // 同じ方針。
+    // GitHub Issue #144: GetFileAttributesW はリンクを辿らず reparse point 自身の
+    // 属性を返すため、生きた/切れたジャンクションや symlink はこの関数の分岐に
+    // 入る前に「INVALID_FILE_ATTRIBUTES ではない」側で正しく検出できる
+    // (P/Invoke 実測・reviewer_security いろは確認済み、2026-08-25。err=0 で
+    // FILE_ATTRIBUTE_REPARSE_POINT が立つ。共有違反中のファイルも err=0 で
+    // 通常属性が返るだけで、この分岐には来ない)。
+    // この分岐が塞ぐのは属性取得そのものが失敗するケース: 実測で
+    // ERROR_ACCESS_DENIED(5) / ERROR_INVALID_NAME(123) / ERROR_BAD_NETPATH(53)
+    // を確認しており、これらは検査できなかっただけなので reparse とみなして
+    // fail-closed にする(fail-open で安全と誤判定しない)。
+    // 既知の残存ギャップ: ERROR_PATH_NOT_FOUND(3) は「親ディレクトリが未作成」の
+    // 正常系(fail-closed が誤検知しないために false が必要)と「MAX_PATH 超過」を
+    // 区別できず、後者は今も fail-open のまま(実測確認済み・未解決)。
+    // dual_hardware_camera_agent_store.cpp の AttributesOrMissing と同じ方針。
     return !IsMissingAttributesError(GetLastError());
 }
 
@@ -1618,7 +1626,7 @@ void ValidateTransactionJournalScope(
             "hardware Camera Agent transaction directory is not a reparse-free child");
     }
     const fs::path journal = directory / "transaction.json";
-    if (fs::exists(journal) && IsReparsePoint(journal)) {
+    if (IsReparsePoint(journal)) {
         throw TransportError(
             "transaction_state_scope_invalid",
             "hardware Camera Agent transaction journal is a reparse point");
