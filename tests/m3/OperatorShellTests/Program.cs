@@ -195,6 +195,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareAppStateStoreFailClosedBoundaryAsync();
+    Console.WriteLine("PASS hardware app state store treats absence as empty and occlusion as fail-closed");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware app state store treats absence as empty and occlusion as fail-closed");
+    Console.Error.WriteLine($"FAIL hardware app state store treats absence as empty and occlusion as fail-closed: {exception}");
+}
+
+try
+{
     HardwareLaunchOptionsAreExplicit();
     Console.WriteLine("PASS app launch options keep hardware and simulation explicit");
 }
@@ -1418,6 +1429,43 @@ static async Task HardwareMalformedLocalStateFailsClosedAsync()
         await oversizedViewModel.InitializeAsync();
         Check.False(oversizedViewModel.CanCheckReadiness, "Oversized state must fail closed before parsing.");
         Check.Equal(0, oversizedOperations.TotalCallCount);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareAppStateStoreFailClosedBoundaryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        // GitHub Issue #147: a state directory that has genuinely never been created (first
+        // launch on a fresh machine) must load as "no pending transaction" without throwing,
+        // and must not be created as a side effect of a read-only load.
+        var neverCreatedStateDirectory = Path.Combine(root, "never-created-state");
+        var freshStore = new HardwareSingleAppStateStore(neverCreatedStateDirectory);
+        Check.True(
+            await freshStore.LoadPendingAsync() is null,
+            "A first launch with no prior state directory must return null instead of throwing.");
+        Check.False(
+            Directory.Exists(neverCreatedStateDirectory),
+            "Loading pending state must not create the state directory as a side effect.");
+
+        // GitHub Issue #147: Directory.Exists()/File.Exists() previously gated the load path and
+        // returned false for any access problem, not only genuine absence, so the pre-fix code
+        // silently reported "no pending transaction" for a state file it could not actually read.
+        // Reproduce that class of failure deterministically (no ACL or symlink privileges needed
+        // in CI, and no dependency on a specific Win32 error code): put a directory where the
+        // state file is expected. File.Exists() returns false for a directory too, so the pre-fix
+        // gate would have swallowed this exactly like a genuine access-denied error. Post-fix, the
+        // regular-file check must still observe the directory and fail closed instead of masking it.
+        var occludedStateDirectory = Path.Combine(root, "occluded-state");
+        Directory.CreateDirectory(occludedStateDirectory);
+        Directory.CreateDirectory(Path.Combine(occludedStateDirectory, "app-state.json"));
+        var occludedStore = new HardwareSingleAppStateStore(occludedStateDirectory);
+        await Check.ThrowsAsync<InvalidDataException>(() => occludedStore.LoadPendingAsync());
     }
     finally
     {
