@@ -52,6 +52,19 @@ public partial class LaunchWindow : Window
                 MessageBoxImage.Warning);
             return;
         }
+        catch (ArgumentException exception)
+        {
+            // MainWindow(HardwareDual) の ctor は CameraAgentExecutablePolicy.Resolve で
+            // Dual Agent EXE を検証し、不在・不正パスなら ArgumentException を投げる
+            // （issue #142 症状2）。このメソッドの意図（上のコメント参照）どおり、
+            // プロセスをクラッシュさせず既存のダイアログ経路へ落とす。
+            MessageBox.Show(
+                exception.Message,
+                "A0 Camera Stitcher — 起動引数エラー",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
         Application.Current.MainWindow = nextWindow;
         nextWindow.Show();
         Close();
