@@ -272,6 +272,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync();
+    Console.WriteLine("PASS hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it");
+    Console.Error.WriteLine($"FAIL hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it: {exception}");
+}
+
+try
+{
     await HardwareSinglePreferencesAndProfileApprovalAsync();
     Console.WriteLine("PASS local export preference and 30-day CAM-A profile approval are durable and fail closed");
 }
@@ -1305,6 +1316,81 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
             "A failed stop must invalidate readiness and keep capture disabled.");
         await blockedViewModel.ShutdownAsync();
         blockedViewModel.Dispose();
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// GitHub Issue #141 stage 1: stopping continuous Live View must not cancel an in-flight
+// frame request. Cancelling it aborts the transport's response read, the C++ Camera Agent
+// cannot deliver its dispatched reply (delivery-ACK contract violation), and the process
+// exits with code 3 - which then makes the following StopLiveViewAsync fail to connect.
+static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-hold-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        var operations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            HoldFrameReadUntilReleased = true,
+        };
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")));
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        Check.True(viewModel.CanStartContinuousLiveView, "Ready CAM-A must allow continuous Live View v2.");
+        await viewModel.StartContinuousLiveViewAsync();
+        Check.True(viewModel.IsContinuousLiveViewActive,
+            "Start must mark the continuous session active before the first frame completes.");
+        Check.True(viewModel.PreviewImage is null,
+            "No frame has been decoded yet, PreviewImage must remain empty.");
+
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.True(operations.LastFrameReadToken.HasValue,
+            "ReadLiveViewFrameAsync must be observed with a token.");
+        Check.False(
+            operations.LastFrameReadToken!.Value.CanBeCanceled,
+            "The frame request must not carry a token the stop path can cancel: a cancellable " +
+            "token lets stop abort the in-flight read, which triggers a delivery-ACK failure " +
+            "and exit code 3 on the Camera Agent side.");
+
+        // Stop = cancel the loop's cancellation token. The frame request stays in-flight.
+        var stopTask = viewModel.StopContinuousLiveViewAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Check.False(
+            operations.FrameReadReleaseGate.Task.IsCompleted,
+            "Stopping while a frame request is in-flight must not abort or complete that request early.");
+
+        // Let the in-flight request run to completion, as the transport is expected to.
+        operations.FrameReadReleaseGate.TrySetResult();
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Check.False(viewModel.IsContinuousLiveViewActive,
+            "Stop must complete once the in-flight frame request finishes.");
+        Check.Equal("停止済み（SDK session closed）", viewModel.LiveViewSummary);
+        Check.True(viewModel.PreviewImage is null,
+            "A frame that resolves after stop was requested must not update PreviewImage with stale data.");
+        Check.False(
+            viewModel.TechnicalDetail.Contains("continuous_live_view_frame_unconfirmed"),
+            "The in-flight frame request must complete normally, not be treated as a communication failure.");
+
+        Check.True(
+            operations.CallOrder.IndexOf("frame") < operations.CallOrder.IndexOf("stop"),
+            "read-live-view-frame must complete and precede stop-live-view, with no dropped connection in between.");
+        Check.Equal(1, operations.StopCount);
+
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
     }
     finally
     {
@@ -5805,6 +5891,19 @@ sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
     public TaskCompletionSource FirstFrame { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    // 以下は #141 段階1の検証用に追加した観測フック。frame読み取りをテストが制御する
+    // タイミングまで in-flight のまま保持し、渡されたトークンが停止によって
+    // キャンセルされていないことを確認できるようにする。
+    public bool HoldFrameReadUntilReleased { get; set; }
+
+    public TaskCompletionSource FrameReadEntered { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource FrameReadReleaseGate { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public CancellationToken? LastFrameReadToken { get; private set; }
+
     public string CreateSessionId() => Guid.NewGuid().ToString("N");
 
     public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> StartLiveViewAsync(
@@ -5816,15 +5915,27 @@ sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
         return Task.FromResult(Reply(sessionId, true, "Started", 0, []));
     }
 
-    public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> ReadLiveViewFrameAsync(
+    public async Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> ReadLiveViewFrameAsync(
         string sessionId,
         CancellationToken cancellationToken = default)
     {
+        LastFrameReadToken = cancellationToken;
         cancellationToken.ThrowIfCancellationRequested();
+        if (HoldFrameReadUntilReleased)
+        {
+            FrameReadEntered.TrySetResult();
+            // 渡されたトークンがキャンセルされたら、実際のトランスポートが応答読み取りを
+            // 打ち切る挙動を再現する。#141の修正後はCancellationToken.Noneが渡るため
+            // CanBeCanceled=falseとなり、この登録は何も起こさず解放はテスト側の
+            // FrameReadReleaseGate.TrySetResult() 呼び出しだけで完了する。
+            using var registration = cancellationToken.Register(
+                () => FrameReadReleaseGate.TrySetCanceled(cancellationToken));
+            await FrameReadReleaseGate.Task.ConfigureAwait(false);
+        }
         _frameNumber++;
         CallOrder.Add("frame");
         FirstFrame.TrySetResult();
-        return Task.FromResult(Reply(sessionId, true, "Frame", _frameNumber, frameBytes));
+        return Reply(sessionId, true, "Frame", _frameNumber, frameBytes);
     }
 
     public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> HeartbeatLiveViewAsync(
