@@ -818,16 +818,20 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             HardwareCameraAgentReply<HardwareContinuousLiveViewResult> reply;
             try
             {
+                // 停止操作はループのトークンをキャンセルするが、フレーム要求自体には渡さない。
+                // 中断するとリンクされたトークンがトランスポートの応答読み取りを打ち切り、
+                // クライアント側パイプが閉じてしまう。サーバはdispatch中の応答を配送できず
+                // （delivery-ACK契約違反）exit code 3でCamera Agentプロセスごと終了する。
+                // 停止は「中断」ではなく「1フレーム分の完了待ち」で表現する。
                 reply = await _continuousLiveViewOperations
-                    .ReadLiveViewFrameAsync(sessionId, cancellationToken)
+                    .ReadLiveViewFrameAsync(sessionId, CancellationToken.None)
                     .ConfigureAwait(true);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
+                // ループのトークンをこの呼び出しに渡さなくなったため、ここに届く
+                // OperationCanceledExceptionは「停止された」ことを意味しない。
+                // 応答タイムアウト（LiveViewResponseTimeout）由来の失敗として扱う。
                 LiveViewSummary = "フレーム取得状態が不明です。停止操作が必要です。";
                 ActivityText = "Live View通信が中断しました。撮影前に停止を確認してください。";
                 TechnicalDetail += $"\ncontinuous_live_view_frame_unconfirmed: {SafeMessage(exception)}";
@@ -840,6 +844,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 LiveViewSummary = $"Live View終了: {reply.Payload.ErrorCategory}";
                 ActivityText = "Camera AgentがLive View SDKセッションをfail-closedで終了しました。";
                 InvalidateReadiness("Live View failure後は撮影前の状態再確認が必要です。");
+                return;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // 停止済み。失敗応答のfail-closed処理（上のブロック）は素通りさせつつ、
+                // 成功応答のデコード/PreviewImage更新だけをスキップし、古いフレームで
+                // 上書きしない。
                 return;
             }
 
@@ -857,7 +869,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 TechnicalDetail += $"\ncontinuous_live_view_frame_invalid: {SafeMessage(exception)}";
                 return;
             }
-            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(true);
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
         }
     }
 

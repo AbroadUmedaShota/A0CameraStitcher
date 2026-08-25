@@ -11,6 +11,9 @@ public sealed class PersistentHardwareCameraAgentOperations :
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan QueryResponseTimeout = TimeSpan.FromSeconds(45);
+    // 不変条件（#141）: C++側のTimeouts::open / Timeouts::live_view_frameより必ず長く保つこと。
+    // これを下回ると、フレーム応答がまだdispatch中のうちにこちらが応答読み取りを諦めて
+    // パイプを閉じてしまい、delivery-ACK契約を破ってCamera Agentがexit code 3で終了する。
     private static readonly TimeSpan LiveViewResponseTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CaptureResponseTimeout = TimeSpan.FromSeconds(240);
     private readonly string _agentExecutablePath;
