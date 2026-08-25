@@ -294,6 +294,39 @@ catch (Exception exception)
 
 try
 {
+    await HardwareArtifactVerifierRejectsPathOutsideAgentRootAsync();
+    Console.WriteLine("PASS HardwareArtifactVerifier rejects a retained-original path outside the agent root (#101 M-4)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareArtifactVerifier rejects a retained-original path outside the agent root (#101 M-4)");
+    Console.Error.WriteLine($"FAIL HardwareArtifactVerifier rejects a retained-original path outside the agent root (#101 M-4): {exception}");
+}
+
+try
+{
+    HardwareDualTransactionSnapshotStoreRejectsOversizedState();
+    Console.WriteLine("PASS HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5)");
+    Console.Error.WriteLine($"FAIL HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5): {exception}");
+}
+
+try
+{
+    await HardwareSinglePreferencesStoreRejectsOversizedFileAsync();
+    Console.WriteLine("PASS HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6)");
+    Console.Error.WriteLine($"FAIL HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6): {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle keeps process/camera at zero while identity is Pending");
 }
@@ -952,9 +985,10 @@ static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
         var wrongDimensionsPath = Path.Combine(root, "agent", "wrong-dimensions", "CAM-A", "original.jpg");
         var wrongDimensions = WriteJpegRecord(wrongDimensionsPath, "CAM-A", preserveOnePixelDimensions: true);
         await Check.ThrowsAsync<InvalidDataException>(() =>
-            HardwareArtifactVerifier.VerifyOriginalAsync(wrongDimensions));
+            HardwareArtifactVerifier.VerifyOriginalAsync(wrongDimensions, Path.GetDirectoryName(wrongDimensionsPath)!));
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
             CaptureResultFactory = (transactionId, alias) =>
                 CompleteCapture(transactionId, alias, original),
         };
@@ -997,6 +1031,85 @@ static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
 
         var loaded = await preferences.LoadAsync();
         Check.Equal(Path.GetFullPath(repairedChoice), loaded!.ExportDirectory);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-4: a spoofed or compromised Camera Agent could report a
+// retained-original record whose Path/SizeBytes/Sha256 are all internally
+// consistent (i.e. an attacker who also controls the reported hash) but that
+// points outside the agent's own directory tree. HardwareArtifactVerifier
+// must reject that record even though every other field is well-formed.
+static async Task HardwareArtifactVerifierRejectsPathOutsideAgentRootAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var sourcePath = Path.Combine(root, "agent", "run-outside-root", "CAM-A", "original.jpg");
+        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        var unrelatedAgentRoot = Path.Combine(root, "not-the-agent-directory");
+        Directory.CreateDirectory(unrelatedAgentRoot);
+
+        await Check.ThrowsAsync<InvalidDataException>(() =>
+            HardwareArtifactVerifier.VerifyOriginalAsync(original, unrelatedAgentRoot));
+
+        // The same file, validated against its real containing directory (or
+        // an ancestor of it), must still be accepted.
+        var verified = await HardwareArtifactVerifier.VerifyOriginalAsync(
+            original, Path.Combine(root, "agent"));
+        Check.Equal(sourcePath, verified.Path);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-5: HardwareDualTransactionSnapshotStore must reject an
+// oversized durable snapshot file before it is fully read into memory, not
+// after (an unbounded File.ReadAllBytes would let an OutOfMemoryException
+// bypass the ViewModel's typed catch filters). This does not reproduce the
+// TOCTOU window itself (there is no injectable seam to pause between the
+// size check and the read), only that the post-refactor code path still
+// enforces the size limit.
+static void HardwareDualTransactionSnapshotStoreRejectsOversizedState()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var productRoot = Path.Combine(root, "product");
+        var stateDirectory = Path.Combine(productRoot, "recovery-state");
+        Directory.CreateDirectory(stateDirectory);
+        File.WriteAllBytes(Path.Combine(stateDirectory, "pending-transaction.json"), new byte[257 * 1024]);
+
+        var store = new HardwareDualTransactionSnapshotStore(productRoot);
+        Check.Throws<InvalidDataException>(() => store.LoadPending());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-6: HardwareSinglePreferencesStore must reject an oversized
+// preferences file. As with M-5 above, this exercises the post-refactor size
+// enforcement on the single read handle; it does not reproduce the TOCTOU
+// race between the old separate FileInfo check and the FileStream open.
+static async Task HardwareSinglePreferencesStoreRejectsOversizedFileAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var stateDirectory = Path.Combine(root, "state");
+        Directory.CreateDirectory(stateDirectory);
+        var preferencesPath = Path.Combine(stateDirectory, "preferences.json");
+        await File.WriteAllBytesAsync(preferencesPath, new byte[17 * 1024]);
+
+        var store = new HardwareSinglePreferencesStore(preferencesPath);
+        await Check.ThrowsAsync<InvalidDataException>(() => store.LoadAsync());
     }
     finally
     {
@@ -1112,6 +1225,7 @@ static async Task HardwareSingleHappyPathAsync()
             Path.Combine(root, "agent", "run-1000-1", "live-view", "CAM-B", "preview.jpg"));
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
             Preview = resumedPreview,
             CaptureResultFactory = (transactionId, alias) =>
                 CompleteCaptureWithHandoff(transactionId, alias, original, resumedPreview),
@@ -1188,7 +1302,10 @@ static async Task HardwarePendingTransactionRecoveryAsync()
             CaptureRequestDispatchAttempted = true,
             StartedAtUtc = DateTimeOffset.UtcNow,
         });
-        var operations = new FakeHardwareSingleCameraOperations();
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
+        };
         operations.TransactionResults.Enqueue(ReservedCapture(transactionId, "CAM-A"));
         operations.TransactionResults.Enqueue(InProgressCapture(transactionId, "CAM-A"));
         operations.TransactionResults.Enqueue(FailedPartialCapture(transactionId, "CAM-A", original));
@@ -1245,6 +1362,7 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
         var operations = new FakeContinuousHardwareOperations(frameBytes)
         {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
             CaptureResultFactory = (transactionId, alias) =>
                 CompleteCapture(transactionId, alias, original),
         };
@@ -1282,6 +1400,7 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
 
         var blockedOperations = new FakeContinuousHardwareOperations(frameBytes)
         {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
             CaptureResultFactory = (transactionId, alias) =>
                 CompleteCapture(transactionId, alias, original),
             FailNextStop = true,
@@ -1320,6 +1439,7 @@ static async Task HardwareLiveViewRequiresFreshReadinessAsync()
         var preview = WritePreviewRecord(Path.Combine(root, "agent", "run-3000-1", "live-view", "CAM-A", "preview.jpg"));
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "agent", "fake-agent.exe"),
             Preview = preview,
             ReadinessFactory = alias => HardwareTestData.ReadyHardware(alias) with
             {
@@ -1632,7 +1752,8 @@ static async Task HardwareExportVerificationFailureStaysUnpublishedAsync()
         await Check.ThrowsAsync<IOException>(() => exporter.ExportAsync(
             original,
             "44444444444444444444444444444444",
-            DateTimeOffset.Parse("2026-08-10T00:00:00Z")));
+            DateTimeOffset.Parse("2026-08-10T00:00:00Z"),
+            Path.GetDirectoryName(sourcePath)!));
 
         Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
         Check.Equal(1, Directory.GetFiles(exportDirectory, "*.partial", SearchOption.TopDirectoryOnly).Length);
@@ -1653,7 +1774,8 @@ static async Task HardwareExportVerificationFailureStaysUnpublishedAsync()
         var finalPath = await exactHandleExporter.ExportAsync(
             original,
             "45454545454545454545454545454545",
-            DateTimeOffset.Parse("2026-08-10T00:00:01Z"));
+            DateTimeOffset.Parse("2026-08-10T00:00:01Z"),
+            Path.GetDirectoryName(sourcePath)!);
         Check.True(replacementHookRan, "The post-verification replacement seam must execute.");
         Check.True(
             File.Exists(finalPath),
@@ -5647,7 +5769,11 @@ sealed class BlockingTransactionService : ISimulatedTransactionService
 
 class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
 {
-    public string AgentExecutablePath => "C:\\fake\\A0CameraStitcher.CameraAgent.exe";
+    // Tests that verify a real retained-original or preview file (i.e. that
+    // exercise HardwareArtifactVerifier's agent-root containment check) must
+    // set this to a path under the same directory as the file(s) they write,
+    // e.g. Path.Combine(root, "agent", "fake-agent.exe").
+    public string AgentExecutablePath { get; set; } = "C:\\fake\\A0CameraStitcher.CameraAgent.exe";
 
     public bool AgentExecutableAvailable => true;
 
