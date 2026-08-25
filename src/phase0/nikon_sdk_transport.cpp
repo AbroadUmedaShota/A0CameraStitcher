@@ -12,6 +12,7 @@
 #endif
 
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/sdk_pending_command.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -133,6 +134,11 @@ NikonCardCaptureEventSnapshot NikonCardCaptureEventWindow::Snapshot() const noex
 namespace {
 
 constexpr auto kAsyncInterval = std::chrono::milliseconds(10);
+// Grace period for abandoning a pending async command after Abort: bounded
+// polling for the completion callback, roughly kAbortGraceIterations *
+// kAsyncInterval (~250ms), before the buffer handed to the SDK is treated as
+// unrecoverable and the session is quarantined.
+constexpr int kAbortGraceIterations = 25;
 constexpr auto kCandidateSettle = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxLiveViewArrayBytes = 16U * 1024U * 1024U;
 // Hybrid capture writes to the camera card; WPD observes the resulting object
@@ -641,6 +647,13 @@ private:
 
     void RequireOpen() const {
         if (!session_open_ || !source_.opened) throw TransportError("session_not_open", "Nikon source is not open");
+        // An abandoned async command that never produced completion evidence
+        // (see AbandonPending) leaves the SDK in an unknown state: it may
+        // still write into a buffer this transport already released. Refuse
+        // to issue further commands rather than risk a second UAF window.
+        if (sdk_session_poisoned_) {
+            throw TransportError("session_poisoned", "Nikon SDK session is poisoned after an abandoned async command");
+        }
     }
 
     void RequireCaptureSession() const {
@@ -741,6 +754,26 @@ private:
         }
     }
 
+    // Abandons a pending async command: issues Abort exactly once, then
+    // pumps for up to kAbortGraceIterations steps waiting for `state->done`.
+    // If completion evidence never arrives, the buffer handed to the SDK for
+    // this command cannot be safely released (stage 2 tracks such buffers so
+    // they can be kept alive instead of freed; for now this only stops the
+    // session from accepting further commands).
+    void AbandonPending(MaidObject& object, CompletionState* state, std::string_view category) {
+        const AbandonOutcome outcome = AbandonPendingCommand(
+            [this, &object]() {
+                Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
+            },
+            [this, &object, category]() { Pump(object, category); },
+            [state]() { return state->done.load(std::memory_order_acquire); },
+            [] { std::this_thread::sleep_for(kAsyncInterval); },
+            kAbortGraceIterations);
+        if (outcome == AbandonOutcome::quarantined) {
+            sdk_session_poisoned_ = true;
+        }
+    }
+
     NKERROR RunCompleted(MaidObject& object, ULONG command, ULONG parameter, ULONG data_type,
                          NKPARAM data, std::chrono::steady_clock::time_point deadline,
                          std::string_view category) {
@@ -751,14 +784,26 @@ private:
             reinterpret_cast<LPNKFUNC>(&CompletionProc), reinterpret_cast<NKREF>(state));
         if (immediate == kNkMAIDResult_BufferSize) return immediate;
         if (immediate != kNkMAIDResult_NoError && immediate != kNkMAIDResult_Pending) {
+            // The SDK reported immediate failure, but it may already hold the
+            // buffer/callback we handed it for this command. Abandon it
+            // instead of walking away as if nothing was ever in flight.
+            AbandonPending(object, state, category);
             throw TransportError(std::string(category), "SDK command failed: " + ResultText(immediate));
         }
         while (!state->done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
+                AbandonPending(object, state, category);
                 throw TransportError(std::string(category), "SDK command timed out");
             }
-            Pump(object, category);
+            try {
+                Pump(object, category);
+            } catch (const TransportError&) {
+                // Pump() failing does not mean the async command itself
+                // completed or was cancelled; still abandon it before
+                // propagating the pump failure.
+                AbandonPending(object, state, category);
+                throw;
+            }
             std::this_thread::sleep_for(kAsyncInterval);
         }
         if (state->result != kNkMAIDResult_NoError) {
@@ -1524,6 +1569,11 @@ private:
     ULONG source_id_{0};
     bool claimed_{false};
     bool session_open_{false};
+    // Set when an abandoned async command never produced completion evidence
+    // within the abort grace period (see AbandonPending). Checked by
+    // RequireOpen() to stop issuing further commands into a session the SDK
+    // may still be writing into.
+    bool sdk_session_poisoned_{false};
     bool capture_session_{false};
     bool live_view_session_{false};
     bool live_view_started_{false};

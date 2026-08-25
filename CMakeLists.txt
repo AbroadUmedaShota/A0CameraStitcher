@@ -188,6 +188,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME phase0_contracts COMMAND a0_phase0_tests)
 
+    # Header-only policy with no MAID/Windows dependency, so it builds and
+    # runs regardless of A0_NIKON_SDK_AVAILABLE (see sdk_pending_command.hpp).
+    add_executable(a0_sdk_pending_command_tests tests/sdk_pending_command_tests.cpp)
+    target_link_libraries(a0_sdk_pending_command_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_sdk_pending_command_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_sdk_pending_command_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME sdk_pending_command_contracts COMMAND a0_sdk_pending_command_tests)
+
     add_executable(a0_phase0_cli_safety_tests tests/phase0_cli_safety_tests.cpp)
     target_link_libraries(a0_phase0_cli_safety_tests PRIVATE a0_phase0_core)
     if(MSVC)
