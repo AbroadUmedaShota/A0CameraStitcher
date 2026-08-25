@@ -351,9 +351,10 @@ Request payload:
 
 Frames are bounded to 1..30 and the interval to 0..1000 ms. The agent acquires a
 finite set of frames, stops Live View, closes the SDK session, then persists the
-last valid frame as `preview.jpg.partial` followed by write-through atomic
-`preview.jpg` rename and reread. The result carries frame/hash/duration and
-stop/close evidence, plus nullable preview path/size/SHA. It always reports
+last valid frame under a randomized `preview.jpg.<runId>.partial` name followed
+by write-through atomic `preview.jpg` rename and reread. The result carries
+frame/hash/duration and stop/close evidence, plus nullable preview path/size/SHA.
+It always reports
 `previewIsOriginal:false`, `previewIsStitchInput:false`, and no real IDs. This
 operation verifies finite acquisition only; it is not a continuous display
 

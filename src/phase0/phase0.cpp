@@ -244,10 +244,23 @@ std::optional<std::string> EnvironmentValue(const char* name) {
     return value;
 }
 
+bool IsMissingAttributesError(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
 bool IsReparsePoint(const fs::path& path) {
+    SetLastError(ERROR_SUCCESS);
     const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    }
+    // GitHub Issue #144: パスが本当に存在しない場合のみ「reparse point ではない」
+    // と判定してよい。アクセス拒否・共有違反・パス長超過・切れた symlink など
+    // それ以外の理由で属性取得に失敗した場合は検査できなかっただけなので、
+    // reparse point とみなして fail-closed にする(fail-open で安全と誤判定
+    // しない)。dual_hardware_camera_agent_store.cpp の AttributesOrMissing と
+    // 同じ方針。
+    return !IsMissingAttributesError(GetLastError());
 }
 
 void PrepareReparseFreeEvidenceDirectory(
