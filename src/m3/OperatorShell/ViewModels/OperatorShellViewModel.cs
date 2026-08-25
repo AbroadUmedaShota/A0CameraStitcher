@@ -2770,7 +2770,15 @@ public sealed class OperatorShellViewModel : ObservableObject
             Notices = focusNotices,
         };
         RecalculateAvailability();
-        if (!preserveOutcomeState && UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching))
+        // _initializationFailed のときは preserveOutcomeState の値によらず自動遷移させない
+        // （PR #152 レビュー指摘・要修正2の再差し戻し）。preserveOutcomeState だけに頼ると、
+        // ここを preserveOutcomeState: false（既定）で呼ぶ通常のUI操作（運用構成/カメラ選択/
+        // 確認シナリオのコンボ/Live View切替/オートフォーカス等、いずれもゲート無しか
+        // IsBusy 程度のゲートしか持たない setter 経由）のたびに GetReadyState が再計算され、
+        // durable journal を一度も読めていないのに UiState が Ready 系へ書き換わってしまう
+        // （Capturing/Stitching と同様、_initializationFailed もここで凍結する）。
+        if (!preserveOutcomeState && !_initializationFailed &&
+            UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching))
         {
             UiState = OperatorReadinessEvaluator.GetReadyState(_readiness, DateOnly.FromDateTime(DateTime.Today));
         }

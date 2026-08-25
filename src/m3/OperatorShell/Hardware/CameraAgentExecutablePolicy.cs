@@ -8,6 +8,11 @@ internal static class CameraAgentExecutablePolicy
     // ArgumentNullException / ArgumentOutOfRangeException や createWindow() 内の
     // 無関係なプログラミングバグまで「起動引数エラー」ダイアログへ飲み込まないようにする
     // （PR #152 レビュー指摘・軽微3）。
+    //
+    // ⚠️ 逆方向の依存に注意: この文言は LaunchWindow.OpenAndClose の catch フィルタが
+    // exception.Message との一致判定で依存している。文言・型のどちらを変える場合も
+    // LaunchWindow.xaml.cs 側のフィルタを同時に見直すこと（片方だけ変えるとフィルタが
+    // 沈黙して素の ArgumentException を再び広く飲み込むようになる）。
     internal const string InvalidExecutableMessage =
         "Camera Agentの実行ファイルはアプリケーション配置先の直下にある固定ローカルドライブ上のEXEである必要があります。";
 

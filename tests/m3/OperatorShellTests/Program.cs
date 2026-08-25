@@ -74,6 +74,17 @@ catch (Exception exception)
 
 try
 {
+    await InitializationFailureSurvivesReadinessRebuildsAsync();
+    Console.WriteLine("PASS a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction");
+}
+catch (Exception exception)
+{
+    failures.Add("a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction");
+    Console.Error.WriteLine($"FAIL a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction: {exception}");
+}
+
+try
+{
     await SingleCameraWorkflowAsync();
     Console.WriteLine("PASS single-camera CAM-B capture skips stitch and exports one original");
 }
@@ -2550,6 +2561,43 @@ static async Task InitializationFailureBlocksPrepareNewCaptureAsync()
         viewModel.CanCapture,
         "PrepareNewCaptureCommand must be a no-op (CanExecute=false) after a startup state-load failure; " +
         "it must not silently re-arm capture without re-reading the durable journal.");
+}
+
+// PR #152 再レビュー指摘: _initializationFailed が CanPrepareNewCapture だけをゲートしていた版は
+// 不十分だった。撮影を実際に止めている実体は UiState==FailedPartial であり、
+// OperatorReadinessEvaluator.Evaluate は state が Ready/ReadyWithCorrection のときしか Capture を
+// Permit しない。ところが RebuildReadiness(preserveOutcomeState: false)（既定）は
+// UiState = GetReadyState(...) で無条件にこれを上書きする。SelectedReadinessDemo のような
+// 「ゲート無し、または IsBusy だけ」の通常UI操作の setter は軒並みこの引数なし
+// RebuildReadiness() を叩くため、起動時読取に失敗していてもコンボを2回変更するだけで
+// (1回目でUiStateがReady系へ書き換わり、2回目でRecalculateAvailabilityがその新UiStateを見る)
+// 撮影が解禁されてしまっていた。RebuildReadiness 側に !_initializationFailed を追加した後、
+// この経路でも FailedPartial のまま固定され続けることを検証する。
+static async Task InitializationFailureSurvivesReadinessRebuildsAsync()
+{
+    var viewModel = new OperatorShellViewModel(new FailingInitializeTransactionService());
+    await viewModel.InitializeAsync(CancellationToken.None);
+    Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+    Check.False(viewModel.CanCapture, "A startup state-load failure must block capture before any further UI interaction.");
+
+    // デモ既定値（Blocker無し）では GetReadyState は SafetyAcknowledged を見ずに Ready 系を
+    // 返しうるため、安全同意の有無はこの再現に無関係。SelectedReadinessDemo の setter は
+    // !IsBusy 以外のゲートを持たず、値が変わるたびに素の RebuildReadiness() を呼ぶ。
+    viewModel.SelectedReadinessDemo = "補正不要";
+    Check.Equal(
+        OperatorUiState.FailedPartial,
+        viewModel.UiState);
+    Check.False(viewModel.CanCapture, "The first ordinary readiness-rebuild trigger must not resurrect capture.");
+
+    viewModel.SelectedReadinessDemo = "自動補正範囲内";
+    Check.Equal(
+        OperatorUiState.FailedPartial,
+        viewModel.UiState);
+    Check.False(
+        viewModel.CanCapture,
+        "A second ordinary readiness-rebuild trigger (which recalculates availability against whatever " +
+        "UiState the first rebuild left behind) must still not resurrect capture after a startup " +
+        "state-load failure — the operator never re-read the durable journal.");
 }
 
 // ---------------------------------------------------------------------------
