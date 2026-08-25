@@ -1967,6 +1967,16 @@ public sealed class OperatorShellViewModel : ObservableObject
                 StatusMessage = "物理シャッターを操作せず、他のカメラアプリを使わないことへ同意してください。";
             }
         }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            // HardwareSingleCameraViewModel.InitializeAsync の fail-closed catch に倣う
+            // （issue #142 症状3）。_transactionService.InitializeAsync は journal 破損時に
+            // InvalidDataException 等を投げうるため、ここで確実に捕捉しユーザーへ状態を
+            // 伝える。黙って握り潰さず、新規撮影は禁止のまま停止する。
+            UiState = OperatorUiState.FailedPartial;
+            StatusMessage = "起動時の状態確認に失敗しました。fail-closedのため新規撮影はできません。";
+            TechnicalDetail = $"error code: {exception.GetType().Name} / {exception.Message}";
+        }
         finally
         {
             IsBusy = false;
