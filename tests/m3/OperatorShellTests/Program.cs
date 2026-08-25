@@ -1330,11 +1330,12 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
 static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
 {
     var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
     try
     {
         var framePath = Path.Combine(root, "agent", "run-live-hold-1", "preview.jpg");
         var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
-        var operations = new FakeContinuousHardwareOperations(frameBytes)
+        operations = new FakeContinuousHardwareOperations(frameBytes)
         {
             HoldFrameReadUntilReleased = true,
         };
@@ -1384,6 +1385,8 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
             viewModel.TechnicalDetail.Contains("continuous_live_view_frame_unconfirmed"),
             "The in-flight frame request must complete normally, not be treated as a communication failure.");
 
+        Check.True(operations.CallOrder.Contains("frame"),
+            "read-live-view-frame must actually have been called.");
         Check.True(
             operations.CallOrder.IndexOf("frame") < operations.CallOrder.IndexOf("stop"),
             "read-live-view-frame must complete and precede stop-live-view, with no dropped connection in between.");
@@ -1394,6 +1397,9 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
     }
     finally
     {
+        // 途中のCheckが例外を投げても、held中のフレーム要求を解放せずに残さない。
+        // 解放しないとRunContinuousLiveViewLoopAsyncのタスクが待機したままになる。
+        operations?.FrameReadReleaseGate.TrySetResult();
         Directory.Delete(root, recursive: true);
     }
 }

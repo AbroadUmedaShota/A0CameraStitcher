@@ -836,18 +836,20 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 return;
             }
 
-            if (cancellationToken.IsCancellationRequested)
-            {
-                // 停止済み。古いフレームでPreviewImage/LiveViewSummaryを上書きしない。
-                return;
-            }
-
             if (!reply.Success)
             {
                 IsContinuousLiveViewActive = false;
                 LiveViewSummary = $"Live View終了: {reply.Payload.ErrorCategory}";
                 ActivityText = "Camera AgentがLive View SDKセッションをfail-closedで終了しました。";
                 InvalidateReadiness("Live View failure後は撮影前の状態再確認が必要です。");
+                return;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // 停止済み。失敗応答のfail-closed処理（上のブロック）は素通りさせつつ、
+                // 成功応答のデコード/PreviewImage更新だけをスキップし、古いフレームで
+                // 上書きしない。
                 return;
             }
 
