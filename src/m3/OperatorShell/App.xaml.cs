@@ -130,9 +130,24 @@ public sealed record ApplicationLaunchOptions(
         var normalizedBase = Path.GetFullPath(baseDirectory);
         var singleDefault = Path.Combine(normalizedBase, "A0CameraStitcher.CameraAgent.exe");
         var dualDefault = Path.Combine(normalizedBase, "A0CameraStitcher.DualCameraAgent.exe");
-        var singlePath = mode is ApplicationLaunchMode.HardwareSingle or ApplicationLaunchMode.Launcher
-            ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? singleDefault)
-            : singleDefault;
+        var singlePath = mode switch
+        {
+            // --hardware-single 明示指定時のみ、起動直後にEXE実在等を検証しfail-closedを維持する。
+            ApplicationLaunchMode.HardwareSingle =>
+                CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? singleDefault),
+            // Launcher（引数なし起動）は既定パス（singleDefault）についてのみResolveの必須対象
+            // から外す。既定パスが指すEXEがパッケージから欠けていても、実在確認はLaunchWindowの
+            // 表示、および実機Single画面を開く際のPersistentHardwareCameraAgentOperations.
+            // AgentExecutableAvailable による独立したfail-closed判定に委ねる（issue #142 症状1）。
+            // 一方 --camera-agent で明示指定された値は、Launcherモードでも配置先直下・.exe拡張子・
+            // トラバーサル拒否等の封じ込めをResolveで検証する。ここを素通りさせると
+            // `A0CameraStitcher.exe --camera-agent <任意のパス>` がLauncherモードのまま通り、
+            // 「実機1台」クリック経由で未検証の実行ファイルを起動できてしまう。
+            ApplicationLaunchMode.Launcher => configuredAgent is null
+                ? singleDefault
+                : CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent),
+            _ => singleDefault,
+        };
         var dualPath = mode == ApplicationLaunchMode.HardwareDual
             ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? dualDefault)
             : dualDefault;

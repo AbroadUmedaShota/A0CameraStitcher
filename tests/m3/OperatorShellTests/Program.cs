@@ -69,6 +69,28 @@ catch (Exception exception)
 
 try
 {
+    await InitializationFailureBlocksPrepareNewCaptureAsync();
+    Console.WriteLine("PASS a startup state-load failure blocks PrepareNewCapture until restart");
+}
+catch (Exception exception)
+{
+    failures.Add("a startup state-load failure blocks PrepareNewCapture until restart");
+    Console.Error.WriteLine($"FAIL a startup state-load failure blocks PrepareNewCapture until restart: {exception}");
+}
+
+try
+{
+    await InitializationFailureSurvivesReadinessRebuildsAsync();
+    Console.WriteLine("PASS a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction");
+}
+catch (Exception exception)
+{
+    failures.Add("a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction");
+    Console.Error.WriteLine($"FAIL a startup state-load failure survives readiness rebuilds triggered by ordinary UI interaction: {exception}");
+}
+
+try
+{
     await SingleCameraWorkflowAsync();
     Console.WriteLine("PASS single-camera CAM-B capture skips stitch and exports one original");
 }
@@ -1689,6 +1711,14 @@ static void HardwareLaunchOptionsAreExplicit()
         Check.Equal(ApplicationLaunchMode.Launcher, launcherOverride.Mode);
         Check.Equal(explicitAgent, launcherOverride.SingleCameraAgentExecutablePath);
         Check.Equal(dualAgent, launcherOverride.DualCameraAgentExecutablePath);
+        // レビュー指摘（PR #152）: Launcher（引数なし起動）でも --camera-agent は明示指定である
+        // 以上 CameraAgentExecutablePolicy.Resolve の封じ込め（配置先直下・.exe拡張子・
+        // トラバーサル拒否等）を通す必要がある。上の launcherOverride は explicitAgent を
+        // baseDirectory 直下に置いているためこの穴を検出しない。ここでは配置先の外を指す
+        // パスを渡し、Launcherモードのままでも拒否されることを確認する。
+        var outsideAgent = Path.Combine(root, "outside-launcher-agent.exe");
+        File.WriteAllBytes(outsideAgent, [0x4d, 0x5a]);
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--camera-agent", outsideAgent], baseDirectory));
         var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", explicitAgent], baseDirectory);
         Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
         Check.Equal(explicitAgent, hardware.SingleCameraAgentExecutablePath);
@@ -1699,7 +1729,15 @@ static void HardwareLaunchOptionsAreExplicit()
         Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
         File.Delete(singleAgent);
         File.Delete(dualAgent);
-        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse([], baseDirectory));
+        // issue #142 症状1: Launcher（引数なし起動）はSingle Agent EXEの実在を必須にしない。
+        // ランチャ画面へ到達できることを優先し、fail-closedの担保はLaunchWindowの表示と、
+        // 実機Single画面を開く際のPersistentHardwareCameraAgentOperations.AgentExecutableAvailable
+        // に委ねる。
+        var launcherWithMissingAgent = ApplicationLaunchOptions.Parse([], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.Launcher, launcherWithMissingAgent.Mode);
+        Check.Equal(singleAgent, launcherWithMissingAgent.SingleCameraAgentExecutablePath);
+        // --hardware-single 明示指定は従来どおりEXE実在の検証を必須のまま維持する（fail-closed）。
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-single"], baseDirectory));
         Check.Equal(ApplicationLaunchMode.Simulated, ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory).Mode);
         File.WriteAllBytes(singleAgent, [0x4d, 0x5a]);
         File.WriteAllBytes(dualAgent, [0x4d, 0x5a]);
@@ -2734,6 +2772,73 @@ static async Task LiveViewStopFailureWorkflowAsync()
             Directory.Delete(root, recursive: true);
         }
     }
+}
+
+// PR #152 レビュー指摘・要修正2: InitializeAsync が _transactionService.InitializeAsync の
+// 例外を捕捉して UiState=FailedPartial にした場合、durable journal を一度も読めていない
+// のだから PrepareNewCapture の1クリックで見た目だけ Ready に戻してはいけない
+// （PrepareNewCaptureAsync は初期化を再実行しないため）。HardwareSingleCameraViewModel の
+// _stateLoadFailed ラッチに倣った _initializationFailed が、この回帰を防いでいることを検証する。
+static async Task InitializationFailureBlocksPrepareNewCaptureAsync()
+{
+    var viewModel = new OperatorShellViewModel(new FailingInitializeTransactionService());
+    await viewModel.InitializeAsync(CancellationToken.None);
+
+    Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+    Check.True(
+        viewModel.TechnicalDetail.Contains(nameof(InvalidDataException), StringComparison.Ordinal),
+        "The startup failure's exception type must remain visible for support.");
+    Check.False(
+        viewModel.CanPrepareNewCapture,
+        "A startup state-load failure must block PrepareNewCapture until restart, not just the initial FailedPartial UiState.");
+
+    viewModel.PrepareNewCaptureCommand.Execute(null);
+    await WaitUntilAsync(() => !viewModel.IsBusy, "PrepareNewCapture command dispatch did not settle.");
+
+    Check.Equal(
+        OperatorUiState.FailedPartial,
+        viewModel.UiState);
+    Check.False(
+        viewModel.CanCapture,
+        "PrepareNewCaptureCommand must be a no-op (CanExecute=false) after a startup state-load failure; " +
+        "it must not silently re-arm capture without re-reading the durable journal.");
+}
+
+// PR #152 再レビュー指摘: _initializationFailed が CanPrepareNewCapture だけをゲートしていた版は
+// 不十分だった。撮影を実際に止めている実体は UiState==FailedPartial であり、
+// OperatorReadinessEvaluator.Evaluate は state が Ready/ReadyWithCorrection のときしか Capture を
+// Permit しない。ところが RebuildReadiness(preserveOutcomeState: false)（既定）は
+// UiState = GetReadyState(...) で無条件にこれを上書きする。SelectedReadinessDemo のような
+// 「ゲート無し、または IsBusy だけ」の通常UI操作の setter は軒並みこの引数なし
+// RebuildReadiness() を叩くため、起動時読取に失敗していてもコンボを2回変更するだけで
+// (1回目でUiStateがReady系へ書き換わり、2回目でRecalculateAvailabilityがその新UiStateを見る)
+// 撮影が解禁されてしまっていた。RebuildReadiness 側に !_initializationFailed を追加した後、
+// この経路でも FailedPartial のまま固定され続けることを検証する。
+static async Task InitializationFailureSurvivesReadinessRebuildsAsync()
+{
+    var viewModel = new OperatorShellViewModel(new FailingInitializeTransactionService());
+    await viewModel.InitializeAsync(CancellationToken.None);
+    Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+    Check.False(viewModel.CanCapture, "A startup state-load failure must block capture before any further UI interaction.");
+
+    // デモ既定値（Blocker無し）では GetReadyState は SafetyAcknowledged を見ずに Ready 系を
+    // 返しうるため、安全同意の有無はこの再現に無関係。SelectedReadinessDemo の setter は
+    // !IsBusy 以外のゲートを持たず、値が変わるたびに素の RebuildReadiness() を呼ぶ。
+    viewModel.SelectedReadinessDemo = "補正不要";
+    Check.Equal(
+        OperatorUiState.FailedPartial,
+        viewModel.UiState);
+    Check.False(viewModel.CanCapture, "The first ordinary readiness-rebuild trigger must not resurrect capture.");
+
+    viewModel.SelectedReadinessDemo = "自動補正範囲内";
+    Check.Equal(
+        OperatorUiState.FailedPartial,
+        viewModel.UiState);
+    Check.False(
+        viewModel.CanCapture,
+        "A second ordinary readiness-rebuild trigger (which recalculates availability against whatever " +
+        "UiState the first rebuild left behind) must still not resurrect capture after a startup " +
+        "state-load failure — the operator never re-read the durable journal.");
 }
 
 // ---------------------------------------------------------------------------
@@ -5958,6 +6063,27 @@ sealed class BlockingTransactionService : ISimulatedTransactionService
     }
 
     public void Release() => _release.TrySetResult();
+}
+
+// InitializationFailureBlocksPrepareNewCaptureAsync 用のフェイク（PR #152 レビュー指摘）。
+// InitializeAsync が journal 破損時に投げうる InvalidDataException を模す。
+sealed class FailingInitializeTransactionService : ISimulatedTransactionService
+{
+    public Task<IReadOnlyList<SimulatedWorkflowState>> InitializeAsync(CancellationToken cancellationToken = default) =>
+        throw new InvalidDataException("simulated durable journal corruption");
+
+    public Task<SimulatedWorkflowState> ExecuteAsync(
+        Guid transactionId,
+        SimulatedWorkflowScenario scenario,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("must not execute after a state-load failure");
+
+    public Task<SimulatedWorkflowState> ExecuteAsync(
+        Guid transactionId,
+        CapturePlan capturePlan,
+        SimulatedWorkflowScenario scenario,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("must not execute after a state-load failure");
 }
 
 class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations

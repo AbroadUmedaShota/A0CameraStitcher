@@ -113,6 +113,12 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private CancellationToken _lifetimeToken;
     private bool _isBusy;
+    // InitializeAsync が起動時のdurable journal読取に失敗したら true のまま保持する。
+    // HardwareSingleCameraViewModel._stateLoadFailed と同型のラッチ（issue #142/PR #152
+    // レビュー指摘）: _transactionService.InitializeAsync を一度も正常に読めていない以上、
+    // PrepareNewCapture で見た目だけ Ready に戻すのはfail-closed原則に反するため、
+    // 再起動して読取が成功するまでブロックし続ける（この場で再試行はしない）。
+    private bool _initializationFailed;
     private bool _safetyAcknowledged;
     private bool _consentOverlayDismissed;
     private bool _physicalShutterAckAccepted;
@@ -1941,7 +1947,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanExport => _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
     public bool CanRestitch => _availability.Restitch.Allowed;
-    public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed;
+    // _initializationFailed が立っている間は PrepareNewCapture 自体をブロックする。
+    // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
+    // ラッチ（issue #142/PR #152 レビュー指摘・要修正2）。
+    public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
     public bool CanOpenMaintenance => _availability.OpenMaintenance.Allowed;
 
     private CapturePlan CurrentCapturePlan => IsSingleCameraMode ? CapturePlan.Single(SelectedCamera) : CapturePlan.Dual();
@@ -1966,6 +1975,24 @@ public sealed class OperatorShellViewModel : ObservableObject
                 UiState = OperatorUiState.AwaitingSafetyAck;
                 StatusMessage = "物理シャッターを操作せず、他のカメラアプリを使わないことへ同意してください。";
             }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            // HardwareSingleCameraViewModel.InitializeAsync の fail-closed catch に倣う
+            // （issue #142 症状3）。_transactionService.InitializeAsync は journal 破損時に
+            // InvalidDataException 等を投げうるため、ここで確実に捕捉しユーザーへ状態を
+            // 伝える。黙って握り潰さず、新規撮影は禁止のまま停止する。
+            //
+            // _initializationFailed を立てるのは、UiState=FailedPartial だけだと
+            // PrepareNewCapture が1クリックで CheckingReadiness→RebuildReadiness 経由の
+            // 見た目上の Ready に戻ってしまうため（PrepareNewCaptureAsync は
+            // _transactionService.InitializeAsync を再実行しない）。durable journal を
+            // 一度も読めていない以上、このラッチで再起動までブロックし続ける
+            // （PR #152 レビュー指摘・要修正2）。
+            UiState = OperatorUiState.FailedPartial;
+            _initializationFailed = true;
+            StatusMessage = "起動時の状態確認に失敗しました。fail-closedのため新規撮影はできません。";
+            TechnicalDetail = $"error code: {exception.GetType().Name} / {exception.Message}";
         }
         finally
         {
@@ -2743,7 +2770,15 @@ public sealed class OperatorShellViewModel : ObservableObject
             Notices = focusNotices,
         };
         RecalculateAvailability();
-        if (!preserveOutcomeState && UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching))
+        // _initializationFailed のときは preserveOutcomeState の値によらず自動遷移させない
+        // （PR #152 レビュー指摘・要修正2の再差し戻し）。preserveOutcomeState だけに頼ると、
+        // ここを preserveOutcomeState: false（既定）で呼ぶ通常のUI操作（運用構成/カメラ選択/
+        // 確認シナリオのコンボ/Live View切替/オートフォーカス等、いずれもゲート無しか
+        // IsBusy 程度のゲートしか持たない setter 経由）のたびに GetReadyState が再計算され、
+        // durable journal を一度も読めていないのに UiState が Ready 系へ書き換わってしまう
+        // （Capturing/Stitching と同様、_initializationFailed もここで凍結する）。
+        if (!preserveOutcomeState && !_initializationFailed &&
+            UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching))
         {
             UiState = OperatorReadinessEvaluator.GetReadyState(_readiness, DateOnly.FromDateTime(DateTime.Today));
         }

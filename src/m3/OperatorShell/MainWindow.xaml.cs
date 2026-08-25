@@ -100,7 +100,16 @@ public partial class MainWindow : Window
     private async void OnLoaded(object sender, RoutedEventArgs eventArgs)
     {
         Loaded -= OnLoaded;
-        await _viewModel.InitializeAsync(_lifetime.Token);
+        try
+        {
+            await _viewModel.InitializeAsync(_lifetime.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // HardwareSingleCameraWindow.OnLoaded と同様、ウィンドウを閉じたことによる
+            // 起動時クエリのキャンセルは無視する（issue #142 症状3）。それ以外の失敗は
+            // OperatorShellViewModel.InitializeAsync 側で fail-closed に捕捉済み。
+        }
     }
 
     // GitHub Issue #94: 以前は async void の Closed ハンドラで await していたが、最後の
