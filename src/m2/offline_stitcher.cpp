@@ -40,6 +40,17 @@ enum class OfflineStitchFaultPoint : std::uint32_t {
     interrupt_after_publish = 10,
 };
 
+// GitHub Issue #102 (item 3, follow-up from item 2): pairs the SHA-256
+// PublishValidatedGeneratedJpeg already computed with the exact byte count it
+// was computed over, so a caller building a manifest record can source both
+// `sha256` and `encoded_size_bytes` from the same validated byte string
+// instead of pairing an in-memory (pre-rename) hash with a fresh (post-rename)
+// filesystem stat of a different observation.
+struct PublishedGeneratedJpeg {
+    StitchJobSha256Hex sha256;
+    std::uint64_t encoded_size_bytes{};
+};
+
 } // namespace a0::m2::detail
 
 namespace a0::m2 {
@@ -906,8 +917,11 @@ std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
 //
 // GitHub Issue #102 (item 2): returns the SHA-256 it already computed here so
 // the caller can record it in the manifest without re-hashing the published
-// file a second time.
-StitchJobSha256Hex PublishValidatedGeneratedJpeg(
+// file a second time. GitHub Issue #102 (item 3, follow-up): also returns the
+// exact byte count that SHA-256 was computed over (see PublishedGeneratedJpeg),
+// so the manifest's sha256 and encoded_size_bytes can be sourced from the same
+// validated byte string instead of two different observations.
+PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     const std::uint32_t expected_width,
@@ -930,7 +944,7 @@ StitchJobSha256Hex PublishValidatedGeneratedJpeg(
     ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
     InvokeTestHook(before_publish_rename_hook);
     locked_partial.RenameToWithoutReplace(destination);
-    return ToLowerHex(snapshot.sha256);
+    return {ToLowerHex(snapshot.sha256), static_cast<std::uint64_t>(snapshot.compressed.size())};
 }
 
 } // namespace detail
@@ -1090,14 +1104,15 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
 
     PartialFileGuard partial_guard(partial);
     // GitHub Issue #102 (item 2): captured from PublishValidatedGeneratedJpeg,
-    // which already computed this SHA-256 to verify the partial before
-    // renaming it into place. Reused for the manifest below instead of
+    // which already computed this SHA-256 (and the byte count it was computed
+    // over, see PublishedGeneratedJpeg / item 3 below) to verify the partial
+    // before renaming it into place. Reused for the manifest below instead of
     // re-reading and re-hashing the published file a third time -- safe
     // because RenameToWithoutReplace renames through the same open handle
     // (SetFileInformationByHandle's FileRenameInfo), a metadata-only
     // operation that never touches file content, so the bytes hashed here are
     // byte-identical to the bytes at `destination` afterward.
-    StitchJobSha256Hex published_sha256;
+    detail::PublishedGeneratedJpeg published;
     try {
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
         ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
@@ -1114,7 +1129,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         InvokeTestHook(before_partial_flush_hook);
         FlushGeneratedPartial(partial);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
-        published_sha256 = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        published = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
         partial_guard.Release();
     } catch (...) {
@@ -1128,10 +1143,27 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     // Steps 4-6 of the commit protocol. Until the manifest is published and read
     // back, this job is not terminal-success no matter how complete the JPEG on
     // disk looks. A crash between the two leaves both artifacts and no claim.
+    //
+    // GitHub Issue #102 (item 3): the manifest's encoded_size_bytes below is
+    // sourced from `published.encoded_size_bytes` (the pre-rename byte count
+    // PublishValidatedGeneratedJpeg already validated and hashed), not from
+    // this file_size(destination) call, so that it and the manifest's sha256
+    // describe the exact same observed byte string rather than two different
+    // reads. The file_size(destination) call itself is kept -- it is a fresh,
+    // independent, post-rename observation from the filesystem (distinct from
+    // "RenameToWithoutReplace did not throw") that the published artifact is
+    // really there and non-empty at the expected path, in keeping with this
+    // commit protocol's insistence on verifying state rather than trusting the
+    // absence of an exception. Its result is now used only as a cross-check
+    // against the pre-rename size, rather than as the manifest's size source.
     std::error_code published_size_error;
-    const auto published_size = std::filesystem::file_size(destination, published_size_error);
-    if (published_size_error || published_size == 0) {
+    const auto observed_destination_size = std::filesystem::file_size(destination, published_size_error);
+    if (published_size_error || observed_destination_size == 0) {
         throw std::runtime_error("the published stitched JPEG could not be measured for the manifest");
+    }
+    if (observed_destination_size != published.encoded_size_bytes) {
+        throw std::runtime_error(
+            "the published stitched JPEG size does not match the bytes that were hashed before publish");
     }
 
     StitchJobManifest manifest;
@@ -1150,10 +1182,10 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     };
     manifest.output = {
         "stitched.jpg",
-        published_sha256,
+        published.sha256,
         output.width,
         output.height,
-        published_size,
+        published.encoded_size_bytes,
     };
     manifest.completed_at_utc = request.completed_at_utc;
     PublishAndVerifyStitchJobManifest(job_path, manifest);
