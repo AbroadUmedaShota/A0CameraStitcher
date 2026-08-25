@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using A0CameraStitcher.M3.Foundation.Hardware;
@@ -137,7 +138,7 @@ internal sealed class HardwareSingleCaptureProfileStore
     }
 
     private static string CanonicalUtc(DateTimeOffset value) =>
-        value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+        value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
     private async Task WriteDurablyAsync(byte[] bytes, CancellationToken cancellationToken)
     {

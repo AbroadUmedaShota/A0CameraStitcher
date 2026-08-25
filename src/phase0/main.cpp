@@ -296,6 +296,9 @@ Options Parse(int argc, char** argv) {
     if (options.wpd_status_access_explicit && options.command != "wpd-status") {
         throw std::runtime_error("wpd-status-access is valid only for wpd-status");
     }
+    if (!options.run_id.empty() && !OperatorGate::IsSafeName(options.run_id)) {
+        throw std::runtime_error("run-id must match [A-Za-z0-9_-] and be 1-64 characters");
+    }
     if (options.operator_gate) {
         const bool hybrid_fault_gate =
             (options.command == "hybrid-fault-single" || options.command == "hybrid-fault-pair" ||
