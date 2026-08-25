@@ -307,7 +307,11 @@ void WriteBytesExclusive(const fs::path& path, const std::vector<unsigned char>&
         0,
         nullptr,
         CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        // GitHub Issue #144: FILE_FLAG_OPEN_REPARSE_POINT が無いと CREATE_NEW は
+        // リンクを辿るため、事前に切れた symlink を置かれると証跡(canonical
+        // original を含む)が攻撃者の選んだパスへ書かれる。リンク自体を開く指定に
+        // して、何かが既に存在するパスへは書かずに fail-closed にする。
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw std::system_error(
