@@ -244,10 +244,31 @@ std::optional<std::string> EnvironmentValue(const char* name) {
     return value;
 }
 
+bool IsMissingAttributesError(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
 bool IsReparsePoint(const fs::path& path) {
+    SetLastError(ERROR_SUCCESS);
     const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    }
+    // GitHub Issue #144: GetFileAttributesW はリンクを辿らず reparse point 自身の
+    // 属性を返すため、生きた/切れたジャンクションや symlink はこの関数の分岐に
+    // 入る前に「INVALID_FILE_ATTRIBUTES ではない」側で正しく検出できる
+    // (P/Invoke 実測・reviewer_security いろは確認済み、2026-08-25。err=0 で
+    // FILE_ATTRIBUTE_REPARSE_POINT が立つ。共有違反中のファイルも err=0 で
+    // 通常属性が返るだけで、この分岐には来ない)。
+    // この分岐が塞ぐのは属性取得そのものが失敗するケース: 実測で
+    // ERROR_ACCESS_DENIED(5) / ERROR_INVALID_NAME(123) / ERROR_BAD_NETPATH(53)
+    // を確認しており、これらは検査できなかっただけなので reparse とみなして
+    // fail-closed にする(fail-open で安全と誤判定しない)。
+    // 既知の残存ギャップ: ERROR_PATH_NOT_FOUND(3) は「親ディレクトリが未作成」の
+    // 正常系(fail-closed が誤検知しないために false が必要)と「MAX_PATH 超過」を
+    // 区別できず、後者は今も fail-open のまま(実測確認済み・未解決)。
+    // dual_hardware_camera_agent_store.cpp の AttributesOrMissing と同じ方針。
+    return !IsMissingAttributesError(GetLastError());
 }
 
 void PrepareReparseFreeEvidenceDirectory(
@@ -294,7 +315,11 @@ void WriteBytesExclusive(const fs::path& path, const std::vector<unsigned char>&
         0,
         nullptr,
         CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        // GitHub Issue #144: FILE_FLAG_OPEN_REPARSE_POINT が無いと CREATE_NEW は
+        // リンクを辿るため、事前に切れた symlink を置かれると証跡(canonical
+        // original を含む)が攻撃者の選んだパスへ書かれる。リンク自体を開く指定に
+        // して、何かが既に存在するパスへは書かずに fail-closed にする。
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw std::system_error(
@@ -2436,7 +2461,7 @@ void PersistSingleIdentityV3(
     fs::path current = absolute.root_path();
     for (const auto& component : absolute.lexically_relative(current)) {
         current /= component;
-        if (fs::exists(current) && IsReparsePoint(current)) {
+        if (IsReparsePoint(current)) {
             throw std::runtime_error("identity-v3 path chain must be reparse-free");
         }
     }

@@ -816,7 +816,7 @@ void WriteFileExclusiveAndFlush(const fs::path& path, const std::string& content
         0,
         nullptr,
         CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw std::system_error(
@@ -859,7 +859,8 @@ void WriteBytesExclusiveAndFlush(
     const fs::path& path,
     const std::vector<unsigned char>& contents) {
     const HANDLE handle = CreateFileW(
-        path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw std::system_error(
             static_cast<int>(GetLastError()), std::system_category(), "exclusive JPEG write failed");
@@ -926,8 +927,14 @@ PreviewJpegRecord PersistPreviewJpeg(
         run_root / "live-view" / std::string(camera_alias);
     fs::create_directories(directory);
     ValidateArtifactRunNoReparse(run_root);
-    const fs::path partial = directory / "preview.jpg.partial";
     const fs::path final = directory / "preview.jpg";
+    // GitHub Issue #144: 中間ファイル名を AtomicReplaceText と同様に撹拌し、
+    // 固定名 "preview.jpg.partial" を事前に狙われても意味を持たないようにする。
+    // FILE_FLAG_OPEN_REPARSE_POINT を付けた CREATE_NEW と合わせ、既に何かが
+    // 存在するパスへは書き込まず fail-closed になる。呼び出し元(C#)が観測する
+    // のは最終名 "preview.jpg" のみで、中間名には依存していない。
+    fs::path partial = final;
+    partial += "." + NewRunId() + ".partial";
     if (fs::exists(partial) || fs::exists(final)) {
         throw std::runtime_error("refusing to overwrite an existing Live View preview");
     }
@@ -1234,10 +1241,31 @@ fs::path TransactionJournalPath(const fs::path& root, std::string_view transacti
         std::string(transaction_id) / "transaction.json";
 }
 
+bool IsMissingAttributesError(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
 bool IsReparsePoint(const fs::path& path) noexcept {
+    SetLastError(ERROR_SUCCESS);
     const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    }
+    // GitHub Issue #144: GetFileAttributesW はリンクを辿らず reparse point 自身の
+    // 属性を返すため、生きた/切れたジャンクションや symlink はこの関数の分岐に
+    // 入る前に「INVALID_FILE_ATTRIBUTES ではない」側で正しく検出できる
+    // (P/Invoke 実測・reviewer_security いろは確認済み、2026-08-25。err=0 で
+    // FILE_ATTRIBUTE_REPARSE_POINT が立つ。共有違反中のファイルも err=0 で
+    // 通常属性が返るだけで、この分岐には来ない)。
+    // この分岐が塞ぐのは属性取得そのものが失敗するケース: 実測で
+    // ERROR_ACCESS_DENIED(5) / ERROR_INVALID_NAME(123) / ERROR_BAD_NETPATH(53)
+    // を確認しており、これらは検査できなかっただけなので reparse とみなして
+    // fail-closed にする(fail-open で安全と誤判定しない)。
+    // 既知の残存ギャップ: ERROR_PATH_NOT_FOUND(3) は「親ディレクトリが未作成」の
+    // 正常系(fail-closed が誤検知しないために false が必要)と「MAX_PATH 超過」を
+    // 区別できず、後者は今も fail-open のまま(実測確認済み・未解決)。
+    // dual_hardware_camera_agent_store.cpp の AttributesOrMissing と同じ方針。
+    return !IsMissingAttributesError(GetLastError());
 }
 
 bool EqualPathComponent(const fs::path& left, const fs::path& right) noexcept {
@@ -1598,7 +1626,7 @@ void ValidateTransactionJournalScope(
             "hardware Camera Agent transaction directory is not a reparse-free child");
     }
     const fs::path journal = directory / "transaction.json";
-    if (fs::exists(journal) && IsReparsePoint(journal)) {
+    if (IsReparsePoint(journal)) {
         throw TransportError(
             "transaction_state_scope_invalid",
             "hardware Camera Agent transaction journal is a reparse point");

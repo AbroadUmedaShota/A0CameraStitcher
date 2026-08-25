@@ -917,6 +917,45 @@ void TestDurableJournalRecoveryContracts() {
               oversized_journal.error_category == "transaction_journal_invalid",
             "oversized durable journal must fail closed before unbounded allocation or parse");
 
+        // GitHub Issue #144 (reviewer_security follow-up, いろは 2026-08-25): a dangling
+        // reparse point at the transaction.json leaf must fail closed even though
+        // std::filesystem::exists() follows the link and reports absence for a target
+        // that does not exist. Before this fix, ValidateTransactionJournalScope guarded
+        // its IsReparsePoint(journal) check with "fs::exists(journal) &&", so this exact
+        // case was skipped and the query fell through to the reservation-incomplete path
+        // instead of being rejected.
+        const std::string dangling_journal_id =
+            "24242424242424242424242424242424";
+        const fs::path dangling_journal_directory =
+            config.transaction_state_root / dangling_journal_id;
+        fs::create_directories(dangling_journal_directory);
+        const fs::path dangling_journal_link =
+            dangling_journal_directory / "transaction.json";
+        const fs::path dangling_journal_target =
+            root / "dangling-journal-target-does-not-exist.json";
+        const bool dangling_journal_link_created = CreateSymbolicLinkW(
+            dangling_journal_link.c_str(),
+            dangling_journal_target.c_str(),
+            0x2U) != FALSE;
+        if (dangling_journal_link_created) {
+            const auto dangling_journal_result =
+                backend.GetTransactionResult(dangling_journal_id);
+            Check(!dangling_journal_result.succeeded &&
+                  dangling_journal_result.terminal_state == "FailedPartial" &&
+                  dangling_journal_result.error_category == "transaction_journal_invalid",
+                "a dangling reparse point at the transaction.json leaf must fail closed; actual=" +
+                    dangling_journal_result.terminal_state + "/" +
+                    dangling_journal_result.error_category);
+            std::error_code remove_dangling_link_error;
+            fs::remove(dangling_journal_link, remove_dangling_link_error);
+            Check(!remove_dangling_link_error,
+                "test transaction.json reparse point must be removed without following it");
+            std::cout << "Dangling transaction.json leaf reparse negative: exercised\n";
+        } else {
+            std::cout <<
+                "Dangling transaction.json leaf reparse negative: unavailable in this Windows session\n";
+        }
+
         const std::string traversal_id = "33333333333333333333333333333333";
         ReplaceJournal(
             config.transaction_state_root,
