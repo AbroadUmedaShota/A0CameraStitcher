@@ -25,6 +25,12 @@ if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
     return await RunSdklessPersistentReadinessE2EAsync(sdklessAgentPath);
 }
 const string dualChildScenarioVariable = "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+
+// Shared with tests that must pre-write a Live View preview (whose canonical
+// path only depends on runId + alias, not transactionId, so it can be
+// written before the transaction ID is known) at a location that will later
+// line up with a capture built by CompleteCapture/CompleteCaptureWithHandoff.
+const string CompleteCaptureRunId = "run-1000-1";
 if (Environment.GetEnvironmentVariable(dualChildScenarioVariable) is { Length: > 0 } dualChildScenario)
 {
     return await RunDualCameraAgentTestChildAsync(dualChildScenario, args);
@@ -3122,11 +3128,6 @@ static void RewriteJpegDimensions(byte[] bytes, int width, int height)
     throw new InvalidDataException("Test JPEG has no start-of-frame marker.");
 }
 
-// Shared with tests that must pre-write a Live View preview (whose canonical
-// path only depends on runId + alias, not transactionId, so it can be
-// written before the transaction ID is known) at a location that will later
-// line up with a capture built by CompleteCapture/CompleteCaptureWithHandoff.
-const string CompleteCaptureRunId = "run-1000-1";
 
 // Writes the canonical original.jpg for (transactionId, alias) under
 // artifactsRoot -- using HardwareAgentArtifactLayout, the same helper
