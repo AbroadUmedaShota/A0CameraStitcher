@@ -1460,7 +1460,15 @@ static void HardwareLaunchOptionsAreExplicit()
         Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
         File.Delete(singleAgent);
         File.Delete(dualAgent);
-        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse([], baseDirectory));
+        // issue #142 症状1: Launcher（引数なし起動）はSingle Agent EXEの実在を必須にしない。
+        // ランチャ画面へ到達できることを優先し、fail-closedの担保はLaunchWindowの表示と、
+        // 実機Single画面を開く際のPersistentHardwareCameraAgentOperations.AgentExecutableAvailable
+        // に委ねる。
+        var launcherWithMissingAgent = ApplicationLaunchOptions.Parse([], baseDirectory);
+        Check.Equal(ApplicationLaunchMode.Launcher, launcherWithMissingAgent.Mode);
+        Check.Equal(singleAgent, launcherWithMissingAgent.SingleCameraAgentExecutablePath);
+        // --hardware-single 明示指定は従来どおりEXE実在の検証を必須のまま維持する（fail-closed）。
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-single"], baseDirectory));
         Check.Equal(ApplicationLaunchMode.Simulated, ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory).Mode);
         File.WriteAllBytes(singleAgent, [0x4d, 0x5a]);
         File.WriteAllBytes(dualAgent, [0x4d, 0x5a]);

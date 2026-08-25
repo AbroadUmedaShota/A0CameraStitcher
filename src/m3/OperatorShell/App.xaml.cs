@@ -130,9 +130,18 @@ public sealed record ApplicationLaunchOptions(
         var normalizedBase = Path.GetFullPath(baseDirectory);
         var singleDefault = Path.Combine(normalizedBase, "A0CameraStitcher.CameraAgent.exe");
         var dualDefault = Path.Combine(normalizedBase, "A0CameraStitcher.DualCameraAgent.exe");
-        var singlePath = mode is ApplicationLaunchMode.HardwareSingle or ApplicationLaunchMode.Launcher
-            ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? singleDefault)
-            : singleDefault;
+        var singlePath = mode switch
+        {
+            // --hardware-single 明示指定時のみ、起動直後にEXE実在等を検証しfail-closedを維持する。
+            ApplicationLaunchMode.HardwareSingle =>
+                CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? singleDefault),
+            // Launcher（引数なし起動）はResolveの必須対象から外す。EXE不在でもランチャ画面へ
+            // 到達できるようにし、実在確認はLaunchWindowの表示、および実機Single画面を開く際の
+            // PersistentHardwareCameraAgentOperations.AgentExecutableAvailable による
+            // 独立したfail-closed判定に委ねる（issue #142 症状1）。
+            ApplicationLaunchMode.Launcher => configuredAgent ?? singleDefault,
+            _ => singleDefault,
+        };
         var dualPath = mode == ApplicationLaunchMode.HardwareDual
             ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? dualDefault)
             : dualDefault;
