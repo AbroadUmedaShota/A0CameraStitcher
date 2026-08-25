@@ -40,6 +40,17 @@ enum class OfflineStitchFaultPoint : std::uint32_t {
     interrupt_after_publish = 10,
 };
 
+// GitHub Issue #102 (item 3, follow-up from item 2): pairs the SHA-256
+// PublishValidatedGeneratedJpeg already computed with the exact byte count it
+// was computed over, so a caller building a manifest record can source both
+// `sha256` and `encoded_size_bytes` from the same validated byte string
+// instead of pairing an in-memory (pre-rename) hash with a fresh (post-rename)
+// filesystem stat of a different observation.
+struct PublishedGeneratedJpeg {
+    StitchJobSha256Hex sha256;
+    std::uint64_t encoded_size_bytes{};
+};
+
 } // namespace a0::m2::detail
 
 namespace a0::m2 {
@@ -133,6 +144,12 @@ struct JpegSnapshot {
     std::vector<std::uint8_t> compressed;
     std::array<std::uint8_t, 32> sha256{};
     Image image;
+};
+
+// Declared pixel dimensions of a JPEG frame, without any decoded pixel data.
+struct JpegDimensions {
+    std::uint32_t width{};
+    std::uint32_t height{};
 };
 
 struct Point {
@@ -333,7 +350,12 @@ std::uint64_t PixelCount(const std::uint32_t width, const std::uint32_t height) 
     return count;
 }
 
-Image DecodeJpegSnapshot(
+// Opens the single frame of a JPEG byte stream after confirming SOI/EOI
+// markers, a recognized JPEG container, and exactly one frame. Shared by the
+// full pixel decode (DecodeJpegSnapshot) and the dimension-only validation
+// (ValidateJpegDimensions) below, since both need the same frame handle up to
+// this point and diverge only on whether pixel data is ever decoded.
+ComPtr<IWICBitmapFrameDecode> OpenJpegFrame(
     IWICImagingFactory* factory,
     const std::vector<std::uint8_t>& bytes,
     const std::string& description,
@@ -373,7 +395,15 @@ Image DecodeJpegSnapshot(
 
     IWICBitmapFrameDecode* frame_raw = nullptr;
     CheckHresult(decoder->GetFrame(0, &frame_raw), description + " frame decode");
-    ComPtr<IWICBitmapFrameDecode> frame(frame_raw);
+    return ComPtr<IWICBitmapFrameDecode>(frame_raw);
+}
+
+Image DecodeJpegSnapshot(
+    IWICImagingFactory* factory,
+    const std::vector<std::uint8_t>& bytes,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    const auto frame = OpenJpegFrame(factory, bytes, description, require_terminal_eoi);
     UINT width = 0;
     UINT height = 0;
     CheckHresult(frame->GetSize(&width, &height), description + " dimensions");
@@ -392,6 +422,33 @@ Image DecodeJpegSnapshot(
     return image;
 }
 
+// GitHub Issue #99: confirms `bytes` is a syntactically complete, single-frame
+// JPEG (SOI/EOI markers present, recognized container, one decodable frame
+// header) and returns its declared dimensions, without ever decoding pixel
+// data. Callers that only need the declared width/height -- not the decoded
+// pixels -- use this instead of DecodeJpegSnapshot to skip the WIC format
+// conversion and full-resolution CopyPixels, both of which are wasted work
+// when the result is discarded immediately.
+//
+// What this does NOT check, relative to a full decode: entropy-coded scan
+// data (the compressed pixel payload) is never decoded, so a JPEG whose frame
+// header parses fine but whose Huffman-coded MCU data is corrupted will pass
+// this check even though DecodeJpegSnapshot would fail on it during
+// CopyPixels. Callers that need that stronger guarantee must keep using
+// DecodeJpegSnapshot/ReadJpegSnapshot.
+JpegDimensions ValidateJpegDimensions(
+    IWICImagingFactory* factory,
+    const std::vector<std::uint8_t>& bytes,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    const auto frame = OpenJpegFrame(factory, bytes, description, require_terminal_eoi);
+    UINT width = 0;
+    UINT height = 0;
+    CheckHresult(frame->GetSize(&width, &height), description + " dimensions");
+    (void)PixelCount(width, height);
+    return {width, height};
+}
+
 JpegSnapshot ReadJpegSnapshot(
     IWICImagingFactory* factory,
     const LockedReadFile& locked_file,
@@ -406,6 +463,43 @@ JpegSnapshot ReadJpegSnapshot(
     return snapshot;
 }
 
+// GitHub Issue #99: lightweight sibling of ReadJpegSnapshot for callers that
+// need the compressed bytes, their SHA-256, and (optionally) confirmation of
+// the declared JPEG dimensions, but never touch decoded pixel data. The
+// returned snapshot's `.image` field is left default-constructed (empty) --
+// callers of this function must not read it. See ValidateJpegDimensions for
+// exactly what validation is and is not performed.
+JpegSnapshot ReadJpegSnapshotStructureOnly(
+    IWICImagingFactory* factory,
+    const LockedReadFile& locked_file,
+    const std::string& description,
+    const bool require_terminal_eoi,
+    JpegDimensions* out_dimensions = nullptr) {
+    JpegSnapshot snapshot;
+    snapshot.compressed = locked_file.ReadAll();
+    Sha256Provider sha256;
+    snapshot.sha256 = sha256.Compute(snapshot.compressed);
+    const auto dimensions = ValidateJpegDimensions(
+        factory, snapshot.compressed, description, require_terminal_eoi);
+    if (out_dimensions != nullptr) {
+        *out_dimensions = dimensions;
+    }
+    return snapshot;
+}
+
+// GitHub Issue #102 (item 1, deliberately left unchanged): this re-reads and
+// re-hashes the file the caller already read via ReadJpegSnapshot /
+// ReadJpegSnapshotStructureOnly, even though the LockedReadFile handle in use
+// for the whole operation excludes concurrent writers (see the FILE_SHARE_READ
+// comments at each call site) and ReadAll() already re-checks the file size
+// did not change during its own read. This looks redundant, but it is kept as
+// an explicit, independent proof that the exact bytes snapshotted earlier are
+// still the exact bytes on disk immediately before they are trusted (hashed
+// into the manifest, or renamed into place) -- a second, cheap check against
+// any future change to LockedReadFile/ReadAll that might weaken that
+// guarantee. Not changed by the #99/#102 performance work in this file: the
+// evidence needed to prove it is safe to remove was not conclusive enough to
+// risk it in a safety-critical (safety:S1) path.
 void ValidateSnapshotHash(
     const JpegSnapshot& snapshot,
     const LockedReadFile& locked_file,
@@ -815,20 +909,34 @@ std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
     return offline_stitch_fault_trigger_count.load(std::memory_order_acquire);
 }
 
-void PublishValidatedGeneratedJpeg(
+// GitHub Issue #99: this only ever needed the partial's declared dimensions
+// (to confirm they match the stitched result) and its bytes/hash, never the
+// decoded pixels, so it validates via ReadJpegSnapshotStructureOnly instead of
+// a full pixel decode. See ValidateJpegDimensions for exactly what that does
+// and does not check.
+//
+// GitHub Issue #102 (item 2): returns the SHA-256 it already computed here so
+// the caller can record it in the manifest without re-hashing the published
+// file a second time. GitHub Issue #102 (item 3, follow-up): also returns the
+// exact byte count that SHA-256 was computed over (see PublishedGeneratedJpeg),
+// so the manifest's sha256 and encoded_size_bytes can be sourced from the same
+// validated byte string instead of two different observations.
+PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     const std::uint32_t expected_width,
     const std::uint32_t expected_height) {
-    // Keep the partial immutable while it is snapshotted, decoded, hashed, and
-    // renamed. FILE_SHARE_DELETE permits this process's atomic rename only;
-    // writers remain excluded and a competing rename/delete makes ours fail.
+    // Keep the partial immutable while it is snapshotted, validated, hashed,
+    // and renamed. FILE_SHARE_DELETE permits this process's atomic rename
+    // only; writers remain excluded and a competing rename/delete makes ours
+    // fail.
     LockedReadFile locked_partial(partial, true);
     ComApartment apartment;
     auto factory = CreateFactory();
-    const auto snapshot = ReadJpegSnapshot(
-        factory.get(), locked_partial, "generated JPEG partial", true);
-    if (snapshot.image.width != expected_width || snapshot.image.height != expected_height) {
+    JpegDimensions dimensions{};
+    const auto snapshot = ReadJpegSnapshotStructureOnly(
+        factory.get(), locked_partial, "generated JPEG partial", true, &dimensions);
+    if (dimensions.width != expected_width || dimensions.height != expected_height) {
         throw std::invalid_argument("generated JPEG partial dimensions do not match the stitched result");
     }
     ValidateSnapshotHash(snapshot, locked_partial, "generated JPEG partial");
@@ -836,6 +944,7 @@ void PublishValidatedGeneratedJpeg(
     ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
     InvokeTestHook(before_publish_rename_hook);
     locked_partial.RenameToWithoutReplace(destination);
+    return {ToLowerHex(snapshot.sha256), static_cast<std::uint64_t>(snapshot.compressed.size())};
 }
 
 } // namespace detail
@@ -913,6 +1022,38 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         throw std::invalid_argument("approved crop removes the complete stitched canvas");
     }
 
+    // GitHub Issue #102 (item 3): b_bounds is the axis-aligned bounding box, in
+    // the same global/output coordinate space as global_x/global_y below, of
+    // CAM-B's rectangle mapped forward through the approved fixed transform
+    // (TransformedBounds already computed it above for canvas sizing). Because
+    // that forward transform is a fixed projective map validated by
+    // ValidateProjectiveDomain to not cross its zero-denominator line inside
+    // the CAM-B rectangle, the transform is a homeomorphism there and the
+    // image of the rectangle is exactly the convex quadrilateral spanned by
+    // its four transformed corners -- so b_bounds, the AABB of those corners,
+    // is already a true, non-lossy superset of every global coordinate CAM-B
+    // can possibly cover. A global point strictly outside b_bounds can never
+    // produce a has_b=true, so skipping the inverse transform and bilinear
+    // sample for such points cannot change any output pixel; it only skips
+    // work that was always going to end in has_b=false.
+    //
+    // The padding below is not required by that geometric argument, but is
+    // added anyway as a second, independent safety margin against floating-
+    // point drift: b_bounds is computed via the forward matrix, while the
+    // per-pixel skip test below is compared against values ultimately used
+    // with the separately-computed inverse matrix (inverse_b), so the two are
+    // not guaranteed to agree to the last bit right at the boundary. Rounding
+    // the box outward to whole pixels and then padding by an extra
+    // kCameraBSkipSafetyMarginPixels on every side keeps the skip test
+    // conservative: on any doubt near the edge, this does not skip, and the
+    // pixel falls through to the exact same TryTransform+SampleBilinear path
+    // used before this change, producing an identical result.
+    constexpr double kCameraBSkipSafetyMarginPixels = 2.0;
+    const double b_skip_minimum_x = std::floor(b_bounds.minimum_x) - kCameraBSkipSafetyMarginPixels;
+    const double b_skip_minimum_y = std::floor(b_bounds.minimum_y) - kCameraBSkipSafetyMarginPixels;
+    const double b_skip_maximum_x = std::ceil(b_bounds.maximum_x) + kCameraBSkipSafetyMarginPixels;
+    const double b_skip_maximum_y = std::ceil(b_bounds.maximum_y) + kCameraBSkipSafetyMarginPixels;
+
     Image output{
         canvas_width - static_cast<std::uint32_t>(horizontal_crop),
         canvas_height - static_cast<std::uint32_t>(vertical_crop),
@@ -921,13 +1062,17 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     output.bgr.resize(static_cast<std::size_t>(PixelCount(output.width, output.height) * 3));
     for (std::uint32_t output_y = 0; output_y < output.height; ++output_y) {
         const double global_y = minimum_y + request.profile.crop.top + output_y;
+        const bool row_may_hit_camera_b = global_y >= b_skip_minimum_y && global_y <= b_skip_maximum_y;
         for (std::uint32_t output_x = 0; output_x < output.width; ++output_x) {
             const double global_x = minimum_x + request.profile.crop.left + output_x;
             std::array<double, 3> pixel_a{};
             std::array<double, 3> pixel_b{};
             const bool has_a = SampleBilinear(camera_a, global_x, global_y, pixel_a);
+            const bool may_hit_camera_b = row_may_hit_camera_b
+                && global_x >= b_skip_minimum_x && global_x <= b_skip_maximum_x;
             Point source_b{};
-            const bool has_b = TryTransform(inverse_b, {global_x, global_y}, source_b)
+            const bool has_b = may_hit_camera_b
+                && TryTransform(inverse_b, {global_x, global_y}, source_b)
                 && SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
             if (!has_a && !has_b) {
                 throw std::invalid_argument("approved crop contains an uncovered output pixel");
@@ -958,6 +1103,16 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     }
 
     PartialFileGuard partial_guard(partial);
+    // GitHub Issue #102 (item 2): captured from PublishValidatedGeneratedJpeg,
+    // which already computed this SHA-256 (and the byte count it was computed
+    // over, see PublishedGeneratedJpeg / item 3 below) to verify the partial
+    // before renaming it into place. Reused for the manifest below instead of
+    // re-reading and re-hashing the published file a third time -- safe
+    // because RenameToWithoutReplace renames through the same open handle
+    // (SetFileInformationByHandle's FileRenameInfo), a metadata-only
+    // operation that never touches file content, so the bytes hashed here are
+    // byte-identical to the bytes at `destination` afterward.
+    detail::PublishedGeneratedJpeg published;
     try {
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
         ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
@@ -974,7 +1129,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         InvokeTestHook(before_partial_flush_hook);
         FlushGeneratedPartial(partial);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
-        detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        published = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
         partial_guard.Release();
     } catch (...) {
@@ -988,10 +1143,27 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     // Steps 4-6 of the commit protocol. Until the manifest is published and read
     // back, this job is not terminal-success no matter how complete the JPEG on
     // disk looks. A crash between the two leaves both artifacts and no claim.
+    //
+    // GitHub Issue #102 (item 3): the manifest's encoded_size_bytes below is
+    // sourced from `published.encoded_size_bytes` (the pre-rename byte count
+    // PublishValidatedGeneratedJpeg already validated and hashed), not from
+    // this file_size(destination) call, so that it and the manifest's sha256
+    // describe the exact same observed byte string rather than two different
+    // reads. The file_size(destination) call itself is kept -- it is a fresh,
+    // independent, post-rename observation from the filesystem (distinct from
+    // "RenameToWithoutReplace did not throw") that the published artifact is
+    // really there and non-empty at the expected path, in keeping with this
+    // commit protocol's insistence on verifying state rather than trusting the
+    // absence of an exception. Its result is now used only as a cross-check
+    // against the pre-rename size, rather than as the manifest's size source.
     std::error_code published_size_error;
-    const auto published_size = std::filesystem::file_size(destination, published_size_error);
-    if (published_size_error || published_size == 0) {
+    const auto observed_destination_size = std::filesystem::file_size(destination, published_size_error);
+    if (published_size_error || observed_destination_size == 0) {
         throw std::runtime_error("the published stitched JPEG could not be measured for the manifest");
+    }
+    if (observed_destination_size != published.encoded_size_bytes) {
+        throw std::runtime_error(
+            "the published stitched JPEG size does not match the bytes that were hashed before publish");
     }
 
     StitchJobManifest manifest;
@@ -1010,10 +1182,10 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     };
     manifest.output = {
         "stitched.jpg",
-        ComputeFileSha256Hex(destination),
+        published.sha256,
         output.width,
         output.height,
-        published_size,
+        published.encoded_size_bytes,
     };
     manifest.completed_at_utc = request.completed_at_utc;
     PublishAndVerifyStitchJobManifest(job_path, manifest);
@@ -1053,13 +1225,21 @@ void ExportStitchedJpeg(
     LockedReadFile locked_source(stitched_jpeg);
     ComApartment apartment;
     auto factory = CreateFactory();
-    const auto source_snapshot = ReadJpegSnapshot(factory.get(), locked_source, "export source", true);
+    // GitHub Issue #99: an explicit export never reads `.image` -- it copies
+    // the compressed bytes verbatim and only needs confirmation that both the
+    // source and the partial are complete, well-formed JPEGs (and, via the
+    // hash/byte comparisons below, that they match each other). Before this
+    // change, ReadJpegSnapshot's full pixel decode ran here only to be
+    // discarded; ReadJpegSnapshotStructureOnly performs the equivalent
+    // structural validation without it. See ValidateJpegDimensions for
+    // exactly what that does and does not check.
+    const auto source_snapshot = ReadJpegSnapshotStructureOnly(factory.get(), locked_source, "export source", true);
     ValidateSnapshotHash(source_snapshot, locked_source, "export source");
 
     PartialFileGuard partial_guard(partial);
     WriteBytesToNewFile(partial, source_snapshot.compressed);
     LockedReadFile locked_partial(partial, true);
-    const auto partial_snapshot = ReadJpegSnapshot(factory.get(), locked_partial, "export partial", true);
+    const auto partial_snapshot = ReadJpegSnapshotStructureOnly(factory.get(), locked_partial, "export partial", true);
     ValidateSnapshotHash(partial_snapshot, locked_partial, "export partial");
     if (partial_snapshot.sha256 != source_snapshot.sha256
         || partial_snapshot.compressed != source_snapshot.compressed) {

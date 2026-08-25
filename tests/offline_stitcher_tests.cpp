@@ -1,4 +1,5 @@
 #include "a0/m2/offline_stitcher.hpp"
+#include "a0/m2/stitch_job_manifest.hpp"
 
 #include <Windows.h>
 #include <wincodec.h>
@@ -33,7 +34,19 @@ enum class OfflineStitchFaultPoint : std::uint32_t {
     interrupt_after_publish = 10,
 };
 
-void PublishValidatedGeneratedJpeg(
+// GitHub Issue #102 (item 3, follow-up from item 2): pairs the SHA-256
+// PublishValidatedGeneratedJpeg already computed with the exact byte count it
+// was computed over. Mirrors the real a0::m2::detail::PublishedGeneratedJpeg
+// definition in offline_stitcher.cpp field-for-field -- the two definitions
+// must stay in sync for this declaration to link correctly.
+struct PublishedGeneratedJpeg {
+    a0::m2::StitchJobSha256Hex sha256;
+    std::uint64_t encoded_size_bytes{};
+};
+
+// GitHub Issue #102 (item 2): now returns the SHA-256 hex digest (and, since
+// item 3, the byte count it was computed over) instead of void.
+PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     std::uint32_t expected_width,
@@ -448,6 +461,25 @@ void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
     Check(overlap[0] > 65 && overlap[2] > 65,
         "fixed overlap seam must feather contributions from both sources");
 
+    // GitHub Issue #102 (item 2) regression pin: PublishValidatedGeneratedJpeg
+    // now returns the SHA-256 it already computed while validating the
+    // partial, and StitchCanonicalPair records that reused value in the
+    // manifest instead of recomputing ComputeFileSha256Hex(destination). If
+    // that reuse were ever wrong -- e.g. the hash were captured for different
+    // bytes than what RenameToWithoutReplace actually publishes --
+    // VerifyPublishedStitchJob would independently recompute
+    // ComputeFileSha256Hex on the published artifact and throw
+    // ArtifactHashMismatch here. This is the same-ID read-only recovery path
+    // (GitHub Issue #40's terminal-success check), so calling it here also
+    // pins that the manifest and the published file agree end to end, not
+    // just that the reused hash happens to equal itself.
+    const auto recovered_first = a0::m2::VerifyPublishedStitchJob(
+        first.stitched_jpeg.parent_path(), first.stitch_job_id);
+    Check(recovered_first.output.sha256 == a0::m2::ComputeFileSha256Hex(first.stitched_jpeg)
+            && recovered_first.output.width_pixels == first.width
+            && recovered_first.output.height_pixels == first.height,
+        "reused publish-time SHA-256 recorded in the manifest must match the published artifact");
+
     const auto second = a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "stitch-job-002", ApprovedProfile()}));
     Check(second.stitched_jpeg != first.stitched_jpeg && std::filesystem::is_regular_file(second.stitched_jpeg),
         "recomposition must publish into a distinct output job");
@@ -746,15 +778,24 @@ void TestGeneratedPartialValidationAndNonReplacingPublish(const std::filesystem:
     Check(!std::filesystem::exists(truncated_destination),
         "truncated generated partial rejection must leave completed output zero");
 
+    // GitHub Issue #99: PublishValidatedGeneratedJpeg no longer runs a full
+    // pixel decode -- it validates via ReadJpegSnapshotStructureOnly, which
+    // still opens the WIC decoder/frame and parses the frame header (SOF) to
+    // read declared dimensions. `0x00` right after the SOI marker is not a
+    // valid marker byte, so this fixture still fails during that structural
+    // parse, not during pixel decode. This does NOT exercise -- and this
+    // lightweight path does not catch -- corruption confined to the
+    // entropy-coded scan data of an otherwise well-formed frame header; that
+    // detection was traded away deliberately (see ValidateJpegDimensions).
     const auto corrupt_partial = directory / "corrupt.jpg.partial";
     const auto corrupt_destination = directory / "corrupt.jpg";
     WriteBytes(corrupt_partial, {0xff, 0xd8, 0x00, 0xff, 0xd9});
     CheckRejected(
         [&] { a0::m2::detail::PublishValidatedGeneratedJpeg(
             corrupt_partial, corrupt_destination, 16, 8); },
-        "a generated JPEG with markers but failed full decode must not publish");
+        "a generated JPEG with markers but failed structural validation must not publish");
     Check(!std::filesystem::exists(corrupt_destination),
-        "generated decode failure must leave completed output zero");
+        "generated structural-validation failure must leave completed output zero");
 
     const auto wrong_dimensions_partial = directory / "wrong-dimensions.jpg.partial";
     const auto wrong_dimensions_destination = directory / "wrong-dimensions.jpg";
