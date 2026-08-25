@@ -2634,6 +2634,50 @@ void TestWpdStreamReadLengthValidationFailsClosed() {
         "a maximally over-reported IStream byte count must retain the download failure category");
 }
 
+void TestWpdEnumeratedObjectCountValidationFailsClosed() {
+    ValidateWpdEnumeratedObjectCount("probe_category", 0, 16);
+    ValidateWpdEnumeratedObjectCount("probe_category", 16, 16);
+
+    bool over_reported_count_rejected = false;
+    try {
+        ValidateWpdEnumeratedObjectCount("probe_category", 17, 16);
+    } catch (const TransportError& error) {
+        over_reported_count_rejected = error.Category() == "probe_category" &&
+            std::string(error.what()).find("more IDs than the request buffer holds") != std::string::npos;
+    }
+    Check(over_reported_count_rejected,
+        "a WPD enumerator that reports more fetched IDs than the request buffer holds must fail closed");
+}
+
+void TestWpdEnumeratedObjectIdValidationFailsClosed() {
+    ValidateWpdEnumeratedObjectId("probe_category", L"non-null-object-id");
+
+    bool null_id_rejected = false;
+    try {
+        ValidateWpdEnumeratedObjectId("probe_category", nullptr);
+    } catch (const TransportError& error) {
+        null_id_rejected = error.Category() == "probe_category" &&
+            std::string(error.what()).find("was not populated") != std::string::npos;
+    }
+    Check(null_id_rejected,
+        "a WPD enumerator that reports a slot as fetched while leaving the ID null must fail closed");
+}
+
+void TestWpdContentScanBudgetValidationFailsClosed() {
+    ValidateWpdContentScanBudget("probe_category", 0, 200'000);
+    ValidateWpdContentScanBudget("probe_category", 200'000, 200'000);
+
+    bool budget_exceeded_rejected = false;
+    try {
+        ValidateWpdContentScanBudget("probe_category", 200'001, 200'000);
+    } catch (const TransportError& error) {
+        budget_exceeded_rejected = error.Category() == "probe_category" &&
+            std::string(error.what()).find("exceeded the maximum object budget") != std::string::npos;
+    }
+    Check(budget_exceeded_rejected,
+        "a WPD content-tree scan that exceeds the configured object budget must fail closed");
+}
+
 void TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry() {
     const auto run_case = [](std::string_view name,
                              std::vector<ImageCandidate> candidates,
@@ -2790,6 +2834,9 @@ int main() {
         TestHybridCaptureArgumentConfirmations();
         TestWpdObjectDateCorrelationFailsClosed();
         TestWpdStreamReadLengthValidationFailsClosed();
+        TestWpdEnumeratedObjectCountValidationFailsClosed();
+        TestWpdEnumeratedObjectIdValidationFailsClosed();
+        TestWpdContentScanBudgetValidationFailsClosed();
         TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry();
         TestHybridCaptureFailureAndObservationTokenAreFailClosed();
     } catch (const std::exception& error) {

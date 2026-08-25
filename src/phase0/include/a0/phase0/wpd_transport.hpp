@@ -93,6 +93,31 @@ void ValidateWpdStreamReadLength(
     std::size_t reported_bytes,
     std::size_t requested_bytes);
 
+// IEnumPortableDeviceObjectIDs::Next reports how many IDs it populated
+// through an untrusted provider-owned out parameter. Reject over-reporting
+// before the count is used to index the fixed-size, zero-initialized ID
+// buffer that holds them.
+void ValidateWpdEnumeratedObjectCount(
+    std::string_view category,
+    std::size_t reported_count,
+    std::size_t buffer_capacity);
+
+// A provider that claims to have populated a slot yet leaves the
+// corresponding entry null would otherwise be read into
+// std::wstring(nullptr) -- undefined behavior. Reject the batch before any
+// entry in the reported range is constructed.
+void ValidateWpdEnumeratedObjectId(std::string_view category, const wchar_t* id);
+
+// Bounds how many objects a single content-tree walk may enumerate. A
+// dedicated capture spool never legitimately holds more than a few thousand
+// objects; the budget is set comfortably above realistic professional-card
+// contents while remaining finite, so a runaway or hostile object tree
+// cannot grow the scan without bound.
+void ValidateWpdContentScanBudget(
+    std::string_view category,
+    std::size_t scanned_object_count,
+    std::size_t maximum_object_count);
+
 class WpdTransport final : public ICameraTransport, public IPostCardObservationTransport, public ICorrelationObservationTransport {
 public:
     using BeforeCommandCallback = std::function<void()>;
