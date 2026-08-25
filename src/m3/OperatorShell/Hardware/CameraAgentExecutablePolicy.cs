@@ -4,7 +4,11 @@ namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 
 internal static class CameraAgentExecutablePolicy
 {
-    private const string InvalidExecutableMessage =
+    // internal: LaunchWindow.OpenAndClose がこの番兵で ArgumentException を絞り込み、
+    // ArgumentNullException / ArgumentOutOfRangeException や createWindow() 内の
+    // 無関係なプログラミングバグまで「起動引数エラー」ダイアログへ飲み込まないようにする
+    // （PR #152 レビュー指摘・軽微3）。
+    internal const string InvalidExecutableMessage =
         "Camera Agentの実行ファイルはアプリケーション配置先の直下にある固定ローカルドライブ上のEXEである必要があります。";
 
     internal static string Resolve(
