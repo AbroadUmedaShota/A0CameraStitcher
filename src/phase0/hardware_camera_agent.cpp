@@ -3320,6 +3320,24 @@ public:
         if (config_.timeouts.transaction_watchdog != std::chrono::seconds(180)) {
             throw std::invalid_argument("hardware Camera Agent transaction watchdog must be 180 seconds");
         }
+        if (config_.timeouts.live_view_frame <= std::chrono::seconds(0) ||
+            config_.timeouts.live_view_frame > config_.timeouts.open) {
+            throw std::invalid_argument(
+                "continuous Live View frame budget must be positive and not exceed the open budget");
+        }
+        // 上の `<= open` は本当の不変条件の代理でしかない。実際に守るべきなのは
+        // 「live_view_frame は C# 側 LiveViewResponseTimeout(30秒、
+        // PersistentHardwareCameraAgentOperations.cs) を明確なマージンを持って
+        // 下回ること」で、これが崩れると応答読み取りが先に諦められてパイプが閉じ、
+        // delivery-ACK 契約違反で Camera Agent が exit code 3 で終了する（#141）。
+        // `open` 自身には上限が無いため、`open` を将来広げる変更（例:60秒）が
+        // 入ると `<= open` だけでは live_view_frame が30秒に接近・到達するのを
+        // 防げない。そのため `open` の値に関係なく効く絶対上限をここに固定する。
+        if (config_.timeouts.live_view_frame > std::chrono::seconds(20)) {
+            throw std::invalid_argument(
+                "continuous Live View frame budget must stay well below the C# "
+                "LiveViewResponseTimeout (30s), independent of the open budget");
+        }
         if (static_cast<bool>(config_.continuous_live_view_sdk_factory_for_testing) !=
             static_cast<bool>(
                 config_.continuous_live_view_identity_resolver_for_testing)) {
@@ -4021,7 +4039,8 @@ public:
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Frame");
         if (!ValidateContinuousSession(request, result)) return result;
         try {
-            const auto frame = live_view_sdk_->ReadLiveViewFrame(config_.timeouts.open);
+            const auto frame =
+                live_view_sdk_->ReadLiveViewFrame(config_.timeouts.live_view_frame);
             if (!IsValidJpeg(frame) || frame.size() > 512U * 1024U) {
                 throw std::runtime_error("Live View frame is not a bounded JPEG");
             }
