@@ -195,28 +195,26 @@ public sealed class PersistentHardwareCameraAgentOperations :
     public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> ReadLiveViewFrameAsync(
         string sessionId,
         CancellationToken cancellationToken = default) =>
-        RunV2Async((client, token) => client.ReadFrameAsync(sessionId, token), sessionId, false, cancellationToken);
+        RunV2Async(
+            (client, token) => client.ReadFrameAsync(sessionId, token), sessionId, setOwnedSession: null, cancellationToken);
 
     public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> HeartbeatLiveViewAsync(
         string sessionId,
         CancellationToken cancellationToken = default) =>
-        RunV2Async((client, token) => client.HeartbeatAsync(sessionId, token), sessionId, false, cancellationToken);
+        RunV2Async(
+            (client, token) => client.HeartbeatAsync(sessionId, token), sessionId, setOwnedSession: null, cancellationToken);
 
+    // Stop releases ownership on success (setOwnedSession: false below clears
+    // _ownedSessionId instead of leaving the just-stopped session id behind), so
+    // DisposeAsync no longer sends close-agent-session for a session this instance
+    // already stopped. See RunV2Async for how the tri-state flag is applied.
     public Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> StopLiveViewAsync(
         string sessionId,
         CancellationToken cancellationToken = default) =>
         RunV2Async(
-            async (client, token) =>
-            {
-                var reply = await client.StopAsync(sessionId, token).ConfigureAwait(false);
-                if (reply.Success)
-                {
-                    _ownedSessionId = sessionId;
-                }
-                return reply;
-            },
+            (client, token) => client.StopAsync(sessionId, token),
             sessionId,
-            false,
+            setOwnedSession: false,
             cancellationToken);
 
     private Task<T> RunV1Async<T>(
@@ -232,17 +230,21 @@ public sealed class PersistentHardwareCameraAgentOperations :
             cancellationToken,
             allowWhileCaptureMayBeActive);
 
+    // setOwnedSession is tri-state: true (Start) claims ownership on success, false
+    // (Stop) releases ownership on success, null (ReadFrame/Heartbeat) never touches
+    // ownership. Centralizing the _ownedSessionId write here (instead of letting each
+    // caller assign it) keeps the argument's meaning and the actual effect in sync.
     private Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>> RunV2Async(
         Func<HardwareContinuousLiveViewClient, CancellationToken,
             Task<HardwareCameraAgentReply<HardwareContinuousLiveViewResult>>> operation,
         string sessionId,
-        bool setOwnedSession,
+        bool? setOwnedSession,
         CancellationToken cancellationToken) =>
         RunSerializedAsync(
             LiveViewResponseTimeout,
             async (pipeName, token) =>
             {
-                if (!setOwnedSession && _ownedSessionId is not null &&
+                if (setOwnedSession != true && _ownedSessionId is not null &&
                     _ownedSessionId != sessionId)
                 {
                     throw new InvalidOperationException("A different Live View session owns the Camera Agent.");
@@ -251,9 +253,16 @@ public sealed class PersistentHardwareCameraAgentOperations :
                     pipeName, ConnectTimeout, LiveViewResponseTimeout);
                 var reply = await operation(new HardwareContinuousLiveViewClient(transport), token)
                     .ConfigureAwait(false);
-                if (setOwnedSession && reply.Success)
+                if (reply.Success)
                 {
-                    _ownedSessionId = sessionId;
+                    if (setOwnedSession == true)
+                    {
+                        _ownedSessionId = sessionId;
+                    }
+                    else if (setOwnedSession == false)
+                    {
+                        _ownedSessionId = null;
+                    }
                 }
                 return reply;
             },
@@ -456,16 +465,28 @@ public sealed class PersistentHardwareCameraAgentOperations :
         await _operationGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_process is { HasExited: false } && _pipeName is not null && !_captureMayBeActive)
+            // Only attempt a defensive close when this instance still owns a Live
+            // View session. A session that StopLiveViewAsync already released
+            // (_ownedSessionId is null) has nothing left to close on the Agent side,
+            // so Dispose no longer invents a session id to send a close for.
+            if (_process is { HasExited: false } && _pipeName is not null && !_captureMayBeActive &&
+                _ownedSessionId is { } ownedSessionId)
             {
-                var sessionId = _ownedSessionId ?? HardwareContinuousLiveViewClient.CreateSessionId();
                 try
                 {
                     var transport = new NamedPipeHardwareCameraAgentTransport(
                         _pipeName, ConnectTimeout, LiveViewResponseTimeout);
-                    _ = await new HardwareContinuousLiveViewClient(transport)
-                        .CloseAsync(sessionId)
+                    var closeReply = await new HardwareContinuousLiveViewClient(transport)
+                        .CloseAsync(ownedSessionId)
                         .ConfigureAwait(false);
+                    if (!closeReply.Success)
+                    {
+                        // Surfaced for diagnosis only; Dispose still remains fail-closed
+                        // below and never throws or kills the process on a failed close.
+                        Trace.TraceWarning(
+                            "Camera Agent close-agent-session failed during dispose " +
+                            $"(category={closeReply.Payload.ErrorCategory}).");
+                    }
                     await _process.WaitForExitAsync(CancellationToken.None)
                         .WaitAsync(TimeSpan.FromSeconds(10))
                         .ConfigureAwait(false);
