@@ -4,6 +4,8 @@
 
 承認日: 2026-08-24
 
+自動テスト方針更新: 2026-08-25 Product owner判断により、2026-08-26 checkpointでは自動テストを省略する。結果は`NotRun`であり、software PASS、release PASS、hardware acceptanceには昇格しない。
+
 計画マイルストーン: `M3T`
 
 対象: Windows 11 x64 / Nikon D810 exactly-one `SingleCamera`
@@ -32,9 +34,9 @@
 | Lane | 主担当 | 所有範囲 | 完了条件 |
 | --- | --- | --- | --- |
 | F: Front / WPF | フロントエンジニア1名 | SingleCameraの接続、readiness、Live View、撮影、review、export、失敗、終了の表示と操作。原則XAMLとUI testを所有し、PR #128統合前にshutdown code-behindを並行編集しない | 未完成Dual経路が`HardwarePending`で無効、連打やmode fallbackがなく、全状態がtruthfulに表示される |
-| C: Camera / Native | その他メンバーA | WPD evidence integrity、identity-v3 read-only route、SDK/WPD session境界、Issue #131 | `read > requested chunk`をfail closedし、対象試験とSDK-less/SDK-enabled契約試験が通る |
-| I: App / Integration | その他メンバーB | Issue #94 / PR #128、clean worktree統合、candidate SHA、CI、実行ファイルhash、既知問題 | shutdown完走、orphan Agentなし、候補SHAのソフトウェア検証結果とmanifestが確定する |
-| Q: QA / Evidence | I担当が兼務可 | テスト手順、停止条件、schema parse、匿名化scan、結果記録 | Go/No-Go項目が埋まり、失敗を成功へ昇格しない |
+| C: Camera / Native | その他メンバーA | WPD evidence integrity、identity-v3 read-only route、SDK/WPD session境界 | #131 / PR #134が`origin/main`へ反映済みであることを確認する |
+| I: App / Integration | その他メンバーB | Issue #94 / PR #128、#130 / PR #135、clean worktree統合、candidate SHA、手動smoke、実行ファイルhash、既知問題 | shutdown完走、orphan Agentなし、候補SHAと手動確認結果とmanifestが確定する |
+| Q: QA / Evidence | I担当が兼務可 | テスト手順、停止条件、schema parse、匿名化scan、`NotRun`を含む結果記録 | Go/No-Go項目が埋まり、省略や失敗を成功へ昇格しない |
 | O: Operator / Product owner | 機材担当 | D810一台、専用empty card、USB、固定チャート、保存先、SDK許諾、実機操作の明示再開 | 実機開始条件を確認し、camera commandは操作者の合図後だけ実行される |
 
 同じファイルまたは同じ不具合を複数Laneで並行編集しない。統合担当が候補SHAと最終差分の唯一の所有者になる。
@@ -43,10 +45,10 @@
 
 | 優先 | Issue / PR | 水曜判定 | 対応 |
 | --- | --- | --- | --- |
-| 必須 | #131 WPD `IStream::Read`返却長 | 未完了なら実撮影No-Go | Camera担当が最優先で修正・negative test追加 |
-| 必須 | #94 / PR #128 shutdown順序 | CI未検証のまま実撮影No-Go | Billing復旧後にexact PR SHAのCIを再実行し、green後に統合 |
+| 解消 | #131 / PR #134 WPD `IStream::Read`返却長 | `origin/main`へ反映済み | 候補SHAに含まれることを確認する |
+| 必須 | #94 / PR #128 shutdown順序 | 候補未反映または手動shutdown確認失敗なら実撮影No-Go | exact candidateへ含め、終了と残留processを手動確認する |
 | 必須 | #7 SingleCamera identity-v3 / one-shot | 実機実行契約 | read-only preflight、empty spool、operator resume後のone-shotをここへ記録 |
-| 条件付き | #130 Dual UI無期限wait | 未完了ならDualを無効化 | 水曜SingleCameraには入れず、Dual software画面を操作不可にする |
+| 解消 | #130 / PR #135 Dual UI無期限wait | `origin/main`へ反映済み | 水曜は引き続きDual実機経路を対象外にする |
 | 対象外 | #85 DualBinding同一ユーザーsquatting | 水曜Dual不可の理由 | 実Dual hostとセットで後続対応 |
 | 対象外 | #10 Dual実capture backend | 水曜Dual不可の理由 | #7 one-shot合格後の別lane |
 
@@ -58,27 +60,27 @@
 
 - テスト対象をSingleCamera exactly-oneへ凍結する。
 - 最新`origin/main`からclean worktreeと担当別branchを作る。
-- GitHub Actionsのbilling / spending limitを復旧する。
-- #131とPR #128の差分、試験、競合範囲を確認する。
+- GitHub Actionsのbilling / spending limitによる起動拒否を記録する。今回のcheckpointでは復旧を開始条件にしない。
+- #131と#130のmain反映、PR #128の差分と競合範囲を確認する。
 - D810一台、専用empty card、USB、保存先、権利確認済みチャートの準備状況を確認する。
 
 Exit gate: 担当、branch、機材準備、未解決blockerが一覧化されている。
 
 ### 8月25日 火曜 午前
 
-- #131をfocused test付きで統合する。
-- PR #128をexact-SHA CI green後に統合する。
+- #131 / PR #134と#130 / PR #135のmain反映を確認する。
+- PR #128をreviewし、exact candidateへ含めた後にshutdownを手動確認する。
 - フロントがSingleCamera導線とDual無効表示を統合する。
-- `main`または候補branchのSDK-less C++ Debug/Release、M3 simulated Debug/Release、formal WPF flowを実行する。
+- 自動テストは実行せず、対象suiteを`NotRun`としてmanifestへ記録する。
 
 Exit gate: 実機前に必要なコードblockerが解消し、候補SHAが一意である。
 
 ### 8月25日 火曜 午後
 
 - 実シャッターを切らないread-only preflightだけを行う。
-- software-onlyで起動、mode選択、Live View mock、capture state、review、export、failure、shutdownを通す。
-- 実行ファイルhash、toolchain、テスト結果、既知問題をcandidate manifestへ記録する。
-- 17:00 JSTに候補版を凍結する。以後はテスト中止級の修正だけを別SHAで明示する。
+- software-onlyで起動、Agent実行ファイル存在、mode選択、Dual無効、Live View start/stop、capture state、review、export、failure、shutdown、残留process 0を手動確認する。
+- 実行ファイルhash、toolchain、手動確認結果、自動テスト`NotRun`、既知問題をcandidate manifestへ記録する。
+- 上記の手動確認後に候補版を凍結する。以後はテスト中止級の修正だけを別SHAで明示する。
 
 Exit gate: 下記Go条件を全て満たすか、No-Go理由が明示されている。
 
@@ -96,9 +98,10 @@ Exit gate: 下記Go条件を全て満たすか、No-Go理由が明示されて�
 
 ### Go
 
-- #131の修正とnegative testが候補SHAに含まれる。
-- #94のshutdown修正が候補SHAに含まれ、Camera AgentとSDK sessionの解放を確認済みである。
-- 候補SHAの必要ソフトウェア試験がgreenである。
+- #131と#130の修正が候補SHAに含まれる。
+- #94のshutdown修正が候補SHAに含まれ、Camera AgentとSDK sessionの解放を手動確認済みである。
+- 候補SHA、実行ファイルhash、手動smoke、既知問題、自動テスト`NotRun`がmanifestに記録されている。
+- 自動テスト省略がsoftware PASS、release PASS、hardware acceptanceではないことを操作者が確認する。
 - D810は一台だけ接続され、identity-v3 read-only preflightが一致する。
 - 専用spoolのpayloadが0件である。
 - 固定チャート、保存先、USB、SDK利用条件が準備済みである。
@@ -107,6 +110,8 @@ Exit gate: 下記Go条件を全て満たすか、No-Go理由が明示されて�
 ### No-Go / 即時停止
 
 - `read > requested chunk`を拒否しない候補である。
+- #94が候補SHAに含まれない、または手動shutdown確認を完了していない。
+- 候補SHA、実行ファイルhash、手動smoke結果のいずれかが未記録である。
 - shutdown後にAgent、SDK session、leaseが残る。
 - D810が0台または複数台、identity不一致、profile期限切れである。
 - spoolに既存payloadがある。
@@ -123,6 +128,8 @@ Exit gate: 下記Go条件を全て満たすか、No-Go理由が明示されて�
 - commit SHA、branch、build日時、toolchain
 - 実行ファイルのSHA-256
 - 実行したコマンドとPass/Fail/Blocked
+- 2026-08-25自動テスト省略判断と対象suiteごとの`NotRun`
+- 手動smokeの各項目とPass/Fail
 - Issue #94、#131の検証結果
 - read-only preflight、spool 0、capture 0/1、delete 0/1、retry 0
 - canonical originalの検証結果と匿名run ID
@@ -135,8 +142,8 @@ camera serial、SDK archive、licensed binary、credential、実画像、顧客�
 
 `M3T`は次の三状態で記録する。
 
-- `Ready`: 火曜17:00のGo条件を満たし、水曜の実機開始が可能。
-- `Blocked`: billing、コードblocker、identity、spool、機材のいずれかが未解消。
+- `Ready`: 候補版確定時のGo条件を満たし、水曜の実機開始が可能。
+- `Blocked`: #94、手動smoke、候補版、identity、spool、機材のいずれかが未解消。
 - `Tested`: 水曜one-shotの結果をPassまたはFailedPartialとして証跡化済み。
 
 `Tested`であっても、M1Aの10回、HG-0009、100回、Dual実機、A0品質、MVP、releaseは未完了のままとする。

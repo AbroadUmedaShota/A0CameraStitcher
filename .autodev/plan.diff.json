@@ -1,28 +1,27 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.12.0",
-  "base_plan_version": "2.11.0",
-  "generated_at": "2026-08-24",
-  "summary": "Add a bounded 2026-08-26 internal SingleCamera test-readiness milestone with separate UI, safety-blocker, exact-SHA candidate, and operator-controlled one-shot work. Keep Dual hardware capture, A0 quality acceptance, durability, packaging, and release outside the Wednesday completion claim.",
-  "added_milestones": [
+  "plan_version": "2.13.0",
+  "base_plan_version": "2.12.0",
+  "generated_at": "2026-08-25",
+  "summary": "Record the product-owner decision to omit automated tests for the 2026-08-26 checkpoint, replace the CI gate with explicit manual software smoke and waiver evidence, and update the resolved Issue 130 and 131 status without treating skipped tests as a PASS.",
+  "added_milestones": [],
+  "changed_milestones": [
     "M3T"
   ],
-  "changed_milestones": [],
   "removed_milestones": [],
-  "added_work_items": [
-    "WI-0036",
+  "added_work_items": [],
+  "changed_work_items": [
     "WI-0037",
-    "WI-0038",
-    "WI-0039"
+    "WI-0038"
   ],
-  "changed_work_items": [],
   "removed_work_items": [],
   "breaking_changes": [],
   "non_completion_guards": [
     "M3T completion is internal test readiness only and does not complete M1A, M3, M4, MVP acceptance, packaging, or release",
     "the Wednesday physical lane is exactly-one SingleCamera only; incomplete Dual capture, binding, and stitch paths remain HardwarePending and disabled",
-    "GitHub billing or runner failure blocks an exact-SHA CI claim and must not be converted into a code PASS or release PASS",
-    "Issue 94 shutdown and Issue 131 WPD read-bound fixes must be verified before a real one-shot; unresolved Issue 130 keeps Dual disabled",
+    "automated test execution is explicitly waived only for the 2026-08-26 checkpoint; every skipped suite is recorded NotRun and the waiver is not a code PASS, release PASS, or hardware acceptance",
+    "the exact candidate still requires manual launch, Agent-presence, explicit-mode, disabled-Dual, Live View start-stop, shutdown, and residual-process checks",
+    "Issue 131 and Issue 130 are resolved in origin/main; Issue 94 shutdown must still be reviewed, included, and manually verified before a real one-shot",
     "real camera work still requires explicit operator resume, identity-v3 read-only readiness, one D810, and a dedicated spool with zero payload objects",
     "one successful capture does not prove ten-run characterization, HG-0009 p95, 100-run acceptance, Dual hardware operation, stitching, or A0 output quality",
     "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"

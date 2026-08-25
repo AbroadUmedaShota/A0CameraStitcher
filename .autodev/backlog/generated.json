@@ -1,7 +1,7 @@
 {
   "schema_version": "autodev.backlog.v1",
-  "generated_at": "2026-08-24",
-  "plan_version": "2.12.0",
+  "generated_at": "2026-08-25",
+  "plan_version": "2.13.0",
   "items": [
     {
       "id": "BL-20260826-01",
@@ -13,7 +13,7 @@
       "safety_class": "S1",
       "status": "draft",
       "ux_review_required": false,
-      "dependencies": ["WI-0032", "WI-0033", "GitHub Issue 94", "GitHub Issue 131"],
+      "dependencies": ["WI-0032", "WI-0033", "GitHub Issue 94"],
       "acceptance_criteria": [
         "SingleCamera connect, readiness, Live View, capture, review, export, failure, and close states are operable and truthful",
         "unfinished Dual paths remain visibly HardwarePending and disabled",
@@ -27,7 +27,7 @@
         "dependency_risk": 2
       },
       "promotion": "not-promoted",
-      "blocked_reason": "Existing critical-path Issues 94 and 131 remain active; the repository permits at most one active promoted implementation issue."
+      "blocked_reason": "Critical-path Issue 94 remains active; Issue 131 is closed and its fix is present in origin/main."
     },
     {
       "id": "BL-20260826-02",
@@ -37,13 +37,13 @@
       "dedupe_key": "wednesday-exact-sha-windows-candidate",
       "work_item_ids": ["WI-0038"],
       "safety_class": "S1",
-      "status": "blocked",
+      "status": "draft",
       "ux_review_required": false,
-      "dependencies": ["WI-0036", "WI-0037", "GitHub Actions billing and runner availability"],
+      "dependencies": ["WI-0036", "WI-0037", "manual candidate smoke and manifest"],
       "acceptance_criteria": [
-        "Candidate commit SHA, executable hashes, toolchain, test commands, outcomes, and limitations are recorded",
-        "SDK-less C++ Debug and Release, M3 simulated Debug and Release, and formal WPF flow pass for the candidate when CI is available",
-        "Billing or runner failure remains an environment block and is not reported as a code PASS"
+        "Candidate commit SHA, executable hashes, toolchain, automated-test waiver, manual observations, and limitations are recorded",
+        "Manual smoke verifies launch, required Agent executable presence, explicit SingleCamera selection, disabled incomplete Dual paths, Live View start and stop without shutter, close completion, and no residual Camera Agent process",
+        "Every skipped automated suite is recorded NotRun and is not reported as a code PASS, release PASS, or hardware acceptance"
       ],
       "score": {
         "safety": 5,
@@ -52,8 +52,7 @@
         "confidence": 4,
         "dependency_risk": 1
       },
-      "promotion": "not-promoted",
-      "blocked_reason": "GitHub Actions jobs currently do not start because of the repository billing or spending-limit condition."
+      "promotion": "not-promoted"
     },
     {
       "id": "BL-20260826-03",
@@ -85,8 +84,8 @@
     }
   ],
   "summary": {
-    "draft_count": 1,
-    "blocked_count": 1,
+    "draft_count": 2,
+    "blocked_count": 0,
     "human_gated_count": 1,
     "promotable_count": 0,
     "ux_review_count": 0,
