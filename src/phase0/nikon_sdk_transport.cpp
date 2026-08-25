@@ -12,6 +12,7 @@
 #endif
 
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/sdk_pending_command.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -133,6 +134,11 @@ NikonCardCaptureEventSnapshot NikonCardCaptureEventWindow::Snapshot() const noex
 namespace {
 
 constexpr auto kAsyncInterval = std::chrono::milliseconds(10);
+// Grace period for abandoning a pending async command after Abort: bounded
+// polling for the completion callback, roughly kAbortGraceIterations *
+// kAsyncInterval (~250ms), before the buffer handed to the SDK is treated as
+// unrecoverable and the session is quarantined.
+constexpr int kAbortGraceIterations = 25;
 constexpr auto kCandidateSettle = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxLiveViewArrayBytes = 16U * 1024U * 1024U;
 // Mirrors wpd_transport.cpp's kMaximumJpegBytes: bounds a device-reported
@@ -329,6 +335,34 @@ public:
     void OpenSource(std::string_view stable_identity, std::chrono::seconds timeout, bool capture_session) {
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
+        // sdk_session_poisoned_ reflects a previous session's abandoned
+        // async command: the vendor DLL may still hold a pointer into a
+        // buffer this transport already released. Merely closing the MAID
+        // source/module objects does not prove that risk is gone -- the DLL
+        // can still write after Close(). What actually proves it is the
+        // chain that must already have run for ClaimSession() to succeed
+        // here:
+        //   ClaimSession() succeeded => claimed_ was false
+        //     => ReleaseSession() already ran (end of Close()'s
+        //        CleanupObjects() path, or end of CleanupNoThrow())
+        //     => both of those call UnloadModule() before ReleaseSession()
+        //     => UnloadModule() FreeLibrary()s the vendor module and USB
+        //        transport DLLs and clears entry_
+        //     => the vendor code that could still be writing into the old
+        //        buffer no longer exists in this process
+        // This is not a new assumption: it is the same safety model
+        // completions_/downloads_ already rely on -- both are only cleared
+        // after UnloadModule() (see #145's discussion of that existing
+        // pattern). Enforce the chain rather than merely assume it, so a
+        // future change that unloads the module lazily (e.g. a DLL cache)
+        // instead of from Close()/CleanupNoThrow() fails loudly here
+        // instead of silently making this reset unsound.
+        if (entry_ != nullptr || module_handle_ != nullptr) {
+            throw TransportError(
+                "open_failed",
+                "internal invariant violated: SDK module was not unloaded before a new session claim");
+        }
+        sdk_session_poisoned_ = false;
         trace_ = {};
         card_capture_events_.ResetForSession();
         try {
@@ -398,6 +432,7 @@ public:
 
     std::string Baseline(std::chrono::seconds timeout) {
         RequireCaptureSession();
+        RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         const auto children = Children(source_, deadline, "baseline_failed");
         baseline_.clear();
@@ -417,6 +452,7 @@ public:
         std::chrono::seconds download_timeout,
         std::chrono::seconds transaction_timeout) {
         RequireCaptureSession();
+        RequireSdkSessionNotPoisoned();
         if (baseline != baseline_token_ || baseline_token_.empty()) {
             throw TransportError("baseline_mismatch", "capture baseline token is not current");
         }
@@ -485,6 +521,7 @@ public:
     void CaptureToCard(std::chrono::seconds image_event_timeout,
                        std::chrono::seconds transaction_timeout) {
         RequireCaptureSession();
+        RequireSdkSessionNotPoisoned();
         const auto overall_deadline = std::chrono::steady_clock::now() + transaction_timeout;
         const auto event_deadline = std::min(std::chrono::steady_clock::now() + image_event_timeout, overall_deadline);
         capture_complete_ = false;
@@ -521,6 +558,7 @@ public:
 
     void StartLiveView(std::chrono::seconds timeout) {
         RequireLiveViewSession();
+        RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         const ULONG prohibit = GetUnsigned(
             source_, kNkMAIDCapability_LiveViewProhibit, deadline, "live_view_prohibited");
@@ -557,6 +595,7 @@ public:
 
     std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) {
         RequireLiveViewSession();
+        RequireSdkSessionNotPoisoned();
         if (!live_view_started_) {
             throw TransportError("live_view_not_started", "live view frame requested before start");
         }
@@ -670,6 +709,25 @@ private:
         if (!session_open_ || !source_.opened) throw TransportError("session_not_open", "Nikon source is not open");
     }
 
+    // Refuses to start new SDK work on a session an abandoned async command
+    // left in an unknown state (see AbandonPending): the SDK may still write
+    // into a buffer this transport already released, so a second UAF window
+    // must not be opened by issuing more commands.
+    //
+    // Deliberately NOT folded into RequireOpen(): RequireOpen() also gates
+    // teardown paths like StopLiveView, and those must still be allowed to
+    // run on a poisoned session. Otherwise a poisoned live view can never be
+    // stopped or closed, which latches the caller's continuous-live-view
+    // recovery logic into a permanently "unsafe" state and leaks its process
+    // lease -- the exact failure mode fail-closed is supposed to prevent,
+    // just moved from "wrote into freed memory" to "camera stuck busy
+    // forever". Fail-closed means refusing new work, not refusing to stop.
+    void RequireSdkSessionNotPoisoned() const {
+        if (sdk_session_poisoned_) {
+            throw TransportError("session_poisoned", "Nikon SDK session is poisoned after an abandoned async command");
+        }
+    }
+
     void RequireCaptureSession() const {
         RequireOpen();
         if (!capture_session_) throw TransportError("session_mode_mismatch", "Nikon session is not a capture session");
@@ -768,6 +826,51 @@ private:
         }
     }
 
+    // Abandons a pending async command: issues Abort exactly once.
+    //
+    // `async_started` distinguishes two very different situations that both
+    // reach this function:
+    //
+    //  - true (the initial Call() returned NoError or Pending, i.e. the SDK
+    //    accepted the command and CompletionProc is genuinely wired up to
+    //    fire later): pumps for up to kAbortGraceIterations steps waiting
+    //    for `state->done`, and quarantines the session (see
+    //    RequireSdkSessionNotPoisoned) if completion evidence never arrives
+    //    -- the buffer handed to the SDK for this command cannot be safely
+    //    released in that case (stage 2 tracks such buffers so they can be
+    //    kept alive instead of freed; for now this only stops the session
+    //    from accepting further commands).
+    //  - false (the initial Call() was rejected synchronously, e.g. an
+    //    unsupported setting during status probing): no async operation was
+    //    ever queued, so CompletionProc can never fire. Polling for
+    //    `state->done` here would only spend the grace period on a signal
+    //    that was never coming, and treating "no evidence" as "still in
+    //    flight" would quarantine the session on every routine synchronous
+    //    rejection. Abort is still fired defensively in case the SDK's own
+    //    "rejected" reporting is imprecise, but that alone must not
+    //    quarantine the session.
+    void AbandonPending(MaidObject& object, CompletionState* state, std::string_view category,
+                        bool async_started) {
+        if (!async_started) {
+            try {
+                Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
+            } catch (...) {
+            }
+            return;
+        }
+        const AbandonOutcome outcome = AbandonPendingCommand(
+            [this, &object]() {
+                Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
+            },
+            [this, &object, category]() { Pump(object, category); },
+            [state]() { return state->done.load(std::memory_order_acquire); },
+            [] { std::this_thread::sleep_for(kAsyncInterval); },
+            kAbortGraceIterations);
+        if (outcome == AbandonOutcome::quarantined) {
+            sdk_session_poisoned_ = true;
+        }
+    }
+
     NKERROR RunCompleted(MaidObject& object, ULONG command, ULONG parameter, ULONG data_type,
                          NKPARAM data, std::chrono::steady_clock::time_point deadline,
                          std::string_view category) {
@@ -778,14 +881,31 @@ private:
             reinterpret_cast<LPNKFUNC>(&CompletionProc), reinterpret_cast<NKREF>(state));
         if (immediate == kNkMAIDResult_BufferSize) return immediate;
         if (immediate != kNkMAIDResult_NoError && immediate != kNkMAIDResult_Pending) {
+            // The SDK rejected the command synchronously: no async operation
+            // was ever queued for it, so nothing could still write into the
+            // caller's buffer later. Fire Abort defensively but do not
+            // derive quarantine from missing completion evidence that was
+            // never going to arrive (see AbandonPending).
+            AbandonPending(object, state, category, /*async_started=*/false);
             throw TransportError(std::string(category), "SDK command failed: " + ResultText(immediate));
         }
         while (!state->done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
+                AbandonPending(object, state, category, /*async_started=*/true);
                 throw TransportError(std::string(category), "SDK command timed out");
             }
-            Pump(object, category);
+            try {
+                Pump(object, category);
+            } catch (...) {
+                // Pump() failing does not mean the async command itself
+                // completed or was cancelled; still abandon it before
+                // propagating the pump failure. Catch broadly (not just
+                // TransportError): Pump()'s own message construction can
+                // throw std::bad_alloc/std::length_error, and that must not
+                // skip Abort either.
+                AbandonPending(object, state, category, /*async_started=*/true);
+                throw;
+            }
             std::this_thread::sleep_for(kAsyncInterval);
         }
         if (state->result != kNkMAIDResult_NoError) {
@@ -898,6 +1018,7 @@ private:
 
     SdkCameraStatus ReadOpenCaptureSessionStatus(std::chrono::seconds timeout) {
         RequireCaptureSession();
+        RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         SdkCameraStatus status;
         status.firmware = Firmware(source_, deadline, "sdk_status_failed");
@@ -1577,6 +1698,15 @@ private:
     ULONG source_id_{0};
     bool claimed_{false};
     bool session_open_{false};
+    // Set when an abandoned async command that was confirmed to have
+    // actually started never produced completion evidence within the abort
+    // grace period (see AbandonPending). Checked by
+    // RequireSdkSessionNotPoisoned() to stop issuing new SDK work into a
+    // session the SDK may still be writing into; deliberately not checked by
+    // teardown paths (StopLiveView, Close), which must remain reachable even
+    // on a poisoned session. Reset when a fresh session is opened
+    // (OpenSource()) so it never outlives the session it describes.
+    bool sdk_session_poisoned_{false};
     bool capture_session_{false};
     bool live_view_session_{false};
     bool live_view_started_{false};
