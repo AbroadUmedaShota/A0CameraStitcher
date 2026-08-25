@@ -4816,6 +4816,42 @@ static void DocumentTiltDetectorMeasuresKnownRollAnglesAndReportsUndetectable()
             $"{pattern}: expected ~{expectedDegrees}°, got {detected.Value:F4}° (tolerance ±{toleranceDegrees}°).");
     }
 
+    // GitHub Issue #84: the four cases above (±3°/±6°) happen to sit close to the OLD
+    // (pre-fix) detector's quantization grid — 0° / 2.8624° / 5.7106° / … for k/SlopeSampleSpacing
+    // with SlopeSampleSpacing=20 — so they stayed within a 0.5° tolerance even while the detector
+    // was silently rounding every reading to the nearest grid step. The cases below sit BETWEEN
+    // grid steps, which is exactly where the old algorithm was worst: it reported 0.0000° for a
+    // true 1° tilt (error +1.00°) and 2.8624° for true 1.5°/2° tilts (error +1.36°/+0.86°).
+    //
+    // Tolerance derivation for the fitted (post-fix) algorithm: DocumentTiltDetector's phase 2
+    // fits an ordinary least-squares line through every top-edge column (~209 columns for this
+    // document shape/canvas size, width W). Modeling each column's integer-pixel row as the true
+    // line plus independent rounding noise in [-0.5, 0.5], the worst-case slope error is bounded
+    // by (max|noise|) * sum(|x-mean|) / sum((x-mean)^2) ≈ 0.5 * (W^2/4) / (W^3/12) = 1.5/W. At
+    // W≈209 that is 1.5/209 ≈ 0.0072 (dy/dx), or about atan(0.0072)*180/pi ≈ 0.41° after
+    // converting to degrees. 0.8° keeps clear margin above that theoretical bound while staying
+    // far under the OLD algorithm's actual errors at these exact angles (+1.00°/+1.36°/+0.86°
+    // above), so a regression back to the old quantized behavior would still fail this assertion.
+    const double newAngleToleranceDegrees = 0.8;
+    foreach (var (rollDegrees, expectedDegrees) in new[]
+             {
+                 (-2.0, -2.0),
+                 (-1.5, -1.5),
+                 (-1.0, -1.0),
+                 (1.0, 1.0),
+                 (1.5, 1.5),
+                 (2.0, 2.0),
+             })
+    {
+        var frame = source.CreateTiltedDocumentFrameForTesting("CAM-A", rollDegrees, 0, DateTimeOffset.UtcNow);
+        var detected = DocumentTiltDetector.DetectRollDegrees(frame.Image);
+        Check.True(detected is not null, $"A {rollDegrees}° custom-roll frame must be detected, not 検出不能.");
+        Check.True(
+            Math.Abs(detected!.Value - expectedDegrees) <= newAngleToleranceDegrees,
+            $"Custom roll {rollDegrees}°: expected ~{expectedDegrees}°, got {detected.Value:F4}° " +
+            $"(tolerance ±{newAngleToleranceDegrees}°).");
+    }
+
     // A frame with no matching document fill at all — the shape a non-live/未取得 preview would
     // degrade toward — must fall back to 検出不能 rather than reporting a noise-driven angle.
     var backgroundOnly = new WriteableBitmap(64, 64, 96, 96, PixelFormats.Bgra32, null);

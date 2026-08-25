@@ -36,6 +36,53 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
         int sequenceNumber,
         DateTimeOffset capturedAtUtc)
     {
+        // TiltedDocumentCustomRoll has no fixed angle of its own (see its doc comment) and, like
+        // BlurToFocusTransition and FrontalDocument, falls through to the 0.0 default here — its
+        // meaningful non-zero-angle rendering only happens via
+        // CreateTiltedDocumentFrameForTesting below. This keeps CreateFrame usable for every
+        // enum value (see SimulatedTestImageFrameSourceRendersWatermarkedFramesForEveryPattern,
+        // which iterates Enum.GetValues<SimulatedFramePattern>()) without a special case.
+        var rollDegrees = pattern switch
+        {
+            SimulatedFramePattern.TiltedDocumentRollMinus6 => -6.0,
+            SimulatedFramePattern.TiltedDocumentRollMinus3 => -3.0,
+            SimulatedFramePattern.TiltedDocumentRollPlus3 => 3.0,
+            SimulatedFramePattern.TiltedDocumentRollPlus6 => 6.0,
+            _ => 0.0,
+        };
+
+        return BuildFrame(cameraAlias, pattern, rollDegrees, sequenceNumber, capturedAtUtc);
+    }
+
+    /// <summary>
+    /// Test-only entry point (see the <c>InternalsVisibleTo</c> grant to
+    /// A0CameraStitcher.M3.OperatorShellTests in Properties/AssemblyInfo.cs) that renders the
+    /// same tilted-document scene as <see cref="CreateFrame"/> but at an arbitrary
+    /// <paramref name="rollDegrees"/> instead of one of the four fixed ±3°/±6° magnitudes. Used
+    /// by <c>DocumentTiltDetector</c>'s accuracy tests (GitHub Issue #84) to probe angles between
+    /// those magnitudes' quantization grid, without duplicating the scene-drawing code the
+    /// production <see cref="CreateFrame"/> path uses. The resulting frame's
+    /// <see cref="SimulatedLiveViewFrame.Pattern"/> reads
+    /// <see cref="SimulatedFramePattern.TiltedDocumentCustomRoll"/>, which is not part of
+    /// <see cref="SimulatedFramePatternCatalog"/> and so is never reachable from the Setup/校正
+    /// tab's pattern switcher.
+    /// </summary>
+    internal SimulatedLiveViewFrame CreateTiltedDocumentFrameForTesting(
+        string cameraAlias,
+        double rollDegrees,
+        int sequenceNumber,
+        DateTimeOffset capturedAtUtc) =>
+        BuildFrame(cameraAlias, SimulatedFramePattern.TiltedDocumentCustomRoll, rollDegrees, sequenceNumber, capturedAtUtc);
+
+    private static SimulatedLiveViewFrame BuildFrame(
+        string cameraAlias,
+        SimulatedFramePattern pattern,
+        double rollDegrees,
+        int sequenceNumber,
+        DateTimeOffset capturedAtUtc)
+    {
+        // Single validation point for both public entry points (CreateFrame and
+        // CreateTiltedDocumentFrameForTesting) — neither of them repeats this check.
         if (string.IsNullOrWhiteSpace(cameraAlias))
         {
             throw new ArgumentException("A camera alias is required.", nameof(cameraAlias));
@@ -44,7 +91,7 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
         var sceneVisual = new DrawingVisual();
         using (var context = sceneVisual.RenderOpen())
         {
-            DrawScene(context, cameraAlias, pattern);
+            DrawScene(context, cameraAlias, rollDegrees);
         }
 
         var blurRadius = pattern == SimulatedFramePattern.BlurToFocusTransition
@@ -99,18 +146,9 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
         };
     }
 
-    private static void DrawScene(DrawingContext context, string cameraAlias, SimulatedFramePattern pattern)
+    private static void DrawScene(DrawingContext context, string cameraAlias, double rollDegrees)
     {
         context.DrawRectangle(new SolidColorBrush(BackgroundColor), null, new Rect(0, 0, CanvasWidth, CanvasHeight));
-
-        var rollDegrees = pattern switch
-        {
-            SimulatedFramePattern.TiltedDocumentRollMinus6 => -6.0,
-            SimulatedFramePattern.TiltedDocumentRollMinus3 => -3.0,
-            SimulatedFramePattern.TiltedDocumentRollPlus3 => 3.0,
-            SimulatedFramePattern.TiltedDocumentRollPlus6 => 6.0,
-            _ => 0.0,
-        };
 
         var documentRect = ComputeDocumentRect();
         var center = new Point(CanvasWidth / 2.0, CanvasHeight / 2.0);
