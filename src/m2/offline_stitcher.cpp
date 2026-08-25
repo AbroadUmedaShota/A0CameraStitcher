@@ -135,6 +135,12 @@ struct JpegSnapshot {
     Image image;
 };
 
+// Declared pixel dimensions of a JPEG frame, without any decoded pixel data.
+struct JpegDimensions {
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+
 struct Point {
     double x{};
     double y{};
@@ -333,7 +339,12 @@ std::uint64_t PixelCount(const std::uint32_t width, const std::uint32_t height) 
     return count;
 }
 
-Image DecodeJpegSnapshot(
+// Opens the single frame of a JPEG byte stream after confirming SOI/EOI
+// markers, a recognized JPEG container, and exactly one frame. Shared by the
+// full pixel decode (DecodeJpegSnapshot) and the dimension-only validation
+// (ValidateJpegDimensions) below, since both need the same frame handle up to
+// this point and diverge only on whether pixel data is ever decoded.
+ComPtr<IWICBitmapFrameDecode> OpenJpegFrame(
     IWICImagingFactory* factory,
     const std::vector<std::uint8_t>& bytes,
     const std::string& description,
@@ -373,7 +384,15 @@ Image DecodeJpegSnapshot(
 
     IWICBitmapFrameDecode* frame_raw = nullptr;
     CheckHresult(decoder->GetFrame(0, &frame_raw), description + " frame decode");
-    ComPtr<IWICBitmapFrameDecode> frame(frame_raw);
+    return ComPtr<IWICBitmapFrameDecode>(frame_raw);
+}
+
+Image DecodeJpegSnapshot(
+    IWICImagingFactory* factory,
+    const std::vector<std::uint8_t>& bytes,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    const auto frame = OpenJpegFrame(factory, bytes, description, require_terminal_eoi);
     UINT width = 0;
     UINT height = 0;
     CheckHresult(frame->GetSize(&width, &height), description + " dimensions");
@@ -392,6 +411,33 @@ Image DecodeJpegSnapshot(
     return image;
 }
 
+// GitHub Issue #99: confirms `bytes` is a syntactically complete, single-frame
+// JPEG (SOI/EOI markers present, recognized container, one decodable frame
+// header) and returns its declared dimensions, without ever decoding pixel
+// data. Callers that only need the declared width/height -- not the decoded
+// pixels -- use this instead of DecodeJpegSnapshot to skip the WIC format
+// conversion and full-resolution CopyPixels, both of which are wasted work
+// when the result is discarded immediately.
+//
+// What this does NOT check, relative to a full decode: entropy-coded scan
+// data (the compressed pixel payload) is never decoded, so a JPEG whose frame
+// header parses fine but whose Huffman-coded MCU data is corrupted will pass
+// this check even though DecodeJpegSnapshot would fail on it during
+// CopyPixels. Callers that need that stronger guarantee must keep using
+// DecodeJpegSnapshot/ReadJpegSnapshot.
+JpegDimensions ValidateJpegDimensions(
+    IWICImagingFactory* factory,
+    const std::vector<std::uint8_t>& bytes,
+    const std::string& description,
+    const bool require_terminal_eoi) {
+    const auto frame = OpenJpegFrame(factory, bytes, description, require_terminal_eoi);
+    UINT width = 0;
+    UINT height = 0;
+    CheckHresult(frame->GetSize(&width, &height), description + " dimensions");
+    (void)PixelCount(width, height);
+    return {width, height};
+}
+
 JpegSnapshot ReadJpegSnapshot(
     IWICImagingFactory* factory,
     const LockedReadFile& locked_file,
@@ -403,6 +449,30 @@ JpegSnapshot ReadJpegSnapshot(
     snapshot.sha256 = sha256.Compute(snapshot.compressed);
     snapshot.image = DecodeJpegSnapshot(
         factory, snapshot.compressed, description, require_terminal_eoi);
+    return snapshot;
+}
+
+// GitHub Issue #99: lightweight sibling of ReadJpegSnapshot for callers that
+// need the compressed bytes, their SHA-256, and (optionally) confirmation of
+// the declared JPEG dimensions, but never touch decoded pixel data. The
+// returned snapshot's `.image` field is left default-constructed (empty) --
+// callers of this function must not read it. See ValidateJpegDimensions for
+// exactly what validation is and is not performed.
+JpegSnapshot ReadJpegSnapshotStructureOnly(
+    IWICImagingFactory* factory,
+    const LockedReadFile& locked_file,
+    const std::string& description,
+    const bool require_terminal_eoi,
+    JpegDimensions* out_dimensions = nullptr) {
+    JpegSnapshot snapshot;
+    snapshot.compressed = locked_file.ReadAll();
+    Sha256Provider sha256;
+    snapshot.sha256 = sha256.Compute(snapshot.compressed);
+    const auto dimensions = ValidateJpegDimensions(
+        factory, snapshot.compressed, description, require_terminal_eoi);
+    if (out_dimensions != nullptr) {
+        *out_dimensions = dimensions;
+    }
     return snapshot;
 }
 
@@ -815,20 +885,27 @@ std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
     return offline_stitch_fault_trigger_count.load(std::memory_order_acquire);
 }
 
+// GitHub Issue #99: this only ever needed the partial's declared dimensions
+// (to confirm they match the stitched result) and its bytes/hash, never the
+// decoded pixels, so it validates via ReadJpegSnapshotStructureOnly instead of
+// a full pixel decode. See ValidateJpegDimensions for exactly what that does
+// and does not check.
 void PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     const std::uint32_t expected_width,
     const std::uint32_t expected_height) {
-    // Keep the partial immutable while it is snapshotted, decoded, hashed, and
-    // renamed. FILE_SHARE_DELETE permits this process's atomic rename only;
-    // writers remain excluded and a competing rename/delete makes ours fail.
+    // Keep the partial immutable while it is snapshotted, validated, hashed,
+    // and renamed. FILE_SHARE_DELETE permits this process's atomic rename
+    // only; writers remain excluded and a competing rename/delete makes ours
+    // fail.
     LockedReadFile locked_partial(partial, true);
     ComApartment apartment;
     auto factory = CreateFactory();
-    const auto snapshot = ReadJpegSnapshot(
-        factory.get(), locked_partial, "generated JPEG partial", true);
-    if (snapshot.image.width != expected_width || snapshot.image.height != expected_height) {
+    JpegDimensions dimensions{};
+    const auto snapshot = ReadJpegSnapshotStructureOnly(
+        factory.get(), locked_partial, "generated JPEG partial", true, &dimensions);
+    if (dimensions.width != expected_width || dimensions.height != expected_height) {
         throw std::invalid_argument("generated JPEG partial dimensions do not match the stitched result");
     }
     ValidateSnapshotHash(snapshot, locked_partial, "generated JPEG partial");
@@ -1053,13 +1130,21 @@ void ExportStitchedJpeg(
     LockedReadFile locked_source(stitched_jpeg);
     ComApartment apartment;
     auto factory = CreateFactory();
-    const auto source_snapshot = ReadJpegSnapshot(factory.get(), locked_source, "export source", true);
+    // GitHub Issue #99: an explicit export never reads `.image` -- it copies
+    // the compressed bytes verbatim and only needs confirmation that both the
+    // source and the partial are complete, well-formed JPEGs (and, via the
+    // hash/byte comparisons below, that they match each other). Before this
+    // change, ReadJpegSnapshot's full pixel decode ran here only to be
+    // discarded; ReadJpegSnapshotStructureOnly performs the equivalent
+    // structural validation without it. See ValidateJpegDimensions for
+    // exactly what that does and does not check.
+    const auto source_snapshot = ReadJpegSnapshotStructureOnly(factory.get(), locked_source, "export source", true);
     ValidateSnapshotHash(source_snapshot, locked_source, "export source");
 
     PartialFileGuard partial_guard(partial);
     WriteBytesToNewFile(partial, source_snapshot.compressed);
     LockedReadFile locked_partial(partial, true);
-    const auto partial_snapshot = ReadJpegSnapshot(factory.get(), locked_partial, "export partial", true);
+    const auto partial_snapshot = ReadJpegSnapshotStructureOnly(factory.get(), locked_partial, "export partial", true);
     ValidateSnapshotHash(partial_snapshot, locked_partial, "export partial");
     if (partial_snapshot.sha256 != source_snapshot.sha256
         || partial_snapshot.compressed != source_snapshot.compressed) {
