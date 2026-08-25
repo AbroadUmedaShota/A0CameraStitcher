@@ -1317,7 +1317,10 @@ static async Task HardwareSingleHappyPathAsync()
         // depends on runId + alias, not the (not-yet-known) transaction ID,
         // so it can be written up front using CompleteCapture's fixed run ID.
         var resumedPreview = WritePreviewRecord(
-            HardwareAgentArtifactLayout.PreviewPath(artifactsRoot, CompleteCaptureRunId, "CAM-B"));
+            HardwareAgentArtifactLayout.PreviewPath(artifactsRoot, CompleteCaptureRunId, "CAM-A"));
+        // ADR-0024: SingleCamera は CAM-A 専用に固定されており、下の SelectedCamera = "CAM-B"
+        // は setter が黙って拒否する（main 時代からの no-op）。正規パス完全一致検証の導入で、
+        // 事前配置する preview は実際に使われる alias (CAM-A) に置く必要がある。
         string? capturedOriginalPath = null;
         var operations = new FakeHardwareSingleCameraOperations
         {
