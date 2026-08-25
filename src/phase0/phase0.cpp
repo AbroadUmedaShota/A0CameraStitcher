@@ -780,7 +780,11 @@ fs::path PersistDualSpoolVerificationSummary(
 EvidenceWriter::EvidenceWriter(fs::path artifacts_root, std::string run_id, std::string sdk_version)
     : artifacts_root_(std::move(artifacts_root)), run_root_(artifacts_root_ / run_id),
       run_id_(std::move(run_id)), sdk_version_(std::move(sdk_version)) {
-    PrepareReparseFreeEvidenceDirectory(run_root_, run_root_);
+    // The trusted root must be the parent (artifacts_root_), not run_root_ itself: passing the
+    // same path as both the trusted root and the directory being validated makes
+    // lexically_relative() compare the path to itself, so it can never observe the ".."
+    // component a hostile run_id would introduce.
+    PrepareReparseFreeEvidenceDirectory(artifacts_root_, run_root_);
 }
 
 void EvidenceWriter::AppendEvent(std::string_view json_line) {

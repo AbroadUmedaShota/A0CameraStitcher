@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -260,7 +261,7 @@ public static class DualBindingCameraAgentProtocolCodec
             writer =>
             {
                 writer.WriteString("sessionId", ValidatedSessionId(sessionId));
-                writer.WriteString("confirmedAtUtc", confirmedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                writer.WriteString("confirmedAtUtc", confirmedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
             });
     }
 

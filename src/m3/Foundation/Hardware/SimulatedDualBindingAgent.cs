@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace A0CameraStitcher.M3.Foundation.Hardware;
@@ -463,7 +464,7 @@ public sealed class SimulatedDualBindingAgent
         }
 
         _state = DualBindingSessionState.Ready;
-        var confirmedAtUtc = _options.ConfirmedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var confirmedAtUtc = _options.ConfirmedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
         return Success(requestId, "BindingCompleted", writer =>
         {
             writer.WriteString("sessionId", _sessionId);

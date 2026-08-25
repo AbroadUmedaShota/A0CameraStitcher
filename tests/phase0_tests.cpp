@@ -1105,6 +1105,35 @@ void TestOperatorGateTimeoutRefusesOverwrite() {
     fs::remove_all(root);
 }
 
+void TestRunIdSafetyRejectsTraversalAndSeparators() {
+    // main.cpp's CLI parser applies OperatorGate::IsSafeName to --run-id the same way it
+    // already does for --operator-gate; main.cpp itself is not linked into this test binary,
+    // so this exercises the shared predicate directly.
+    Check(OperatorGate::IsSafeName("run-1234567890-1"), "a NewRunId()-shaped run id must remain accepted");
+    Check(!OperatorGate::IsSafeName(".."), "a bare .. run id must be rejected");
+    Check(!OperatorGate::IsSafeName("run/../escape"), "a run id containing a forward-slash separator must be rejected");
+    Check(!OperatorGate::IsSafeName("run\\..\\escape"), "a run id containing a backslash separator must be rejected");
+    Check(!OperatorGate::IsSafeName(""), "an empty run id must be rejected");
+
+    // Even if an unsafe run id ever reached EvidenceWriter, PrepareReparseFreeEvidenceDirectory
+    // must still catch the escape on its own: it used to be called with run_root_ passed as
+    // both the trusted root and the directory being validated, so lexically_relative() compared
+    // the path to itself and the ".." check could never fire.
+    const auto root = NewTestRoot("run-id-traversal");
+    const auto root_artifacts = root / "artifacts";
+    bool escape_rejected = false;
+    try {
+        EvidenceWriter evidence(root_artifacts, "..\\escaped-run-id", "test");
+        (void)evidence.RunRoot();
+    } catch (const std::runtime_error& error) {
+        escape_rejected = std::string(error.what()).find("escaped its trusted run root") != std::string::npos;
+    }
+    Check(escape_rejected, "a run id that walks the evidence directory outside the artifacts root must be rejected");
+    Check(!fs::exists(root / "escaped-run-id"),
+        "a rejected traversal run id must not create a directory outside the artifacts root");
+    fs::remove_all(root);
+}
+
 void TestLiveViewStopFailureBlocksWpdWithoutRetry() {
     const auto root = NewTestRoot("live-view-stop-failure");
     FakeLiveViewTransport live_view(FakeLiveViewFailure::stop_failure);
@@ -2714,6 +2743,7 @@ int main() {
         TestWpdSpoolStatusSummaryIsAnonymousAndReportable();
         TestOperatorGateReadyThenContinue();
         TestOperatorGateTimeoutRefusesOverwrite();
+        TestRunIdSafetyRejectsTraversalAndSeparators();
         TestProcessTerminationGateNeverContinues();
         TestLiveViewStopFailureBlocksWpdWithoutRetry();
         TestLiveViewCloseFailureBlocksWpdWithoutRetry();

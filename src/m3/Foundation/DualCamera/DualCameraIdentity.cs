@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -239,7 +240,7 @@ public static class DualCameraNativeIdentityAdapter
     {
         value = default;
         return TryString(element, name, out var text) &&
-            DateTimeOffset.TryParse(text, out value) &&
+            DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out value) &&
             value.Offset == TimeSpan.Zero &&
             text.EndsWith('Z');
     }
