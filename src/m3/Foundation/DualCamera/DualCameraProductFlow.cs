@@ -508,8 +508,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             // arbitrary file.
             if (!string.Equals(Path.GetFileName(artifact.OutputPath), "stitched.jpg", StringComparison.OrdinalIgnoreCase) ||
                 !File.Exists(artifact.OutputPath) ||
-                artifact.ManifestFileName.Length == 0 ||
-                !string.Equals(Path.GetFileName(artifact.ManifestFileName), artifact.ManifestFileName, StringComparison.Ordinal) ||
+                !ManifestFileNameGuard.IsSafeManifestFileName(artifact.ManifestFileName) ||
                 !File.Exists(Path.Combine(jobDirectory, artifact.ManifestFileName)) ||
                 !string.Equals(artifact.ProfileId, profile.ProfileId, StringComparison.Ordinal))
             {

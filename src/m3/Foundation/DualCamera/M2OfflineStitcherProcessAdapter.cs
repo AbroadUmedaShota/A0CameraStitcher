@@ -102,8 +102,7 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         // arbitrary file on disk.
         var manifestFileName = values.GetValueOrDefault("manifest") ?? string.Empty;
         if (!string.Equals(values.GetValueOrDefault("stitchJobId"), stitchJobId.ToString("N"), StringComparison.Ordinal) ||
-            manifestFileName.Length == 0 ||
-            !string.Equals(Path.GetFileName(manifestFileName), manifestFileName, StringComparison.Ordinal) ||
+            !ManifestFileNameGuard.IsSafeManifestFileName(manifestFileName) ||
             !File.Exists(Path.Combine(Path.GetFullPath(outputJobDirectory), manifestFileName)))
         {
             throw new InvalidDataException(
@@ -280,5 +279,39 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+}
+
+// Shared between this adapter and DualCameraProductFlow: both validate a
+// manifest file name reported by (ultimately) child-process stdout before
+// using it in Path.Combine/File.Exists.
+internal static class ManifestFileNameGuard
+{
+    // Windows reserved device names: these resolve to a device rather than a
+    // regular file even with an extension attached (e.g. "NUL.json" still
+    // opens the NUL device), so File.Exists/File.Open on them does not behave
+    // like a normal file-existence check.
+    private static readonly HashSet<string> ReservedWindowsDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    internal static bool IsSafeManifestFileName(string candidate)
+    {
+        if (string.IsNullOrEmpty(candidate))
+        {
+            return false;
+        }
+        // Path.GetFileName(candidate) == candidate rejects any directory
+        // separator or rooted path, but "." and ".." both round-trip through
+        // GetFileName unchanged, so they need an explicit check.
+        if (!string.Equals(Path.GetFileName(candidate), candidate, StringComparison.Ordinal) ||
+            candidate is "." or "..")
+        {
+            return false;
+        }
+        return !ReservedWindowsDeviceNames.Contains(Path.GetFileNameWithoutExtension(candidate));
     }
 }
