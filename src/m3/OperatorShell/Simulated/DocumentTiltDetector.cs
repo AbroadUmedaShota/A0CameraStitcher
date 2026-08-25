@@ -60,17 +60,25 @@ public static class DocumentTiltDetector
     /// least-squares fit as a corner/side-edge outlier. Derivation: the coarse slope from phase
     /// 1 is within 1/SlopeSampleSpacing = 0.05 of the true top-edge slope (every spaced-pair
     /// sample is within that bound of the true slope, and so is the median of a set where such
-    /// samples are the majority), so a genuine top-edge column up to ~210 columns from the
-    /// phase-2 fit's anchor column deviates from the coarse line by at most
-    /// 0.05*210 + 1 ≈ 11.5px (the "+1" covers ±0.5px integer-rounding noise at both the anchor
-    /// and the column itself). 20px keeps clear margin above that bound while staying well below
-    /// a genuine side-edge column's deviation, which is already several pixels just one column
-    /// past the corner and grows by roughly cot(θ) per further column (e.g. ~9.5px for the next
-    /// column at this detector's largest tested angle, 6°, and much more at smaller angles). At
-    /// unusually large angles a single near-corner column can still slip past this filter; its
-    /// effect on the fitted angle is small and bounded (see the Issue #84 PR description for the
-    /// full argument).</summary>
-    private const double InlierResidualToleranceInPixels = 20.0;
+    /// samples are the majority). The phase-2 anchor is the MIDDLE valid column, not an
+    /// endpoint, so a genuine top-edge column is at most about half the valid range's width from
+    /// it — for this document/canvas size that is ~120 columns even at the largest angle this
+    /// detector is tested against (the corner/side-edge block widens the valid range on one
+    /// side, which shifts the middle by only a few more columns). That bounds a genuine top-edge
+    /// column's deviation from the coarse line at 0.05*120 + 1 ≈ 7px (the "+1" covers ±0.5px
+    /// integer-rounding noise at both the anchor and the column itself). 12px keeps a ~5px
+    /// margin above that 7px bound while staying below a genuine side-edge column's deviation,
+    /// which grows by roughly cot(θ) per column past the corner — e.g. ~19px for the very next
+    /// column at 3°, and ~9.5px at this detector's largest tested angle, 6° — cot(θ) shrinks as
+    /// θ grows, so 6° is the hardest case and smaller angles (including this fix's new ±1°/
+    /// ±1.5°/±2° test cases) push the side edge's deviation higher still, well clear of 12px. At
+    /// 6° specifically, that ~9.5px first corner column can still slip past a 12px filter (as it
+    /// would past any fixed threshold, since cot(θ) keeps shrinking beyond 6° too); its effect on
+    /// the fitted angle is small and bounded (see the Issue #84 PR description for the full
+    /// argument). 12px is nonetheless a real tightening over an earlier 20px figure this constant
+    /// held: at 20px, the existing ±3° test case's first corner column (~19px) would have slipped
+    /// through as well, which 12px correctly excludes.</summary>
+    private const double InlierResidualToleranceInPixels = 12.0;
 
     /// <summary>
     /// Estimates the document's in-plane rotation (ROLL) in degrees from <paramref name="source"/>,

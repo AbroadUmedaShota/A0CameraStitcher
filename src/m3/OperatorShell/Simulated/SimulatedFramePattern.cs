@@ -21,6 +21,9 @@ public enum SimulatedFramePattern
     /// <summary>A document sample rotated +6 degrees, for edge/tilt detection verification.</summary>
     TiltedDocumentRollPlus6,
 
+    /// <summary>A repeating blur-to-focus transition, for focus peaking verification.</summary>
+    BlurToFocusTransition,
+
     /// <summary>A document sample meant to be rotated by an arbitrary angle supplied at render
     /// time, instead of one of the four fixed magnitudes above. Test-only: never appears in
     /// <see cref="SimulatedFramePatternCatalog"/> (so it is not selectable from the Setup/校正
@@ -31,9 +34,7 @@ public enum SimulatedFramePattern
     /// value itself; going through the ordinary
     /// <see cref="SimulatedTestImageFrameSource.CreateFrame"/> with this pattern instead falls
     /// through to an unrotated (0°) frame, the same as any other pattern with no fixed
-    /// angle.</summary>
+    /// angle. Appended after the existing members (rather than inserted between them) so no
+    /// other member's underlying numeric value shifts.</summary>
     TiltedDocumentCustomRoll,
-
-    /// <summary>A repeating blur-to-focus transition, for focus peaking verification.</summary>
-    BlurToFocusTransition,
 }

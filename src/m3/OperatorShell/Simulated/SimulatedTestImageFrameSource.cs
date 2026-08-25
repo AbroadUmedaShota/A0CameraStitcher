@@ -36,11 +36,6 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
         int sequenceNumber,
         DateTimeOffset capturedAtUtc)
     {
-        if (string.IsNullOrWhiteSpace(cameraAlias))
-        {
-            throw new ArgumentException("A camera alias is required.", nameof(cameraAlias));
-        }
-
         // TiltedDocumentCustomRoll has no fixed angle of its own (see its doc comment) and, like
         // BlurToFocusTransition and FrontalDocument, falls through to the 0.0 default here — its
         // meaningful non-zero-angle rendering only happens via
@@ -86,6 +81,8 @@ public sealed class SimulatedTestImageFrameSource : ISimulatedLiveViewFrameSourc
         int sequenceNumber,
         DateTimeOffset capturedAtUtc)
     {
+        // Single validation point for both public entry points (CreateFrame and
+        // CreateTiltedDocumentFrameForTesting) — neither of them repeats this check.
         if (string.IsNullOrWhiteSpace(cameraAlias))
         {
             throw new ArgumentException("A camera alias is required.", nameof(cameraAlias));
