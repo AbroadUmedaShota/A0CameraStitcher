@@ -52,6 +52,25 @@ constexpr std::size_t kMaximumJpegBytes = 256U * 1024U * 1024U;
 constexpr auto kPollInterval = std::chrono::milliseconds(250);
 constexpr auto kCandidateSettle = std::chrono::milliseconds(750);
 
+// ContentObjects() walks every object under the connected camera looking for
+// payload objects. A dedicated capture spool holds at most a handful of
+// objects, and even a full professional card is realistically a few thousand
+// frames; this budget sits two orders of magnitude above that so ordinary
+// use is never affected, while a pathological or hostile object tree (a
+// driver that keeps reporting non-empty batches) cannot grow the scan --
+// and its memory/time cost -- without bound.
+constexpr std::size_t kMaximumScannedContentObjects = 200'000;
+
+// A single ContentObjects() call is bulk WPD I/O, the same class of
+// operation as a JPEG download, so this is set to the same order of
+// magnitude as Timeouts::download (60s; see phase0.hpp). It stays well
+// inside Timeouts::transaction_watchdog (180s) so one call can never by
+// itself consume the whole transaction envelope. Callers that poll
+// ContentObjects() in a loop (BeginPostCardObservation, VerifyJpegSpoolEmpty)
+// already re-check their own outer deadline between calls; this bounds the
+// duration of a single call so that outer check cannot be starved.
+constexpr auto kContentScanDeadline = std::chrono::seconds(60);
+
 std::string HResultText(HRESULT result) {
     std::ostringstream text;
     text << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(8)
@@ -466,6 +485,33 @@ void ValidateWpdStreamReadLength(
         throw TransportError(
             "download_failed",
             "WPD JPEG stream returned more bytes than requested");
+    }
+}
+
+void ValidateWpdEnumeratedObjectCount(
+    std::string_view category,
+    std::size_t reported_count,
+    std::size_t buffer_capacity) {
+    if (reported_count > buffer_capacity) {
+        throw TransportError(std::string(category),
+            "WPD object enumeration reported more IDs than the request buffer holds");
+    }
+}
+
+void ValidateWpdEnumeratedObjectId(std::string_view category, const wchar_t* id) {
+    if (id == nullptr) {
+        throw TransportError(std::string(category),
+            "WPD object enumeration reported an object ID that was not populated");
+    }
+}
+
+void ValidateWpdContentScanBudget(
+    std::string_view category,
+    std::size_t scanned_object_count,
+    std::size_t maximum_object_count) {
+    if (scanned_object_count > maximum_object_count) {
+        throw TransportError(std::string(category),
+            "WPD content-tree scan exceeded the maximum object budget");
     }
 }
 
@@ -1097,20 +1143,60 @@ private:
         auto date_keys = NewKeys(category);
         Check(date_keys->Add(WPD_OBJECT_DATE_CREATED), category, "add WPD object creation date key");
 
+        const auto scan_deadline = std::chrono::steady_clock::now() + kContentScanDeadline;
+        std::size_t scanned_object_count = 0;
+        // Bounds total wall-clock time even when object counts alone would stay
+        // under budget (e.g. a slow driver on a small tree). Checked once per
+        // popped parent AND once per enumeration batch below, so a single
+        // parent that reports a very large -- but still under-budget -- object
+        // count cannot itself run past the deadline before this is re-checked.
+        const auto check_scan_deadline = [&] {
+            if (std::chrono::steady_clock::now() >= scan_deadline) {
+                throw TransportError(std::string(category), "WPD content-tree scan exceeded its internal deadline");
+            }
+        };
         while (!pending.empty()) {
+            check_scan_deadline();
             const std::wstring parent = std::move(pending.back());
             pending.pop_back();
             if (!visited.insert(parent).second) continue;
             ComPtr<IEnumPortableDeviceObjectIDs> enumerator;
             Check(content_->EnumObjects(0, parent.c_str(), nullptr, &enumerator), category, "enumerate WPD objects");
             for (;;) {
+                check_scan_deadline();
                 std::array<PWSTR, 16> ids{};
                 DWORD fetched = 0;
                 const HRESULT next = enumerator->Next(static_cast<ULONG>(ids.size()), ids.data(), &fetched);
+                // IEnumPortableDeviceObjectIDs::Next allocates each populated ID
+                // with CoTaskMemAlloc. This guard frees whatever the driver
+                // actually wrote no matter how this batch is exited below (a WPD
+                // failure, an over-reported count, a null entry, or normal
+                // completion), so a fail-closed rejection never leaks
+                // driver-owned memory.
+                struct FreeRemainingIds final {
+                    std::array<PWSTR, 16>& ids;
+                    ~FreeRemainingIds() {
+                        for (auto& id : ids) {
+                            if (id != nullptr) {
+                                CoTaskMemFree(id);
+                                id = nullptr;
+                            }
+                        }
+                    }
+                } free_remaining_ids{ids};
                 if (FAILED(next)) Check(next, category, "read WPD object IDs");
+                // fetched is a provider-owned out parameter; reject it before it
+                // is used to index the fixed-size ids buffer.
+                ValidateWpdEnumeratedObjectCount(category, static_cast<std::size_t>(fetched), ids.size());
                 for (DWORD index = 0; index < fetched; ++index) {
+                    // A provider may report a slot as populated while leaving it
+                    // null; reject that before constructing a std::wstring from it.
+                    ValidateWpdEnumeratedObjectId(category, ids[index]);
                     std::wstring id(ids[index]);
                     CoTaskMemFree(ids[index]);
+                    ids[index] = nullptr;
+                    ++scanned_object_count;
+                    ValidateWpdContentScanBudget(category, scanned_object_count, kMaximumScannedContentObjects);
                     pending.push_back(id);
                     ComPtr<IPortableDeviceValues> values;
                     Check(properties_->GetValues(id.c_str(), keys.Get(), &values),
