@@ -1543,6 +1543,34 @@ static void HardwareProtocolValidation()
             "lookup-journal-invalid-wrong-state",
             transactionId));
 
+    // #149 (populated-alias shape): a second reparse of an already-committed
+    // Reserved/InProgress journal can also fail (see
+    // tests/hardware_camera_agent_tests.cpp "populated-alias shape" case),
+    // which keeps the camera_alias/run_id already learned from the first
+    // successful read. Unlike journalInvalid above, this shape must NOT be
+    // treated as missingRecord (only the alias/runId-empty shape is) and must
+    // pass the dedicated transaction_journal_invalid switch case as a normal
+    // populated response instead.
+    var journalInvalidPopulated = inProgress with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "transaction_journal_invalid",
+        ErrorDetail = "durable Camera Agent transaction state is invalid",
+    };
+    var journalInvalidPopulatedReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-journal-invalid-populated",
+            false,
+            "transaction_journal_invalid",
+            journalInvalidPopulated),
+        "lookup-journal-invalid-populated",
+        transactionId);
+    Check.Equal("FailedPartial", journalInvalidPopulatedReply.Payload.TerminalState);
+    Check.Equal("CAM-A", journalInvalidPopulatedReply.Payload.CameraAlias);
+    Check.False(
+        string.IsNullOrEmpty(journalInvalidPopulatedReply.Payload.RunId),
+        "the populated-alias shape must keep the run ID already learned on the first read.");
+
     Check.ThrowsHardwareProtocol("CameraAliasMismatch", () =>
         HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
             HardwareResponseJson(

@@ -939,6 +939,67 @@ void TestDurableJournalRecoveryContracts() {
             "dispatcher must surface transaction_journal_invalid (not InvalidBackendResult) "
             "for an unparseable durable journal; response=" + dispatched_journal_invalid);
 
+        // GitHub Issue #149 (populated-alias shape): a transaction whose first
+        // journal read observes Reserved/InProgress is reread under the
+        // transaction lease before being trusted (see the race test above).
+        // If that *second* read fails to parse - e.g. a concurrent writer left
+        // the file mid-write - GetTransactionResult keeps the camera_alias/
+        // run_id already learned from the first successful read and only
+        // overwrites terminalState/errorCategory/errorDetail to
+        // transaction_journal_invalid/FailedPartial. That populated-alias
+        // shape must fall through IsCaptureResultStructurallyValid's general
+        // structural check (not the empty-alias allow_not_found branch above)
+        // and must not collapse into InvalidBackendResult at the dispatcher.
+        const fs::path journal_reparse_root = root / "journal-reparse-race";
+        ProductionHardwareCameraAgentConfig journal_reparse_config;
+        journal_reparse_config.artifacts_root = journal_reparse_root / "artifacts";
+        journal_reparse_config.reports_root = journal_reparse_root / "reports";
+        journal_reparse_config.sdk_identity_map = journal_reparse_root / "sdk-map.json";
+        journal_reparse_config.wpd_identity_map = journal_reparse_root / "wpd-map.json";
+        journal_reparse_config.transaction_state_root =
+            journal_reparse_root / "transactions";
+        const std::string journal_reparse_id = "99999999999999999999999999999999";
+        const fs::path journal_reparse_path =
+            journal_reparse_config.transaction_state_root / journal_reparse_id /
+            "transaction.json";
+        ReplaceJournal(
+            journal_reparse_config.transaction_state_root,
+            journal_reparse_id,
+            JournalJson(journal_reparse_id, "run-1700000000000-99", "InProgress"));
+        journal_reparse_config.after_initial_active_journal_read_for_testing = [&] {
+            WriteText(journal_reparse_path, "{not-parseable-journal");
+        };
+        ProductionHardwareCameraAgentBackend journal_reparse_backend(
+            journal_reparse_config);
+        const auto journal_reparse_result =
+            journal_reparse_backend.GetTransactionResult(journal_reparse_id);
+        Check(!journal_reparse_result.succeeded &&
+              journal_reparse_result.terminal_state == "FailedPartial" &&
+              journal_reparse_result.error_category == "transaction_journal_invalid" &&
+              journal_reparse_result.camera_alias == "CAM-A" &&
+              journal_reparse_result.run_id == "run-1700000000000-99",
+            "a journal that fails to reparse after an active Reserved/InProgress read "
+            "must report transaction_journal_invalid without erasing the camera_alias/"
+            "run_id already known from the first read; actual=" +
+                journal_reparse_result.terminal_state + "/" +
+                journal_reparse_result.error_category);
+
+        HardwareCameraAgentDispatcher journal_reparse_dispatcher(journal_reparse_backend);
+        const std::string dispatched_journal_reparse = journal_reparse_dispatcher.Handle(
+            Envelope(
+                "get-transaction-result",
+                "{\"transactionId\":\"" + journal_reparse_id + "\"}"));
+        Check(dispatched_journal_reparse.find(
+                  "\"resultCode\":\"transaction_journal_invalid\"") != std::string::npos &&
+              dispatched_journal_reparse.find(
+                  "\"resultCode\":\"InvalidBackendResult\"") == std::string::npos &&
+              dispatched_journal_reparse.find("\"cameraAlias\":\"CAM-A\"") !=
+                  std::string::npos &&
+              dispatched_journal_reparse.find("\"runId\":\"\"") == std::string::npos,
+            "dispatcher must surface transaction_journal_invalid (not InvalidBackendResult) "
+            "for the populated-alias reparse-failure shape; response=" +
+                dispatched_journal_reparse);
+
         const std::string traversal_id = "33333333333333333333333333333333";
         ReplaceJournal(
             config.transaction_state_root,

@@ -2010,12 +2010,17 @@ bool IsCaptureResultStructurallyValid(
     }
     // GitHub Issue #149: transaction_journal_invalid はジャーナル自体を検査・
     // パース・スコープ確認できなかった時点で返るため、どの camera_alias/run_id
-    // の話かがそもそも分からない。ここで CAM-A/CAM-B のような alias を捏造して
-    // 下の一般構造チェックを通すのは誤情報になるため、transaction_reservation_incomplete
-    // と同じ形で許容分岐を設け、素直に camera_alias/run_id 空のまま許可する。
-    if (allow_not_found && result.error_category == "transaction_journal_invalid") {
+    // の話かがそもそも分からないケース（ジャーナルが存在しない/壊れている）と、
+    // 直前の読み取りで一度は正常にパースできていた Reserved/InProgress の journal
+    // を、トランザクションレース確認のため lease 取得後に再パースしたところ今度は
+    // 失敗したケースの2形がある（GetTransactionResult の2回目の
+    // ParseTransactionJournal 呼び出しが失敗する経路。result は代入前の値を保持
+    // するため、1回目のパースで確定した camera_alias/run_id がそのまま残る）。
+    // 後者は camera_alias/run_id が既知なので、transaction_reserved と同じく
+    // 空の場合のみここで許容し、alias 入りの場合は下の一般構造チェックへ委ねる。
+    if (allow_not_found && result.error_category == "transaction_journal_invalid" &&
+        result.camera_alias.empty() && result.run_id.empty()) {
         return !result.succeeded && result.terminal_state == "FailedPartial" &&
-            result.camera_alias.empty() && result.run_id.empty() &&
             !result.retained_original && !result.spool_empty_before_capture &&
             !result.camera_object_delete_attempted &&
             !result.camera_object_delete_succeeded &&

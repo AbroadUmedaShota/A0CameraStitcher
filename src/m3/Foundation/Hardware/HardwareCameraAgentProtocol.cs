@@ -982,19 +982,23 @@ public static class HardwareCameraAgentProtocolCodec
         }
 
         var missingRecord = isTransactionLookup && envelope.ResultCode is
-            "TransactionNotFound" or "transaction_reservation_incomplete" or "transaction_journal_invalid";
-        if (!missingRecord && isTransactionLookup && envelope.ResultCode == "TransactionReserved" &&
+            "TransactionNotFound" or "transaction_reservation_incomplete";
+
+        if (!missingRecord && isTransactionLookup &&
+            envelope.ResultCode is "TransactionReserved" or "transaction_journal_invalid" &&
             string.IsNullOrEmpty(payload.CameraAlias) &&
             string.IsNullOrEmpty(payload.RequiredCameraAlias) &&
             string.IsNullOrEmpty(payload.RunId))
         {
-            // TransactionReserved is reported for two distinct wire shapes from the
-            // Camera Agent: a lease-busy race observed before the transaction journal
-            // exists (no durable record yet, alias/runId empty), and a lease-busy race
-            // observed after the journal is committed (durable record with its assigned
-            // alias/runId already present). Only the former is a "missing record" -
-            // treating every TransactionReserved response as missingRecord would reject
-            // the populated-alias shape below via the empty-field check.
+            // TransactionReserved and transaction_journal_invalid are each reported for
+            // two distinct wire shapes from the Camera Agent: a shape observed before the
+            // transaction journal exists or can be reread (no durable record known yet,
+            // alias/runId empty), and a shape observed after the journal is committed
+            // (durable record with its assigned alias/runId already present - e.g. a
+            // second read of an already-parsed Reserved/InProgress journal that fails to
+            // reparse still carries the alias/runId learned on the first read). Only the
+            // former is a "missing record" - treating every response as missingRecord
+            // would reject the populated-alias shape below via the empty-field check.
             missingRecord = true;
         }
 
