@@ -16,7 +16,13 @@ namespace a0::phase0 {
 // Outcome of abandoning an in-flight asynchronous SDK command.
 enum class AbandonOutcome {
     // The SDK's completion callback fired before the grace period ran out.
-    // Whatever buffer was handed to the SDK is safe to release.
+    // The caller may treat the buffer handed to the SDK as safe to release
+    // -- but note this rests on the same kind of unconfirmed vendor-behavior
+    // assumption as the Abort-return-value skepticism above: that the
+    // completion callback firing means the SDK is truly done touching the
+    // buffer, not merely that it has scheduled more work against it. Stage 2
+    // (moving buffer ownership into the transport, see #145) makes this
+    // assumption moot rather than resolving it.
     completed,
     // The completion callback never fired within the grace period. The
     // buffer handed to the SDK must NOT be released; the caller is

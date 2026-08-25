@@ -309,9 +309,32 @@ public:
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
         // sdk_session_poisoned_ reflects a previous session's abandoned
-        // async command, not this new one. ClaimSession() having succeeded
-        // proves any previous session on this Impl was already closed, so
-        // a fresh session must not inherit its poison.
+        // async command: the vendor DLL may still hold a pointer into a
+        // buffer this transport already released. Merely closing the MAID
+        // source/module objects does not prove that risk is gone -- the DLL
+        // can still write after Close(). What actually proves it is the
+        // chain that must already have run for ClaimSession() to succeed
+        // here:
+        //   ClaimSession() succeeded => claimed_ was false
+        //     => ReleaseSession() already ran (end of Close()'s
+        //        CleanupObjects() path, or end of CleanupNoThrow())
+        //     => both of those call UnloadModule() before ReleaseSession()
+        //     => UnloadModule() FreeLibrary()s the vendor module and USB
+        //        transport DLLs and clears entry_
+        //     => the vendor code that could still be writing into the old
+        //        buffer no longer exists in this process
+        // This is not a new assumption: it is the same safety model
+        // completions_/downloads_ already rely on -- both are only cleared
+        // after UnloadModule() (see #145's discussion of that existing
+        // pattern). Enforce the chain rather than merely assume it, so a
+        // future change that unloads the module lazily (e.g. a DLL cache)
+        // instead of from Close()/CleanupNoThrow() fails loudly here
+        // instead of silently making this reset unsound.
+        if (entry_ != nullptr || module_handle_ != nullptr) {
+            throw TransportError(
+                "open_failed",
+                "internal invariant violated: SDK module was not unloaded before a new session claim");
+        }
         sdk_session_poisoned_ = false;
         trace_ = {};
         card_capture_events_.ResetForSession();
@@ -946,6 +969,7 @@ private:
 
     SdkCameraStatus ReadOpenCaptureSessionStatus(std::chrono::seconds timeout) {
         RequireCaptureSession();
+        RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         SdkCameraStatus status;
         status.firmware = Firmware(source_, deadline, "sdk_status_failed");
