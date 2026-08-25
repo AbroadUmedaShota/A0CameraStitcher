@@ -43,13 +43,18 @@
        これが無いと、シェルをビルドするたびに cmake の configure とビルドが起動し、
        1回のCI内で同じアダプタを何度も作り直す（GitHub Issue #28）。 -->
   <ItemGroup>
+    <M2AdapterInput Include="$(MSBuildProjectFullPath)" />
     <M2AdapterInput Include="$(RepositoryRoot)\CMakeLists.txt" />
     <M2AdapterInput Include="$(RepositoryRoot)\src\m2\**\*.cpp" />
     <M2AdapterInput Include="$(RepositoryRoot)\src\m2\**\*.hpp" />
+    <M2AdapterInput Include="$(RepositoryRoot)\src\phase0\**\*.cpp" />
+    <M2AdapterInput Include="$(RepositoryRoot)\src\phase0\**\*.hpp" />
+    <M2AdapterInput Include="$(RepositoryRoot)\src\common\**\*.hpp" />
   </ItemGroup>
 
   <Target Name="BuildM2Adapter" BeforeTargets="PrepareForBuild"
-          Inputs="@(M2AdapterInput)" Outputs="$(M2AdapterSourcePath)">
+          Inputs="@(M2AdapterInput)"
+          Outputs="$(M2AdapterSourcePath);$(SingleCameraAgentSourcePath);$(DualCameraAgentSourcePath)">
     <Exec Command="cmake -S &quot;$(RepositoryRoot)&quot; -B &quot;$(M2AdapterBuildDirectory)&quot; -A x64" />
     <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.M2Adapter -- /m:1" />
     <Exec Command="cmake --build &quot;$(M2AdapterBuildDirectory)&quot; --config $(Configuration) --target A0CameraStitcher.CameraAgent -- /m:1" />
@@ -57,5 +62,9 @@
     <Error Condition="!Exists('$(M2AdapterSourcePath)')" Text="A0CameraStitcher.M2Adapter.exe was not produced." />
     <Error Condition="!Exists('$(SingleCameraAgentSourcePath)')" Text="A0CameraStitcher.CameraAgent.exe was not produced." />
     <Error Condition="!Exists('$(DualCameraAgentSourcePath)')" Text="A0CameraStitcher.DualCameraAgent.exe was not produced." />
+    <!-- Regression-only execution proof. Empty in ordinary builds, so it does
+         not alter the packaged product or leave a marker in its output. -->
+    <Touch Files="$(BuildM2AdapterExecutionMarker)" AlwaysCreate="true"
+           Condition="'$(BuildM2AdapterExecutionMarker)' != ''" />
   </Target>
 </Project>
