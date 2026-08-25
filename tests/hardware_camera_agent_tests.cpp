@@ -917,6 +917,28 @@ void TestDurableJournalRecoveryContracts() {
               oversized_journal.error_category == "transaction_journal_invalid",
             "oversized durable journal must fail closed before unbounded allocation or parse");
 
+        // GitHub Issue #149: バックエンドを直接叩くのではなくディスパッチャ経由で確認する。
+        // 以前は transaction_journal_invalid な FailedPartial 結果(camera_alias/run_id 空)が
+        // IsCaptureResultStructurallyValid の一般構造チェックを通らず、本来の診断
+        // (transaction_journal_invalid)が InvalidBackendResult に化けて呼び出し側へ
+        // 届かなくなっていた。
+        HardwareCameraAgentDispatcher journal_invalid_dispatcher(backend);
+        const std::string dispatched_journal_invalid = journal_invalid_dispatcher.Handle(
+            Envelope(
+                "get-transaction-result",
+                "{\"transactionId\":\"" + oversized_journal_id + "\"}"));
+        Check(dispatched_journal_invalid.find(
+                  "\"resultCode\":\"transaction_journal_invalid\"") != std::string::npos &&
+              dispatched_journal_invalid.find(
+                  "\"resultCode\":\"InvalidBackendResult\"") == std::string::npos &&
+              dispatched_journal_invalid.find("\"terminalState\":\"FailedPartial\"") !=
+                  std::string::npos &&
+              dispatched_journal_invalid.find("\"success\":false") != std::string::npos &&
+              dispatched_journal_invalid.find("\"cameraAlias\":\"\"") != std::string::npos &&
+              dispatched_journal_invalid.find("\"runId\":\"\"") != std::string::npos,
+            "dispatcher must surface transaction_journal_invalid (not InvalidBackendResult) "
+            "for an unparseable durable journal; response=" + dispatched_journal_invalid);
+
         const std::string traversal_id = "33333333333333333333333333333333";
         ReplaceJournal(
             config.transaction_state_root,

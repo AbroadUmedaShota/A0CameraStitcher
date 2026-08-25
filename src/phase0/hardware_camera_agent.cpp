@@ -2008,6 +2008,19 @@ bool IsCaptureResultStructurallyValid(
             !result.camera_object_delete_succeeded &&
             !result.spool_empty_after_cleanup;
     }
+    // GitHub Issue #149: transaction_journal_invalid はジャーナル自体を検査・
+    // パース・スコープ確認できなかった時点で返るため、どの camera_alias/run_id
+    // の話かがそもそも分からない。ここで CAM-A/CAM-B のような alias を捏造して
+    // 下の一般構造チェックを通すのは誤情報になるため、transaction_reservation_incomplete
+    // と同じ形で許容分岐を設け、素直に camera_alias/run_id 空のまま許可する。
+    if (allow_not_found && result.error_category == "transaction_journal_invalid") {
+        return !result.succeeded && result.terminal_state == "FailedPartial" &&
+            result.camera_alias.empty() && result.run_id.empty() &&
+            !result.retained_original && !result.spool_empty_before_capture &&
+            !result.camera_object_delete_attempted &&
+            !result.camera_object_delete_succeeded &&
+            !result.spool_empty_after_cleanup;
+    }
     if (allow_not_found && result.error_category == "transaction_reserved" &&
         result.camera_alias.empty() && result.run_id.empty()) {
         return !result.succeeded && result.terminal_state == "Reserved" &&

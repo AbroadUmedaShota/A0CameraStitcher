@@ -1507,6 +1507,42 @@ static void HardwareProtocolValidation()
         expectedLiveViewHandoffRequested: true);
     Check.Equal("FailedPartial", incompleteReply.Payload.TerminalState);
 
+    // #149: transaction_journal_invalid is reported when the durable journal
+    // itself could not be inspected, read, or parsed (missing/corrupt/reparse
+    // point), so - like transaction_reservation_incomplete above - no
+    // camera_alias/run_id can be attributed to the lookup. Before this fix the
+    // response fell to the generic missingRecord check with an unrecognized
+    // resultCode, so ValidateAlias("") rejected it as InvalidAlias instead of
+    // surfacing the real journal-invalid diagnostic.
+    var journalInvalid = notFound with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "transaction_journal_invalid",
+        ErrorDetail = "durable Camera Agent transaction state is invalid",
+    };
+    var journalInvalidReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-journal-invalid",
+            false,
+            "transaction_journal_invalid",
+            journalInvalid),
+        "lookup-journal-invalid",
+        transactionId);
+    Check.Equal("FailedPartial", journalInvalidReply.Payload.TerminalState);
+    Check.Equal("transaction_journal_invalid", journalInvalidReply.Payload.ErrorCategory);
+    Check.Equal("", journalInvalidReply.Payload.CameraAlias);
+    Check.Equal("", journalInvalidReply.Payload.RunId);
+
+    Check.ThrowsHardwareProtocol("InvalidTransactionResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+            HardwareResponseJson(
+                "lookup-journal-invalid-wrong-state",
+                false,
+                "transaction_journal_invalid",
+                journalInvalid with { TerminalState = "Blocked" }),
+            "lookup-journal-invalid-wrong-state",
+            transactionId));
+
     Check.ThrowsHardwareProtocol("CameraAliasMismatch", () =>
         HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
             HardwareResponseJson(
