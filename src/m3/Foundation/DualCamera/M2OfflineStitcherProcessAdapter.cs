@@ -94,9 +94,16 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         // The job the adapter says it recorded has to be the job that was asked
         // for. A response naming a different StitchJob would leave this process
         // pointing at someone else's manifest.
+        //
+        // manifestFileName comes from the child process's stdout and must be a
+        // bare file name. Path.Combine discards its first argument whenever the
+        // second is rooted, so an adapter that reports an absolute path (or a
+        // path containing separators) could redirect the existence check to an
+        // arbitrary file on disk.
         var manifestFileName = values.GetValueOrDefault("manifest") ?? string.Empty;
         if (!string.Equals(values.GetValueOrDefault("stitchJobId"), stitchJobId.ToString("N"), StringComparison.Ordinal) ||
             manifestFileName.Length == 0 ||
+            !string.Equals(Path.GetFileName(manifestFileName), manifestFileName, StringComparison.Ordinal) ||
             !File.Exists(Path.Combine(Path.GetFullPath(outputJobDirectory), manifestFileName)))
         {
             throw new InvalidDataException(
