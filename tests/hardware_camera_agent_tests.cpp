@@ -3053,10 +3053,13 @@ void TestProductionContinuousLiveViewContracts() {
 }
 
 // GitHub Issue #141 段階2: 継続 Live View のフレーム取得予算(live_view_frame)を
-// open 予算から分離したことを検証する。段階1(#158)は in-flight フレーム要求を
-// 中断しない形に変えたため、停止操作の待ち上界がフレーム取得の予算そのものに
-// なった。open(既定10s)のままでは病的ケースで停止操作が長くブロックされうるため、
-// フレーム取得だけ短い専用予算を持たせている。
+// open 予算から分離したことを検証する。段階1(#158)適用後、停止操作は
+// 「in-flight フレーム取得の完了待ち」になった。SDK が予算内に応答する
+// 通常ケースではこの待ちは open(既定10s)に漸近するため、フレーム取得だけ
+// 短い専用予算(既定3s)へ分離して通常ケースの待ちを縮める。
+// 注意: SDK が渡されたタイムアウトを無視して詰まる病的ケースの待ち
+// (LiveViewResponseTimeout 30s + ConnectTimeout 10s ≒ 40s)は、渡す予算の
+// 値を変えても短縮できない。段階2はこの病的ケースを解決するものではない。
 void TestContinuousLiveViewFrameBudgetIsolation() {
     const fs::path root = fs::temp_directory_path() /
         ("a0-agent-continuous-live-view-frame-budget-test-" + NewRunId());
@@ -3148,6 +3151,53 @@ void TestContinuousLiveViewFrameBudgetIsolation() {
                 exceeds_open.timeouts.open + std::chrono::seconds(1);
             Check(constructor_rejects(exceeds_open),
                 "live_view_frame exceeding timeouts.open must be rejected at construction");
+
+            // 境界値: live_view_frame == open はちょうど「超えていない」ので
+            // 受理されなければならない。'>' が誤って '>=' に書き換わる
+            // off-by-one をこのテストで検出する。
+            auto equal_state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto equals_open =
+                ContinuousLiveViewTestConfig(root / "frame-budget-equals-open", equal_state);
+            equals_open.timeouts.live_view_frame = equals_open.timeouts.open;
+            Check(!constructor_rejects(equals_open),
+                "live_view_frame == open is the boundary and must be accepted");
+        }
+
+        // T4: live_view_frame の絶対上限(20s)は open の値に関係なく効く。
+        // open を将来広げても、C# 側 LiveViewResponseTimeout(30s)に対する
+        // マージンが失われないことを保証する回帰テスト。
+        {
+            const auto constructor_rejects =
+                [](ProductionHardwareCameraAgentConfig config) {
+                    try {
+                        ProductionHardwareCameraAgentBackend backend(std::move(config));
+                        (void)backend;
+                        return false;
+                    } catch (const std::invalid_argument&) {
+                        return true;
+                    }
+                };
+
+            // open を60秒へ広げても、live_view_frame が20秒を超えていれば
+            // (open 以下であっても)絶対上限で拒否されること。
+            auto widened_state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto widened_open_exceeds_ceiling = ContinuousLiveViewTestConfig(
+                root / "frame-budget-widened-open-exceeds-ceiling", widened_state);
+            widened_open_exceeds_ceiling.timeouts.open = std::chrono::seconds(60);
+            widened_open_exceeds_ceiling.timeouts.live_view_frame =
+                std::chrono::seconds(45);
+            Check(constructor_rejects(widened_open_exceeds_ceiling),
+                "live_view_frame must be rejected once it approaches the C# 30s timeout, "
+                "even when open has been widened to allow it");
+
+            // 絶対上限ちょうど(20s)は open が広くても受理されること。
+            auto at_ceiling_state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto at_ceiling = ContinuousLiveViewTestConfig(
+                root / "frame-budget-at-ceiling", at_ceiling_state);
+            at_ceiling.timeouts.open = std::chrono::seconds(60);
+            at_ceiling.timeouts.live_view_frame = std::chrono::seconds(20);
+            Check(!constructor_rejects(at_ceiling),
+                "live_view_frame at the 20s ceiling must be accepted when open allows it");
         }
     } catch (const std::exception& error) {
         ++failures;

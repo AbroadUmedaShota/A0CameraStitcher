@@ -33,7 +33,10 @@ struct Timeouts {
     std::chrono::seconds close{10};
     std::chrono::seconds transaction_watchdog{180};
     // 継続 Live View の1フレーム取得だけの予算。open(10s) と分離する理由は、
-    // この値がそのまま「停止ボタンが返るまでの上界」になるため。
+    // SDK が予算内に応答する通常ケースにおいてこの値が「停止ボタンが返るまでの
+    // 上界」になるため。ただし SDK がこの値を無視して詰まる病的ケースの上界は
+    // C# 側 LiveViewResponseTimeout(30s)+ConnectTimeout(10s) で決まり、この
+    // 値を縮めても短縮されない(GitHub Issue #141 参照)。
     std::chrono::seconds live_view_frame{3};
 };
 
