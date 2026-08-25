@@ -14,6 +14,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
     private static readonly TimeSpan LiveViewResponseTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CaptureResponseTimeout = TimeSpan.FromSeconds(240);
     private readonly string _agentExecutablePath;
+    private readonly string _artifactsRoot;
     private readonly string _captureProfilePath;
     private readonly string _singleIdentityV3Path;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
@@ -27,6 +28,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
 
     public PersistentHardwareCameraAgentOperations(
         string agentExecutablePath,
+        string artifactsRoot,
         string? captureProfilePath = null,
         string? singleIdentityV3Path = null)
     {
@@ -34,8 +36,13 @@ public sealed class PersistentHardwareCameraAgentOperations :
         {
             throw new ArgumentException("A Camera Agent executable path is required.", nameof(agentExecutablePath));
         }
+        if (string.IsNullOrWhiteSpace(artifactsRoot))
+        {
+            throw new ArgumentException("A Camera Agent artifacts root is required.", nameof(artifactsRoot));
+        }
 
         _agentExecutablePath = Path.GetFullPath(agentExecutablePath);
+        _artifactsRoot = Path.GetFullPath(artifactsRoot);
         _captureProfilePath = string.IsNullOrWhiteSpace(captureProfilePath)
             ? string.Empty
             : Path.GetFullPath(captureProfilePath);
@@ -45,6 +52,8 @@ public sealed class PersistentHardwareCameraAgentOperations :
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
+
+    public string AgentArtifactsRoot => _artifactsRoot;
 
     public bool AgentExecutableAvailable
     {
@@ -381,7 +390,12 @@ public sealed class PersistentHardwareCameraAgentOperations :
         }
     }
 
-    private ProcessStartInfo CreateStartInfo(string pipeName)
+    // internal (not private) so a test can assert the exact --artifacts-root
+    // value passed to the child matches AgentArtifactsRoot, without spawning
+    // a real process: the two are supplied from the same _artifactsRoot
+    // field here, but that agreement is exactly the invariant HardwareArtifact-
+    // Layout's canonical-path checks depend on, so it is worth a direct test.
+    internal ProcessStartInfo CreateStartInfo(string pipeName)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -394,6 +408,9 @@ public sealed class PersistentHardwareCameraAgentOperations :
         };
         startInfo.ArgumentList.Add("--pipe-name");
         startInfo.ArgumentList.Add(pipeName);
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_artifactsRoot);
+        startInfo.ArgumentList.Add("--artifacts-root");
+        startInfo.ArgumentList.Add(_artifactsRoot);
         if (!string.IsNullOrEmpty(_captureProfilePath))
         {
             WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(

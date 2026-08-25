@@ -16,6 +16,7 @@ public static class HardwareArtifactVerifier
 
     public static Task<VerifiedHardwareJpeg> VerifyOriginalAsync(
         HardwareRetainedOriginalRecord original,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -29,11 +30,13 @@ public static class HardwareArtifactVerifier
             original.SizeBytes,
             original.Sha256,
             "original.jpg",
+            expectedPath,
             cancellationToken);
     }
 
     public static Task<VerifiedHardwareJpeg> VerifyPreviewAsync(
         HardwarePreviewJpegRecord preview,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(preview);
@@ -42,6 +45,7 @@ public static class HardwareArtifactVerifier
             preview.SizeBytes,
             preview.Sha256,
             "preview.jpg",
+            expectedPath,
             cancellationToken);
     }
 
@@ -50,9 +54,10 @@ public static class HardwareArtifactVerifier
         long expectedSize,
         string expectedSha256,
         string requiredFileName,
+        string expectedPath,
         CancellationToken cancellationToken)
     {
-        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName);
+        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName, expectedPath);
         EnsureRegularFile(path);
         await using var stream = OpenStableRead(path);
         var observed = await InspectJpegAsync(
@@ -219,7 +224,8 @@ public static class HardwareArtifactVerifier
         string path,
         long expectedSize,
         string expectedSha256,
-        string requiredFileName)
+        string requiredFileName,
+        string expectedPath)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || IsUncPath(path) ||
             !string.Equals(Path.GetFileName(path), requiredFileName, StringComparison.OrdinalIgnoreCase) ||
@@ -228,6 +234,34 @@ public static class HardwareArtifactVerifier
                 character is >= '0' and <= '9' or >= 'a' and <= 'f'))
         {
             throw new InvalidDataException("Camera Agent artifact metadata is invalid.");
+        }
+
+        // expectedPath is the canonical location the caller independently
+        // derived (HardwareAgentArtifactLayout.OriginalPath/PreviewPath) from
+        // values it already owns or has separately validated: the
+        // --artifacts-root this process itself passed to the agent, plus the
+        // agent's run/transaction/alias, which HardwareCameraAgentProtocol
+        // validates the shape of (and, for transactionId, that it matches the
+        // transaction requested) before this code ever runs. Requiring exact
+        // equality here -- not merely containment under the artifacts root --
+        // is a provenance guarantee and accident detector: a Camera Agent
+        // that names a file outside its own run/transaction directory (its
+        // own leftovers, a different transaction's original, or an
+        // altogether unrelated local file with a self-supplied matching
+        // size/hash) is rejected even though authentication of "is this our
+        // Camera Agent" is already handled upstream by the named pipe's ACL
+        // and CurrentUserOnly restriction.
+        if (string.IsNullOrWhiteSpace(expectedPath) || !Path.IsPathFullyQualified(expectedPath))
+        {
+            throw new InvalidDataException("The Camera Agent canonical artifact path is invalid.");
+        }
+        if (!string.Equals(
+                Path.GetFullPath(path),
+                Path.GetFullPath(expectedPath),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Camera Agent artifact path is not the canonical location for this run.");
         }
     }
 
@@ -275,6 +309,7 @@ public sealed class HardwareOriginalExporter
         HardwareRetainedOriginalRecord original,
         string transactionId,
         DateTimeOffset now,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -282,7 +317,8 @@ public sealed class HardwareOriginalExporter
             original.Path,
             original.SizeBytes,
             original.Sha256,
-            "original.jpg");
+            "original.jpg",
+            expectedPath);
         if (transactionId.Length != 32 || !transactionId.All(character =>
                 character is >= '0' and <= '9' or >= 'a' and <= 'f'))
         {

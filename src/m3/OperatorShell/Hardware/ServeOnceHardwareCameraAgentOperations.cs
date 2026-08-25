@@ -82,11 +82,13 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
     private static readonly TimeSpan LiveViewResponseTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan CaptureResponseTimeout = TimeSpan.FromSeconds(240);
     private readonly string _agentExecutablePath;
+    private readonly string _artifactsRoot;
     private readonly string _captureProfilePath;
     private readonly string _singleIdentityV3Path;
 
     public ServeOnceHardwareCameraAgentOperations(
         string agentExecutablePath,
+        string artifactsRoot,
         string? captureProfilePath = null,
         string? singleIdentityV3Path = null)
     {
@@ -94,8 +96,13 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         {
             throw new ArgumentException("A Camera Agent executable path is required.", nameof(agentExecutablePath));
         }
+        if (string.IsNullOrWhiteSpace(artifactsRoot))
+        {
+            throw new ArgumentException("A Camera Agent artifacts root is required.", nameof(artifactsRoot));
+        }
 
         _agentExecutablePath = Path.GetFullPath(agentExecutablePath);
+        _artifactsRoot = Path.GetFullPath(artifactsRoot);
         _captureProfilePath = string.IsNullOrWhiteSpace(captureProfilePath)
             ? string.Empty
             : Path.GetFullPath(captureProfilePath);
@@ -105,6 +112,8 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
+
+    public string AgentArtifactsRoot => _artifactsRoot;
 
     public bool AgentExecutableAvailable
     {
@@ -318,7 +327,9 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         }
     }
 
-    private ProcessStartInfo CreateStartInfo(string pipeName)
+    // internal (not private): see PersistentHardwareCameraAgentOperations.
+    // CreateStartInfo for why this is exercised directly by a test.
+    internal ProcessStartInfo CreateStartInfo(string pipeName)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -332,6 +343,9 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         startInfo.ArgumentList.Add("--serve-once");
         startInfo.ArgumentList.Add("--pipe-name");
         startInfo.ArgumentList.Add(pipeName);
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_artifactsRoot);
+        startInfo.ArgumentList.Add("--artifacts-root");
+        startInfo.ArgumentList.Add(_artifactsRoot);
         if (!string.IsNullOrEmpty(_captureProfilePath))
         {
             WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(

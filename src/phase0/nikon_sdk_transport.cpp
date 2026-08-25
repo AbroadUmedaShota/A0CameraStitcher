@@ -135,6 +135,17 @@ namespace {
 constexpr auto kAsyncInterval = std::chrono::milliseconds(10);
 constexpr auto kCandidateSettle = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxLiveViewArrayBytes = 16U * 1024U * 1024U;
+// Mirrors wpd_transport.cpp's kMaximumJpegBytes: bounds a device-reported
+// file transfer size so a malicious or malfunctioning SDK cannot force an
+// unbounded allocation (ulTotalLength is a device-controlled ULONG with no
+// SDK-side upper bound other than != 0).
+constexpr ULONG kMaximumNikonFileDownloadBytes = 256U * 1024U * 1024U;
+// Bounds camera-reported enum/array element counts (Children ids, capability
+// counts, ShootingMode enum values) to the same order of magnitude already
+// used for status enums below, so a malformed response cannot force an
+// unbounded allocation.
+constexpr ULONG kMaximumNikonEnumElements = 256;
+constexpr ULONG kMaximumNikonCapabilityCount = 8192;
 // Hybrid capture writes to the camera card; WPD observes the resulting object
 // only after this SDK session has fully closed.
 constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_Card;
@@ -195,8 +206,12 @@ NKERROR CALLBACK DataProc(NKREF reference, LPVOID raw_info, LPVOID raw_data) {
 
     auto* file = static_cast<NkMAIDFileInfo*>(raw_info);
     if (file->fDiskFile || file->ulFileDataType != kNkMAIDFileDataType_JPEG ||
-        file->ulTotalLength == 0 || file->ulStart > file->ulTotalLength ||
+        file->ulTotalLength == 0 || file->ulTotalLength > kMaximumNikonFileDownloadBytes ||
+        file->ulStart > file->ulTotalLength ||
         file->ulLength > file->ulTotalLength - file->ulStart) {
+        // Reject rather than throw: this callback runs on the vendor DLL's
+        // stack, and a std::bad_alloc (or any exception) unwinding across
+        // that frame is undefined behavior.
         state->invalid = true;
         return kNkMAIDResult_UnexpectedDataType;
     }
@@ -204,7 +219,19 @@ NKERROR CALLBACK DataProc(NKREF reference, LPVOID raw_info, LPVOID raw_data) {
     if (!state->saw_file) {
         state->expected = file->ulTotalLength;
         state->file_type = file->ulFileDataType;
-        state->bytes.resize(state->expected);
+        // The size cap above bounds this allocation but does not guarantee
+        // it succeeds (fragmentation, other pressure). resize() can throw
+        // std::bad_alloc/std::length_error; std::copy below cannot throw.
+        // This callback runs on the vendor DLL's stack, so an exception
+        // unwinding across that frame would be undefined behavior -- reject
+        // instead, using the same "invalid" pattern as the rest of this
+        // function.
+        try {
+            state->bytes.resize(state->expected);
+        } catch (...) {
+            state->invalid = true;
+            return kNkMAIDResult_UnexpectedError;
+        }
         state->saw_file = true;
     }
     if (state->expected != file->ulTotalLength || state->bytes.size() != state->expected ||
@@ -769,10 +796,32 @@ private:
 
     void EnumerateCapabilities(MaidObject& object, std::chrono::steady_clock::time_point deadline,
                                std::string_view category) {
+        // The retry protocol here is: GetCapCount tells us how big a buffer
+        // to allocate, then GetCapInfo either fills it or reports
+        // kNkMAIDResult_BufferSize (the count grew between the two calls) and
+        // we loop back to re-fetch the count. That is only legitimate if the
+        // re-fetched count actually changes; a device/driver that keeps
+        // reporting the same count while GetCapInfo keeps demanding a bigger
+        // buffer for that same count is stuck, not making progress. Bound the
+        // loop on that structural signal, not only on the wall-clock
+        // deadline below (this also bounds how many entries this call can
+        // add to completions_, which is otherwise unbounded per iteration).
+        std::optional<ULONG> previous_count;
         for (;;) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw TransportError(std::string(category), "SDK capability enumeration timed out");
+            }
             ULONG count = 0;
             RunCompleted(object, kNkMAIDCommand_GetCapCount, 0, kNkMAIDDataType_UnsignedPtr,
                 reinterpret_cast<NKPARAM>(&count), deadline, category);
+            if (count > kMaximumNikonCapabilityCount) {
+                throw TransportError(std::string(category), "SDK reported an implausible capability count");
+            }
+            if (previous_count.has_value() && count == *previous_count) {
+                throw TransportError(std::string(category),
+                    "SDK capability count did not change after a buffer-size retry");
+            }
+            previous_count = count;
             object.capabilities.assign(count, NkMAIDCapInfo{});
             const NKERROR result = RunCompleted(object, kNkMAIDCommand_GetCapInfo, count,
                 kNkMAIDDataType_CapInfoPtr, reinterpret_cast<NKPARAM>(object.capabilities.data()), deadline, category);
@@ -1079,6 +1128,9 @@ private:
         RunCompleted(object, kNkMAIDCommand_CapGet, kNkMAIDCapability_Children,
             kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
         if (values.ulElements == 0) return {};
+        if (values.ulElements > kMaximumNikonEnumElements) {
+            throw TransportError(std::string(category), "SDK reported an implausible child ID count");
+        }
         if (values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) {
             throw TransportError(std::string(category), "SDK child IDs have an unexpected width");
         }
@@ -1128,7 +1180,8 @@ private:
             NkMAIDEnum values{};
             RunCompleted(source, kNkMAIDCommand_CapGet, kNkMAIDCapability_ShootingMode,
                 kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "inventory_failed");
-            if (values.ulElements == 0 || values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) return "unknown";
+            if (values.ulElements == 0 || values.ulElements > kMaximumNikonEnumElements ||
+                values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) return "unknown";
             std::vector<ULONG> items(values.ulElements);
             values.pData = items.data();
             RunCompleted(source, kNkMAIDCommand_CapGetArray, kNkMAIDCapability_ShootingMode,

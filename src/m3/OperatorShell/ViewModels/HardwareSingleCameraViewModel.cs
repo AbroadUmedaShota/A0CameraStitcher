@@ -643,8 +643,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             }
             else
             {
+                var expectedPreviewPath = HardwareAgentArtifactLayout.PreviewPath(
+                    _operations.AgentArtifactsRoot, reply.Payload.RunId, reply.Payload.CameraAlias);
                 var verified = await HardwareArtifactVerifier
-                    .VerifyPreviewAsync(reply.Payload.Preview)
+                    .VerifyPreviewAsync(reply.Payload.Preview, expectedPreviewPath)
                     .ConfigureAwait(true);
                 PreviewPath = verified.Path;
                 PreviewImage = TryLoadFrozenImage(verified.Path);
@@ -1103,10 +1105,16 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ActivityText = "検証済み単体原画像をbyte-identical copyで保存中…";
         try
         {
+            var expectedOriginalPath = HardwareAgentArtifactLayout.OriginalPath(
+                _operations.AgentArtifactsRoot,
+                _captureResult.RunId,
+                _captureResult.TransactionId,
+                _captureResult.RetainedOriginal.CameraAlias);
             var outputPath = await _exporter.ExportAsync(
                     _captureResult.RetainedOriginal,
                     _captureResult.TransactionId,
-                    _timeProvider.GetUtcNow())
+                    _timeProvider.GetUtcNow(),
+                    expectedOriginalPath)
                 .ConfigureAwait(true);
             LastExportPath = outputPath;
             ExportSummary = _captureResult.TerminalState == "Complete"
@@ -1140,8 +1148,13 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         {
             try
             {
+                var expectedOriginalPath = HardwareAgentArtifactLayout.OriginalPath(
+                    _operations.AgentArtifactsRoot,
+                    reply.Payload.RunId,
+                    reply.Payload.TransactionId,
+                    reply.Payload.RetainedOriginal.CameraAlias);
                 _verifiedOriginal = await HardwareArtifactVerifier
-                    .VerifyOriginalAsync(reply.Payload.RetainedOriginal)
+                    .VerifyOriginalAsync(reply.Payload.RetainedOriginal, expectedOriginalPath)
                     .ConfigureAwait(true);
                 RetainedOriginalSummary =
                     $"{reply.Payload.RetainedOriginal.CameraAlias} / {_verifiedOriginal.SizeBytes:N0} bytes / SHA-256確認済み";
@@ -1169,8 +1182,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             {
                 try
                 {
+                    var expectedPostCapturePreviewPath = HardwareAgentArtifactLayout.PreviewPath(
+                        _operations.AgentArtifactsRoot, reply.Payload.RunId, reply.Payload.CameraAlias);
                     var postCapturePreview = await HardwareArtifactVerifier
-                        .VerifyPreviewAsync(reply.Payload.PostCapturePreview)
+                        .VerifyPreviewAsync(reply.Payload.PostCapturePreview, expectedPostCapturePreviewPath)
                         .ConfigureAwait(true);
                     PreviewPath = postCapturePreview.Path;
                     PreviewImage = LoadFrozenImage(postCapturePreview.Path);

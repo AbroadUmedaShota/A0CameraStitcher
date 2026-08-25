@@ -94,9 +94,15 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         // The job the adapter says it recorded has to be the job that was asked
         // for. A response naming a different StitchJob would leave this process
         // pointing at someone else's manifest.
+        //
+        // manifestFileName comes from the child process's stdout and must be a
+        // bare file name. Path.Combine discards its first argument whenever the
+        // second is rooted, so an adapter that reports an absolute path (or a
+        // path containing separators) could redirect the existence check to an
+        // arbitrary file on disk.
         var manifestFileName = values.GetValueOrDefault("manifest") ?? string.Empty;
         if (!string.Equals(values.GetValueOrDefault("stitchJobId"), stitchJobId.ToString("N"), StringComparison.Ordinal) ||
-            manifestFileName.Length == 0 ||
+            !ManifestFileNameGuard.IsSafeManifestFileName(manifestFileName) ||
             !File.Exists(Path.Combine(Path.GetFullPath(outputJobDirectory), manifestFileName)))
         {
             throw new InvalidDataException(
@@ -273,5 +279,44 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+}
+
+// Shared between this adapter and DualCameraProductFlow: both validate a
+// manifest file name reported by (ultimately) child-process stdout before
+// using it in Path.Combine/File.Exists.
+internal static class ManifestFileNameGuard
+{
+    // Windows reserved device names: these resolve to a device rather than a
+    // regular file even with an extension attached (e.g. "NUL.json" still
+    // opens the NUL device), so File.Exists/File.Open on them does not behave
+    // like a normal file-existence check.
+    private static readonly HashSet<string> ReservedWindowsDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    internal static bool IsSafeManifestFileName(string candidate)
+    {
+        if (string.IsNullOrEmpty(candidate))
+        {
+            return false;
+        }
+        // Path.GetFileName(candidate) == candidate rejects any directory
+        // separator or rooted path, but "." and ".." both round-trip through
+        // GetFileName unchanged, so they need an explicit check.
+        if (!string.Equals(Path.GetFileName(candidate), candidate, StringComparison.Ordinal) ||
+            candidate is "." or "..")
+        {
+            return false;
+        }
+        // Windows resolves reserved names from the segment before the FIRST
+        // period, with trailing spaces/periods stripped ("NUL.json.txt" and
+        // "NUL " both reach the NUL device). GetFileNameWithoutExtension only
+        // strips the last extension, so derive that first segment explicitly.
+        var firstSegment = candidate.Split('.')[0].TrimEnd(' ', '.');
+        return !ReservedWindowsDeviceNames.Contains(firstSegment);
     }
 }

@@ -25,12 +25,12 @@ internal sealed class HardwareSinglePreferencesStore
         }
 
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_path);
-        var info = new FileInfo(_path);
-        if (info.Length is <= 0 or > MaximumBytes)
-        {
-            throw new InvalidDataException("保存先設定ファイルのサイズが不正です。");
-        }
 
+        // Check the size on the same handle used to read/parse below, not on
+        // a separate FileInfo query: a FileInfo.Length check followed by a
+        // later, independent FileStream open is a TOCTOU window in which the
+        // file on disk could be swapped for a larger one between the two
+        // operations, defeating the size limit.
         await using var stream = new FileStream(
             _path,
             FileMode.Open,
@@ -38,6 +38,11 @@ internal sealed class HardwareSinglePreferencesStore
             FileShare.Read,
             4096,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length is <= 0 or > MaximumBytes)
+        {
+            throw new InvalidDataException("保存先設定ファイルのサイズが不正です。");
+        }
+
         using var document = await JsonDocument.ParseAsync(
             stream,
             new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow },

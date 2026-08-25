@@ -500,9 +500,15 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
                 cancellationToken).ConfigureAwait(false);
             // The manifest is the commit point: without it this is a file on disk,
             // not a completed job (Issue #39 decision).
+            //
+            // ManifestFileName is adapter-reported (ultimately child-process
+            // stdout) and must be a bare file name: Path.Combine discards
+            // jobDirectory whenever the second argument is rooted, which would
+            // let a compromised adapter redirect the existence check to an
+            // arbitrary file.
             if (!string.Equals(Path.GetFileName(artifact.OutputPath), "stitched.jpg", StringComparison.OrdinalIgnoreCase) ||
                 !File.Exists(artifact.OutputPath) ||
-                artifact.ManifestFileName.Length == 0 ||
+                !ManifestFileNameGuard.IsSafeManifestFileName(artifact.ManifestFileName) ||
                 !File.Exists(Path.Combine(jobDirectory, artifact.ManifestFileName)) ||
                 !string.Equals(artifact.ProfileId, profile.ProfileId, StringComparison.Ordinal))
             {

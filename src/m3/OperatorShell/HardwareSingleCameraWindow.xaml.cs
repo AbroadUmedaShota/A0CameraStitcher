@@ -27,6 +27,7 @@ public partial class HardwareSingleCameraWindow : Window
             var profileStore = new HardwareSingleCaptureProfileStore(storagePaths.CaptureProfilePath);
             _operations = new PersistentHardwareCameraAgentOperations(
                 cameraAgentExecutablePath,
+                storagePaths.AgentArtifactsRoot,
                 storagePaths.CaptureProfilePath,
                 storagePaths.SingleIdentityV3Path);
             _viewModel = new HardwareSingleCameraViewModel(

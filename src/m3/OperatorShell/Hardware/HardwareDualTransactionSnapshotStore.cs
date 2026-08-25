@@ -138,9 +138,22 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
     {
         if (!File.Exists(_statePath)) return null;
         EnsureRegularStateFile(_statePath);
-        var bytes = File.ReadAllBytes(_statePath);
-        if (bytes.LongLength is <= 0 or > MaximumStateBytes)
+        // Check the size against the stream before allocating/reading, not
+        // after (File.ReadAllBytes would otherwise read an oversized file in
+        // full first, which the ViewModel's catch filters do not treat as a
+        // recoverable OutOfMemoryException). Mirrors HardwareSingleAppState-
+        // Store.LoadPendingAsync's stream.Length-first check.
+        using var stream = new FileStream(
+            _statePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.SequentialScan);
+        if (stream.Length is <= 0 or > MaximumStateBytes)
             throw new InvalidDataException("HardwareDual transaction snapshot size is invalid.");
+        var bytes = new byte[(int)stream.Length];
+        stream.ReadExactly(bytes);
         try
         {
             RejectDuplicatePropertyNames(bytes);

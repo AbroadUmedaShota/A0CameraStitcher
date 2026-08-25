@@ -25,6 +25,12 @@ if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
     return await RunSdklessPersistentReadinessE2EAsync(sdklessAgentPath);
 }
 const string dualChildScenarioVariable = "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+
+// Shared with tests that must pre-write a Live View preview (whose canonical
+// path only depends on runId + alias, not transactionId, so it can be
+// written before the transaction ID is known) at a location that will later
+// line up with a capture built by CompleteCapture/CompleteCaptureWithHandoff.
+const string CompleteCaptureRunId = "run-1000-1";
 if (Environment.GetEnvironmentVariable(dualChildScenarioVariable) is { Length: > 0 } dualChildScenario)
 {
     return await RunDualCameraAgentTestChildAsync(dualChildScenario, args);
@@ -290,6 +296,50 @@ catch (Exception exception)
 {
     failures.Add("hardware single requires an operator export folder and permits repair after capture");
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
+}
+
+try
+{
+    await HardwareArtifactVerifierRequiresExactCanonicalPathAsync();
+    Console.WriteLine("PASS HardwareArtifactVerifier requires the exact canonical artifact path (#101 M-4)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareArtifactVerifier requires the exact canonical artifact path (#101 M-4)");
+    Console.Error.WriteLine($"FAIL HardwareArtifactVerifier requires the exact canonical artifact path (#101 M-4): {exception}");
+}
+
+try
+{
+    await PersistentHardwareCameraAgentOperationsPassesArtifactsRootToChildAsync();
+    Console.WriteLine("PASS PersistentHardwareCameraAgentOperations passes --artifacts-root matching AgentArtifactsRoot (#101 M-4)");
+}
+catch (Exception exception)
+{
+    failures.Add("PersistentHardwareCameraAgentOperations passes --artifacts-root matching AgentArtifactsRoot (#101 M-4)");
+    Console.Error.WriteLine($"FAIL PersistentHardwareCameraAgentOperations passes --artifacts-root matching AgentArtifactsRoot (#101 M-4): {exception}");
+}
+
+try
+{
+    HardwareDualTransactionSnapshotStoreRejectsOversizedState();
+    Console.WriteLine("PASS HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5)");
+    Console.Error.WriteLine($"FAIL HardwareDualTransactionSnapshotStore rejects an oversized durable snapshot (#101 M-5): {exception}");
+}
+
+try
+{
+    await HardwareSinglePreferencesStoreRejectsOversizedFileAsync();
+    Console.WriteLine("PASS HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6)");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6)");
+    Console.Error.WriteLine($"FAIL HardwareSinglePreferencesStore rejects an oversized preferences file (#101 M-6): {exception}");
 }
 
 try
@@ -677,7 +727,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {58 - failures.Count}/58 passed.");
+Console.WriteLine($"Operator shell tests: {62 - failures.Count}/62 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -709,6 +759,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
             Environment.SetEnvironmentVariable(persistentChildScenarioVariable, scenario);
             await using var operations = new PersistentHardwareCameraAgentOperations(
                 executablePath,
+                storagePaths.AgentArtifactsRoot,
                 profilePath,
                 identityPath);
             try
@@ -749,6 +800,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
         await using (var operations = new PersistentHardwareCameraAgentOperations(
             executablePath,
+            storagePaths.AgentArtifactsRoot,
             profilePath,
             identityPath))
         {
@@ -766,6 +818,10 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
             .Select(value => value.GetString()!)
             .ToArray();
         Check.True(childArguments.Contains("--pipe-name", StringComparer.Ordinal), "The persistent pipe argument is required.");
+        Check.True(
+            childArguments.Contains("--artifacts-root", StringComparer.Ordinal) &&
+            childArguments.Contains(storagePaths.AgentArtifactsRoot, StringComparer.Ordinal),
+            "WPF and the Agent must share the same --artifacts-root (issue #101 M-4).");
         Check.True(childArguments.Contains(profilePath, StringComparer.Ordinal), "WPF and the Agent must share the profile path.");
         Check.True(childArguments.Contains(identityPath, StringComparer.Ordinal), "WPF and the Agent must share identity-v3.");
         Check.False(childArguments.Contains("--serve-once", StringComparer.Ordinal), "The formal WPF must use the persistent Agent mode.");
@@ -789,8 +845,15 @@ static async Task<int> RunSdklessPersistentReadinessE2EAsync(string agentExecuta
         var identityPath = storagePaths.SingleIdentityV3Path;
         Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
         Directory.CreateDirectory(Path.GetDirectoryName(identityPath)!);
+        // This test launches the real native Camera Agent, unlike the fakes
+        // elsewhere in this file: pre-create --artifacts-root so its startup
+        // does not depend on whether the real agent itself creates missing
+        // ancestors before this read-only readiness check ever prepares an
+        // artifact run.
+        Directory.CreateDirectory(storagePaths.AgentArtifactsRoot);
         await using var operations = new PersistentHardwareCameraAgentOperations(
             agentExecutablePath,
+            storagePaths.AgentArtifactsRoot,
             profilePath,
             identityPath);
         var reply = await operations.GetReadinessAsync("CAM-A");
@@ -947,16 +1010,25 @@ static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var sourcePath = Path.Combine(root, "agent", "run-export-selection", "CAM-A", "original.jpg");
-        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        // AgentExecutablePath and AgentArtifactsRoot are deliberately separate
+        // directories (see FakeHardwareSingleCameraOperations.AgentArtifactsRoot).
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
         var wrongDimensionsPath = Path.Combine(root, "agent", "wrong-dimensions", "CAM-A", "original.jpg");
         var wrongDimensions = WriteJpegRecord(wrongDimensionsPath, "CAM-A", preserveOnePixelDimensions: true);
         await Check.ThrowsAsync<InvalidDataException>(() =>
-            HardwareArtifactVerifier.VerifyOriginalAsync(wrongDimensions));
+            HardwareArtifactVerifier.VerifyOriginalAsync(wrongDimensions, wrongDimensionsPath));
+
+        string? capturedOriginalPath = null;
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
             CaptureResultFactory = (transactionId, alias) =>
-                CompleteCapture(transactionId, alias, original),
+            {
+                var (result, originalPath) = CompleteCapture(artifactsRoot, transactionId, alias);
+                capturedOriginalPath = originalPath;
+                return result;
+            },
         };
         var preferences = new HardwareSinglePreferencesStore(
             Path.Combine(root, "state", "preferences.json"));
@@ -992,11 +1064,142 @@ static async Task HardwareSingleRequiresAndRepairsOperatorExportDirectoryAsync()
         await viewModel.ExportAsync();
         Check.Equal(Path.GetFullPath(repairedChoice), Path.GetDirectoryName(viewModel.LastExportPath)!);
         Check.True(
-            File.ReadAllBytes(sourcePath).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
+            File.ReadAllBytes(capturedOriginalPath!).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
             "The repaired destination must receive a byte-identical copy of the verified canonical original.");
 
         var loaded = await preferences.LoadAsync();
         Check.Equal(Path.GetFullPath(repairedChoice), loaded!.ExportDirectory);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-4 (redesigned 2026-08-25 per security(AZKi)'s provenance-
+// guarantee model, replacing the earlier agent-root containment check that
+// reviewer_security(いろは) sent back): HardwareArtifactVerifier now compares
+// the agent-reported path for exact equality against a canonical path this
+// process derives itself (HardwareAgentArtifactLayout), not merely
+// containment under the agent's directory. A record whose Path/SizeBytes/
+// Sha256 are all internally consistent (i.e. an attacker who also controls
+// the reported hash) must still be rejected unless it names that exact
+// location.
+static async Task HardwareArtifactVerifierRequiresExactCanonicalPathAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = Path.Combine(root, "artifacts");
+        const string runId = "run-9000-1";
+        const string transactionId = "99999999999999999999999999999999";
+        var canonicalPath = HardwareAgentArtifactLayout.OriginalPath(artifactsRoot, runId, transactionId, "CAM-A");
+        var original = WriteJpegRecord(canonicalPath, "CAM-A");
+
+        // (a) A record whose path is outside the artifacts root entirely.
+        var elsewherePath = Path.Combine(root, "not-the-artifacts-root", "original.jpg");
+        var elsewhere = WriteJpegRecord(elsewherePath, "CAM-A");
+        await Check.ThrowsAsync<InvalidDataException>(() =>
+            HardwareArtifactVerifier.VerifyOriginalAsync(elsewhere, canonicalPath));
+
+        // (b) A record inside the artifacts root, but under a different
+        // run/transaction than the one this process actually reserved -- an
+        // agent that names a leftover file from a different transaction must
+        // be rejected even though the file lives under the correct root.
+        var wrongTransactionPath = HardwareAgentArtifactLayout.OriginalPath(
+            artifactsRoot, runId, "00000000000000000000000000000000", "CAM-A");
+        var wrongTransaction = WriteJpegRecord(wrongTransactionPath, "CAM-A");
+        await Check.ThrowsAsync<InvalidDataException>(() =>
+            HardwareArtifactVerifier.VerifyOriginalAsync(wrongTransaction, canonicalPath));
+
+        // (c) The canonical path is accepted.
+        var verified = await HardwareArtifactVerifier.VerifyOriginalAsync(original, canonicalPath);
+        Check.Equal(canonicalPath, verified.Path);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-4: HardwareAgentArtifactLayout's canonical-path checks only
+// mean anything if --artifacts-root is actually the same value AgentArtifacts
+// Root reports. This asserts that directly against CreateStartInfo's
+// ArgumentList (exposed internal for this reason -- see its doc comment)
+// rather than spawning a real child process.
+static async Task PersistentHardwareCameraAgentOperationsPassesArtifactsRootToChildAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agentExecutablePath = Path.Combine(root, "app", "A0CameraStitcher.CameraAgent.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(agentExecutablePath)!);
+        File.WriteAllBytes(agentExecutablePath, [0x4d, 0x5a]);
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        var profilePath = Path.Combine(root, "camera-agent", "approved-single-capture-profile.json");
+        var identityPath = Path.Combine(root, "phase0", "single-identity-v3.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(identityPath)!);
+
+        await using var operations = new PersistentHardwareCameraAgentOperations(
+            agentExecutablePath, artifactsRoot, profilePath, identityPath);
+        var startInfo = operations.CreateStartInfo("A0CameraStitcher.CameraAgent.Hardware.v2.test");
+        var arguments = startInfo.ArgumentList;
+        var flagIndex = arguments.IndexOf("--artifacts-root");
+        Check.True(
+            flagIndex >= 0 && flagIndex + 1 < arguments.Count,
+            "The child process must receive --artifacts-root.");
+        Check.Equal(operations.AgentArtifactsRoot, arguments[flagIndex + 1]);
+        Check.Equal(Path.GetFullPath(artifactsRoot), operations.AgentArtifactsRoot);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-5: HardwareDualTransactionSnapshotStore must reject an
+// oversized durable snapshot file before it is fully read into memory, not
+// after (an unbounded File.ReadAllBytes would let an OutOfMemoryException
+// bypass the ViewModel's typed catch filters). This does not reproduce the
+// TOCTOU window itself (there is no injectable seam to pause between the
+// size check and the read), only that the post-refactor code path still
+// enforces the size limit.
+static void HardwareDualTransactionSnapshotStoreRejectsOversizedState()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var productRoot = Path.Combine(root, "product");
+        var stateDirectory = Path.Combine(productRoot, "recovery-state");
+        Directory.CreateDirectory(stateDirectory);
+        File.WriteAllBytes(Path.Combine(stateDirectory, "pending-transaction.json"), new byte[257 * 1024]);
+
+        var store = new HardwareDualTransactionSnapshotStore(productRoot);
+        Check.Throws<InvalidDataException>(() => store.LoadPending());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #101 M-6: HardwareSinglePreferencesStore must reject an oversized
+// preferences file. As with M-5 above, this exercises the post-refactor size
+// enforcement on the single read handle; it does not reproduce the TOCTOU
+// race between the old separate FileInfo check and the FileStream open.
+static async Task HardwareSinglePreferencesStoreRejectsOversizedFileAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var stateDirectory = Path.Combine(root, "state");
+        Directory.CreateDirectory(stateDirectory);
+        var preferencesPath = Path.Combine(stateDirectory, "preferences.json");
+        await File.WriteAllBytesAsync(preferencesPath, new byte[17 * 1024]);
+
+        var store = new HardwareSinglePreferencesStore(preferencesPath);
+        await Check.ThrowsAsync<InvalidDataException>(() => store.LoadAsync());
     }
     finally
     {
@@ -1106,15 +1309,32 @@ static async Task HardwareSingleHappyPathAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var sourcePath = Path.Combine(root, "agent", "run-1000-1", "CAM-B", "original.jpg");
-        var original = WriteJpegRecord(sourcePath, "CAM-B");
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        // The same preview file plays two roles below: the pre-capture finite
+        // Live View probe's Preview, and (via CompleteCaptureWithHandoff) the
+        // capture's PostCapturePreview. Both must therefore resolve to the
+        // same canonical path -- HardwareAgentArtifactLayout.PreviewPath only
+        // depends on runId + alias, not the (not-yet-known) transaction ID,
+        // so it can be written up front using CompleteCapture's fixed run ID.
         var resumedPreview = WritePreviewRecord(
-            Path.Combine(root, "agent", "run-1000-1", "live-view", "CAM-B", "preview.jpg"));
+            HardwareAgentArtifactLayout.PreviewPath(artifactsRoot, CompleteCaptureRunId, "CAM-A"));
+        // ADR-0024: SingleCamera は CAM-A 専用に固定されており、下の SelectedCamera = "CAM-B"
+        // は setter が黙って拒否する（main 時代からの no-op）。正規パス完全一致検証の導入で、
+        // 事前配置する preview は実際に使われる alias (CAM-A) に置く必要がある。
+        string? capturedOriginalPath = null;
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            ProbeLiveViewRunId = CompleteCaptureRunId,
             Preview = resumedPreview,
             CaptureResultFactory = (transactionId, alias) =>
-                CompleteCaptureWithHandoff(transactionId, alias, original, resumedPreview),
+            {
+                var (result, originalPath) = CompleteCaptureWithHandoff(
+                    artifactsRoot, transactionId, alias, resumedPreview);
+                capturedOriginalPath = originalPath;
+                return result;
+            },
         };
         var store = new HardwareSingleAppStateStore(Path.Combine(root, "state"));
         var viewModel = new HardwareSingleCameraViewModel(
@@ -1148,7 +1368,7 @@ static async Task HardwareSingleHappyPathAsync()
         await viewModel.ExportAsync();
         Check.True(File.Exists(viewModel.LastExportPath), "Explicit hardware export must create a file.");
         Check.True(
-            File.ReadAllBytes(sourcePath).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
+            File.ReadAllBytes(capturedOriginalPath!).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
             "Hardware export must be byte-identical to the canonical original.");
         Check.True(viewModel.ExportSummary.Contains("byte-identical", StringComparison.Ordinal), "The UI must label the single export provenance.");
         Check.True(await store.LoadPendingAsync() is not null, "A terminal result must remain durable until explicit operator preparation.");
@@ -1171,8 +1391,7 @@ static async Task HardwarePendingTransactionRecoveryAsync()
     try
     {
         const string transactionId = "0123456789abcdef0123456789abcdef";
-        var sourcePath = Path.Combine(root, "agent", "run-2000-1", "CAM-A", "original.jpg");
-        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
         var store = new HardwareSingleAppStateStore(Path.Combine(root, "state"));
         await store.SavePendingAsync(new HardwarePendingTransaction
         {
@@ -1188,10 +1407,20 @@ static async Task HardwarePendingTransactionRecoveryAsync()
             CaptureRequestDispatchAttempted = true,
             StartedAtUtc = DateTimeOffset.UtcNow,
         });
-        var operations = new FakeHardwareSingleCameraOperations();
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+        };
+        // The transaction ID here is a compile-time constant (unlike a real
+        // dispatched capture), so FailedPartialCapture can write its
+        // original.jpg immediately -- it does not need to wait for a
+        // dynamically-generated transaction ID the way CaptureResultFactory
+        // callbacks elsewhere do.
         operations.TransactionResults.Enqueue(ReservedCapture(transactionId, "CAM-A"));
         operations.TransactionResults.Enqueue(InProgressCapture(transactionId, "CAM-A"));
-        operations.TransactionResults.Enqueue(FailedPartialCapture(transactionId, "CAM-A", original));
+        var (failedPartialResult, _) = FailedPartialCapture(artifactsRoot, transactionId, "CAM-A");
+        operations.TransactionResults.Enqueue(failedPartialResult);
         var viewModel = new HardwareSingleCameraViewModel(
             operations,
             store,
@@ -1239,14 +1468,18 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var sourcePath = Path.Combine(root, "agent", "run-live-1", "CAM-A", "original.jpg");
-        var original = WriteJpegRecord(sourcePath, "CAM-A");
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        // Continuous Live View frames are decoded and displayed in-memory
+        // (DecodeVerifiedFrame), never checked against HardwareArtifactVerifier,
+        // so this file's location is unrelated to artifactsRoot.
         var framePath = Path.Combine(root, "agent", "run-live-1", "preview.jpg");
         var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
         var operations = new FakeContinuousHardwareOperations(frameBytes)
         {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
             CaptureResultFactory = (transactionId, alias) =>
-                CompleteCapture(transactionId, alias, original),
+                CompleteCapture(artifactsRoot, transactionId, alias).Result,
         };
         var viewModel = new HardwareSingleCameraViewModel(
             operations,
@@ -1282,8 +1515,10 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
 
         var blockedOperations = new FakeContinuousHardwareOperations(frameBytes)
         {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
             CaptureResultFactory = (transactionId, alias) =>
-                CompleteCapture(transactionId, alias, original),
+                CompleteCapture(artifactsRoot, transactionId, alias).Result,
             FailNextStop = true,
         };
         var blockedViewModel = new HardwareSingleCameraViewModel(
@@ -1317,9 +1552,13 @@ static async Task HardwareLiveViewRequiresFreshReadinessAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var preview = WritePreviewRecord(Path.Combine(root, "agent", "run-3000-1", "live-view", "CAM-A", "preview.jpg"));
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        var preview = WritePreviewRecord(
+            HardwareAgentArtifactLayout.PreviewPath(artifactsRoot, "run-3000-1", "CAM-A"));
         var operations = new FakeHardwareSingleCameraOperations
         {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
             Preview = preview,
             ReadinessFactory = alias => HardwareTestData.ReadyHardware(alias) with
             {
@@ -1632,7 +1871,8 @@ static async Task HardwareExportVerificationFailureStaysUnpublishedAsync()
         await Check.ThrowsAsync<IOException>(() => exporter.ExportAsync(
             original,
             "44444444444444444444444444444444",
-            DateTimeOffset.Parse("2026-08-10T00:00:00Z")));
+            DateTimeOffset.Parse("2026-08-10T00:00:00Z"),
+            sourcePath));
 
         Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
         Check.Equal(1, Directory.GetFiles(exportDirectory, "*.partial", SearchOption.TopDirectoryOnly).Length);
@@ -1653,7 +1893,8 @@ static async Task HardwareExportVerificationFailureStaysUnpublishedAsync()
         var finalPath = await exactHandleExporter.ExportAsync(
             original,
             "45454545454545454545454545454545",
-            DateTimeOffset.Parse("2026-08-10T00:00:01Z"));
+            DateTimeOffset.Parse("2026-08-10T00:00:01Z"),
+            sourcePath);
         Check.True(replacementHookRan, "The post-verification replacement seam must execute.");
         Check.True(
             File.Exists(finalPath),
@@ -2816,6 +3057,14 @@ static string CreateHardwareTestRoot()
     return root;
 }
 
+// Mirrors HardwareSingleStoragePaths.Resolve's real layout
+// (<LocalAppData>/A0CameraStitcher/phase0/camera-agent/artifacts) under a
+// test root, deliberately in a different subtree than any fake agent exe
+// path a test also sets -- see FakeHardwareSingleCameraOperations
+// .AgentArtifactsRoot for why the two must not be conflated.
+static string FakeAgentArtifactsRoot(string root) =>
+    Path.Combine(root, "localappdata", "A0CameraStitcher", "phase0", "camera-agent", "artifacts");
+
 static HardwareRetainedOriginalRecord WriteJpegRecord(
     string path,
     string alias,
@@ -2882,16 +3131,32 @@ static void RewriteJpegDimensions(byte[] bytes, int width, int height)
     throw new InvalidDataException("Test JPEG has no start-of-frame marker.");
 }
 
-static HardwareSingleCaptureResult CompleteCapture(
+
+// Writes the canonical original.jpg for (transactionId, alias) under
+// artifactsRoot -- using HardwareAgentArtifactLayout, the same helper
+// production code uses to compute the expected path -- and returns both the
+// resulting HardwareSingleCaptureResult and the original's on-disk path (for
+// tests that later assert byte-identical export output).
+//
+// The write happens here, not before the caller has a transactionId, because
+// CaptureAsync's real transaction ID is only known once the ViewModel calls
+// this factory: HardwareArtifactVerifier now requires the reported path to
+// exactly equal <artifactsRoot>/<runId>/<transactionId>/<alias>/original.jpg,
+// so the file cannot be pre-staged before that ID exists.
+static (HardwareSingleCaptureResult Result, string OriginalPath) CompleteCapture(
+    string artifactsRoot,
     string transactionId,
-    string alias,
-    HardwareRetainedOriginalRecord original) =>
-    new()
+    string alias)
+{
+    var originalPath = HardwareAgentArtifactLayout.OriginalPath(
+        artifactsRoot, CompleteCaptureRunId, transactionId, alias);
+    var original = WriteJpegRecord(originalPath, alias);
+    var result = new HardwareSingleCaptureResult
     {
         CameraMode = "SingleCamera",
         CameraAlias = alias,
         RequiredCameraAlias = alias,
-        RunId = "run-1000-1",
+        RunId = CompleteCaptureRunId,
         TransactionId = transactionId,
         CaptureProfileId = "single-profile",
         CaptureProfileVersion = 1,
@@ -2901,7 +3166,7 @@ static HardwareSingleCaptureResult CompleteCapture(
         TerminalState = "Complete",
         ErrorCategory = string.Empty,
         ErrorDetail = string.Empty,
-        RetainedOriginal = original with { CameraAlias = alias },
+        RetainedOriginal = original,
         LiveViewHandoffRequested = false,
         LiveViewStoppedBeforeCapture = false,
         LiveViewSdkSessionClosedBeforeCapture = false,
@@ -2916,6 +3181,8 @@ static HardwareSingleCaptureResult CompleteCapture(
         TransactionWatchdogSeconds = 180,
         RealIdentifiersIncluded = false,
     };
+    return (result, originalPath);
+}
 
 static HardwareSingleCaptureResult InProgressCapture(string transactionId, string alias) =>
     new()
@@ -2949,12 +3216,18 @@ static HardwareSingleCaptureResult InProgressCapture(string transactionId, strin
         RealIdentifiersIncluded = false,
     };
 
-static HardwareSingleCaptureResult CompleteCaptureWithHandoff(
+// resumedPreview must already be written at HardwareAgentArtifactLayout
+// .PreviewPath(artifactsRoot, CompleteCaptureRunId, alias) -- e.g. because the
+// same file was also used as the pre-capture finite Live View probe's
+// Preview, before the transaction ID existed.
+static (HardwareSingleCaptureResult Result, string OriginalPath) CompleteCaptureWithHandoff(
+    string artifactsRoot,
     string transactionId,
     string alias,
-    HardwareRetainedOriginalRecord original,
-    HardwarePreviewJpegRecord resumedPreview) =>
-    CompleteCapture(transactionId, alias, original) with
+    HardwarePreviewJpegRecord resumedPreview)
+{
+    var (captureResult, originalPath) = CompleteCapture(artifactsRoot, transactionId, alias);
+    var result = captureResult with
     {
         LiveViewHandoffRequested = true,
         LiveViewStoppedBeforeCapture = true,
@@ -2963,18 +3236,24 @@ static HardwareSingleCaptureResult CompleteCaptureWithHandoff(
         PostCaptureLiveViewProbeSucceeded = true,
         PostCapturePreview = resumedPreview,
     };
+    return (result, originalPath);
+}
 
-static HardwareSingleCaptureResult FailedPartialCapture(
+static (HardwareSingleCaptureResult Result, string OriginalPath) FailedPartialCapture(
+    string artifactsRoot,
     string transactionId,
-    string alias,
-    HardwareRetainedOriginalRecord original) =>
-    CompleteCapture(transactionId, alias, original) with
+    string alias)
+{
+    var (captureResult, originalPath) = CompleteCapture(artifactsRoot, transactionId, alias);
+    var result = captureResult with
     {
         TerminalState = "FailedPartial",
         ErrorCategory = "spool_empty_after_failed",
         ErrorDetail = "The canonical PC original is retained but spool cleanup did not complete.",
         SpoolEmptyAfterCleanup = false,
     };
+    return (result, originalPath);
+}
 
 static HardwareSingleCaptureResult ReservedCapture(string transactionId, string alias) =>
     InProgressCapture(transactionId, alias) with
@@ -5683,7 +5962,23 @@ sealed class BlockingTransactionService : ISimulatedTransactionService
 
 class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
 {
-    public string AgentExecutablePath => "C:\\fake\\A0CameraStitcher.CameraAgent.exe";
+    public string AgentExecutablePath { get; set; } = "C:\\fake\\A0CameraStitcher.CameraAgent.exe";
+
+    // Deliberately a different directory than AgentExecutablePath's: the real
+    // agent's exe directory and its --artifacts-root are unrelated (see
+    // HardwareSingleStoragePaths.Resolve), and a fake that conflated the two
+    // would hide any bug where production code derived the canonical-path
+    // root from the wrong one. Tests that verify a real retained-original or
+    // preview file must set this to the directory under which they actually
+    // write it (typically via HardwareAgentArtifactLayout).
+    public string AgentArtifactsRoot { get; set; } = "C:\\fake\\artifacts";
+
+    // HardwareSingleLiveViewResult.RunId reported by ProbeLiveViewAsync
+    // below. Real runs get a fresh run ID per Live View session; tests that
+    // reuse the same Preview record across a probe and a later capture's
+    // PostCapturePreview must set this to match whatever run ID the capture
+    // side (e.g. CompleteCaptureRunId) used to write that file.
+    public string ProbeLiveViewRunId { get; set; } = "run-3000-1";
 
     public bool AgentExecutableAvailable => true;
 
@@ -5751,7 +6046,7 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
             {
                 CameraMode = "SingleCamera",
                 CameraAlias = cameraAlias,
-                RunId = "run-3000-1",
+                RunId = ProbeLiveViewRunId,
                 Frames = 1,
                 LastFrameBytes = Preview.SizeBytes,
                 LastFrameSha256 = Preview.Sha256,
