@@ -983,6 +983,25 @@ public static class HardwareCameraAgentProtocolCodec
 
         var missingRecord = isTransactionLookup && envelope.ResultCode is
             "TransactionNotFound" or "transaction_reservation_incomplete";
+
+        if (!missingRecord && isTransactionLookup &&
+            envelope.ResultCode is "TransactionReserved" or "transaction_journal_invalid" &&
+            string.IsNullOrEmpty(payload.CameraAlias) &&
+            string.IsNullOrEmpty(payload.RequiredCameraAlias) &&
+            string.IsNullOrEmpty(payload.RunId))
+        {
+            // TransactionReserved and transaction_journal_invalid are each reported for
+            // two distinct wire shapes from the Camera Agent: a shape observed before the
+            // transaction journal exists or can be reread (no durable record known yet,
+            // alias/runId empty), and a shape observed after the journal is committed
+            // (durable record with its assigned alias/runId already present - e.g. a
+            // second read of an already-parsed Reserved/InProgress journal that fails to
+            // reparse still carries the alias/runId learned on the first read). Only the
+            // former is a "missing record" - treating every response as missingRecord
+            // would reject the populated-alias shape below via the empty-field check.
+            missingRecord = true;
+        }
+
         if (missingRecord)
         {
             if (!string.IsNullOrEmpty(payload.CameraAlias) ||
@@ -1164,6 +1183,22 @@ public static class HardwareCameraAgentProtocolCodec
                     payload.SpoolEmptyAfterCleanup)
                 {
                     throw Violation("InvalidTransactionResult", "Incomplete reservation evidence is inconsistent.");
+                }
+
+                break;
+            case "transaction_journal_invalid" when isTransactionLookup:
+                // GitHub Issue #149: the durable journal could not be inspected, read, or
+                // parsed, so no camera/run can be attributed to this lookup. Same shape as
+                // transaction_reservation_incomplete above (FailedPartial, no capture
+                // evidence); this dedicated case pins TerminalState explicitly instead of
+                // relying on the default case's weaker resultCode == errorCategory check.
+                if (payload.TerminalState != "FailedPartial" ||
+                    payload.ErrorCategory != "transaction_journal_invalid" ||
+                    payload.RetainedOriginal is not null || payload.SpoolEmptyBeforeCapture ||
+                    payload.CameraObjectDeleteAttempted || payload.CameraObjectDeleteSucceeded ||
+                    payload.SpoolEmptyAfterCleanup)
+                {
+                    throw Violation("InvalidTransactionResult", "Journal-invalid lookup evidence is inconsistent.");
                 }
 
                 break;

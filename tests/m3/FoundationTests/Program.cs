@@ -1463,6 +1463,31 @@ static void HardwareProtocolValidation()
         transactionId);
     Check.Equal("TransactionNotFound", notFoundReply.ResultCode);
 
+    // #140: the Camera Agent also reports TransactionReserved for a lease-busy
+    // race observed *before* the transaction journal is committed (no durable
+    // record yet). That shape carries the same empty alias/runId as notFound
+    // above (see tests/hardware_camera_agent_tests.cpp "reservation-directory
+    // creation ... initial journal commit" case), unlike the `reserved` fixture
+    // above which represents the post-commit shape with a populated alias.
+    var reservedMissingRecord = notFound with
+    {
+        TerminalState = "Reserved",
+        ErrorCategory = "transaction_reserved",
+        ErrorDetail =
+            "transaction owner is committing its initial durable reservation; query again without resubmitting capture",
+    };
+    var reservedMissingRecordReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-reserved-missing-record",
+            false,
+            "TransactionReserved",
+            reservedMissingRecord),
+        "lookup-reserved-missing-record",
+        transactionId);
+    Check.Equal("Reserved", reservedMissingRecordReply.Payload.TerminalState);
+    Check.Equal("", reservedMissingRecordReply.Payload.CameraAlias);
+    Check.Equal("", reservedMissingRecordReply.Payload.RunId);
+
     var incompleteReservation = notFound with
     {
         TerminalState = "FailedPartial",
@@ -1481,6 +1506,70 @@ static void HardwareProtocolValidation()
         profileSnapshot,
         expectedLiveViewHandoffRequested: true);
     Check.Equal("FailedPartial", incompleteReply.Payload.TerminalState);
+
+    // #149: transaction_journal_invalid is reported when the durable journal
+    // itself could not be inspected, read, or parsed (missing/corrupt/reparse
+    // point), so - like transaction_reservation_incomplete above - no
+    // camera_alias/run_id can be attributed to the lookup. Before this fix the
+    // response fell to the generic missingRecord check with an unrecognized
+    // resultCode, so ValidateAlias("") rejected it as InvalidAlias instead of
+    // surfacing the real journal-invalid diagnostic.
+    var journalInvalid = notFound with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "transaction_journal_invalid",
+        ErrorDetail = "durable Camera Agent transaction state is invalid",
+    };
+    var journalInvalidReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-journal-invalid",
+            false,
+            "transaction_journal_invalid",
+            journalInvalid),
+        "lookup-journal-invalid",
+        transactionId);
+    Check.Equal("FailedPartial", journalInvalidReply.Payload.TerminalState);
+    Check.Equal("transaction_journal_invalid", journalInvalidReply.Payload.ErrorCategory);
+    Check.Equal("", journalInvalidReply.Payload.CameraAlias);
+    Check.Equal("", journalInvalidReply.Payload.RunId);
+
+    Check.ThrowsHardwareProtocol("InvalidTransactionResult", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+            HardwareResponseJson(
+                "lookup-journal-invalid-wrong-state",
+                false,
+                "transaction_journal_invalid",
+                journalInvalid with { TerminalState = "Blocked" }),
+            "lookup-journal-invalid-wrong-state",
+            transactionId));
+
+    // #149 (populated-alias shape): a second reparse of an already-committed
+    // Reserved/InProgress journal can also fail (see
+    // tests/hardware_camera_agent_tests.cpp "populated-alias shape" case),
+    // which keeps the camera_alias/run_id already learned from the first
+    // successful read. Unlike journalInvalid above, this shape must NOT be
+    // treated as missingRecord (only the alias/runId-empty shape is) and must
+    // pass the dedicated transaction_journal_invalid switch case as a normal
+    // populated response instead.
+    var journalInvalidPopulated = inProgress with
+    {
+        TerminalState = "FailedPartial",
+        ErrorCategory = "transaction_journal_invalid",
+        ErrorDetail = "durable Camera Agent transaction state is invalid",
+    };
+    var journalInvalidPopulatedReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-journal-invalid-populated",
+            false,
+            "transaction_journal_invalid",
+            journalInvalidPopulated),
+        "lookup-journal-invalid-populated",
+        transactionId);
+    Check.Equal("FailedPartial", journalInvalidPopulatedReply.Payload.TerminalState);
+    Check.Equal("CAM-A", journalInvalidPopulatedReply.Payload.CameraAlias);
+    Check.False(
+        string.IsNullOrEmpty(journalInvalidPopulatedReply.Payload.RunId),
+        "the populated-alias shape must keep the run ID already learned on the first read.");
 
     Check.ThrowsHardwareProtocol("CameraAliasMismatch", () =>
         HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
