@@ -984,6 +984,20 @@ void TestDurableJournalRecoveryContracts() {
                 journal_reparse_result.terminal_state + "/" +
                 journal_reparse_result.error_category);
 
+        // The direct GetTransactionResult call above already consumed the
+        // seeded journal: its hook (after_initial_active_journal_read_for_testing,
+        // stored as a std::function on the config and therefore not one-shot)
+        // left "transaction.json" corrupted on disk. Re-seed a valid
+        // Reserved/InProgress journal so the dispatcher's own call also
+        // observes a successful first parse and re-fires the same hook,
+        // reproducing the populated-alias reparse-failure path
+        // (hardware_camera_agent.cpp:4244) instead of short-circuiting on the
+        // already-corrupted file at the very first parse
+        // (hardware_camera_agent.cpp:4197, the empty-alias shape).
+        ReplaceJournal(
+            journal_reparse_config.transaction_state_root,
+            journal_reparse_id,
+            JournalJson(journal_reparse_id, "run-1700000000000-99", "InProgress"));
         HardwareCameraAgentDispatcher journal_reparse_dispatcher(journal_reparse_backend);
         const std::string dispatched_journal_reparse = journal_reparse_dispatcher.Handle(
             Envelope(
