@@ -52,6 +52,18 @@ catch (Exception exception)
 
 try
 {
+    await PersistentLiveViewOwnedSessionReleaseAsync();
+    Console.WriteLine("PASS persistent hardware Camera Agent releases the owned Live View session on stop");
+}
+catch (Exception exception)
+{
+    failures.Add("persistent hardware Camera Agent releases the owned Live View session on stop");
+    Console.Error.WriteLine(
+        $"FAIL persistent hardware Camera Agent releases the owned Live View session on stop: {exception}");
+}
+
+try
+{
     await LiveViewStopFailureWorkflowAsync();
     Console.WriteLine("PASS live view stop failure survives restart and rejects duplicate start");
 }
@@ -778,6 +790,127 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
     }
 }
 
+// GitHub Issue #143: StopLiveViewAsync assigned _ownedSessionId back to the very same
+// value it already held instead of releasing it, so DisposeAsync always believed a
+// session was still owned and sent close-agent-session for a session that had already
+// been stopped. This exercises the real PersistentHardwareCameraAgentOperations against
+// the continuous-live-view-session child scenario (RunContinuousLiveViewSessionChildAsync)
+// and asserts on the exact sequence of requests it sent.
+static async Task PersistentLiveViewOwnedSessionReleaseAsync()
+{
+    var executablePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "A0CameraStitcher.M3.OperatorShellTests.exe");
+    Check.True(File.Exists(executablePath), "The persistent test child apphost must exist.");
+
+    var root = Path.Combine(Path.GetTempPath(), $"a0-persistent-liveview-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var storagePaths = HardwareSingleStoragePaths.Resolve(root);
+        Directory.CreateDirectory(Path.GetDirectoryName(storagePaths.CaptureProfilePath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(storagePaths.SingleIdentityV3Path)!);
+
+        // Case 1: start -> stop -> dispose. Stop must release the owned session, so
+        // (a) a later call for an unrelated session id reaches the Agent instead of
+        // being rejected by the "different session owns the Camera Agent" guard, and
+        // (b) DisposeAsync must not send close-agent-session for the already-stopped
+        // session.
+        var releaseTracePath = Path.Combine(root, "release-requests.json");
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "continuous-live-view-session");
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_LIVE_VIEW_TRACE", releaseTracePath);
+        try
+        {
+            var stoppedSessionId = HardwareContinuousLiveViewClient.CreateSessionId();
+            var otherSessionId = HardwareContinuousLiveViewClient.CreateSessionId();
+            await using (var operations = new PersistentHardwareCameraAgentOperations(
+                executablePath,
+                storagePaths.CaptureProfilePath,
+                storagePaths.SingleIdentityV3Path))
+            {
+                var startReply = await operations.StartLiveViewAsync(stoppedSessionId);
+                Check.True(startReply.Success, "Start must succeed against the fake continuous Live View child.");
+
+                var stopReply = await operations.StopLiveViewAsync(stoppedSessionId);
+                Check.True(stopReply.Success, "Stop must succeed against the fake continuous Live View child.");
+
+                // Before the fix, _ownedSessionId still held stoppedSessionId here and
+                // this call would throw InvalidOperationException locally instead of
+                // ever reaching the Agent.
+                var heartbeatReply = await operations.HeartbeatLiveViewAsync(otherSessionId);
+                Check.False(
+                    heartbeatReply.Success,
+                    "A session that was never started must fail at the Agent, not succeed.");
+                Check.Equal("live_view_session_not_found", heartbeatReply.Payload.ErrorCategory);
+            }
+
+            await WaitUntilAsync(
+                () => File.Exists(releaseTracePath),
+                "The continuous Live View child did not finish recording requests.");
+            var releaseRequests = await ReadRecordedLiveViewRequestsAsync(releaseTracePath);
+            Check.Equal(3, releaseRequests.Count);
+            Check.Equal(("start-live-view", stoppedSessionId), releaseRequests[0]);
+            Check.Equal(("stop-live-view", stoppedSessionId), releaseRequests[1]);
+            Check.Equal(("live-view-heartbeat", otherSessionId), releaseRequests[2]);
+            Check.False(
+                releaseRequests.Any(request => request.Operation == "close-agent-session"),
+                "DisposeAsync must not send close-agent-session for a session StopLiveViewAsync already released.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
+            Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_LIVE_VIEW_TRACE", null);
+        }
+
+        // Case 2: start only, then dispose. A session that was never stopped is still
+        // owned at dispose time, so the defensive close-agent-session call must still
+        // fire (proving the fix narrows the close to "still owned", not "never close").
+        var activeTracePath = Path.Combine(root, "active-requests.json");
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "continuous-live-view-session");
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_LIVE_VIEW_TRACE", activeTracePath);
+        try
+        {
+            var activeSessionId = HardwareContinuousLiveViewClient.CreateSessionId();
+            await using (var operations = new PersistentHardwareCameraAgentOperations(
+                executablePath,
+                storagePaths.CaptureProfilePath,
+                storagePaths.SingleIdentityV3Path))
+            {
+                var startReply = await operations.StartLiveViewAsync(activeSessionId);
+                Check.True(startReply.Success, "Start must succeed against the fake continuous Live View child.");
+            }
+
+            await WaitUntilAsync(
+                () => File.Exists(activeTracePath),
+                "The continuous Live View child did not finish recording requests.");
+            var activeRequests = await ReadRecordedLiveViewRequestsAsync(activeTracePath);
+            Check.Equal(2, activeRequests.Count);
+            Check.Equal(("start-live-view", activeSessionId), activeRequests[0]);
+            Check.Equal(("close-agent-session", activeSessionId), activeRequests[1]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
+            Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_LIVE_VIEW_TRACE", null);
+        }
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task<IReadOnlyList<(string Operation, string SessionId)>> ReadRecordedLiveViewRequestsAsync(
+    string tracePath)
+{
+    using var trace = JsonDocument.Parse(await File.ReadAllTextAsync(tracePath));
+    return trace.RootElement.EnumerateArray()
+        .Select(entry => (
+            Operation: entry.GetProperty("operation").GetString() ?? string.Empty,
+            SessionId: entry.GetProperty("sessionId").GetString() ?? string.Empty))
+        .ToList();
+}
+
 static async Task<int> RunSdklessPersistentReadinessE2EAsync(string agentExecutablePath)
 {
     var root = Path.Combine(Path.GetTempPath(), $"a0-sdkless-agent-e2e-{Guid.NewGuid():N}");
@@ -864,6 +997,10 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
         WriteSyntheticSensitiveStderr();
         return 37;
     }
+    if (scenario == "continuous-live-view-session")
+    {
+        return await RunContinuousLiveViewSessionChildAsync(pipe, requestJson);
+    }
     if (scenario != "typed-fail-closed")
     {
         return 65;
@@ -906,6 +1043,119 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
         new JsonSerializerOptions(JsonSerializerDefaults.Web));
     await WritePersistentTestFrameAsync(pipe, responseJson, timeout.Token);
     return 0;
+}
+
+// GitHub Issue #143 regression coverage: PersistentHardwareCameraAgentOperations keeps
+// one child process alive across an entire continuous Live View session (start, stop,
+// and -- only when a session is still owned -- the DisposeAsync close). Unlike the
+// single-request hardware.v1 scenarios above, this speaks the v2 continuous protocol
+// over a sequence of connections on the same named pipe server, recording each request
+// (operation + sessionId) so the test can assert on exactly what was sent, including
+// the absence of a request. A bounded wait between connections is what lets the test
+// tell "nothing more was sent" apart from "the process hung"; see the request loop below.
+static async Task<int> RunContinuousLiveViewSessionChildAsync(
+    NamedPipeServerStream pipe,
+    string firstRequestJson)
+{
+    var tracePath = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_LIVE_VIEW_TRACE");
+    var recorded = new List<(string Operation, string SessionId)>();
+    var requestJson = firstRequestJson;
+
+    while (true)
+    {
+        using (var request = JsonDocument.Parse(requestJson))
+        {
+            var root = request.RootElement;
+            var requestId = root.GetProperty("requestId").GetString() ?? string.Empty;
+            var operation = root.GetProperty("operation").GetString() ?? string.Empty;
+            var sessionId = root.GetProperty("payload").GetProperty("sessionId").GetString() ?? string.Empty;
+            recorded.Add((operation, sessionId));
+
+            using var respondTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await WritePersistentTestFrameAsync(
+                pipe,
+                BuildContinuousLiveViewResponse(requestId, operation, sessionId),
+                respondTimeout.Token);
+        }
+
+        pipe.Disconnect();
+
+        // A well-behaved caller reconnects immediately over a local pipe if it has
+        // another request queued. Two seconds is long enough to also observe a
+        // regressed extra close-agent-session call from DisposeAsync, while keeping
+        // the well-behaved (nothing more to send) path from stalling the test suite.
+        using var nextConnectionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await pipe.WaitForConnectionAsync(nextConnectionTimeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+        requestJson = await ReadPersistentTestFrameAsync(pipe, CancellationToken.None);
+    }
+
+    if (!string.IsNullOrWhiteSpace(tracePath))
+    {
+        await File.WriteAllTextAsync(
+            tracePath,
+            JsonSerializer.Serialize(recorded.Select(entry => new
+            {
+                operation = entry.Operation,
+                sessionId = entry.SessionId,
+            })));
+    }
+    return 0;
+}
+
+static string BuildContinuousLiveViewResponse(string requestId, string operation, string sessionId)
+{
+    var (success, state, errorCategory, errorDetail) = operation switch
+    {
+        HardwareContinuousLiveViewProtocol.Operations.Start =>
+            (true, "Started", string.Empty, string.Empty),
+        HardwareContinuousLiveViewProtocol.Operations.Stop =>
+            (true, "Stopped", string.Empty, string.Empty),
+        HardwareContinuousLiveViewProtocol.Operations.Close =>
+            (true, "Closed", string.Empty, string.Empty),
+        _ =>
+            (false, string.Empty, "live_view_session_not_found",
+                "the requested continuous Live View session is not active"),
+    };
+    var running = state == "Started";
+    var payload = new HardwareContinuousLiveViewResult
+    {
+        CameraMode = "SingleCamera",
+        CameraAlias = "CAM-A",
+        SessionId = sessionId,
+        State = state,
+        FrameNumber = 0,
+        FrameSize = 0,
+        FrameSha256 = string.Empty,
+        FrameJpegBase64 = string.Empty,
+        PreviewIsOriginal = false,
+        PreviewIsStitchInput = false,
+        SdkSessionOpen = running,
+        LiveViewRunning = running,
+        HeartbeatTimeoutSeconds = 20,
+        MaximumSessionSeconds = 600,
+        RealIdentifiersIncluded = false,
+        ErrorCategory = errorCategory,
+        ErrorDetail = errorDetail,
+    };
+    return JsonSerializer.Serialize(
+        new
+        {
+            schemaVersion = HardwareContinuousLiveViewProtocol.SchemaVersion,
+            simulation = false,
+            marker = HardwareContinuousLiveViewProtocol.Marker,
+            requestId,
+            success,
+            resultCode = success ? state : errorCategory,
+            payload,
+        },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
 }
 
 static void WriteSyntheticSensitiveStderr() =>
