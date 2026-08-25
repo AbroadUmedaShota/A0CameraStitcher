@@ -27,13 +27,21 @@ enum class AbandonOutcome {
 // Early-exit policy for a pending asynchronous SDK command: issue Abort
 // exactly once, then poll for the completion evidence (`done`) for up to
 // `max_iterations` bounded steps, sleeping between steps via `sleep`.
+// `max_iterations <= 0` skips polling entirely and only performs the single
+// post-loop completion check below.
 //
-// `abort` and `pump` are called from an error path that has no further
-// recovery available if they themselves fail, so exceptions raised by either
-// are swallowed here rather than propagated. `done` and `sleep` are expected
-// not to throw.
+// This function is noexcept: it is itself called from error/cleanup paths
+// with nothing better to fall back to, and its caller must be able to rely
+// on it never propagating. Every callback is invoked from inside its own
+// try/catch for that reason -- including `done` and `sleep`, which are not
+// contractually noexcept in general (std::this_thread::sleep_for is not, for
+// instance). An exception escaping here would call std::terminate before
+// the transport's own cleanup (e.g. Close()) can run, which is exactly the
+// "camera left stuck" failure mode this policy exists to avoid. A callback
+// that throws is treated as "no information" (not-done / step-not-taken)
+// rather than propagated.
 template <typename AbortFn, typename PumpFn, typename DoneFn, typename SleepFn>
-AbandonOutcome AbandonPendingCommand(
+[[nodiscard]] AbandonOutcome AbandonPendingCommand(
     AbortFn&& abort, PumpFn&& pump, DoneFn&& done, SleepFn&& sleep,
     int max_iterations) noexcept {
     try {
@@ -43,6 +51,17 @@ AbandonOutcome AbandonPendingCommand(
         // to keep going and rely on the completion poll below.
     }
 
+    const auto is_done = [&done]() noexcept -> bool {
+        try {
+            return done();
+        } catch (...) {
+            // An exception from the completion predicate carries no usable
+            // information either way; treat it as "not yet observed" and
+            // keep polling rather than let it escape.
+            return false;
+        }
+    };
+
     for (int iteration = 0; iteration < max_iterations; ++iteration) {
         try {
             pump();
@@ -50,13 +69,18 @@ AbandonOutcome AbandonPendingCommand(
             // A pump failure here does not change the plan: keep polling for
             // the completion callback regardless of why pumping failed.
         }
-        if (done()) return AbandonOutcome::completed;
-        sleep();
+        if (is_done()) return AbandonOutcome::completed;
+        try {
+            sleep();
+        } catch (...) {
+            // Same reasoning as pump(): a failed sleep does not change the
+            // plan, just the pacing of the remaining iterations.
+        }
     }
 
     // The completion callback may have fired during the last sleep, after
     // the last in-loop check. Recheck once more before giving up.
-    return done() ? AbandonOutcome::completed : AbandonOutcome::quarantined;
+    return is_done() ? AbandonOutcome::completed : AbandonOutcome::quarantined;
 }
 
 } // namespace a0::phase0

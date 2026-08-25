@@ -3,8 +3,14 @@
 // The MAID implementation that calls this policy lives behind
 // A0_NIKON_SDK_AVAILABLE and is not compiled without the licensed Nikon SDK,
 // so these tests exercise the policy directly instead: exactly one Abort,
-// bounded pumping for completion evidence, and no exception from either
-// abort or pump escaping the loop.
+// bounded pumping for completion evidence, and no exception from abort,
+// pump, done, or sleep escaping the (noexcept) function.
+//
+// Not covered here: the decision of *whether* to poll at all based on
+// whether the SDK actually confirmed the async command started. That
+// decision lives one layer up, in nikon_sdk_transport.cpp's AbandonPending
+// wrapper (MAID-gated, untestable without the licensed SDK), because it
+// depends on the MAID immediate-result contract, not on this policy.
 
 #include "a0/phase0/sdk_pending_command.hpp"
 
@@ -120,6 +126,39 @@ void DoneBecomingTrueAfterTheFinalSleepIsStillObservedByTheBoundaryRecheck() {
     Check(sleep_calls == kMaxIterations, "the final grace-period sleep still ran before the boundary recheck");
 }
 
+void DoneExceptionEveryIterationStillExhaustsMaxIterationsAndQuarantines() {
+    int pump_calls = 0;
+    constexpr int kMaxIterations = 5;
+    const AbandonOutcome outcome = AbandonPendingCommand(
+        [] {},
+        [&] { ++pump_calls; },
+        []() -> bool { throw std::runtime_error("simulated done() failure"); },
+        [] {},
+        kMaxIterations);
+    Check(outcome == AbandonOutcome::quarantined,
+        "a done() that always throws is treated as not-yet-observed, not propagated out of a noexcept function");
+    Check(pump_calls == kMaxIterations, "pumping still runs to completion when done() always throws");
+}
+
+void SleepExceptionEveryIterationStillExhaustsMaxIterationsAndQuarantines() {
+    int pump_calls = 0;
+    int sleep_calls = 0;
+    constexpr int kMaxIterations = 5;
+    const AbandonOutcome outcome = AbandonPendingCommand(
+        [] {},
+        [&] { ++pump_calls; },
+        [] { return false; },
+        [&]() {
+            ++sleep_calls;
+            throw std::runtime_error("simulated sleep() failure");
+        },
+        kMaxIterations);
+    Check(outcome == AbandonOutcome::quarantined,
+        "a sleep() that always throws does not propagate out of a noexcept function");
+    Check(pump_calls == kMaxIterations, "pumping still runs to completion when sleep() always throws");
+    Check(sleep_calls == kMaxIterations, "sleep is still invoked each iteration despite throwing every time");
+}
+
 } // namespace
 
 int main() {
@@ -129,6 +168,8 @@ int main() {
     AbortExceptionIsSwallowedAndPumpingStillProceeds();
     PumpExceptionEveryIterationStillExhaustsMaxIterationsAndQuarantines();
     DoneBecomingTrueAfterTheFinalSleepIsStillObservedByTheBoundaryRecheck();
+    DoneExceptionEveryIterationStillExhaustsMaxIterationsAndQuarantines();
+    SleepExceptionEveryIterationStillExhaustsMaxIterationsAndQuarantines();
 
     if (failures != 0) {
         std::cerr << failures << " AbandonPendingCommand contract failures\n";
