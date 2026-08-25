@@ -8,6 +8,14 @@
       "result": "waiting-for-existing-critical-path",
       "promoted_issue": null,
       "reason": "No new execution Issue was promoted. GitHub Issues 7, 94, and 131 already cover the active hardware, shutdown, and WPD evidence-integrity critical path; the exact-SHA candidate is billing-blocked, and physical one-shot work is S2 and operator-gated."
+    },
+    {
+      "timestamp": "2026-08-25T18:06:40+09:00",
+      "run_id": "manual-20260825-automated-test-waiver",
+      "plan_version": "2.13.0",
+      "result": "waiting-for-existing-critical-path",
+      "promoted_issue": null,
+      "reason": "No new execution Issue was promoted. The product owner waived automated test execution for the 2026-08-26 checkpoint, so the exact-SHA candidate moved from billing-blocked to draft with mandatory manual smoke and NotRun evidence; Issue 94 and the operator-resume hardware gate remain active."
     }
   ]
 }
