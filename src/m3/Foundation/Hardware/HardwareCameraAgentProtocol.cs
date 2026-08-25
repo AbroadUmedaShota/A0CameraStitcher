@@ -983,6 +983,21 @@ public static class HardwareCameraAgentProtocolCodec
 
         var missingRecord = isTransactionLookup && envelope.ResultCode is
             "TransactionNotFound" or "transaction_reservation_incomplete";
+        if (!missingRecord && isTransactionLookup && envelope.ResultCode == "TransactionReserved" &&
+            string.IsNullOrEmpty(payload.CameraAlias) &&
+            string.IsNullOrEmpty(payload.RequiredCameraAlias) &&
+            string.IsNullOrEmpty(payload.RunId))
+        {
+            // TransactionReserved is reported for two distinct wire shapes from the
+            // Camera Agent: a lease-busy race observed before the transaction journal
+            // exists (no durable record yet, alias/runId empty), and a lease-busy race
+            // observed after the journal is committed (durable record with its assigned
+            // alias/runId already present). Only the former is a "missing record" -
+            // treating every TransactionReserved response as missingRecord would reject
+            // the populated-alias shape below via the empty-field check.
+            missingRecord = true;
+        }
+
         if (missingRecord)
         {
             if (!string.IsNullOrEmpty(payload.CameraAlias) ||

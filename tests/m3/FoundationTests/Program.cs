@@ -1463,6 +1463,31 @@ static void HardwareProtocolValidation()
         transactionId);
     Check.Equal("TransactionNotFound", notFoundReply.ResultCode);
 
+    // #140: the Camera Agent also reports TransactionReserved for a lease-busy
+    // race observed *before* the transaction journal is committed (no durable
+    // record yet). That shape carries the same empty alias/runId as notFound
+    // above (see tests/hardware_camera_agent_tests.cpp "reservation-directory
+    // creation ... initial journal commit" case), unlike the `reserved` fixture
+    // above which represents the post-commit shape with a populated alias.
+    var reservedMissingRecord = notFound with
+    {
+        TerminalState = "Reserved",
+        ErrorCategory = "transaction_reserved",
+        ErrorDetail =
+            "transaction owner is committing its initial durable reservation; query again without resubmitting capture",
+    };
+    var reservedMissingRecordReply = HardwareCameraAgentProtocolCodec.DeserializeTransactionResultResponse(
+        HardwareResponseJson(
+            "lookup-reserved-missing-record",
+            false,
+            "TransactionReserved",
+            reservedMissingRecord),
+        "lookup-reserved-missing-record",
+        transactionId);
+    Check.Equal("Reserved", reservedMissingRecordReply.Payload.TerminalState);
+    Check.Equal("", reservedMissingRecordReply.Payload.CameraAlias);
+    Check.Equal("", reservedMissingRecordReply.Payload.RunId);
+
     var incompleteReservation = notFound with
     {
         TerminalState = "FailedPartial",
