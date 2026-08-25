@@ -312,6 +312,11 @@ internal static class ManifestFileNameGuard
         {
             return false;
         }
-        return !ReservedWindowsDeviceNames.Contains(Path.GetFileNameWithoutExtension(candidate));
+        // Windows resolves reserved names from the segment before the FIRST
+        // period, with trailing spaces/periods stripped ("NUL.json.txt" and
+        // "NUL " both reach the NUL device). GetFileNameWithoutExtension only
+        // strips the last extension, so derive that first segment explicitly.
+        var firstSegment = candidate.Split('.')[0].TrimEnd(' ', '.');
+        return !ReservedWindowsDeviceNames.Contains(firstSegment);
     }
 }
