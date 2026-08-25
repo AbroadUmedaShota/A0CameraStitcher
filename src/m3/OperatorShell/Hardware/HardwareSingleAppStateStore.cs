@@ -94,12 +94,21 @@ public sealed class HardwareSingleAppStateStore : IHardwareSingleAppStateStore
     public async Task<HardwarePendingTransaction?> LoadPendingAsync(
         CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(_stateDirectory))
+        // Directory.Exists() swallows access-denied/I-O errors and returns false for them,
+        // which would silently report "no pending transaction" even when the directory is
+        // actually present but unreadable. Probe with a real filesystem call instead and
+        // only treat a genuine not-found as "nothing to load"; anything else (access denied,
+        // I/O error, ...) must propagate so the caller fails closed.
+        try
+        {
+            EnsureDirectoryIsNotReparsePoint(_stateDirectory);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
 
-        EnsureDirectoryIsNotReparsePoint(_stateDirectory);
         await using var stateLock = AcquireStateLock();
         return await LoadPendingCoreAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -107,12 +116,19 @@ public sealed class HardwareSingleAppStateStore : IHardwareSingleAppStateStore
     private async Task<HardwarePendingTransaction?> LoadPendingCoreAsync(
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(_statePath))
+        // Same rationale as LoadPendingAsync above: File.Exists() must not be used as a gate
+        // here, since it would mask a real read failure as "state file absent" and let the
+        // fail-closed design in the catch around this store's callers be bypassed.
+        try
+        {
+            EnsureRegularLocalStateFile(_statePath);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
 
-        EnsureRegularLocalStateFile(_statePath);
         await using var stream = new FileStream(
             _statePath,
             FileMode.Open,
