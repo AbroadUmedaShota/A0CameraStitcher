@@ -1845,6 +1845,13 @@ struct FakeContinuousLiveViewSdkState {
     std::atomic<int> close_calls{};
     bool fail_stop{};
     bool fail_close{};
+    // Issue #141 段階2: フレーム取得予算(open から分離した live_view_frame)が
+    // 正しい呼び出しにだけ渡されていることを検証するため、各 SDK 呼び出しに
+    // 渡されたタイムアウトを記録する。
+    std::chrono::seconds last_probe_timeout{0};
+    std::chrono::seconds last_open_timeout{0};
+    std::chrono::seconds last_start_timeout{0};
+    std::chrono::seconds last_read_timeout{0};
 };
 
 class FakeContinuousLiveViewSdkTransport final
@@ -1861,22 +1868,26 @@ public:
 
     SdkCameraStatus ProbeSdkStatus(
         std::string_view,
-        std::chrono::seconds) override {
+        std::chrono::seconds timeout) override {
         ++state_->probe_calls;
+        state_->last_probe_timeout = timeout;
         return ConfirmedLiveViewOffStatus();
     }
 
-    void OpenLiveView(std::string_view, std::chrono::seconds) override {
+    void OpenLiveView(std::string_view, std::chrono::seconds timeout) override {
         ++state_->open_calls;
+        state_->last_open_timeout = timeout;
     }
 
-    void StartLiveView(std::chrono::seconds) override {
+    void StartLiveView(std::chrono::seconds timeout) override {
         ++state_->start_calls;
+        state_->last_start_timeout = timeout;
     }
 
     std::vector<unsigned char> ReadLiveViewFrame(
-        std::chrono::seconds) override {
+        std::chrono::seconds timeout) override {
         ++state_->read_calls;
+        state_->last_read_timeout = timeout;
         if (state_->before_read) state_->before_read();
         return state_->frame;
     }
@@ -3041,6 +3052,112 @@ void TestProductionContinuousLiveViewContracts() {
     fs::remove_all(root, cleanup_error);
 }
 
+// GitHub Issue #141 段階2: 継続 Live View のフレーム取得予算(live_view_frame)を
+// open 予算から分離したことを検証する。段階1(#158)は in-flight フレーム要求を
+// 中断しない形に変えたため、停止操作の待ち上界がフレーム取得の予算そのものに
+// なった。open(既定10s)のままでは病的ケースで停止操作が長くブロックされうるため、
+// フレーム取得だけ短い専用予算を持たせている。
+void TestContinuousLiveViewFrameBudgetIsolation() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-agent-continuous-live-view-frame-budget-test-" + NewRunId());
+    const std::string owner_session(32, 'a');
+    try {
+        // T1: ReadContinuousLiveViewFrame は timeouts.live_view_frame を渡す。
+        // 回帰防止として timeouts.open を変えても live_view_frame の値は
+        // 影響を受けないことを確認する。
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto config = ContinuousLiveViewTestConfig(root / "frame-budget-default", state);
+            ProductionHardwareCameraAgentBackend backend(std::move(config));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "frame budget contract setup must start");
+            Check(backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                      HardwareCameraAgentOperation::read_live_view_frame,
+                      owner_session)).succeeded,
+                "frame budget contract read must succeed");
+            Check(state->last_read_timeout == std::chrono::seconds(3),
+                "ReadLiveViewFrame must receive the default live_view_frame budget (3s), not open");
+        }
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto config = ContinuousLiveViewTestConfig(root / "frame-budget-open-widened", state);
+            config.timeouts.open = std::chrono::seconds(30);
+            ProductionHardwareCameraAgentBackend backend(std::move(config));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "frame budget regression setup must start");
+            Check(backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                      HardwareCameraAgentOperation::read_live_view_frame,
+                      owner_session)).succeeded,
+                "frame budget regression read must succeed");
+            Check(state->last_read_timeout == std::chrono::seconds(3),
+                "widening timeouts.open (10s -> 30s) must not change the frame read budget");
+        }
+
+        // T2: Start 経路(ProbeSdkStatus/OpenLiveView/StartLiveView)は
+        // 引き続き timeouts.open を渡す(フレーム予算の分離はフレーム取得1点に閉じる)。
+        {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto config = ContinuousLiveViewTestConfig(root / "frame-budget-start-path", state);
+            config.timeouts.open = std::chrono::seconds(7);
+            ProductionHardwareCameraAgentBackend backend(std::move(config));
+            Check(backend.StartContinuousLiveView(ContinuousRequest(
+                      HardwareCameraAgentOperation::start_live_view,
+                      owner_session)).succeeded,
+                "start-path budget contract setup must start");
+            Check(state->last_probe_timeout == std::chrono::seconds(7) &&
+                  state->last_open_timeout == std::chrono::seconds(7) &&
+                  state->last_start_timeout == std::chrono::seconds(7),
+                "ProbeSdkStatus/OpenLiveView/StartLiveView must still receive timeouts.open");
+            Check(backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                      HardwareCameraAgentOperation::read_live_view_frame,
+                      owner_session)).succeeded,
+                "start-path budget contract read must succeed");
+            Check(state->last_read_timeout == std::chrono::seconds(3),
+                "the frame read must still use the (separate, default) live_view_frame budget");
+        }
+
+        // T3: live_view_frame は正の値かつ open 以下でなければ backend 構築が
+        // fail-closed で拒否すること。
+        {
+            const auto constructor_rejects =
+                [](ProductionHardwareCameraAgentConfig config) {
+                    try {
+                        ProductionHardwareCameraAgentBackend backend(std::move(config));
+                        (void)backend;
+                        return false;
+                    } catch (const std::invalid_argument&) {
+                        return true;
+                    }
+                };
+
+            auto zero_state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto zero_budget =
+                ContinuousLiveViewTestConfig(root / "frame-budget-zero", zero_state);
+            zero_budget.timeouts.live_view_frame = std::chrono::seconds(0);
+            Check(constructor_rejects(zero_budget),
+                "live_view_frame == 0s must be rejected at construction");
+
+            auto exceeds_state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto exceeds_open =
+                ContinuousLiveViewTestConfig(root / "frame-budget-exceeds-open", exceeds_state);
+            exceeds_open.timeouts.live_view_frame =
+                exceeds_open.timeouts.open + std::chrono::seconds(1);
+            Check(constructor_rejects(exceeds_open),
+                "live_view_frame exceeding timeouts.open must be rejected at construction");
+        }
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: continuous Live View frame budget isolation test threw: "
+                  << error.what() << '\n';
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
 } // namespace
 
 int main() {
@@ -3061,6 +3178,7 @@ int main() {
     TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();
     TestContinuousLiveViewV2Protocol();
     TestProductionContinuousLiveViewContracts();
+    TestContinuousLiveViewFrameBudgetIsolation();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;

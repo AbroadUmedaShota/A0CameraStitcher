@@ -3274,6 +3274,11 @@ public:
         if (config_.timeouts.transaction_watchdog != std::chrono::seconds(180)) {
             throw std::invalid_argument("hardware Camera Agent transaction watchdog must be 180 seconds");
         }
+        if (config_.timeouts.live_view_frame <= std::chrono::seconds(0) ||
+            config_.timeouts.live_view_frame > config_.timeouts.open) {
+            throw std::invalid_argument(
+                "continuous Live View frame budget must be positive and not exceed the open budget");
+        }
         if (static_cast<bool>(config_.continuous_live_view_sdk_factory_for_testing) !=
             static_cast<bool>(
                 config_.continuous_live_view_identity_resolver_for_testing)) {
@@ -3975,7 +3980,8 @@ public:
         ContinuousLiveViewResult result = ContinuousResultFor(request, "Frame");
         if (!ValidateContinuousSession(request, result)) return result;
         try {
-            const auto frame = live_view_sdk_->ReadLiveViewFrame(config_.timeouts.open);
+            const auto frame =
+                live_view_sdk_->ReadLiveViewFrame(config_.timeouts.live_view_frame);
             if (!IsValidJpeg(frame) || frame.size() > 512U * 1024U) {
                 throw std::runtime_error("Live View frame is not a bounded JPEG");
             }

@@ -32,6 +32,9 @@ struct Timeouts {
     std::chrono::seconds download{60};
     std::chrono::seconds close{10};
     std::chrono::seconds transaction_watchdog{180};
+    // 継続 Live View の1フレーム取得だけの予算。open(10s) と分離する理由は、
+    // この値がそのまま「停止ボタンが返るまでの上界」になるため。
+    std::chrono::seconds live_view_frame{3};
 };
 
 class OperatorGate final {
