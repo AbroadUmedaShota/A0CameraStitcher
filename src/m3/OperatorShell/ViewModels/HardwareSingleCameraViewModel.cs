@@ -100,6 +100,13 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     public string AgentExecutablePath => _operations.AgentExecutablePath;
 
+    // The Camera Agent process is launched with this directory as its working
+    // directory (see ServeOnceHardwareCameraAgentOperations/PersistentHardware-
+    // CameraAgentOperations). Retained-original and preview paths the agent
+    // reports are only trusted when they resolve inside it.
+    private string AgentRootDirectory => Path.GetDirectoryName(AgentExecutablePath)
+        ?? throw new InvalidOperationException("The Camera Agent executable path has no directory.");
+
     public string AgentAvailabilityText => _operations.AgentExecutableAvailable
         ? "Camera Agent実行ファイル: 検出済み"
         : "Camera Agent実行ファイル: 未検出";
@@ -644,7 +651,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             else
             {
                 var verified = await HardwareArtifactVerifier
-                    .VerifyPreviewAsync(reply.Payload.Preview)
+                    .VerifyPreviewAsync(reply.Payload.Preview, AgentRootDirectory)
                     .ConfigureAwait(true);
                 PreviewPath = verified.Path;
                 PreviewImage = TryLoadFrozenImage(verified.Path);
@@ -1106,7 +1113,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             var outputPath = await _exporter.ExportAsync(
                     _captureResult.RetainedOriginal,
                     _captureResult.TransactionId,
-                    _timeProvider.GetUtcNow())
+                    _timeProvider.GetUtcNow(),
+                    AgentRootDirectory)
                 .ConfigureAwait(true);
             LastExportPath = outputPath;
             ExportSummary = _captureResult.TerminalState == "Complete"
@@ -1141,7 +1149,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             try
             {
                 _verifiedOriginal = await HardwareArtifactVerifier
-                    .VerifyOriginalAsync(reply.Payload.RetainedOriginal)
+                    .VerifyOriginalAsync(reply.Payload.RetainedOriginal, AgentRootDirectory)
                     .ConfigureAwait(true);
                 RetainedOriginalSummary =
                     $"{reply.Payload.RetainedOriginal.CameraAlias} / {_verifiedOriginal.SizeBytes:N0} bytes / SHA-256確認済み";
@@ -1170,7 +1178,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 try
                 {
                     var postCapturePreview = await HardwareArtifactVerifier
-                        .VerifyPreviewAsync(reply.Payload.PostCapturePreview)
+                        .VerifyPreviewAsync(reply.Payload.PostCapturePreview, AgentRootDirectory)
                         .ConfigureAwait(true);
                     PreviewPath = postCapturePreview.Path;
                     PreviewImage = LoadFrozenImage(postCapturePreview.Path);

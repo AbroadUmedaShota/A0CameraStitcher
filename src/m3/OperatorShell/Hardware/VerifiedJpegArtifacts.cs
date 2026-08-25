@@ -16,6 +16,7 @@ public static class HardwareArtifactVerifier
 
     public static Task<VerifiedHardwareJpeg> VerifyOriginalAsync(
         HardwareRetainedOriginalRecord original,
+        string agentRootDirectory,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -29,11 +30,13 @@ public static class HardwareArtifactVerifier
             original.SizeBytes,
             original.Sha256,
             "original.jpg",
+            agentRootDirectory,
             cancellationToken);
     }
 
     public static Task<VerifiedHardwareJpeg> VerifyPreviewAsync(
         HardwarePreviewJpegRecord preview,
+        string agentRootDirectory,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(preview);
@@ -42,6 +45,7 @@ public static class HardwareArtifactVerifier
             preview.SizeBytes,
             preview.Sha256,
             "preview.jpg",
+            agentRootDirectory,
             cancellationToken);
     }
 
@@ -50,9 +54,10 @@ public static class HardwareArtifactVerifier
         long expectedSize,
         string expectedSha256,
         string requiredFileName,
+        string agentRootDirectory,
         CancellationToken cancellationToken)
     {
-        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName);
+        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName, agentRootDirectory);
         EnsureRegularFile(path);
         await using var stream = OpenStableRead(path);
         var observed = await InspectJpegAsync(
@@ -219,7 +224,8 @@ public static class HardwareArtifactVerifier
         string path,
         long expectedSize,
         string expectedSha256,
-        string requiredFileName)
+        string requiredFileName,
+        string agentRootDirectory)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || IsUncPath(path) ||
             !string.Equals(Path.GetFileName(path), requiredFileName, StringComparison.OrdinalIgnoreCase) ||
@@ -228,6 +234,29 @@ public static class HardwareArtifactVerifier
                 character is >= '0' and <= '9' or >= 'a' and <= 'f'))
         {
             throw new InvalidDataException("Camera Agent artifact metadata is invalid.");
+        }
+
+        // The agent process is only trusted to report files somewhere inside
+        // its own directory tree (originals and Live View previews live in
+        // different subdirectories under it, so containment - not an exact
+        // directory match - is what mirrors HardwareDualTransactionSnapshot-
+        // Store.ValidateRequest's artifact-root check here). Without this, a
+        // spoofed or compromised agent could name an arbitrary local file
+        // (supplying a matching size/hash itself) and have
+        // HardwareOriginalExporter copy it out as if it were a genuine
+        // capture.
+        if (string.IsNullOrWhiteSpace(agentRootDirectory) || !Path.IsPathFullyQualified(agentRootDirectory))
+        {
+            throw new InvalidDataException("The Camera Agent root directory is invalid.");
+        }
+        var expectedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(agentRootDirectory));
+        var resolvedDirectory = Path.GetDirectoryName(Path.GetFullPath(path));
+        var isContained = resolvedDirectory is not null &&
+            (string.Equals(resolvedDirectory, expectedRoot, StringComparison.OrdinalIgnoreCase) ||
+             resolvedDirectory.StartsWith(expectedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        if (!isContained)
+        {
+            throw new InvalidDataException("Camera Agent artifact path is outside the agent's own directory.");
         }
     }
 
@@ -275,6 +304,7 @@ public sealed class HardwareOriginalExporter
         HardwareRetainedOriginalRecord original,
         string transactionId,
         DateTimeOffset now,
+        string agentRootDirectory,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -282,7 +312,8 @@ public sealed class HardwareOriginalExporter
             original.Path,
             original.SizeBytes,
             original.Sha256,
-            "original.jpg");
+            "original.jpg",
+            agentRootDirectory);
         if (transactionId.Length != 32 || !transactionId.All(character =>
                 character is >= '0' and <= '9' or >= 'a' and <= 'f'))
         {
