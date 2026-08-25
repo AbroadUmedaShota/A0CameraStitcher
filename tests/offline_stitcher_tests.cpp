@@ -33,7 +33,12 @@ enum class OfflineStitchFaultPoint : std::uint32_t {
     interrupt_after_publish = 10,
 };
 
-void PublishValidatedGeneratedJpeg(
+// GitHub Issue #102 (item 2): now returns the SHA-256 hex digest it already
+// computed while validating the partial, instead of void. Declared here as
+// std::string (rather than a0::m2::StitchJobSha256Hex) to avoid pulling in
+// stitch_job_manifest.hpp; the alias is exactly std::string, so this matches
+// the real definition's signature.
+std::string PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     std::uint32_t expected_width,

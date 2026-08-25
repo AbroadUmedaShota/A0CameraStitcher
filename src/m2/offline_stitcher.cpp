@@ -476,6 +476,19 @@ JpegSnapshot ReadJpegSnapshotStructureOnly(
     return snapshot;
 }
 
+// GitHub Issue #102 (item 1, deliberately left unchanged): this re-reads and
+// re-hashes the file the caller already read via ReadJpegSnapshot /
+// ReadJpegSnapshotStructureOnly, even though the LockedReadFile handle in use
+// for the whole operation excludes concurrent writers (see the FILE_SHARE_READ
+// comments at each call site) and ReadAll() already re-checks the file size
+// did not change during its own read. This looks redundant, but it is kept as
+// an explicit, independent proof that the exact bytes snapshotted earlier are
+// still the exact bytes on disk immediately before they are trusted (hashed
+// into the manifest, or renamed into place) -- a second, cheap check against
+// any future change to LockedReadFile/ReadAll that might weaken that
+// guarantee. Not changed by the #99/#102 performance work in this file: the
+// evidence needed to prove it is safe to remove was not conclusive enough to
+// risk it in a safety-critical (safety:S1) path.
 void ValidateSnapshotHash(
     const JpegSnapshot& snapshot,
     const LockedReadFile& locked_file,
@@ -890,7 +903,11 @@ std::uint32_t GetOfflineStitchFaultTriggerCountForTest() noexcept {
 // decoded pixels, so it validates via ReadJpegSnapshotStructureOnly instead of
 // a full pixel decode. See ValidateJpegDimensions for exactly what that does
 // and does not check.
-void PublishValidatedGeneratedJpeg(
+//
+// GitHub Issue #102 (item 2): returns the SHA-256 it already computed here so
+// the caller can record it in the manifest without re-hashing the published
+// file a second time.
+StitchJobSha256Hex PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     const std::uint32_t expected_width,
@@ -913,6 +930,7 @@ void PublishValidatedGeneratedJpeg(
     ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
     InvokeTestHook(before_publish_rename_hook);
     locked_partial.RenameToWithoutReplace(destination);
+    return ToLowerHex(snapshot.sha256);
 }
 
 } // namespace detail
@@ -990,6 +1008,38 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         throw std::invalid_argument("approved crop removes the complete stitched canvas");
     }
 
+    // GitHub Issue #102 (item 3): b_bounds is the axis-aligned bounding box, in
+    // the same global/output coordinate space as global_x/global_y below, of
+    // CAM-B's rectangle mapped forward through the approved fixed transform
+    // (TransformedBounds already computed it above for canvas sizing). Because
+    // that forward transform is a fixed projective map validated by
+    // ValidateProjectiveDomain to not cross its zero-denominator line inside
+    // the CAM-B rectangle, the transform is a homeomorphism there and the
+    // image of the rectangle is exactly the convex quadrilateral spanned by
+    // its four transformed corners -- so b_bounds, the AABB of those corners,
+    // is already a true, non-lossy superset of every global coordinate CAM-B
+    // can possibly cover. A global point strictly outside b_bounds can never
+    // produce a has_b=true, so skipping the inverse transform and bilinear
+    // sample for such points cannot change any output pixel; it only skips
+    // work that was always going to end in has_b=false.
+    //
+    // The padding below is not required by that geometric argument, but is
+    // added anyway as a second, independent safety margin against floating-
+    // point drift: b_bounds is computed via the forward matrix, while the
+    // per-pixel skip test below is compared against values ultimately used
+    // with the separately-computed inverse matrix (inverse_b), so the two are
+    // not guaranteed to agree to the last bit right at the boundary. Rounding
+    // the box outward to whole pixels and then padding by an extra
+    // kCameraBSkipSafetyMarginPixels on every side keeps the skip test
+    // conservative: on any doubt near the edge, this does not skip, and the
+    // pixel falls through to the exact same TryTransform+SampleBilinear path
+    // used before this change, producing an identical result.
+    constexpr double kCameraBSkipSafetyMarginPixels = 2.0;
+    const double b_skip_minimum_x = std::floor(b_bounds.minimum_x) - kCameraBSkipSafetyMarginPixels;
+    const double b_skip_minimum_y = std::floor(b_bounds.minimum_y) - kCameraBSkipSafetyMarginPixels;
+    const double b_skip_maximum_x = std::ceil(b_bounds.maximum_x) + kCameraBSkipSafetyMarginPixels;
+    const double b_skip_maximum_y = std::ceil(b_bounds.maximum_y) + kCameraBSkipSafetyMarginPixels;
+
     Image output{
         canvas_width - static_cast<std::uint32_t>(horizontal_crop),
         canvas_height - static_cast<std::uint32_t>(vertical_crop),
@@ -998,13 +1048,17 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     output.bgr.resize(static_cast<std::size_t>(PixelCount(output.width, output.height) * 3));
     for (std::uint32_t output_y = 0; output_y < output.height; ++output_y) {
         const double global_y = minimum_y + request.profile.crop.top + output_y;
+        const bool row_may_hit_camera_b = global_y >= b_skip_minimum_y && global_y <= b_skip_maximum_y;
         for (std::uint32_t output_x = 0; output_x < output.width; ++output_x) {
             const double global_x = minimum_x + request.profile.crop.left + output_x;
             std::array<double, 3> pixel_a{};
             std::array<double, 3> pixel_b{};
             const bool has_a = SampleBilinear(camera_a, global_x, global_y, pixel_a);
+            const bool may_hit_camera_b = row_may_hit_camera_b
+                && global_x >= b_skip_minimum_x && global_x <= b_skip_maximum_x;
             Point source_b{};
-            const bool has_b = TryTransform(inverse_b, {global_x, global_y}, source_b)
+            const bool has_b = may_hit_camera_b
+                && TryTransform(inverse_b, {global_x, global_y}, source_b)
                 && SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
             if (!has_a && !has_b) {
                 throw std::invalid_argument("approved crop contains an uncovered output pixel");
@@ -1035,6 +1089,15 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     }
 
     PartialFileGuard partial_guard(partial);
+    // GitHub Issue #102 (item 2): captured from PublishValidatedGeneratedJpeg,
+    // which already computed this SHA-256 to verify the partial before
+    // renaming it into place. Reused for the manifest below instead of
+    // re-reading and re-hashing the published file a third time -- safe
+    // because RenameToWithoutReplace renames through the same open handle
+    // (SetFileInformationByHandle's FileRenameInfo), a metadata-only
+    // operation that never touches file content, so the bytes hashed here are
+    // byte-identical to the bytes at `destination` afterward.
+    StitchJobSha256Hex published_sha256;
     try {
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
         ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
@@ -1051,7 +1114,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         InvokeTestHook(before_partial_flush_hook);
         FlushGeneratedPartial(partial);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
-        detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        published_sha256 = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
         partial_guard.Release();
     } catch (...) {
@@ -1087,7 +1150,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     };
     manifest.output = {
         "stitched.jpg",
-        ComputeFileSha256Hex(destination),
+        published_sha256,
         output.width,
         output.height,
         published_size,
