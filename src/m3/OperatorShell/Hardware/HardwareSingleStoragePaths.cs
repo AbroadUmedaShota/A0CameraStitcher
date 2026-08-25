@@ -7,7 +7,8 @@ internal sealed record HardwareSingleStoragePaths(
     string DefaultExportDirectory,
     string PreferencesPath,
     string CaptureProfilePath,
-    string SingleIdentityV3Path)
+    string SingleIdentityV3Path,
+    string AgentArtifactsRoot)
 {
     public string ExportDirectory => DefaultExportDirectory;
 
@@ -28,6 +29,15 @@ internal sealed record HardwareSingleStoragePaths(
             Path.Combine(productRoot, "Exports"),
             Path.Combine(productRoot, "hardware-single", "preferences.json"),
             Path.Combine(productRoot, "camera-agent", "approved-single-capture-profile.json"),
-            Path.Combine(productRoot, "phase0", "single-identity-v3.json"));
+            Path.Combine(productRoot, "phase0", "single-identity-v3.json"),
+            // Must match ProductionHardwareCameraAgentConfig::Defaults() in
+            // hardware_camera_agent.cpp: root = sdk_identity_map.parent_path()
+            // / "camera-agent" (i.e. <LocalAppData>/A0CameraStitcher/phase0/
+            // camera-agent), artifacts_root = root / "artifacts". The "phase0"
+            // segment is easy to drop by analogy with CaptureProfilePath above
+            // (which has no "phase0" segment) -- don't; it would point this
+            // process's canonical-path checks at a different directory than
+            // where the agent actually writes by default.
+            Path.Combine(productRoot, "phase0", "camera-agent", "artifacts"));
     }
 }

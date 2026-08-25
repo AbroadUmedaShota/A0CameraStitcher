@@ -16,7 +16,7 @@ public static class HardwareArtifactVerifier
 
     public static Task<VerifiedHardwareJpeg> VerifyOriginalAsync(
         HardwareRetainedOriginalRecord original,
-        string agentRootDirectory,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -30,13 +30,13 @@ public static class HardwareArtifactVerifier
             original.SizeBytes,
             original.Sha256,
             "original.jpg",
-            agentRootDirectory,
+            expectedPath,
             cancellationToken);
     }
 
     public static Task<VerifiedHardwareJpeg> VerifyPreviewAsync(
         HardwarePreviewJpegRecord preview,
-        string agentRootDirectory,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(preview);
@@ -45,7 +45,7 @@ public static class HardwareArtifactVerifier
             preview.SizeBytes,
             preview.Sha256,
             "preview.jpg",
-            agentRootDirectory,
+            expectedPath,
             cancellationToken);
     }
 
@@ -54,10 +54,10 @@ public static class HardwareArtifactVerifier
         long expectedSize,
         string expectedSha256,
         string requiredFileName,
-        string agentRootDirectory,
+        string expectedPath,
         CancellationToken cancellationToken)
     {
-        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName, agentRootDirectory);
+        ValidateExpectedRecord(path, expectedSize, expectedSha256, requiredFileName, expectedPath);
         EnsureRegularFile(path);
         await using var stream = OpenStableRead(path);
         var observed = await InspectJpegAsync(
@@ -225,7 +225,7 @@ public static class HardwareArtifactVerifier
         long expectedSize,
         string expectedSha256,
         string requiredFileName,
-        string agentRootDirectory)
+        string expectedPath)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || IsUncPath(path) ||
             !string.Equals(Path.GetFileName(path), requiredFileName, StringComparison.OrdinalIgnoreCase) ||
@@ -236,27 +236,32 @@ public static class HardwareArtifactVerifier
             throw new InvalidDataException("Camera Agent artifact metadata is invalid.");
         }
 
-        // The agent process is only trusted to report files somewhere inside
-        // its own directory tree (originals and Live View previews live in
-        // different subdirectories under it, so containment - not an exact
-        // directory match - is what mirrors HardwareDualTransactionSnapshot-
-        // Store.ValidateRequest's artifact-root check here). Without this, a
-        // spoofed or compromised agent could name an arbitrary local file
-        // (supplying a matching size/hash itself) and have
-        // HardwareOriginalExporter copy it out as if it were a genuine
-        // capture.
-        if (string.IsNullOrWhiteSpace(agentRootDirectory) || !Path.IsPathFullyQualified(agentRootDirectory))
+        // expectedPath is the canonical location the caller independently
+        // derived (HardwareAgentArtifactLayout.OriginalPath/PreviewPath) from
+        // values it already owns or has separately validated: the
+        // --artifacts-root this process itself passed to the agent, plus the
+        // agent's run/transaction/alias, which HardwareCameraAgentProtocol
+        // validates the shape of (and, for transactionId, that it matches the
+        // transaction requested) before this code ever runs. Requiring exact
+        // equality here -- not merely containment under the artifacts root --
+        // is a provenance guarantee and accident detector: a Camera Agent
+        // that names a file outside its own run/transaction directory (its
+        // own leftovers, a different transaction's original, or an
+        // altogether unrelated local file with a self-supplied matching
+        // size/hash) is rejected even though authentication of "is this our
+        // Camera Agent" is already handled upstream by the named pipe's ACL
+        // and CurrentUserOnly restriction.
+        if (string.IsNullOrWhiteSpace(expectedPath) || !Path.IsPathFullyQualified(expectedPath))
         {
-            throw new InvalidDataException("The Camera Agent root directory is invalid.");
+            throw new InvalidDataException("The Camera Agent canonical artifact path is invalid.");
         }
-        var expectedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(agentRootDirectory));
-        var resolvedDirectory = Path.GetDirectoryName(Path.GetFullPath(path));
-        var isContained = resolvedDirectory is not null &&
-            (string.Equals(resolvedDirectory, expectedRoot, StringComparison.OrdinalIgnoreCase) ||
-             resolvedDirectory.StartsWith(expectedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
-        if (!isContained)
+        if (!string.Equals(
+                Path.GetFullPath(path),
+                Path.GetFullPath(expectedPath),
+                StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidDataException("Camera Agent artifact path is outside the agent's own directory.");
+            throw new InvalidDataException(
+                "Camera Agent artifact path is not the canonical location for this run.");
         }
     }
 
@@ -304,7 +309,7 @@ public sealed class HardwareOriginalExporter
         HardwareRetainedOriginalRecord original,
         string transactionId,
         DateTimeOffset now,
-        string agentRootDirectory,
+        string expectedPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -313,7 +318,7 @@ public sealed class HardwareOriginalExporter
             original.SizeBytes,
             original.Sha256,
             "original.jpg",
-            agentRootDirectory);
+            expectedPath);
         if (transactionId.Length != 32 || !transactionId.All(character =>
                 character is >= '0' and <= '9' or >= 'a' and <= 'f'))
         {
