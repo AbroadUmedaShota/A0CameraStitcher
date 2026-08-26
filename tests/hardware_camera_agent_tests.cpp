@@ -2757,8 +2757,11 @@ void TestSingleIdentityV3SdkStatusResolution() {
         const auto identity = LoadSingleCameraIdentityV3(identity_path);
         const auto selected = ResolveSingleCameraSdkStatusCamera(
             identity, "CAM-A", {sdk_camera}, {wpd_camera});
-        Check(selected.stable_identity == sdk_camera.stable_identity,
-            "SingleCamera sdk-status must select the exact-one current SDK projection from identity-v3");
+        const auto selected_wpd = ResolveSingleCameraWpdIdentityCamera(
+            identity, "CAM-A", {wpd_camera});
+        Check(selected.stable_identity == sdk_camera.stable_identity &&
+              selected_wpd.stable_identity == wpd_camera.stable_identity,
+            "SingleCamera product routes must select the exact-one SDK projection and registered WPD body from identity-v3");
 
         const auto rejected = [&](const SingleCameraIdentityV3& candidate,
                                   std::string_view alias,
@@ -2780,7 +2783,22 @@ void TestSingleIdentityV3SdkStatusResolution() {
               rejected(identity, "CAM-A", {sdk_camera}, {wpd_camera, wpd_camera}) &&
               rejected(identity, "CAM-A", {sdk_camera}, {mismatched_wpd}) &&
               rejected(identity, "CAM-B", {sdk_camera}, {wpd_camera}),
-            "SingleCamera sdk-status must reject missing, multiple, digest-mismatched, or non-CAM-A identity before status probe");
+            "SingleCamera SDK route must reject missing, multiple, digest-mismatched, or non-CAM-A identity before status probe");
+        const auto wpd_rejected = [&](std::string_view alias,
+                                      const std::vector<CameraInfo>& wpd) {
+            try {
+                (void)ResolveSingleCameraWpdIdentityCamera(
+                    identity, alias, wpd);
+                return false;
+            } catch (const std::exception&) {
+                return true;
+            }
+        };
+        Check(wpd_rejected("CAM-A", {}) &&
+              wpd_rejected("CAM-A", {wpd_camera, wpd_camera}) &&
+              wpd_rejected("CAM-A", {mismatched_wpd}) &&
+              wpd_rejected("CAM-B", {wpd_camera}),
+            "SingleCamera WPD route must reject missing, multiple, digest-mismatched, or non-CAM-A identity");
 
         WriteText(root / "malformed.json", "{not-json}");
         bool malformed_rejected = false;
