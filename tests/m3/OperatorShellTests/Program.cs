@@ -6,6 +6,7 @@ using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Buffers.Binary;
+using System.ComponentModel;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
@@ -330,6 +331,23 @@ catch (Exception exception)
 {
     failures.Add("hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it");
     Console.Error.WriteLine($"FAIL hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it: {exception}");
+}
+
+try
+{
+    // Runs on a dedicated STA + Dispatcher thread (see RunOnStaRenderThread, GitHub Issue #63)
+    // instead of the plain MTA thread the rest of Main uses. On the MTA thread there is no
+    // SynchronizationContext, so the calling context itself runs on ThreadPool worker threads
+    // and can end up re-executing its own just-queued Task.Run work, which makes a
+    // "did decode run on the calling thread" assertion flaky. A DispatcherSynchronizationContext
+    // mirrors the real WPF UI thread, where that can never happen.
+    RunOnStaRenderThread(HardwareContinuousLiveViewDecodesFramesOffTheCallingThreadAsync);
+    Console.WriteLine("PASS hardware continuous Live View decodes and builds each frame off the thread that started the loop");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware continuous Live View decodes and builds each frame off the thread that started the loop");
+    Console.Error.WriteLine($"FAIL hardware continuous Live View decodes and builds each frame off the thread that started the loop: {exception}");
 }
 
 try
@@ -1757,6 +1775,40 @@ static async Task HardwarePendingTransactionRecoveryAsync()
     }
 }
 
+// #148: frame decode and BitmapImage creation moved off the UI thread, so a Live View
+// frame arriving (observed via a fake operations signal) no longer implies PreviewImage
+// has already been assigned. Tests that need the rendered frame wait for the
+// PropertyChanged notification instead.
+static async Task WaitForPreviewImageAsync(HardwareSingleCameraViewModel viewModel, TimeSpan timeout)
+{
+    if (viewModel.PreviewImage is not null)
+    {
+        return;
+    }
+    var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    void OnPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(HardwareSingleCameraViewModel.PreviewImage) &&
+            viewModel.PreviewImage is not null)
+        {
+            tcs.TrySetResult();
+        }
+    }
+    viewModel.PropertyChanged += OnPropertyChanged;
+    try
+    {
+        if (viewModel.PreviewImage is not null)
+        {
+            return;
+        }
+        await tcs.Task.WaitAsync(timeout).ConfigureAwait(false);
+    }
+    finally
+    {
+        viewModel.PropertyChanged -= OnPropertyChanged;
+    }
+}
+
 static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -1789,6 +1841,9 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         await viewModel.StartContinuousLiveViewAsync();
         await operations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Check.True(viewModel.IsContinuousLiveViewActive, "The UI must expose the owned active Live View session.");
+        // #148: decode and BitmapImage creation now run off the UI thread, so the frame
+        // read (FirstFrame) completing no longer guarantees PreviewImage has been set yet.
+        await WaitForPreviewImageAsync(viewModel, TimeSpan.FromSeconds(2));
         Check.True(viewModel.PreviewImage is not null, "A verified in-memory JPEG frame must be displayed.");
 
         await viewModel.CaptureAsync();
@@ -1918,6 +1973,61 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
         // 途中のCheckが例外を投げても、held中のフレーム要求を解放せずに残さない。
         // 解放しないとRunContinuousLiveViewLoopAsyncのタスクが待機したままになる。
         operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// GitHub Issue #148: continuous Live View frame decode (Base64 round-trip, canonicality
+// check, SHA-256) and BitmapImage creation are CPU-bound work that used to run
+// synchronously on whichever thread started RunContinuousLiveViewLoopAsync (the UI thread
+// in production). Uses the ContinuousLiveViewFrameWorkerThreadObservedForTesting test hook
+// to assert that work now runs on a worker thread instead of the calling thread.
+static async Task HardwareContinuousLiveViewDecodesFramesOffTheCallingThreadAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-thread-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        var operations = new FakeContinuousHardwareOperations(frameBytes);
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")));
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        var callingThreadId = Environment.CurrentManagedThreadId;
+        var observedThreadIds = new List<int>();
+        viewModel.ContinuousLiveViewFrameWorkerThreadObservedForTesting =
+            id => { lock (observedThreadIds) { observedThreadIds.Add(id); } };
+
+        Check.True(viewModel.CanStartContinuousLiveView, "Ready CAM-A must allow continuous Live View v2.");
+        await viewModel.StartContinuousLiveViewAsync();
+        await operations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitForPreviewImageAsync(viewModel, TimeSpan.FromSeconds(2));
+
+        int[] observedSnapshot;
+        lock (observedThreadIds)
+        {
+            observedSnapshot = observedThreadIds.ToArray();
+        }
+        Check.True(observedSnapshot.Length > 0,
+            "The per-frame decode delegate must have been observed running at least once.");
+        Check.True(
+            observedSnapshot.All(id => id != callingThreadId),
+            "Frame decode and BitmapImage creation must not run on the thread that started the continuous Live View loop.");
+
+        await viewModel.StopContinuousLiveViewAsync();
+        Check.False(viewModel.IsContinuousLiveViewActive, "Explicit stop must close the continuous session.");
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+    }
+    finally
+    {
         Directory.Delete(root, recursive: true);
     }
 }
