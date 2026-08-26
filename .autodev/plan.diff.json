@@ -1,29 +1,26 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.13.0",
-  "base_plan_version": "2.12.0",
-  "generated_at": "2026-08-25",
-  "summary": "Record the product-owner decision to omit automated tests for the 2026-08-26 checkpoint, replace the CI gate with explicit manual software smoke and waiver evidence, and update the resolved Issue 130 and 131 status without treating skipped tests as a PASS.",
+  "plan_version": "2.14.0",
+  "base_plan_version": "2.13.0",
+  "generated_at": "2026-08-27",
+  "summary": "Record the 2026-08-26 SingleCamera hardware results, close the approved HG-0009 p95 gate, and keep WPF end-to-end, continuous Live View handoff, physical fault, Dual hardware, A0 quality, and release acceptance separate.",
   "added_milestones": [],
-  "changed_milestones": [
-    "M3T"
-  ],
+  "changed_milestones": [],
   "removed_milestones": [],
   "added_work_items": [],
   "changed_work_items": [
-    "WI-0037",
-    "WI-0038"
+    "WI-0012",
+    "WI-0035",
+    "WI-0042"
   ],
   "removed_work_items": [],
   "breaking_changes": [],
   "non_completion_guards": [
-    "M3T completion is internal test readiness only and does not complete M1A, M3, M4, MVP acceptance, packaging, or release",
-    "the Wednesday physical lane is exactly-one SingleCamera only; incomplete Dual capture, binding, and stitch paths remain HardwarePending and disabled",
-    "automated test execution is explicitly waived only for the 2026-08-26 checkpoint; every skipped suite is recorded NotRun and the waiver is not a code PASS, release PASS, or hardware acceptance",
-    "the exact candidate still requires manual launch, Agent-presence, explicit-mode, disabled-Dual, Live View start-stop, shutdown, and residual-process checks",
-    "Issue 131 and Issue 130 are resolved in origin/main; Issue 94 shutdown must still be reviewed, included, and manually verified before a real one-shot",
-    "real camera work still requires explicit operator resume, identity-v3 read-only readiness, one D810, and a dedicated spool with zero payload objects",
-    "one successful capture does not prove ten-run characterization, HG-0009 p95, 100-run acceptance, Dual hardware operation, stitching, or A0 output quality",
+    "Camera Agent one-shot, ten-run p95, and 100-run durability do not prove real WPF end-to-end acceptance",
+    "standalone Live View does not prove ten continuous Live View capture handoffs",
+    "software failure recovery does not prove physical USB disconnect or storage failure behavior",
+    "SingleCamera evidence does not prove Dual hardware operation, stitching, A0 output quality, packaging, or release",
+    "GitHub Actions remains billing-blocked and must not be reported green",
     "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"
   ]
 }

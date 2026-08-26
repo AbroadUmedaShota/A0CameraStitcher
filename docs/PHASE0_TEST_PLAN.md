@@ -52,7 +52,7 @@ WI-0010A revise loop後のsoftware contractは実装済みである。MAID trace
 
 現在判定: `HG-0008`は2026-08-06に承認済みでsoftware contractは実装済み。ただし[run-1786014841232-1](evidence/phase0/run-1786014841232-1/report.md)が撮影前に90 payload objectを検出し、SDK/shutter/delete/retry 0で安全停止した。read-only [run-1786015997366-1](evidence/phase0/run-1786015997366-1/report.md)と[run-1786017282044-1](evidence/phase0/run-1786017282044-1/report.md)も全payload 90件、WPD close 1/1、capture/delete/vendor operation 0件を確認した。同じ空spool阻害条件が3回連続したため、M1Aは専用empty cardへの交換または操作者によるbackup・手動clear待ちとしてブロック判定する。解消後に新規one-shotを開始する。合格条件はone-shot proof 1/1後、10/10でsingle-slot spoolのSDK one capture、WPD exact-one recovery、PC原本の再読込検証までの確定、single-object delete、全payload empty-after確認が成功すること。
 
-標準WPD失敗は履歴として保持する。attempted hybrid [run-1785914842210-1](evidence/phase0/run-1785914842210-1/report.md)はbaseline timeout、SDK open/capture 0、`FailedPartial`、retry/delete 0である。read-only [run-1785917005306-1](evidence/phase0/run-1785917005306-1/report.md)は3/3 WPD session closeを記録しつつclock cutoffを支持しない。P0-A2は承認済みspool経路の実機one-shotから開始し、A3/A4はその後に進める。いずれの合格証拠も未取得である。
+標準WPD失敗は履歴として保持する。attempted hybrid [run-1785914842210-1](evidence/phase0/run-1785914842210-1/report.md)はbaseline timeout、SDK open/capture 0、`FailedPartial`、retry/delete 0である。read-only [run-1785917005306-1](evidence/phase0/run-1785917005306-1/report.md)は3/3 WPD session closeを記録しつつclock cutoffを支持しない。後続の2026-08-26専用empty spool試験ではCamera Agent one-shot 1/1と10/10を完了した。A3の物理異常系とA4のhandoff 10回は未完了である。
 
 ### P0-A3: 単体異常系
 
@@ -85,6 +85,8 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 - one-shot合格後、CAM-A、承認済み30日profile、empty dedicated spool、no-retryで10 transactionを実行し、capture開始からbyte-identical `7360×4912`製品JPEG確定までのp50/p95/maxを記録する。
 - 10回はcharacterizationであり、`HG-0009`でproduct ownerが実測p95を承認するまで性能Passにしない。
 - 承認後、同じ契約で100件連続の初回成功を要求する。失敗、original損失、曖昧採用、cleanup不整合、自動retryを0件とする。
+
+実施結果（2026-08-26）: Camera Agent実機経路でone-shot 1/1、10/10 characterization、p50 `14.036秒`、p95/max `14.643秒`を確認し、Product Ownerがp95を承認した。その後100/100を全件初回成功で完了し、p50 `14.204秒`、p95 `14.430秒`、max `14.692秒`だった。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失、誤削除、曖昧採用、自動retry、復旧不能停止は各0件だった。実WPF UI操作、Live View handoff 10回、物理USB切断・保存先障害はこの結果に含まない。詳細は[SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照する。
 
 ## SDK単独PC転送経路の不成立判定（判定済み）
 
@@ -161,7 +163,7 @@ active中の実USB切断には`hybrid-fault-pair --alias CAM-A|CAM-B --scenario 
 
 `WI-0021A`と`WI-0022B`の依存を満たした`WI-0022C`は、実機を使わないbounded software sliceとして完了した。rights-clearedな合成画像fixtureからshift、rotation、scale、exposure、colorを決定的に測定し、測定値とfixture/profile provenanceを保持するproposalへ接続する。承認済みprofile envelope内の一時補正だけを受理し、target／automatic-correction上限のboundary、over-limit、malformed、profile-mismatch、unapproved profile、入力不整合をfail closedする。profileの自動学習・更新はない。
 
-最新のsoftware-only回帰はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release全CTest各10/10、`Test-M3Simulated.ps1` Release/Debug、正式DualCamera WPF flowに合格した。このsoftware contractは最終リグ、承認済みA0閾値、実写品質、実機性能、identity strategyの解決を証明しない。identity strategyはBlocked、`HG-0003B`は未解消、実D810 v5 runと実機capture 1/10/100は未検証のままである。カメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryはこのsliceで実行していない。
+software-only回帰はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release全CTest各10/10、`Test-M3Simulated.ps1` Release/Debug、正式DualCamera WPF flowに合格した。このslice自体はカメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryを実行していない。`HG-0003B`は後にADR-0025のsession-local bindingで解消され、SingleCamera実機1/10/100は2026-08-26に別証跡で合格したが、Dual実機、最終リグ、A0閾値、実写品質は未検証である。
 
 ## P0判定
 
