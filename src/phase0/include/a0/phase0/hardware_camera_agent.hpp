@@ -206,6 +206,10 @@ struct ProductionDualIdentityPreflightRequest {
     std::string_view json);
 [[nodiscard]] SingleCameraIdentityV3 LoadSingleCameraIdentityV3(
     const std::filesystem::path& path);
+[[nodiscard]] CameraInfo ResolveSingleCameraWpdIdentityCamera(
+    const SingleCameraIdentityV3& identity,
+    std::string_view requested_alias,
+    const std::vector<CameraInfo>& wpd_cameras);
 [[nodiscard]] CameraInfo ResolveSingleCameraSdkStatusCamera(
     const SingleCameraIdentityV3& identity,
     std::string_view requested_alias,

@@ -2663,13 +2663,22 @@ CameraInfo ResolveSingleCameraSdkStatusSdkProjection(
 
 } // namespace
 
+CameraInfo ResolveSingleCameraWpdIdentityCamera(
+    const SingleCameraIdentityV3& identity,
+    std::string_view requested_alias,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    ValidateSingleCameraSdkStatusIdentityPolicy(identity, requested_alias);
+    ValidateSingleCameraSdkStatusWpdIdentity(identity, wpd_cameras);
+    return wpd_cameras.front();
+}
+
 CameraInfo ResolveSingleCameraSdkStatusCamera(
     const SingleCameraIdentityV3& identity,
     std::string_view requested_alias,
     const std::vector<CameraInfo>& sdk_cameras,
     const std::vector<CameraInfo>& wpd_cameras) {
-    ValidateSingleCameraSdkStatusIdentityPolicy(identity, requested_alias);
-    ValidateSingleCameraSdkStatusWpdIdentity(identity, wpd_cameras);
+    (void)ResolveSingleCameraWpdIdentityCamera(
+        identity, requested_alias, wpd_cameras);
     return ResolveSingleCameraSdkStatusSdkProjection(sdk_cameras);
 }
 

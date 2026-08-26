@@ -66,6 +66,9 @@ struct Options {
 };
 
 fs::path WpdIdentityMapPath(const Options& options);
+CameraInfo ResolveProductSingleWpdCamera(
+    const Options& options,
+    ICameraTransport& transport);
 CameraInfo ResolveCamera(
     const std::vector<CameraInfo>& cameras,
     const fs::path& camera_map,
@@ -361,7 +364,7 @@ int RunWpdCorrelationStatus(const Options& options) {
     WpdTransport transport;
     WpdCorrelationRunSummary summary;
     try {
-        const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+        const auto camera = ResolveProductSingleWpdCamera(options, transport);
         summary = ExecuteWpdCorrelationSamples(
             transport, camera.stable_identity, options.correlation_samples, options.correlation_interval_ms);
     } catch (...) {
@@ -630,6 +633,44 @@ CameraInfo ResolveCamera(
     return ResolveCamera(transport.Enumerate(), camera_map, alias);
 }
 
+CameraInfo ResolveProductSingleWpdCamera(
+    const Options& options,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    if (options.camera_map_explicit) {
+        return ResolveCamera(
+            wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    }
+    const auto identity = LoadSingleCameraIdentityV3(options.single_identity_v3);
+    return ResolveSingleCameraWpdIdentityCamera(
+        identity, options.alias, wpd_cameras);
+}
+
+CameraInfo ResolveProductSingleWpdCamera(
+    const Options& options,
+    ICameraTransport& transport) {
+    return ResolveProductSingleWpdCamera(options, transport.Enumerate());
+}
+
+std::pair<CameraInfo, CameraInfo> ResolveProductSingleCameras(
+    const Options& options,
+    const std::vector<CameraInfo>& sdk_cameras,
+    const std::vector<CameraInfo>& wpd_cameras) {
+    if (options.camera_map_explicit) {
+        return {
+            ResolveCamera(sdk_cameras, options.camera_map, options.alias),
+            ResolveCamera(
+                wpd_cameras, WpdIdentityMapPath(options), options.alias),
+        };
+    }
+    const auto identity = LoadSingleCameraIdentityV3(options.single_identity_v3);
+    return {
+        ResolveSingleCameraSdkStatusCamera(
+            identity, options.alias, sdk_cameras, wpd_cameras),
+        ResolveSingleCameraWpdIdentityCamera(
+            identity, options.alias, wpd_cameras),
+    };
+}
+
 int RunSdkStatus(const Options& options) {
     if (const auto routing_error = ValidateSdkStatusCliRouting(options.command, options.transport)) {
         throw std::runtime_error(*routing_error);
@@ -769,7 +810,7 @@ int RunSdkStatus(const Options& options) {
 int RunWpdStatus(const Options& options) {
     if (options.transport != "wpd") throw std::runtime_error("wpd-status requires --transport wpd");
     WpdTransport transport(options.wpd_command_target);
-    const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+    const auto camera = ResolveProductSingleWpdCamera(options, transport);
     const auto target = transport.ProbeCaptureTarget(camera.stable_identity);
     const auto vendor = transport.ProbeVendorOpcodes(camera.stable_identity, options.wpd_status_access);
     const auto run_id = NewRunId();
@@ -843,7 +884,7 @@ int RunSpoolStatus(const Options& options) {
     WpdTransport transport(options.wpd_command_target);
     WpdSpoolStatusSummary status;
     try {
-        const auto camera = ResolveCamera(transport, WpdIdentityMapPath(options), options.alias);
+        const auto camera = ResolveProductSingleWpdCamera(options, transport);
         status.payload_object_count = transport.InspectSpoolPayloadCount(
             camera.stable_identity, std::chrono::seconds(10));
         status.wpd_sessions_closed = 1;
@@ -955,8 +996,8 @@ int RunLiveViewHandoff(const Options& options) {
             "cross_transport_binding_required",
             "live-view-handoff currently requires exactly one physical D810 connected and exactly one SDK/WPD projection; disconnect every other D810 until dual-camera cross-transport binding is registered");
     }
-    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
-    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const auto [sdk_camera, wpd_camera] = ResolveProductSingleCameras(
+        options, sdk_cameras, wpd_cameras);
     const std::string run_id = NewRunId();
     EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
     evidence.RecordCamera(options.alias, sdk_camera.firmware);
@@ -1052,8 +1093,8 @@ int RunHybridCapture(const Options& options) {
     if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1) {
         throw std::runtime_error("hybrid capture requires exactly one physical D810 in both SDK and WPD inventories");
     }
-    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
-    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const auto [sdk_camera, wpd_camera] = ResolveProductSingleCameras(
+        options, sdk_cameras, wpd_cameras);
     const std::string run_id = NewRunId();
     EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion());
     evidence.RecordCamera(options.alias, sdk_camera.firmware);
@@ -1349,8 +1390,8 @@ int RunHybridFaultSingle(const Options& options) {
     if (sdk_cameras.size() != 1 || wpd_cameras.size() != 1) {
         throw std::runtime_error("hybrid fault test requires exactly one physical D810 in both SDK and WPD inventories");
     }
-    const auto sdk_camera = ResolveCamera(sdk_cameras, options.camera_map, options.alias);
-    const auto wpd_camera = ResolveCamera(wpd_cameras, WpdIdentityMapPath(options), options.alias);
+    const auto [sdk_camera, wpd_camera] = ResolveProductSingleCameras(
+        options, sdk_cameras, wpd_cameras);
     const std::string run_id = NewRunId();
     EvidenceWriter evidence(options.artifacts, run_id, sdk.SdkVersion() + "+" + wpd.SdkVersion());
     evidence.RecordCamera(options.alias, sdk_camera.firmware);
