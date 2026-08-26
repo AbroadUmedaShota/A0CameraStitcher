@@ -12,10 +12,12 @@
 #endif
 
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/sdk_buffer_arena.hpp"
 #include "a0/phase0/sdk_pending_command.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
@@ -152,6 +154,7 @@ constexpr ULONG kMaximumNikonFileDownloadBytes = 256U * 1024U * 1024U;
 // unbounded allocation.
 constexpr ULONG kMaximumNikonEnumElements = 256;
 constexpr ULONG kMaximumNikonCapabilityCount = 8192;
+constexpr std::size_t kMaximumSessionMaidObjects = 1024;
 // Hybrid capture writes to the camera card; WPD observes the resulting object
 // only after this SDK session has fully closed.
 constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_Card;
@@ -373,7 +376,7 @@ public:
             std::size_t d810_count = 0;
             std::optional<ULONG> selected_id;
             for (const ULONG id : ids) {
-                MaidObject candidate;
+                MaidObject& candidate = AcquireSessionMaidObject("open_failed");
                 OpenChild(module_, candidate, id, "open_failed");
                 try {
                     EnumerateCapabilities(candidate, deadline, "open_failed");
@@ -614,10 +617,11 @@ public:
             throw TransportError("live_view_unavailable", message.str());
         }
 
-        NkMAIDArray frame{};
+        auto frame_query = AcquireCommandBuffer<NkMAIDArray>("live_view_frame_failed");
         RunCompleted(source_, kNkMAIDCommand_CapGet, kNkMAIDCapability_GetLiveViewImage,
-            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(&frame), deadline,
-            "live_view_frame_failed");
+            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(frame_query.data()), deadline,
+            "live_view_frame_failed", &frame_query);
+        const NkMAIDArray frame = *frame_query.as<NkMAIDArray>();
         const std::size_t elements = static_cast<std::size_t>(frame.ulElements);
         const std::size_t physical_bytes = static_cast<std::size_t>(frame.wPhysicalBytes);
         if (elements == 0 || physical_bytes == 0 ||
@@ -625,12 +629,16 @@ public:
             elements * physical_bytes > kMaxLiveViewArrayBytes) {
             throw TransportError("live_view_invalid_frame", "D810 returned an invalid live view array size");
         }
-        std::vector<unsigned char> raw(elements * physical_bytes);
-        frame.pData = raw.data();
+        auto frame_request = AcquireCommandBuffer<NkMAIDArray>("live_view_frame_failed");
+        auto raw = AcquireCommandBuffer<unsigned char>("live_view_frame_failed", elements * physical_bytes);
+        *frame_request.as<NkMAIDArray>() = frame;
+        frame_request.as<NkMAIDArray>()->pData = raw.data();
         RunCompleted(source_, kNkMAIDCommand_CapGetArray, kNkMAIDCapability_GetLiveViewImage,
-            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(&frame), deadline,
-            "live_view_frame_failed");
-        return ExtractD810LiveViewJpeg(raw);
+            kNkMAIDDataType_ArrayPtr, reinterpret_cast<NKPARAM>(frame_request.data()), deadline,
+            "live_view_frame_failed", &frame_request, &raw);
+        const auto* raw_begin = raw.as<unsigned char>();
+        const std::vector<unsigned char> raw_copy(raw_begin, raw_begin + elements * physical_bytes);
+        return ExtractD810LiveViewJpeg(raw_copy);
     }
 
     void StopLiveView(std::chrono::seconds timeout) {
@@ -826,6 +834,30 @@ private:
         }
     }
 
+    template <typename T>
+    SdkBufferArena::CommandLease AcquireCommandBuffer(
+        std::string_view category,
+        std::size_t count = 1) {
+        try {
+            return sdk_buffers_.AcquireCommand<T>(count);
+        } catch (const SdkBufferArenaCapacityExceeded&) {
+            throw TransportError(
+                std::string(category),
+                "SDK buffer quarantine capacity is exhausted; refusing a new command");
+        }
+    }
+
+    template <typename T>
+    T* AcquireSessionBuffer(std::string_view category, std::size_t count = 1) {
+        try {
+            return sdk_buffers_.AcquireSession<T>(count);
+        } catch (const SdkBufferArenaCapacityExceeded&) {
+            throw TransportError(
+                std::string(category),
+                "SDK session buffer capacity is exhausted; refusing a new command");
+        }
+    }
+
     // Abandons a pending async command: issues Abort exactly once.
     //
     // `async_started` distinguishes two very different situations that both
@@ -837,9 +869,8 @@ private:
     //    for `state->done`, and quarantines the session (see
     //    RequireSdkSessionNotPoisoned) if completion evidence never arrives
     //    -- the buffer handed to the SDK for this command cannot be safely
-    //    released in that case (stage 2 tracks such buffers so they can be
-    //    kept alive instead of freed; for now this only stops the session
-    //    from accepting further commands).
+    //    released in that case. SdkBufferArena therefore quarantines the
+    //    command payload until UnloadModule has unloaded the vendor DLLs.
     //  - false (the initial Call() was rejected synchronously, e.g. an
     //    unsupported setting during status probing): no async operation was
     //    ever queued, so CompletionProc can never fire. Polling for
@@ -849,14 +880,14 @@ private:
     //    rejection. Abort is still fired defensively in case the SDK's own
     //    "rejected" reporting is imprecise, but that alone must not
     //    quarantine the session.
-    void AbandonPending(MaidObject& object, CompletionState* state, std::string_view category,
-                        bool async_started) {
+    AbandonOutcome AbandonPending(MaidObject& object, CompletionState* state, std::string_view category,
+                                  bool async_started) noexcept {
         if (!async_started) {
             try {
                 Call(&object.value, kNkMAIDCommand_Abort, 0, kNkMAIDDataType_Null, 0);
             } catch (...) {
             }
-            return;
+            return AbandonOutcome::completed;
         }
         const AbandonOutcome outcome = AbandonPendingCommand(
             [this, &object]() {
@@ -869,17 +900,38 @@ private:
         if (outcome == AbandonOutcome::quarantined) {
             sdk_session_poisoned_ = true;
         }
+        return outcome;
     }
 
+    // MAID command dispatch is intentionally single-threaded for the lifetime
+    // of a loaded session. The debug assertions here and in SdkBufferArena
+    // detect accidental cross-thread use; no concurrent RunCompleted calls are
+    // supported.
     NKERROR RunCompleted(MaidObject& object, ULONG command, ULONG parameter, ULONG data_type,
-                         NKPARAM data, std::chrono::steady_clock::time_point deadline,
-                         std::string_view category) {
+                          NKPARAM data, std::chrono::steady_clock::time_point deadline,
+                          std::string_view category,
+                          SdkBufferArena::CommandLease* payload = nullptr,
+                          SdkBufferArena::CommandLease* secondary_payload = nullptr) {
+#ifndef NDEBUG
+        const auto current_thread = std::this_thread::get_id();
+        if (run_completed_thread_ == std::thread::id{}) run_completed_thread_ = current_thread;
+        assert(run_completed_thread_ == current_thread &&
+            "RunCompleted must be serialized on the SDK transport owner thread");
+#endif
+        sdk_buffers_.AssertOwnerThread();
+        const auto confirm_payloads = [payload, secondary_payload]() noexcept {
+            if (payload != nullptr) payload->ConfirmCompletion();
+            if (secondary_payload != nullptr) secondary_payload->ConfirmCompletion();
+        };
         auto completion = std::make_unique<CompletionState>();
         CompletionState* state = completion.get();
         completions_.push_back(std::move(completion));
         const NKERROR immediate = Call(&object.value, command, parameter, data_type, data,
             reinterpret_cast<LPNKFUNC>(&CompletionProc), reinterpret_cast<NKREF>(state));
-        if (immediate == kNkMAIDResult_BufferSize) return immediate;
+        if (immediate == kNkMAIDResult_BufferSize) {
+            confirm_payloads();
+            return immediate;
+        }
         if (immediate != kNkMAIDResult_NoError && immediate != kNkMAIDResult_Pending) {
             // The SDK rejected the command synchronously: no async operation
             // was ever queued for it, so nothing could still write into the
@@ -887,11 +939,14 @@ private:
             // derive quarantine from missing completion evidence that was
             // never going to arrive (see AbandonPending).
             AbandonPending(object, state, category, /*async_started=*/false);
+            confirm_payloads();
             throw TransportError(std::string(category), "SDK command failed: " + ResultText(immediate));
         }
         while (!state->done.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                AbandonPending(object, state, category, /*async_started=*/true);
+                if (AbandonPending(object, state, category, /*async_started=*/true) == AbandonOutcome::completed) {
+                    confirm_payloads();
+                }
                 throw TransportError(std::string(category), "SDK command timed out");
             }
             try {
@@ -903,11 +958,14 @@ private:
                 // TransportError): Pump()'s own message construction can
                 // throw std::bad_alloc/std::length_error, and that must not
                 // skip Abort either.
-                AbandonPending(object, state, category, /*async_started=*/true);
+                if (AbandonPending(object, state, category, /*async_started=*/true) == AbandonOutcome::completed) {
+                    confirm_payloads();
+                }
                 throw;
             }
             std::this_thread::sleep_for(kAsyncInterval);
         }
+        confirm_payloads();
         if (state->result != kNkMAIDResult_NoError) {
             throw TransportError(std::string(category), "SDK completion failed: " + ResultText(state->result));
         }
@@ -931,9 +989,10 @@ private:
             if (std::chrono::steady_clock::now() >= deadline) {
                 throw TransportError(std::string(category), "SDK capability enumeration timed out");
             }
-            ULONG count = 0;
+            auto count_buffer = AcquireCommandBuffer<ULONG>(category);
             RunCompleted(object, kNkMAIDCommand_GetCapCount, 0, kNkMAIDDataType_UnsignedPtr,
-                reinterpret_cast<NKPARAM>(&count), deadline, category);
+                reinterpret_cast<NKPARAM>(count_buffer.data()), deadline, category, &count_buffer);
+            const ULONG count = *count_buffer.as<ULONG>();
             if (count > kMaximumNikonCapabilityCount) {
                 throw TransportError(std::string(category), "SDK reported an implausible capability count");
             }
@@ -942,10 +1001,15 @@ private:
                     "SDK capability count did not change after a buffer-size retry");
             }
             previous_count = count;
-            object.capabilities.assign(count, NkMAIDCapInfo{});
+            auto capabilities = AcquireCommandBuffer<NkMAIDCapInfo>(category, count);
             const NKERROR result = RunCompleted(object, kNkMAIDCommand_GetCapInfo, count,
-                kNkMAIDDataType_CapInfoPtr, reinterpret_cast<NKPARAM>(object.capabilities.data()), deadline, category);
-            if (result != kNkMAIDResult_BufferSize) return;
+                kNkMAIDDataType_CapInfoPtr, reinterpret_cast<NKPARAM>(capabilities.data()), deadline, category,
+                &capabilities);
+            if (result != kNkMAIDResult_BufferSize) {
+                const auto* begin = capabilities.as<NkMAIDCapInfo>();
+                object.capabilities.assign(begin, begin + count);
+                return;
+            }
         }
     }
 
@@ -967,10 +1031,10 @@ private:
             !Supports(object, id, kNkMAIDCapOperation_Get)) {
             throw TransportError(std::string(category), "required unsigned SDK capability is unavailable");
         }
-        ULONG value = 0;
+        auto value = AcquireCommandBuffer<ULONG>(category);
         RunCompleted(object, kNkMAIDCommand_CapGet, id, kNkMAIDDataType_UnsignedPtr,
-            reinterpret_cast<NKPARAM>(&value), deadline, category);
-        return value;
+            reinterpret_cast<NKPARAM>(value.data()), deadline, category, &value);
+        return *value.as<ULONG>();
     }
 
     std::string GetRequiredString(
@@ -983,11 +1047,12 @@ private:
             !Supports(object, id, kNkMAIDCapOperation_Get)) {
             throw TransportError(std::string(category), "required SDK identity string is unavailable");
         }
-        NkMAIDString value{};
+        auto value = AcquireCommandBuffer<NkMAIDString>(category);
         RunCompleted(object, kNkMAIDCommand_CapGet, id, kNkMAIDDataType_StringPtr,
-            reinterpret_cast<NKPARAM>(&value), deadline, category);
-        const char* const begin = reinterpret_cast<const char*>(value.str);
-        const char* const end = begin + sizeof(value.str);
+            reinterpret_cast<NKPARAM>(value.data()), deadline, category, &value);
+        const auto* maid_string = value.as<NkMAIDString>();
+        const char* const begin = reinterpret_cast<const char*>(maid_string->str);
+        const char* const end = begin + sizeof(maid_string->str);
         const char* const terminator = std::find(begin, end, '\0');
         if (terminator == begin || terminator == end) {
             throw TransportError(std::string(category), "SDK identity string is empty or unterminated");
@@ -1069,22 +1134,28 @@ private:
             return std::nullopt;
         }
 
-        NkMAIDEnum values{};
+        auto values_query = AcquireCommandBuffer<NkMAIDEnum>(category);
         RunCompleted(object, kNkMAIDCommand_CapGet, id,
-            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_query.data()), deadline, category,
+            &values_query);
+        const NkMAIDEnum values = *values_query.as<NkMAIDEnum>();
         constexpr ULONG kMaximumStatusEnumElements = 256;
         if (values.ulElements == 0 || values.ulElements > kMaximumStatusEnumElements ||
             values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) {
             throw TransportError(std::string(category), "SDK status enum has an invalid shape");
         }
-        std::vector<ULONG> items(values.ulElements);
-        values.pData = items.data();
+        auto values_request = AcquireCommandBuffer<NkMAIDEnum>(category);
+        auto items = AcquireCommandBuffer<ULONG>(category, values.ulElements);
+        *values_request.as<NkMAIDEnum>() = values;
+        values_request.as<NkMAIDEnum>()->pData = items.data();
         RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
-            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
-        if (values.ulValue >= items.size()) {
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline, category,
+            &values_request, &items);
+        const auto current_index = values_request.as<NkMAIDEnum>()->ulValue;
+        if (current_index >= values.ulElements) {
             throw TransportError(std::string(category), "SDK status enum has an invalid current index");
         }
-        return items[values.ulValue];
+        return items.as<ULONG>()[current_index];
     }
 
     SdkCameraStatus::SettingCapability ReadSettingCapability(
@@ -1118,9 +1189,11 @@ private:
                 return result;
             }
 
-            NkMAIDEnum values{};
+            auto values_query = AcquireCommandBuffer<NkMAIDEnum>("sdk_status_failed");
             RunCompleted(object, kNkMAIDCommand_CapGet, id,
-                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_query.data()), deadline,
+                "sdk_status_failed", &values_query);
+            const NkMAIDEnum values = *values_query.as<NkMAIDEnum>();
             constexpr ULONG kMaximumStatusEnumElements = 256;
             // Bound untrusted packed SDK data to 64 KiB to avoid a malformed
             // device response forcing an unbounded allocation during status read.
@@ -1135,21 +1208,27 @@ private:
                     result.probe_state = "invalid-shape";
                     return result;
                 }
-                std::vector<ULONG> items(values.ulElements);
-                values.pData = items.data();
+                auto values_request = AcquireCommandBuffer<NkMAIDEnum>("sdk_status_failed");
+                auto items = AcquireCommandBuffer<ULONG>("sdk_status_failed", values.ulElements);
+                *values_request.as<NkMAIDEnum>() = values;
+                values_request.as<NkMAIDEnum>()->pData = items.data();
                 RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
-                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
-                if (values.ulValue >= items.size()) {
+                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline,
+                    "sdk_status_failed", &values_request, &items);
+                const auto current_index = values_request.as<NkMAIDEnum>()->ulValue;
+                if (current_index >= values.ulElements) {
                     result.probe_state = "invalid-shape";
                     return result;
                 }
                 result.available = true;
                 result.probe_state = "available";
                 result.value_type = "unsigned";
-                result.current_index = static_cast<std::uint32_t>(values.ulValue);
-                result.current_value = static_cast<std::uint32_t>(items[values.ulValue]);
-                result.numeric_values.reserve(items.size());
-                for (const ULONG item : items) result.numeric_values.push_back(static_cast<std::uint32_t>(item));
+                result.current_index = static_cast<std::uint32_t>(current_index);
+                result.current_value = static_cast<std::uint32_t>(items.as<ULONG>()[current_index]);
+                result.numeric_values.reserve(values.ulElements);
+                for (ULONG index = 0; index < values.ulElements; ++index) {
+                    result.numeric_values.push_back(static_cast<std::uint32_t>(items.as<ULONG>()[index]));
+                }
                 return result;
             }
             if (values.ulType == kNkMAIDArrayType_PackedString) {
@@ -1157,12 +1236,17 @@ private:
                     result.probe_state = "invalid-shape";
                     return result;
                 }
-                std::vector<unsigned char> bytes(values.ulElements);
-                values.pData = bytes.data();
+                auto values_request = AcquireCommandBuffer<NkMAIDEnum>("sdk_status_failed");
+                auto bytes = AcquireCommandBuffer<unsigned char>("sdk_status_failed", values.ulElements);
+                *values_request.as<NkMAIDEnum>() = values;
+                values_request.as<NkMAIDEnum>()->pData = bytes.data();
                 RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
-                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
+                    kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline,
+                    "sdk_status_failed", &values_request, &bytes);
+                const auto* bytes_begin = bytes.as<unsigned char>();
+                const std::vector<unsigned char> bytes_copy(bytes_begin, bytes_begin + values.ulElements);
                 const auto labels = ParsePackedStringLabels(
-                    bytes, kMaximumStatusEnumElements, kMaximumPackedStringBytes);
+                    bytes_copy, kMaximumStatusEnumElements, kMaximumPackedStringBytes);
                 if (!labels) {
                     result = {};
                     result.cap_type = "enum";
@@ -1170,7 +1254,8 @@ private:
                     return result;
                 }
                 result.string_values = *labels;
-                if (values.ulValue >= result.string_values.size()) {
+                const auto current_index = values_request.as<NkMAIDEnum>()->ulValue;
+                if (current_index >= result.string_values.size()) {
                     result = {};
                     result.cap_type = "enum";
                     result.probe_state = "invalid-shape";
@@ -1179,8 +1264,8 @@ private:
                 result.available = true;
                 result.probe_state = "available";
                 result.value_type = "packed-string";
-                result.current_index = static_cast<std::uint32_t>(values.ulValue);
-                result.current_label = result.string_values[values.ulValue];
+                result.current_index = static_cast<std::uint32_t>(current_index);
+                result.current_label = result.string_values[current_index];
                 return result;
             }
             if (values.ulType != kNkMAIDArrayType_String || values.ulElements > kMaximumStatusEnumElements ||
@@ -1188,11 +1273,15 @@ private:
                 result.probe_state = "invalid-shape";
                 return result;
             }
-            std::vector<NkMAIDString> items(values.ulElements);
-            values.pData = items.data();
+            auto values_request = AcquireCommandBuffer<NkMAIDEnum>("sdk_status_failed");
+            auto items = AcquireCommandBuffer<NkMAIDString>("sdk_status_failed", values.ulElements);
+            *values_request.as<NkMAIDEnum>() = values;
+            values_request.as<NkMAIDEnum>()->pData = items.data();
             RunCompleted(object, kNkMAIDCommand_CapGetArray, id,
-                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "sdk_status_failed");
-            for (const NkMAIDString& item : items) {
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline,
+                "sdk_status_failed", &values_request, &items);
+            for (ULONG index = 0; index < values.ulElements; ++index) {
+                const NkMAIDString& item = items.as<NkMAIDString>()[index];
                 const char* const begin = reinterpret_cast<const char*>(item.str);
                 const char* const end = begin + sizeof(item.str);
                 const char* const terminator = std::find(begin, end, '\0');
@@ -1204,7 +1293,8 @@ private:
                 }
                 result.string_values.emplace_back(begin, static_cast<std::size_t>(terminator - begin));
             }
-            if (values.ulValue >= result.string_values.size()) {
+            const auto current_index = values_request.as<NkMAIDEnum>()->ulValue;
+            if (current_index >= result.string_values.size()) {
                 result = {};
                 result.cap_type = "enum";
                 result.probe_state = "invalid-shape";
@@ -1213,8 +1303,8 @@ private:
             result.available = true;
             result.probe_state = "available";
             result.value_type = "string";
-            result.current_index = static_cast<std::uint32_t>(values.ulValue);
-            result.current_label = result.string_values[values.ulValue];
+            result.current_index = static_cast<std::uint32_t>(current_index);
+            result.current_label = result.string_values[current_index];
         } catch (...) {
             // Status probing is fail-closed per setting and keeps error details
             // out of anonymous evidence.
@@ -1245,9 +1335,11 @@ private:
             !Supports(object, kNkMAIDCapability_Children, kNkMAIDCapOperation_GetArray)) {
             throw TransportError(std::string(category), "SDK Children capability is unavailable");
         }
-        NkMAIDEnum values{};
+        auto values_query = AcquireCommandBuffer<NkMAIDEnum>(category);
         RunCompleted(object, kNkMAIDCommand_CapGet, kNkMAIDCapability_Children,
-            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_query.data()), deadline, category,
+            &values_query);
+        const NkMAIDEnum values = *values_query.as<NkMAIDEnum>();
         if (values.ulElements == 0) return {};
         if (values.ulElements > kMaximumNikonEnumElements) {
             throw TransportError(std::string(category), "SDK reported an implausible child ID count");
@@ -1255,11 +1347,15 @@ private:
         if (values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) {
             throw TransportError(std::string(category), "SDK child IDs have an unexpected width");
         }
-        std::vector<ULONG> ids(values.ulElements);
-        values.pData = ids.data();
+        auto values_request = AcquireCommandBuffer<NkMAIDEnum>(category);
+        auto ids = AcquireCommandBuffer<ULONG>(category, values.ulElements);
+        *values_request.as<NkMAIDEnum>() = values;
+        values_request.as<NkMAIDEnum>()->pData = ids.data();
         RunCompleted(object, kNkMAIDCommand_CapGetArray, kNkMAIDCapability_Children,
-            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, category);
-        return ids;
+            kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline, category,
+            &values_request, &ids);
+        const auto* ids_begin = ids.as<ULONG>();
+        return {ids_begin, ids_begin + values.ulElements};
     }
 
     std::string Firmware(
@@ -1269,11 +1365,13 @@ private:
         const auto* cap = Capability(source, kNkMAIDCapability_Firmware);
         if (cap == nullptr || !Supports(source, kNkMAIDCapability_Firmware, kNkMAIDCapOperation_Get)) return "unknown";
         if (cap->ulType == kNkMAIDCapType_String) {
-            NkMAIDString value{};
+            auto value = AcquireCommandBuffer<NkMAIDString>(category);
             RunCompleted(source, kNkMAIDCommand_CapGet, kNkMAIDCapability_Firmware,
-                kNkMAIDDataType_StringPtr, reinterpret_cast<NKPARAM>(&value), deadline, category);
-            const char* const begin = reinterpret_cast<const char*>(value.str);
-            const char* const end = begin + sizeof(value.str);
+                kNkMAIDDataType_StringPtr, reinterpret_cast<NKPARAM>(value.data()), deadline, category,
+                &value);
+            const auto* maid_string = value.as<NkMAIDString>();
+            const char* const begin = reinterpret_cast<const char*>(maid_string->str);
+            const char* const end = begin + sizeof(maid_string->str);
             const char* const terminator = std::find(begin, end, '\0');
             if (terminator == begin || terminator == end) {
                 return "unknown";
@@ -1298,17 +1396,23 @@ private:
         if (cap->ulType == kNkMAIDCapType_Unsigned) {
             value = GetUnsigned(source, kNkMAIDCapability_ShootingMode, deadline, "inventory_failed");
         } else if (cap->ulType == kNkMAIDCapType_Enum) {
-            NkMAIDEnum values{};
+            auto values_query = AcquireCommandBuffer<NkMAIDEnum>("inventory_failed");
             RunCompleted(source, kNkMAIDCommand_CapGet, kNkMAIDCapability_ShootingMode,
-                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "inventory_failed");
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_query.data()), deadline,
+                "inventory_failed", &values_query);
+            const NkMAIDEnum values = *values_query.as<NkMAIDEnum>();
             if (values.ulElements == 0 || values.ulElements > kMaximumNikonEnumElements ||
                 values.wPhysicalBytes != static_cast<SWORD>(sizeof(ULONG))) return "unknown";
-            std::vector<ULONG> items(values.ulElements);
-            values.pData = items.data();
+            auto values_request = AcquireCommandBuffer<NkMAIDEnum>("inventory_failed");
+            auto items = AcquireCommandBuffer<ULONG>("inventory_failed", values.ulElements);
+            *values_request.as<NkMAIDEnum>() = values;
+            values_request.as<NkMAIDEnum>()->pData = items.data();
             RunCompleted(source, kNkMAIDCommand_CapGetArray, kNkMAIDCapability_ShootingMode,
-                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(&values), deadline, "inventory_failed");
-            if (values.ulValue >= items.size()) return "unknown";
-            value = items[values.ulValue];
+                kNkMAIDDataType_EnumPtr, reinterpret_cast<NKPARAM>(values_request.data()), deadline,
+                "inventory_failed", &values_request, &items);
+            const auto current_index = values_request.as<NkMAIDEnum>()->ulValue;
+            if (current_index >= values.ulElements) return "unknown";
+            value = items.as<ULONG>()[current_index];
         } else {
             return "unknown";
         }
@@ -1331,32 +1435,32 @@ private:
     void SetEventCallback(MaidObject& object, std::chrono::steady_clock::time_point deadline,
                           std::string_view category) {
         if (!Supports(object, kNkMAIDCapability_EventProc, kNkMAIDCapOperation_Set)) return;
-        NkMAIDCallback callback{};
-        callback.pProc = object.value.ulType == kNkMAIDObjectType_Module
+        auto* callback = AcquireSessionBuffer<NkMAIDCallback>(category);
+        callback->pProc = object.value.ulType == kNkMAIDObjectType_Module
             ? reinterpret_cast<LPNKFUNC>(&ModuleEventProc)
             : reinterpret_cast<LPNKFUNC>(&SourceEventProc);
-        callback.refProc = reinterpret_cast<NKREF>(this);
+        callback->refProc = reinterpret_cast<NKREF>(this);
         RunCompleted(object, kNkMAIDCommand_CapSet, kNkMAIDCapability_EventProc,
-            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(&callback), deadline, category);
+            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(callback), deadline, category);
     }
 
     void SetProgressCallback(MaidObject& object, std::chrono::steady_clock::time_point deadline,
                              std::string_view category) {
         if (!Supports(object, kNkMAIDCapability_ProgressProc, kNkMAIDCapOperation_Set)) return;
-        NkMAIDCallback callback{};
-        callback.pProc = reinterpret_cast<LPNKFUNC>(&ProgressProc);
-        callback.refProc = reinterpret_cast<NKREF>(this);
+        auto* callback = AcquireSessionBuffer<NkMAIDCallback>(category);
+        callback->pProc = reinterpret_cast<LPNKFUNC>(&ProgressProc);
+        callback->refProc = reinterpret_cast<NKREF>(this);
         RunCompleted(object, kNkMAIDCommand_CapSet, kNkMAIDCapability_ProgressProc,
-            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(&callback), deadline, category);
+            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(callback), deadline, category);
     }
 
     void SetUiCallback(MaidObject& object, std::chrono::steady_clock::time_point deadline) {
         if (!Supports(object, kNkMAIDCapability_UIRequestProc, kNkMAIDCapOperation_Set)) return;
-        NkMAIDCallback callback{};
-        callback.pProc = reinterpret_cast<LPNKFUNC>(&UiRequestProc);
-        callback.refProc = reinterpret_cast<NKREF>(this);
+        auto* callback = AcquireSessionBuffer<NkMAIDCallback>("open_failed");
+        callback->pProc = reinterpret_cast<LPNKFUNC>(&UiRequestProc);
+        callback->refProc = reinterpret_cast<NKREF>(this);
         RunCompleted(object, kNkMAIDCommand_CapSet, kNkMAIDCapability_UIRequestProc,
-            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(&callback), deadline, "open_failed");
+            kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(callback), deadline, "open_failed");
     }
 
     void StartProcess(MaidObject& object, ULONG capability,
@@ -1420,7 +1524,7 @@ private:
         std::vector<CameraInfo> cameras;
         std::set<std::string> identities;
         for (const ULONG id : WaitForSourceIds(deadline, "inventory_failed")) {
-            MaidObject source;
+            MaidObject& source = AcquireSessionMaidObject("inventory_failed");
             OpenChild(module_, source, id, "inventory_failed");
             try {
                 EnumerateCapabilities(source, deadline, "inventory_failed");
@@ -1467,6 +1571,20 @@ private:
         child.opened = true;
     }
 
+    MaidObject& AcquireSessionMaidObject(std::string_view category) {
+        if (maid_objects_.size() >= kMaximumSessionMaidObjects) {
+            throw TransportError(
+                std::string(category),
+                "SDK session object capacity is exhausted; refusing a new object open");
+        }
+        try {
+            maid_objects_.push_back(std::make_unique<MaidObject>());
+        } catch (const std::bad_alloc&) {
+            throw TransportError(std::string(category), "SDK session object allocation failed");
+        }
+        return *maid_objects_.back();
+    }
+
     void ReconcileChildren(std::chrono::steady_clock::time_point deadline) {
         try {
             // MAID permits clients to force publication of all current child
@@ -1501,8 +1619,8 @@ private:
     }
 
     ImageCandidate AcquireCandidate(ULONG id, std::chrono::steady_clock::time_point deadline) {
-        MaidObject item;
-        MaidObject data;
+        MaidObject& item = AcquireSessionMaidObject("download_failed");
+        MaidObject& data = AcquireSessionMaidObject("download_failed");
         OpenChild(source_, item, id, "download_failed");
         try {
             EnumerateCapabilities(item, deadline, "download_failed");
@@ -1519,11 +1637,11 @@ private:
             auto download = std::make_unique<DownloadState>();
             DownloadState* download_state = download.get();
             downloads_.push_back(std::move(download));
-            NkMAIDCallback callback{};
-            callback.pProc = reinterpret_cast<LPNKFUNC>(&DataProc);
-            callback.refProc = reinterpret_cast<NKREF>(download_state);
+            auto* callback = AcquireSessionBuffer<NkMAIDCallback>("download_failed");
+            callback->pProc = reinterpret_cast<LPNKFUNC>(&DataProc);
+            callback->refProc = reinterpret_cast<NKREF>(download_state);
             RunCompleted(data, kNkMAIDCommand_CapSet, kNkMAIDCapability_DataProc,
-                kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(&callback), deadline, "download_failed");
+                kNkMAIDDataType_CallbackPtr, reinterpret_cast<NKPARAM>(callback), deadline, "download_failed");
             StartProcess(data, kNkMAIDCapability_Acquire, deadline, "download_timeout");
             try {
                 RunCompleted(data, kNkMAIDCommand_CapSet, kNkMAIDCapability_DataProc,
@@ -1596,8 +1714,18 @@ private:
             RemoveDllDirectory(dll_directory_);
             dll_directory_ = nullptr;
         }
+        // Vendor code is now absent from the process. Only at this point may
+        // uncertain command buffers, retained callback payloads, and MAID
+        // object/capability storage be released.
+        sdk_buffers_.ReleaseAfterSdkUnload();
+        maid_objects_.clear();
+        module_.capabilities.clear();
+        source_.capabilities.clear();
         completions_.clear();
         downloads_.clear();
+#ifndef NDEBUG
+        run_completed_thread_ = {};
+#endif
     }
 
     void CleanupNoThrow() noexcept {
@@ -1723,10 +1851,15 @@ private:
     std::string baseline_token_;
     unsigned long long baseline_sequence_{0};
     std::string sdk_version_;
+    SdkBufferArena sdk_buffers_;
+    std::vector<std::unique_ptr<MaidObject>> maid_objects_;
     std::vector<std::unique_ptr<CompletionState>> completions_;
     std::vector<std::unique_ptr<DownloadState>> downloads_;
     bool require_exactly_one_d810_{};
     SdkCommandTrace trace_;
+#ifndef NDEBUG
+    std::thread::id run_completed_thread_{};
+#endif
 
     friend class NikonSdkTransport;
 };
