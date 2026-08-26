@@ -256,12 +256,17 @@ public sealed class OperatorShellViewModel : ObservableObject
         // なるまで撮影を開始できない。実機用の binding Agent host はまだ存在しないため、
         // HardwareDual では接続に失敗し HardwarePending のまま止まる——これは仕様どおりで、
         // 模擬 binding を実機の合格として見せないための意図的な状態。
+        // GitHub Issue #85: この固定パイプ名 transport には launcher (spawned host) が存在せず、
+        // 照合すべき正規PIDを持たない。NamedPipeServerIdentity.NoLauncherProcessId は実在し得ない
+        // PIDなので、万一同名パイプに何かが応答してもサーバ同一性チェックは必ず不一致で
+        // fail-closed になる。
         var isHardwareDual =
             _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual;
         DualBinding = new DualBindingViewModel(
             new DualBindingSessionClient(dualBindingTransport ?? (isHardwareDual
                 ? new NamedPipeHardwareCameraAgentTransport(
-                    DualBindingCameraAgentProtocol.DefaultPipeName)
+                    DualBindingCameraAgentProtocol.DefaultPipeName,
+                    NamedPipeServerIdentity.NoLauncherProcessId)
                 : new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()))),
             isRequired: isHardwareDual);
         DualBinding.PropertyChanged += OnDualBindingChanged;

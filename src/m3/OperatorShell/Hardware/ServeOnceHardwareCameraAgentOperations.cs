@@ -196,10 +196,11 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
 
         return RunPipeAsync(
             CaptureResponseTimeout,
-            async (pipeName, token) =>
+            async (pipeName, serverProcessId, token) =>
             {
                 var transport = new NamedPipeHardwareCameraAgentTransport(
                     pipeName,
+                    serverProcessId,
                     ConnectTimeout,
                     CaptureResponseTimeout);
                 var responseJson = await transport.SendAsync(requestJson, token).ConfigureAwait(false);
@@ -236,14 +237,14 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         CancellationToken cancellationToken) =>
         await RunPipeAsync(
             responseTimeout,
-            (pipeName, token) => operation(
-                new HardwareCameraAgentClient(pipeName, ConnectTimeout, responseTimeout),
+            (pipeName, serverProcessId, token) => operation(
+                new HardwareCameraAgentClient(pipeName, serverProcessId, ConnectTimeout, responseTimeout),
                 token),
             cancellationToken).ConfigureAwait(false);
 
     private async Task<T> RunPipeAsync<T>(
         TimeSpan responseTimeout,
-        Func<string, CancellationToken, Task<T>> operation,
+        Func<string, int, CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken)
     {
         if (!AgentExecutableAvailable)
@@ -279,7 +280,7 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         var standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
         try
         {
-            var result = await operation(pipeName, cancellationToken).ConfigureAwait(false);
+            var result = await operation(pipeName, process.Id, cancellationToken).ConfigureAwait(false);
             await WaitForSuccessfulExitAsync(process, standardOutput, standardError).ConfigureAwait(false);
             return result;
         }

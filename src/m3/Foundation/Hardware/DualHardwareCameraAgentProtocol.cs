@@ -513,10 +513,12 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
     }
 
     public DualHardwareCameraAgentOperations(
-        string pipeName = DualHardwareCameraAgentProtocol.DefaultPipeName,
+        string pipeName,
+        int expectedServerProcessId,
         TimeSpan? connectTimeout = null,
         TimeSpan? responseTimeout = null)
-        : this(new NamedPipeHardwareCameraAgentTransport(pipeName, connectTimeout, responseTimeout))
+        : this(new NamedPipeHardwareCameraAgentTransport(
+            pipeName, expectedServerProcessId, connectTimeout, responseTimeout))
     {
     }
 

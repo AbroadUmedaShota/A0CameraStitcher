@@ -9,13 +9,29 @@ public interface IHardwareCameraAgentTransport
     Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default);
 }
 
-public sealed class HardwareCameraAgentConnectException : IOException
+public class HardwareCameraAgentConnectException : IOException
 {
     internal HardwareCameraAgentConnectException(
         string pipeName,
         bool callerCancellationRequested,
         Exception innerException)
-        : base("The hardware Camera Agent pipe connection failed before request dispatch.", innerException)
+        : this(
+            "The hardware Camera Agent pipe connection failed before request dispatch.",
+            pipeName,
+            callerCancellationRequested,
+            innerException)
+    {
+    }
+
+    // Lets HardwareCameraAgentServerIdentityException (Issue #85) supply its own message while
+    // still going through this type's fields and IOException base -- see that type's remarks for
+    // why it derives from this one instead of being a fully independent sibling.
+    private protected HardwareCameraAgentConnectException(
+        string message,
+        string pipeName,
+        bool callerCancellationRequested,
+        Exception? innerException)
+        : base(message, innerException)
     {
         PipeName = pipeName;
         CallerCancellationRequested = callerCancellationRequested;
@@ -49,16 +65,40 @@ public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgent
 {
     private const byte DeliveryAcknowledgment = 0x06;
     private readonly string _pipeName;
+    private readonly int? _expectedServerProcessId;
     private readonly TimeSpan _connectTimeout;
     private readonly TimeSpan _responseTimeout;
 
     public NamedPipeHardwareCameraAgentTransport(
-        string pipeName = HardwareCameraAgentProtocol.DefaultPipeName,
+        string pipeName,
+        int expectedServerProcessId,
         TimeSpan? connectTimeout = null,
         TimeSpan? responseTimeout = null)
+        : this(pipeName, (int?)expectedServerProcessId, connectTimeout, responseTimeout)
+    {
+    }
+
+    /// <summary>
+    /// Skips the Issue #85 server-identity check entirely (fail-open). Test-only: production
+    /// code must always go through the primary constructor and supply the PID of the process it
+    /// spawned, so a caller can never end up on this path by simply omitting an optional
+    /// argument.
+    /// </summary>
+    public static NamedPipeHardwareCameraAgentTransport CreateWithoutServerIdentityVerificationForTesting(
+        string pipeName,
+        TimeSpan? connectTimeout = null,
+        TimeSpan? responseTimeout = null) =>
+        new(pipeName, expectedServerProcessId: null, connectTimeout, responseTimeout);
+
+    private NamedPipeHardwareCameraAgentTransport(
+        string pipeName,
+        int? expectedServerProcessId,
+        TimeSpan? connectTimeout,
+        TimeSpan? responseTimeout)
     {
         ValidatePipeName(pipeName);
         _pipeName = pipeName;
+        _expectedServerProcessId = expectedServerProcessId;
         _connectTimeout = ValidateTimeout(
             connectTimeout ?? TimeSpan.FromSeconds(5),
             nameof(connectTimeout));
@@ -96,6 +136,15 @@ public sealed class NamedPipeHardwareCameraAgentTransport : IHardwareCameraAgent
                     cancellationToken.IsCancellationRequested,
                     exception);
             }
+        }
+
+        // GitHub Issue #85: CurrentUserOnly only rules out a different Windows user squatting on
+        // the pipe name; it does not rule out a same-user process creating it first. Verify the
+        // connected server is the exact process this caller spawned before any request byte is
+        // written -- see NamedPipeServerIdentity for why this closes that remaining gap.
+        if (_expectedServerProcessId is { } expectedServerProcessId)
+        {
+            NamedPipeServerIdentity.Verify(pipe, _pipeName, expectedServerProcessId);
         }
 
         using var responseSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -265,10 +314,12 @@ public sealed class HardwareCameraAgentClient : IHardwareCameraAgentClient
     }
 
     public HardwareCameraAgentClient(
-        string pipeName = HardwareCameraAgentProtocol.DefaultPipeName,
+        string pipeName,
+        int expectedServerProcessId,
         TimeSpan? connectTimeout = null,
         TimeSpan? responseTimeout = null)
-        : this(new NamedPipeHardwareCameraAgentTransport(pipeName, connectTimeout, responseTimeout))
+        : this(new NamedPipeHardwareCameraAgentTransport(
+            pipeName, expectedServerProcessId, connectTimeout, responseTimeout))
     {
     }
 
