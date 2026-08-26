@@ -135,10 +135,10 @@ public sealed class PersistentHardwareCameraAgentOperations :
 
         return RunSerializedAsync(
             CaptureResponseTimeout,
-            async (pipeName, token) =>
+            async (pipeName, serverProcessId, token) =>
             {
                 var transport = new NamedPipeHardwareCameraAgentTransport(
-                    pipeName, ConnectTimeout, CaptureResponseTimeout);
+                    pipeName, serverProcessId, ConnectTimeout, CaptureResponseTimeout);
                 _captureMayBeActive = true;
                 try
                 {
@@ -227,8 +227,8 @@ public sealed class PersistentHardwareCameraAgentOperations :
         bool allowWhileCaptureMayBeActive = false) =>
         RunSerializedAsync(
             responseTimeout,
-            (pipeName, token) => operation(
-                new HardwareCameraAgentClient(pipeName, ConnectTimeout, responseTimeout),
+            (pipeName, serverProcessId, token) => operation(
+                new HardwareCameraAgentClient(pipeName, serverProcessId, ConnectTimeout, responseTimeout),
                 token),
             cancellationToken,
             allowWhileCaptureMayBeActive);
@@ -245,7 +245,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
         CancellationToken cancellationToken) =>
         RunSerializedAsync(
             LiveViewResponseTimeout,
-            async (pipeName, token) =>
+            async (pipeName, serverProcessId, token) =>
             {
                 if (setOwnedSession != true && _ownedSessionId is not null &&
                     _ownedSessionId != sessionId)
@@ -253,7 +253,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
                     throw new InvalidOperationException("A different Live View session owns the Camera Agent.");
                 }
                 var transport = new NamedPipeHardwareCameraAgentTransport(
-                    pipeName, ConnectTimeout, LiveViewResponseTimeout);
+                    pipeName, serverProcessId, ConnectTimeout, LiveViewResponseTimeout);
                 var reply = await operation(new HardwareContinuousLiveViewClient(transport), token)
                     .ConfigureAwait(false);
                 if (reply.Success)
@@ -273,7 +273,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
 
     private async Task<T> RunSerializedAsync<T>(
         TimeSpan responseTimeout,
-        Func<string, CancellationToken, Task<T>> operation,
+        Func<string, int, CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken,
         bool allowWhileCaptureMayBeActive = false)
     {
@@ -281,10 +281,10 @@ public sealed class PersistentHardwareCameraAgentOperations :
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var pipeName = EnsureProcessStarted(allowWhileCaptureMayBeActive);
+            var (pipeName, serverProcessId) = EnsureProcessStarted(allowWhileCaptureMayBeActive);
             try
             {
-                return await operation(pipeName, cancellationToken).ConfigureAwait(false);
+                return await operation(pipeName, serverProcessId, cancellationToken).ConfigureAwait(false);
             }
             catch (IOException exception) when (exception is not HardwareCameraAgentConnectException)
             {
@@ -346,11 +346,11 @@ public sealed class PersistentHardwareCameraAgentOperations :
             responseFailureStage: responseFailureStage);
     }
 
-    private string EnsureProcessStarted(bool allowWhileCaptureMayBeActive)
+    private (string PipeName, int ServerProcessId) EnsureProcessStarted(bool allowWhileCaptureMayBeActive)
     {
         if (_process is { HasExited: false } && _pipeName is not null)
         {
-            return _pipeName;
+            return (_pipeName, _process.Id);
         }
         // GitHub Issue #93: capture が未確定(_captureMayBeActive)でも、結果を確認する
         // 読み取り専用の get-transaction-result だけは新しい agent を起動して照会できる
@@ -386,7 +386,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
             _process = process;
             _standardOutput = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
             _standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
-            return _pipeName;
+            return (_pipeName, process.Id);
         }
         catch (HardwareCameraAgentLaunchException)
         {
@@ -478,7 +478,7 @@ public sealed class PersistentHardwareCameraAgentOperations :
                 try
                 {
                     var transport = new NamedPipeHardwareCameraAgentTransport(
-                        _pipeName, ConnectTimeout, LiveViewResponseTimeout);
+                        _pipeName, _process.Id, ConnectTimeout, LiveViewResponseTimeout);
                     var closeReply = await new HardwareContinuousLiveViewClient(transport)
                         .CloseAsync(ownedSessionId)
                         .ConfigureAwait(false);

@@ -5,5 +5,8 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <LangVersion>latest</LangVersion>
+    <!-- Required by the LibraryImport-generated marshalling code for
+         NamedPipeServerIdentity's GetNamedPipeServerProcessId P/Invoke (Issue #85). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 </Project>

@@ -256,7 +256,8 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             _standardOutput = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
             _standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
             _pipeName = pipeName;
-            _wireOperations = new DualHardwareCameraAgentOperations(pipeName, ConnectTimeout, ResponseTimeout);
+            _wireOperations = new DualHardwareCameraAgentOperations(
+                pipeName, process.Id, ConnectTimeout, ResponseTimeout);
             return _wireOperations;
         }
         catch (HardwareCameraAgentLaunchException)

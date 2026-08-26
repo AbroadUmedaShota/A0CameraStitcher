@@ -1827,8 +1827,11 @@ static async Task HardwareNamedPipeRoundtripAsync()
 {
     var pipeName = $"a0-camera-stitcher-hardware-{Guid.NewGuid():N}";
     var serverTask = ServeHardwareReadinessOnceAsync(pipeName);
+    // The fake server above runs in this same test process, so its actual named pipe server PID
+    // is this process's own PID.
     var client = new HardwareCameraAgentClient(
         pipeName,
+        Environment.ProcessId,
         connectTimeout: TimeSpan.FromSeconds(5),
         responseTimeout: TimeSpan.FromSeconds(5));
 
@@ -1840,12 +1843,16 @@ static async Task HardwareNamedPipeRoundtripAsync()
     await HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync();
     await HardwareConnectFailureIsTypedAsync();
     await HardwarePostDispatchCancellationIsNotConnectFailureAsync();
+    await HardwareServerIdentityMismatchFailsClosedAsync();
 }
 
 static async Task HardwareConnectFailureIsTypedAsync()
 {
     var pipeName = $"a0-camera-stitcher-hardware-missing-{Guid.NewGuid():N}";
-    var transport = new NamedPipeHardwareCameraAgentTransport(
+    // No server exists for this pipe name, so ConnectAsync itself must fail before the Issue #85
+    // identity check ever runs -- server-identity verification is intentionally not exercised
+    // here.
+    var transport = NamedPipeHardwareCameraAgentTransport.CreateWithoutServerIdentityVerificationForTesting(
         pipeName,
         connectTimeout: TimeSpan.FromSeconds(5),
         responseTimeout: TimeSpan.FromSeconds(5));
@@ -1878,8 +1885,12 @@ static async Task HardwarePostDispatchCancellationIsNotConnectFailureAsync()
         pipeName,
         requestReceived,
         releaseServer);
+    // The fake server above runs in this same test process, so its actual named pipe server PID
+    // is this process's own PID -- this exercises the Issue #85 identity check on its normal
+    // (matching) path as a side effect of dispatch actually happening.
     var transport = new NamedPipeHardwareCameraAgentTransport(
         pipeName,
+        Environment.ProcessId,
         connectTimeout: TimeSpan.FromSeconds(5),
         responseTimeout: TimeSpan.FromSeconds(5));
     using var cancellationSource = new CancellationTokenSource();
@@ -1906,6 +1917,65 @@ static async Task HardwarePostDispatchCancellationIsNotConnectFailureAsync()
         releaseServer.TrySetResult(true);
         await serverTask;
     }
+}
+
+// GitHub Issue #85: the client must reject a connection whose actual named pipe server process
+// does not match the process it expected, and it must do so before ever writing a request frame.
+static async Task HardwareServerIdentityMismatchFailsClosedAsync()
+{
+    var pipeName = $"a0-camera-stitcher-hardware-identity-{Guid.NewGuid():N}";
+    var clientDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = ServeHardwareConnectionOnlyOnceAsync(pipeName, clientDone.Task);
+
+    // Deliberately wrong: the fake server above always answers from this very test process, so
+    // any PID other than Environment.ProcessId is guaranteed to mismatch it.
+    var wrongServerProcessId = Environment.ProcessId == int.MaxValue
+        ? Environment.ProcessId - 1
+        : Environment.ProcessId + 1;
+    var transport = new NamedPipeHardwareCameraAgentTransport(
+        pipeName,
+        wrongServerProcessId,
+        connectTimeout: TimeSpan.FromSeconds(5),
+        responseTimeout: TimeSpan.FromSeconds(5));
+
+    try
+    {
+        try
+        {
+            await transport.SendAsync("{}");
+            throw new InvalidOperationException("A server-identity mismatch must fail closed before dispatch.");
+        }
+        catch (HardwareCameraAgentServerIdentityException exception)
+        {
+            Check.Equal(pipeName, exception.PipeName);
+            Check.Equal(wrongServerProcessId, exception.ExpectedServerProcessId);
+            Check.Equal(Environment.ProcessId, exception.ActualServerProcessId);
+            Check.False(
+                exception.CallerCancellationRequested,
+                "A server-identity mismatch is not a caller cancellation.");
+        }
+    }
+    finally
+    {
+        clientDone.TrySetResult(true);
+        await serverTask;
+    }
+}
+
+static async Task ServeHardwareConnectionOnlyOnceAsync(string pipeName, Task clientDone)
+{
+    await using var pipe = new NamedPipeServerStream(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await pipe.WaitForConnectionAsync(timeoutSource.Token);
+    // The client is expected to fail its own server-identity check and never write a request
+    // frame. Keep the pipe open only until the client signals its check is done, so the
+    // client-side GetNamedPipeServerProcessId call always sees a live server handle.
+    await clientDone.WaitAsync(timeoutSource.Token);
 }
 
 static async Task HoldHardwarePipeAfterRequestAsync(
@@ -1991,8 +2061,11 @@ static async Task HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync()
     {
         var pipeName = $"a0-camera-stitcher-hardware-invalid-{Guid.NewGuid():N}";
         var serverTask = ServeInvalidHardwareResponseOnceAsync(pipeName, invalidUtf8);
+        // The fake server above runs in this same test process, so its actual named pipe server
+        // PID is this process's own PID.
         var transport = new NamedPipeHardwareCameraAgentTransport(
             pipeName,
+            Environment.ProcessId,
             connectTimeout: TimeSpan.FromSeconds(5),
             responseTimeout: TimeSpan.FromSeconds(5));
         await Check.ThrowsAsync<IOException>(() => transport.SendAsync("{}"));
