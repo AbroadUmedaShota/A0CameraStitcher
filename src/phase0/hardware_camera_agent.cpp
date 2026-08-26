@@ -3263,6 +3263,127 @@ ProductionHardwareCameraAgentConfig ProductionHardwareCameraAgentConfig::Default
     return config;
 }
 
+namespace {
+
+struct TimeoutEnvironmentOverrideSpec {
+    std::chrono::seconds Timeouts::*field;
+    const char* variable_name;
+    const char* field_label;
+};
+
+constexpr TimeoutEnvironmentOverrideSpec kTimeoutEnvironmentOverrides[] = {
+    {&Timeouts::open, "A0_CAMERA_AGENT_OPEN_TIMEOUT_MS", "open"},
+    {&Timeouts::image_event, "A0_CAMERA_AGENT_IMAGE_EVENT_TIMEOUT_MS", "image_event"},
+    {&Timeouts::download, "A0_CAMERA_AGENT_DOWNLOAD_TIMEOUT_MS", "download"},
+    {&Timeouts::close, "A0_CAMERA_AGENT_CLOSE_TIMEOUT_MS", "close"},
+    {&Timeouts::live_view_frame, "A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS",
+     "live_view_frame"},
+};
+
+// 24 hours in milliseconds. A sane upper bound so a corrupted or wildly
+// wrong value (e.g. nanoseconds passed where milliseconds were expected) is
+// refused outright rather than silently accepted as some enormous timeout.
+constexpr unsigned long long kMaxTimeoutOverrideMilliseconds =
+    24ULL * 60ULL * 60ULL * 1000ULL;
+
+std::wstring WidenAsciiLiteral(const char* value) {
+    std::wstring output;
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        output.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*cursor)));
+    }
+    return output;
+}
+
+std::chrono::seconds ParseTimeoutOverrideMilliseconds(
+    const char* field_label, const std::wstring& raw) {
+    if (raw.empty() ||
+        !std::all_of(raw.begin(), raw.end(), [](wchar_t character) {
+            return character >= L'0' && character <= L'9';
+        })) {
+        throw std::invalid_argument(
+            std::string("timeout override for ") + field_label +
+            " must be a positive whole number of milliseconds (digits only)");
+    }
+    unsigned long long milliseconds = 0;
+    try {
+        const std::string digits(raw.begin(), raw.end());
+        std::size_t consumed = 0;
+        milliseconds = std::stoull(digits, &consumed);
+        if (consumed != digits.size()) {
+            throw std::out_of_range("trailing characters after the number");
+        }
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            std::string("timeout override for ") + field_label +
+            " is not a valid millisecond count");
+    }
+    if (milliseconds == 0) {
+        throw std::invalid_argument(
+            std::string("timeout override for ") + field_label +
+            " must be greater than zero milliseconds");
+    }
+    if (milliseconds > kMaxTimeoutOverrideMilliseconds) {
+        throw std::invalid_argument(
+            std::string("timeout override for ") + field_label +
+            " exceeds the maximum accepted value (24 hours in milliseconds)");
+    }
+    if (milliseconds % 1000ULL != 0ULL) {
+        throw std::invalid_argument(
+            std::string("timeout override for ") + field_label +
+            " must be a whole number of seconds (a multiple of 1000 "
+            "milliseconds); fractional-second timeouts are not "
+            "representable and are rejected instead of being silently "
+            "rounded");
+    }
+    return std::chrono::seconds(static_cast<long long>(milliseconds / 1000ULL));
+}
+
+} // namespace
+
+std::optional<std::wstring> RealEnvironmentVariable(std::wstring_view name) {
+    const std::wstring name_copy(name);
+    wchar_t stack_buffer[256];
+    const DWORD written = ::GetEnvironmentVariableW(
+        name_copy.c_str(), stack_buffer,
+        static_cast<DWORD>(std::size(stack_buffer)));
+    if (written == 0) {
+        // Not set, or set to "" (Windows reports both identically) -- either
+        // way there is no override value to return.
+        return std::nullopt;
+    }
+    if (written < std::size(stack_buffer)) {
+        return std::wstring(stack_buffer, written);
+    }
+    // The value did not fit the stack buffer. `written` is the required
+    // buffer size including the null terminator; retry with an exact-size
+    // heap buffer per the GetEnvironmentVariableW contract.
+    std::wstring value(written, L'\0');
+    const DWORD copied = ::GetEnvironmentVariableW(
+        name_copy.c_str(), value.data(), written);
+    if (copied == 0 || copied >= written) return std::nullopt;
+    value.resize(copied);
+    return value;
+}
+
+void ApplyTimeoutEnvironmentOverrides(
+    Timeouts& timeouts,
+    std::vector<std::string>& applied_overrides_trace,
+    const std::function<std::optional<std::wstring>(std::wstring_view)>&
+        environment_lookup) {
+    for (const TimeoutEnvironmentOverrideSpec& spec : kTimeoutEnvironmentOverrides) {
+        const std::optional<std::wstring> raw =
+            environment_lookup(WidenAsciiLiteral(spec.variable_name));
+        if (!raw.has_value() || raw->empty()) continue;
+        const std::chrono::seconds value =
+            ParseTimeoutOverrideMilliseconds(spec.field_label, *raw);
+        timeouts.*(spec.field) = value;
+        applied_overrides_trace.push_back(
+            std::string("hardware Camera Agent timeout override applied: ") +
+            spec.field_label + "=" + std::to_string(value.count()) +
+            "s (from " + spec.variable_name + ")");
+    }
+}
+
 class NikonContinuousLiveViewSdkTransport final
     : public IContinuousLiveViewSdkTransport {
 public:

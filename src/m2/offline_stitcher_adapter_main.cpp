@@ -93,9 +93,14 @@ std::vector<double> ParseDoubles(const std::wstring& value) {
         const auto end = value.find(L',', start);
         const auto token = value.substr(start, end == std::wstring::npos ? value.size() - start : end - start);
         const auto utf8 = Utf8(token);
-        std::size_t consumed = 0;
-        const auto parsed = std::stod(utf8, &consumed);
-        if (consumed != utf8.size()) throw std::invalid_argument("invalid floating point list");
+        double parsed{};
+        const auto result = std::from_chars(utf8.data(), utf8.data() + utf8.size(), parsed);
+        // std::from_chars (unlike std::stod) never accepts a "0x1.8p3"-style
+        // hex float, leading whitespace, or a leading '+', so a value like
+        // "0x10" cannot silently become 16.0 here.
+        if (result.ec != std::errc{} || result.ptr != utf8.data() + utf8.size()) {
+            throw std::invalid_argument("invalid floating point list");
+        }
         values.push_back(parsed);
         if (end == std::wstring::npos) break;
         start = end + 1;
@@ -181,8 +186,15 @@ void ValidateCanonicalJpeg(
     if (!std::filesystem::is_regular_file(input) || expected_width == 0 || expected_height == 0) {
         throw std::invalid_argument("canonical JPEG validation input is invalid");
     }
-    std::ifstream jpeg_stream(input, std::ios::binary);
     const auto encoded_size = std::filesystem::file_size(input);
+    // Mirrors the 64 MiB compressed-JPEG ceiling enforced on the capture
+    // path (offline_stitcher.cpp's LockedReadFile::ReadAll); without this,
+    // an oversized file on disk would make this validation step attempt an
+    // unbounded allocation and read.
+    if (encoded_size == 0 || encoded_size > a0::m2::kMaximumCompressedJpegBytes) {
+        throw std::invalid_argument("canonical JPEG byte size is empty or exceeds the 64 MiB limit");
+    }
+    std::ifstream jpeg_stream(input, std::ios::binary);
     std::vector<std::uint8_t> encoded(static_cast<std::size_t>(encoded_size));
     jpeg_stream.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
     if (!jpeg_stream || jpeg_stream.gcount() != static_cast<std::streamsize>(encoded.size()) ||
@@ -196,7 +208,13 @@ void ValidateCanonicalJpeg(
         while (position < encoded.size() && encoded[position] == 0xffU) ++position;
         if (position >= encoded.size()) throw std::runtime_error("canonical JPEG marker is truncated");
         const auto marker = encoded[position++];
-        if (marker == 0xd9U || marker == 0x00U || (marker >= 0xd0U && marker <= 0xd7U)) {
+        // TEM (0x01), SOI (0xd8), EOI (0xd9), and RST0-RST7 (0xd0-0xd7) carry
+        // no length field per the JPEG spec. Without listing 0x01 and 0xd8
+        // here too, either one reaching this point would fall through to the
+        // length-field read below and misread its following two bytes as a
+        // segment length instead of being rejected outright.
+        if (marker == 0x01U || marker == 0xd8U || marker == 0xd9U || marker == 0x00U ||
+            (marker >= 0xd0U && marker <= 0xd7U)) {
             throw std::runtime_error("canonical JPEG ended before a complete scan");
         }
         if (position + 2U > encoded.size()) throw std::runtime_error("canonical JPEG segment is truncated");

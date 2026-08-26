@@ -546,11 +546,32 @@ public:
         Check(manager->GetDevices(nullptr, &count), "inventory_failed", "count WPD devices");
         std::vector<PWSTR> ids(count, nullptr);
         if (count != 0) Check(manager->GetDevices(ids.data(), &count), "inventory_failed", "enumerate WPD devices");
+        // IPortableDeviceManager::GetDevices allocates each populated ID with
+        // CoTaskMemAlloc. This guard frees whatever remains no matter how the
+        // loop below is exited (a Check() failure partway through, the
+        // identity_collision throw, or normal completion), so an exception
+        // raised while processing one device never leaks the CoTaskMemAlloc
+        // buffers for the devices not yet reached. Mirrors the equivalent
+        // guard in the content-enumeration loop below.
+        struct FreeRemainingIds final {
+            std::vector<PWSTR>& ids;
+            ~FreeRemainingIds() {
+                for (PWSTR& id : ids) {
+                    if (id != nullptr) {
+                        CoTaskMemFree(id);
+                        id = nullptr;
+                    }
+                }
+            }
+        } free_remaining_ids{ids};
 
         std::vector<CameraInfo> cameras;
         for (DWORD index = 0; index < count; ++index) {
             std::wstring id = ids[index] == nullptr ? L"" : ids[index];
-            if (ids[index] != nullptr) CoTaskMemFree(ids[index]);
+            if (ids[index] != nullptr) {
+                CoTaskMemFree(ids[index]);
+                ids[index] = nullptr;
+            }
             const std::wstring friendly = DeviceFriendlyName(manager.Get(), id.c_str());
             if (!ContainsD810(friendly)) continue;
             // Inventory only reads capabilities, firmware, and the standard

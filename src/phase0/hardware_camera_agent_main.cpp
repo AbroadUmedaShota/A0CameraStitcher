@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace a0::phase0;
@@ -90,6 +91,21 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (sdk_map_overridden && !wpd_map_overridden) {
             config.wpd_identity_map = DerivedWpdMap(config.sdk_identity_map);
+        }
+
+        // GitHub Issue #162: `Timeouts` was only ever adjustable by
+        // rebuilding this executable. Environment-variable overrides let an
+        // operator retune the budgets without a rebuild; unset variables
+        // leave every default untouched. Applied before the backend is
+        // constructed so its constructor's fail-closed invariants (e.g.
+        // live_view_frame <= open, live_view_frame <= 20s) run against the
+        // final, possibly-overridden values -- an invalid override aborts
+        // startup exactly like an invalid built-in default would.
+        std::vector<std::string> timeout_override_trace;
+        ApplyTimeoutEnvironmentOverrides(
+            config.timeouts, timeout_override_trace, RealEnvironmentVariable);
+        for (const std::string& line : timeout_override_trace) {
+            std::cerr << line << '\n';
         }
 
         ProductionHardwareCameraAgentBackend backend(std::move(config));

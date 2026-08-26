@@ -489,6 +489,14 @@ std::string DualBindingCameraAgentDispatcher::Handle(
     } catch (const std::exception&) {
         return ProtocolRejection(
             extracted_request_id, "AgentFailure", "binding agent failed to handle the request");
+    } catch (...) {
+        // Handle() is noexcept: anything not derived from std::exception
+        // (a third-party or SDK-thrown non-standard exception) must still be
+        // turned into a protocol rejection here, matching the sibling
+        // catch(...) in dual_hardware_camera_agent.cpp, instead of escaping
+        // this function and calling std::terminate().
+        return ProtocolRejection(
+            extracted_request_id, "AgentFailure", "binding agent failed to handle the request");
     }
 }
 
