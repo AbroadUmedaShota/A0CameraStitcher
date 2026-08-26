@@ -801,7 +801,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {62 - failures.Count}/62 passed.");
+Console.WriteLine($"Operator shell tests: {63 - failures.Count}/63 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
