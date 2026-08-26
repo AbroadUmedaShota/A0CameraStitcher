@@ -31,6 +31,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private CancellationTokenSource? _continuousLiveViewLoopCancellation;
     private Task? _continuousLiveViewLoop;
     private ImageSource? _previewImage;
+    private Action<int>? _continuousLiveViewFrameWorkerThreadObservedForTesting;
     private bool _localPreDispatchFailure;
     private bool _isBusy;
     private bool _initializationStarted;
@@ -94,6 +95,19 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, HandleCommandException);
         PrepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, HandleCommandException);
         ApproveProfileCommand = new AsyncRelayCommand(ApproveProfileAsync, () => CanApproveProfile, HandleCommandException);
+    }
+
+    /// <summary>
+    /// Test-only hook (see the <c>InternalsVisibleTo</c> grant to A0CameraStitcher.M3.OperatorShellTests
+    /// in Properties/AssemblyInfo.cs). Invoked with <see cref="Environment.CurrentManagedThreadId"/> from
+    /// inside the worker-thread delegate that decodes and builds each continuous Live View frame
+    /// (GitHub Issue #148), so tests can assert that this per-frame CPU-bound work does not run on the
+    /// thread that started the loop (the UI thread in production).
+    /// </summary>
+    internal Action<int>? ContinuousLiveViewFrameWorkerThreadObservedForTesting
+    {
+        get => _continuousLiveViewFrameWorkerThreadObservedForTesting;
+        set => _continuousLiveViewFrameWorkerThreadObservedForTesting = value;
     }
 
     public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A"];
@@ -857,8 +871,27 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
             try
             {
-                var frame = reply.Payload.DecodeVerifiedFrame();
-                PreviewImage = LoadFrozenImage(frame);
+                // デコード（Base64往復・正準性検証・SHA-256）とBitmapImage生成はいずれも
+                // CPUバウンドな同期処理で、UIスレッド上で行うと約100ms間隔のフレーム受信の
+                // たびにメッセージポンプが止まる。ワーカースレッドへ逃がし、UIへは
+                // Freeze()済みのBitmapSourceだけを渡す。
+                var (frame, image) = await Task.Run(() =>
+                {
+                    _continuousLiveViewFrameWorkerThreadObservedForTesting?.Invoke(
+                        Environment.CurrentManagedThreadId);
+                    var decodedFrame = reply.Payload.DecodeVerifiedFrame();
+                    return (decodedFrame, LoadFrozenImage(decodedFrame));
+                }).ConfigureAwait(true);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    // デコードをワーカースレッドへ逃がしたことで、このawait中にUIスレッドの
+                    // メッセージポンプが空くようになり、停止コマンドがここで割り込める。
+                    // 上のブロックと同じ理由で、古いフレームでPreviewImageを上書きしない。
+                    return;
+                }
+
+                PreviewImage = image;
                 PreviewPath = string.Empty;
                 LiveViewSummary = $"継続表示中 / frame {reply.Payload.FrameNumber:N0} / {frame.Length:N0} bytes";
             }
