@@ -490,6 +490,59 @@ struct ProductionHardwareCameraAgentConfig {
     [[nodiscard]] static ProductionHardwareCameraAgentConfig Defaults();
 };
 
+// Environment-variable overrides for `Timeouts`, applied once at process
+// startup (never mid-flight). `open`, `image_event`, `download`, `close`,
+// and `live_view_frame` may each be overridden independently by setting the
+// corresponding variable below; `transaction_watchdog` is intentionally not
+// overridable, because ProductionHardwareCameraAgentBackend's constructor
+// enforces it must stay exactly 180 seconds — an override there could only
+// ever succeed by reproducing the default, so exposing one would just be a
+// confusing no-op knob.
+//
+//   open          -> A0_CAMERA_AGENT_OPEN_TIMEOUT_MS
+//   image_event   -> A0_CAMERA_AGENT_IMAGE_EVENT_TIMEOUT_MS
+//   download      -> A0_CAMERA_AGENT_DOWNLOAD_TIMEOUT_MS
+//   close         -> A0_CAMERA_AGENT_CLOSE_TIMEOUT_MS
+//   live_view_frame -> A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS
+//
+// A variable that is unset (or set to an empty string, which
+// GetEnvironmentVariableW reports the same way) leaves the corresponding
+// field untouched, so the built-in default from `Timeouts{}` (or whatever
+// the caller already set) survives unless an operator explicitly opts in.
+//
+// A variable that is set to anything else must be a positive, whole number
+// of milliseconds that is also an exact multiple of 1000 (`Timeouts` only
+// has second resolution, so a fractional-second value is rejected instead
+// of being silently rounded). Anything that fails validation — non-digit
+// characters, zero, a value that is not a multiple of 1000, or a value
+// above the sane upper bound (24 hours in milliseconds) — makes this
+// function throw std::invalid_argument, so the caller fails closed before
+// the server starts serving any request. Overrides are never silently
+// clamped.
+//
+// Domain-specific bounds (e.g. `live_view_frame` must stay <= `open` and
+// <= 20s) are not re-validated here; they are already enforced uniformly,
+// for both defaulted and overridden values, by
+// ProductionHardwareCameraAgentBackend's constructor.
+//
+// `applied_overrides_trace` receives one human-readable line per override
+// that was actually applied, so a caller can surface it as a startup
+// evidence/trace record (see GitHub Issue #162); fields left at their
+// existing value do not produce a line. `environment_lookup` is the seam
+// contract tests use to supply synthetic values without mutating the real
+// process environment; production callers pass RealEnvironmentVariable.
+void ApplyTimeoutEnvironmentOverrides(
+    Timeouts& timeouts,
+    std::vector<std::string>& applied_overrides_trace,
+    const std::function<std::optional<std::wstring>(std::wstring_view)>&
+        environment_lookup);
+
+// Looks up `name` in the real process environment via GetEnvironmentVariableW.
+// Returns std::nullopt when the variable is not set (or set to an empty
+// string, which Windows reports identically to "not set").
+[[nodiscard]] std::optional<std::wstring> RealEnvironmentVariable(
+    std::wstring_view name);
+
 class ProductionHardwareCameraAgentBackend final : public IHardwareCameraAgentBackend {
 public:
     explicit ProductionHardwareCameraAgentBackend(ProductionHardwareCameraAgentConfig config);

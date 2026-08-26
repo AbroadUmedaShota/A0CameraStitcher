@@ -3187,6 +3187,173 @@ void TestProductionContinuousLiveViewContracts() {
     fs::remove_all(root, cleanup_error);
 }
 
+// GitHub Issue #162: `Timeouts` was only ever adjustable by rebuilding this
+// executable (no CLI argument, config file, or environment variable ever
+// assigned any of its fields). ApplyTimeoutEnvironmentOverrides lets an
+// operator retune the budgets at process startup without a rebuild. This
+// test exercises the pure override function directly with a synthetic
+// lookup, so it never touches the real process environment.
+void TestTimeoutEnvironmentOverrides() {
+    // T1: no variables set -> every field keeps its default and no trace
+    // line is produced.
+    {
+        Timeouts timeouts;
+        std::vector<std::string> trace;
+        ApplyTimeoutEnvironmentOverrides(
+            timeouts, trace,
+            [](std::wstring_view) -> std::optional<std::wstring> { return std::nullopt; });
+        Check(timeouts.open == std::chrono::seconds(10) &&
+                  timeouts.image_event == std::chrono::seconds(15) &&
+                  timeouts.download == std::chrono::seconds(60) &&
+                  timeouts.close == std::chrono::seconds(10) &&
+                  timeouts.live_view_frame == std::chrono::seconds(3),
+            "no environment overrides must leave every Timeouts field at its default");
+        Check(trace.empty(), "no environment overrides must not produce a trace line");
+    }
+
+    // T2: a variable reported as an explicit empty string must be treated
+    // identically to "unset" (this mirrors what GetEnvironmentVariableW
+    // itself reports for a variable set to "").
+    {
+        Timeouts timeouts;
+        std::vector<std::string> trace;
+        ApplyTimeoutEnvironmentOverrides(
+            timeouts, trace,
+            [](std::wstring_view) -> std::optional<std::wstring> { return std::wstring(); });
+        Check(timeouts.live_view_frame == std::chrono::seconds(3),
+            "an empty override value must be treated as unset, not as zero");
+        Check(trace.empty(), "an empty override value must not produce a trace line");
+    }
+
+    // T3: a single field can be overridden independently; the rest keep
+    // their defaults, and exactly one trace line names the field, its new
+    // value, and the variable that supplied it.
+    {
+        Timeouts timeouts;
+        std::vector<std::string> trace;
+        ApplyTimeoutEnvironmentOverrides(
+            timeouts, trace,
+            [](std::wstring_view name) -> std::optional<std::wstring> {
+                if (name == L"A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS") {
+                    return std::wstring(L"5000");
+                }
+                return std::nullopt;
+            });
+        Check(timeouts.live_view_frame == std::chrono::seconds(5),
+            "live_view_frame override must apply the overridden value");
+        Check(timeouts.open == std::chrono::seconds(10),
+            "overriding live_view_frame must not disturb the other fields");
+        Check(trace.size() == 1 &&
+                  trace.front().find("live_view_frame=5s") != std::string::npos &&
+                  trace.front().find("A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS") !=
+                      std::string::npos,
+            "an applied override must produce exactly one descriptive trace line, "
+            "so production behavior differences stay traceable (#162)");
+    }
+
+    // T4: every overridable field applies independently when all five are
+    // set at once. transaction_watchdog is never queried, because it is
+    // deliberately excluded from the override table -- construction always
+    // requires it to stay exactly 180s (see the Impl constructor), so an
+    // override there could only ever "succeed" by reproducing the default.
+    {
+        Timeouts timeouts;
+        std::vector<std::string> trace;
+        std::vector<std::wstring> queried_names;
+        ApplyTimeoutEnvironmentOverrides(
+            timeouts, trace,
+            [&](std::wstring_view name) -> std::optional<std::wstring> {
+                queried_names.emplace_back(name);
+                if (name == L"A0_CAMERA_AGENT_OPEN_TIMEOUT_MS") return std::wstring(L"11000");
+                if (name == L"A0_CAMERA_AGENT_IMAGE_EVENT_TIMEOUT_MS") return std::wstring(L"16000");
+                if (name == L"A0_CAMERA_AGENT_DOWNLOAD_TIMEOUT_MS") return std::wstring(L"61000");
+                if (name == L"A0_CAMERA_AGENT_CLOSE_TIMEOUT_MS") return std::wstring(L"12000");
+                if (name == L"A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS") return std::wstring(L"4000");
+                return std::nullopt;
+            });
+        Check(timeouts.open == std::chrono::seconds(11) &&
+                  timeouts.image_event == std::chrono::seconds(16) &&
+                  timeouts.download == std::chrono::seconds(61) &&
+                  timeouts.close == std::chrono::seconds(12) &&
+                  timeouts.live_view_frame == std::chrono::seconds(4),
+            "every overridable field must apply independently when all are set");
+        Check(trace.size() == 5, "five applied overrides must produce five trace lines");
+        Check(std::find(
+                  queried_names.begin(), queried_names.end(),
+                  L"A0_CAMERA_AGENT_TRANSACTION_WATCHDOG_TIMEOUT_MS") == queried_names.end(),
+            "transaction_watchdog must never be queried; it is not overridable");
+    }
+
+    // T5: malformed or out-of-range values fail closed (throw) instead of
+    // being silently clamped, truncated, or ignored.
+    {
+        const auto expect_rejected = [](const wchar_t* raw_value, std::string_view why) {
+            Timeouts timeouts;
+            std::vector<std::string> trace;
+            bool threw = false;
+            try {
+                ApplyTimeoutEnvironmentOverrides(
+                    timeouts, trace,
+                    [&](std::wstring_view name) -> std::optional<std::wstring> {
+                        if (name == L"A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS") {
+                            return std::wstring(raw_value);
+                        }
+                        return std::nullopt;
+                    });
+            } catch (const std::invalid_argument&) {
+                threw = true;
+            }
+            Check(threw, why);
+        };
+
+        expect_rejected(L"0",
+            "a zero override must be rejected, not accepted as an unbounded timeout");
+        expect_rejected(L"-1000", "a negative override must be rejected outright");
+        expect_rejected(L"abc", "a non-numeric override must be rejected");
+        expect_rejected(L"12ab", "a partially-numeric override must be rejected, not truncated");
+        expect_rejected(L"1500",
+            "a value that is not a whole number of seconds must be rejected, not rounded");
+        expect_rejected(L"999999999999",
+            "a value far beyond the 24h sane upper bound must be rejected, not clamped");
+    }
+}
+
+// Exercises RealEnvironmentVariable's Win32 wrapping directly (buffer sizing,
+// the too-small-buffer retry path, and the not-set/empty-string cases),
+// using a dedicated variable name so no other test's environment is
+// disturbed. Unlike TestTimeoutEnvironmentOverrides above, this test does
+// mutate the real process environment for its own probe variable, and
+// restores it (unset) when done.
+void TestRealEnvironmentVariableWrapsWin32Api() {
+    const wchar_t* const name = L"A0_CAMERA_AGENT_TEST_ENV_LOOKUP_PROBE";
+    ::SetEnvironmentVariableW(name, nullptr);
+    Check(!RealEnvironmentVariable(name).has_value(),
+        "an unset variable must be reported as not present");
+
+    Check(::SetEnvironmentVariableW(name, L"short-value") != 0,
+        "test setup: SetEnvironmentVariableW must succeed for a short value");
+    const std::optional<std::wstring> short_value = RealEnvironmentVariable(name);
+    Check(short_value.has_value() && *short_value == L"short-value",
+        "a short variable value must round-trip exactly through the stack-buffer path");
+
+    // Long enough to exceed the function's 256-wchar_t stack buffer and
+    // exercise its heap-buffer retry path.
+    const std::wstring long_value(300, L'x');
+    Check(::SetEnvironmentVariableW(name, long_value.c_str()) != 0,
+        "test setup: SetEnvironmentVariableW must succeed for a long value");
+    const std::optional<std::wstring> round_tripped = RealEnvironmentVariable(name);
+    Check(round_tripped.has_value() && *round_tripped == long_value,
+        "a value longer than the stack buffer must still round-trip exactly");
+
+    Check(::SetEnvironmentVariableW(name, L"") != 0,
+        "test setup: SetEnvironmentVariableW must succeed for an empty value");
+    Check(!RealEnvironmentVariable(name).has_value(),
+        "a variable explicitly set to an empty string must be reported as not present, "
+        "matching how ApplyTimeoutEnvironmentOverrides treats \"unset\"");
+
+    ::SetEnvironmentVariableW(name, nullptr);
+}
+
 // GitHub Issue #141 段階2: 継続 Live View のフレーム取得予算(live_view_frame)を
 // open 予算から分離したことを検証する。段階1(#158)適用後、停止操作は
 // 「in-flight フレーム取得の完了待ち」になった。SDK が予算内に応答する
@@ -3364,6 +3531,8 @@ int main() {
     TestContinuousLiveViewV2Protocol();
     TestProductionContinuousLiveViewContracts();
     TestContinuousLiveViewFrameBudgetIsolation();
+    TestTimeoutEnvironmentOverrides();
+    TestRealEnvironmentVariableWrapsWin32Api();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;
