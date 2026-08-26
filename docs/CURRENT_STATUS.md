@@ -1,15 +1,17 @@
 # 現在の開発状況
 
-更新日: 2026-08-17
+更新日: 2026-08-27
 
 ## 総合判定
 
-`in-progress`。requirements 2.7.0のMVP要件32件の完全検証はまだ0件である。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、`single-software-active / hardware-capture-paused / dual-identity-blocked`で進行する。WPD digest＋exact-one identity-v3、30日read-only profile、fixed-local byte-identical export、継続Live View v2はsoftware実装済みだが、実D810/WPF受入は未完了である。
+`in-progress`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCamera実機とA0合成品質も未完了である。
 
 第三者向けには[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)を入口とする。二台順次撮影のsoftware contractと安全停止は提示可能だが、実機二台撮影とA0品質の受入完了は主張しない。
 
 ## 確認済み
 
+- [2026-08-26 SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md): one-shot 1/1、10/10、p50 `14.036秒`、p95/max `14.643秒`、HG-0009承認、100/100初回成功、100回p50 `14.204秒`・p95 `14.430秒`・max `14.692秒`。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件だった。
+- PR #163でNikon SDK非同期バッファ寿命とSingleCamera WPD identity-v3経路を修正し、Release buildとfocused contractsを確認後にmainへマージした。GitHub ActionsはBilling制限により未実行であり、CI greenとは扱わない。
 - 2026-08-17時点でDual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約→開始→同一ID照会、.NETのReserved／terminal typed recovery、厳密なsemantic preflightを実装済みである。fake backend限定orchestratorはCAM-A→CAM-Bを各最大一回、自動retry 0、共有180秒deadlineで実行する。A失敗時はBを開始せず、B失敗時はA原本を保持する。terminalはtransaction ID別にatomic publish・再読込検証され、その後だけactiveを削除する。過去結果を残したまま次pairを予約でき、再起動後も同一IDで照会できる。Foundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release CTest各10/10、M3 Release/Debug、正式DualCamera WPF flowが合格した。production Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続であり、既定は`PairDispatcherUnavailable`／`HardwarePending`、実カメラ操作0件である。
 - 正式camera modelはNikon D810であり、明示的な`SingleCamera`または`DualCamera`をUSBで運用する。`SingleCamera`はCAM-A、WPD serial digest、SDK/WPD各exactly-one current session、canonical original一件、stitch `NotApplicable`、byte-identical `7360×4912` export、30日read-only profileとする。`DualCamera`は従来どおり固定平面A0原稿をCAM-A→CAM-Bで順次撮影・合成する。
 - modeはactive transaction外で明示選択し、接続台数から推定しない。`DualCamera`の一台不足を`SingleCamera`へ自動降格せず、active中のmode変更を禁止する。
@@ -54,38 +56,42 @@
 ## Partial
 
 - setting readback: native MAID command-traceとSingle identity-v3対応`sdk-status` process-routing software contractは実装・fresh test済み。identity-v3登録後の実D810 v5再実行、focus値の意味、FileType未広告の扱いは未検証／未確定。
-- Live View: standaloneは合格だが、実撮影を含むhandoff 10回は未実施。
+- Live View: standaloneは合格だが、実撮影を含むContinuous Live View handoff 10回は未実施。
 - identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。SingleCamera CAM-AはWPD digest＋exactly-one current SDK/WPDのidentity-v3を実装し、操作者報告の一台登録はPassした。旧v2 mapへ自動fallbackせず、欠落・破損・digest不一致・0台／複数台をstatus open前に拒否する。二台接続時のSDK Name/Interface v2衝突、旧v2 mapの明示migration/invalidation、CAM-A/Bの恒久的区別はDual laneの`HG-0003B`としてBlockedであり、Single identity-v3をDualへ流用しない。
 - setup/correction: parameter contractとWI-0022Cのsynthetic measurement seamは合格。proposalは測定値・fixture/profile provenanceを保持し、profile envelope外を拒否し、profileを変更しない。実写A0品質、承認済みDual profile、実機性能は未検証である。
 - M3P: requirements 2.6.0のfresh software contractは合格したが、実D810、actual JPEG、実WPF画面操作の統合証拠ではない。旧Dual UI Automationは保持し、screen reader、keyboard/focus、Single実画面walkthroughは残る。
-- SingleCamera製品mode: CAM-A identity-v3、30日profile承認、操作者選択fixed-local folder、byte-identical export、`hardware.v2`継続Live Viewをsoftware実装済み。v2はcanonical Base64を含むmemory-only frame、512 KiB frame上限、1 MiB pipe上限、20秒heartbeat timeout、600秒max lifetime、単列backpressure、session所有権、cleanup失敗時のcapture拒否、stop/SDK-close前のcapture 0、verified capture成功後だけ再startを契約化する。実D810、actual JPEG、実WPF操作、10回handoff、10回p95、100件受入は未検証である。
+- SingleCamera製品mode: 実D810のCamera Agent撮影、actual JPEG、one-shot、10回p95、100件耐久は合格済み。実WPF操作、10回handoff、UI経由fixed-local export、物理異常系は未検証である。
 
 ## Deferred / Waiting
 
 | 項目 | 理由 | 再開条件 |
 |---|---|---|
-| M1A one-shot、10/10、fault、handoff | 操作者がカード作業を保留。最後の証拠は90 payload | empty cardへの交換または手動backup/clearの報告と明示再開 |
+| M1A one-shot、10/10 | 2026-08-26に完了 | one-shot 1/1、10/10、p95承認、Camera Agent経路100/100を実績として維持 |
+| M1A fault、handoff | software recoveryは合格。物理USB切断とContinuous Live View handoff 10回は未実施 | 実機操作者の明示確認後に残試験を個別実施 |
 | M1B二台試験 | 二台接続時のSDK identity collisionは、2026-08-20のADR-0025でsession-local operator bindingへ置換して解消した。恒久的な機体識別は作らず、割当はAgent process内のmemory-onlyで、Single identity-v3は流用しない | core（#9）・binding Agent protocol（#61）・確認UI（#62）はsoftware実装済み。実capture backend（#10）と実機受入が残り、DualCameraは`HardwarePending` |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
-| SingleCamera製品受入 | identity/profile/export/継続Live View v2 softwareは実装済み。実D810・actual JPEG・10回handoff・10回p95・100件耐久は未実行 | empty spoolと明示再開、実Live View v2/handoff、10回後の`HG-0009`承認、100件実WPF受入 |
+| SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。実WPF 100件とLive View handoffは未完了 | WPF end-to-end one-shot後、UI操作・export・状態表示を含む100件受入 |
 | 配布 | native dependency再配布未承認 | `HG-0005` |
 
-既知の90 payload状態は、物理状態が変わるまで再確認しない。撮影、削除、format、USB切断、電源操作も自動では行わない。
+90 payloadを検出した旧カード状態は履歴として保持する。2026-08-26の実績は別の専用empty spoolで取得しており、旧カードへ削除・formatを行ったことを意味しない。今後もUSB切断、電源操作、保存障害は自動実行しない。
 
 ## 次の安全な順番
 
-1. 明示的な実機再開後に一台CAM-Aの`sdk-status` v5をidentity-v3経路でread-only再実行し、設定・capture・Live View・card操作0を確認する
-2. empty dedicated spoolの用意と明示再開後だけ、one-shot、10回handoff／characterizationへ進む
-3. 10回の実測p95を`HG-0009`で承認後、SingleCamera 100件受入を行う
-4. Dualは別laneとして`HG-0003B`解決後だけbindingとM1Bを再開する
+1. SingleCameraの残作業を、Continuous Live View handoff 10回、実WPF end-to-end、物理異常系へ限定する
+2. DualCameraのproduction real capture backend（Issue #10）をsoftware contractで完成させる
+3. 実D810二台でone-shot、10組、100組、fault matrixを順に実施する
+4. `HG-0001/0002`承認後にA0合成品質へ進む
 
-## Open human gates
+## Human gates
 
 - `HG-0001`: A0品質・補正上限
 - `HG-0002`: 最終リグ・光学条件
-- `HG-0003B`: 二台D810のPnP存在は確認済み。SDK/WPD bindingと二台実機試験は未完了
 - `HG-0005`: Nikon SDK/OpenCV等の再配布
-- `HG-0009`: SingleCamera実機10回characterization後のp95目標承認
+
+解消済み:
+
+- `HG-0003B`: ADR-0025のsession-local operator bindingとして解消。software実装済み、二台実機受入は別途未完了
+- `HG-0009`: 2026-08-26にSingleCamera実測p95 `14.643秒`を承認
 
 ## 証拠の読み方
 

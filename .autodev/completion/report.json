@@ -1,5 +1,7 @@
 {
   "schema_version": "autodev.completion-report.v1",
+  "snapshot_status": "superseded-by-2026-08-27-singlecamera-results-sync",
+  "current_status_document": "docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md",
   "evaluated_at": "2026-08-10T00:00:00+09:00",
   "completion_state": "in-progress",
   "automatable_gaps": [

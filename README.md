@@ -4,11 +4,11 @@
 
 ## 現在の段階
 
-総合状態は`in-progress`です。ADR-0024により最初の`SingleCamera`をCAM-A専用へ固定し、WPD serial digest＋SDK/WPD各exactly-one current-sessionのidentity-v3、アプリ内30日read-only profile承認、操作者選択fixed-local folder、byte-identical `7360×4912` canonical original export、対話的継続Live View v2をsoftware実装しました。実WPFからD810を撮影・export・継続表示した合格証拠ではありません。実撮影は専用empty spoolと明示再開を待ち、10回characterization後のp95承認（`HG-0009`）と100件受入が残ります。DualCameraは二台前提を維持します。二台のSDK identity collisionは2026-08-20のADR-0025でsession-local operator bindingへ置換され、binding core・binding Agent protocol・確認UIまでsoftware実装済みです（Issue #9 / #61 / #62）。恒久的な機体識別を作ったわけではなく、操作者がLive Viewを一台ずつ見て割り当てる方式であり、取り違えriskは受容した残留riskです。実capture backendと実機受入が残るためDualCameraは`HardwarePending`のままです。
+総合状態は`in-progress`です。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、Product Ownerによるp95 `14.643秒`承認、100/100耐久を完了しました。111件の原画像再検証も合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件です。ただし、実WPF画面からの100回操作、撮影を挟むContinuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体の判定は`Partial`です。詳細は[SingleCamera実機結果](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照してください。DualCameraは二台前提を維持し、実capture backendと実機受入が残るため`HardwarePending`のままです。
 
 DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。ただしproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、既定経路は`PairDispatcherUnavailable`／`HardwarePending`のままです。
 
-第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。要約すると、一台／二台のmode-aware application contractと二台順次撮影の安全なsoftware contractは提示可能です。committed済みの匿名証拠には一台接続時の記録がありますが、これは現在のlive接続状態を断定するものではありません。実アプリ一台撮影、実機二台撮影、A0品質の受入はいずれも未完了です。
+第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。一台の実Camera Agent撮影・回収・耐久は合格しましたが、実WPF UI受入は未完了です。二台順次撮影の安全なsoftware contractは提示可能である一方、実機二台撮影とA0品質の受入は未完了です。
 
 PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証を完了した`original.jpg`だけを製品上の正本とします。カメラカードは一過性の転送元で、永続保持を要件にしません。承認済みの専用empty/cleared card single-slot spoolでは、撮影前にJPEG以外も含むcamera payload objectが0件であることを確認し、その後にjust-recovered WPD objectだけを削除して再びpayload 0件を確認します。候補0件・複数件・遅延・無効画像、download/persist/delete失敗では削除せず、PC原本があれば保持して`FailedPartial`にします。existing cardのbulk delete/format、vendor operation、retryは禁止です。
 
@@ -22,13 +22,14 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 - 制御: WPD baseline/recoveryと、カメラカードへ一回撮影するNikon SDK、および一台選択式SDK Live View
 - 入力: FX JPEG Fine L
 - 出力: `SingleCamera`はcanonical `original.jpg`のbyte-identicalな明示export（合成なし）、`DualCamera`は合成JPEG
-- 時間目標: `DualCamera`はp95 10秒以内を暫定目標とする。`SingleCamera`はone-shot後の10回でp95を測定し、`HG-0009`で承認後に100件連続受入を行う
+- 時間目標: `DualCamera`はp95 10秒以内を暫定目標とする。`SingleCamera`は10回実測p95 `14.643秒`が承認済みで、Camera Agent撮影経路の100件耐久は合格済み
 - 保存: PCへ確定・再読込検証済みの原画像を保持。カメラカードは一過性の転送元で、承認済みsingle-slot spoolではexact WPD objectだけを削除して空状態を確認する
 
 ## ドキュメント
 
 - [Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)
 - [現在の開発状況](docs/CURRENT_STATUS.md)
+- [SingleCamera実機結果（2026-08-26）](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)
 - [製品要件](docs/PRODUCT_REQUIREMENTS.md)
 - [アーキテクチャ](docs/ARCHITECTURE.md)
 - [Phase 0実機検証計画](docs/PHASE0_TEST_PLAN.md)
@@ -104,7 +105,7 @@ build\Debug\A0CameraStitcher.Phase0.exe report --run-id <表示されたrun-id>
 
 旧`capture-single`、`capture-pair`、`stability`はfake contract専用です。`--transport sdk`または`wpd`はcamera sessionを開く前に拒否し、実機経路は確認付き`hybrid-capture-single`と`hybrid-capture-pair`だけに限定します。実SDK/WPDへ触れるコマンドはoperator-session-wide named OS leaseを保持するため、同じWindowsログオンsession内の別processとの同時実行もfail closedになります。別ユーザーsessionやserviceからの起動はMVP運用外とし、installer／運用policyで禁止します。
 
-旧`CAM-A` continuity証拠のうちWPD側は履歴として保持しますが、SDK側の結論はephemeral MAID source object IDを使っていたため無効化しました。現在有効なidentity-v2 checkpointは`CAM-B`一台です。Standalone Live Viewは5分04秒・2,424 frame、停止、SDK close、preview非保存に成功し、別プロセスでの再起動後も1 frame取得と正常終了を確認していますが、これはidentity-v2 continuityや二台撮影の証拠には読み替えません。撮影を含むone-shot、10/10、handoff 10回は承認済みspool経路で今後実施します。
+旧`CAM-A` continuity証拠のうちWPD側は履歴として保持しますが、SDK側の結論はephemeral MAID source object IDを使っていたため無効化しました。Standalone Live Viewは5分04秒・2,424 frame、停止、SDK close、preview非保存に成功しています。2026-08-26にidentity-v3と専用empty spoolを使うCamera Agent撮影one-shot 1/1、10/10、100/100を完了しましたが、Continuous Live Viewを撮影前後に切り替えるhandoff 10回とDualCameraの証拠には読み替えません。
 
 一台の設定read-only診断 [run-1786040075194-1](docs/evidence/phase0/run-1786040075194-1/report.md)では、SDKが返した値としてJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1、focus opaque値1を取得しました。FileTypeはnot-advertisedです。撮影設定write、capture、Live View開始、WPD、deleteは行わずSDK sessionを閉じました。MAID control-plane callback登録は既存`CapSet`を使い得るため、証拠上で撮影設定writeと区別しています。native command-trace testとfocus値の意味確定が残るため、この検証はPartialです。
 

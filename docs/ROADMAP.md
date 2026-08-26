@@ -2,7 +2,7 @@
 
 ## 現在の進め方
 
-MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`をCAM-A、WPD-digest＋exact-one identity-v3、byte-identical `7360×4912` export、30日read-only profileへ固定した。identity/profile/exportと継続Live View v2のsoftware実装は追加済みだが、実機受入は未完了である。Dualのidentity collisionはADR-0025のsession-local operator bindingへ置換済みで、core・protocol・確認UIまでsoftware実装した（Issue #9 / #61 / #62）。残るのは実capture backend（#10）と実機受入で、DualCameraは`HardwarePending`を維持する。空カードが必要なM1Aは`Deferred`のままとする。
+MVP全体は`in-progress`である。2026-08-26に`SingleCamera`のCamera Agent実機経路でone-shot、10回characterization、p95承認、100回耐久を完了した。残るSingleCamera作業は実WPF end-to-end、Continuous Live View handoff 10回、物理異常系である。Dualはsession-local operator bindingのcore・protocol・確認UIまでsoftware実装済みで、実capture backend（#10）と実機受入が次の主工程となる。
 
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
@@ -11,9 +11,9 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 | オフラインpre-gate M2P | Active / WI-0022C software complete | `HG-0001/HG-0002`承認後に実リグ値・品質作業へ進む |
 | simulated統合 M3P | Complete / Software-only | requirements 2.7.0の明示mode、CAM-A-only、no-auto-fallback、Single original一件、stitch N/A、local profile/exportをfresh contractで維持 |
 | Dual schema `a0.camera-agent.hardware-dual.v2` software slice | Complete / Fake backend only | 4操作、durable予約／terminal journal、strict preflight、CAM-A→CAM-B、180秒、retry 0、same-ID restart queryを維持。production pipe／実camera／WPF実撮影は未接続 |
-| 一台製品mode M1A/M3 | Identity/Profile/Export/Live View v2 Software Implemented / Hardware Deferred | empty spool、CAM-A one-shot、10回handoff、10回p95承認、100件実WPF受入 |
-| 二台 Phase 0 M1B | Identity Strategy Blocked | CAM-B identity-v2 checkpointとfake安全契約は確認済みだが、二台接続時にSDK `identity_collision`。documentedな本体固有SDK propertyまたは安全なSDK/WPD相関が見つかるまで、binding、pair撮影、CAM-A/B別USB/電源異常、A完了後B開始前process中断は開始しない |
-| 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0003B/HG-0005/HG-0009`と先行実機証拠 |
+| 一台製品mode M1A/M3 | Camera Agent hardware Partial | one-shot 1/1、10/10、p95 `14.643秒`承認、100/100は完了。実WPF end-to-end、Live View handoff 10回、物理異常系を残す |
+| 二台 Phase 0 M1B | Software binding complete / HardwarePending | production real capture backend、二台one-shot、10組、100組、異常系を順次完了する |
+| 実リグ・製品統合 M2/M3/M4 | Human/Hardware Gated | `HG-0001/HG-0002/HG-0005`とDual先行実機証拠 |
 
 現在の詳細は[CURRENT_STATUS.md](CURRENT_STATUS.md)、機能単位の検証キューは[FEATURE_VERIFICATION_PLAN.md](FEATURE_VERIFICATION_PLAN.md)を正本とする。
 
@@ -21,10 +21,10 @@ MVP全体は`in-progress`である。ADR-0024により最初の`SingleCamera`を
 
 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffはQA revise済みsoftware checkpointとして完了している。次工程は以下である。
 
-1. empty spoolの用意と明示再開後、CAM-A identity-v3登録、one-shot、10回handoff／characterizationを行う
-2. `HG-0009`で実測p95承認後、SingleCamera 100件と実WPF受入を行う
-3. Dualは`HG-0003B`解決後だけCAM-A/B bindingとM1Bへ進む
-4. `HG-0001/HG-0002`承認後にDual実M2/M3受入、続いてM4
+1. 実績をGitHub Issueと正本文書へ同期し、SingleCamera残作業をWPF／Live View／物理異常系へ限定する
+2. Issue #10のDual production real capture backendを完成させる
+3. Dual実機one-shot、10組、100組、fault matrixを実施する
+4. `HG-0001/HG-0002`承認後にA0合成品質とmode別WPF統合へ進み、最後にM4を行う
 
 ## M0: D810/SDK安全基盤
 
@@ -76,7 +76,7 @@ requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-en
 - Live View handoff 10回
 - USB切断、software process再起動からの新規transaction復旧（物理power-cycle/power-off復旧は2026-08-09判断でN/A）
 
-現在: 操作者の指示で保留中。接続中cardは最後のread-only証拠で90 payload objectだった。カード交換または手動backup/clearの報告があるまで、`spool-status`を含め再実行しない。既存Phase 0 software contractは実WPF `SingleCamera`連携、canonical original明示export、一台製品受入の証拠ではない。
+現在: 2026-08-26に専用empty spoolを用意し、Camera Agent実機経路のone-shot 1/1、10/10、p95承認、100/100を完了した。原画像111件を再検証し、安全指標は全て0件だった。実WPF end-to-end、Continuous Live View handoff 10回、物理USB切断・保存先障害は未実施のため、M1A/M3全体は`Partial`を維持する。
 
 ## M1B: D810二台 Phase 0
 
