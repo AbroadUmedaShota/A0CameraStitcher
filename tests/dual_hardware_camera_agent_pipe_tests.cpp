@@ -339,6 +339,47 @@ std::string StartEnvelope(
     return Envelope("start-reserved-pair", payload, request_id);
 }
 
+std::string CaptureRecoveryOnlyEnvelope(
+    std::string_view transaction_id,
+    std::string_view request_id) {
+    std::string payload = StartEnvelope(transaction_id, request_id);
+    const std::string rig_start =
+        ",\"rigProfileSnapshot\":{\"profileId\":\"pipe-test-rig\",\"version\":\"1\",";
+    const auto rig_position = payload.find(rig_start);
+    Check(rig_position != std::string::npos,
+        "capture-only helper must find the normal rig profile start");
+    const std::string confirmation_start = ",\"operatorConfirmations\":";
+    const auto confirmation_position = payload.find(confirmation_start, rig_position);
+    Check(confirmation_position != std::string::npos,
+        "capture-only helper must find the normal confirmation start");
+    if (rig_position != std::string::npos &&
+        confirmation_position != std::string::npos) {
+        payload.erase(rig_position, confirmation_position - rig_position);
+    }
+    const std::string normal_confirmations =
+        "\"rigProfileFrozen\":true,\"liveViewStoppedAndClosed\":true,"
+        "\"bothCardsConfirmedEmpty\":true";
+    const std::string capture_only_confirmations =
+        "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
+        "\"captureRecoveryOnlyApproved\":true";
+    const auto confirmations_position = payload.find(normal_confirmations);
+    Check(confirmations_position != std::string::npos,
+        "capture-only helper must find the normal confirmations");
+    if (confirmations_position != std::string::npos) {
+        payload.replace(confirmations_position, normal_confirmations.size(),
+            capture_only_confirmations);
+    }
+    const std::string operation = "\"operation\":\"start-reserved-pair\"";
+    const auto operation_position = payload.find(operation);
+    Check(operation_position != std::string::npos,
+        "capture-only helper must find the normal operation");
+    if (operation_position != std::string::npos) {
+        payload.replace(operation_position, operation.size(),
+            "\"operation\":\"start-reserved-capture-recovery-only\"");
+    }
+    return payload;
+}
+
 // ---------------------------------------------------------------------
 // 1 MiB frame boundary: limit-1/limit accepted, limit+1 rejected fail
 // closed. Mirrors hardware_camera_agent_tests.cpp's
@@ -704,6 +745,18 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
               started_again->find("\"resultCode\":\"PairDispatcherUnavailable\"") !=
                   std::string::npos,
         "a repeated start attempt must remain PairDispatcherUnavailable");
+
+    const auto capture_only = SendRequest(
+        pipe_name, CaptureRecoveryOnlyEnvelope(
+            transaction_id, "pipe-contract-capture-recovery-only"));
+    Check(capture_only.has_value(),
+        "CaptureRecoveryOnly start must be delivered over the real host");
+    if (capture_only) {
+        CheckContains(*capture_only, "\"resultCode\":\"PairDispatcherUnavailable\"",
+            "CaptureRecoveryOnly must reach the same unavailable backend boundary");
+        CheckContains(*capture_only, "\"dispatchStarted\":false",
+            "unavailable CaptureRecoveryOnly must not start dispatch");
+    }
 
     // This query must happen here, while the host is still up -- see the
     // function-level comment above. It also completes the coverage that a

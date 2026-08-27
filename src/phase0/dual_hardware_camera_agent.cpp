@@ -323,6 +323,16 @@ void ValidateConfirmations(const JsonValue& confirmations) {
     RequireTrue(confirmations, "bothCardsConfirmedEmpty");
 }
 
+void ValidateCaptureRecoveryOnlyConfirmations(const JsonValue& confirmations) {
+    RequireExactFields(confirmations, {"identitySnapshotApproved","captureProfileFrozen",
+        "liveViewStoppedAndClosed","bothCardsConfirmedEmpty","captureRecoveryOnlyApproved"});
+    RequireTrue(confirmations, "identitySnapshotApproved");
+    RequireTrue(confirmations, "captureProfileFrozen");
+    RequireTrue(confirmations, "liveViewStoppedAndClosed");
+    RequireTrue(confirmations, "bothCardsConfirmedEmpty");
+    RequireTrue(confirmations, "captureRecoveryOnlyApproved");
+}
+
 void ValidateCameraMode(const JsonValue& payload) {
     if (RequireField(payload, "cameraMode", JsonKind::string).string != kCameraMode) {
         ProtocolFailure(
@@ -413,10 +423,25 @@ std::string BuildTerminalResult(
     std::string_view terminal_state, std::string_view failure_code,
     const std::vector<std::pair<std::string, DualHardwareFakeCaptureOutcome>>& originals,
     const std::filesystem::path& transaction_directory,
-    std::int64_t completed_at_100ns) {
+    std::int64_t completed_at_100ns,
+    bool capture_recovery_only) {
     const auto& identity = RequireField(transaction, "identitySnapshot", JsonKind::object);
     const auto& capture = RequireField(transaction, "captureProfileSnapshot", JsonKind::object);
-    const auto& rig = RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+    std::string purpose_json;
+    std::string rig_evidence_json;
+    if (capture_recovery_only) {
+        purpose_json =
+            ",\"capturePurpose\":\"CaptureRecoveryOnly\""
+            ",\"stitchOutcome\":\"Pending\""
+            ",\"a0QualityApproval\":\"Unapproved\"";
+    } else {
+        const auto& rig = RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+        rig_evidence_json =
+            ",\"profileId\":\"" +
+            JsonEscape(RequireField(rig, "profileId", JsonKind::string).string) +
+            "\",\"profileVersion\":\"" +
+            JsonEscape(RequireField(rig, "version", JsonKind::string).string) + "\"";
+    }
     std::string original_json = "[";
     for (std::size_t index = 0; index < originals.size(); ++index) {
         if (index != 0) original_json += ',';
@@ -444,16 +469,15 @@ std::string BuildTerminalResult(
     const bool empty = complete && std::all_of(originals.begin(), originals.end(), [](const auto& item) {
         return item.second.spool_empty_after_delete;
     });
-    return "{\"transactionId\":\"" + std::string(transaction_id) +
-        "\",\"originals\":" + original_json + ",\"terminalState\":\"" +
+    return "{\"transactionId\":\"" + std::string(transaction_id) + "\"" +
+        purpose_json + ",\"originals\":" + original_json + ",\"terminalState\":\"" +
         std::string(terminal_state) + "\",\"failureCode\":\"" + std::string(failure_code) +
         "\",\"evidence\":{\"terminalState\":\"" + std::string(terminal_state) +
         "\",\"identitySnapshot\":" + SerializeJson(identity) +
         ",\"captureProfileId\":\"" + JsonEscape(RequireField(capture, "profileId", JsonKind::string).string) +
         "\",\"captureProfileVersion\":\"" + JsonEscape(RequireField(capture, "version", JsonKind::string).string) +
-        "\",\"profileId\":\"" + JsonEscape(RequireField(rig, "profileId", JsonKind::string).string) +
-        "\",\"profileVersion\":\"" + JsonEscape(RequireField(rig, "version", JsonKind::string).string) +
-        "\",\"watchdogStartedAtUtc\":\"" + RequireField(transaction, "startedAtUtc", JsonKind::string).string +
+        "\"" + rig_evidence_json +
+        ",\"watchdogStartedAtUtc\":\"" + RequireField(transaction, "startedAtUtc", JsonKind::string).string +
         "\",\"watchdogDeadlineUtc\":\"" + RequireField(transaction, "watchdogDeadlineUtc", JsonKind::string).string +
         "\",\"completedAtUtc\":\"" + FormatUtc100ns(completed_at_100ns) +
         "\",\"watchdogCompletedInTime\":" +
@@ -476,6 +500,7 @@ std::string CapabilitiesResponse(std::string_view request_id) {
         "\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"],"
         "\"supportedOperations\":[\"get-dual-capabilities\","
         "\"reserve-pair-transaction\",\"start-reserved-pair\","
+        "\"start-reserved-capture-recovery-only\","
         "\"get-pair-transaction-result\",\"close-reserved-pair-transaction\"],"
         "\"pairJournalDurable\":true,"
         "\"sameTransactionQueryOnly\":true,\"automaticRetryCount\":0}}";
@@ -625,7 +650,8 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
             DualHardwareCameraAgentOperation::reserve_pair_transaction;
         return request;
     }
-    if (operation == "start-reserved-pair") {
+    if (operation == "start-reserved-pair" ||
+        operation == "start-reserved-capture-recovery-only") {
         RequireExactFields(payload, {
             "cameraMode", "orderedRequiredAliases", "transaction",
         });
@@ -633,25 +659,41 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
         ValidateOrderedAliases(payload);
         const auto& transaction =
             RequireField(payload, "transaction", JsonKind::object);
-        RequireExactFields(transaction, {
-            "transactionId",
-            "transactionDirectory",
-            "identitySnapshot",
-            "captureProfileSnapshot",
-            "rigProfileSnapshot",
-            "operatorConfirmations",
-            "startedAtUtc",
-            "watchdogDeadlineUtc",
-        });
+        if (operation == "start-reserved-pair") {
+            RequireExactFields(transaction, {
+                "transactionId",
+                "transactionDirectory",
+                "identitySnapshot",
+                "captureProfileSnapshot",
+                "rigProfileSnapshot",
+                "operatorConfirmations",
+                "startedAtUtc",
+                "watchdogDeadlineUtc",
+            });
+        } else {
+            RequireExactFields(transaction, {
+                "transactionId",
+                "transactionDirectory",
+                "identitySnapshot",
+                "captureProfileSnapshot",
+                "operatorConfirmations",
+                "startedAtUtc",
+                "watchdogDeadlineUtc",
+            });
+        }
         request.transaction_id = ValidateTransactionId(transaction);
         (void)RequireField(transaction, "transactionDirectory", JsonKind::string);
         (void)RequireField(transaction, "identitySnapshot", JsonKind::object);
         (void)RequireField(transaction, "captureProfileSnapshot", JsonKind::object);
-        (void)RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+        if (operation == "start-reserved-pair") {
+            (void)RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+        }
         (void)RequireField(transaction, "operatorConfirmations", JsonKind::object);
         (void)RequireField(transaction, "startedAtUtc", JsonKind::string);
         (void)RequireField(transaction, "watchdogDeadlineUtc", JsonKind::string);
-        request.operation = DualHardwareCameraAgentOperation::start_reserved_pair;
+        request.operation = operation == "start-reserved-pair"
+            ? DualHardwareCameraAgentOperation::start_reserved_pair
+            : DualHardwareCameraAgentOperation::start_reserved_capture_recovery_only;
         return request;
     }
     if (operation == "get-pair-transaction-result") {
@@ -705,7 +747,10 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             }
         }
         case DualHardwareCameraAgentOperation::start_reserved_pair:
+        case DualHardwareCameraAgentOperation::start_reserved_capture_recovery_only:
         {
+            const bool capture_recovery_only = request.operation ==
+                DualHardwareCameraAgentOperation::start_reserved_capture_recovery_only;
             const JsonValue root = JsonParser(request_json).Parse();
             const auto& transaction = RequireField(RequireField(root, "payload", JsonKind::object), "transaction", JsonKind::object);
             const auto now = Clock100ns(utc_clock_);
@@ -717,8 +762,13 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             ValidateTransactionDirectory(RequireField(transaction, "transactionDirectory", JsonKind::string).string);
             ValidateIdentity(RequireField(transaction, "identitySnapshot", JsonKind::object), request.started_at_100ns, now, request);
             ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
-            ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
-            ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
+            if (capture_recovery_only) {
+                ValidateCaptureRecoveryOnlyConfirmations(
+                    RequireField(transaction, "operatorConfirmations", JsonKind::object));
+            } else {
+                ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
+                ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
+            }
             if (pair_store_ == nullptr || capture_backend_ == nullptr) {
                 return StartUnavailableResponse(
                     request.request_id, request.transaction_id);
@@ -737,7 +787,8 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                                              std::int64_t completed) {
                     const std::string result = BuildTerminalResult(
                         transaction, request.transaction_id, state, failure,
-                        originals, transaction_directory, completed);
+                        originals, transaction_directory, completed,
+                        capture_recovery_only);
                     const auto persisted = pair_store_->CompleteTerminal(
                         request.transaction_id, JournalStateFor(state), result);
                     return ResponsePrefix(request.request_id, true, "PairDispatchAccepted") +

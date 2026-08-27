@@ -45,6 +45,7 @@ enum class DualHardwareCameraAgentOperation {
     get_dual_capabilities,
     reserve_pair_transaction,
     start_reserved_pair,
+    start_reserved_capture_recovery_only,
     get_pair_transaction_result,
     close_reserved_pair_transaction,
 };

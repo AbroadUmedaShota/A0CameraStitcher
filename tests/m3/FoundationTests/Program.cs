@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("single-camera readiness ignores only the inactive body", SingleCameraReadinessAsync),
     ("continuous hardware Live View v2 validates sessions and JPEG frames", ContinuousHardwareLiveViewV2Async),
     ("dual hardware Agent v2 reserves starts and queries one pair transaction", DualHardwareAgentV2RoundTripAsync),
+    ("dual hardware Agent v2 accepts a safe additive capability", DualHardwareAgentV2AdditiveCapabilitiesAsync),
     ("dual hardware Agent v2 rejects retry capability and mismatched journals", DualHardwareAgentV2NegativesAsync),
     ("dual binding accepts exactly two candidates", DualBindingCandidateCardinalityAsync),
     ("dual binding reaches Ready through the five operations", DualBindingFiveOperationsReachReadyAsync),
@@ -389,6 +390,41 @@ static async Task DualHardwareAgentV2NegativesAsync()
             duplicateField,
             requestId,
             transactionId));
+}
+
+static Task DualHardwareAgentV2AdditiveCapabilitiesAsync()
+{
+    const string requestId = "request-additive-capability";
+    const string existingSequence =
+        "\"start-reserved-pair\",\"get-pair-transaction-result\"";
+    const string additiveSequence =
+        "\"start-reserved-pair\",\"start-reserved-capture-recovery-only\"," +
+        "\"get-pair-transaction-result\"";
+    var additive = DualHardwareCapabilitiesResponseJson(requestId).Replace(
+        existingSequence,
+        additiveSequence,
+        StringComparison.Ordinal);
+    Check.False(additive == DualHardwareCapabilitiesResponseJson(requestId),
+        "The additive-capability fixture must contain the new operation.");
+    var accepted = DualHardwareCameraAgentProtocolCodec.DeserializeCapabilitiesResponse(
+        additive,
+        requestId);
+    Check.True(
+        accepted.SupportedOperations.Contains(
+            DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly,
+            StringComparer.Ordinal),
+        "A safe additive operation must not disable the ordinary Dual workflow.");
+
+    var duplicate = additive.Replace(
+        "\"start-reserved-capture-recovery-only\"",
+        "\"start-reserved-capture-recovery-only\",\"start-reserved-capture-recovery-only\"",
+        StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol(
+        "UnsupportedDualCapabilities",
+        () => DualHardwareCameraAgentProtocolCodec.DeserializeCapabilitiesResponse(
+            duplicate,
+            requestId));
+    return Task.CompletedTask;
 }
 
 static string DualHardwareCapabilitiesResponseJson(string requestId, int automaticRetryCount = 0) =>

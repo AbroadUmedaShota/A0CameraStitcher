@@ -1,6 +1,6 @@
 # Dual Hardware Camera Agent v2 — Native Named Pipe host
 
-Status: Native host implemented / real SDK backend not wired (fake orchestrator stays test-only)
+Status: Native host and session-bound real SDK/WPD backend implemented / Dual hardware acceptance pending
 Schema: `a0.camera-agent.hardware-dual.v2`
 
 This document covers the production Native Named Pipe host process that serves
@@ -41,7 +41,9 @@ but deliberately do not modify machine ACLs.
   --pipe-name A0CameraStitcher.CameraAgent.HardwareDual.v2.<random-guid> `
   --pair-journal-root C:\approved-local-path\dual-journal `
   --approved-capture-profile C:\approved-local-path\dual-profile.json `
-  --dual-identity-proof C:\approved-local-path\dual-identity-proof.json
+  --dual-identity-proof C:\approved-local-path\dual-identity-proof.json `
+  --binding-pipe-name A0CameraStitcher.CameraAgent.HardwareDual.Binding.v1.<random-guid> `
+  --wpd-camera-map C:\approved-local-path\camera-map-wpd.json
 ```
 
 Default pipe name (used when `--pipe-name` is omitted):
@@ -77,15 +79,22 @@ same fixed-local-path contract the pair journal store applies to its own
 root. UNC, NT-namespace, mapped-network, removable, optical, and symlink/
 junction paths are all rejected before this process opens the pipe.
 
-`--approved-capture-profile` and `--dual-identity-proof` are part of the host
-launch contract agreed with Issue #8. Their **content is not read** yet:
-every `start-reserved-pair` request already carries its own frozen
-`captureProfileSnapshot`/`identitySnapshot`, which the existing dispatcher
-validates per request. Reading these two files to cross-check the
-client-carried snapshot, and wiring a real SDK/WPD camera backend into
-`start-reserved-pair`, are both future work outside this host's current
-scope: without an injected backend, every `start-reserved-pair` request is
-answered `PairDispatcherUnavailable` after running its full preflight.
+`--approved-capture-profile` and `--dual-identity-proof` remain part of the host
+launch contract. Each start request also carries frozen
+`captureProfileSnapshot`/`identitySnapshot` values that the dispatcher validates
+before dispatch. Supplying both `--binding-pipe-name` and `--wpd-camera-map`
+enables one process-owned real backend: the binding pipe first establishes a
+memory-only, operator-confirmed CAM-A/B binding, all candidate Live View and SDK
+sources are fully closed, and the same process then serves the capture pipe
+without SDK re-enumeration. Omitting both options preserves the fail-closed
+legacy host; starts return `PairDispatcherUnavailable` after full preflight.
+
+The additive `start-reserved-capture-recovery-only` operation is limited to
+controlled Dual transport verification under ADR-0027. It omits rig evidence,
+requires an explicit `captureRecoveryOnlyApproved` confirmation, and reports
+`capturePurpose=CaptureRecoveryOnly`, `stitchOutcome=Pending`, and
+`a0QualityApproval=Unapproved`. It does not run a stitch or establish A0 quality.
+The ordinary `start-reserved-pair` request and approved-rig contract are unchanged.
 
 ## Operations
 
@@ -93,7 +102,8 @@ answered `PairDispatcherUnavailable` after running its full preflight.
 | --- | --- | --- |
 | `get-dual-capabilities` | none | always succeeds |
 | `reserve-pair-transaction` | durable pair journal store | fails closed (`PairStoreUnavailable`) only if the store failed to construct |
-| `start-reserved-pair` | full preflight, then `PairDispatcherUnavailable` | preflight (identity/capture-profile/rig-profile/confirmations) always runs; no camera dispatch occurs |
+| `start-reserved-pair` | durable pair journal plus injected session-bound backend | requires identity, approved capture profile, approved rig profile, operator confirmations, and a current Ready binding; without a backend it fails `PairDispatcherUnavailable` after preflight |
+| `start-reserved-capture-recovery-only` | durable pair journal plus injected session-bound backend | requires identity, approved capture profile, capture-only confirmations, and a current Ready binding; no rig input or stitch; result remains `stitchOutcome=Pending` and A0 quality unapproved |
 | `close-reserved-pair-transaction` | durable pair journal store | closes only the exact same-ID `Reserved` transaction before dispatch; missing, wrong-ID, `Dispatching`, and capture-terminal states are rejected |
 | `get-pair-transaction-result` | durable pair journal store | a same-ID query recovers a Reserved, `ClosedBeforeDispatch`, or capture-terminal transaction |
 
@@ -145,7 +155,8 @@ to that use.
 
 ## Verification boundary
 
-Native contract tests (`tests/dual_hardware_camera_agent_pipe_tests.cpp`)
+Native contract tests (`tests/dual_hardware_camera_agent_tests.cpp` and
+`tests/dual_hardware_camera_agent_pipe_tests.cpp`)
 drive this host over a real Windows named pipe. They cover the 1 MiB frame
 boundary, zero-length and partial header/body frames, malformed JSON
 delivered as a typed dispatch-level rejection rather than a transport
@@ -159,9 +170,13 @@ reserved cleanup with a durable `ClosedBeforeDispatch` tombstone. The
 transport cases include response-header-only, partial-body, full response
 without ACK, invalid ACK, late ACK, a completely unread response, normal ACK,
 and injected ACK-wait failure; each failure remains bounded and has zero
-redispatch. They do not load or call a real camera;
-`A0CameraStitcher.DualCameraAgent.exe` never
-constructs a real SDK/WPD backend or the test-only fake orchestrator.
+redispatch. They also cover the strict rig-free CaptureRecoveryOnly request,
+Pending/A0-unapproved result, CAM-A-before-CAM-B ordering, partial retention,
+and zero retry with an injected deterministic backend. These software tests do
+not load or call a real camera. Real backend construction occurs only in the
+production executable when both binding options are supplied, and its claims
+remain subject to separate one-shot, 10-pair, approved-p95 100-pair, and fault
+evidence on the licensed Windows hardware PC.
 
 ## Known gaps (tracked, not fixed here)
 

@@ -16,6 +16,8 @@ public static class DualHardwareCameraAgentProtocol
         public const string GetCapabilities = "get-dual-capabilities";
         public const string ReservePairTransaction = "reserve-pair-transaction";
         public const string StartReservedPair = "start-reserved-pair";
+        public const string StartReservedCaptureRecoveryOnly =
+            "start-reserved-capture-recovery-only";
         public const string GetPairTransactionResult = "get-pair-transaction-result";
         public const string CloseReservedPairTransaction = "close-reserved-pair-transaction";
 
@@ -213,10 +215,36 @@ public static class DualHardwareCameraAgentProtocolCodec
         var payload = DeserializePayload<DualHardwareCapabilitiesResult>(envelope.Payload);
         if (payload.CameraMode != "DualCamera" || payload.ProtocolVersion != 2 ||
             !payload.OrderedRequiredAliases.SequenceEqual(OrderedAliases(), StringComparer.Ordinal) ||
-            !payload.SupportedOperations.SequenceEqual(DualHardwareCameraAgentProtocol.Operations.Required, StringComparer.Ordinal) ||
+            !SupportsRequiredOperations(payload.SupportedOperations) ||
             !payload.PairJournalDurable || !payload.SameTransactionQueryOnly || payload.AutomaticRetryCount != 0)
             throw Violation("UnsupportedDualCapabilities", "The Agent cannot safely own one durable no-retry pair transaction.");
         return payload;
+    }
+
+    private static bool SupportsRequiredOperations(IReadOnlyList<string> supportedOperations)
+    {
+        var requiredOperations = DualHardwareCameraAgentProtocol.Operations.Required;
+        if (supportedOperations.Count < requiredOperations.Count ||
+            supportedOperations.Count > 32)
+            return false;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var requiredIndex = 0;
+        foreach (var operation in supportedOperations)
+        {
+            if (string.IsNullOrWhiteSpace(operation) || operation.Length > 128 ||
+                operation.Any(character =>
+                    !((character >= 'a' && character <= 'z') ||
+                      (character >= '0' && character <= '9') ||
+                      character == '-')) ||
+                !seen.Add(operation))
+                return false;
+
+            if (requiredIndex < requiredOperations.Count &&
+                operation == requiredOperations[requiredIndex])
+                ++requiredIndex;
+        }
+        return requiredIndex == requiredOperations.Count;
     }
 
     public static bool DeserializeReservationResponse(

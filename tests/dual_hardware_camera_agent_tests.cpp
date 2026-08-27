@@ -1,5 +1,6 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
+#include "a0/common/protocol_json.hpp"
 
 #include <Windows.h>
 
@@ -233,6 +234,73 @@ std::string StartPayload(
         ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
 }
 
+struct TestJsonFailure final {
+    [[noreturn]] static void Fail(std::string_view, std::string_view message) {
+        throw std::runtime_error(std::string(message));
+    }
+};
+
+const a0::common::protocol_json::JsonValue& TestJsonField(
+    const a0::common::protocol_json::JsonValue& object,
+    std::string_view name,
+    a0::common::protocol_json::JsonKind kind) {
+    using namespace a0::common::protocol_json;
+    return RequireFieldWith<TestJsonFailure>(object, name, kind);
+}
+
+void CheckCaptureRecoveryOnlyTerminalJson(
+    std::string_view response,
+    std::string_view expected_terminal,
+    std::string_view message) {
+    using namespace a0::common::protocol_json;
+    try {
+        const JsonValue envelope = BasicJsonParser<TestJsonFailure>(response).Parse();
+        const auto& payload = TestJsonField(envelope, "payload", JsonKind::object);
+        const auto& result = TestJsonField(payload, "result", JsonKind::object);
+        Check(TestJsonField(result, "capturePurpose", JsonKind::string).string == "CaptureRecoveryOnly",
+            std::string(message) + ": parsed terminal must retain CaptureRecoveryOnly purpose");
+        Check(TestJsonField(result, "stitchOutcome", JsonKind::string).string == "Pending",
+            std::string(message) + ": parsed terminal must retain Pending stitch outcome");
+        Check(TestJsonField(result, "a0QualityApproval", JsonKind::string).string == "Unapproved",
+            std::string(message) + ": parsed terminal must retain unapproved A0 quality");
+        Check(TestJsonField(result, "terminalState", JsonKind::string).string == expected_terminal,
+            std::string(message) + ": parsed terminal state must match");
+    } catch (const std::exception& error) {
+        Check(false, std::string(message) + ": response must parse through the shared JSON seam: " + error.what());
+    }
+}
+
+std::string CaptureRecoveryOnlyPayload(
+    std::string_view transaction_id = "11111111111111111111111111111111",
+    std::string_view aliases = "[\"CAM-A\",\"CAM-B\"]",
+    std::string_view transaction_directory = "C:/anonymous/capture-recovery-only") {
+    constexpr std::string_view body_a =
+        "{\"alias\":\"CAM-A\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
+        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
+        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
+        "\"vibrationReductionEnabled\":false}";
+    constexpr std::string_view body_b =
+        "{\"alias\":\"CAM-B\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
+        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
+        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
+        "\"vibrationReductionEnabled\":false}";
+    return "{\"cameraMode\":\"DualCamera\",\"orderedRequiredAliases\":" +
+        std::string(aliases) +
+        ",\"transaction\":{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"transactionDirectory\":\"" + std::string(transaction_directory) + "\""
+        ",\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"anonymous-test-ready\","
+        "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}"
+        ",\"captureProfileSnapshot\":{\"profileId\":\"anonymous-profile\",\"version\":\"1\","
+        "\"schemaVersion\":\"a0.hardware-dual-capture-profile.v1\",\"status\":\"Approved\","
+        "\"approvedAtUtc\":\"2026-08-13T00:00:00Z\",\"validUntilUtc\":\"2026-08-15T00:00:00Z\","
+        "\"bodies\":[" + std::string(body_a) + "," + std::string(body_b) + "]}"
+        ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
+        "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
+        "\"captureRecoveryOnlyApproved\":true}"
+        ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
+        ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
+}
+
 std::chrono::system_clock::time_point FixedNow() {
     using namespace std::chrono;
     return sys_days{year{2026}/August/14} + minutes{1};
@@ -311,8 +379,8 @@ void TestCapabilitiesAndRecognizedOperations() {
     CheckContains(capabilities, "\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"]",
         "capabilities must freeze the CAM-A then CAM-B alias order");
     CheckContains(capabilities,
-        "\"supportedOperations\":[\"get-dual-capabilities\",\"reserve-pair-transaction\",\"start-reserved-pair\",\"get-pair-transaction-result\",\"close-reserved-pair-transaction\"]",
-        "capabilities must advertise the five operations in stable order");
+        "\"supportedOperations\":[\"get-dual-capabilities\",\"reserve-pair-transaction\",\"start-reserved-pair\",\"start-reserved-capture-recovery-only\",\"get-pair-transaction-result\",\"close-reserved-pair-transaction\"]",
+        "capabilities must advertise the six operations in stable order");
     CheckContains(capabilities, "\"pairJournalDurable\":true",
         "capabilities must require a durable pair journal");
     CheckContains(capabilities, "\"sameTransactionQueryOnly\":true",
@@ -844,6 +912,201 @@ void TestFakePairBackendSuccessAndRestartQuery() {
     Check(backend->aliases.size() == 2, "restart query must not invoke the backend again");
 }
 
+void TestCaptureRecoveryOnlyContractAndNoRetry() {
+    DualHardwareCameraAgentDispatcher unavailable({}, [] { return FixedNow(); });
+    const auto complete = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(),
+        "request-recovery-only-unavailable"));
+    CheckContains(complete, "\"resultCode\":\"PairDispatcherUnavailable\"",
+        "a complete CaptureRecoveryOnly request must reach the unavailable backend boundary");
+
+    const auto missing_approval = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "\"captureRecoveryOnlyApproved\":true", "\"captureRecoveryOnlyApproved\":false"),
+        "request-recovery-only-missing-approval"));
+    CheckContains(missing_approval, "\"resultCode\":\"InvalidPairRequest\"",
+        "CaptureRecoveryOnly must reject a false captureRecoveryOnlyApproved confirmation");
+    const auto missing_approval_field = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            ",\"captureRecoveryOnlyApproved\":true", ""),
+        "request-recovery-only-absent-approval"));
+    CheckContains(missing_approval_field, "\"resultCode\":\"UnexpectedField\"",
+        "CaptureRecoveryOnly must reject a missing captureRecoveryOnlyApproved confirmation");
+    const auto rig_mixed_in = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "},\"operatorConfirmations\"", "},\"rigProfileSnapshot\":{},\"operatorConfirmations\""),
+        "request-recovery-only-rig-mixed-in"));
+    CheckContains(rig_mixed_in, "\"resultCode\":\"UnexpectedField\"",
+        "CaptureRecoveryOnly must reject a rig profile mixed into its strict transaction payload");
+    const auto rig_confirmation_mixed_in = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "\"captureProfileFrozen\":true,", "\"captureProfileFrozen\":true,\"rigProfileFrozen\":true,"),
+        "request-recovery-only-rig-confirmation-mixed-in"));
+    CheckContains(rig_confirmation_mixed_in, "\"resultCode\":\"UnexpectedField\"",
+        "CaptureRecoveryOnly must reject a rig confirmation mixed into its strict confirmation payload");
+
+    const auto normal_missing_rig = unavailable.Handle(Envelope(
+        "start-reserved-pair", ReplaceOnce(StartPayload(),
+            ",\"rigProfileSnapshot\":{\"profileId\":\"anonymous-rig\",\"version\":\"1\","
+            "\"status\":\"Approved\",\"schemaVersion\":\"1.1.0\",\"provenance\":\"anonymous-test\","
+            "\"measuredAtUtc\":\"2026-08-12T00:00:00Z\",\"validUntilUtc\":\"2026-08-15T00:00:00Z\","
+            "\"assessedAtUtc\":\"2026-08-13T00:00:00Z\",\"expectedInputWidth\":7360,"
+            "\"expectedInputHeight\":4912,\"cameraBToCameraA\":[1,0,12,0,1,0,0,0,1],"
+            "\"layout\":\"camera-a-left-camera-b-right\",\"crop\":[1,1,1,1],"
+            "\"cameraAliases\":[\"CAM-A\",\"CAM-B\"]}", ""),
+        "request-normal-pair-missing-rig"));
+    CheckContains(normal_missing_rig, "\"resultCode\":\"UnexpectedField\"",
+        "ordinary start-reserved-pair must continue to require its rig profile");
+
+    const auto run = [](
+        std::string_view name,
+        std::string_view transaction_id,
+        std::vector<DualHardwareFakeCaptureOutcome> outcomes,
+        std::vector<std::chrono::system_clock::time_point> times =
+            std::vector<std::chrono::system_clock::time_point>(4, FixedNow())) {
+        auto sandbox = std::make_unique<TempSandbox>();
+        const fs::path store_root = sandbox->Child(std::string(name) + "-store");
+        const fs::path transaction_root = sandbox->Child(std::string(name) + "-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        backend->outcomes = std::move(outcomes);
+        auto time_index = std::make_shared<std::size_t>(0);
+        DualHardwareCameraAgentDispatcher dispatcher(store,
+            [times = std::move(times), time_index] {
+                const auto index = (std::min)(*time_index, times.size() - 1);
+                ++*time_index;
+                return times[index];
+            }, backend);
+        const auto response = dispatcher.Handle(Envelope(
+            "start-reserved-capture-recovery-only",
+            CaptureRecoveryOnlyPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()),
+            "request-recovery-only-" + std::string(name)));
+        return std::tuple{std::move(sandbox), response, backend, transaction_root,
+            store_root, std::string(transaction_id)};
+    };
+
+    const auto check_durable_replay = [](const fs::path& store_root,
+                                         std::string_view transaction_id,
+                                         std::string_view expected_terminal,
+                                         std::string_view name) {
+        auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        DualHardwareCameraAgentDispatcher restarted(restarted_store);
+        const auto replay = restarted.Handle(Envelope("get-pair-transaction-result",
+            "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
+            "request-recovery-only-replay-" + std::string(name)));
+        CheckContains(replay, "\"resultCode\":\"PairTransactionFound\"",
+            std::string(name) + ": a new Agent/store instance must recover the same terminal transaction");
+        CheckCaptureRecoveryOnlyTerminalJson(replay, expected_terminal,
+            std::string(name) + ": durable terminal replay");
+    };
+
+    auto [success_sandbox, success_response, success_backend, success_root,
+          success_store_root, success_transaction_id] = run(
+        "success", "12121212121212121212121212121212", {{true, true, true}, {true, true, true}});
+    CheckContains(success_response, "\"capturePurpose\":\"CaptureRecoveryOnly\"",
+        "CaptureRecoveryOnly success must identify its terminal capture purpose");
+    CheckContains(success_response, "\"stitchOutcome\":\"Pending\"",
+        "CaptureRecoveryOnly success must defer stitching");
+    CheckContains(success_response, "\"a0QualityApproval\":\"Unapproved\"",
+        "CaptureRecoveryOnly success must not claim A0 quality approval");
+    CheckNotContains(success_response, "rigProfile",
+        "CaptureRecoveryOnly terminal evidence must not contain rig profile evidence");
+    Check(success_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
+        "CaptureRecoveryOnly success must capture CAM-A then CAM-B exactly once without retry");
+    Check(fs::is_regular_file(success_root / "CAM-A" / "original.jpg") &&
+          fs::is_regular_file(success_root / "CAM-B" / "original.jpg"),
+        "CaptureRecoveryOnly success must retain both originals");
+    CheckCaptureRecoveryOnlyTerminalJson(success_response, "Succeeded",
+        "CaptureRecoveryOnly success response");
+    check_durable_replay(success_store_root, success_transaction_id, "Succeeded", "success");
+
+    auto [a_failure_sandbox, a_failure_response, a_failure_backend, a_failure_root,
+          a_failure_store_root, a_failure_transaction_id] = run(
+        "a-failure", "13131313131313131313131313131313", {{false, true, true}});
+    CheckContains(a_failure_response, "\"terminalState\":\"Failed\"",
+        "CaptureRecoveryOnly CAM-A failure must terminalize as Failed");
+    Check(a_failure_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "CaptureRecoveryOnly CAM-A failure must prevent CAM-B and retry");
+    CheckCaptureRecoveryOnlyTerminalJson(a_failure_response, "Failed",
+        "CaptureRecoveryOnly CAM-A failure response");
+    check_durable_replay(a_failure_store_root, a_failure_transaction_id, "Failed", "a-failure");
+
+    auto [b_failure_sandbox, b_failure_response, b_failure_backend, b_failure_root,
+          b_failure_store_root, b_failure_transaction_id] = run(
+        "b-failure", "14141414141414141414141414141414", {{true, true, true}, {false, true, true}});
+    CheckContains(b_failure_response, "\"terminalState\":\"FailedPartial\"",
+        "CaptureRecoveryOnly CAM-B failure must terminalize as FailedPartial");
+    Check(b_failure_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"} &&
+          fs::is_regular_file(b_failure_root / "CAM-A" / "original.jpg"),
+        "CaptureRecoveryOnly CAM-B failure must retain CAM-A and not retry");
+    CheckCaptureRecoveryOnlyTerminalJson(b_failure_response, "FailedPartial",
+        "CaptureRecoveryOnly CAM-B failure response");
+    check_durable_replay(b_failure_store_root, b_failure_transaction_id, "FailedPartial", "b-failure");
+
+    auto [a_exact_sandbox, a_exact_response, a_exact_backend, a_exact_root,
+          a_exact_store_root, a_exact_transaction_id] = run(
+        "a-exact-delete", "15151515151515151515151515151515", {{true, false, true}});
+    CheckContains(a_exact_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "CaptureRecoveryOnly CAM-A exact-delete failure must be typed SpoolNotEmpty");
+    Check(a_exact_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "CaptureRecoveryOnly CAM-A exact-delete failure must prevent CAM-B");
+    CheckCaptureRecoveryOnlyTerminalJson(a_exact_response, "Failed",
+        "CaptureRecoveryOnly CAM-A exact-delete failure response");
+    check_durable_replay(a_exact_store_root, a_exact_transaction_id, "Failed", "a-exact-delete");
+
+    auto [b_exact_sandbox, b_exact_response, b_exact_backend, b_exact_root,
+          b_exact_store_root, b_exact_transaction_id] = run(
+        "b-exact-delete", "16161616161616161616161616161616",
+        {{true, true, true}, {true, false, true}});
+    CheckContains(b_exact_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "CaptureRecoveryOnly CAM-B exact-delete failure must be typed SpoolNotEmpty");
+    Check(b_exact_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
+        "CaptureRecoveryOnly CAM-B exact-delete failure must not retry either camera");
+    CheckCaptureRecoveryOnlyTerminalJson(b_exact_response, "FailedPartial",
+        "CaptureRecoveryOnly CAM-B exact-delete failure response");
+    check_durable_replay(b_exact_store_root, b_exact_transaction_id, "FailedPartial", "b-exact-delete");
+
+    auto [a_empty_sandbox, a_empty_response, a_empty_backend, a_empty_root,
+          a_empty_store_root, a_empty_transaction_id] = run(
+        "a-empty-after", "17171717171717171717171717171717", {{true, true, false}});
+    CheckContains(a_empty_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "CaptureRecoveryOnly CAM-A empty-after failure must be typed SpoolNotEmpty");
+    Check(a_empty_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "CaptureRecoveryOnly CAM-A empty-after failure must prevent CAM-B");
+    CheckCaptureRecoveryOnlyTerminalJson(a_empty_response, "Failed",
+        "CaptureRecoveryOnly CAM-A empty-after failure response");
+    check_durable_replay(a_empty_store_root, a_empty_transaction_id, "Failed", "a-empty-after");
+
+    auto [b_empty_sandbox, b_empty_response, b_empty_backend, b_empty_root,
+          b_empty_store_root, b_empty_transaction_id] = run(
+        "b-empty-after", "18181818181818181818181818181818",
+        {{true, true, true}, {true, true, false}});
+    CheckContains(b_empty_response, "\"failureCode\":\"SpoolNotEmpty\"",
+        "CaptureRecoveryOnly CAM-B empty-after failure must be typed SpoolNotEmpty");
+    Check(b_empty_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
+        "CaptureRecoveryOnly CAM-B empty-after failure must not retry either camera");
+    CheckCaptureRecoveryOnlyTerminalJson(b_empty_response, "FailedPartial",
+        "CaptureRecoveryOnly CAM-B empty-after failure response");
+    check_durable_replay(b_empty_store_root, b_empty_transaction_id, "FailedPartial", "b-empty-after");
+
+    using namespace std::chrono;
+    const auto deadline = sys_days{year{2026}/August/14} + minutes{3};
+    auto [watchdog_sandbox, watchdog_response, watchdog_backend, watchdog_root,
+          watchdog_store_root, watchdog_transaction_id] = run(
+        "watchdog", "19191919191919191919191919191919", {{true, true, true}},
+        {FixedNow(), FixedNow(), deadline});
+    CheckContains(watchdog_response, "\"failureCode\":\"WatchdogExpired\"",
+        "CaptureRecoveryOnly watchdog expiry must be typed WatchdogExpired");
+    Check(watchdog_backend->aliases == std::vector<std::string>{"CAM-A"} &&
+          fs::is_regular_file(watchdog_root / "CAM-A" / "original.jpg"),
+        "CaptureRecoveryOnly watchdog expiry after CAM-A must retain CAM-A and prevent CAM-B");
+    CheckCaptureRecoveryOnlyTerminalJson(watchdog_response, "WatchdogExpired",
+        "CaptureRecoveryOnly watchdog expiry response");
+    check_durable_replay(watchdog_store_root, watchdog_transaction_id, "WatchdogExpired", "watchdog");
+}
+
 void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
     const auto run = [](std::string_view name,
                          std::vector<DualHardwareFakeCaptureOutcome> outcomes,
@@ -1100,6 +1363,7 @@ int main() {
     TestInjectedPairStoreReservationAndRestartQuery();
     TestCloseReservedPairOperationIsExactAndDurable();
     TestFakePairBackendSuccessAndRestartQuery();
+    TestCaptureRecoveryOnlyContractAndNoRetry();
     TestFakePairBackendFailuresAndDeadlineAreNoRetry();
     TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch();
     TestStoreFailureIsFixedAndRedacted();
