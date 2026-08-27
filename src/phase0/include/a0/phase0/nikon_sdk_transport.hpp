@@ -1,10 +1,35 @@
 #pragma once
 
+#include "a0/phase0/dual_binding_camera_agent.hpp"
 #include "a0/phase0/phase0.hpp"
 
 #include <memory>
 
 namespace a0::phase0 {
+
+class INikonDualSessionTransport {
+public:
+    virtual ~INikonDualSessionTransport() = default;
+    [[nodiscard]] virtual std::vector<std::string> BeginDualSession(
+        std::chrono::seconds timeout) = 0;
+    virtual void OpenDualCandidateLiveView(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) = 0;
+    virtual void OpenDualBoundCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) = 0;
+    virtual void StartLiveView(std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual std::vector<unsigned char> ReadLiveViewFrame(
+        std::chrono::seconds timeout) = 0;
+    virtual void StopLiveView(std::chrono::seconds timeout) = 0;
+    virtual void CaptureToCard(
+        std::chrono::seconds image_event_timeout,
+        std::chrono::seconds transaction_timeout) = 0;
+    virtual void CloseDualSourceKeepingModule(
+        std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual DualIdentityInvalidationReason PollDualInvalidation() = 0;
+    virtual void EndDualSession(std::chrono::seconds timeout) = 0;
+};
 
 // Derives the private SDK-side identity from documented, source-level MAID
 // strings. The returned digest is local-only and must never be committed.
@@ -52,7 +77,9 @@ private:
     NikonCardCaptureEventSnapshot snapshot_{};
 };
 
-class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport, public ICardCaptureTransport {
+class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport,
+                                public ICardCaptureTransport,
+                                public INikonDualSessionTransport {
 public:
     NikonSdkTransport();
     ~NikonSdkTransport() override;
@@ -86,11 +113,71 @@ public:
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;
     void Close(std::chrono::seconds timeout) override;
+
+    // ADR-0025 DualCamera session boundary. The module object stays open for
+    // the lifetime of one operator binding, while at most one candidate source
+    // object is open at any time. Candidate tokens are opaque, memory-only and
+    // valid only until EndDualSession or an invalidation.
+    [[nodiscard]] std::vector<std::string> BeginDualSession(
+        std::chrono::seconds timeout) override;
+    void OpenDualCandidateLiveView(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) override;
+    void OpenDualBoundCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) override;
+    void CloseDualSourceKeepingModule(std::chrono::seconds timeout) override;
+    [[nodiscard]] DualIdentityInvalidationReason PollDualInvalidation() override;
+    void EndDualSession(std::chrono::seconds timeout) override;
     [[nodiscard]] static bool LicensedAdapterAvailable() noexcept;
 
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// Production implementation of the ADR-0025 binding port. It deliberately
+// owns one NikonSdkTransport so the private candidate tokens never cross a
+// process or get persisted. Capture uses the same owner through
+// BoundSourceObjectForCapture; this class only implements the binding and Live
+// View lifecycle.
+class NikonDualBindingSdkAdapter final : public DualBindingSdkAdapter {
+public:
+    NikonDualBindingSdkAdapter();
+    explicit NikonDualBindingSdkAdapter(
+        std::shared_ptr<INikonDualSessionTransport> transport);
+    ~NikonDualBindingSdkAdapter() override;
+    NikonDualBindingSdkAdapter(const NikonDualBindingSdkAdapter&) = delete;
+    NikonDualBindingSdkAdapter& operator=(const NikonDualBindingSdkAdapter&) = delete;
+
+    [[nodiscard]] std::vector<std::string> EnumerateCandidates() override;
+    [[nodiscard]] bool StartLiveView(std::size_t ordinal) override;
+    [[nodiscard]] bool StopLiveView(std::size_t ordinal) override;
+    [[nodiscard]] std::vector<std::uint8_t> ReadLiveViewFrame(
+        std::size_t ordinal) override;
+    [[nodiscard]] bool CloseCandidateSession(std::size_t ordinal) override;
+    [[nodiscard]] DualIdentityInvalidationReason PollInvalidation() override;
+
+    // Capture-side seam. The token comes only from a Ready
+    // DualIdentitySessionBinding and is never logged or persisted.
+    void OpenBoundCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout);
+    void CaptureToCard(
+        std::chrono::seconds image_event_timeout,
+        std::chrono::seconds transaction_timeout);
+    void CloseBoundCapture(std::chrono::seconds timeout);
+    void EndSession(std::chrono::seconds timeout);
+
+private:
+    [[nodiscard]] std::string CandidateToken(std::size_t ordinal) const;
+    void FailAndInvalidate() noexcept;
+
+    std::shared_ptr<INikonDualSessionTransport> transport_;
+    std::vector<std::string> candidate_tokens_;
+    std::optional<std::size_t> open_live_view_ordinal_;
+    DualIdentityInvalidationReason pending_invalidation_{
+        DualIdentityInvalidationReason::None};
 };
 
 class NikonSdkStatusExecutor final : public ISdkStatusExecutor {

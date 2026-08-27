@@ -405,32 +405,135 @@ public:
             // MAID object storage must remain at a stable address for the whole
             // session; identify with temporary objects, then open into the
             // long-lived member used by every later command and callback.
-            OpenChild(module_, source_, *selected_id, "open_failed");
-            source_id_ = *selected_id;
-            EnumerateCapabilities(source_, deadline, "open_failed");
-            SetProgressCallback(source_, deadline, "open_failed");
-            const bool source_event_callback_supported =
-                Supports(source_, kNkMAIDCapability_EventProc, kNkMAIDCapOperation_Set);
-            SetEventCallback(source_, deadline, "open_failed");
-            if (source_event_callback_supported) card_capture_events_.CallbackRegistered();
-            RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
-                0, deadline, "open_failed");
-            if (capture_session) {
-                original_save_media_ = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
-                SetUnsigned(source_, kNkMAIDCapability_SaveMedia, kDesiredSaveMedia, deadline, "save_media_mismatch");
-                const ULONG verified = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_mismatch");
-                if (verified != kDesiredSaveMedia) {
-                    throw TransportError("save_media_mismatch", "card capture destination did not persist");
-                }
-            }
-            session_open_ = true;
-            capture_session_ = capture_session;
-            live_view_session_ = !capture_session;
-            trace_.sdk_session_opened = true;
+            OpenSelectedSource(*selected_id, capture_session, deadline);
         } catch (...) {
             CleanupNoThrow();
             throw;
         }
+    }
+
+    std::vector<std::string> BeginDualSession(std::chrono::seconds timeout) {
+        ClaimSession();
+        trace_ = {};
+        card_capture_events_.ResetForSession();
+        try {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            OpenModule(deadline);
+            const auto ids = WaitForSourceIds(deadline, "dual_inventory_failed");
+            std::vector<ULONG> d810_ids;
+            for (const ULONG id : ids) {
+                MaidObject& candidate = AcquireSessionMaidObject("dual_inventory_failed");
+                OpenChild(module_, candidate, id, "dual_inventory_failed");
+                try {
+                    EnumerateCapabilities(candidate, deadline, "dual_inventory_failed");
+                    if (GetUnsigned(candidate, kNkMAIDCapability_CameraType,
+                            deadline, "dual_inventory_failed") == kNkMAIDCameraType_D810) {
+                        d810_ids.push_back(id);
+                    }
+                    CloseObjectNoThrow(candidate);
+                } catch (...) {
+                    CloseObjectNoThrow(candidate);
+                    throw;
+                }
+            }
+            if (d810_ids.size() != kDualIdentityRequiredCandidateCount) {
+                throw TransportError(
+                    "camera_count_mismatch",
+                    "DualCamera binding requires exactly two currently connected D810 sources");
+            }
+            std::sort(d810_ids.begin(), d810_ids.end());
+            dual_candidates_.clear();
+            const std::string seed = NewRunId();
+            for (std::size_t ordinal = 0; ordinal < d810_ids.size(); ++ordinal) {
+                dual_candidates_.emplace_back(
+                    "dual-session-candidate-" + seed + "-" + std::to_string(ordinal),
+                    d810_ids[ordinal]);
+            }
+            dual_expected_module_source_ids_.clear();
+            dual_expected_module_source_ids_.insert(ids.begin(), ids.end());
+            dual_topology_changed_ = false;
+            dual_manager_active_ = true;
+            std::vector<std::string> tokens;
+            tokens.reserve(dual_candidates_.size());
+            for (const auto& candidate : dual_candidates_) tokens.push_back(candidate.first);
+            return tokens;
+        } catch (...) {
+            CleanupNoThrow();
+            throw;
+        }
+    }
+
+    void OpenDualCandidateLiveView(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) {
+        OpenDualSource(candidate_token, false, timeout);
+    }
+
+    void OpenDualBoundCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) {
+        OpenDualSource(candidate_token, true, timeout);
+    }
+
+    void CloseDualSourceKeepingModule(std::chrono::seconds timeout) {
+        if (!dual_manager_active_ || !source_.opened) {
+            throw TransportError(
+                "session_not_open", "DualCamera candidate source is not open");
+        }
+        try {
+            CloseSourceOnly(std::chrono::steady_clock::now() + timeout);
+            if (sdk_session_poisoned_) {
+                throw TransportError(
+                    "session_poisoned",
+                    "DualCamera source cannot be reused after an abandoned SDK command");
+            }
+        } catch (...) {
+            dual_topology_changed_ = true;
+            CleanupNoThrow();
+            throw;
+        }
+    }
+
+    DualIdentityInvalidationReason PollDualInvalidation() {
+        if (!dual_manager_active_ || !module_.opened) {
+            return DualIdentityInvalidationReason::AgentRestart;
+        }
+        try {
+            Pump(module_, "dual_topology_poll_failed");
+        } catch (...) {
+            dual_topology_changed_ = true;
+            return DualIdentityInvalidationReason::SdkError;
+        }
+        if (dual_topology_changed_ ||
+            module_sources_ != dual_expected_module_source_ids_) {
+            return DualIdentityInvalidationReason::TopologyChanged;
+        }
+        return DualIdentityInvalidationReason::None;
+    }
+
+    void EndDualSession(std::chrono::seconds timeout) {
+        if (!claimed_) return;
+        std::optional<TransportError> pending_error;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        if (source_.opened) {
+            try {
+                CloseSourceOnly(deadline);
+            } catch (const TransportError& error) {
+                pending_error.emplace(error.Category(), error.what());
+            }
+        }
+        try {
+            CleanupObjects(deadline);
+        } catch (const TransportError& error) {
+            if (!pending_error) pending_error.emplace(error.Category(), error.what());
+            CleanupNoThrow();
+        }
+        ReleaseSession();
+        dual_manager_active_ = false;
+        dual_candidates_.clear();
+        dual_expected_module_source_ids_.clear();
+        trace_.sdk_session_closed = true;
+        if (pending_error) throw *pending_error;
     }
 
     std::string Baseline(std::chrono::seconds timeout) {
@@ -700,6 +803,156 @@ public:
     }
 
 private:
+    void OpenDualSource(
+        std::string_view candidate_token,
+        bool capture_session,
+        std::chrono::seconds timeout) {
+        if (!dual_manager_active_ || !module_.opened || source_.opened) {
+            throw TransportError(
+                "session_busy",
+                "DualCamera requires one active module and at most one open source");
+        }
+        if (PollDualInvalidation() != DualIdentityInvalidationReason::None) {
+            throw TransportError(
+                "binding_invalidated",
+                "DualCamera binding was invalidated before source open");
+        }
+        const auto candidate = std::find_if(
+            dual_candidates_.begin(), dual_candidates_.end(),
+            [candidate_token](const auto& value) {
+                return value.first == candidate_token;
+            });
+        if (candidate == dual_candidates_.end()) {
+            throw TransportError(
+                "candidate_unavailable",
+                "DualCamera candidate token does not belong to the active session");
+        }
+        try {
+            OpenSelectedSource(
+                candidate->second,
+                capture_session,
+                std::chrono::steady_clock::now() + timeout);
+        } catch (...) {
+            dual_topology_changed_ = true;
+            throw;
+        }
+    }
+
+    void OpenSelectedSource(
+        ULONG selected_id,
+        bool capture_session,
+        std::chrono::steady_clock::time_point deadline) {
+        if (!module_.opened || source_.opened) {
+            throw TransportError(
+                "open_failed", "SDK source open preconditions are not satisfied");
+        }
+        source_.capabilities.clear();
+        sdk_session_poisoned_ = false;
+        card_capture_events_.ResetForSession();
+        capture_complete_ = false;
+        add_child_in_card_ = false;
+        baseline_.clear();
+        added_items_.clear();
+        late_items_.clear();
+        removed_items_.clear();
+        baseline_token_.clear();
+        live_view_started_ = false;
+        live_view_stop_attempted_ = false;
+        original_save_media_.reset();
+
+        OpenChild(module_, source_, selected_id, "open_failed");
+        source_id_ = selected_id;
+        EnumerateCapabilities(source_, deadline, "open_failed");
+        SetProgressCallback(source_, deadline, "open_failed");
+        const bool source_event_callback_supported =
+            Supports(source_, kNkMAIDCapability_EventProc, kNkMAIDCapOperation_Set);
+        SetEventCallback(source_, deadline, "open_failed");
+        if (source_event_callback_supported) card_capture_events_.CallbackRegistered();
+        RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0,
+            kNkMAIDDataType_Null, 0, deadline, "open_failed");
+        if (capture_session) {
+            original_save_media_ = GetUnsigned(
+                source_, kNkMAIDCapability_SaveMedia, deadline,
+                "save_media_mismatch");
+            SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
+                kDesiredSaveMedia, deadline, "save_media_mismatch");
+            const ULONG verified = GetUnsigned(
+                source_, kNkMAIDCapability_SaveMedia, deadline,
+                "save_media_mismatch");
+            if (verified != kDesiredSaveMedia) {
+                throw TransportError(
+                    "save_media_mismatch",
+                    "card capture destination did not persist");
+            }
+        }
+        session_open_ = true;
+        capture_session_ = capture_session;
+        live_view_session_ = !capture_session;
+        trace_.sdk_session_opened = true;
+    }
+
+    void CloseSourceOnly(std::chrono::steady_clock::time_point deadline) {
+        std::optional<TransportError> pending_error;
+        if (source_.opened && live_view_session_ && live_view_started_ &&
+            !live_view_stop_attempted_) {
+            try {
+                live_view_stop_attempted_ = true;
+                SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+                    kNkMAIDLiveViewStatus_OFF, deadline,
+                    "live_view_stop_failed");
+                if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
+                        deadline, "live_view_stop_failed") !=
+                    kNkMAIDLiveViewStatus_OFF) {
+                    throw TransportError(
+                        "live_view_stop_failed",
+                        "D810 did not leave live view mode before source close");
+                }
+                live_view_started_ = false;
+            } catch (const TransportError& error) {
+                pending_error.emplace(error.Category(), error.what());
+            }
+        }
+        if (source_.opened && original_save_media_) {
+            try {
+                SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
+                    *original_save_media_, deadline,
+                    "save_media_restore_failed");
+                if (GetUnsigned(source_, kNkMAIDCapability_SaveMedia,
+                        deadline, "save_media_restore_failed") !=
+                    *original_save_media_) {
+                    throw TransportError(
+                        "save_media_restore_failed",
+                        "original SaveMedia value was not restored");
+                }
+            } catch (const TransportError& error) {
+                if (!pending_error) {
+                    pending_error.emplace(error.Category(), error.what());
+                }
+            }
+            original_save_media_.reset();
+        }
+        if (source_.opened) {
+            const NKERROR result = Call(
+                &source_.value, kNkMAIDCommand_Close, 0,
+                kNkMAIDDataType_Null, 0);
+            source_.opened = false;
+            card_capture_events_.SessionClosed();
+            if (result != kNkMAIDResult_NoError &&
+                result != kNkMAIDResult_ZombieObject && !pending_error) {
+                pending_error.emplace(
+                    "close_failed",
+                    "SDK source close failed: " + ResultText(result));
+            }
+        }
+        source_.capabilities.clear();
+        session_open_ = false;
+        capture_session_ = false;
+        live_view_session_ = false;
+        live_view_started_ = false;
+        live_view_stop_attempted_ = false;
+        if (pending_error) throw *pending_error;
+    }
+
     void ClaimSession() {
         std::lock_guard lock(g_session_mutex);
         if (claimed_ || g_session_active) throw TransportError("session_busy", "another Nikon SDK session is active");
@@ -1762,6 +2015,10 @@ private:
         live_view_stop_attempted_ = false;
         original_save_media_.reset();
         module_sources_.clear();
+        dual_candidates_.clear();
+        dual_expected_module_source_ids_.clear();
+        dual_manager_active_ = false;
+        dual_topology_changed_ = false;
         baseline_.clear();
         added_items_.clear();
         late_items_.clear();
@@ -1774,8 +2031,17 @@ private:
         auto* self = reinterpret_cast<Impl*>(reference);
         if (self == nullptr) return;
         const ULONG id = static_cast<ULONG>(data);
-        if (event == kNkMAIDEvent_AddChild) self->module_sources_.insert(id);
-        if (event == kNkMAIDEvent_RemoveChild) self->module_sources_.erase(id);
+        if (event == kNkMAIDEvent_AddChild) {
+            if (self->dual_manager_active_ &&
+                !self->dual_expected_module_source_ids_.contains(id)) {
+                self->dual_topology_changed_ = true;
+            }
+            self->module_sources_.insert(id);
+        }
+        if (event == kNkMAIDEvent_RemoveChild) {
+            if (self->dual_manager_active_) self->dual_topology_changed_ = true;
+            self->module_sources_.erase(id);
+        }
     }
 
     static void CALLBACK ProgressProc(ULONG, ULONG, NKREF, ULONG, ULONG) {}
@@ -1845,6 +2111,10 @@ private:
     std::optional<ULONG> original_save_media_;
     std::set<ULONG> baseline_;
     std::set<ULONG> module_sources_;
+    std::vector<std::pair<std::string, ULONG>> dual_candidates_;
+    std::set<ULONG> dual_expected_module_source_ids_;
+    bool dual_manager_active_{false};
+    bool dual_topology_changed_{false};
     std::set<ULONG> added_items_;
     std::set<ULONG> late_items_;
     std::set<ULONG> removed_items_;
@@ -1904,6 +2174,30 @@ void NikonSdkTransport::CaptureToCard(std::chrono::seconds image_event_timeout,
     impl_->CaptureToCard(image_event_timeout, transaction_timeout);
 }
 void NikonSdkTransport::Close(std::chrono::seconds timeout) { impl_->Close(timeout); }
+std::vector<std::string> NikonSdkTransport::BeginDualSession(
+    std::chrono::seconds timeout) {
+    return impl_->BeginDualSession(timeout);
+}
+void NikonSdkTransport::OpenDualCandidateLiveView(
+    std::string_view candidate_token,
+    std::chrono::seconds timeout) {
+    impl_->OpenDualCandidateLiveView(candidate_token, timeout);
+}
+void NikonSdkTransport::OpenDualBoundCapture(
+    std::string_view candidate_token,
+    std::chrono::seconds timeout) {
+    impl_->OpenDualBoundCapture(candidate_token, timeout);
+}
+void NikonSdkTransport::CloseDualSourceKeepingModule(
+    std::chrono::seconds timeout) {
+    impl_->CloseDualSourceKeepingModule(timeout);
+}
+DualIdentityInvalidationReason NikonSdkTransport::PollDualInvalidation() {
+    return impl_->PollDualInvalidation();
+}
+void NikonSdkTransport::EndDualSession(std::chrono::seconds timeout) {
+    impl_->EndDualSession(timeout);
+}
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept {
     try {
         return fs::exists(fs::path(A0_NIKON_SDK_MODULE_PATH));
@@ -1941,9 +2235,186 @@ std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
     std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::CaptureToCard(std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::Close(std::chrono::seconds) { ThrowGated(); }
+std::vector<std::string> NikonSdkTransport::BeginDualSession(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenDualCandidateLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenDualBoundCapture(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::CloseDualSourceKeepingModule(std::chrono::seconds) { ThrowGated(); }
+DualIdentityInvalidationReason NikonSdkTransport::PollDualInvalidation() { ThrowGated(); }
+void NikonSdkTransport::EndDualSession(std::chrono::seconds) { ThrowGated(); }
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept { return false; }
 
 #endif
+
+NikonDualBindingSdkAdapter::NikonDualBindingSdkAdapter()
+    : transport_(std::make_shared<NikonSdkTransport>()) {}
+NikonDualBindingSdkAdapter::NikonDualBindingSdkAdapter(
+    std::shared_ptr<INikonDualSessionTransport> transport)
+    : transport_(std::move(transport)) {
+    if (!transport_) {
+        throw std::invalid_argument("Dual Nikon session transport is required");
+    }
+}
+NikonDualBindingSdkAdapter::~NikonDualBindingSdkAdapter() {
+    if (!candidate_tokens_.empty() || open_live_view_ordinal_.has_value()) {
+        try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
+    }
+}
+
+std::vector<std::string> NikonDualBindingSdkAdapter::EnumerateCandidates() {
+    if (!candidate_tokens_.empty()) {
+        try { transport_->EndDualSession(std::chrono::seconds(5)); } catch (...) {}
+    }
+    candidate_tokens_.clear();
+    open_live_view_ordinal_.reset();
+    pending_invalidation_ = DualIdentityInvalidationReason::None;
+    try {
+        candidate_tokens_ = transport_->BeginDualSession(std::chrono::seconds(10));
+        return candidate_tokens_;
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+bool NikonDualBindingSdkAdapter::StartLiveView(std::size_t ordinal) {
+    if (open_live_view_ordinal_.has_value()) return false;
+    try {
+        transport_->OpenDualCandidateLiveView(
+            CandidateToken(ordinal), std::chrono::seconds(10));
+        transport_->StartLiveView(std::chrono::seconds(10));
+        open_live_view_ordinal_ = ordinal;
+        return true;
+    } catch (...) {
+        FailAndInvalidate();
+        return false;
+    }
+}
+
+bool NikonDualBindingSdkAdapter::StopLiveView(std::size_t ordinal) {
+    if (!open_live_view_ordinal_.has_value() ||
+        *open_live_view_ordinal_ != ordinal) {
+        return false;
+    }
+    try {
+        transport_->StopLiveView(std::chrono::seconds(10));
+        return true;
+    } catch (...) {
+        FailAndInvalidate();
+        return false;
+    }
+}
+
+std::vector<std::uint8_t> NikonDualBindingSdkAdapter::ReadLiveViewFrame(
+    std::size_t ordinal) {
+    if (!open_live_view_ordinal_.has_value() ||
+        *open_live_view_ordinal_ != ordinal) {
+        return {};
+    }
+    try {
+        return transport_->ReadLiveViewFrame(std::chrono::seconds(3));
+    } catch (...) {
+        FailAndInvalidate();
+        return {};
+    }
+}
+
+bool NikonDualBindingSdkAdapter::CloseCandidateSession(std::size_t ordinal) {
+    if (!open_live_view_ordinal_.has_value() ||
+        *open_live_view_ordinal_ != ordinal) {
+        return false;
+    }
+    try {
+        transport_->CloseDualSourceKeepingModule(std::chrono::seconds(10));
+        open_live_view_ordinal_.reset();
+        return true;
+    } catch (...) {
+        FailAndInvalidate();
+        return false;
+    }
+}
+
+DualIdentityInvalidationReason NikonDualBindingSdkAdapter::PollInvalidation() {
+    if (pending_invalidation_ != DualIdentityInvalidationReason::None) {
+        const auto reason = pending_invalidation_;
+        pending_invalidation_ = DualIdentityInvalidationReason::None;
+        return reason;
+    }
+    if (candidate_tokens_.empty()) return DualIdentityInvalidationReason::None;
+    try {
+        const auto reason = transport_->PollDualInvalidation();
+        if (reason != DualIdentityInvalidationReason::None) {
+            candidate_tokens_.clear();
+            open_live_view_ordinal_.reset();
+            try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
+        }
+        return reason;
+    } catch (...) {
+        FailAndInvalidate();
+        const auto reason = pending_invalidation_;
+        pending_invalidation_ = DualIdentityInvalidationReason::None;
+        return reason;
+    }
+}
+
+void NikonDualBindingSdkAdapter::OpenBoundCapture(
+    std::string_view candidate_token,
+    std::chrono::seconds timeout) {
+    if (candidate_tokens_.empty() ||
+        std::find(candidate_tokens_.begin(), candidate_tokens_.end(),
+            candidate_token) == candidate_tokens_.end()) {
+        throw TransportError(
+            "candidate_unavailable",
+            "bound candidate token is not part of the active Dual session");
+    }
+    try {
+        transport_->OpenDualBoundCapture(candidate_token, timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+void NikonDualBindingSdkAdapter::CaptureToCard(
+    std::chrono::seconds image_event_timeout,
+    std::chrono::seconds transaction_timeout) {
+    try {
+        transport_->CaptureToCard(image_event_timeout, transaction_timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+void NikonDualBindingSdkAdapter::CloseBoundCapture(std::chrono::seconds timeout) {
+    try {
+        transport_->CloseDualSourceKeepingModule(timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+void NikonDualBindingSdkAdapter::EndSession(std::chrono::seconds timeout) {
+    transport_->EndDualSession(timeout);
+    candidate_tokens_.clear();
+    open_live_view_ordinal_.reset();
+}
+
+std::string NikonDualBindingSdkAdapter::CandidateToken(std::size_t ordinal) const {
+    if (ordinal >= candidate_tokens_.size()) {
+        throw TransportError(
+            "candidate_unavailable",
+            "candidate ordinal is outside the active Dual session");
+    }
+    return candidate_tokens_[ordinal];
+}
+
+void NikonDualBindingSdkAdapter::FailAndInvalidate() noexcept {
+    pending_invalidation_ = DualIdentityInvalidationReason::SdkError;
+    candidate_tokens_.clear();
+    open_live_view_ordinal_.reset();
+    try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
+}
 
 NikonSdkStatusExecutor::NikonSdkStatusExecutor() = default;
 NikonSdkStatusExecutor::~NikonSdkStatusExecutor() = default;

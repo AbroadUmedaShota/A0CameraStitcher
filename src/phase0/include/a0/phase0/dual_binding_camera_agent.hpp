@@ -223,7 +223,8 @@ class DualBindingCameraAgentDispatcher final {
 public:
     DualBindingCameraAgentDispatcher() noexcept = default;
     explicit DualBindingCameraAgentDispatcher(
-        std::shared_ptr<DualBindingSdkAdapter> adapter) noexcept;
+        std::shared_ptr<DualBindingSdkAdapter> adapter,
+        bool stop_host_when_ready = false) noexcept;
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -280,6 +281,7 @@ private:
     std::uint64_t session_counter_{};
     std::string session_id_seed_;
     DualBindingCameraAgentSafetyCounters safety_counters_;
+    bool stop_host_when_ready_{false};
 };
 
 // Failure-injection seam for named-pipe host contract tests only, identical in

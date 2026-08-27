@@ -425,8 +425,9 @@ DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
 // ---------------------------------------------------------------------------
 
 DualBindingCameraAgentDispatcher::DualBindingCameraAgentDispatcher(
-    std::shared_ptr<DualBindingSdkAdapter> adapter) noexcept
-    : adapter_(std::move(adapter)) {}
+    std::shared_ptr<DualBindingSdkAdapter> adapter,
+    bool stop_host_when_ready) noexcept
+    : adapter_(std::move(adapter)), stop_host_when_ready_(stop_host_when_ready) {}
 
 std::string DualBindingCameraAgentDispatcher::Handle(
     std::string_view request_json) noexcept {
@@ -760,6 +761,9 @@ DualBindingCameraAgentDispatcher::SafetyCounters() const noexcept {
 
 void DualBindingCameraAgentDispatcher::OnIdle() noexcept {}
 
-bool DualBindingCameraAgentDispatcher::ShouldStop() const noexcept { return false; }
+bool DualBindingCameraAgentDispatcher::ShouldStop() const noexcept {
+    return stop_host_when_ready_ &&
+        binding_.State() == DualIdentitySessionBindingState::Ready;
+}
 
 } // namespace a0::phase0

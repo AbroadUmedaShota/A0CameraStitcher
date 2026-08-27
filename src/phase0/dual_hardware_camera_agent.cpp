@@ -570,9 +570,9 @@ DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
 DualHardwareCameraAgentDispatcher::DualHardwareCameraAgentDispatcher(
     std::shared_ptr<DualHardwarePairJournalStore> pair_store,
     DualHardwareUtcClock utc_clock,
-    std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend)
+    std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend)
     : pair_store_(std::move(pair_store)), utc_clock_(std::move(utc_clock)),
-      fake_backend_(std::move(fake_backend)) {
+      capture_backend_(std::move(capture_backend)) {
     if (!utc_clock_) throw std::invalid_argument("utc_clock is required");
 }
 
@@ -719,7 +719,7 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
             ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
             ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
-            if (pair_store_ == nullptr || fake_backend_ == nullptr) {
+            if (pair_store_ == nullptr || capture_backend_ == nullptr) {
                 return StartUnavailableResponse(
                     request.request_id, request.transaction_id);
             }
@@ -752,7 +752,7 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 bool a_spool_invalid = false;
                 try {
                     const auto path = transaction_directory / "CAM-A" / "original.jpg";
-                    a = fake_backend_->Capture("CAM-A", path, request.watchdog_deadline_100ns);
+                    a = capture_backend_->Capture("CAM-A", path, request.watchdog_deadline_100ns);
                     a_spool_invalid = a.succeeded &&
                         (!a.exact_recovered_object_deleted || !a.spool_empty_after_delete);
                     if (a.succeeded && !IsRegularCanonicalOriginal(path)) a.succeeded = false;
@@ -767,7 +767,7 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 bool b_spool_invalid = false;
                 try {
                     const auto path = transaction_directory / "CAM-B" / "original.jpg";
-                    b = fake_backend_->Capture("CAM-B", path, request.watchdog_deadline_100ns);
+                    b = capture_backend_->Capture("CAM-B", path, request.watchdog_deadline_100ns);
                     b_spool_invalid = b.succeeded &&
                         (!b.exact_recovered_object_deleted || !b.spool_empty_after_delete);
                     if (b.succeeded && !IsRegularCanonicalOriginal(path)) b.succeeded = false;

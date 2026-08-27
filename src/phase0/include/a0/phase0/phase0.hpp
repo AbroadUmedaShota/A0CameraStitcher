@@ -372,6 +372,7 @@ public:
         std::optional<std::string> cam_a,
         std::optional<std::string> cam_b);
     [[nodiscard]] std::optional<std::string> FindAlias(std::string_view stable_identity) const;
+    [[nodiscard]] std::optional<std::string> FindIdentity(std::string_view alias) const;
     void ValidateBinding(std::string_view alias, std::string_view stable_identity) const;
     void Bind(std::string_view alias, std::string_view stable_identity);
     [[nodiscard]] const std::filesystem::path& Path() const noexcept;

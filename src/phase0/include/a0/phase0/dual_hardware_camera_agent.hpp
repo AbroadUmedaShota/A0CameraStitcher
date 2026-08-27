@@ -24,14 +24,18 @@ struct DualHardwareFakeCaptureOutcome {
     bool spool_empty_after_delete{true};
 };
 
-class DualHardwareFakePairCaptureBackend {
+class DualHardwarePairCaptureBackend {
 public:
-    virtual ~DualHardwareFakePairCaptureBackend() = default;
+    virtual ~DualHardwarePairCaptureBackend() = default;
     [[nodiscard]] virtual DualHardwareFakeCaptureOutcome Capture(
         std::string_view alias,
         const std::filesystem::path& canonical_original_path,
         std::int64_t watchdog_deadline_100ns) = 0;
 };
+
+// Compatibility name retained for the existing deterministic contract-test
+// backends. Production hosts inject DualHardwarePairCaptureBackend directly.
+using DualHardwareFakePairCaptureBackend = DualHardwarePairCaptureBackend;
 
 inline constexpr std::string_view kDualHardwareCameraAgentSchemaVersion =
     "a0.camera-agent.hardware-dual.v2";
@@ -93,7 +97,7 @@ public:
     DualHardwareCameraAgentDispatcher(
         std::shared_ptr<DualHardwarePairJournalStore> pair_store,
         DualHardwareUtcClock utc_clock,
-        std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend);
+        std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend);
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -115,7 +119,7 @@ private:
     // A null store preserves the fail-closed PairStoreUnavailable behavior.
     std::shared_ptr<DualHardwarePairJournalStore> pair_store_;
     DualHardwareUtcClock utc_clock_;
-    std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend_;
+    std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend_;
     DualHardwareCameraAgentSafetyCounters safety_counters_;
 };
 

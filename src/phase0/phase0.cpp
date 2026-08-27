@@ -536,6 +536,12 @@ std::optional<std::string> IdentityMap::FindAlias(std::string_view stable_identi
     return std::nullopt;
 }
 
+std::optional<std::string> IdentityMap::FindIdentity(std::string_view alias) const {
+    if (alias == "CAM-A") return cam_a_;
+    if (alias == "CAM-B") return cam_b_;
+    return std::nullopt;
+}
+
 void IdentityMap::ValidateBinding(std::string_view alias, std::string_view stable_identity) const {
     if (alias != "CAM-A" && alias != "CAM-B") {
         throw std::runtime_error("camera alias must be CAM-A or CAM-B");
