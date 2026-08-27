@@ -33,6 +33,7 @@ public:
     std::size_t source_close_count{};
     std::size_t end_count{};
     std::size_t capture_count{};
+    std::size_t status_probe_count{};
     std::size_t concurrent_source_violation_count{};
     std::vector<std::string> opened_tokens;
 
@@ -55,6 +56,23 @@ public:
     void StartLiveView(std::chrono::seconds) override {
         if (!source_open || capture_source) throw std::runtime_error("wrong source mode");
         live_view_active = true;
+    }
+
+    SdkCameraStatus ProbeOpenCaptureSessionStatus(std::chrono::seconds) override {
+        if (!source_open || !capture_source) {
+            throw std::runtime_error("capture source is not open for status");
+        }
+        ++status_probe_count;
+        SdkCameraStatus status;
+        status.live_view_status_available = true;
+        status.live_view_status = "off";
+        status.file_type.available = true;
+        status.file_type.current_label = "JPEG";
+        status.compression_level.available = true;
+        status.compression_level.current_label = "Fine";
+        status.image_size.available = true;
+        status.image_size.current_label = "L";
+        return status;
     }
 
     std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds) override {
@@ -131,9 +149,13 @@ void TestSequentialBindingAndBoundCaptureReuseOneModule() {
     Check(adapter.CloseCandidateSession(1), "CAM-B candidate source must close");
 
     adapter.OpenBoundCapture(tokens[0], 5s);
+    const auto status_a = adapter.ProbeOpenCaptureSessionStatus(5s);
+    Check(status_a.live_view_status == "off",
+        "bound capture status must be read from the same open source session");
     adapter.CaptureToCard(5s, 10s);
     adapter.CloseBoundCapture(5s);
     adapter.OpenBoundCapture(tokens[1], 5s);
+    (void)adapter.ProbeOpenCaptureSessionStatus(5s);
     adapter.CaptureToCard(5s, 10s);
     adapter.CloseBoundCapture(5s);
 
@@ -141,6 +163,8 @@ void TestSequentialBindingAndBoundCaptureReuseOneModule() {
         "bound capture must never re-enumerate SDK candidates");
     Check(transport->capture_count == 2,
         "CAM-A and CAM-B must each capture exactly once");
+    Check(transport->status_probe_count == 2,
+        "each bound source must be revalidated exactly once before capture");
     Check(transport->concurrent_source_violation_count == 0,
         "candidate and capture source sessions must never overlap");
     Check(transport->module_active && !transport->source_open,

@@ -405,7 +405,7 @@ public:
             // MAID object storage must remain at a stable address for the whole
             // session; identify with temporary objects, then open into the
             // long-lived member used by every later command and callback.
-            OpenSelectedSource(*selected_id, capture_session, deadline);
+            OpenSelectedSource(*selected_id, capture_session, deadline, true);
         } catch (...) {
             CleanupNoThrow();
             throw;
@@ -831,7 +831,8 @@ private:
             OpenSelectedSource(
                 candidate->second,
                 capture_session,
-                std::chrono::steady_clock::now() + timeout);
+                std::chrono::steady_clock::now() + timeout,
+                false);
         } catch (...) {
             dual_topology_changed_ = true;
             throw;
@@ -841,7 +842,8 @@ private:
     void OpenSelectedSource(
         ULONG selected_id,
         bool capture_session,
-        std::chrono::steady_clock::time_point deadline) {
+        std::chrono::steady_clock::time_point deadline,
+        bool configure_save_media) {
         if (!module_.opened || source_.opened) {
             throw TransportError(
                 "open_failed", "SDK source open preconditions are not satisfied");
@@ -871,15 +873,21 @@ private:
         RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0,
             kNkMAIDDataType_Null, 0, deadline, "open_failed");
         if (capture_session) {
-            original_save_media_ = GetUnsigned(
+            const ULONG current_save_media = GetUnsigned(
                 source_, kNkMAIDCapability_SaveMedia, deadline,
                 "save_media_mismatch");
-            SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
-                kDesiredSaveMedia, deadline, "save_media_mismatch");
-            const ULONG verified = GetUnsigned(
-                source_, kNkMAIDCapability_SaveMedia, deadline,
-                "save_media_mismatch");
-            if (verified != kDesiredSaveMedia) {
+            if (!configure_save_media && current_save_media != kDesiredSaveMedia) {
+                throw TransportError(
+                    "save_media_profile_mismatch",
+                    "DualCamera requires card SaveMedia before the session and will not change it");
+            }
+            if (configure_save_media) {
+                original_save_media_ = current_save_media;
+                SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
+                    kDesiredSaveMedia, deadline, "save_media_mismatch");
+            }
+            if (GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline,
+                    "save_media_mismatch") != kDesiredSaveMedia) {
                 throw TransportError(
                     "save_media_mismatch",
                     "card capture destination did not persist");
@@ -2368,6 +2376,16 @@ void NikonDualBindingSdkAdapter::OpenBoundCapture(
     }
     try {
         transport_->OpenDualBoundCapture(candidate_token, timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+SdkCameraStatus NikonDualBindingSdkAdapter::ProbeOpenCaptureSessionStatus(
+    std::chrono::seconds timeout) {
+    try {
+        return transport_->ProbeOpenCaptureSessionStatus(timeout);
     } catch (...) {
         FailAndInvalidate();
         throw;

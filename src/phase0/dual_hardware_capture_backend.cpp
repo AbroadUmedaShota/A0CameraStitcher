@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -17,6 +18,50 @@ namespace fs = std::filesystem;
 
 namespace a0::phase0 {
 namespace {
+
+std::string NormalizeSettingLabel(std::string_view label) {
+    std::string normalized;
+    normalized.reserve(label.size());
+    for (const unsigned char character : label) {
+        if (std::isalnum(character) != 0) {
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+        }
+    }
+    return normalized;
+}
+
+bool LabelContains(
+    const SdkCameraStatus::SettingCapability& setting,
+    std::string_view expected) {
+    if (!setting.available || !setting.current_label) return false;
+    return NormalizeSettingLabel(*setting.current_label).find(expected) !=
+        std::string::npos;
+}
+
+void RequireReadOnlyDualCaptureProfile(const SdkCameraStatus& status) {
+    if (!status.live_view_status_available || status.live_view_status != "off") {
+        throw TransportError(
+            "dual_live_view_not_off",
+            "DualCamera Live View OFF was not confirmed in the capture session");
+    }
+    if (!LabelContains(status.file_type, "jpeg") ||
+        !LabelContains(status.compression_level, "fine")) {
+        throw TransportError(
+            "dual_jpeg_fine_not_confirmed",
+            "DualCamera JPEG Fine was not confirmed in the capture session");
+    }
+    const bool large_label =
+        LabelContains(status.image_size, "large") ||
+        (status.image_size.available && status.image_size.current_label &&
+         NormalizeSettingLabel(*status.image_size.current_label) == "l") ||
+        (LabelContains(status.image_size, "7360") &&
+         LabelContains(status.image_size, "4912"));
+    if (!large_label) {
+        throw TransportError(
+            "dual_image_size_l_not_confirmed",
+            "DualCamera image size L was not confirmed in the capture session");
+    }
+}
 
 class BoundNikonCardCaptureTransport final : public ICameraTransport,
                                              public ICardCaptureTransport {
@@ -213,6 +258,9 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
                 throw TransportError("dual_binding_invalidated",
                                      "Dual binding invalidated before shutter command");
             }
+            RequireReadOnlyDualCaptureProfile(
+                sdk_adapter_->ProbeOpenCaptureSessionStatus(
+                    std::chrono::seconds(5)));
         });
 
     DualHardwareFakeCaptureOutcome outcome;

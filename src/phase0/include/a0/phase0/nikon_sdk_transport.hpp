@@ -18,6 +18,8 @@ public:
     virtual void OpenDualBoundCapture(
         std::string_view candidate_token,
         std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual SdkCameraStatus ProbeOpenCaptureSessionStatus(
+        std::chrono::seconds timeout) = 0;
     virtual void StartLiveView(std::chrono::seconds timeout) = 0;
     [[nodiscard]] virtual std::vector<unsigned char> ReadLiveViewFrame(
         std::chrono::seconds timeout) = 0;
@@ -94,7 +96,7 @@ public:
     // this immediately before the shutter command so the approved profile is
     // checked in the same SDK session that performs the capture.
     [[nodiscard]] SdkCameraStatus ProbeOpenCaptureSessionStatus(
-        std::chrono::seconds timeout);
+        std::chrono::seconds timeout) override;
     // Product Camera Agent only: every subsequent SDK source open rejects
     // unless the open-time inventory contains exactly one D810. Legacy pair
     // experiments leave this disabled.
@@ -162,6 +164,8 @@ public:
     // DualIdentitySessionBinding and is never logged or persisted.
     void OpenBoundCapture(
         std::string_view candidate_token,
+        std::chrono::seconds timeout);
+    [[nodiscard]] SdkCameraStatus ProbeOpenCaptureSessionStatus(
         std::chrono::seconds timeout);
     void CaptureToCard(
         std::chrono::seconds image_event_timeout,

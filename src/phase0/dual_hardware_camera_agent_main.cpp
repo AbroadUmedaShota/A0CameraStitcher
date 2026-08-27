@@ -2,6 +2,7 @@
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
+#include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 
@@ -189,6 +190,10 @@ int wmain(int argc, wchar_t** argv) {
                     "--wpd-camera-map is required for the read-only coexistence probe");
             }
             RequireExistingFixedLocalFile("--wpd-camera-map", *wpd_camera_map);
+            // The probe retains the Nikon SDK Module while WPD enumerates the
+            // same physical cameras. Serialize that real-camera access with
+            // every other Phase 0 process for the probe's complete lifetime.
+            HardwareProcessLease camera_control_lease;
             NikonDualBindingSdkAdapter adapter;
             const auto candidates = adapter.EnumerateCandidates();
             WpdTransport wpd;
@@ -242,6 +247,11 @@ int wmain(int argc, wchar_t** argv) {
         // production host needs. Session-binding mode injects the real backend;
         // legacy mode below deliberately injects none and remains fail closed.
         if (binding_pipe_name) {
+            // One operator binding session owns both the SDK candidate Live
+            // View phase and the subsequent bound capture pipe. Keep the
+            // process-wide camera lease in this scope so no other Phase 0
+            // process can open either D810 between binding and host shutdown.
+            HardwareProcessLease camera_control_lease;
             auto sdk_adapter = std::make_shared<NikonDualBindingSdkAdapter>();
             DualBindingCameraAgentDispatcher binding_dispatcher(sdk_adapter, true);
             const int binding_exit = RunDualBindingCameraAgentNamedPipeServer(
