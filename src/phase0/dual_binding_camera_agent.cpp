@@ -510,6 +510,7 @@ void DualBindingCameraAgentDispatcher::InvalidateSession(
         invalidation_reason_ = reason;
     }
     active_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
 }
 
 std::string DualBindingCameraAgentDispatcher::InvalidatedRejection(
@@ -529,6 +530,7 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
     // does the same for its own state; this is the wire-level half of it.
     session_id_.clear();
     active_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
     assigned_ordinals_.clear();
     invalidation_reason_ = DualIdentityInvalidationReason::None;
 
@@ -605,17 +607,27 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
     }
     if (active_live_view_ordinal_.has_value() &&
         *active_live_view_ordinal_ != request.candidate_ordinal) {
-        // Switching bodies is a normal part of the operator's flow, so the other
-        // Live View is stopped here rather than making the caller do it. What is
-        // never allowed is two running at once: if the stop fails, the new one
-        // does not start.
-        if (!adapter_->StopLiveView(*active_live_view_ordinal_)) {
+        // Switching bodies is a normal part of comparison. Nikon keeps the
+        // Source open after Live View stops, so both the stream and Source must
+        // quiesce before another candidate is opened under the retained Module.
+        const std::size_t previous_ordinal = *active_live_view_ordinal_;
+        if (!adapter_->StopLiveView(previous_ordinal)) {
             InvalidateSession(DualIdentityInvalidationReason::SdkError);
             return ProtocolRejection(
                 request.request_id, "LiveViewStopFailed",
                 "the previously running Live View could not be stopped");
         }
         active_live_view_ordinal_.reset();
+        if (!adapter_->CloseCandidateSession(previous_ordinal)) {
+            InvalidateSession(DualIdentityInvalidationReason::SdkError);
+            return ProtocolRejection(
+                request.request_id, "SdkSessionCloseFailed",
+                "the previously viewed candidate SDK session could not be closed");
+        }
+        if (std::find(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                      previous_ordinal) == quiesced_ordinals_.end()) {
+            quiesced_ordinals_.push_back(previous_ordinal);
+        }
     }
     if (!active_live_view_ordinal_.has_value()) {
         if (!adapter_->StartLiveView(request.candidate_ordinal)) {
@@ -624,6 +636,10 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
                 "the SDK refused to start Live View for this candidate");
         }
         active_live_view_ordinal_ = request.candidate_ordinal;
+        quiesced_ordinals_.erase(
+            std::remove(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                        request.candidate_ordinal),
+            quiesced_ordinals_.end());
         ++safety_counters_.live_view_start_count;
     }
 
@@ -674,11 +690,16 @@ std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     // with its codes.
     binding_.ConfirmAlias(request.candidate_ordinal, request.camera_alias);
 
-    // The operator's flow is view -> assign -> stop, so the assignment is what
-    // ends this candidate's Live View. Both results are observed, never assumed.
-    const bool live_view_stopped = adapter_->StopLiveView(request.candidate_ordinal);
+    // A candidate may already be quiesced because the operator compared both
+    // previews before deciding their aliases. Reuse that observed result rather
+    // than reopening the Source solely to close it again.
+    const bool already_quiesced =
+        std::find(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                  request.candidate_ordinal) != quiesced_ordinals_.end();
+    const bool live_view_stopped =
+        already_quiesced || adapter_->StopLiveView(request.candidate_ordinal);
     const bool sdk_session_closed =
-        adapter_->CloseCandidateSession(request.candidate_ordinal);
+        already_quiesced || adapter_->CloseCandidateSession(request.candidate_ordinal);
     if (live_view_stopped && active_live_view_ordinal_.has_value() &&
         *active_live_view_ordinal_ == request.candidate_ordinal) {
         active_live_view_ordinal_.reset();
@@ -690,6 +711,9 @@ std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     // start against a Live View that never stopped.
     binding_.ConfirmCandidateQuiesced(
         request.candidate_ordinal, live_view_stopped, sdk_session_closed);
+    if (live_view_stopped && sdk_session_closed && !already_quiesced) {
+        quiesced_ordinals_.push_back(request.candidate_ordinal);
+    }
     assigned_ordinals_.push_back(request.candidate_ordinal);
 
     if (!live_view_stopped || !sdk_session_closed) {

@@ -419,6 +419,35 @@ void OnlyOneLiveViewRunsAtATime() {
         "an ordinal outside this session's candidates is refused");
 }
 
+void BothCandidatesCanBeComparedBeforeEitherAliasIsConfirmed() {
+    Harness harness;
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
+    const std::string switched =
+        harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+
+    Check(Succeeded(switched), "the second candidate can be viewed before assigning the first");
+    Check(
+        harness.adapter->ClosedCandidateSessionCount() == 1,
+        "switching candidates closes the first SDK source while retaining the session");
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
+
+    const std::string confirmed_a =
+        harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
+    const std::string confirmed_b =
+        harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
+    const std::string completed = harness.dispatcher.Handle(CompleteBindingRequest(session));
+
+    Check(
+        Succeeded(confirmed_a) && Succeeded(confirmed_b),
+        "both aliases can be confirmed after the operator compared both candidates");
+    Check(
+        Succeeded(completed) && ResultCode(completed) == "BindingCompleted",
+        "the compare-before-assign flow reaches a fully quiesced binding");
+}
+
 void AFailedStopPreventsASecondLiveView() {
     // The body that is already streaming stops responding to stop requests.
     // Starting the other one anyway would leave two running.
@@ -438,6 +467,25 @@ void AFailedStopPreventsASecondLiveView() {
     Check(
         harness.dispatcher.BindingState() == DualIdentitySessionBindingState::Invalid,
         "an SDK that will not stop Live View invalidates the binding");
+}
+
+void AFailedSourceClosePreventsASecondLiveView() {
+    DualBindingFakeSdkOptions options;
+    options.fail_close_candidate_session = true;
+    Harness harness(options);
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+
+    const std::string refused = harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    Check(
+        !Succeeded(refused) && ResultCode(refused) == "SdkSessionCloseFailed",
+        "a candidate Source that will not close blocks the next Live View");
+    Check(
+        harness.adapter->ActiveLiveViewCount() == 0,
+        "the failed Source close does not start a second Live View");
+    Check(
+        harness.dispatcher.BindingState() == DualIdentitySessionBindingState::Invalid,
+        "an unclosed candidate Source invalidates the binding");
 }
 
 void ARefusedLiveViewStartIsNotRecordedAsRunning() {
@@ -874,7 +922,9 @@ int main() {
     NoResponseEverCarriesASourceObject();
     CaptureReusesBoundObjectsWithoutReEnumerating();
     OnlyOneLiveViewRunsAtATime();
+    BothCandidatesCanBeComparedBeforeEitherAliasIsConfirmed();
     AFailedStopPreventsASecondLiveView();
+    AFailedSourceClosePreventsASecondLiveView();
     ARefusedLiveViewStartIsNotRecordedAsRunning();
     FramesAreBoundedAndNeverTruncated();
     ThePreviewEncodingIsPinnedToKnownBytes();

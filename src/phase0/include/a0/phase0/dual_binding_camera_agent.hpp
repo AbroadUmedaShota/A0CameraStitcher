@@ -267,6 +267,10 @@ private:
     // Empty session id plus this being set is impossible; both are cleared and
     // set together with the session.
     std::optional<std::size_t> active_live_view_ordinal_;
+    // Candidates whose Live View and SDK source were both closed during an
+    // operator comparison. They remain eligible for alias confirmation without
+    // being reopened; reopening one removes it from this set.
+    std::vector<std::size_t> quiesced_ordinals_;
     // Candidates whose alias the operator already confirmed. The binding core
     // knows this too but exposes no accessor for it, and Live View has to be
     // refused for them: their SDK session is closed and reopening it would undo
