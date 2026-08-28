@@ -43,8 +43,26 @@ public partial class MainWindow : Window
     public MainWindow(
         DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,
         string? dualCameraAgentExecutablePath = null,
-        string? dualWpdCameraMapPath = null)
+        string? dualWpdCameraMapPath = null,
+        bool captureRecoveryOnly = false,
+        string? approvedCaptureProfilePath = null,
+        string? dualIdentityProofPath = null)
     {
+        if (captureRecoveryOnly && environment != DualCameraExecutionEnvironment.HardwareDual)
+        {
+            throw new ArgumentException(
+                "CaptureRecoveryOnly requires the explicit HardwareDual environment.",
+                nameof(captureRecoveryOnly));
+        }
+        if (captureRecoveryOnly &&
+            (string.IsNullOrWhiteSpace(approvedCaptureProfilePath) ||
+             string.IsNullOrWhiteSpace(dualIdentityProofPath)))
+        {
+            throw new ArgumentException(
+                "CaptureRecoveryOnly requires explicit approved capture-profile and dual-identity-proof files.",
+                nameof(approvedCaptureProfilePath));
+        }
+
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
         // hardware operator window (Single or Dual) may be open in this Windows logon
         // session, so a mode switch can only start Dual after Single has fully exited.
@@ -64,8 +82,15 @@ public partial class MainWindow : Window
                 environment == DualCameraExecutionEnvironment.HardwareDual
                     ? "dual-camera-hardware-products"
                     : "dual-camera-test-synthetic-products");
+            IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null;
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
             {
+                var resolvedCaptureProfilePath = captureRecoveryOnly
+                    ? Path.GetFullPath(approvedCaptureProfilePath!)
+                    : Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json");
+                var resolvedIdentityProofPath = captureRecoveryOnly
+                    ? Path.GetFullPath(dualIdentityProofPath!)
+                    : Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json");
                 _dualAgentLifecycle = new DualCameraAgentLifecycle(
                     CameraAgentExecutablePolicy.Resolve(
                         AppContext.BaseDirectory,
@@ -73,11 +98,21 @@ public partial class MainWindow : Window
                             AppContext.BaseDirectory,
                             "A0CameraStitcher.DualCameraAgent.exe")),
                     Path.Combine(dualProductRoot, "agent-pair-journal"),
-                    Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json"),
-                    Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json"),
+                    resolvedCaptureProfilePath,
+                    resolvedIdentityProofPath,
                     dualWpdCameraMapPath ?? throw new ArgumentException(
                         "HardwareDual requires an existing WPD camera map.",
                         nameof(dualWpdCameraMapPath)));
+                if (captureRecoveryOnly)
+                {
+                    var captureProfile = HardwareDualCaptureRecoveryOnlyProfileFile.Load(
+                        resolvedCaptureProfilePath);
+                    captureRecoveryOnlyWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                        dualProductRoot,
+                        _dualAgentLifecycle,
+                        _dualAgentLifecycle,
+                        captureProfile);
+                }
             }
             // The product identity source remains unconfigured (HardwarePending):
             // wiring the operator's one-process binding transport does not make the
@@ -87,7 +122,8 @@ public partial class MainWindow : Window
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
                 liveViewFramePump: _liveViewFramePump,
                 liveViewFrameSource: _liveViewFrameSource,
-                dualBindingTransport: _dualAgentLifecycle);
+                dualBindingTransport: _dualAgentLifecycle,
+                captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closing += OnClosing;

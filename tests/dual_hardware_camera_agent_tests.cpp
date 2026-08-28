@@ -265,6 +265,23 @@ void CheckCaptureRecoveryOnlyTerminalJson(
             std::string(message) + ": parsed terminal must retain unapproved A0 quality");
         Check(TestJsonField(result, "terminalState", JsonKind::string).string == expected_terminal,
             std::string(message) + ": parsed terminal state must match");
+        const auto& evidence = TestJsonField(result, "evidence", JsonKind::object);
+        Check(TestJsonField(evidence, "captureProfileSchemaVersion", JsonKind::string).string ==
+                "a0.dual-capture-profile.operator-approved.v1",
+            std::string(message) + ": terminal must retain the capture-only profile schema");
+        Check(TestJsonField(evidence, "captureProfileApprovalBasis", JsonKind::string).string ==
+                "operator-approved-test",
+            std::string(message) + ": terminal must retain the capture-only approval basis");
+        Check(TestJsonField(evidence, "cameraModel", JsonKind::string).string == "Nikon D810" &&
+              TestJsonField(evidence, "imageFormat", JsonKind::string).string == "JPEG Fine" &&
+              TestJsonField(evidence, "imageSize", JsonKind::string).string == "L" &&
+              TestJsonField(evidence, "pixelDimensions", JsonKind::string).string == "7360x4912",
+            std::string(message) + ": terminal must retain the approved capture-only camera profile");
+        Check(evidence.object.find("captureProfileId") == evidence.object.end() &&
+              evidence.object.find("captureProfileVersion") == evidence.object.end() &&
+              evidence.object.find("profileId") == evidence.object.end() &&
+              evidence.object.find("profileVersion") == evidence.object.end(),
+            std::string(message) + ": terminal must omit ordinary capture and rig profile evidence");
     } catch (const std::exception& error) {
         Check(false, std::string(message) + ": response must parse through the shared JSON seam: " + error.what());
     }
@@ -274,26 +291,17 @@ std::string CaptureRecoveryOnlyPayload(
     std::string_view transaction_id = "11111111111111111111111111111111",
     std::string_view aliases = "[\"CAM-A\",\"CAM-B\"]",
     std::string_view transaction_directory = "C:/anonymous/capture-recovery-only") {
-    constexpr std::string_view body_a =
-        "{\"alias\":\"CAM-A\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
-        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
-        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
-        "\"vibrationReductionEnabled\":false}";
-    constexpr std::string_view body_b =
-        "{\"alias\":\"CAM-B\",\"imageArea\":\"FX\",\"fileFormat\":\"JPEG\","
-        "\"jpegQuality\":\"Fine\",\"imageSize\":\"L\",\"exposureMode\":\"Manual\","
-        "\"autoIsoEnabled\":false,\"focusMode\":\"Manual\",\"whiteBalanceMode\":\"Fixed\","
-        "\"vibrationReductionEnabled\":false}";
     return "{\"cameraMode\":\"DualCamera\",\"orderedRequiredAliases\":" +
         std::string(aliases) +
         ",\"transaction\":{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"transactionDirectory\":\"" + std::string(transaction_directory) + "\""
         ",\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"anonymous-test-ready\","
         "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}"
-        ",\"captureProfileSnapshot\":{\"profileId\":\"anonymous-profile\",\"version\":\"1\","
-        "\"schemaVersion\":\"a0.hardware-dual-capture-profile.v1\",\"status\":\"Approved\","
-        "\"approvedAtUtc\":\"2026-08-13T00:00:00Z\",\"validUntilUtc\":\"2026-08-15T00:00:00Z\","
-        "\"bodies\":[" + std::string(body_a) + "," + std::string(body_b) + "]}"
+        ",\"captureProfileSnapshot\":{\"schemaVersion\":\"a0.dual-capture-profile.operator-approved.v1\","
+        "\"cameraMode\":\"DualCamera\",\"cameraModel\":\"Nikon D810\",\"imageFormat\":\"JPEG Fine\","
+        "\"imageSize\":\"L\",\"pixelDimensions\":\"7360x4912\","
+        "\"cameraSettingWritesApproved\":false,\"automaticRetryApproved\":false,"
+        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-test\"}"
         ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
         "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
         "\"captureRecoveryOnlyApproved\":true}"
@@ -886,6 +894,14 @@ void TestFakePairBackendSuccessAndRestartQuery() {
         "two successful fake captures must terminalize as Succeeded");
     CheckContains(response, "\"failureCode\":\"None\"",
         "a successful pair must use the None failure code");
+    CheckContains(response, "\"captureProfileId\":\"anonymous-profile\"",
+        "ordinary pair terminal must retain its established capture profile identifier");
+    CheckContains(response, "\"captureProfileVersion\":\"1\"",
+        "ordinary pair terminal must retain its established capture profile version");
+    CheckContains(response, "\"profileId\":\"anonymous-rig\"",
+        "ordinary pair terminal must retain its established rig profile identifier");
+    CheckNotContains(response, "\"capturePurpose\":\"CaptureRecoveryOnly\"",
+        "ordinary pair terminal must not acquire CaptureRecoveryOnly semantics");
     Check(backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
         "the fake orchestrator must invoke CAM-A then CAM-B exactly once");
     Check(backend->paths.size() == 2 &&
@@ -944,6 +960,38 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         "request-recovery-only-rig-confirmation-mixed-in"));
     CheckContains(rig_confirmation_mixed_in, "\"resultCode\":\"UnexpectedField\"",
         "CaptureRecoveryOnly must reject a rig confirmation mixed into its strict confirmation payload");
+
+    const auto wrong_capture_only_schema = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "a0.dual-capture-profile.operator-approved.v1", "a0.other-profile.v1"),
+        "request-recovery-only-wrong-schema"));
+    CheckContains(wrong_capture_only_schema, "\"resultCode\":\"InvalidPairRequest\"",
+        "CaptureRecoveryOnly must reject a different approval profile schema");
+    const auto wrong_capture_only_value = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "\"cameraModel\":\"Nikon D810\"", "\"cameraModel\":\"Other\""),
+        "request-recovery-only-wrong-value"));
+    CheckContains(wrong_capture_only_value, "\"resultCode\":\"InvalidPairRequest\"",
+        "CaptureRecoveryOnly must reject a different approved camera model");
+    const auto wrong_capture_only_boolean = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "\"automaticRetryApproved\":false", "\"automaticRetryApproved\":true"),
+        "request-recovery-only-wrong-boolean"));
+    CheckContains(wrong_capture_only_boolean, "\"resultCode\":\"InvalidPairRequest\"",
+        "CaptureRecoveryOnly must reject an approval for automatic retry");
+    const auto extra_capture_only_field = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            "\"approvalBasis\":\"operator-approved-test\"",
+            "\"approvalBasis\":\"operator-approved-test\",\"profileId\":\"not-allowed\""),
+        "request-recovery-only-extra-field"));
+    CheckContains(extra_capture_only_field, "\"resultCode\":\"UnexpectedField\"",
+        "CaptureRecoveryOnly must reject ordinary profile fields");
+    const auto missing_capture_only_field = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+            ",\"approvalBasis\":\"operator-approved-test\"", ""),
+        "request-recovery-only-missing-field"));
+    CheckContains(missing_capture_only_field, "\"resultCode\":\"UnexpectedField\"",
+        "CaptureRecoveryOnly must require every approved profile field");
 
     const auto normal_missing_rig = unavailable.Handle(Envelope(
         "start-reserved-pair", ReplaceOnce(StartPayload(),

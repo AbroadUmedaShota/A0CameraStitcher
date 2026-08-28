@@ -115,7 +115,7 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ### P0-B2: 順次二台transaction
 
-Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約、通常開始、CaptureRecoveryOnly開始、結果照会、取消の六操作を提供する。実SDK/WPD backendはbinding modeのproduction Agent hostへ接続済みである。通常の`start-reserved-pair`は従来どおり承認済みrig profileを必須とする。`start-reserved-capture-recovery-only`は、明示承認されたtransport検証専用であり、rig profileを受け付けず、合成・再合成・合成画像exportを行わない。WPFからのCaptureRecoveryOnly操作は別途未検証であり、このPhase 0ではnative Agent入口だけを使用する。
+Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約、通常開始、CaptureRecoveryOnly開始、結果照会、取消の六操作を提供する。実SDK/WPD backendはbinding modeのproduction Agent hostへ接続済みである。通常の`start-reserved-pair`は従来どおり承認済みrig profileを必須とする。`start-reserved-capture-recovery-only`は、明示承認されたtransport検証専用であり、rig profileを受け付けず、合成・再合成・合成画像exportを行わない。WPF software経路は明示起動引数、外部承認profile、再bindingを含めて接続済みだが、実WPF・実D810操作は未検証である。Phase 0の実機結果はone-shotを実行するまで`NotRun`とする。
 
 #### 一回撮影
 

@@ -1077,6 +1077,16 @@
                                                  CheckingReadinessもここに含む）: 撮影ボタン2種 -->
                                             <StackPanel Visibility="{Binding IsActionZonePreparing, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="アクションゾーン state1 準備中 設置判定と撮影ボタン">
+                                                <Border Margin="0,0,0,10" Padding="10" Background="{StaticResource RightColumnBrush}"
+                                                        BorderBrush="{StaticResource CautionBrush}" BorderThickness="1"
+                                                        Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                    <CheckBox IsChecked="{Binding IsCaptureRecoveryOnlyOperatorApproved}"
+                                                              AutomationProperties.Name="専用カード2枚が空で撮影回収のみを1回実行することを承認">
+                                                        <TextBlock Text="専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。"
+                                                                   TextWrapping="Wrap" FontWeight="Medium"
+                                                                   Foreground="{StaticResource CautionBrush}" />
+                                                    </CheckBox>
+                                                </Border>
                                                 <Grid>
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -1109,7 +1119,12 @@
                                                 <TextBlock Text="A→Bの順に撮影し、完了後に合成へ進みます。" Margin="0,8,0,0"
                                                            Style="{StaticResource MutedTextStyle}"
                                                            FontSize="{StaticResource FontSizeCompact}"
-                                                           Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                           Visibility="{Binding ShowAutomaticStitchInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                <TextBlock Text="A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。"
+                                                           Margin="0,8,0,0" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource CautionBrush}"
+                                                           FontSize="{StaticResource FontSizeCompact}"
+                                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
                                                 <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"

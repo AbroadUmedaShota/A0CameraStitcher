@@ -134,6 +134,7 @@ public sealed class DualBindingViewModel : ObservableObject
         BeginBindingCommand = new AsyncRelayCommand(
             BeginBindingAsync,
             () => !IsShutdownBlocked &&
+                !IsCaptureHostActivated &&
                 Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid or DualBindingPhase.Ready,
             ReportFailure);
         ShowCandidateCommand = new AsyncRelayCommand<DualBindingCandidateViewModel>(
@@ -214,6 +215,13 @@ public sealed class DualBindingViewModel : ObservableObject
     /// downstream could tell.
     /// </summary>
     public bool IsReady => Phase == DualBindingPhase.Ready;
+
+    /// <summary>
+    /// True after the one-time handoff from the binding pipe to the capture pipe.
+    /// The same Agent process and the same CAM-A/B assignment remain in force;
+    /// re-binding and binding-pipe freshness probes are no longer valid.
+    /// </summary>
+    public bool IsCaptureHostActivated => _client.CaptureHostActivated;
 
     public bool IsSummaryVisible => Phase == DualBindingPhase.Summary;
 
@@ -372,6 +380,15 @@ public sealed class DualBindingViewModel : ObservableObject
             return true;
         }
 
+        // After activation the binding pipe is intentionally closed and the
+        // capture host owns the same session-local assignment. Native validates
+        // that topology on capture; sending complete-binding again would be an
+        // invalid cross-protocol operation.
+        if (IsCaptureHostActivated)
+        {
+            return true;
+        }
+
         if (!IsReady)
         {
             return false;
@@ -384,6 +401,36 @@ public sealed class DualBindingViewModel : ObservableObject
         }
 
         ApplyRefusal(refusal);
+        return false;
+    }
+
+    /// <summary>
+    /// Performs the exactly-once Ready binding handoff immediately before the
+    /// first CaptureRecoveryOnly reservation. A refusal is shown and no capture
+    /// operation may follow it.
+    /// </summary>
+    public async Task<bool> ActivateCaptureAsync(CancellationToken cancellationToken = default)
+    {
+        if (IsCaptureHostActivated)
+        {
+            return true;
+        }
+        if (!IsReady)
+        {
+            return false;
+        }
+
+        var reply = await _client.ActivateCaptureAsync(cancellationToken).ConfigureAwait(true);
+        if (reply.Value is not null)
+        {
+            OnPropertyChanged(nameof(IsCaptureHostActivated));
+            NotifyCommandsChanged();
+            Notify("機体照合を同じAgentの撮影処理へ引き継ぎました。", "info");
+            return true;
+        }
+
+        ApplyRefusal(reply.Refusal!);
+        OnPropertyChanged(nameof(IsCaptureHostActivated));
         return false;
     }
 
@@ -412,6 +459,14 @@ public sealed class DualBindingViewModel : ObservableObject
     public async Task<DualBindingRefusal?> CancelBindingOnShutdownAsync(
         CancellationToken cancellationToken = default)
     {
+        // Activation already performed the native Live View/SDK handoff. The
+        // binding pipe can no longer accept cancel-binding; process cleanup is
+        // owned by DualCameraAgentLifecycle.DisposeAsync instead.
+        if (IsCaptureHostActivated)
+        {
+            return null;
+        }
+
         var reply = await _client.CancelBindingAsync(cancellationToken).ConfigureAwait(true);
         if (reply.Value is not null)
         {
@@ -467,6 +522,7 @@ public sealed class DualBindingViewModel : ObservableObject
         {
             ClearSessionSurface();
             var reply = await _client.BeginBindingAsync().ConfigureAwait(true);
+            OnPropertyChanged(nameof(IsCaptureHostActivated));
             if (reply.Value is not { } started)
             {
                 ApplyRefusal(reply.Refusal!);

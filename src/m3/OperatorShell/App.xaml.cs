@@ -36,7 +36,10 @@ public partial class App : Application
                 ApplicationLaunchMode.HardwareDual => new MainWindow(
                     DualCameraExecutionEnvironment.HardwareDual,
                     options.DualCameraAgentExecutablePath,
-                    options.DualWpdCameraMapPath),
+                    options.DualWpdCameraMapPath,
+                    options.CaptureRecoveryOnly,
+                    options.ApprovedCaptureProfilePath,
+                    options.DualIdentityProofPath),
                 _ => new LaunchWindow(options.SingleCameraAgentExecutablePath),
             };
         }
@@ -48,6 +51,18 @@ public partial class App : Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             Shutdown(3);
+            return;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidDataException or IOException or
+            UnauthorizedAccessException or NotSupportedException or System.Security.SecurityException)
+        {
+            MessageBox.Show(
+                "実機2台モードのローカル設定を安全に読み込めませんでした。撮影は開始していません。\n" +
+                exception.Message,
+                "A0 Camera Stitcher — 実機設定エラー",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(2);
             return;
         }
         MainWindow = window;
@@ -67,7 +82,10 @@ public sealed record ApplicationLaunchOptions(
     ApplicationLaunchMode Mode,
     string SingleCameraAgentExecutablePath,
     string DualCameraAgentExecutablePath,
-    string? DualWpdCameraMapPath)
+    string? DualWpdCameraMapPath,
+    bool CaptureRecoveryOnly,
+    string? ApprovedCaptureProfilePath,
+    string? DualIdentityProofPath)
 {
     public static ApplicationLaunchOptions Parse(IReadOnlyList<string> arguments, string baseDirectory)
     {
@@ -80,6 +98,9 @@ public sealed record ApplicationLaunchOptions(
         var mode = ApplicationLaunchMode.Launcher;
         string? configuredAgent = null;
         string? configuredWpdCameraMap = null;
+        string? configuredApprovedCaptureProfile = null;
+        string? configuredDualIdentityProof = null;
+        var captureRecoveryOnly = false;
         var modeSeen = false;
         for (var index = 0; index < arguments.Count; index++)
         {
@@ -129,6 +150,32 @@ public sealed record ApplicationLaunchOptions(
 
                     configuredWpdCameraMap = arguments[index];
                     break;
+                case "--capture-recovery-only":
+                    if (captureRecoveryOnly)
+                    {
+                        throw new ArgumentException("--capture-recovery-only は一度だけ指定してください。");
+                    }
+
+                    captureRecoveryOnly = true;
+                    break;
+                case "--approved-capture-profile":
+                    if (configuredApprovedCaptureProfile is not null || ++index >= arguments.Count ||
+                        string.IsNullOrWhiteSpace(arguments[index]))
+                    {
+                        throw new ArgumentException("--approved-capture-profile には重複しない既存ファイルのパスが必要です。");
+                    }
+
+                    configuredApprovedCaptureProfile = arguments[index];
+                    break;
+                case "--dual-identity-proof":
+                    if (configuredDualIdentityProof is not null || ++index >= arguments.Count ||
+                        string.IsNullOrWhiteSpace(arguments[index]))
+                    {
+                        throw new ArgumentException("--dual-identity-proof には重複しない既存ファイルのパスが必要です。");
+                    }
+
+                    configuredDualIdentityProof = arguments[index];
+                    break;
                 default:
                     throw new ArgumentException($"未対応の起動引数です: {arguments[index]}");
             }
@@ -145,6 +192,23 @@ public sealed record ApplicationLaunchOptions(
         if (mode == ApplicationLaunchMode.HardwareDual && configuredWpdCameraMap is null)
         {
             throw new ArgumentException("--hardware-dual には既存の --wpd-camera-map が必要です。");
+        }
+        if (captureRecoveryOnly && mode != ApplicationLaunchMode.HardwareDual)
+        {
+            throw new ArgumentException("--capture-recovery-only は--hardware-dual と一緒に指定してください。");
+        }
+        if ((configuredApprovedCaptureProfile is not null || configuredDualIdentityProof is not null) &&
+            mode != ApplicationLaunchMode.HardwareDual)
+        {
+            throw new ArgumentException("--approved-capture-profile と --dual-identity-proof は--hardware-dual と一緒に指定してください。");
+        }
+        if (!captureRecoveryOnly && (configuredApprovedCaptureProfile is not null || configuredDualIdentityProof is not null))
+        {
+            throw new ArgumentException("--approved-capture-profile と --dual-identity-proof には --capture-recovery-only が必要です。");
+        }
+        if (captureRecoveryOnly && (configuredApprovedCaptureProfile is null || configuredDualIdentityProof is null))
+        {
+            throw new ArgumentException("--capture-recovery-only には既存の --approved-capture-profile と --dual-identity-proof が必要です。");
         }
 
         var normalizedBase = Path.GetFullPath(baseDirectory);
@@ -174,14 +238,26 @@ public sealed record ApplicationLaunchOptions(
         var dualWpdMapPath = mode == ApplicationLaunchMode.HardwareDual
             ? ResolveExistingFixedLocalMap(configuredWpdCameraMap!)
             : null;
+        var approvedCaptureProfilePath = captureRecoveryOnly
+            ? ResolveExistingFixedLocalFile(configuredApprovedCaptureProfile!, "--approved-capture-profile")
+            : null;
+        var dualIdentityProofPath = captureRecoveryOnly
+            ? ResolveExistingFixedLocalFile(configuredDualIdentityProof!, "--dual-identity-proof")
+            : null;
         return new ApplicationLaunchOptions(
             mode,
             singlePath,
             dualPath,
-            dualWpdMapPath);
+            dualWpdMapPath,
+            captureRecoveryOnly,
+            approvedCaptureProfilePath,
+            dualIdentityProofPath);
     }
 
     private static string ResolveExistingFixedLocalMap(string candidate)
+        => ResolveExistingFixedLocalFile(candidate, "--wpd-camera-map");
+
+    private static string ResolveExistingFixedLocalFile(string candidate, string optionName)
     {
         try
         {
@@ -203,7 +279,7 @@ public sealed record ApplicationLaunchOptions(
         catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or
             NotSupportedException or System.Security.SecurityException or InvalidDataException)
         {
-            throw new ArgumentException("--wpd-camera-map は固定ローカルドライブ上の既存通常ファイルである必要があります。");
+            throw new ArgumentException($"{optionName} は固定ローカルドライブ上の既存通常ファイルである必要があります。");
         }
     }
 }

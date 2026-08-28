@@ -209,10 +209,11 @@ operator CAM-A/CAM-B binding. Closing the window before capture sends one typed
 never kills the process or retries cleanup.
 
 This wiring does **not** make ordinary product capture Ready. The production
-identity source remains `HardwarePending`, and the separate
-`CaptureRecoveryOnly` acceptance controller is required before any real shutter
-command is exposed. No result in this protocol proves A0 image quality, shutter
-synchronization, or general hardware release readiness.
+identity source remains `HardwarePending`. The separate `CaptureRecoveryOnly`
+controller is available only through explicit hardware-dual launch arguments,
+strict external approval files, a fresh Ready binding, and an operator checkbox;
+it never selects the ordinary stitch path. No result in this protocol proves A0
+image quality, shutter synchronization, or general hardware release readiness.
 
 ## Test coverage
 

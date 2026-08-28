@@ -21,8 +21,11 @@ namespace A0CameraStitcher.M3.Foundation.Hardware;
 public sealed class DualBindingSessionClient
 {
     private readonly IHardwareCameraAgentTransport _transport;
+    private readonly IHardwareCameraAgentProcessLifetime? _processLifetime;
     private readonly Func<string> _requestIdFactory;
     private readonly Func<DateTimeOffset> _utcNow;
+    private bool _captureHostActivated;
+    private long? _captureHostProcessGeneration;
 
     public DualBindingSessionClient(
         IHardwareCameraAgentTransport transport,
@@ -31,6 +34,7 @@ public sealed class DualBindingSessionClient
     {
         ArgumentNullException.ThrowIfNull(transport);
         _transport = transport;
+        _processLifetime = transport as IHardwareCameraAgentProcessLifetime;
         _requestIdFactory = requestIdFactory ?? (() => $"binding-{Guid.NewGuid():N}");
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -69,7 +73,11 @@ public sealed class DualBindingSessionClient
     /// to its capture pipe. The binding pipe is retired at that point, so neither
     /// cancellation nor a freshness probe may be sent through it again.
     /// </summary>
-    public bool CaptureHostActivated { get; private set; }
+    public bool CaptureHostActivated =>
+        _captureHostActivated &&
+        (_processLifetime is null ||
+            _captureHostProcessGeneration is { } generation &&
+            _processLifetime.IsProcessGenerationAlive(generation));
 
     private readonly Dictionary<int, string> _assignments = [];
 
@@ -266,6 +274,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingReply<DualBindingCaptureActivationResult>> ActivateCaptureAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedCaptureHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingCaptureActivationResult>.Refused(noSession);
@@ -300,7 +312,12 @@ public sealed class DualBindingSessionClient
             SessionId);
         if (reply.Value is not null)
         {
-            CaptureHostActivated = true;
+            _captureHostActivated = true;
+            _captureHostProcessGeneration = _processLifetime?.CurrentProcessGeneration;
+            if (DetectExitedCaptureHost() is { } exitedAfterActivation)
+            {
+                return DualBindingReply<DualBindingCaptureActivationResult>.Refused(exitedAfterActivation);
+            }
         }
         else
         {
@@ -318,6 +335,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingReply<DualBindingCancellationResult>> CancelBindingAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedCaptureHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingCancellationResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingCancellationResult>.Refused(noSession);
@@ -371,6 +392,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingRefusal?> VerifyBindingIsCurrentAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedCaptureHost() is { } processExited)
+        {
+            return processExited;
+        }
         if (RequireSession() is { } noSession)
         {
             return noSession;
@@ -405,6 +430,27 @@ public sealed class DualBindingSessionClient
                 Detail = "No binding session has been started.",
             }
             : null;
+
+    private DualBindingRefusal? DetectExitedCaptureHost()
+    {
+        if (!_captureHostActivated || CaptureHostActivated)
+        {
+            return null;
+        }
+
+        var expiredSessionId = SessionId;
+        ResetSession();
+        State = DualBindingSessionState.Invalid;
+        InvalidationReason = DualBindingInvalidationReason.AgentRestart;
+        return new DualBindingRefusal
+        {
+            ResultCode = "SessionMismatch",
+            SessionId = expiredSessionId,
+            State = DualBindingSessionState.Invalid,
+            InvalidationReason = DualBindingInvalidationReason.AgentRestart,
+            Detail = "The activated Camera Agent process exited; a fresh binding is required.",
+        };
+    }
 
     private void ApplyRefusal(DualBindingRefusal refusal)
     {
@@ -476,7 +522,8 @@ public sealed class DualBindingSessionClient
         State = DualBindingSessionState.None;
         InvalidationReason = DualBindingInvalidationReason.None;
         CandidateOrdinals = Array.Empty<int>();
-        CaptureHostActivated = false;
+        _captureHostActivated = false;
+        _captureHostProcessGeneration = null;
         DiscardSessionArtifacts();
     }
 }

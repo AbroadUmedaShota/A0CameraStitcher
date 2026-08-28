@@ -88,11 +88,25 @@ public sealed record DualHardwarePairStartRequest
     public required DualHardwareCaptureRequest Transaction { get; init; }
 }
 
+public sealed record DualHardwareCaptureRecoveryOnlyPairStartRequest
+{
+    public required string CameraMode { get; init; }
+    public required IReadOnlyList<string> OrderedRequiredAliases { get; init; }
+    public required DualHardwareCaptureRecoveryOnlyRequest Transaction { get; init; }
+}
+
 public sealed record DualHardwarePairDispatchResult
 {
     public required string TransactionId { get; init; }
     public required DualHardwareDispatchState DispatchState { get; init; }
     public required DualHardwareCaptureResult? Result { get; init; }
+}
+
+public sealed record DualHardwareCaptureRecoveryOnlyPairDispatchResult
+{
+    public required string TransactionId { get; init; }
+    public required DualHardwareDispatchState DispatchState { get; init; }
+    public required DualHardwareCaptureRecoveryOnlyResult? Result { get; init; }
 }
 
 public sealed record DualHardwarePairQueryRequest
@@ -105,6 +119,13 @@ public sealed record DualHardwarePairQueryResult
     public required string TransactionId { get; init; }
     public required bool Found { get; init; }
     public required DualHardwareCaptureResult? Result { get; init; }
+}
+
+public sealed record DualHardwareCaptureRecoveryOnlyPairQueryResult
+{
+    public required string TransactionId { get; init; }
+    public required bool Found { get; init; }
+    public required DualHardwareCaptureRecoveryOnlyResult? Result { get; init; }
 }
 
 public sealed record DualHardwarePairCloseRequest
@@ -171,6 +192,22 @@ public static class DualHardwareCameraAgentProtocolCodec
             requestId);
     }
 
+    public static DualHardwareCameraAgentRequestEnvelope CreateCaptureRecoveryOnlyStartRequest(
+        DualHardwareCaptureRecoveryOnlyRequest transaction,
+        string? requestId = null)
+    {
+        ValidateCaptureRecoveryOnlyRequest(transaction);
+        return CreateRequest(
+            DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly,
+            new DualHardwareCaptureRecoveryOnlyPairStartRequest
+            {
+                CameraMode = "DualCamera",
+                OrderedRequiredAliases = OrderedAliases(),
+                Transaction = transaction,
+            },
+            requestId);
+    }
+
     public static DualHardwareCameraAgentRequestEnvelope CreateQueryRequest(
         Guid transactionId,
         string? requestId = null)
@@ -200,7 +237,8 @@ public static class DualHardwareCameraAgentProtocolCodec
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateCommon(request.SchemaVersion, request.Simulation, request.Marker, request.RequestId);
-        if (!DualHardwareCameraAgentProtocol.Operations.Required.Contains(request.Operation, StringComparer.Ordinal))
+        if (!DualHardwareCameraAgentProtocol.Operations.Required.Contains(request.Operation, StringComparer.Ordinal) &&
+            request.Operation != DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly)
             throw Violation("UnsupportedOperation", "The Dual hardware Agent operation is unsupported.");
         return JsonSerializer.Serialize(request, SerializerOptions);
     }
@@ -284,6 +322,24 @@ public static class DualHardwareCameraAgentProtocolCodec
         return new(payload.DispatchState, payload.Result);
     }
 
+    public static DualHardwareCaptureRecoveryOnlyDispatchResult DeserializeCaptureRecoveryOnlyStartResponse(
+        string json,
+        string expectedRequestId,
+        Guid expectedTransactionId)
+    {
+        var envelope = DeserializeResponse(json, expectedRequestId);
+        if (!envelope.Success || envelope.ResultCode != "PairDispatchAccepted")
+            ThrowRemote(envelope);
+        var payload = DeserializePayload<DualHardwareCaptureRecoveryOnlyPairDispatchResult>(envelope.Payload);
+        ValidateTransactionMatch(payload.TransactionId, expectedTransactionId);
+        if (payload.DispatchState is not (DualHardwareDispatchState.Completed or DualHardwareDispatchState.ResponseUnknown) ||
+            (payload.DispatchState == DualHardwareDispatchState.Completed) != (payload.Result is not null) ||
+            (payload.Result is not null && payload.Result.TransactionId != expectedTransactionId))
+            throw Violation("InvalidPairDispatch", "The capture-recovery-only dispatch state and result are inconsistent.");
+        if (payload.Result is not null) ValidateCaptureRecoveryOnlyResult(payload.Result);
+        return new(payload.DispatchState, payload.Result);
+    }
+
     public static DualHardwarePairQueryOutcome DeserializeQueryResponse(
         string json,
         string expectedRequestId,
@@ -318,6 +374,31 @@ public static class DualHardwareCameraAgentProtocolCodec
             payload.Result is null || payload.Result.TransactionId != expectedTransactionId ||
             !IsActualTerminal(payload.Result.TerminalState))
             throw Violation("InvalidPairQuery", "The pair query response is inconsistent.");
+        return new(DualHardwarePairQueryState.Terminal, payload.Result);
+    }
+
+    public static DualHardwareCaptureRecoveryOnlyPairQueryOutcome DeserializeCaptureRecoveryOnlyQueryResponse(
+        string json,
+        string expectedRequestId,
+        Guid expectedTransactionId)
+    {
+        var envelope = DeserializeResponse(json, expectedRequestId);
+        var payload = DeserializePayload<DualHardwareCaptureRecoveryOnlyPairQueryResult>(envelope.Payload);
+        ValidateTransactionMatch(payload.TransactionId, expectedTransactionId);
+        if (!envelope.Success)
+        {
+            if (envelope.ResultCode == "PairTransactionNotFound" && !payload.Found && payload.Result is null)
+                return new(DualHardwarePairQueryState.NotFound, null);
+            if (envelope.ResultCode == "PairTransactionReserved" && payload.Found && payload.Result is null)
+                return new(DualHardwarePairQueryState.Reserved, null);
+            ThrowRemote(envelope);
+        }
+        if (envelope.ResultCode == "PairTransactionClosedBeforeDispatch" && payload.Found && payload.Result is null)
+            return new(DualHardwarePairQueryState.ClosedBeforeDispatch, null);
+        if (envelope.ResultCode != "PairTransactionFound" || !payload.Found || payload.Result is null ||
+            payload.Result.TransactionId != expectedTransactionId || !IsActualTerminal(payload.Result.TerminalState))
+            throw Violation("InvalidPairQuery", "The capture-recovery-only pair query response is inconsistent.");
+        ValidateCaptureRecoveryOnlyResult(payload.Result);
         return new(DualHardwarePairQueryState.Terminal, payload.Result);
     }
 
@@ -413,6 +494,38 @@ public static class DualHardwareCameraAgentProtocolCodec
             throw Violation("InvalidPairRequest", "The frozen Dual hardware transaction is incomplete or unsafe.");
         request.CaptureProfileSnapshot.Validate(request.StartedAtUtc);
         request.RigProfileSnapshot.Validate(request.StartedAtUtc);
+    }
+
+    private static void ValidateCaptureRecoveryOnlyRequest(DualHardwareCaptureRecoveryOnlyRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateTransactionId(request.TransactionId);
+        if (!request.IdentitySnapshot.IsReady || request.OperatorConfirmations.AllConfirmed != true ||
+            request.StartedAtUtc.Offset != TimeSpan.Zero || request.WatchdogDeadlineUtc.Offset != TimeSpan.Zero ||
+            request.WatchdogDeadlineUtc - request.StartedAtUtc != TimeSpan.FromSeconds(180) ||
+            string.IsNullOrWhiteSpace(request.TransactionDirectory) ||
+            !Path.IsPathFullyQualified(request.TransactionDirectory))
+            throw Violation("InvalidPairRequest", "The capture-recovery-only transaction is incomplete or unsafe.");
+        request.CaptureProfileSnapshot.Validate();
+    }
+
+    private static void ValidateCaptureRecoveryOnlyResult(DualHardwareCaptureRecoveryOnlyResult result)
+    {
+        if (result.CapturePurpose != "CaptureRecoveryOnly" || result.StitchOutcome != "Pending" ||
+            result.A0QualityApproval != "Unapproved" || result.Evidence.TerminalState != result.TerminalState ||
+            result.Evidence.AutomaticRetryCount != 0 ||
+            !string.Equals(
+                result.Evidence.CaptureProfileSchemaVersion,
+                "a0.dual-capture-profile.operator-approved.v1",
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(result.Evidence.CaptureProfileApprovalBasis) ||
+            result.Evidence.CaptureProfileApprovalBasis.Length > 128 ||
+            result.Evidence.CaptureProfileApprovalBasis.Any(char.IsControl) ||
+            !string.Equals(result.Evidence.CameraModel, "Nikon D810", StringComparison.Ordinal) ||
+            !string.Equals(result.Evidence.ImageFormat, "JPEG Fine", StringComparison.Ordinal) ||
+            !string.Equals(result.Evidence.ImageSize, "L", StringComparison.Ordinal) ||
+            !string.Equals(result.Evidence.PixelDimensions, "7360x4912", StringComparison.Ordinal))
+            throw Violation("InvalidCaptureRecoveryOnlyResult", "The recovery-only terminal result claims unsupported rig or quality evidence.");
     }
 
     private static void ValidateJson(string json)
@@ -529,11 +642,11 @@ internal sealed class DualHardwareTransactionIdConverter : JsonConverter<Guid>
     }
 }
 
-public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOperations
+public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOperations, IDualHardwareCaptureRecoveryOnlyOperations
 {
     private readonly IHardwareCameraAgentTransport _transport;
     private readonly SemaphoreSlim _capabilityLock = new(1, 1);
-    private bool _capabilitiesConfirmed;
+    private DualHardwareCapabilitiesResult? _capabilities;
 
     public DualHardwareCameraAgentOperations(IHardwareCameraAgentTransport transport)
     {
@@ -580,6 +693,19 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
             request.TransactionId);
     }
 
+    public async Task<DualHardwareCaptureRecoveryOnlyDispatchResult> StartReservedCaptureRecoveryOnlyAsync(
+        DualHardwareCaptureRecoveryOnlyRequest request,
+        CancellationToken cancellationToken)
+    {
+        await EnsureCaptureRecoveryOnlyAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var envelope = DualHardwareCameraAgentProtocolCodec.CreateCaptureRecoveryOnlyStartRequest(request);
+        var response = await _transport.SendAsync(
+            DualHardwareCameraAgentProtocolCodec.SerializeRequest(envelope),
+            cancellationToken).ConfigureAwait(false);
+        return DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyStartResponse(
+            response, envelope.RequestId, request.TransactionId);
+    }
+
     public async Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken)
@@ -593,6 +719,19 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
             response,
             request.RequestId,
             transactionId);
+    }
+
+    public async Task<DualHardwareCaptureRecoveryOnlyPairQueryOutcome> QueryCaptureRecoveryOnlyTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureCaptureRecoveryOnlyAvailableAsync(cancellationToken).ConfigureAwait(false);
+        var request = DualHardwareCameraAgentProtocolCodec.CreateQueryRequest(transactionId);
+        var response = await _transport.SendAsync(
+            DualHardwareCameraAgentProtocolCodec.SerializeRequest(request),
+            cancellationToken).ConfigureAwait(false);
+        return DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+            response, request.RequestId, transactionId);
     }
 
     public async Task<DualHardwareCloseState> CloseReservedPairTransactionAsync(
@@ -610,21 +749,32 @@ public sealed class DualHardwareCameraAgentOperations : IDualHardwareCaptureOper
             transactionId);
     }
 
-    private async Task EnsureCapabilitiesAsync(CancellationToken cancellationToken)
+    public async Task EnsureCaptureRecoveryOnlyAvailableAsync(CancellationToken cancellationToken)
     {
-        if (_capabilitiesConfirmed) return;
+        var capabilities = await EnsureCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        if (!capabilities.SupportedOperations.Contains(
+                DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly,
+                StringComparer.Ordinal))
+            throw new HardwareProtocolViolationException(
+                "CaptureRecoveryOnlyUnsupported",
+                "The Dual hardware Agent does not advertise CaptureRecoveryOnly.");
+    }
+
+    private async Task<DualHardwareCapabilitiesResult> EnsureCapabilitiesAsync(CancellationToken cancellationToken)
+    {
+        if (_capabilities is not null) return _capabilities;
         await _capabilityLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_capabilitiesConfirmed) return;
+            if (_capabilities is not null) return _capabilities;
             var request = DualHardwareCameraAgentProtocolCodec.CreateCapabilitiesRequest();
             var response = await _transport.SendAsync(
                 DualHardwareCameraAgentProtocolCodec.SerializeRequest(request),
                 cancellationToken).ConfigureAwait(false);
-            _ = DualHardwareCameraAgentProtocolCodec.DeserializeCapabilitiesResponse(
+            _capabilities = DualHardwareCameraAgentProtocolCodec.DeserializeCapabilitiesResponse(
                 response,
                 request.RequestId);
-            _capabilitiesConfirmed = true;
+            return _capabilities;
         }
         finally
         {

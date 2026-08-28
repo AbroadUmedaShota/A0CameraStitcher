@@ -28,7 +28,9 @@ namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 /// </summary>
 public sealed class DualCameraAgentLifecycle :
     IDualHardwareCaptureOperations,
+    IDualHardwareCaptureRecoveryOnlyOperations,
     IHardwareCameraAgentTransport,
+    IHardwareCameraAgentProcessLifetime,
     IAsyncDisposable
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
@@ -62,6 +64,7 @@ public sealed class DualCameraAgentLifecycle :
     private bool _bindingCancellationResponseReceived;
     private bool _bindingCancellationSucceeded;
     private bool _disposed;
+    private long _processGeneration;
 
     public DualCameraAgentLifecycle(
         string agentExecutablePath,
@@ -97,6 +100,26 @@ public sealed class DualCameraAgentLifecycle :
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
+
+    public long CurrentProcessGeneration => Interlocked.Read(ref _processGeneration);
+
+    public bool IsProcessGenerationAlive(long processGeneration)
+    {
+        if (processGeneration <= 0 || processGeneration != CurrentProcessGeneration)
+        {
+            return false;
+        }
+
+        var process = Volatile.Read(ref _process);
+        try
+        {
+            return process is { HasExited: false } && processGeneration == CurrentProcessGeneration;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            return false;
+        }
+    }
 
     public bool AgentExecutableAvailable
     {
@@ -150,11 +173,51 @@ public sealed class DualCameraAgentLifecycle :
         }
     }
 
+    public async Task<DualHardwareCaptureRecoveryOnlyDispatchResult> StartReservedCaptureRecoveryOnlyAsync(
+        DualHardwareCaptureRecoveryOnlyRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.StartReservedCaptureRecoveryOnlyAsync(request, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            return new(
+                exception.RequestMayHaveBeenDispatched
+                    ? DualHardwareDispatchState.ResponseUnknown
+                    : DualHardwareDispatchState.ConfirmedUndispatched,
+                null);
+        }
+    }
+
+    public async Task EnsureCaptureRecoveryOnlyAvailableAsync(CancellationToken cancellationToken)
+    {
+        await RunSerializedAsync(
+                async (operations, token) =>
+                {
+                    await operations.EnsureCaptureRecoveryOnlyAvailableAsync(token).ConfigureAwait(false);
+                    return true;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken) =>
         RunSerializedAsync(
             (operations, token) => operations.QueryPairTransactionAsync(transactionId, token),
+            cancellationToken);
+
+    public Task<DualHardwareCaptureRecoveryOnlyPairQueryOutcome> QueryCaptureRecoveryOnlyTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken) =>
+        RunSerializedAsync(
+            (operations, token) => operations.QueryCaptureRecoveryOnlyTransactionAsync(transactionId, token),
             cancellationToken);
 
     /// <summary>
@@ -325,6 +388,7 @@ public sealed class DualCameraAgentLifecycle :
             {
                 throw new HardwareCameraAgentLaunchException("Dual Camera Agent を開始できませんでした。");
             }
+            Interlocked.Increment(ref _processGeneration);
             _process = process;
             _standardOutput = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
             _standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);

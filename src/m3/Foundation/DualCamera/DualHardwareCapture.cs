@@ -14,6 +14,61 @@ public sealed record HardwareDualOperatorConfirmations(
         LiveViewStoppedAndClosed && BothCardsConfirmedEmpty;
 }
 
+// This intentionally omits any rig confirmation. CaptureRecoveryOnly preserves
+// originals for recovery; it does not assert an approved A0 rig or stitch result.
+public sealed record HardwareDualCaptureRecoveryOnlyConfirmations(
+    bool IdentitySnapshotApproved,
+    bool CaptureProfileFrozen,
+    bool LiveViewStoppedAndClosed,
+    bool BothCardsConfirmedEmpty,
+    bool CaptureRecoveryOnlyApproved)
+{
+    [JsonIgnore]
+    public bool AllConfirmed => IdentitySnapshotApproved && CaptureProfileFrozen &&
+        LiveViewStoppedAndClosed && BothCardsConfirmedEmpty && CaptureRecoveryOnlyApproved;
+}
+
+/// <summary>
+/// Human-approved, read-only transport acceptance profile. This is deliberately
+/// narrower than <see cref="HardwareDualCaptureProfile"/>: it does not claim
+/// exposure, focus, white-balance, VR, rig, or A0-quality approval that the
+/// current real-hardware gate has not established.
+/// </summary>
+public sealed record HardwareDualCaptureRecoveryOnlyProfile(
+    string SchemaVersion,
+    string CameraMode,
+    string CameraModel,
+    string ImageFormat,
+    string ImageSize,
+    string PixelDimensions,
+    bool CameraSettingWritesApproved,
+    bool AutomaticRetryApproved,
+    bool ActualShutterSynchronizationGuaranteed,
+    string ApprovalBasis)
+{
+    public void Validate()
+    {
+        if (!string.Equals(
+                SchemaVersion,
+                "a0.dual-capture-profile.operator-approved.v1",
+                StringComparison.Ordinal) ||
+            !string.Equals(CameraMode, "DualCamera", StringComparison.Ordinal) ||
+            !string.Equals(CameraModel, "Nikon D810", StringComparison.Ordinal) ||
+            !string.Equals(ImageFormat, "JPEG Fine", StringComparison.Ordinal) ||
+            !string.Equals(ImageSize, "L", StringComparison.Ordinal) ||
+            !string.Equals(PixelDimensions, "7360x4912", StringComparison.Ordinal) ||
+            CameraSettingWritesApproved || AutomaticRetryApproved ||
+            ActualShutterSynchronizationGuaranteed ||
+            string.IsNullOrWhiteSpace(ApprovalBasis) || ApprovalBasis.Length > 128 ||
+            ApprovalBasis.Any(char.IsControl))
+        {
+            throw new DualCameraFlowException(
+                DualCameraFailureCode.InvalidProfile,
+                "The CaptureRecoveryOnly approval profile is invalid or claims an unapproved operation.");
+        }
+    }
+}
+
 public sealed record HardwareDualBodyCaptureSettings(
     string Alias,
     string ImageArea,
@@ -128,6 +183,15 @@ public sealed record DualHardwareCaptureRequest(
     DateTimeOffset StartedAtUtc,
     DateTimeOffset WatchdogDeadlineUtc);
 
+public sealed record DualHardwareCaptureRecoveryOnlyRequest(
+    Guid TransactionId,
+    string TransactionDirectory,
+    DualCameraIdentitySnapshot IdentitySnapshot,
+    HardwareDualCaptureRecoveryOnlyProfile CaptureProfileSnapshot,
+    HardwareDualCaptureRecoveryOnlyConfirmations OperatorConfirmations,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset WatchdogDeadlineUtc);
+
 public sealed record DualHardwareCaptureResult(
     Guid TransactionId,
     IReadOnlyList<DualHardwareOriginalRecord> Originals,
@@ -135,9 +199,41 @@ public sealed record DualHardwareCaptureResult(
     DualCameraFailureCode FailureCode,
     DualHardwareCaptureEvidence Evidence);
 
+public sealed record DualHardwareCaptureRecoveryOnlyEvidence(
+    DualHardwareCaptureTerminalState TerminalState,
+    DualCameraIdentitySnapshot IdentitySnapshot,
+    string CaptureProfileSchemaVersion,
+    string CaptureProfileApprovalBasis,
+    string CameraModel,
+    string ImageFormat,
+    string ImageSize,
+    string PixelDimensions,
+    DateTimeOffset WatchdogStartedAtUtc,
+    DateTimeOffset WatchdogDeadlineUtc,
+    DateTimeOffset CompletedAtUtc,
+    bool WatchdogCompletedInTime,
+    bool LiveViewStopAndCloseConfirmed,
+    bool ExactDeleteConfirmedForEveryRetainedOriginal,
+    bool BothSpoolsEmptyAfter,
+    int AutomaticRetryCount);
+
+public sealed record DualHardwareCaptureRecoveryOnlyResult(
+    Guid TransactionId,
+    string CapturePurpose,
+    string StitchOutcome,
+    string A0QualityApproval,
+    IReadOnlyList<DualHardwareOriginalRecord> Originals,
+    DualHardwareCaptureTerminalState TerminalState,
+    DualCameraFailureCode FailureCode,
+    DualHardwareCaptureRecoveryOnlyEvidence Evidence);
+
 public sealed record DualHardwareDispatchResult(
     DualHardwareDispatchState State,
     DualHardwareCaptureResult? Result);
+
+public sealed record DualHardwareCaptureRecoveryOnlyDispatchResult(
+    DualHardwareDispatchState State,
+    DualHardwareCaptureRecoveryOnlyResult? Result);
 
 public enum DualHardwarePairQueryState
 {
@@ -157,6 +253,10 @@ public sealed record DualHardwarePairQueryOutcome(
     DualHardwarePairQueryState State,
     DualHardwareCaptureResult? Result);
 
+public sealed record DualHardwareCaptureRecoveryOnlyPairQueryOutcome(
+    DualHardwarePairQueryState State,
+    DualHardwareCaptureRecoveryOnlyResult? Result);
+
 public interface IDualHardwareCaptureOperations
 {
     Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken);
@@ -173,6 +273,21 @@ public interface IDualHardwareCaptureOperations
         Guid transactionId,
         CancellationToken cancellationToken) =>
         Task.FromResult(DualHardwareCloseState.ResponseUnknown);
+}
+
+// Kept separate so existing ordinary-capture callers and Agents remain binary
+// compatible. CaptureRecoveryOnly callers must opt in to this additional contract.
+public interface IDualHardwareCaptureRecoveryOnlyOperations
+{
+    Task EnsureCaptureRecoveryOnlyAvailableAsync(CancellationToken cancellationToken);
+
+    Task<DualHardwareCaptureRecoveryOnlyDispatchResult> StartReservedCaptureRecoveryOnlyAsync(
+        DualHardwareCaptureRecoveryOnlyRequest request,
+        CancellationToken cancellationToken);
+
+    Task<DualHardwareCaptureRecoveryOnlyPairQueryOutcome> QueryCaptureRecoveryOnlyTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken);
 }
 
 public enum DualHardwareRecoveryIntent

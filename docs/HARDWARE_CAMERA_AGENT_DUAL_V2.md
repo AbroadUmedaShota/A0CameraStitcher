@@ -95,6 +95,12 @@ requires an explicit `captureRecoveryOnlyApproved` confirmation, and reports
 `capturePurpose=CaptureRecoveryOnly`, `stitchOutcome=Pending`, and
 `a0QualityApproval=Unapproved`. It does not run a stitch or establish A0 quality.
 The ordinary `start-reserved-pair` request and approved-rig contract are unchanged.
+Its separate external/request profile schema is
+`a0.dual-capture-profile.operator-approved.v1` and accepts only `DualCamera`,
+`Nikon D810`, `JPEG Fine`, `L`, `7360x4912`, all of
+`cameraSettingWritesApproved`／`automaticRetryApproved`／
+`actualShutterSynchronizationGuaranteed=false`, and a bounded approval basis.
+Normal capture-profile or rig fields are rejected instead of inferred.
 
 ## Operations
 
@@ -114,7 +120,7 @@ finishes removal if a previous process stopped after publishing the tombstone.
 It never closes a transaction that reached `Dispatching` or a capture-terminal
 state.
 
-The .NET pending snapshot schema is v2 and records the recovery intent. A v1
+The ordinary .NET pending snapshot schema is v2 and records the recovery intent. A v1
 snapshot migrates fail-closed to `MayHaveDispatched`. Only a typed
 `ConfirmedUndispatched` start outcome may change the intent to
 `CloseReservedBeforeDispatch`, and the PC pending snapshot is cleared only
@@ -122,6 +128,12 @@ after the Agent confirms the durable `ClosedBeforeDispatch` tombstone. If the
 close response is unknown or the process restarts, recovery uses only the
 frozen transaction ID for close/query operations: it does not reserve, start,
 redispatch, capture, or retry.
+
+`CaptureRecoveryOnly` uses its own snapshot schema and saves the frozen request
+before reservation. A restart first requires a fresh operator CAM-A/B binding and
+activation of the new Agent process, then performs only a same-ID query. `NotFound`
+proves that no reservation was recorded; `Reserved` is closed by exact ID; a
+terminal result is revalidated without another reserve/start.
 
 ## Exit codes
 

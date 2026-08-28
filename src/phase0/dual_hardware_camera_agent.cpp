@@ -278,6 +278,24 @@ void ValidateCaptureProfile(const JsonValue& profile, std::int64_t started, std:
     ValidateCaptureBody(bodies[0], kCameraAliasA); ValidateCaptureBody(bodies[1], kCameraAliasB);
     request.capture_profile_valid_until_100ns = valid;
 }
+void ValidateCaptureRecoveryOnlyProfile(const JsonValue& profile) {
+    RequireExactFields(profile, {"schemaVersion","cameraMode","cameraModel","imageFormat",
+        "imageSize","pixelDimensions","cameraSettingWritesApproved","automaticRetryApproved",
+        "actualShutterSynchronizationGuaranteed","approvalBasis"});
+    RequireStringValue(profile, "schemaVersion", "a0.dual-capture-profile.operator-approved.v1");
+    RequireStringValue(profile, "cameraMode", "DualCamera");
+    RequireStringValue(profile, "cameraModel", "Nikon D810");
+    RequireStringValue(profile, "imageFormat", "JPEG Fine");
+    RequireStringValue(profile, "imageSize", "L");
+    RequireStringValue(profile, "pixelDimensions", "7360x4912");
+    if (RequireField(profile, "cameraSettingWritesApproved", JsonKind::boolean).boolean ||
+        RequireField(profile, "automaticRetryApproved", JsonKind::boolean).boolean ||
+        RequireField(profile, "actualShutterSynchronizationGuaranteed", JsonKind::boolean).boolean)
+        ProtocolFailure("InvalidPairRequest", "capture-only profile claims an unapproved operation");
+    const auto& approval_basis = RequireField(profile, "approvalBasis", JsonKind::string).string;
+    if (!IsBoundedText(approval_basis, 128))
+        ProtocolFailure("InvalidPairRequest", "capture-only profile approval basis is invalid");
+}
 void ValidateRigProfile(const JsonValue& profile, std::int64_t started, std::int64_t now,
     DualHardwareCameraAgentRequest& request) {
     RequireExactFields(profile, {"profileId","version","status","schemaVersion","provenance","measuredAtUtc",
@@ -428,14 +446,33 @@ std::string BuildTerminalResult(
     const auto& identity = RequireField(transaction, "identitySnapshot", JsonKind::object);
     const auto& capture = RequireField(transaction, "captureProfileSnapshot", JsonKind::object);
     std::string purpose_json;
+    std::string capture_evidence_json;
     std::string rig_evidence_json;
     if (capture_recovery_only) {
         purpose_json =
             ",\"capturePurpose\":\"CaptureRecoveryOnly\""
             ",\"stitchOutcome\":\"Pending\""
             ",\"a0QualityApproval\":\"Unapproved\"";
+        capture_evidence_json =
+            ",\"captureProfileSchemaVersion\":\"" +
+            JsonEscape(RequireField(capture, "schemaVersion", JsonKind::string).string) +
+            "\",\"captureProfileApprovalBasis\":\"" +
+            JsonEscape(RequireField(capture, "approvalBasis", JsonKind::string).string) +
+            "\",\"cameraModel\":\"" +
+            JsonEscape(RequireField(capture, "cameraModel", JsonKind::string).string) +
+            "\",\"imageFormat\":\"" +
+            JsonEscape(RequireField(capture, "imageFormat", JsonKind::string).string) +
+            "\",\"imageSize\":\"" +
+            JsonEscape(RequireField(capture, "imageSize", JsonKind::string).string) +
+            "\",\"pixelDimensions\":\"" +
+            JsonEscape(RequireField(capture, "pixelDimensions", JsonKind::string).string) + "\"";
     } else {
         const auto& rig = RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
+        capture_evidence_json =
+            ",\"captureProfileId\":\"" +
+            JsonEscape(RequireField(capture, "profileId", JsonKind::string).string) +
+            "\",\"captureProfileVersion\":\"" +
+            JsonEscape(RequireField(capture, "version", JsonKind::string).string) + "\"";
         rig_evidence_json =
             ",\"profileId\":\"" +
             JsonEscape(RequireField(rig, "profileId", JsonKind::string).string) +
@@ -474,9 +511,7 @@ std::string BuildTerminalResult(
         std::string(terminal_state) + "\",\"failureCode\":\"" + std::string(failure_code) +
         "\",\"evidence\":{\"terminalState\":\"" + std::string(terminal_state) +
         "\",\"identitySnapshot\":" + SerializeJson(identity) +
-        ",\"captureProfileId\":\"" + JsonEscape(RequireField(capture, "profileId", JsonKind::string).string) +
-        "\",\"captureProfileVersion\":\"" + JsonEscape(RequireField(capture, "version", JsonKind::string).string) +
-        "\"" + rig_evidence_json +
+        capture_evidence_json + rig_evidence_json +
         ",\"watchdogStartedAtUtc\":\"" + RequireField(transaction, "startedAtUtc", JsonKind::string).string +
         "\",\"watchdogDeadlineUtc\":\"" + RequireField(transaction, "watchdogDeadlineUtc", JsonKind::string).string +
         "\",\"completedAtUtc\":\"" + FormatUtc100ns(completed_at_100ns) +
@@ -761,11 +796,13 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 ProtocolFailure("InvalidPairRequest", "pair watchdog window is invalid");
             ValidateTransactionDirectory(RequireField(transaction, "transactionDirectory", JsonKind::string).string);
             ValidateIdentity(RequireField(transaction, "identitySnapshot", JsonKind::object), request.started_at_100ns, now, request);
-            ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
             if (capture_recovery_only) {
+                ValidateCaptureRecoveryOnlyProfile(
+                    RequireField(transaction, "captureProfileSnapshot", JsonKind::object));
                 ValidateCaptureRecoveryOnlyConfirmations(
                     RequireField(transaction, "operatorConfirmations", JsonKind::object));
             } else {
+                ValidateCaptureProfile(RequireField(transaction, "captureProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
                 ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
                 ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
             }

@@ -36,6 +36,8 @@ public sealed class OperatorShellViewModel : ObservableObject
 {
     public const string SimulationBanner = "模擬動作（実機未接続）";
     public const string HardwareDualPendingBanner = "実機2台 / 機体照合の提供元が未接続 / 撮影禁止";
+    public const string HardwareDualCaptureRecoveryOnlyBanner =
+        "実機2台 / 撮影・原画像保存のみ / 合成保留 / A0品質未承認";
     private const string SingleModeLabel = "1台構成";
     private const string DualModeLabel = "2台構成";
     private const string StageModeCameraALive = "CAM-A live";
@@ -81,6 +83,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly ISimulatedTransactionService _transactionService;
     private readonly IDualCameraProductFlow? _dualCameraFlow;
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
+    private readonly IHardwareDualCaptureRecoveryOnlyWorkflow? _captureRecoveryOnlyWorkflow;
     private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
     private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
@@ -123,6 +126,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool _consentOverlayDismissed;
     private bool _physicalShutterAckAccepted;
     private bool _exclusiveUseAckAccepted;
+    private bool _captureRecoveryOnlyOperatorApproved;
     private int _gridColumns = DefaultGridDivision;
     private int _gridRows = DefaultGridDivision;
     private string _noticeText = string.Empty;
@@ -224,11 +228,13 @@ public sealed class OperatorShellViewModel : ObservableObject
         Func<DualCameraCaptureRequest>? hardwareDualRequestProvider = null,
         ISimulatedLiveViewFramePump? liveViewFramePump = null,
         ISimulatedLiveViewFrameSource? liveViewFrameSource = null,
-        IHardwareCameraAgentTransport? dualBindingTransport = null)
+        IHardwareCameraAgentTransport? dualBindingTransport = null,
+        IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
+        _captureRecoveryOnlyWorkflow = captureRecoveryOnlyWorkflow;
         _liveViewFramePump = liveViewFramePump;
         _liveViewFrameSource = liveViewFrameSource;
         if (_dualCameraFlow is not null)
@@ -302,9 +308,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         ResetProgress();
     }
 
-    public string BannerText => _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
-        ? HardwareDualPendingBanner
-        : SimulationBanner;
+    public string BannerText => IsCaptureRecoveryOnlyMode
+        ? HardwareDualCaptureRecoveryOnlyBanner
+        : _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
+            ? HardwareDualPendingBanner
+            : SimulationBanner;
 
     /// <summary>ヘルプ(H)メニューの「バージョン」項目用（issue #34）。実装時点でセマンティック
     /// バージョンの運用ルールは未確定のため、独自の番号を捏造せずビルド済みアセンブリのメタ
@@ -314,7 +322,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public IReadOnlyList<string> OperatingModeOptions { get; } = [SingleModeLabel, DualModeLabel];
     public IReadOnlyList<string> CameraAliases { get; } = ["CAM-A", "CAM-B"];
     public IReadOnlyList<string> ReadinessDemoOptions { get; } = ["補正不要", "自動補正範囲内", "物理調整が必要", "CAM-A未接続", "CAM-B未接続", "カード状態要確認"];
-    public IReadOnlyList<string> DiagnosticScenarios => IsSingleCameraMode
+    public IReadOnlyList<string> DiagnosticScenarios => IsCaptureRecoveryOnlyMode
+        ? ["正常完了"]
+        : IsSingleCameraMode
         ? ["正常完了", "Live View停止失敗", "対象カメラ撮影失敗", "cleanup失敗", "Live View再開失敗", "1台目保存後クラッシュ"]
         : ["正常完了", "Live View停止失敗", "CAM-A撮影失敗", "CAM-B撮影失敗", "cleanup失敗", "合成失敗", "Live View再開失敗", "CAM-A保存後クラッシュ"];
     public IReadOnlyList<CameraSettingRow> CameraSettingRows { get; } =
@@ -451,19 +461,55 @@ public sealed class OperatorShellViewModel : ObservableObject
             }
         }
     }
+
+    /// <summary>
+    /// Dedicated acceptance mode. Its output is two verified originals only;
+    /// ordinary rig/stitch behavior is deliberately not selected by this flag.
+    /// </summary>
+    public bool IsCaptureRecoveryOnlyMode => _captureRecoveryOnlyWorkflow is not null;
+
+    /// <summary>
+    /// One explicit operator confirmation covering the two facts that cannot be
+    /// inferred by this WPF layer: both dedicated cards were checked empty and
+    /// this run is approved as capture/recovery-only (not an A0-quality test).
+    /// </summary>
+    public bool IsCaptureRecoveryOnlyOperatorApproved
+    {
+        get => _captureRecoveryOnlyOperatorApproved;
+        set
+        {
+            if (!IsCaptureRecoveryOnlyMode || IsBusy ||
+                !SetProperty(ref _captureRecoveryOnlyOperatorApproved, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(CanCapture));
+            OnPropertyChanged(nameof(CaptureAvailabilityText));
+            OnPropertyChanged(nameof(CaptureDisabledReason));
+            NotifyAllCommands();
+        }
+    }
+
     public string ActivityText => IsBusy ? "操作をロック中" : "操作受付中";
     public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
-    public bool CanChangeOperatingMode => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
+    public bool CanChangeOperatingMode => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
     public bool CanSelectCamera => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
     public bool CanChangeExportDirectory => !IsBusy;
-    public string OperatingModeDescription => IsSingleCameraMode
+    public string OperatingModeDescription => IsCaptureRecoveryOnlyMode
+        ? "CAM-A→CAM-Bを順次撮影し、検証済み原画像2枚だけを固定ローカルへ保持します。合成とA0品質判定は行いません。"
+        : IsSingleCameraMode
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
-    public string CaptureButtonText => IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
+    public string CaptureButtonText => IsCaptureRecoveryOnlyMode
+        ? "2台を順次撮影・回収する（1回）"
+        : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
     public string CameraSelectionLabel => IsSingleCameraMode ? "撮影・ライブ表示の対象" : "ライブ表示するカメラ（1台ずつ）";
-    public string ProcessingResultLabel => IsSingleCameraMode ? "単体出力" : "合成";
+    public string ProcessingResultLabel => IsCaptureRecoveryOnlyMode
+        ? "原画像2枚（合成保留）"
+        : IsSingleCameraMode ? "単体出力" : "合成";
     public string OverallStateText => UiState switch
     {
         OperatorUiState.Ready => "撮影可能",
@@ -551,6 +597,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(ProcessingResultLabel));
             OnPropertyChanged(nameof(DiagnosticScenarios));
             OnPropertyChanged(nameof(StageCompositeApplicable));
+            OnPropertyChanged(nameof(ShowAutomaticStitchInstruction));
             OnPropertyChanged(nameof(IsOverlapBandVisible));
             OnPropertyChanged(nameof(StageReviewBadgeText));
             OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
@@ -771,7 +818,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsStageCompositePreviewMode => IsStageLiveNoteVisible && SelectedStageMode == StageModeCompositePreview;
     public string StageProcessingPlaceholderText => StageProcessingPlaceholderMessage;
     public string StagePreviewNoteText => StagePreviewNoteMessage;
-    public string StageReviewBadgeText => IsSingleCameraMode ? "検証済み原本" : "合成結果";
+    public string StageReviewBadgeText => IsCaptureRecoveryOnlyMode
+        ? "検証済み原画像（合成保留）"
+        : IsSingleCameraMode ? "検証済み原本" : "合成結果";
     public string CaptureAvailabilityText => CanCapture ? "撮影可" : "撮影不可";
     public string ReadyStatusChipText => $"{OverallStateText} / {CaptureAvailabilityText}";
 
@@ -783,6 +832,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         : $"{StageSingleLiveAlias}\n\n1台構成のため対象外（運用対象は{SelectedCamera}のみ）";
 
     public bool StageCompositeApplicable => !IsSingleCameraMode;
+    public bool ShowAutomaticStitchInstruction => StageCompositeApplicable && !IsCaptureRecoveryOnlyMode;
+    public bool ShowCaptureRecoveryOnlyInstruction => IsCaptureRecoveryOnlyMode;
     public string StageCompositeLiveAlias => SelectedCamera;
     public string StageCompositeStillAlias => SelectedCamera == "CAM-A" ? "CAM-B" : "CAM-A";
     public string StageCompositeOverlapBandText => "重複帯\n幅px実測未接続";
@@ -1891,33 +1942,48 @@ public sealed class OperatorShellViewModel : ObservableObject
             Current: { FailureCode: DualCameraFailureCode.AgentResponseUnknown },
         };
 
+    private bool HasRecoverableCaptureRecoveryOnlyTransaction =>
+        IsCaptureRecoveryOnlyMode && _captureRecoveryOnlyWorkflow!.HasPendingRecovery;
+
     // 新規撮影は、必要な機体照合が Ready になるまで開始できない。Single へのフォールバックも
     // 無い——未確定の binding で 2 台を撮ると、片方の本体の画像がもう片方の alias として
     // 記録され、後から誰も判別できない（ADR-0025）。
-    // ただし同一撮影IDの読み直し（HasRecoverableHardwareDualTransaction）はゲート対象外。
-    // これは新しい撮影を始めず、既に dispatch 済みの結果を read-only で確認するだけで、
-    // ここを塞ぐと曖昧な状態のまま操作者が確認手段を失う。
+    // ordinary HardwareDual の同一撮影ID読み直しは既存host契約どおりbinding gate対象外。
+    // CaptureRecoveryOnlyは再起動後の新しいAgentがbinding pipeから始まるため、同一ID照会だけでも
+    // CAM-A/Bを再割当してcapture hostへactivationしなければならない（新規撮影は送らない）。
     public bool CanCapture => !_isPreCaptureAutoFocusRunning &&
         (HasRecoverableHardwareDualTransaction ||
+        (HasRecoverableCaptureRecoveryOnlyTransaction &&
+         (!DualBinding.IsRequired || DualBinding.IsReady) &&
+         _availability.Capture.Allowed) ||
         ((!DualBinding.IsRequired || DualBinding.IsReady) &&
         _availability.Capture.Allowed &&
-        (IsSingleCameraMode || _dualCameraFlow is null ||
+        (IsCaptureRecoveryOnlyMode
+            ? !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
+              _captureRecoveryOnlyWorkflow!.CanStartNewCapture
+            : IsSingleCameraMode || _dualCameraFlow is null ||
             (_dualCameraFlow.IdentitySnapshot.IsReady &&
              (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
               _hardwareDualRequestProvider is not null)))));
     public string CaptureDisabledReason => _isPreCaptureAutoFocusRunning
         ? "撮影+AF: 各カメラの撮影直前AFを実行中です。完了までお待ちください。"
         : CanCapture
-        ? HasRecoverableHardwareDualTransaction
+        ? HasRecoverableHardwareDualTransaction || HasRecoverableCaptureRecoveryOnlyTransaction
             ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
         // binding が先に来る。identity が Pending でも、操作者にとっては「まず割当を終わらせる」
         // が次の一手なので、そちらを名指しする。
         : DualBinding.IsRequired && !DualBinding.IsReady
             ? "機体照合（CAM-A / CAM-B の割当）が未完了です — 撮影禁止"
-        : !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
+        : HasRecoverableCaptureRecoveryOnlyTransaction
+            ? _availability.Capture.DisabledReason
+        : IsCaptureRecoveryOnlyMode && !IsCaptureRecoveryOnlyOperatorApproved
+            ? "専用カード2枚が空であることと『撮影・回収のみ』の実行承認を確認してください — 撮影禁止"
+        : IsCaptureRecoveryOnlyMode && !_captureRecoveryOnlyWorkflow!.CanStartNewCapture
+            ? $"CaptureRecoveryOnly開始条件を満たしていません: {_captureRecoveryOnlyWorkflow.NewCaptureBlocker} — 撮影禁止"
+        : !IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
             ? $"2台の機体照合: {_dualCameraFlow.IdentitySnapshot.Status} — 撮影禁止"
-            : !IsSingleCameraMode && _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual &&
+            : !IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual &&
               _hardwareDualRequestProvider is null
                 ? "HardwareDual approved profiles and explicit operator confirmations are unavailable — 撮影禁止"
             : _availability.Capture.DisabledReason;
@@ -1938,16 +2004,18 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// <see cref="CaptureDisabledReason"/>が既に読んでいる同じ<see cref="IDualCameraProductFlow.IdentitySnapshot"/>
     /// を専用の表示文字列として公開するだけで、新しい業務ロジックは追加しない — 撮影失敗を
     /// 待たずにidentity状態を確認できるようにする目的のみ。</summary>
-    public string DualCameraIdentityStatusText => _dualCameraFlow is null
+    public string DualCameraIdentityStatusText => IsCaptureRecoveryOnlyMode
+        ? $"同一Agent内の機体照合: {DualBinding.Phase} / 撮影引継ぎ: {(DualBinding.IsCaptureHostActivated ? "完了" : "未実施")}"
+        : _dualCameraFlow is null
         ? "DualCamera未接続"
         : IsSingleCameraMode
             ? "1台構成のため対象外"
             : $"機体照合: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
 
     public bool CanUseLiveView => _availability.LiveView.Allowed;
-    public bool CanExport => _availability.Export.Allowed &&
+    public bool CanExport => !IsCaptureRecoveryOnlyMode && _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
-    public bool CanRestitch => _availability.Restitch.Allowed;
+    public bool CanRestitch => !IsCaptureRecoveryOnlyMode && _availability.Restitch.Allowed;
     // _initializationFailed が立っている間は PrepareNewCapture 自体をブロックする。
     // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
     // ラッチ（issue #142/PR #152 レビュー指摘・要修正2）。
@@ -2036,13 +2104,32 @@ public sealed class OperatorShellViewModel : ObservableObject
 
         // 機体照合が確定してからシャッターを切るまでの間にも本体は抜ける。request/response の
         // protocol は誰かが訊ねるまで無効化を伝えられないので、撮影を始める直前にここで訊ねる。
-        // 同一撮影IDの読み直しは新しい撮影を始めないため対象外。
+        // ordinary HardwareDualだけは既存hostで同一IDを読める。CaptureRecoveryOnlyはAgent再起動時に
+        // capture pipeへ到達するため再binding/activationが必要だが、新規Reserve/Startは送らない。
         if (!HasRecoverableHardwareDualTransaction &&
             !await DualBinding.VerifyBindingIsCurrentAsync().ConfigureAwait(true))
         {
-            Notify("機体照合が無効になりました。撮影は開始していません。", false);
+            StatusMessage = "機体照合が無効になりました。撮影は開始していません。";
+            Notify(StatusMessage, false);
             OnPropertyChanged(nameof(CanCapture));
             OnPropertyChanged(nameof(CaptureDisabledReason));
+            return;
+        }
+
+        if (IsCaptureRecoveryOnlyMode)
+        {
+            if (!await DualBinding.ActivateCaptureAsync(_lifetimeToken).ConfigureAwait(true))
+            {
+                StatusMessage = "機体照合を撮影処理へ引き継げなかったため、撮影は開始していません。";
+                Notify(StatusMessage, false);
+                OnPropertyChanged(nameof(CanCapture));
+                OnPropertyChanged(nameof(CaptureDisabledReason));
+                return;
+            }
+
+            await RunCaptureRecoveryOnlyAsync(
+                    recoverPending: HasRecoverableCaptureRecoveryOnlyTransaction)
+                .ConfigureAwait(true);
             return;
         }
 
@@ -2202,6 +2289,139 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
+    private async Task RunCaptureRecoveryOnlyAsync(bool recoverPending)
+    {
+        var workflow = _captureRecoveryOnlyWorkflow ??
+            throw new InvalidOperationException("CaptureRecoveryOnly workflow is unavailable.");
+        IsBusy = true;
+        if (!recoverPending)
+        {
+            TransactionStartCount++;
+        }
+        CaptureResult = recoverPending ? "同じ撮影IDの結果確認中" : "CAM-A→CAM-B 撮影・回収中";
+        StitchResult = "保留（CaptureRecoveryOnly）";
+        ExportResult = "原画像の固定ローカル保存を確認中";
+        _captureOutcome = null;
+        _stitchOutcome = null;
+        _exportOutcome = null;
+        ResetProgress(CapturePlan.Dual());
+        SetStep("liveview", "completed");
+        SetStep("capture-a", "current");
+        UiState = OperatorUiState.Capturing;
+        StatusMessage = recoverPending
+            ? "新しい撮影は行わず、同じtransaction IDの終端結果だけを確認します。"
+            : "同じAgentの割当を使い、CAM-A→CAM-Bを各1回だけ撮影・回収します。";
+
+        try
+        {
+            HardwareDualCaptureRecoveryOnlyExecution outcome;
+            if (recoverPending)
+            {
+                outcome = await workflow.RecoverAsync(_lifetimeToken).ConfigureAwait(true);
+            }
+            else
+            {
+                var observedAtUtc = DateTimeOffset.UtcNow;
+                var identity = new DualCameraIdentitySnapshot(
+                    DualCameraIdentityStatus.Ready,
+                    "same_agent_operator_binding",
+                    observedAtUtc,
+                    observedAtUtc.AddMinutes(5));
+                outcome = await workflow.CaptureAsync(identity, _lifetimeToken).ConfigureAwait(true);
+            }
+            ApplyCaptureRecoveryOnlyExecution(outcome);
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+        {
+            UiState = OperatorUiState.FailedPartial;
+            CaptureResult = "中断（結果不明）";
+            StitchResult = "保留（CaptureRecoveryOnly）";
+            ExportResult = "取得済み原画像がある場合は保持";
+            StatusMessage = "終了操作で中断しました。自動再試行せず、次回は同じ撮影IDの結果だけを確認します。";
+            TechnicalDetail = "capturePurpose=CaptureRecoveryOnly / stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0";
+        }
+        finally
+        {
+            IsBusy = false;
+            RebuildReadiness(preserveOutcomeState: true);
+        }
+    }
+
+    private void ApplyCaptureRecoveryOnlyExecution(HardwareDualCaptureRecoveryOnlyExecution outcome)
+    {
+        LastTransactionId = outcome.TransactionId == Guid.Empty
+            ? "未実行"
+            : outcome.TransactionId.ToString("N");
+        var originals = outcome.Originals;
+        RetainedOriginals = originals.Count == 0
+            ? "なし"
+            : string.Join(" / ", originals.Select(original =>
+                $"{original.Alias}: original.jpg {original.SizeBytes} bytes SHA-256 {original.Sha256[..12]}…"));
+        foreach (var original in originals)
+        {
+            _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
+            RecordSavedFile(original.Path);
+            SetStep(original.Alias == "CAM-A" ? "capture-a" : "capture-b", "completed");
+            SetStep(original.Alias == "CAM-A" ? "persist-a" : "persist-b", "completed");
+        }
+
+        if (outcome.Succeeded)
+        {
+            SetStep("capture-a", "completed");
+            SetStep("persist-a", "completed");
+            SetStep("capture-b", "completed");
+            SetStep("persist-b", "completed");
+        }
+        else if (!outcome.RecoveryPending)
+        {
+            var failedStep = originals.Any(item => item.Alias == "CAM-A")
+                ? "capture-b"
+                : "capture-a";
+            SetStep(failedStep, "failure");
+        }
+        SetStep("stitch", "skipped");
+        SetStep("review", outcome.RecoveryPending ? "pending" : "completed");
+        SetStep("export", "skipped");
+
+        _captureOutcome = new CaptureOutcome(
+            outcome.TransactionId,
+            CapturePlan.Dual(),
+            outcome.Succeeded ? SimulatedTransactionState.Complete : SimulatedTransactionState.FailedPartial,
+            originals.Select(original => original.Alias).ToArray(),
+            outcome.Succeeded ? "二原本検証済み" : "撮影・回収または原画像検証が未完了",
+            outcome.FailureCode == DualCameraFailureCode.None ? null : outcome.FailureCode.ToString(),
+            DateTimeOffset.UtcNow);
+        CaptureResult = outcome.Succeeded
+            ? "CAM-A/CAM-B JPEG 7360×4912・SHA-256再検証済み"
+            : outcome.RecoveryPending
+                ? "結果不明（同じ撮影IDのみ再確認可）"
+                : $"{outcome.TerminalState}: {outcome.FailureCode}";
+        StitchResult = "Pending（未実施・A0品質未承認）";
+        ExportResult = originals.Count == 0
+            ? "保存済み原画像なし"
+            : "原画像を固定ローカルtransactionフォルダへ保存済み";
+        LastExportPath = string.IsNullOrWhiteSpace(outcome.TransactionDirectory)
+            ? "未確定"
+            : outcome.TransactionDirectory;
+        _stitchOutcome = null;
+        _exportOutcome = null;
+        UiState = outcome.Succeeded ? OperatorUiState.Review : OperatorUiState.FailedPartial;
+        _cameraInspectionRequired = !outcome.Succeeded && !outcome.RecoveryPending;
+        StatusMessage = outcome.Succeeded
+            ? "原画像2枚の撮影・回収・再検証が完了しました。合成は実施せず、A0品質は未承認です。"
+            : outcome.RecoveryPending
+                ? "結果が確定していません。新しい撮影や自動再試行は行わず、同じ撮影IDだけを再確認します。"
+                : $"撮影・回収を{outcome.TerminalState}で停止しました。取得済み原画像は保持しています。";
+        TechnicalDetail =
+            $"capturePurpose={HardwareDualCaptureRecoveryOnlyExecution.CapturePurpose} / " +
+            $"stitchOutcome={HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome} / " +
+            $"a0QualityApproval={HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval} / " +
+            $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode}";
+        OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseLoupeProperties();
+        RecalculateAvailability();
+    }
+
     private async Task RunFormalDualCameraCaptureAsync(string scenario)
     {
         var flow = _dualCameraFlow ?? throw new InvalidOperationException("DualCamera product flow is unavailable.");
@@ -2284,6 +2504,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         if (args.PropertyName is not (nameof(DualBindingViewModel.IsReady)
             or nameof(DualBindingViewModel.IsRequired)
+            or nameof(DualBindingViewModel.IsCaptureHostActivated)
             or nameof(DualBindingViewModel.Phase)))
         {
             return;
@@ -2302,6 +2523,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CaptureDisabledReason));
+        OnPropertyChanged(nameof(DualCameraIdentityStatusText));
         _showBindingDemoCommand.NotifyCanExecuteChanged();
         _captureCommand.NotifyCanExecuteChanged();
         _captureWithAutoFocusCommand.NotifyCanExecuteChanged();
@@ -2522,6 +2744,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _focusPositionValues.Clear();
         _lastFocusResult = null;
         LastPreCaptureAutoFocusResult = null;
+        if (IsCaptureRecoveryOnlyMode)
+        {
+            _captureRecoveryOnlyOperatorApproved = false;
+            OnPropertyChanged(nameof(IsCaptureRecoveryOnlyOperatorApproved));
+        }
         RaiseStageFrameProperties();
         RaiseFocusPanelProperties();
         OnPropertyChanged(nameof(FocusResultText));

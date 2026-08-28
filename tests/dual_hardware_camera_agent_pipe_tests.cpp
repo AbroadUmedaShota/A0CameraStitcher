@@ -342,42 +342,23 @@ std::string StartEnvelope(
 std::string CaptureRecoveryOnlyEnvelope(
     std::string_view transaction_id,
     std::string_view request_id) {
-    std::string payload = StartEnvelope(transaction_id, request_id);
-    const std::string rig_start =
-        ",\"rigProfileSnapshot\":{\"profileId\":\"pipe-test-rig\",\"version\":\"1\",";
-    const auto rig_position = payload.find(rig_start);
-    Check(rig_position != std::string::npos,
-        "capture-only helper must find the normal rig profile start");
-    const std::string confirmation_start = ",\"operatorConfirmations\":";
-    const auto confirmation_position = payload.find(confirmation_start, rig_position);
-    Check(confirmation_position != std::string::npos,
-        "capture-only helper must find the normal confirmation start");
-    if (rig_position != std::string::npos &&
-        confirmation_position != std::string::npos) {
-        payload.erase(rig_position, confirmation_position - rig_position);
-    }
-    const std::string normal_confirmations =
-        "\"rigProfileFrozen\":true,\"liveViewStoppedAndClosed\":true,"
-        "\"bothCardsConfirmedEmpty\":true";
-    const std::string capture_only_confirmations =
+    const std::string payload =
+        "{\"cameraMode\":\"DualCamera\",\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"]"
+        ",\"transaction\":{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"transactionDirectory\":\"C:/anonymous/capture-recovery-only\""
+        ",\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"pipe-test-ready\","
+        "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}"
+        ",\"captureProfileSnapshot\":{\"schemaVersion\":\"a0.dual-capture-profile.operator-approved.v1\","
+        "\"cameraMode\":\"DualCamera\",\"cameraModel\":\"Nikon D810\",\"imageFormat\":\"JPEG Fine\","
+        "\"imageSize\":\"L\",\"pixelDimensions\":\"7360x4912\","
+        "\"cameraSettingWritesApproved\":false,\"automaticRetryApproved\":false,"
+        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-test\"}"
+        ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
         "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
-        "\"captureRecoveryOnlyApproved\":true";
-    const auto confirmations_position = payload.find(normal_confirmations);
-    Check(confirmations_position != std::string::npos,
-        "capture-only helper must find the normal confirmations");
-    if (confirmations_position != std::string::npos) {
-        payload.replace(confirmations_position, normal_confirmations.size(),
-            capture_only_confirmations);
-    }
-    const std::string operation = "\"operation\":\"start-reserved-pair\"";
-    const auto operation_position = payload.find(operation);
-    Check(operation_position != std::string::npos,
-        "capture-only helper must find the normal operation");
-    if (operation_position != std::string::npos) {
-        payload.replace(operation_position, operation.size(),
-            "\"operation\":\"start-reserved-capture-recovery-only\"");
-    }
-    return payload;
+        "\"captureRecoveryOnlyApproved\":true}"
+        ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
+        ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
+    return Envelope("start-reserved-capture-recovery-only", payload, request_id);
 }
 
 // ---------------------------------------------------------------------
