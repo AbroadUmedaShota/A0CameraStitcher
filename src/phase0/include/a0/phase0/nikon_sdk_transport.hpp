@@ -10,6 +10,11 @@ namespace a0::phase0 {
 class INikonDualSessionTransport {
 public:
     virtual ~INikonDualSessionTransport() = default;
+    // SDK-only Dual preflight. This counts D810 source objects without
+    // deriving persistent identities or generating candidate tokens. The
+    // caller must end the retained module session before any WPD access.
+    [[nodiscard]] virtual std::size_t BeginDualReadOnlyProbe(
+        std::chrono::seconds timeout) = 0;
     [[nodiscard]] virtual std::vector<std::string> BeginDualSession(
         std::chrono::seconds timeout) = 0;
     virtual void OpenDualCandidateLiveView(
@@ -31,6 +36,16 @@ public:
         std::chrono::seconds timeout) = 0;
     [[nodiscard]] virtual DualIdentityInvalidationReason PollDualInvalidation() = 0;
     virtual void EndDualSession(std::chrono::seconds timeout) = 0;
+    struct ExitState {
+        bool process_claim_retained{};
+        bool module_retained{};
+        bool source_open{};
+
+        [[nodiscard]] bool FullyEnded() const noexcept {
+            return !process_claim_retained && !module_retained && !source_open;
+        }
+    };
+    [[nodiscard]] virtual ExitState InspectDualSessionExitState() const noexcept = 0;
 };
 
 // Derives the private SDK-side identity from documented, source-level MAID
@@ -120,6 +135,8 @@ public:
     // the lifetime of one operator binding, while at most one candidate source
     // object is open at any time. Candidate tokens are opaque, memory-only and
     // valid only until EndDualSession or an invalidation.
+    [[nodiscard]] std::size_t BeginDualReadOnlyProbe(
+        std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<std::string> BeginDualSession(
         std::chrono::seconds timeout) override;
     void OpenDualCandidateLiveView(
@@ -131,6 +148,8 @@ public:
     void CloseDualSourceKeepingModule(std::chrono::seconds timeout) override;
     [[nodiscard]] DualIdentityInvalidationReason PollDualInvalidation() override;
     void EndDualSession(std::chrono::seconds timeout) override;
+    [[nodiscard]] INikonDualSessionTransport::ExitState
+        InspectDualSessionExitState() const noexcept override;
     [[nodiscard]] static bool LicensedAdapterAvailable() noexcept;
 
 private:
@@ -183,6 +202,47 @@ private:
     DualIdentityInvalidationReason pending_invalidation_{
         DualIdentityInvalidationReason::None};
 };
+
+enum class DualSdkReadOnlyProbeError {
+    None,
+    CameraCountMismatch,
+    SdkStartFailed,
+    SdkInventoryFailed,
+    SdkOperationFailed,
+    HostSetupFailed,
+};
+
+enum class DualSdkReadOnlyProbeCleanup {
+    Ended,
+    EndedAfterError,
+    Unconfirmed,
+};
+
+enum class DualSdkReadOnlyProbeTerminalState {
+    Pass,
+    Blocked,
+};
+
+struct DualSdkReadOnlyProbeResult {
+    std::optional<std::size_t> sdk_d810_count;
+    INikonDualSessionTransport::ExitState exit_state;
+    DualSdkReadOnlyProbeError error{DualSdkReadOnlyProbeError::HostSetupFailed};
+    DualSdkReadOnlyProbeCleanup cleanup{DualSdkReadOnlyProbeCleanup::Ended};
+    DualSdkReadOnlyProbeTerminalState terminal_state{
+        DualSdkReadOnlyProbeTerminalState::Blocked};
+};
+
+// DualCamera readiness must use the session-local candidate path rather than
+// generic stable-identity inventory: two identical D810 bodies can
+// legitimately report the same MAID Name/Interface pair. The candidate tokens
+// are not generated, and the SDK session is fully ended before this result is
+// returned. All transport exceptions are normalized into fixed anonymous
+// result values; no SDK error text crosses the CLI boundary.
+[[nodiscard]] DualSdkReadOnlyProbeResult RunDualSdkReadOnlyProbe(
+    INikonDualSessionTransport& transport,
+    std::chrono::seconds timeout);
+[[nodiscard]] std::string SerializeDualSdkReadOnlyProbeResult(
+    const DualSdkReadOnlyProbeResult& result);
 
 class NikonSdkStatusExecutor final : public ISdkStatusExecutor {
 public:

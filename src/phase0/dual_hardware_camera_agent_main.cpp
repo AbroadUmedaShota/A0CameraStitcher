@@ -55,7 +55,9 @@ void PrintUsage() {
            L"--approved-capture-profile PATH --dual-identity-proof PATH "
            L"[--binding-pipe-name NAME --wpd-camera-map PATH]\n"
         << L"       A0CameraStitcher.DualCameraAgent "
-           L"--read-only-coexistence-probe --wpd-camera-map PATH\n";
+           L"--read-only-coexistence-probe --wpd-camera-map PATH\n"
+        << L"       A0CameraStitcher.DualCameraAgent "
+           L"--read-only-sdk-probe\n";
 }
 
 // Legacy launch without the session-binding pair of arguments remains fail
@@ -106,6 +108,7 @@ int wmain(int argc, wchar_t** argv) {
         std::string pipe_name(kDefaultDualHardwareCameraAgentPipeName);
         bool serve_once = false;
         bool read_only_coexistence_probe = false;
+        bool read_only_sdk_probe = false;
         std::optional<fs::path> pair_journal_root;
         std::optional<fs::path> approved_capture_profile;
         std::optional<fs::path> dual_identity_proof;
@@ -126,6 +129,14 @@ int wmain(int argc, wchar_t** argv) {
                         "--read-only-coexistence-probe was repeated");
                 }
                 read_only_coexistence_probe = true;
+                continue;
+            }
+            if (argument == L"--read-only-sdk-probe") {
+                if (read_only_sdk_probe) {
+                    throw std::invalid_argument(
+                        "--read-only-sdk-probe was repeated");
+                }
+                read_only_sdk_probe = true;
                 continue;
             }
             if (argument == L"--help" || argument == L"-h") {
@@ -183,6 +194,26 @@ int wmain(int argc, wchar_t** argv) {
         if (binding_pipe_name && serve_once) {
             throw std::invalid_argument(
                 "--serve-once cannot complete a multi-request binding session");
+        }
+        if (read_only_sdk_probe) {
+            if (serve_once || read_only_coexistence_probe || !seen.empty()) {
+                throw std::invalid_argument(
+                    "--read-only-sdk-probe cannot be combined with other options");
+            }
+            DualSdkReadOnlyProbeResult result;
+            try {
+                HardwareProcessLease camera_control_lease;
+                NikonSdkTransport transport;
+                result = RunDualSdkReadOnlyProbe(
+                    transport, std::chrono::seconds(10));
+            } catch (...) {
+                // The fixed default result is the only public boundary for a
+                // host/lease setup failure. Never publish exception text from
+                // the licensed SDK or process environment.
+            }
+            std::cout << SerializeDualSdkReadOnlyProbeResult(result) << '\n';
+            return result.terminal_state == DualSdkReadOnlyProbeTerminalState::Pass
+                ? 0 : 2;
         }
         if (read_only_coexistence_probe) {
             if (!wpd_camera_map) {

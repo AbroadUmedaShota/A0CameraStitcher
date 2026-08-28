@@ -24,11 +24,18 @@ public:
     DualIdentityInvalidationReason invalidation{DualIdentityInvalidationReason::None};
     bool fail_close{};
     bool fail_capture{};
+    bool fail_read_only_start{};
+    bool fail_read_only_inventory{};
+    bool fail_end_after_cleanup{};
+    bool fail_end_before_cleanup{};
+    std::size_t read_only_d810_count{2};
+    bool process_claimed{};
     bool module_active{};
     bool source_open{};
     bool live_view_active{};
     bool capture_source{};
     std::size_t begin_count{};
+    std::size_t read_only_begin_count{};
     std::size_t source_open_count{};
     std::size_t source_close_count{};
     std::size_t end_count{};
@@ -37,8 +44,27 @@ public:
     std::size_t concurrent_source_violation_count{};
     std::vector<std::string> opened_tokens;
 
+    std::size_t BeginDualReadOnlyProbe(std::chrono::seconds) override {
+        ++read_only_begin_count;
+        if (fail_read_only_start) {
+            throw TransportError(
+                "sdk_load_failed", "injected-sensitive-start-detail");
+        }
+        process_claimed = true;
+        module_active = true;
+        if (fail_read_only_inventory) {
+            process_claimed = false;
+            module_active = false;
+            throw TransportError(
+                "dual_read_only_inventory_failed",
+                "injected-sensitive-inventory-detail");
+        }
+        return read_only_d810_count;
+    }
+
     std::vector<std::string> BeginDualSession(std::chrono::seconds) override {
         ++begin_count;
+        process_claimed = true;
         module_active = true;
         return tokens;
     }
@@ -104,11 +130,24 @@ public:
     }
 
     void EndDualSession(std::chrono::seconds) override {
+        ++end_count;
+        if (fail_end_before_cleanup) {
+            throw TransportError(
+                "close_failed", "injected-sensitive-unconfirmed-detail");
+        }
         source_open = false;
         live_view_active = false;
         capture_source = false;
         module_active = false;
-        ++end_count;
+        process_claimed = false;
+        if (fail_end_after_cleanup) {
+            throw TransportError(
+                "close_failed", "injected-sensitive-cleanup-detail");
+        }
+    }
+
+    ExitState InspectDualSessionExitState() const noexcept override {
+        return {process_claimed, module_active, source_open};
     }
 
 private:
@@ -256,6 +295,131 @@ void TestCloseFailureEndsManagerAndInvalidatesSession() {
         "close failure must not retry or issue a capture command");
 }
 
+void TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+
+    const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+    Check(result.sdk_d810_count == 2 && result.exit_state.FullyEnded() &&
+          result.error == DualSdkReadOnlyProbeError::None &&
+          result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
+          result.terminal_state == DualSdkReadOnlyProbeTerminalState::Pass,
+        "Dual SDK read-only probe must report exactly two candidates and end the session");
+    Check(transport->read_only_begin_count == 1 && transport->begin_count == 0 &&
+          transport->end_count == 1 &&
+          !transport->module_active && transport->source_open_count == 0,
+        "probe must not generate binding tokens and must end without opening a source");
+    Check(transport->capture_count == 0 && transport->status_probe_count == 0,
+        "Dual SDK read-only probe must not inspect settings or send a capture command");
+
+    const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+    Check(json ==
+        "{\"operation\":\"read-only-sdk-probe\",\"sdkD810Count\":2,"
+        "\"sdkSessionEnded\":true,\"sdkProcessClaimRetainedAtExit\":false,"
+        "\"sdkModuleRetainedAtExit\":false,"
+        "\"sdkSourceOpenAtExit\":false,\"candidateTokensPublished\":false,"
+        "\"liveViewStarted\":false,\"captureCommandSent\":false,"
+        "\"cameraSettingsChanged\":false,\"wpdAccessed\":false,"
+        "\"errorCategory\":\"none\",\"cleanupState\":\"ended\","
+        "\"terminalState\":\"Pass\"}",
+        "Dual SDK read-only probe output must expose only the safe fixed schema");
+    for (const auto& token : transport->tokens) {
+        Check(json.find(token) == std::string::npos,
+            "Dual SDK read-only probe output must not publish candidate tokens");
+    }
+}
+
+void TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens() {
+    for (const std::size_t count : {std::size_t{0}, std::size_t{1}, std::size_t{3}}) {
+        auto transport = std::make_shared<RecordingDualSessionTransport>();
+        transport->read_only_d810_count = count;
+
+        const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+        Check(result.sdk_d810_count == count && result.exit_state.FullyEnded() &&
+              result.error == DualSdkReadOnlyProbeError::CameraCountMismatch &&
+              result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
+              result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
+            "every non-two Dual SDK count must return a typed Blocked result");
+        Check(transport->read_only_begin_count == 1 && transport->begin_count == 0 &&
+              transport->end_count == 1 && !transport->module_active &&
+              transport->source_open_count == 0 && transport->capture_count == 0,
+            "count mismatch must close once without token generation or camera commands");
+        const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+        Check(json.find("\"errorCategory\":\"cameraCountMismatch\"") !=
+                  std::string::npos &&
+              json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
+            "count mismatch must keep the fixed anonymous JSON schema");
+    }
+}
+
+void TestReadOnlyProbeNormalizesStartAndInventoryFailures() {
+    for (const bool fail_start : {true, false}) {
+        auto transport = std::make_shared<RecordingDualSessionTransport>();
+        transport->fail_read_only_start = fail_start;
+        transport->fail_read_only_inventory = !fail_start;
+
+        const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+        const auto expected = fail_start
+            ? DualSdkReadOnlyProbeError::SdkStartFailed
+            : DualSdkReadOnlyProbeError::SdkInventoryFailed;
+        Check(!result.sdk_d810_count.has_value() &&
+              result.exit_state.FullyEnded() && result.error == expected &&
+              result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
+              result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
+            "start and inventory failures must be normalized after confirmed cleanup");
+        Check(transport->read_only_begin_count == 1 && transport->end_count == 0 &&
+              transport->begin_count == 0 && transport->source_open_count == 0 &&
+              transport->capture_count == 0,
+            "failed read-only begin must not retry, bind, or issue camera commands");
+        const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+        Check(json.find("injected-sensitive") == std::string::npos &&
+              json.find("\"sdkD810Count\":null") != std::string::npos &&
+              json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
+            "SDK failure details must never cross the fixed JSON boundary");
+    }
+}
+
+void TestReadOnlyProbeBlocksCleanupErrorAfterConfirmedEnd() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    transport->fail_end_after_cleanup = true;
+
+    const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+    Check(result.sdk_d810_count == 2 && result.exit_state.FullyEnded() &&
+          result.error == DualSdkReadOnlyProbeError::None &&
+          result.cleanup == DualSdkReadOnlyProbeCleanup::EndedAfterError &&
+          result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
+        "cleanup error must block even when module release is confirmed");
+    Check(transport->read_only_begin_count == 1 && transport->end_count == 1 &&
+          transport->begin_count == 0 && transport->capture_count == 0,
+        "cleanup failure must not retry the probe or issue a camera command");
+    const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+    Check(json.find("injected-sensitive-cleanup-detail") == std::string::npos &&
+          json.find("\"cleanupState\":\"endedAfterError\"") != std::string::npos &&
+          json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
+        "confirmed cleanup error must use only the fixed anonymous schema");
+}
+
+void TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    transport->fail_end_before_cleanup = true;
+
+    const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+    Check(result.sdk_d810_count == 2 && !result.exit_state.FullyEnded() &&
+          result.exit_state.process_claim_retained &&
+          result.exit_state.module_retained &&
+          result.cleanup == DualSdkReadOnlyProbeCleanup::Unconfirmed &&
+          result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
+        "unconfirmed SDK cleanup must remain visible and Blocked");
+    Check(transport->read_only_begin_count == 1 && transport->end_count == 1 &&
+          transport->begin_count == 0 && transport->capture_count == 0,
+        "unconfirmed cleanup must not trigger an automatic retry");
+    const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+    Check(json.find("injected-sensitive-unconfirmed-detail") == std::string::npos &&
+          json.find("\"sdkSessionEnded\":false") != std::string::npos &&
+          json.find("\"cleanupState\":\"unconfirmed\"") != std::string::npos &&
+          json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
+        "unconfirmed cleanup output must remain anonymous and fixed-schema");
+}
+
 } // namespace
 
 int main() {
@@ -266,6 +430,11 @@ int main() {
         TestCloseFailureEndsManagerAndInvalidatesSession();
         TestDestructorClosesRetainedManager();
         TestCaptureFailureInvalidatesAndEndsSessionWithoutRetry();
+        TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens();
+        TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens();
+        TestReadOnlyProbeNormalizesStartAndInventoryFailures();
+        TestReadOnlyProbeBlocksCleanupErrorAfterConfirmedEnd();
+        TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed();
         std::cout << "Nikon Dual session adapter contracts passed\n";
         return 0;
     } catch (const std::exception& error) {
