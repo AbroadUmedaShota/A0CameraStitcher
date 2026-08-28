@@ -118,6 +118,7 @@ public sealed class DualBindingViewModel : ObservableObject
     private string _previewPlaceholderText = string.Empty;
     private string _noticeText = string.Empty;
     private string _noticeKind = "info";
+    private bool _shutdownBlocked;
     private string _invalidationText = string.Empty;
     private bool _isBusy;
 
@@ -132,11 +133,12 @@ public sealed class DualBindingViewModel : ObservableObject
         // recovery as restarting the app.
         BeginBindingCommand = new AsyncRelayCommand(
             BeginBindingAsync,
-            () => Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid or DualBindingPhase.Ready,
+            () => !IsShutdownBlocked &&
+                Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid or DualBindingPhase.Ready,
             ReportFailure);
         ShowCandidateCommand = new AsyncRelayCommand<DualBindingCandidateViewModel>(
             ShowCandidateAsync,
-            candidate => Phase == DualBindingPhase.Collecting && !candidate.IsAssigned,
+            candidate => !IsShutdownBlocked && Phase == DualBindingPhase.Collecting && !candidate.IsAssigned,
             ReportFailure);
         AssignCameraACommand = new AsyncRelayCommand(
             () => ConfirmAliasAsync(DualBindingCameraAgentProtocol.CameraAliasA),
@@ -148,7 +150,7 @@ public sealed class DualBindingViewModel : ObservableObject
             ReportFailure);
         CompleteBindingCommand = new AsyncRelayCommand(
             CompleteBindingAsync,
-            () => Phase == DualBindingPhase.Summary,
+            () => !IsShutdownBlocked && Phase == DualBindingPhase.Summary,
             ReportFailure);
     }
 
@@ -385,7 +387,75 @@ public sealed class DualBindingViewModel : ObservableObject
         return false;
     }
 
+    /// <summary>
+    /// True when window shutdown could not prove SDK cleanup and natural Agent
+    /// exit. The binding UI remains visible but every operation is locked while
+    /// the process-wide hardware lease stays owned.
+    /// </summary>
+    public bool IsShutdownBlocked
+    {
+        get => _shutdownBlocked;
+        private set
+        {
+            if (SetProperty(ref _shutdownBlocked, value))
+            {
+                NotifyCommandsChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Window-shutdown path for a hardware binding that has not transitioned to
+    /// capture. The native acknowledgment proves that Live View and the retained
+    /// SDK session were ended; there is no retry if cleanup is refused.
+    /// </summary>
+    public async Task<DualBindingRefusal?> CancelBindingOnShutdownAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var reply = await _client.CancelBindingAsync(cancellationToken).ConfigureAwait(true);
+        if (reply.Value is not null)
+        {
+            ClearSessionSurface();
+            Phase = DualBindingPhase.NotStarted;
+            InvalidationText = string.Empty;
+            Notify("機体照合を終了し、SDKセッションを閉じました。", "info");
+            return null;
+        }
+
+        if (reply.Refusal is { ResultCode: "NoBindingSession" })
+        {
+            return null;
+        }
+
+        if (reply.Refusal is { } refusal)
+        {
+            ApplyRefusal(refusal);
+            return refusal;
+        }
+
+        return new DualBindingRefusal
+        {
+            ResultCode = "BindingCleanupFailed",
+            State = DualBindingSessionState.Invalid,
+            InvalidationReason = DualBindingInvalidationReason.SdkError,
+            Detail = "Binding cancellation returned no result.",
+        };
+    }
+
+    public void ReportShutdownBlocked(string blockingCode)
+    {
+        ClearSessionSurface();
+        IsShutdownBlocked = true;
+        Phase = DualBindingPhase.Invalid;
+        InvalidationText =
+            "実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。" +
+            "自動再試行やAgentの強制終了は行いません。実機操作を止めたまま技術担当者が確認してください。" +
+            $"（状態: {blockingCode}）";
+        Notify(InvalidationText, "block");
+    }
+
     private bool CanAssign(string alias) =>
+        !IsShutdownBlocked &&
         Phase == DualBindingPhase.Collecting &&
         SelectedCandidate is { IsAssigned: false } &&
         !Candidates.Any(candidate => string.Equals(candidate.AssignedAlias, alias, StringComparison.Ordinal));

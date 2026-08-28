@@ -42,7 +42,8 @@ public partial class MainWindow : Window
 
     public MainWindow(
         DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,
-        string? dualCameraAgentExecutablePath = null)
+        string? dualCameraAgentExecutablePath = null,
+        string? dualWpdCameraMapPath = null)
     {
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
         // hardware operator window (Single or Dual) may be open in this Windows logon
@@ -73,18 +74,20 @@ public partial class MainWindow : Window
                             "A0CameraStitcher.DualCameraAgent.exe")),
                     Path.Combine(dualProductRoot, "agent-pair-journal"),
                     Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json"),
-                    Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json"));
+                    Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json"),
+                    dualWpdCameraMapPath ?? throw new ArgumentException(
+                        "HardwareDual requires an existing WPD camera map.",
+                        nameof(dualWpdCameraMapPath)));
             }
-            // The identity source is left unconfigured (HardwarePending) in production:
-            // no real DualCamera identity provider exists yet, so HardwareDual never
-            // reaches Ready and this lifecycle is constructed but never launches a
-            // process or reaches a camera. Connecting a real identity provider and
-            // flipping this to Ready is explicitly out of scope for this change.
+            // The product identity source remains unconfigured (HardwarePending):
+            // wiring the operator's one-process binding transport does not make the
+            // product capture identity Ready or permit a capture by itself.
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
                 liveViewFramePump: _liveViewFramePump,
-                liveViewFrameSource: _liveViewFrameSource);
+                liveViewFrameSource: _liveViewFrameSource,
+                dualBindingTransport: _dualAgentLifecycle);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closing += OnClosing;
@@ -132,29 +135,30 @@ public partial class MainWindow : Window
         _shutdownStarted = true;
         IsEnabled = false;
         _lifetime.Cancel();
-        try
+        if (_dualAgentLifecycle is not null)
         {
-            if (_dualAgentLifecycle is not null)
+            // The gate releases the exclusive lease only after both the typed
+            // binding cleanup acknowledgment and the child's natural exit are
+            // confirmed. Any refusal, response loss or timeout leaves this
+            // window open and the lease held; it never retries or kills Native.
+            var outcome = await HardwareDualWindowShutdownGate.TryShutdownAsync(
+                () => _viewModel.DualBinding.CancelBindingOnShutdownAsync(),
+                _dualAgentLifecycle.DisposeAsync,
+                () => _sessionLease?.Dispose());
+            if (!outcome.Completed)
             {
-                try
-                {
-                    await _dualAgentLifecycle.DisposeAsync();
-                }
-                catch (Exception exception) when (exception is not OutOfMemoryException)
-                {
-                    // Never force-kill an Agent whose pair-dispatch state may be
-                    // ambiguous. Durable recovery resolves it on the next launch.
-                }
+                _viewModel.DualBinding.ReportShutdownBlocked(outcome.BlockingCode);
+                _shutdownStarted = false;
+                IsEnabled = true;
+                return;
             }
         }
-        finally
-        {
-            _liveViewFramePump.Dispose();
-            _lifetime.Dispose();
-            _sessionLease?.Dispose();
-            _shutdownComplete = true;
-            Close();
-        }
+
+        _liveViewFramePump.Dispose();
+        _lifetime.Dispose();
+        _sessionLease?.Dispose();
+        _shutdownComplete = true;
+        Close();
     }
 
     // メニューバー（issue #34）の code-behind ハンドラ。「保存先を指定」「技術情報」

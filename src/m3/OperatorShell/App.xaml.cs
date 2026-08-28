@@ -35,7 +35,8 @@ public partial class App : Application
                 ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(options.SingleCameraAgentExecutablePath),
                 ApplicationLaunchMode.HardwareDual => new MainWindow(
                     DualCameraExecutionEnvironment.HardwareDual,
-                    options.DualCameraAgentExecutablePath),
+                    options.DualCameraAgentExecutablePath,
+                    options.DualWpdCameraMapPath),
                 _ => new LaunchWindow(options.SingleCameraAgentExecutablePath),
             };
         }
@@ -65,7 +66,8 @@ public enum ApplicationLaunchMode
 public sealed record ApplicationLaunchOptions(
     ApplicationLaunchMode Mode,
     string SingleCameraAgentExecutablePath,
-    string DualCameraAgentExecutablePath)
+    string DualCameraAgentExecutablePath,
+    string? DualWpdCameraMapPath)
 {
     public static ApplicationLaunchOptions Parse(IReadOnlyList<string> arguments, string baseDirectory)
     {
@@ -77,6 +79,7 @@ public sealed record ApplicationLaunchOptions(
 
         var mode = ApplicationLaunchMode.Launcher;
         string? configuredAgent = null;
+        string? configuredWpdCameraMap = null;
         var modeSeen = false;
         for (var index = 0; index < arguments.Count; index++)
         {
@@ -117,6 +120,15 @@ public sealed record ApplicationLaunchOptions(
 
                     configuredAgent = arguments[index];
                     break;
+                case "--wpd-camera-map":
+                    if (configuredWpdCameraMap is not null || ++index >= arguments.Count ||
+                        string.IsNullOrWhiteSpace(arguments[index]))
+                    {
+                        throw new ArgumentException("--wpd-camera-map には重複しない既存ファイルのパスが必要です。");
+                    }
+
+                    configuredWpdCameraMap = arguments[index];
+                    break;
                 default:
                     throw new ArgumentException($"未対応の起動引数です: {arguments[index]}");
             }
@@ -125,6 +137,14 @@ public sealed record ApplicationLaunchOptions(
         if (configuredAgent is not null && mode == ApplicationLaunchMode.Simulated)
         {
             throw new ArgumentException("--camera-agent はSIMULATEDモードでは指定できません。");
+        }
+        if (configuredWpdCameraMap is not null && mode != ApplicationLaunchMode.HardwareDual)
+        {
+            throw new ArgumentException("--wpd-camera-map は--hardware-dual と一緒に指定してください。");
+        }
+        if (mode == ApplicationLaunchMode.HardwareDual && configuredWpdCameraMap is null)
+        {
+            throw new ArgumentException("--hardware-dual には既存の --wpd-camera-map が必要です。");
         }
 
         var normalizedBase = Path.GetFullPath(baseDirectory);
@@ -151,9 +171,39 @@ public sealed record ApplicationLaunchOptions(
         var dualPath = mode == ApplicationLaunchMode.HardwareDual
             ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? dualDefault)
             : dualDefault;
+        var dualWpdMapPath = mode == ApplicationLaunchMode.HardwareDual
+            ? ResolveExistingFixedLocalMap(configuredWpdCameraMap!)
+            : null;
         return new ApplicationLaunchOptions(
             mode,
             singlePath,
-            dualPath);
+            dualPath,
+            dualWpdMapPath);
+    }
+
+    private static string ResolveExistingFixedLocalMap(string candidate)
+    {
+        try
+        {
+            var normalized = Path.GetFullPath(candidate);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+            if (!File.Exists(normalized))
+            {
+                throw new InvalidDataException("The WPD map does not exist.");
+            }
+
+            var attributes = File.GetAttributes(normalized);
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+            {
+                throw new InvalidDataException("The WPD map is not a regular file.");
+            }
+
+            return normalized;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or
+            NotSupportedException or System.Security.SecurityException or InvalidDataException)
+        {
+            throw new ArgumentException("--wpd-camera-map は固定ローカルドライブ上の既存通常ファイルである必要があります。");
+        }
     }
 }

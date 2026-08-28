@@ -324,11 +324,18 @@ int wmain(int argc, wchar_t** argv) {
             DualBindingCameraAgentDispatcher binding_dispatcher(sdk_adapter, true);
             const int binding_exit = RunDualBindingCameraAgentNamedPipeServer(
                 *binding_pipe_name, binding_dispatcher, false);
-            if (binding_exit != 0 ||
+            if (binding_exit != 0) {
+                throw std::runtime_error(
+                    "Dual binding host ended before a terminal request was delivered");
+            }
+            if (binding_dispatcher.CancellationRequested()) {
+                return binding_dispatcher.CancellationSucceeded() ? 0 : 2;
+            }
+            if (!binding_dispatcher.CaptureTransitionRequested() ||
                 binding_dispatcher.BindingState() !=
                     DualIdentitySessionBindingState::Ready) {
                 throw std::runtime_error(
-                    "Dual binding host ended before a Ready binding was established");
+                    "Dual binding host ended before capture activation was approved");
             }
             auto capture_backend = std::make_shared<DualBoundPairCaptureBackend>(
                 binding_dispatcher, sdk_adapter, *wpd_camera_map);

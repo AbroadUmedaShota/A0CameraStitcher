@@ -2310,7 +2310,8 @@ NikonDualBindingSdkAdapter::NikonDualBindingSdkAdapter(
     }
 }
 NikonDualBindingSdkAdapter::~NikonDualBindingSdkAdapter() {
-    if (!candidate_tokens_.empty() || open_live_view_ordinal_.has_value()) {
+    if (!explicit_end_attempted_ &&
+        (!candidate_tokens_.empty() || open_live_view_ordinal_.has_value())) {
         try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
     }
 }
@@ -2319,6 +2320,7 @@ std::vector<std::string> NikonDualBindingSdkAdapter::EnumerateCandidates() {
     if (!candidate_tokens_.empty()) {
         try { transport_->EndDualSession(std::chrono::seconds(5)); } catch (...) {}
     }
+    explicit_end_attempted_ = false;
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
     pending_invalidation_ = DualIdentityInvalidationReason::None;
@@ -2388,6 +2390,20 @@ bool NikonDualBindingSdkAdapter::CloseCandidateSession(std::size_t ordinal) {
     }
 }
 
+bool NikonDualBindingSdkAdapter::EndBindingSession(
+    std::chrono::seconds timeout) noexcept {
+    explicit_end_attempted_ = true;
+    try {
+        transport_->EndDualSession(timeout);
+        candidate_tokens_.clear();
+        open_live_view_ordinal_.reset();
+        return true;
+    } catch (...) {
+        pending_invalidation_ = DualIdentityInvalidationReason::SdkError;
+        return false;
+    }
+}
+
 DualIdentityInvalidationReason NikonDualBindingSdkAdapter::PollInvalidation() {
     if (pending_invalidation_ != DualIdentityInvalidationReason::None) {
         const auto reason = pending_invalidation_;
@@ -2400,6 +2416,7 @@ DualIdentityInvalidationReason NikonDualBindingSdkAdapter::PollInvalidation() {
         if (reason != DualIdentityInvalidationReason::None) {
             candidate_tokens_.clear();
             open_live_view_ordinal_.reset();
+            explicit_end_attempted_ = true;
             try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
         }
         return reason;
@@ -2460,6 +2477,7 @@ void NikonDualBindingSdkAdapter::CloseBoundCapture(std::chrono::seconds timeout)
 }
 
 void NikonDualBindingSdkAdapter::EndSession(std::chrono::seconds timeout) {
+    explicit_end_attempted_ = true;
     transport_->EndDualSession(timeout);
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
@@ -2604,6 +2622,7 @@ void NikonDualBindingSdkAdapter::FailAndInvalidate() noexcept {
     pending_invalidation_ = DualIdentityInvalidationReason::SdkError;
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
+    explicit_end_attempted_ = true;
     try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
 }
 

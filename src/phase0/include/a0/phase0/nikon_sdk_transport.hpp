@@ -177,6 +177,8 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> ReadLiveViewFrame(
         std::size_t ordinal) override;
     [[nodiscard]] bool CloseCandidateSession(std::size_t ordinal) override;
+    [[nodiscard]] bool EndBindingSession(
+        std::chrono::seconds timeout) noexcept override;
     [[nodiscard]] DualIdentityInvalidationReason PollInvalidation() override;
 
     // Capture-side seam. The token comes only from a Ready
@@ -201,6 +203,7 @@ private:
     std::optional<std::size_t> open_live_view_ordinal_;
     DualIdentityInvalidationReason pending_invalidation_{
         DualIdentityInvalidationReason::None};
+    bool explicit_end_attempted_{};
 };
 
 enum class DualSdkReadOnlyProbeError {

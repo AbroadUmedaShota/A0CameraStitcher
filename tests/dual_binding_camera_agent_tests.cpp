@@ -73,6 +73,18 @@ std::string CompleteBindingRequest(
             std::string(confirmed_at) + "\"}");
 }
 
+std::string ActivateCaptureRequest(std::string_view session) {
+    return Envelope(
+        "r-activate", "activate-capture",
+        R"({"sessionId":")" + std::string(session) + "\"}");
+}
+
+std::string CancelBindingRequest(std::string_view session) {
+    return Envelope(
+        "r-cancel", "cancel-binding",
+        R"({"sessionId":")" + std::string(session) + "\"}");
+}
+
 // Reads one quoted field out of a response. Deliberately a plain substring
 // search rather than a JSON parse: the point of these tests is to pin the exact
 // bytes the agent puts on the wire, so re-parsing them with the same parser the
@@ -417,6 +429,103 @@ void OnlyOneLiveViewRunsAtATime() {
         ResultCode(harness.dispatcher.Handle(StartLiveViewRequest(session, 7))) ==
             "UnknownCandidateOrdinal",
         "an ordinal outside this session's candidates is refused");
+}
+
+void ReadyBindingRequiresExplicitFreshActivation() {
+    auto adapter = std::make_shared<DualBindingFakeSdkAdapter>();
+    DualBindingCameraAgentDispatcher dispatcher(adapter, true);
+    const std::string transition_session =
+        StringFieldOf(dispatcher.Handle(BeginBindingRequest()), "sessionId");
+    (void)dispatcher.Handle(StartLiveViewRequest(transition_session, 0));
+    (void)dispatcher.Handle(
+        ConfirmAliasRequest(transition_session, 0, kDualIdentityCameraAliasA));
+    (void)dispatcher.Handle(StartLiveViewRequest(transition_session, 1));
+    (void)dispatcher.Handle(
+        ConfirmAliasRequest(transition_session, 1, kDualIdentityCameraAliasB));
+    Check(Succeeded(dispatcher.Handle(CompleteBindingRequest(transition_session))),
+        "the operator-confirmed binding must reach Ready");
+    Check(!dispatcher.ShouldStop(),
+        "Ready alone must leave the freshness/cancellation pipe available");
+    Check(ResultCode(dispatcher.Handle(CompleteBindingRequest(transition_session))) ==
+            "BindingAlreadyComplete",
+        "a Ready binding remains addressable for the read-only freshness probe");
+
+    const std::string activated =
+        dispatcher.Handle(ActivateCaptureRequest(transition_session));
+    Check(Succeeded(activated) && ResultCode(activated) == "CaptureHostActivated",
+        "only explicit capture activation retires the binding pipe");
+    Check(dispatcher.CaptureTransitionRequested() && dispatcher.ShouldStop(),
+        "successful activation requests the same process to enter its capture pipe");
+}
+
+void CancellationEndsActiveBindingExactlyOnce() {
+    Harness harness;
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+
+    const std::string cancelled = harness.dispatcher.Handle(CancelBindingRequest(session));
+    Check(Succeeded(cancelled) && ResultCode(cancelled) == "BindingCancelled",
+        "cancel-binding acknowledges only confirmed full cleanup");
+    Check(cancelled.find("\"sdkSessionEnded\":true") != std::string::npos &&
+          cancelled.find("\"liveViewStopped\":true") != std::string::npos,
+        "the cancellation response confirms Live View and SDK teardown");
+    Check(harness.adapter->ActiveLiveViewCount() == 0 &&
+          harness.adapter->ClosedCandidateSessionCount() == 2 &&
+          harness.adapter->EndBindingSessionCount() == 1,
+        "active Live View and both candidate sessions end in one cleanup attempt");
+    Check(harness.dispatcher.CancellationRequested() &&
+          harness.dispatcher.CancellationSucceeded() &&
+          harness.dispatcher.ShouldStop(),
+        "the binding host exits after delivering a successful cancellation");
+}
+
+void CancellationStillRunsAfterInvalidation() {
+    Harness harness;
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    harness.adapter->RaiseInvalidation(DualIdentityInvalidationReason::UsbReconnect);
+    Check(ResultCode(harness.dispatcher.Handle(FrameRequest(session, 0))) ==
+            "BindingInvalidated",
+        "test precondition invalidates the active binding");
+
+    const std::string cancelled = harness.dispatcher.Handle(CancelBindingRequest(session));
+    Check(Succeeded(cancelled) && harness.adapter->EndBindingSessionCount() == 1,
+        "an invalid binding can still release the SDK session");
+    Check(harness.adapter->ActiveLiveViewCount() == 0 && harness.dispatcher.ShouldStop(),
+        "invalidation does not strand Live View after cancellation");
+}
+
+void CancellationFailureIsTerminalAndNeverRetried() {
+    DualBindingFakeSdkOptions options;
+    options.fail_end_binding_session = true;
+    Harness harness(options);
+    const std::string session = StringFieldOf(harness.Begin(), "sessionId");
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+
+    const std::string failed = harness.dispatcher.Handle(CancelBindingRequest(session));
+    Check(!Succeeded(failed) && ResultCode(failed) == "BindingCleanupFailed",
+        "unconfirmed SDK teardown is never reported as cancellation success");
+    Check(harness.adapter->EndBindingSessionCount() == 1,
+        "cleanup failure is recorded after exactly one attempt");
+    Check(harness.dispatcher.CancellationRequested() &&
+          !harness.dispatcher.CancellationSucceeded() &&
+          harness.dispatcher.ShouldStop(),
+        "a failed cleanup response is terminal instead of leaving a ten-minute host");
+}
+
+void AStaleSessionCannotCancelTheCurrentBinding() {
+    Harness harness;
+    const std::string old_session = StringFieldOf(harness.Begin(), "sessionId");
+    const std::string current_session = StringFieldOf(harness.Begin(), "sessionId");
+
+    Check(ResultCode(harness.dispatcher.Handle(CancelBindingRequest(old_session))) ==
+            "SessionMismatch",
+        "a stale session cannot cancel a newer binding");
+    Check(harness.adapter->EndBindingSessionCount() == 0 &&
+          !harness.dispatcher.ShouldStop(),
+        "stale cancellation touches no SDK state and does not stop the current host");
+    Check(Succeeded(harness.dispatcher.Handle(CancelBindingRequest(current_session))),
+        "the exact current session remains cancellable");
 }
 
 void BothCandidatesCanBeComparedBeforeEitherAliasIsConfirmed() {
@@ -919,6 +1028,11 @@ int main() {
     AnAgentWithNoSdkFailsClosed();
     FiveOperationsBindTwoBodies();
     CompletedEvidenceIsExactlyTheAllowlist();
+    ReadyBindingRequiresExplicitFreshActivation();
+    CancellationEndsActiveBindingExactlyOnce();
+    CancellationStillRunsAfterInvalidation();
+    CancellationFailureIsTerminalAndNeverRetried();
+    AStaleSessionCannotCancelTheCurrentBinding();
     NoResponseEverCarriesASourceObject();
     CaptureReusesBoundObjectsWithoutReEnumerating();
     OnlyOneLiveViewRunsAtATime();

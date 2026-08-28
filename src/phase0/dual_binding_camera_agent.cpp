@@ -299,6 +299,15 @@ bool DualBindingFakeSdkAdapter::CloseCandidateSession(std::size_t ordinal) {
     return true;
 }
 
+bool DualBindingFakeSdkAdapter::EndBindingSession(
+    std::chrono::seconds) noexcept {
+    ++end_binding_session_count_;
+    if (options_.fail_end_binding_session) return false;
+    std::fill(live_view_active_.begin(), live_view_active_.end(), false);
+    std::fill(session_closed_.begin(), session_closed_.end(), true);
+    return true;
+}
+
 DualIdentityInvalidationReason DualBindingFakeSdkAdapter::PollInvalidation() {
     const DualIdentityInvalidationReason reason = options_.pending_invalidation;
     options_.pending_invalidation = DualIdentityInvalidationReason::None;
@@ -327,6 +336,10 @@ std::size_t DualBindingFakeSdkAdapter::ConcurrentLiveViewViolationCount()
 std::size_t DualBindingFakeSdkAdapter::ClosedCandidateSessionCount() const noexcept {
     return static_cast<std::size_t>(
         std::count(session_closed_.begin(), session_closed_.end(), true));
+}
+
+std::size_t DualBindingFakeSdkAdapter::EndBindingSessionCount() const noexcept {
+    return end_binding_session_count_;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +430,18 @@ DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
         request.operation = DualBindingCameraAgentOperation::complete_binding;
         return request;
     }
+    if (operation == "activate-capture") {
+        RequireExactFields(payload, {"sessionId"});
+        request.session_id = require_session_id();
+        request.operation = DualBindingCameraAgentOperation::activate_capture;
+        return request;
+    }
+    if (operation == "cancel-binding") {
+        RequireExactFields(payload, {"sessionId"});
+        request.session_id = require_session_id();
+        request.operation = DualBindingCameraAgentOperation::cancel_binding;
+        return request;
+    }
     ProtocolFailure("UnsupportedOperation", "binding protocol operation is unsupported");
 }
 
@@ -426,8 +451,9 @@ DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
 
 DualBindingCameraAgentDispatcher::DualBindingCameraAgentDispatcher(
     std::shared_ptr<DualBindingSdkAdapter> adapter,
-    bool stop_host_when_ready) noexcept
-    : adapter_(std::move(adapter)), stop_host_when_ready_(stop_host_when_ready) {}
+    bool capture_transition_enabled) noexcept
+    : adapter_(std::move(adapter)),
+      capture_transition_enabled_(capture_transition_enabled) {}
 
 std::string DualBindingCameraAgentDispatcher::Handle(
     std::string_view request_json) noexcept {
@@ -457,6 +483,14 @@ std::string DualBindingCameraAgentDispatcher::Handle(
                 request.request_id, "SessionMismatch",
                 "the named binding session is not the one this agent is serving");
         }
+
+        // Cancellation is allowed even after a typed invalidation. Its job is
+        // to release resources owned by this exact session; refusing cleanup
+        // because the binding is already untrustworthy could leave Live View
+        // and the SDK module open until the host lifetime expires.
+        if (request.operation == DualBindingCameraAgentOperation::cancel_binding) {
+            return HandleCancelBinding(request);
+        }
         const DualIdentityInvalidationReason observed = adapter_->PollInvalidation();
         if (observed != DualIdentityInvalidationReason::None) {
             InvalidateSession(observed);
@@ -474,6 +508,10 @@ std::string DualBindingCameraAgentDispatcher::Handle(
                 return HandleConfirmAlias(request);
             case DualBindingCameraAgentOperation::complete_binding:
                 return HandleCompleteBinding(request);
+            case DualBindingCameraAgentOperation::activate_capture:
+                return HandleActivateCapture(request);
+            case DualBindingCameraAgentOperation::cancel_binding:
+                break;
             case DualBindingCameraAgentOperation::begin_binding:
                 break;
         }
@@ -533,6 +571,7 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
     quiesced_ordinals_.clear();
     assigned_ordinals_.clear();
     invalidation_reason_ = DualIdentityInvalidationReason::None;
+    capture_transition_requested_ = false;
 
     // Drain any event left over from the session just discarded. It describes a
     // session nobody can name any more, so acting on it would invalidate the new
@@ -768,6 +807,58 @@ std::string DualBindingCameraAgentDispatcher::HandleCompleteBinding(
     return output.str();
 }
 
+std::string DualBindingCameraAgentDispatcher::HandleActivateCapture(
+    const DualBindingCameraAgentRequest& request) {
+    if (!capture_transition_enabled_) {
+        return ProtocolRejection(
+            request.request_id, "CaptureTransitionUnavailable",
+            "this binding host is not configured to enter a capture host");
+    }
+    if (binding_.State() != DualIdentitySessionBindingState::Ready) {
+        return ProtocolRejection(
+            request.request_id, "BindingNotReady",
+            "capture activation requires a completed Ready binding");
+    }
+
+    capture_transition_requested_ = true;
+    std::ostringstream output;
+    output << ResponsePrefix(request.request_id, true, "CaptureHostActivated")
+           << "{\"sessionId\":\"" << session_id_
+           << "\",\"state\":\"Ready\",\"captureHostActivated\":true}}";
+    return output.str();
+}
+
+std::string DualBindingCameraAgentDispatcher::HandleCancelBinding(
+    const DualBindingCameraAgentRequest& request) {
+    cancellation_requested_ = true;
+    const std::string cancelled_session = session_id_;
+    cancellation_succeeded_ = adapter_->EndBindingSession(std::chrono::seconds(10));
+
+    active_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
+    assigned_ordinals_.clear();
+    if (cancellation_succeeded_) {
+        binding_ = DualIdentitySessionBinding{};
+        session_id_.clear();
+        invalidation_reason_ = DualIdentityInvalidationReason::None;
+        std::ostringstream output;
+        output << ResponsePrefix(request.request_id, true, "BindingCancelled")
+               << "{\"sessionId\":\"" << cancelled_session
+               << "\",\"state\":\"None\",\"liveViewStopped\":true"
+                  ",\"sdkSessionClosed\":true,\"sdkSessionEnded\":true}}";
+        return output.str();
+    }
+
+    InvalidateSession(DualIdentityInvalidationReason::SdkError);
+    std::ostringstream output;
+    output << ResponsePrefix(request.request_id, false, "BindingCleanupFailed")
+           << "{\"sessionId\":\"" << cancelled_session
+           << "\",\"state\":\"Invalid\",\"invalidationReason\":\""
+           << DualIdentityInvalidationReasonName(invalidation_reason_)
+           << "\",\"detail\":\"binding SDK cleanup could not be confirmed\"}}";
+    return output.str();
+}
+
 std::string DualBindingCameraAgentDispatcher::BoundSourceObjectForCapture(
     std::string_view camera_alias) {
     return binding_.BoundSourceObjectForCapture(camera_alias);
@@ -778,6 +869,18 @@ DualIdentitySessionBindingState DualBindingCameraAgentDispatcher::BindingState()
     return binding_.State();
 }
 
+bool DualBindingCameraAgentDispatcher::CaptureTransitionRequested() const noexcept {
+    return capture_transition_requested_;
+}
+
+bool DualBindingCameraAgentDispatcher::CancellationRequested() const noexcept {
+    return cancellation_requested_;
+}
+
+bool DualBindingCameraAgentDispatcher::CancellationSucceeded() const noexcept {
+    return cancellation_succeeded_;
+}
+
 DualBindingCameraAgentSafetyCounters
 DualBindingCameraAgentDispatcher::SafetyCounters() const noexcept {
     return safety_counters_;
@@ -786,8 +889,7 @@ DualBindingCameraAgentDispatcher::SafetyCounters() const noexcept {
 void DualBindingCameraAgentDispatcher::OnIdle() noexcept {}
 
 bool DualBindingCameraAgentDispatcher::ShouldStop() const noexcept {
-    return stop_host_when_ready_ &&
-        binding_.State() == DualIdentitySessionBindingState::Ready;
+    return capture_transition_requested_ || cancellation_requested_;
 }
 
 } // namespace a0::phase0

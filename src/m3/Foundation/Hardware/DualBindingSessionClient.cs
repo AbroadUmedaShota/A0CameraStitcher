@@ -64,6 +64,13 @@ public sealed class DualBindingSessionClient
     /// </summary>
     public bool RequiresRebinding => State == DualBindingSessionState.Invalid;
 
+    /// <summary>
+    /// True only after the native binding host acknowledged the one-way transition
+    /// to its capture pipe. The binding pipe is retired at that point, so neither
+    /// cancellation nor a freshness probe may be sent through it again.
+    /// </summary>
+    public bool CaptureHostActivated { get; private set; }
+
     private readonly Dictionary<int, string> _assignments = [];
 
     public async Task<DualBindingReply<DualBindingBeginResult>> BeginBindingAsync(
@@ -251,6 +258,102 @@ public sealed class DualBindingSessionClient
     }
 
     /// <summary>
+    /// Performs the final freshness-checked handoff from the binding pipe to the
+    /// capture pipe. This is deliberately separate from complete-binding so a
+    /// Ready session can still be rechecked or safely cancelled while no capture
+    /// has been dispatched.
+    /// </summary>
+    public async Task<DualBindingReply<DualBindingCaptureActivationResult>> ActivateCaptureAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (RequireSession() is { } noSession)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(noSession);
+        }
+        if (!IsReady)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(new DualBindingRefusal
+            {
+                ResultCode = "BindingNotReady",
+                SessionId = SessionId,
+                State = State,
+                Detail = "The binding must be Ready before capture activation.",
+            });
+        }
+        if (CaptureHostActivated)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(new DualBindingRefusal
+            {
+                ResultCode = "CaptureAlreadyActivated",
+                SessionId = SessionId,
+                State = State,
+                Detail = "The binding pipe has already transitioned to capture.",
+            });
+        }
+
+        var requestId = _requestIdFactory();
+        var reply = DualBindingCameraAgentProtocolCodec.DeserializeActivateCaptureResponse(
+            await _transport.SendAsync(
+                DualBindingCameraAgentProtocolCodec.CreateActivateCaptureRequest(requestId, SessionId),
+                cancellationToken).ConfigureAwait(false),
+            requestId,
+            SessionId);
+        if (reply.Value is not null)
+        {
+            CaptureHostActivated = true;
+        }
+        else
+        {
+            ApplyRefusal(reply.Refusal!);
+        }
+
+        return reply;
+    }
+
+    /// <summary>
+    /// Ends the active binding session and confirms that Live View, candidate
+    /// source, SDK manager and process-side session were all released. It is a
+    /// single attempt and is never sent after capture activation.
+    /// </summary>
+    public async Task<DualBindingReply<DualBindingCancellationResult>> CancelBindingAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (RequireSession() is { } noSession)
+        {
+            return DualBindingReply<DualBindingCancellationResult>.Refused(noSession);
+        }
+        if (CaptureHostActivated)
+        {
+            return DualBindingReply<DualBindingCancellationResult>.Refused(new DualBindingRefusal
+            {
+                ResultCode = "CaptureAlreadyActivated",
+                SessionId = SessionId,
+                State = State,
+                Detail = "The binding pipe has already transitioned to capture.",
+            });
+        }
+
+        var requestId = _requestIdFactory();
+        var sessionId = SessionId;
+        var reply = DualBindingCameraAgentProtocolCodec.DeserializeCancelBindingResponse(
+            await _transport.SendAsync(
+                DualBindingCameraAgentProtocolCodec.CreateCancelBindingRequest(requestId, sessionId),
+                cancellationToken).ConfigureAwait(false),
+            requestId,
+            sessionId);
+        if (reply.Value is not null)
+        {
+            ResetSession();
+        }
+        else
+        {
+            ApplyRefusal(reply.Refusal!);
+        }
+
+        return reply;
+    }
+
+    /// <summary>
     /// Asks the agent whether this binding is still the one it is serving, without changing
     /// anything.
     /// </summary>
@@ -271,6 +374,16 @@ public sealed class DualBindingSessionClient
         if (RequireSession() is { } noSession)
         {
             return noSession;
+        }
+        if (CaptureHostActivated)
+        {
+            return new DualBindingRefusal
+            {
+                ResultCode = "CaptureAlreadyActivated",
+                SessionId = SessionId,
+                State = State,
+                Detail = "The binding pipe has already transitioned to capture.",
+            };
         }
 
         var reply = await CompleteBindingAsync(cancellationToken).ConfigureAwait(false);
@@ -330,6 +443,14 @@ public sealed class DualBindingSessionClient
                 DiscardSessionArtifacts();
                 break;
 
+            case "BindingCleanupFailed":
+                ResetSession();
+                State = DualBindingSessionState.Invalid;
+                InvalidationReason = refusal.InvalidationReason == DualBindingInvalidationReason.None
+                    ? DualBindingInvalidationReason.SdkError
+                    : refusal.InvalidationReason;
+                break;
+
             default:
                 // Everything else -- an unknown ordinal, a duplicate alias, a Live View that would
                 // not start -- leaves the session usable. The operator retries the step.
@@ -355,6 +476,7 @@ public sealed class DualBindingSessionClient
         State = DualBindingSessionState.None;
         InvalidationReason = DualBindingInvalidationReason.None;
         CandidateOrdinals = Array.Empty<int>();
+        CaptureHostActivated = false;
         DiscardSessionArtifacts();
     }
 }

@@ -440,6 +440,50 @@ catch (Exception exception)
 
 try
 {
+    await DualCameraAgentLifecycleBindingCancellationAsync();
+    Console.WriteLine("PASS HardwareDual binding cancellation ends the same child process after one acknowledged cleanup");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual binding cancellation ends the same child process after one acknowledged cleanup");
+    Console.Error.WriteLine($"FAIL HardwareDual binding cancellation ends the same child process after one acknowledged cleanup: {exception}");
+}
+
+try
+{
+    await HardwareDualShutdownGateRetainsLeaseOnFailureAsync();
+    Console.WriteLine("PASS HardwareDual shutdown keeps the exclusive lease across every unconfirmed cleanup outcome");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual shutdown keeps the exclusive lease across every unconfirmed cleanup outcome");
+    Console.Error.WriteLine($"FAIL HardwareDual shutdown keeps the exclusive lease across every unconfirmed cleanup outcome: {exception}");
+}
+
+try
+{
+    await DualCameraAgentLifecycleCleanupFailureStaysBlockingAsync();
+    Console.WriteLine("PASS HardwareDual cleanup refusal remains terminal and cannot be disposed as success");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual cleanup refusal remains terminal and cannot be disposed as success");
+    Console.Error.WriteLine($"FAIL HardwareDual cleanup refusal remains terminal and cannot be disposed as success: {exception}");
+}
+
+try
+{
+    await DualCameraAgentLifecycleExitTimeoutStaysBlockingAsync();
+    Console.WriteLine("PASS HardwareDual acknowledged cleanup keeps blocking until the child exits naturally");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual acknowledged cleanup keeps blocking until the child exits naturally");
+    Console.Error.WriteLine($"FAIL HardwareDual acknowledged cleanup keeps blocking until the child exits naturally: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleFakeHostHappyPathAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
 }
@@ -2198,9 +2242,11 @@ static void HardwareLaunchOptionsAreExplicit()
     var singleAgent = Path.Combine(baseDirectory, "A0CameraStitcher.CameraAgent.exe");
     var dualAgent = Path.Combine(baseDirectory, "A0CameraStitcher.DualCameraAgent.exe");
     var explicitAgent = Path.Combine(baseDirectory, "explicit-agent.exe");
+    var wpdCameraMap = Path.Combine(root, "wpd-camera-map.json");
     File.WriteAllBytes(singleAgent, [0x4d, 0x5a]);
     File.WriteAllBytes(dualAgent, [0x4d, 0x5a]);
     File.WriteAllBytes(explicitAgent, [0x4d, 0x5a]);
+    File.WriteAllText(wpdCameraMap, "{\"note\":\"test-only WPD map\"}");
     try
     {
         var launcher = ApplicationLaunchOptions.Parse([], baseDirectory);
@@ -2222,9 +2268,13 @@ static void HardwareLaunchOptionsAreExplicit()
         var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", explicitAgent], baseDirectory);
         Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
         Check.Equal(explicitAgent, hardware.SingleCameraAgentExecutablePath);
-        var hardwareDual = ApplicationLaunchOptions.Parse(["--hardware-dual", "--camera-agent", explicitAgent], baseDirectory);
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory));
+        var hardwareDual = ApplicationLaunchOptions.Parse(
+            ["--hardware-dual", "--camera-agent", explicitAgent, "--wpd-camera-map", wpdCameraMap],
+            baseDirectory);
         Check.Equal(ApplicationLaunchMode.HardwareDual, hardwareDual.Mode);
         Check.Equal(explicitAgent, hardwareDual.DualCameraAgentExecutablePath);
+        Check.Equal(wpdCameraMap, hardwareDual.DualWpdCameraMapPath!);
         var simulated = ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory);
         Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
         File.Delete(singleAgent);
@@ -2247,7 +2297,14 @@ static void HardwareLaunchOptionsAreExplicit()
         Environment.SetEnvironmentVariable(legacySingleAgentVariable, Path.Combine(root, "legacy-single.exe"));
         Environment.SetEnvironmentVariable(legacyDualAgentVariable, Path.Combine(root, "legacy-dual.exe"));
         Check.Equal(singleAgent, ApplicationLaunchOptions.Parse(["--hardware-single"], baseDirectory).SingleCameraAgentExecutablePath);
-        Check.Equal(dualAgent, ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory).DualCameraAgentExecutablePath);
+        Check.Equal(
+            dualAgent,
+            ApplicationLaunchOptions.Parse(["--hardware-dual", "--wpd-camera-map", wpdCameraMap], baseDirectory)
+                .DualCameraAgentExecutablePath);
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--simulated", "--wpd-camera-map", wpdCameraMap], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--hardware-dual", "--wpd-camera-map", Path.Combine(root, "missing-wpd-map.json")], baseDirectory));
 
         foreach (var rejected in new[]
                  {
@@ -4058,6 +4115,211 @@ static async Task DualCameraAgentLifecycleRequiresExistingArtifactFilesAsync()
     }
 }
 
+static async Task DualCameraAgentLifecycleBindingCancellationAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "binding-cancel");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
+        var identityProofPath = Path.Combine(root, "phase0", "dual-identity-proof.json");
+        var wpdMapPath = Path.Combine(root, "wpd-camera-map.json");
+        WriteDualAgentTestArtifactFiles(captureProfilePath, identityProofPath);
+        File.WriteAllText(wpdMapPath, "{\"note\":\"test-only WPD map\"}");
+
+        await using var lifecycle = new DualCameraAgentLifecycle(
+            DualCameraAgentTestHostPath(),
+            Path.Combine(root, "agent-pair-journal"),
+            captureProfilePath,
+            identityProofPath,
+            wpdMapPath);
+        var client = new DualBindingSessionClient(lifecycle);
+        Check.True((await client.BeginBindingAsync()).Succeeded,
+            "the same child process must start the binding session");
+        Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded,
+            "the fake host must model an active Live View before shutdown");
+        var cancelled = await client.CancelBindingAsync();
+        Check.True(cancelled.Succeeded && cancelled.Value!.SdkSessionEnded,
+            "the binding client must receive checked full-cleanup evidence");
+
+        // Dispose verifies the already-acknowledged child exits naturally inside
+        // the bound wait. It never calls Process.Kill.
+        await lifecycle.DisposeAsync();
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.True(
+            new[] { "begin-binding", "start-candidate-live-view", "cancel-binding" }
+                .SequenceEqual(entries.Select(entry => entry.Operation)),
+            "the same child must receive begin, Live View, and one cancellation in order");
+        Check.Equal(1, entries.Select(entry => entry.PipeName).Distinct().Count());
+        Check.Equal(0, entries.Count(entry =>
+            entry.Operation == DualHardwareCameraAgentProtocol.Operations.StartReservedPair));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareDualShutdownGateRetainsLeaseOnFailureAsync()
+{
+    var cases = new[]
+    {
+        new
+        {
+            Name = "cancel connect failure",
+            Cancel = (Func<Task<DualBindingRefusal?>>)(() =>
+                Task.FromException<DualBindingRefusal?>(new IOException("synthetic connect failure"))),
+            Dispose = (Func<ValueTask>)(() => ValueTask.CompletedTask),
+        },
+        new
+        {
+            Name = "response interrupted",
+            Cancel = (Func<Task<DualBindingRefusal?>>)(() =>
+                Task.FromException<DualBindingRefusal?>(new EndOfStreamException("synthetic partial response"))),
+            Dispose = (Func<ValueTask>)(() => ValueTask.CompletedTask),
+        },
+        new
+        {
+            Name = "BindingCleanupFailed",
+            Cancel = (Func<Task<DualBindingRefusal?>>)(() => Task.FromResult<DualBindingRefusal?>(new DualBindingRefusal
+            {
+                ResultCode = "BindingCleanupFailed",
+                State = DualBindingSessionState.Invalid,
+                InvalidationReason = DualBindingInvalidationReason.SdkError,
+            })),
+            Dispose = (Func<ValueTask>)(() => ValueTask.CompletedTask),
+        },
+        new
+        {
+            Name = "Agent exit timeout",
+            Cancel = (Func<Task<DualBindingRefusal?>>)(() => Task.FromResult<DualBindingRefusal?>(null)),
+            Dispose = (Func<ValueTask>)(() => new ValueTask(Task.FromException(new TimeoutException("synthetic exit timeout")))),
+        },
+    };
+
+    foreach (var testCase in cases)
+    {
+        var releaseCount = 0;
+        var outcome = await HardwareDualWindowShutdownGate.TryShutdownAsync(
+            testCase.Cancel,
+            testCase.Dispose,
+            () => releaseCount++);
+        Check.False(outcome.Completed, $"{testCase.Name}: shutdown must remain Blocking.");
+        Check.Equal(0, releaseCount);
+    }
+
+    var successfulReleaseCount = 0;
+    var success = await HardwareDualWindowShutdownGate.TryShutdownAsync(
+        () => Task.FromResult<DualBindingRefusal?>(null),
+        () => ValueTask.CompletedTask,
+        () => successfulReleaseCount++);
+    Check.True(success.Completed, "confirmed cleanup plus natural exit must complete shutdown");
+    Check.Equal(1, successfulReleaseCount);
+}
+
+static async Task DualCameraAgentLifecycleCleanupFailureStaysBlockingAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-cleanup-failure-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "binding-cancel-cleanup-failed");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var client = new DualBindingSessionClient(lifecycle);
+        Check.True((await client.BeginBindingAsync()).Succeeded, "binding must start before cleanup refusal");
+        Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded, "Live View must be active before cleanup refusal");
+        var cancellation = await client.CancelBindingAsync();
+        Check.Equal("BindingCleanupFailed", cancellation.Refusal!.ResultCode);
+
+        HardwareCameraAgentLaunchException? caught = null;
+        try
+        {
+            await lifecycle.DisposeAsync();
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            caught = exception;
+        }
+        Check.True(caught is not null && caught.Message.Contains("must remain held", StringComparison.Ordinal),
+            "cleanup refusal must not dispose the lifecycle as a successful shutdown");
+        Check.Equal(1, ReadDualAgentTraceEntries(tracePath)
+            .Count(entry => entry.Operation == DualBindingCameraAgentProtocol.Operations.CancelBinding));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task DualCameraAgentLifecycleExitTimeoutStaysBlockingAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-exit-timeout-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "binding-cancel-exit-timeout");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var client = new DualBindingSessionClient(lifecycle);
+        Check.True((await client.BeginBindingAsync()).Succeeded, "binding must start before exit-timeout coverage");
+        Check.True((await client.CancelBindingAsync()).Succeeded, "cleanup acknowledgment must arrive before the timeout");
+
+        HardwareCameraAgentLaunchException? caught = null;
+        try
+        {
+            await lifecycle.DisposeAsync();
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            caught = exception;
+        }
+        Check.True(caught is not null && caught.Message.Contains("did not exit", StringComparison.Ordinal),
+            "the lifecycle must remain Blocking when the acknowledged child does not exit in time");
+
+        // The child exits naturally after the first bounded wait. Re-entering
+        // Dispose only verifies that exit; it does not resend cancel-binding.
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        await lifecycle.DisposeAsync();
+        Check.Equal(1, ReadDualAgentTraceEntries(tracePath)
+            .Count(entry => entry.Operation == DualBindingCameraAgentProtocol.Operations.CancelBinding));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static DualCameraAgentLifecycle CreateDualBindingTestLifecycle(string root)
+{
+    var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
+    var identityProofPath = Path.Combine(root, "phase0", "dual-identity-proof.json");
+    var wpdMapPath = Path.Combine(root, "wpd-camera-map.json");
+    WriteDualAgentTestArtifactFiles(captureProfilePath, identityProofPath);
+    File.WriteAllText(wpdMapPath, "{\"note\":\"test-only WPD map\"}");
+    return new DualCameraAgentLifecycle(
+        DualCameraAgentTestHostPath(),
+        Path.Combine(root, "agent-pair-journal"),
+        captureProfilePath,
+        identityProofPath,
+        wpdMapPath);
+}
+
 static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -4444,6 +4706,8 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
     var pairJournalRoot = TryGetDualAgentArgument(arguments, "--pair-journal-root");
     var approvedCaptureProfile = TryGetDualAgentArgument(arguments, "--approved-capture-profile");
     var dualIdentityProof = TryGetDualAgentArgument(arguments, "--dual-identity-proof");
+    var bindingPipeName = TryGetDualAgentArgument(arguments, "--binding-pipe-name");
+    var wpdCameraMap = TryGetDualAgentArgument(arguments, "--wpd-camera-map");
     if (pipeName is null || pairJournalRoot is null || approvedCaptureProfile is null || dualIdentityProof is null)
     {
         return 1; // argument/launch failure
@@ -4459,6 +4723,14 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
     }
 
     var tracePath = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    if (scenario.StartsWith("binding-cancel", StringComparison.Ordinal))
+    {
+        if (bindingPipeName is null || wpdCameraMap is null || !File.Exists(wpdCameraMap))
+        {
+            return 1;
+        }
+        return await RunDualBindingCancellationTestChildAsync(bindingPipeName, tracePath, scenario);
+    }
     var exitCodeText = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
     var dieExitCode = int.TryParse(exitCodeText, out var parsedExitCode) ? parsedExitCode : 3;
 
@@ -4698,6 +4970,54 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
         if (pipe.IsConnected)
         {
             pipe.Disconnect();
+        }
+    }
+}
+
+static async Task<int> RunDualBindingCancellationTestChildAsync(
+    string bindingPipeName,
+    string? tracePath,
+    string scenario)
+{
+    var agent = new SimulatedDualBindingAgent(
+        scenario == "binding-cancel-cleanup-failed"
+            ? new SimulatedDualBindingOptions { FailEndBindingSession = true }
+            : new SimulatedDualBindingOptions());
+    await using var pipe = new NamedPipeServerStream(
+        bindingPipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous);
+    while (true)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        try
+        {
+            await pipe.WaitForConnectionAsync(timeout.Token);
+            var requestJson = await ReadPersistentTestFrameAsync(pipe, timeout.Token);
+            using var request = JsonDocument.Parse(requestJson);
+            var operation = request.RootElement.GetProperty("operation").GetString()!;
+            await AppendDualAgentTraceAsync(tracePath, bindingPipeName, operation, null);
+            var responseJson = agent.Handle(requestJson);
+            await WritePersistentTestFrameAsync(pipe, responseJson, timeout.Token);
+            if (pipe.IsConnected)
+            {
+                pipe.Disconnect();
+            }
+            if (operation == DualBindingCameraAgentProtocol.Operations.CancelBinding)
+            {
+                var succeeded = responseJson.Contains("\"success\":true", StringComparison.Ordinal);
+                if (scenario == "binding-cancel-exit-timeout" && succeeded)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(7));
+                }
+                return succeeded ? 0 : 2;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return 2;
         }
     }
 }

@@ -36,6 +36,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("dual hardware Agent v2 rejects retry capability and mismatched journals", DualHardwareAgentV2NegativesAsync),
     ("dual binding accepts exactly two candidates", DualBindingCandidateCardinalityAsync),
     ("dual binding reaches Ready through the five operations", DualBindingFiveOperationsReachReadyAsync),
+    ("dual binding Ready stays addressable until explicit capture activation", DualBindingActivationIsExplicitAsync),
+    ("dual binding cancellation ends SDK state once and clears client state", DualBindingCancellationAsync),
     ("dual binding refuses duplicate candidate and alias assignments", DualBindingRefusesDuplicateAssignmentsAsync),
     ("dual binding shows one candidate Live View at a time", DualBindingShowsOneLiveViewAtATimeAsync),
     ("dual binding never reaches Ready with an unquiesced body", DualBindingQuiesceFailureNeverReachesReadyAsync),
@@ -2629,6 +2631,57 @@ static async Task DualBindingFiveOperationsReachReadyAsync()
     Check.False(
         responses[^1].Contains("candidateOrdinal", StringComparison.Ordinal),
         "A completed binding must publish no candidate ordinal as evidence.");
+}
+
+static async Task DualBindingActivationIsExplicitAsync()
+{
+    var client = await BoundToBothAliasesAsync(null);
+    Check.True((await client.CompleteBindingAsync()).Succeeded,
+        "The binding must reach Ready before capture activation.");
+    Check.False(client.CaptureHostActivated,
+        "complete-binding alone must not retire the freshness/cancellation pipe.");
+    Check.Equal(null, await client.VerifyBindingIsCurrentAsync());
+
+    var activated = await client.ActivateCaptureAsync();
+    Check.True(activated.Succeeded && activated.Value!.CaptureHostActivated,
+        "The explicit activation response must authorize the capture-pipe transition.");
+    Check.True(client.CaptureHostActivated,
+        "The client must remember that the binding pipe is retired.");
+    var afterActivation = await client.VerifyBindingIsCurrentAsync();
+    Check.Equal("CaptureAlreadyActivated", afterActivation!.ResultCode);
+}
+
+static async Task DualBindingCancellationAsync()
+{
+    var client = BindingClient(null, out var agent);
+    await client.BeginBindingAsync();
+    await client.StartCandidateLiveViewAsync(0);
+
+    var cancelled = await client.CancelBindingAsync();
+    Check.True(cancelled.Succeeded && cancelled.Value!.SdkSessionEnded,
+        "Cancellation must confirm complete SDK cleanup.");
+    Check.Equal(1, agent.EndBindingSessionCount);
+    Check.Equal(0, agent.ActiveLiveViewCount);
+    Check.Equal(string.Empty, client.SessionId);
+    Check.Equal(DualBindingSessionState.None, client.State);
+    Check.Equal(0, client.Assignments.Count);
+    Check.Equal(0, client.Evidence.Count);
+
+    var second = await client.CancelBindingAsync();
+    Check.Equal("NoBindingSession", second.Refusal!.ResultCode);
+    Check.Equal(1, agent.EndBindingSessionCount);
+
+    var failed = BindingClient(
+        new SimulatedDualBindingOptions { FailEndBindingSession = true },
+        out var failingAgent);
+    await failed.BeginBindingAsync();
+    await failed.StartCandidateLiveViewAsync(0);
+    var refusal = await failed.CancelBindingAsync();
+    Check.Equal("BindingCleanupFailed", refusal.Refusal!.ResultCode);
+    Check.Equal(1, failingAgent.EndBindingSessionCount);
+    Check.Equal(string.Empty, failed.SessionId);
+    Check.Equal(DualBindingSessionState.Invalid, failed.State);
+    Check.Equal(DualBindingInvalidationReason.SdkError, failed.InvalidationReason);
 }
 
 static async Task DualBindingRefusesDuplicateAssignmentsAsync()

@@ -253,13 +253,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         ];
 
         // 機体照合（Dual session binding・ADR-0025）。HardwareDual では binding が Ready に
-        // なるまで撮影を開始できない。実機用の binding Agent host はまだ存在しないため、
-        // HardwareDual では接続に失敗し HardwarePending のまま止まる——これは仕様どおりで、
-        // 模擬 binding を実機の合格として見せないための意図的な状態。
-        // GitHub Issue #85: この固定パイプ名 transport には launcher (spawned host) が存在せず、
-        // 照合すべき正規PIDを持たない。NamedPipeServerIdentity.NoLauncherProcessId は実在し得ない
-        // PIDなので、万一同名パイプに何かが応答してもサーバ同一性チェックは必ず不一致で
-        // fail-closed になる。
+        // なるまで撮影を開始できない。production composition は、同じ子AgentのPIDに束縛した
+        // transport を明示注入する。注入されないHardwareDualは固定パイプ名へは接続せず、
+        // NoLauncherProcessIdで必ずfail-closedにするため、模擬bindingを実機合格にはしない。
         var isHardwareDual =
             _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual;
         DualBinding = new DualBindingViewModel(

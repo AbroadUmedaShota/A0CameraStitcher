@@ -260,6 +260,39 @@ void TestFullBindingSurvivesSeparateConnections() {
     Check(server.get() == 0, "a fully delivered session ends the host cleanly");
 }
 
+void TestCancellationResponseIsDeliveredBeforeHostExit() {
+    auto adapter = std::make_shared<DualBindingFakeSdkAdapter>();
+    DualBindingCameraAgentDispatcher dispatcher(adapter);
+    const std::string pipe_name = PipeNameFor("cancel-and-exit");
+    auto server = std::async(std::launch::async, [&] {
+        return RunDualBindingCameraAgentNamedPipeServer(
+            pipe_name, dispatcher, false, {}, std::chrono::seconds(20));
+    });
+
+    const auto begin = SendRequest(
+        pipe_name, Envelope("p-begin", "begin-binding", R"({"cameraMode":"DualCamera"})"));
+    const std::string session = begin ? StringFieldOf(*begin, "sessionId") : std::string{};
+    (void)SendRequest(
+        pipe_name,
+        Envelope("p-start", "start-candidate-live-view",
+                 R"({"sessionId":")" + session + R"(","candidateOrdinal":0})"));
+    const auto cancelled = SendRequest(
+        pipe_name,
+        Envelope("p-cancel", "cancel-binding",
+                 R"({"sessionId":")" + session + "\"}"));
+
+    Check(cancelled &&
+          cancelled->find("\"resultCode\":\"BindingCancelled\"") != std::string::npos,
+        "the client receives the checked cleanup response");
+    Check(
+        server.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+        "the binding host exits promptly after the delivered cancellation");
+    Check(server.get() == 0, "a delivered successful cancellation exits cleanly");
+    Check(adapter->EndBindingSessionCount() == 1 &&
+          adapter->ActiveLiveViewCount() == 0,
+        "pipe cancellation performs one cleanup and leaves no Live View");
+}
+
 // ---------------------------------------------------------------------
 // A session belongs to the host process that produced it. Restarting the
 // host is the strongest form of the invalidation rule, and it must hold
@@ -470,6 +503,7 @@ void TestMissingAcknowledgmentIsADeliveryFailure() {
 
 int main() {
     TestFullBindingSurvivesSeparateConnections();
+    TestCancellationResponseIsDeliveredBeforeHostExit();
     TestRestartedHostRefusesThePreviousSession();
     TestMaximumFrameBoundaryMatchesTheOtherHosts();
     TestTruncatedFramesNeverStartASession();

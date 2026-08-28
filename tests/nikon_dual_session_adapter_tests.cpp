@@ -257,6 +257,36 @@ void TestDestructorClosesRetainedManager() {
         "adapter destruction must close a retained manager module");
 }
 
+void TestExplicitBindingCancellationEndsLiveViewAndManager() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    NikonDualBindingSdkAdapter adapter(transport);
+    (void)adapter.EnumerateCandidates();
+    Check(adapter.StartLiveView(0),
+        "binding cancellation test requires an active candidate Live View");
+
+    Check(adapter.EndBindingSession(5s),
+        "explicit binding cancellation must confirm full SDK cleanup");
+    Check(transport->end_count == 1 && !transport->live_view_active &&
+          !transport->source_open && !transport->module_active &&
+          !transport->process_claimed,
+        "one cancellation call ends Live View, source, module, and process claim");
+}
+
+void TestFailedBindingCancellationIsNotRetriedByDestructor() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    transport->fail_end_before_cleanup = true;
+    {
+        NikonDualBindingSdkAdapter adapter(transport);
+        (void)adapter.EnumerateCandidates();
+        Check(!adapter.EndBindingSession(5s),
+            "unconfirmed binding cleanup must be reported as failure");
+        Check(transport->end_count == 1,
+            "the explicit cancellation performs exactly one end attempt");
+    }
+    Check(transport->end_count == 1,
+        "adapter destruction must not hide a failed cancellation with an implicit retry");
+}
+
 void TestCaptureFailureInvalidatesAndEndsSessionWithoutRetry() {
     auto transport = std::make_shared<RecordingDualSessionTransport>();
     NikonDualBindingSdkAdapter adapter(transport);
@@ -429,6 +459,8 @@ int main() {
         TestInvalidationRevokesEveryCandidateWithoutRetry();
         TestCloseFailureEndsManagerAndInvalidatesSession();
         TestDestructorClosesRetainedManager();
+        TestExplicitBindingCancellationEndsLiveViewAndManager();
+        TestFailedBindingCancellationIsNotRetriedByDestructor();
         TestCaptureFailureInvalidatesAndEndsSessionWithoutRetry();
         TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens();
         TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens();
