@@ -57,7 +57,9 @@ void PrintUsage() {
         << L"       A0CameraStitcher.DualCameraAgent "
            L"--read-only-coexistence-probe --wpd-camera-map PATH\n"
         << L"       A0CameraStitcher.DualCameraAgent "
-           L"--read-only-sdk-probe\n";
+           L"--read-only-sdk-probe\n"
+        << L"       A0CameraStitcher.DualCameraAgent "
+           L"--read-only-wpd-probe --wpd-camera-map PATH\n";
 }
 
 // Legacy launch without the session-binding pair of arguments remains fail
@@ -109,6 +111,7 @@ int wmain(int argc, wchar_t** argv) {
         bool serve_once = false;
         bool read_only_coexistence_probe = false;
         bool read_only_sdk_probe = false;
+        bool read_only_wpd_probe = false;
         std::optional<fs::path> pair_journal_root;
         std::optional<fs::path> approved_capture_profile;
         std::optional<fs::path> dual_identity_proof;
@@ -137,6 +140,14 @@ int wmain(int argc, wchar_t** argv) {
                         "--read-only-sdk-probe was repeated");
                 }
                 read_only_sdk_probe = true;
+                continue;
+            }
+            if (argument == L"--read-only-wpd-probe") {
+                if (read_only_wpd_probe) {
+                    throw std::invalid_argument(
+                        "--read-only-wpd-probe was repeated");
+                }
+                read_only_wpd_probe = true;
                 continue;
             }
             if (argument == L"--help" || argument == L"-h") {
@@ -186,7 +197,7 @@ int wmain(int argc, wchar_t** argv) {
             throw std::invalid_argument(
                 "--binding-pipe-name must be 1-120 ASCII letters, digits, '.', '-', or '_'");
         }
-        if (!read_only_coexistence_probe &&
+        if (!read_only_coexistence_probe && !read_only_wpd_probe &&
             binding_pipe_name.has_value() != wpd_camera_map.has_value()) {
             throw std::invalid_argument(
                 "--binding-pipe-name and --wpd-camera-map must be supplied together");
@@ -196,7 +207,8 @@ int wmain(int argc, wchar_t** argv) {
                 "--serve-once cannot complete a multi-request binding session");
         }
         if (read_only_sdk_probe) {
-            if (serve_once || read_only_coexistence_probe || !seen.empty()) {
+            if (serve_once || read_only_coexistence_probe ||
+                read_only_wpd_probe || !seen.empty()) {
                 throw std::invalid_argument(
                     "--read-only-sdk-probe cannot be combined with other options");
             }
@@ -213,6 +225,31 @@ int wmain(int argc, wchar_t** argv) {
             }
             std::cout << SerializeDualSdkReadOnlyProbeResult(result) << '\n';
             return result.terminal_state == DualSdkReadOnlyProbeTerminalState::Pass
+                ? 0 : 2;
+        }
+        if (read_only_wpd_probe) {
+            if (serve_once || read_only_coexistence_probe || read_only_sdk_probe ||
+                !wpd_camera_map || seen.size() != 1 ||
+                seen.count(L"--wpd-camera-map") != 1) {
+                throw std::invalid_argument(
+                    "--read-only-wpd-probe requires only --wpd-camera-map");
+            }
+            DualWpdReadOnlyProbeResult result;
+            try {
+                RequireExistingFixedLocalFile(
+                    "--wpd-camera-map", *wpd_camera_map);
+                HardwareProcessLease camera_control_lease;
+                IdentityMap map(*wpd_camera_map);
+                WpdTransport transport;
+                result = RunDualWpdReadOnlyProbe(
+                    transport, map, std::chrono::seconds(10));
+            } catch (...) {
+                // Host, lease, and map setup failures stay behind the fixed
+                // anonymous result. Never publish identities or WPD details.
+            }
+            std::cout << SerializeDualWpdReadOnlyProbeResult(result) << '\n';
+            return result.terminal_state ==
+                    DualWpdReadOnlyProbeTerminalState::Pass
                 ? 0 : 2;
         }
         if (read_only_coexistence_probe) {

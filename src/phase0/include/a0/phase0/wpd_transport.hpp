@@ -118,7 +118,80 @@ void ValidateWpdContentScanBudget(
     std::size_t scanned_object_count,
     std::size_t maximum_object_count);
 
-class WpdTransport final : public ICameraTransport, public IPostCardObservationTransport, public ICorrelationObservationTransport {
+// Narrow read-only seam for the DualCamera WPD gate. Implementations may only
+// enumerate D810s, inspect all card payload objects through GENERIC_READ, and
+// close a retained read-only session during failure cleanup. SDK, capture,
+// delete, vendor command, and settings-write capabilities are absent.
+class IWpdDualReadOnlyProbeTransport {
+public:
+    virtual ~IWpdDualReadOnlyProbeTransport() = default;
+    [[nodiscard]] virtual std::vector<CameraInfo>
+        EnumerateForDualReadOnlyProbe() = 0;
+    [[nodiscard]] virtual std::size_t InspectDualReadOnlySpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) = 0;
+    virtual void CloseDualReadOnlyProbeSession(
+        std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual bool DualReadOnlyProbeSessionOpen() const noexcept = 0;
+};
+
+enum class DualWpdReadOnlyProbeError {
+    None,
+    CameraCountMismatch,
+    AliasMapInvalid,
+    AliasMatchMismatch,
+    InventoryFailed,
+    TopologyChanged,
+    SpoolInspectionFailed,
+    SessionCloseFailed,
+    SessionCleanupUnconfirmed,
+    SpoolNotEmpty,
+    HostSetupFailed,
+};
+
+enum class DualWpdReadOnlyProbeCleanup {
+    Ended,
+    EndedAfterError,
+    Unconfirmed,
+};
+
+enum class DualWpdReadOnlyProbeTerminalState {
+    Pass,
+    Blocked,
+};
+
+struct DualWpdReadOnlyProbeResult {
+    std::optional<std::size_t> wpd_d810_count;
+    std::size_t inventory_checks_completed{};
+    std::size_t cam_a_match_count{};
+    std::size_t cam_b_match_count{};
+    std::size_t unbound_camera_count{};
+    bool alias_identities_distinct{};
+    std::optional<std::size_t> cam_a_payload_object_count;
+    std::optional<std::size_t> cam_b_payload_object_count;
+    bool cam_a_session_closed{};
+    bool cam_b_session_closed{};
+    std::size_t wpd_spool_sessions_closed{};
+    bool topology_stable{};
+    bool wpd_access_attempted{};
+    bool wpd_session_open_at_exit{};
+    DualWpdReadOnlyProbeError error{DualWpdReadOnlyProbeError::HostSetupFailed};
+    DualWpdReadOnlyProbeCleanup cleanup{DualWpdReadOnlyProbeCleanup::Ended};
+    DualWpdReadOnlyProbeTerminalState terminal_state{
+        DualWpdReadOnlyProbeTerminalState::Blocked};
+};
+
+[[nodiscard]] DualWpdReadOnlyProbeResult RunDualWpdReadOnlyProbe(
+    IWpdDualReadOnlyProbeTransport& transport,
+    const IdentityMap& identity_map,
+    std::chrono::seconds timeout);
+[[nodiscard]] std::string SerializeDualWpdReadOnlyProbeResult(
+    const DualWpdReadOnlyProbeResult& result);
+
+class WpdTransport final : public ICameraTransport,
+                           public IPostCardObservationTransport,
+                           public ICorrelationObservationTransport,
+                           public IWpdDualReadOnlyProbeTransport {
 public:
     using BeforeCommandCallback = std::function<void()>;
 
@@ -130,6 +203,8 @@ public:
     WpdTransport& operator=(const WpdTransport&) = delete;
     [[nodiscard]] std::string SdkVersion() const override;
     [[nodiscard]] std::vector<CameraInfo> Enumerate() override;
+    [[nodiscard]] std::vector<CameraInfo>
+        EnumerateForDualReadOnlyProbe() override;
     // Product Camera Agent only: refreshes at each open boundary and rejects
     // unless exactly one D810 is present. Legacy pair experiments leave this
     // disabled.
@@ -143,6 +218,12 @@ public:
     [[nodiscard]] std::size_t InspectSpoolPayloadCount(
         std::string_view stable_identity,
         std::chrono::seconds timeout);
+    [[nodiscard]] std::size_t InspectDualReadOnlySpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) override;
+    void CloseDualReadOnlyProbeSession(
+        std::chrono::seconds timeout) override;
+    [[nodiscard]] bool DualReadOnlyProbeSessionOpen() const noexcept override;
     // Read-only session used only by wpd-correlation-status.
     void OpenReadOnlyObservation(std::string_view stable_identity, std::chrono::seconds timeout) override;
     [[nodiscard]] WpdCorrelationSample ReadCorrelationSample() override;

@@ -106,7 +106,7 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 - binding開始前のSDK台数確認には`A0CameraStitcher.DualCameraAgent --read-only-sdk-probe`を使う。このprobeは恒久identityや候補tokenを生成せず、D810 source数だけを読み取り、SDK process claim・source・moduleをすべて終了してから匿名結果を返す。D810が二台、`cleanupState=ended`、`terminalState=Pass`のすべてを満たす場合だけ次へ進む。
 - 同型D810二台ではMAID Name/Interface由来のgeneric inventoryが`identity_collision`で安全停止し得るため、その結果をDualの台数確認や個体対応付けへ流用しない。generic inventoryの衝突防止自体は維持する。
-- SDK-only probeの完全終了を確認した後に、WPD-onlyの台数・既存alias map・空カード確認を別実行する。SDK moduleを保持したままWPDを開く`--read-only-coexistence-probe`は、SDK/WPD非同時open要件の受入証拠にしない。
+- SDK-only probeの完全終了を確認した後に、`A0CameraStitcher.DualCameraAgent --read-only-wpd-probe --wpd-camera-map PATH`を別processで一回だけ実行し、WPDのD810二台、既存CAM-A/B alias map各一台、両専用カードpayload 0件、各WPD session close、topology不変を確認する。このWPD-only gateはSDK、capture、delete、camera settings、vendor operation、自動retryを行わない。SDK moduleを保持したままWPDを開く`--read-only-coexistence-probe`は、SDK/WPD非同時open要件の受入証拠にしない。
 - ADR-0025に従い、恒久的なSDK識別子ではなく、同一Agent session内で操作者が二台を`CAM-A`と`CAM-B`へ明示割当する。候補数が二台以外、二重割当、割当漏れは`HardwarePending`として停止する。
 - Live Viewは候補一台ずつ表示し、候補切替時と割当完了時にLive View停止とSDK session完全終了を確認する。確認できなければbindingを無効化し、撮影へ進まない。
 - binding完了後は、撮影中にSDK候補を再列挙しない。Agent再起動、USB再接続、台数またはtopology変更、SDK manager再生成、SDK errorではbindingを無効化し、操作者へ再割当を要求する。

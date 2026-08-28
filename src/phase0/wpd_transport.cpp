@@ -580,18 +580,31 @@ public:
             auto device = OpenDevice(id, "inventory_failed", GENERIC_READ);
             std::string firmware;
             std::string identity;
+            bool compatible = false;
+            bool close_attempted = false;
             try {
-                if (!GetSupportedWpdCommands(device.Get()).still_image_capture) {
-                    device->Close();
-                    continue;
+                compatible = GetSupportedWpdCommands(device.Get()).still_image_capture;
+                if (compatible) {
+                    firmware = DeviceFirmware(device.Get());
+                    identity = DeviceStableIdentity(device.Get());
                 }
-                firmware = DeviceFirmware(device.Get());
-                identity = DeviceStableIdentity(device.Get());
-                device->Close();
+                close_attempted = true;
+                Check(device->Close(), "inventory_close_failed",
+                    "close WPD inventory device");
             } catch (...) {
-                device->Close();
+                // A close HRESULT failure is already the single checked close
+                // attempt for this session. Other inventory failures get one
+                // checked cleanup close, never an operational retry. A cleanup
+                // close failure replaces the earlier inventory error so the
+                // caller cannot claim a confirmed session end.
+                if (!close_attempted) {
+                    close_attempted = true;
+                    Check(device->Close(), "inventory_close_failed",
+                        "close WPD inventory device after error");
+                }
                 throw;
             }
+            if (!compatible) continue;
             DeviceRecord record{id, identity, WideToUtf8(friendly)};
             if (!devices_.emplace(record.stable_identity, record).second) {
                 throw TransportError("identity_collision", "multiple D810 devices reported the same WPD serial identity");
@@ -604,6 +617,8 @@ public:
     void RequireExactlyOneD810ForProductAgent() noexcept {
         require_exactly_one_d810_ = true;
     }
+
+    bool SessionOpen() const noexcept { return device_ != nullptr; }
 
     void Open(std::string_view stable_identity) {
         if (device_) throw TransportError("session_busy", "WPD session is already open");
@@ -681,7 +696,10 @@ public:
             Close();
             return payload_count;
         } catch (...) {
-            CloseNoThrow();
+            // Keep the original spool inspection error only after one checked
+            // cleanup close. A cleanup close failure supersedes it so the
+            // read-only probe cannot report a confirmed session end.
+            if (device_) Close();
             throw;
         }
     }
@@ -1355,6 +1373,9 @@ std::string WpdTransport::SdkVersion() const {
     return impl_->SdkVersion();
 }
 std::vector<CameraInfo> WpdTransport::Enumerate() { return impl_->Enumerate(); }
+std::vector<CameraInfo> WpdTransport::EnumerateForDualReadOnlyProbe() {
+    return impl_->Enumerate();
+}
 void WpdTransport::RequireExactlyOneD810ForProductAgent() {
     impl_->RequireExactlyOneD810ForProductAgent();
 }
@@ -1370,6 +1391,18 @@ std::size_t WpdTransport::InspectSpoolPayloadCount(
     std::string_view stable_identity,
     std::chrono::seconds) {
     return impl_->InspectSpoolPayloadCount(stable_identity);
+}
+std::size_t WpdTransport::InspectDualReadOnlySpoolPayloadCount(
+    std::string_view stable_identity,
+    std::chrono::seconds timeout) {
+    return InspectSpoolPayloadCount(stable_identity, timeout);
+}
+void WpdTransport::CloseDualReadOnlyProbeSession(
+    std::chrono::seconds timeout) {
+    Close(timeout);
+}
+bool WpdTransport::DualReadOnlyProbeSessionOpen() const noexcept {
+    return impl_->SessionOpen();
 }
 void WpdTransport::OpenReadOnlyObservation(std::string_view stable_identity, std::chrono::seconds) {
     impl_->OpenReadOnlyObservation(stable_identity);
@@ -1404,5 +1437,298 @@ void WpdTransport::VerifyJpegSpoolEmpty(std::chrono::seconds timeout) {
     impl_->VerifyJpegSpoolEmpty(timeout);
 }
 void WpdTransport::Close(std::chrono::seconds) { impl_->Close(); }
+
+namespace {
+
+constexpr std::size_t kDualWpdRequiredCameraCount = 2;
+
+struct DualWpdInventoryProjection {
+    std::size_t camera_count{};
+    std::size_t cam_a_count{};
+    std::size_t cam_b_count{};
+    std::size_t unbound_count{};
+    std::vector<std::string> identities;
+};
+
+DualWpdInventoryProjection ProjectDualWpdInventory(
+    const IdentityMap& identity_map,
+    const std::vector<CameraInfo>& cameras) {
+    DualWpdInventoryProjection projection;
+    projection.camera_count = cameras.size();
+    projection.identities.reserve(cameras.size());
+    for (const auto& camera : cameras) {
+        projection.identities.push_back(camera.stable_identity);
+        const auto alias = identity_map.FindAlias(camera.stable_identity);
+        if (!alias) {
+            ++projection.unbound_count;
+        } else if (*alias == "CAM-A") {
+            ++projection.cam_a_count;
+        } else if (*alias == "CAM-B") {
+            ++projection.cam_b_count;
+        } else {
+            ++projection.unbound_count;
+        }
+    }
+    std::sort(projection.identities.begin(), projection.identities.end());
+    return projection;
+}
+
+bool DualWpdProjectionReady(const DualWpdInventoryProjection& projection) noexcept {
+    return projection.camera_count == kDualWpdRequiredCameraCount &&
+        projection.cam_a_count == 1 && projection.cam_b_count == 1 &&
+        projection.unbound_count == 0;
+}
+
+void CopyDualWpdProjection(
+    DualWpdReadOnlyProbeResult& result,
+    const DualWpdInventoryProjection& projection) noexcept {
+    result.wpd_d810_count = projection.camera_count;
+    result.cam_a_match_count = projection.cam_a_count;
+    result.cam_b_match_count = projection.cam_b_count;
+    result.unbound_camera_count = projection.unbound_count;
+}
+
+const char* DualWpdReadOnlyProbeErrorText(
+    DualWpdReadOnlyProbeError error) noexcept {
+    switch (error) {
+    case DualWpdReadOnlyProbeError::None: return "none";
+    case DualWpdReadOnlyProbeError::CameraCountMismatch: return "cameraCountMismatch";
+    case DualWpdReadOnlyProbeError::AliasMapInvalid: return "aliasMapInvalid";
+    case DualWpdReadOnlyProbeError::AliasMatchMismatch: return "aliasMatchMismatch";
+    case DualWpdReadOnlyProbeError::InventoryFailed: return "inventoryFailed";
+    case DualWpdReadOnlyProbeError::TopologyChanged: return "topologyChanged";
+    case DualWpdReadOnlyProbeError::SpoolInspectionFailed: return "spoolInspectionFailed";
+    case DualWpdReadOnlyProbeError::SessionCloseFailed: return "sessionCloseFailed";
+    case DualWpdReadOnlyProbeError::SessionCleanupUnconfirmed: return "sessionCleanupUnconfirmed";
+    case DualWpdReadOnlyProbeError::SpoolNotEmpty: return "spoolNotEmpty";
+    case DualWpdReadOnlyProbeError::HostSetupFailed: return "hostSetupFailed";
+    }
+    return "spoolInspectionFailed";
+}
+
+const char* DualWpdReadOnlyProbeCleanupText(
+    DualWpdReadOnlyProbeCleanup cleanup) noexcept {
+    switch (cleanup) {
+    case DualWpdReadOnlyProbeCleanup::Ended: return "ended";
+    case DualWpdReadOnlyProbeCleanup::EndedAfterError: return "endedAfterError";
+    case DualWpdReadOnlyProbeCleanup::Unconfirmed: return "unconfirmed";
+    }
+    return "unconfirmed";
+}
+
+const char* DualWpdReadOnlyProbeTerminalText(
+    DualWpdReadOnlyProbeTerminalState state) noexcept {
+    return state == DualWpdReadOnlyProbeTerminalState::Pass ? "Pass" : "Blocked";
+}
+
+const char* WpdJsonBool(bool value) noexcept {
+    return value ? "true" : "false";
+}
+
+} // namespace
+
+DualWpdReadOnlyProbeResult RunDualWpdReadOnlyProbe(
+    IWpdDualReadOnlyProbeTransport& transport,
+    const IdentityMap& identity_map,
+    std::chrono::seconds timeout) {
+    DualWpdReadOnlyProbeResult result;
+    result.error = DualWpdReadOnlyProbeError::None;
+
+    const auto cam_a_identity = identity_map.FindIdentity("CAM-A");
+    const auto cam_b_identity = identity_map.FindIdentity("CAM-B");
+    if (!cam_a_identity || cam_a_identity->empty() ||
+        !cam_b_identity || cam_b_identity->empty() ||
+        *cam_a_identity == *cam_b_identity) {
+        result.error = DualWpdReadOnlyProbeError::AliasMapInvalid;
+        return result;
+    }
+    result.alias_identities_distinct = true;
+
+    const auto finish_after_error = [&] {
+        bool cleanup_reported_error = false;
+        const bool session_was_open =
+            transport.DualReadOnlyProbeSessionOpen();
+        if (session_was_open) {
+            try {
+                transport.CloseDualReadOnlyProbeSession(timeout);
+            } catch (...) {
+                cleanup_reported_error = true;
+            }
+        }
+        result.wpd_session_open_at_exit =
+            transport.DualReadOnlyProbeSessionOpen();
+        if (result.wpd_session_open_at_exit || cleanup_reported_error) {
+            result.error = DualWpdReadOnlyProbeError::SessionCleanupUnconfirmed;
+            result.cleanup = DualWpdReadOnlyProbeCleanup::Unconfirmed;
+        } else if (result.error == DualWpdReadOnlyProbeError::SessionCloseFailed &&
+                   !session_was_open) {
+            // A released local handle after a failed checked Close is not
+            // proof that the WPD session ended successfully.
+            result.error =
+                DualWpdReadOnlyProbeError::SessionCleanupUnconfirmed;
+            result.cleanup = DualWpdReadOnlyProbeCleanup::Unconfirmed;
+        } else if (result.error == DualWpdReadOnlyProbeError::SessionCloseFailed ||
+                   result.error == DualWpdReadOnlyProbeError::InventoryFailed ||
+                   result.error == DualWpdReadOnlyProbeError::SpoolInspectionFailed) {
+            result.cleanup = DualWpdReadOnlyProbeCleanup::EndedAfterError;
+        }
+    };
+
+    const auto enumerate = [&]() -> std::optional<DualWpdInventoryProjection> {
+        result.wpd_access_attempted = true;
+        try {
+            const auto cameras = transport.EnumerateForDualReadOnlyProbe();
+            if (transport.DualReadOnlyProbeSessionOpen()) {
+                result.error = DualWpdReadOnlyProbeError::SessionCloseFailed;
+                finish_after_error();
+                return std::nullopt;
+            }
+            auto projection = ProjectDualWpdInventory(identity_map, cameras);
+            ++result.inventory_checks_completed;
+            CopyDualWpdProjection(result, projection);
+            return projection;
+        } catch (const TransportError& error) {
+            result.error = error.Category() == "inventory_close_failed"
+                ? DualWpdReadOnlyProbeError::SessionCloseFailed
+                : DualWpdReadOnlyProbeError::InventoryFailed;
+        } catch (...) {
+            result.error = DualWpdReadOnlyProbeError::InventoryFailed;
+        }
+        finish_after_error();
+        return std::nullopt;
+    };
+
+    const auto initial = enumerate();
+    if (!initial) return result;
+    if (initial->camera_count != kDualWpdRequiredCameraCount) {
+        result.error = DualWpdReadOnlyProbeError::CameraCountMismatch;
+        return result;
+    }
+    if (!DualWpdProjectionReady(*initial)) {
+        result.error = DualWpdReadOnlyProbeError::AliasMatchMismatch;
+        return result;
+    }
+
+    const auto inspect = [&](std::string_view identity,
+                             std::optional<std::size_t>& payload_count,
+                             bool& session_closed) {
+        try {
+            payload_count = transport.InspectDualReadOnlySpoolPayloadCount(
+                identity, timeout);
+            if (transport.DualReadOnlyProbeSessionOpen()) {
+                result.error = DualWpdReadOnlyProbeError::SessionCloseFailed;
+                finish_after_error();
+                return false;
+            }
+            session_closed = true;
+            ++result.wpd_spool_sessions_closed;
+        } catch (const TransportError& error) {
+            result.error = error.Category() == "close_failed"
+                ? DualWpdReadOnlyProbeError::SessionCloseFailed
+                : DualWpdReadOnlyProbeError::SpoolInspectionFailed;
+            finish_after_error();
+            return false;
+        } catch (...) {
+            result.error = DualWpdReadOnlyProbeError::SpoolInspectionFailed;
+            finish_after_error();
+            return false;
+        }
+        if (*payload_count != 0) {
+            result.error = DualWpdReadOnlyProbeError::SpoolNotEmpty;
+            return false;
+        }
+        return true;
+    };
+
+    if (!inspect(*cam_a_identity, result.cam_a_payload_object_count,
+            result.cam_a_session_closed)) {
+        return result;
+    }
+
+    const auto after_cam_a = enumerate();
+    if (!after_cam_a) return result;
+    if (!DualWpdProjectionReady(*after_cam_a) ||
+        after_cam_a->identities != initial->identities) {
+        result.error = DualWpdReadOnlyProbeError::TopologyChanged;
+        return result;
+    }
+
+    if (!inspect(*cam_b_identity, result.cam_b_payload_object_count,
+            result.cam_b_session_closed)) {
+        return result;
+    }
+
+    const auto after_cam_b = enumerate();
+    if (!after_cam_b) return result;
+    if (!DualWpdProjectionReady(*after_cam_b) ||
+        after_cam_b->identities != initial->identities) {
+        result.error = DualWpdReadOnlyProbeError::TopologyChanged;
+        return result;
+    }
+
+    result.topology_stable = true;
+    result.wpd_session_open_at_exit =
+        transport.DualReadOnlyProbeSessionOpen();
+    if (result.wpd_session_open_at_exit) {
+        result.error = DualWpdReadOnlyProbeError::SessionCleanupUnconfirmed;
+        result.cleanup = DualWpdReadOnlyProbeCleanup::Unconfirmed;
+        return result;
+    }
+    result.terminal_state = DualWpdReadOnlyProbeTerminalState::Pass;
+    return result;
+}
+
+std::string SerializeDualWpdReadOnlyProbeResult(
+    const DualWpdReadOnlyProbeResult& result) {
+    std::ostringstream output;
+    output << "{\"operation\":\"read-only-wpd-probe\",\"wpdD810Count\":";
+    if (result.wpd_d810_count) output << *result.wpd_d810_count;
+    else output << "null";
+    output
+        << ",\"wpdInventoryChecksCompleted\":"
+        << result.inventory_checks_completed
+        << ",\"camAMapMatchCount\":" << result.cam_a_match_count
+        << ",\"camBMapMatchCount\":" << result.cam_b_match_count
+        << ",\"wpdUnboundCameraCount\":" << result.unbound_camera_count
+        << ",\"aliasIdentitiesDistinct\":"
+        << WpdJsonBool(result.alias_identities_distinct)
+        << ",\"camAPayloadObjectCount\":";
+    if (result.cam_a_payload_object_count) {
+        output << *result.cam_a_payload_object_count;
+    } else {
+        output << "null";
+    }
+    output << ",\"camBPayloadObjectCount\":";
+    if (result.cam_b_payload_object_count) {
+        output << *result.cam_b_payload_object_count;
+    } else {
+        output << "null";
+    }
+    output
+        << ",\"camASessionClosed\":" << WpdJsonBool(result.cam_a_session_closed)
+        << ",\"camBSessionClosed\":" << WpdJsonBool(result.cam_b_session_closed)
+        << ",\"wpdSpoolSessionsClosed\":"
+        << result.wpd_spool_sessions_closed
+        << ",\"topologyStable\":" << WpdJsonBool(result.topology_stable)
+        << ",\"wpdAccessAttempted\":"
+        << WpdJsonBool(result.wpd_access_attempted)
+        << ",\"wpdSessionOpenAtExit\":"
+        << WpdJsonBool(result.wpd_session_open_at_exit)
+        << ",\"readOnlyAccessOnly\":true"
+           ",\"sdkAccessed\":false"
+           ",\"captureCommandSent\":false"
+           ",\"cameraSettingsChanged\":false"
+           ",\"cameraObjectDeleteAttempted\":false"
+           ",\"vendorOperationExecuted\":false"
+           ",\"automaticRetryCount\":0"
+           ",\"realIdentifiersIncluded\":false"
+        << ",\"errorCategory\":\""
+        << DualWpdReadOnlyProbeErrorText(result.error)
+        << "\",\"cleanupState\":\""
+        << DualWpdReadOnlyProbeCleanupText(result.cleanup)
+        << "\",\"terminalState\":\""
+        << DualWpdReadOnlyProbeTerminalText(result.terminal_state) << "\"}";
+    return output.str();
+}
 
 } // namespace a0::phase0
