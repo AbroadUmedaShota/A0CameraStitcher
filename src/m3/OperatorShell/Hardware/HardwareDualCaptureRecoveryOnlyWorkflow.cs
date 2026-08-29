@@ -34,6 +34,8 @@ public sealed record HardwareDualCaptureRecoveryOnlyExecution(
 
 public interface IHardwareDualCaptureRecoveryOnlyWorkflow
 {
+    string TransactionRoot { get; }
+
     bool CanStartNewCapture { get; }
 
     string NewCaptureBlocker { get; }
@@ -406,6 +408,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
     }
 
     public bool HasPendingRecovery => _pending?.PendingRequest is not null;
+
+    public string TransactionRoot => Path.Combine(_artifactRoot, "transactions");
 
     public Guid? PendingTransactionId => _pending?.PendingRequest?.TransactionId;
 

@@ -208,6 +208,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _retainedOriginals = "なし";
     private string _lastStitchJobId = "未実行";
     private string _lastExportPath = "未実行";
+    private string _captureRecoveryOnlyTransactionDirectory = string.Empty;
     private string _fixedLocalExportDirectory = string.Empty;
     private bool _cameraInspectionRequired;
     private int _transactionStartCount;
@@ -262,8 +263,14 @@ public sealed class OperatorShellViewModel : ObservableObject
         // なるまで撮影を開始できない。production composition は、同じ子AgentのPIDに束縛した
         // transport を明示注入する。注入されないHardwareDualは固定パイプ名へは接続せず、
         // NoLauncherProcessIdで必ずfail-closedにするため、模擬bindingを実機合格にはしない。
-        var isHardwareDual =
-            _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual;
+        var isHardwareDual = IsHardwareDualEnvironment;
+        if (isHardwareDual)
+        {
+            _statusMessage = captureRecoveryOnlyWorkflow is null
+                ? "実機2台モードです。機体照合が完了するまで撮影は禁止です。"
+                : "実機2台の撮影・回収専用モードです。安全確認と機体照合が完了するまで撮影は禁止です。";
+            _technicalDetail = "execution=HardwareDual / capture=not-started / automatic retry count: 0";
+        }
         DualBinding = new DualBindingViewModel(
             new DualBindingSessionClient(dualBindingTransport ?? (isHardwareDual
                 ? new NamedPipeHardwareCameraAgentTransport(
@@ -282,10 +289,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             () => !SafetyAcknowledged && !IsBusy && IsPhysicalShutterAckAccepted && IsExclusiveUseAckAccepted);
         _declineSafetyCommand = new RelayCommand(DeclineSafety, () => !SafetyAcknowledged && !IsBusy);
         _showConsentCommand = new RelayCommand(ShowConsent, () => !SafetyAcknowledged && !IsBusy);
-        _gridPreset3Command = new RelayCommand(() => ApplyGridPreset(3), () => !IsBusy);
-        _gridPreset4Command = new RelayCommand(() => ApplyGridPreset(4), () => !IsBusy);
-        _gridPreset5Command = new RelayCommand(() => ApplyGridPreset(5), () => !IsBusy);
-        _resetViewCommand = new RelayCommand(RequestResetView, () => !IsBusy);
+        _gridPreset3Command = new RelayCommand(() => ApplyGridPreset(3), () => CanUseSimulationStageControls);
+        _gridPreset4Command = new RelayCommand(() => ApplyGridPreset(4), () => CanUseSimulationStageControls);
+        _gridPreset5Command = new RelayCommand(() => ApplyGridPreset(5), () => CanUseSimulationStageControls);
+        _resetViewCommand = new RelayCommand(RequestResetView, () => CanUseSimulationStageControls);
         _captureCommand = new AsyncRelayCommand(() => RunCaptureAsync("正常完了"), () => CanCapture, ShowUnexpectedFailure);
         _captureWithAutoFocusCommand = new AsyncRelayCommand(() => RunCaptureWithAutoFocusAsync("正常完了"), () => CanCaptureWithAutoFocus, ShowUnexpectedFailure);
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
@@ -308,11 +315,30 @@ public sealed class OperatorShellViewModel : ObservableObject
         ResetProgress();
     }
 
+    public bool IsHardwareDualEnvironment =>
+        _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual;
     public string BannerText => IsCaptureRecoveryOnlyMode
         ? HardwareDualCaptureRecoveryOnlyBanner
-        : _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual
+        : IsHardwareDualEnvironment
             ? HardwareDualPendingBanner
             : SimulationBanner;
+    public string WindowTitle => $"A0 Camera Stitcher — {BannerText}";
+    public string WindowAutomationName => IsCaptureRecoveryOnlyMode
+        ? $"A0 Camera Stitcher 撮影画面 / {BannerText} / 実シャッター同期未保証"
+        : $"A0 Camera Stitcher 撮影画面 / {BannerText}";
+    public string EnvironmentStatusAutomationName => IsCaptureRecoveryOnlyMode
+        ? $"状態チップ 実行環境と検証範囲 / {BannerText} / 実シャッター同期未保証"
+        : $"状態チップ 実行環境と検証範囲 / {BannerText}";
+    public string BindingMenuHeader => IsHardwareDualEnvironment
+        ? "機体照合を表示(_B)"
+        : "機体照合を表示（模擬）(_B)";
+    public string BindingMenuAutomationName => IsHardwareDualEnvironment
+        ? "カメラ 実機の機体照合を表示 CAM-A CAM-Bの目視割当"
+        : "カメラ 機体照合を表示 模擬動作 実機の合格判定ではない";
+    public string MenuBarAutomationName => IsCaptureRecoveryOnlyMode
+        ? "メニューバー ファイル カメラ ヘルプ"
+        : "メニューバー ファイル カメラ 表示 ツール ヘルプ";
+    public bool CanUseSimulationStageControls => !IsCaptureRecoveryOnlyMode && !IsBusy;
 
     /// <summary>ヘルプ(H)メニューの「バージョン」項目用（issue #34）。実装時点でセマンティック
     /// バージョンの運用ルールは未確定のため、独自の番号を捏造せずビルド済みアセンブリのメタ
@@ -495,9 +521,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
     public bool CanChangeOperatingMode => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
-    public bool CanSelectCamera => !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
+    public bool CanSelectCamera => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
-    public bool CanChangeExportDirectory => !IsBusy;
+    public bool CanChangeExportDirectory => !IsCaptureRecoveryOnlyMode && !IsBusy;
     public string OperatingModeDescription => IsCaptureRecoveryOnlyMode
         ? "CAM-A→CAM-Bを順次撮影し、検証済み原画像2枚だけを固定ローカルへ保持します。合成とA0品質判定は行いません。"
         : IsSingleCameraMode
@@ -506,7 +532,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string CaptureButtonText => IsCaptureRecoveryOnlyMode
         ? "2台を順次撮影・回収する（1回）"
         : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
-    public string CameraSelectionLabel => IsSingleCameraMode ? "撮影・ライブ表示の対象" : "ライブ表示するカメラ（1台ずつ）";
+    public string CameraSelectionLabel => IsCaptureRecoveryOnlyMode
+        ? "CAM-A / CAM-Bは機体照合画面で割り当て"
+        : IsSingleCameraMode ? "撮影・ライブ表示の対象" : "ライブ表示するカメラ（1台ずつ）";
     public string ProcessingResultLabel => IsCaptureRecoveryOnlyMode
         ? "原画像2枚（合成保留）"
         : IsSingleCameraMode ? "単体出力" : "合成";
@@ -792,7 +820,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? pattern
             : SimulatedFramePatternCatalog.DefaultPattern;
 
-    public bool CanChangeStageMode => UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
+    public bool CanChangeStageMode => !IsCaptureRecoveryOnlyMode &&
+        UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
 
     /// <summary>A / B キーからのステージ表示切替。表示モードを変えるだけで、
     /// 撮影対象カメラ（<see cref="SelectedCamera"/>）やライブ表示の開閉には触らない。
@@ -813,6 +842,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
     public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
     public bool IsStageReviewMode => UiState == OperatorUiState.Review;
+    public bool IsStandardStageVisible => !IsCaptureRecoveryOnlyMode;
     public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
     public bool IsStageSingleLiveMode => IsStageLiveNoteVisible && SelectedStageMode != StageModeCompositePreview;
     public bool IsStageCompositePreviewMode => IsStageLiveNoteVisible && SelectedStageMode == StageModeCompositePreview;
@@ -1887,7 +1917,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         get => _fixedLocalExportDirectory;
         set
         {
-            if (!IsBusy && SetProperty(ref _fixedLocalExportDirectory, value?.Trim() ?? string.Empty))
+            if (CanChangeExportDirectory && SetProperty(ref _fixedLocalExportDirectory, value?.Trim() ?? string.Empty))
             {
                 OnPropertyChanged(nameof(OutputDirectory));
                 OnPropertyChanged(nameof(CanExport));
@@ -1896,10 +1926,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
-    public string ProfileText => $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
-    public string OutputDirectory => _dualCameraFlow is not null && !IsSingleCameraMode
+    public string ProfileText => IsCaptureRecoveryOnlyMode
+        ? "撮影・回収のみ / 合成保留 / A0品質未承認"
+        : $"{_readiness.Profile.ProfileId} / v{_readiness.Profile.Version} / 期限 {_readiness.Profile.ExpiresOn:yyyy-MM-dd}";
+    public string OutputDirectory => IsCaptureRecoveryOnlyMode
+        ? (string.IsNullOrWhiteSpace(_captureRecoveryOnlyTransactionDirectory)
+            ? _captureRecoveryOnlyWorkflow!.TransactionRoot
+            : _captureRecoveryOnlyTransactionDirectory)
+        : _dualCameraFlow is not null && !IsSingleCameraMode
         ? (string.IsNullOrWhiteSpace(FixedLocalExportDirectory) ? "未選択 — 「選択…」からフォルダを選んでください" : FixedLocalExportDirectory)
         : _readiness.OutputDirectory;
+    public string OutputDirectoryLabel => IsCaptureRecoveryOnlyMode
+        ? (string.IsNullOrWhiteSpace(_captureRecoveryOnlyTransactionDirectory)
+            ? "固定保存ルート（transaction IDごとに作成）"
+            : "今回のtransaction保存先")
+        : "保存先（このPC内のフォルダのみ）";
 
     /// <summary>フォルダ選択ダイアログで選ばれた保存先を受け取る。ネットワーク共有・
     /// リムーバブルメディア・reparse point 先はここで弾く。撮り終えてから保存に失敗すると
@@ -1926,14 +1967,26 @@ public sealed class OperatorShellViewModel : ObservableObject
         FixedLocalExportDirectory = normalized;
         Notify("保存先を設定しました", true);
     }
-    public string CameraAStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
-    public string CameraBStatus => FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
-    public string SetupStatusText => _readiness.Setup.Summary;
-    public string CorrectionText => _readiness.Setup.PlannedCorrections.Count == 0 ? "予定補正なし" : string.Join(" / ", _readiness.Setup.PlannedCorrections);
-    public string PhysicalAdjustmentText => _readiness.Setup.PhysicalAdjustments.Count == 0 ? "物理調整なし" : string.Join(" / ", _readiness.Setup.PhysicalAdjustments);
+    public string CameraAStatus => IsCaptureRecoveryOnlyMode
+        ? "実機状態は未判定（機体照合で確認）"
+        : FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-A"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-A"));
+    public string CameraBStatus => IsCaptureRecoveryOnlyMode
+        ? "実機状態は未判定（機体照合で確認）"
+        : FormatCamera(_readiness.Cameras.Single(camera => camera.Alias == "CAM-B"), CurrentCapturePlan.RequiredCameraAliases.Contains("CAM-B"));
+    public string SetupStatusText => IsCaptureRecoveryOnlyMode ? "撮影・回収のみ（設置品質は未判定）" : _readiness.Setup.Summary;
+    public string CorrectionText => IsCaptureRecoveryOnlyMode
+        ? "自動補正は行いません"
+        : _readiness.Setup.PlannedCorrections.Count == 0 ? "予定補正なし" : string.Join(" / ", _readiness.Setup.PlannedCorrections);
+    public string PhysicalAdjustmentText => IsCaptureRecoveryOnlyMode
+        ? "固定リグ・A0品質は別途確認"
+        : _readiness.Setup.PhysicalAdjustments.Count == 0 ? "物理調整なし" : string.Join(" / ", _readiness.Setup.PhysicalAdjustments);
     public string BlockerText => FormatNotices(OperatorWarningSeverity.Blocker, "撮影を止める要因はありません");
-    public string CautionText => FormatNotices(OperatorWarningSeverity.Caution, "注意する点はありません");
-    public string InfoText => FormatNotices(OperatorWarningSeverity.Info, "原画像はPCに保持 ／ ライブ表示は原画像ではありません ／ 2台のシャッター時刻差は保証しません");
+    public string CautionText => IsCaptureRecoveryOnlyMode
+        ? "合成・A0品質・実シャッター同期は未承認です。フォーカスはこの画面では判定しません。"
+        : FormatNotices(OperatorWarningSeverity.Caution, "注意する点はありません");
+    public string InfoText => IsCaptureRecoveryOnlyMode
+        ? "機体照合画面のLive Viewは割当確認専用です。保存対象は検証済み原画像です。"
+        : FormatNotices(OperatorWarningSeverity.Info, "原画像はPCに保持 ／ ライブ表示は原画像ではありません ／ 2台のシャッター時刻差は保証しません");
     private bool HasRecoverableHardwareDualTransaction =>
         !IsSingleCameraMode &&
         _dualCameraFlow is
@@ -2012,7 +2065,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "1台構成のため対象外"
             : $"機体照合: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
 
-    public bool CanUseLiveView => _availability.LiveView.Allowed;
+    public bool CanUseLiveView => !IsCaptureRecoveryOnlyMode && _availability.LiveView.Allowed;
     public bool CanExport => !IsCaptureRecoveryOnlyMode && _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
     public bool CanRestitch => !IsCaptureRecoveryOnlyMode && _availability.Restitch.Allowed;
@@ -2020,7 +2073,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
     // ラッチ（issue #142/PR #152 レビュー指摘・要修正2）。
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
-    public bool CanOpenMaintenance => _availability.OpenMaintenance.Allowed;
+    public bool CanOpenMaintenance => !IsCaptureRecoveryOnlyMode && _availability.OpenMaintenance.Allowed;
 
     private CapturePlan CurrentCapturePlan => IsSingleCameraMode ? CapturePlan.Single(SelectedCamera) : CapturePlan.Dual();
 
@@ -2400,9 +2453,12 @@ public sealed class OperatorShellViewModel : ObservableObject
         ExportResult = originals.Count == 0
             ? "保存済み原画像なし"
             : "原画像を固定ローカルtransactionフォルダへ保存済み";
+        _captureRecoveryOnlyTransactionDirectory = outcome.TransactionDirectory;
         LastExportPath = string.IsNullOrWhiteSpace(outcome.TransactionDirectory)
             ? "未確定"
             : outcome.TransactionDirectory;
+        OnPropertyChanged(nameof(OutputDirectory));
+        OnPropertyChanged(nameof(OutputDirectoryLabel));
         _stitchOutcome = null;
         _exportOutcome = null;
         UiState = outcome.Succeeded ? OperatorUiState.Review : OperatorUiState.FailedPartial;
@@ -2747,7 +2803,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         if (IsCaptureRecoveryOnlyMode)
         {
             _captureRecoveryOnlyOperatorApproved = false;
+            _captureRecoveryOnlyTransactionDirectory = string.Empty;
+            LastExportPath = "未実行";
             OnPropertyChanged(nameof(IsCaptureRecoveryOnlyOperatorApproved));
+            OnPropertyChanged(nameof(OutputDirectory));
+            OnPropertyChanged(nameof(OutputDirectoryLabel));
         }
         RaiseStageFrameProperties();
         RaiseFocusPanelProperties();

@@ -2745,6 +2745,11 @@ static async Task DualCameraRegressionAsync()
         await viewModel.InitializeAsync(CancellationToken.None);
         Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the safe default for the existing workflow.");
         Check.True(viewModel.CaptureButtonText.Contains("2台", StringComparison.Ordinal), "The dual action must remain explicit.");
+        Check.True(viewModel.BindingMenuHeader.Contains("模擬", StringComparison.Ordinal),
+            "The simulated shell must keep its binding demonstration labeled as simulated.");
+        Check.True(viewModel.MenuBarAutomationName.Contains("表示", StringComparison.Ordinal) &&
+                   viewModel.MenuBarAutomationName.Contains("ツール", StringComparison.Ordinal),
+            "The simulated shell must retain its stage display and tool menus.");
 
         viewModel.AcceptSafetyCommand.Execute(null);
         Check.True(viewModel.CanCapture, "A ready dual plan must allow capture.");
@@ -2890,6 +2895,10 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal(DualCameraIdentityStatus.HardwarePending, pendingHardwareFlow.IdentitySnapshot.Status);
         Check.False(pendingViewModel.CanCapture, "HardwareDual production composition must remain HardwarePending without provider/Agent operations.");
         Check.Equal(OperatorShellViewModel.HardwareDualPendingBanner, pendingViewModel.BannerText);
+        Check.Equal($"A0 Camera Stitcher — {OperatorShellViewModel.HardwareDualPendingBanner}", pendingViewModel.WindowTitle);
+        Check.True(
+            pendingViewModel.WindowAutomationName.Contains(OperatorShellViewModel.HardwareDualPendingBanner, StringComparison.Ordinal),
+            "HardwareDual accessibility text must not identify the whole window as simulated.");
 
         var hardwareAdapter = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
         var hardwareOperations = new WpfHardwareDualFakeOperations(hardwareAdapter);
@@ -4762,6 +4771,43 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             ordinaryFlow,
             dualBindingTransport: bindingTransport,
             captureRecoveryOnlyWorkflow: wpfWorkflow);
+        Check.Equal(
+            $"A0 Camera Stitcher — {OperatorShellViewModel.HardwareDualCaptureRecoveryOnlyBanner}",
+            shell.WindowTitle);
+        Check.True(
+            shell.EnvironmentStatusAutomationName.Contains(
+                OperatorShellViewModel.HardwareDualCaptureRecoveryOnlyBanner,
+                StringComparison.Ordinal),
+            "CaptureRecoveryOnly accessibility text must state the real-hardware scope and unapproved quality boundary.");
+        Check.True(
+            shell.EnvironmentStatusAutomationName.Contains("実シャッター同期未保証", StringComparison.Ordinal),
+            "CaptureRecoveryOnly accessibility text must keep shutter synchronization unguaranteed.");
+        Check.Equal("実機状態は未判定（機体照合で確認）", shell.CameraAStatus);
+        Check.Equal("実機状態は未判定（機体照合で確認）", shell.CameraBStatus);
+        Check.Equal("撮影・回収のみ / 合成保留 / A0品質未承認", shell.ProfileText);
+        Check.True(shell.IsCaptureRecoveryOnlyMode, "The focused WPF path must expose its dedicated mode.");
+        Check.False(shell.IsStandardStageVisible, "CaptureRecoveryOnly must hide simulated stage surfaces.");
+        Check.False(shell.CanChangeStageMode, "CaptureRecoveryOnly must not expose simulated stage switching.");
+        Check.False(shell.CanSelectCamera, "CAM-A/B selection belongs to the explicit binding flow in CaptureRecoveryOnly.");
+        Check.False(shell.CanUseLiveView, "CaptureRecoveryOnly must not expose the simulated main-stage Live View.");
+        Check.False(shell.CanOpenMaintenance, "CaptureRecoveryOnly must not expose simulated maintenance pages.");
+        Check.False(shell.CanChangeExportDirectory, "CaptureRecoveryOnly must not accept an unrelated operator export folder.");
+        Check.Equal(wpfWorkflow.TransactionRoot, shell.OutputDirectory);
+        Check.Equal("固定保存ルート（transaction IDごとに作成）", shell.OutputDirectoryLabel);
+        Check.False(shell.GridPreset3Command.CanExecute(null), "CaptureRecoveryOnly must disable simulated grid presets.");
+        Check.False(shell.ResetViewCommand.CanExecute(null), "CaptureRecoveryOnly must disable simulated view reset.");
+        Check.False(shell.MenuBarAutomationName.Contains("表示", StringComparison.Ordinal),
+            "CaptureRecoveryOnly must omit simulated display controls from its menu description.");
+        Check.False(shell.MenuBarAutomationName.Contains("ツール", StringComparison.Ordinal),
+            "CaptureRecoveryOnly must omit simulated tools from its menu description.");
+        Check.False(shell.BindingMenuHeader.Contains("模擬", StringComparison.Ordinal),
+            "Hardware binding must not be labeled as a simulation.");
+        Check.True(shell.BindingMenuAutomationName.Contains("実機", StringComparison.Ordinal),
+            "Hardware binding accessibility text must identify the real-hardware assignment.");
+        var rejectedExportFolder = Path.Combine(root, "must-not-be-used-as-capture-only-output");
+        shell.FixedLocalExportDirectory = rejectedExportFolder;
+        Check.Equal(string.Empty, shell.FixedLocalExportDirectory);
+        Check.Equal(wpfWorkflow.TransactionRoot, shell.OutputDirectory);
         await shell.InitializeAsync(CancellationToken.None);
         shell.IsPhysicalShutterAckAccepted = true;
         shell.IsExclusiveUseAckAccepted = true;
@@ -4770,6 +4816,8 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.False(shell.CanCapture, "A CaptureRecoveryOnly WPF path must wait for explicit CAM-A/B binding.");
         await CompleteDualBindingAsync(shell.DualBinding);
         Check.True(shell.CanCapture, "Ready binding plus explicit acceptance must enable only CaptureRecoveryOnly.");
+        Check.False(shell.CanUseLiveView, "A Ready hardware binding must not enable the simulated main-stage Live View.");
+        Check.False(shell.CanOpenMaintenance, "A Ready hardware binding must not enable simulated maintenance pages.");
         shell.CaptureCommand.Execute(null);
         await WaitUntilAsync(() => !shell.IsBusy && shell.UiState == OperatorUiState.Review,
             "CaptureRecoveryOnly WPF path did not reach review.");
@@ -4785,6 +4833,10 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             "CaptureRecoveryOnly WPF review must keep A0 quality unapproved.");
         Check.True(shell.RetainedOriginals.Contains("CAM-A", StringComparison.Ordinal) && shell.RetainedOriginals.Contains("CAM-B", StringComparison.Ordinal),
             "CaptureRecoveryOnly WPF review must list both retained originals.");
+        Check.Equal(shell.LastExportPath, shell.OutputDirectory);
+        Check.Equal("今回のtransaction保存先", shell.OutputDirectoryLabel);
+        Check.True(shell.OutputDirectory.StartsWith(wpfWorkflow.TransactionRoot, StringComparison.OrdinalIgnoreCase),
+            "The shown CaptureRecoveryOnly output must be the fixed transaction directory used by the workflow.");
 
         var wpfRecoveryRoot = Path.Combine(root, "wpf-same-id-recovery");
         var wpfRecoveryOperations = new CaptureRecoveryOnlyFakeOperations(
