@@ -12,6 +12,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -922,7 +923,18 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL an unconfirmed binding blocks capture in SingleCamera mode too, so mode switching is not a fallback (issue #62): {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {63 - failures.Count}/63 passed.");
+try
+{
+    CaptureRecoveryOnlySoftwareRunEvidenceContract();
+    Console.WriteLine("PASS CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims");
+}
+catch (Exception exception)
+{
+    failures.Add("CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims");
+    Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {80 - failures.Count}/80 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -5106,6 +5118,250 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
     finally
     {
         Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CaptureRecoveryOnlySoftwareRunEvidenceContract()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var now = DateTimeOffset.Parse("2026-08-31T01:00:00Z");
+        var evidenceRoot = Path.Combine(root, "evidence");
+        var writer = new CaptureRecoveryOnlyRunEvidenceWriter(evidenceRoot, () => now);
+        const string tenId = "run-11111111111111111111111111111111";
+        const string hundredId = "run-22222222222222222222222222222222";
+        var tenAttempts = Enumerable.Range(1, 10).Select(index => EvidenceAttempt(index, true)).ToArray();
+        var tenFiles = writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(tenId, 10, tenAttempts));
+        var tenReport = File.ReadAllText(tenFiles.ReportPath);
+        Check.True(tenReport.Contains("evidenceScope: SoftwareAggregationOnly", StringComparison.Ordinal), "The report must identify software-only aggregation.");
+        Check.True(tenReport.Contains("hardwareExecutionVerified: false", StringComparison.Ordinal), "The report must not claim hardware execution.");
+        Check.True(tenReport.Contains("productionRunner: false", StringComparison.Ordinal), "The report must not claim production-runner execution.");
+        using (var summary = JsonDocument.Parse(File.ReadAllText(tenFiles.SummaryPath)))
+        {
+            var body = summary.RootElement;
+            Check.Equal("SoftwareAggregationOnly", body.GetProperty("evidenceScope").GetString()!);
+            Check.False(body.GetProperty("hardwareExecutionVerified").GetBoolean(), "The 10-run summary must not claim hardware execution.");
+            Check.False(body.GetProperty("productionRunner").GetBoolean(), "The 10-run summary must not claim a production runner.");
+            Check.Equal("SoftwareAggregatePartial", body.GetProperty("verdict").GetString()!);
+            Check.Equal("Unapproved", body.GetProperty("p95ApprovalStatus").GetString()!);
+            Check.Equal(JsonValueKind.Null, body.GetProperty("approval").ValueKind);
+        }
+        var tenEventCount = 0;
+        foreach (var line in File.ReadLines(tenFiles.TransactionEventsPath))
+        {
+            using var item = JsonDocument.Parse(line);
+            tenEventCount++;
+            Check.Equal("SoftwareAggregationOnly", item.RootElement.GetProperty("evidenceScope").GetString()!);
+            Check.False(item.RootElement.GetProperty("hardwareExecutionVerified").GetBoolean(), "A 10-run event must not claim hardware execution.");
+            Check.False(item.RootElement.GetProperty("productionRunner").GetBoolean(), "A 10-run event must not claim a production runner.");
+            Check.Equal(JsonValueKind.Null, item.RootElement.GetProperty("approvalRecordId").ValueKind);
+        }
+        Check.Equal(10, tenEventCount);
+        Check.Throws<IOException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(tenId, 10, tenAttempts)));
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest("run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 10, tenAttempts)));
+
+        now = now.AddMinutes(1);
+        var externalApprovalPath = Path.Combine(root, "operator-p95-approval.json");
+        WriteExternalApproval(externalApprovalPath, tenId, hundredId, tenFiles, now);
+        var generatedRootApprovalPath = Path.Combine(evidenceRoot, "not-an-external-approval.json");
+        File.Copy(externalApprovalPath, generatedRootApprovalPath);
+        Check.Throws<InvalidDataException>(() => writer.RecordP95Approval(generatedRootApprovalPath));
+        File.Delete(generatedRootApprovalPath);
+        var approval = writer.RecordP95Approval(externalApprovalPath);
+        var approvalPath = Path.Combine(evidenceRoot, "approvals", approval.ApprovalRecordId + ".json");
+        using (var approvalDocument = JsonDocument.Parse(File.ReadAllText(approvalPath)))
+        {
+            var approvalBody = approvalDocument.RootElement;
+            Check.Equal("OperatorRecordedApproval", approvalBody.GetProperty("approvalStatus").GetString()!);
+            Check.False(approvalBody.GetProperty("approvalAuthorityVerifiedBySoftware").GetBoolean(), "Software must not claim that it authenticated the human approver.");
+            Check.Equal(tenId, approvalBody.GetProperty("tenRunId").GetString()!);
+            Check.Equal(hundredId, approvalBody.GetProperty("targetHundredRunId").GetString()!);
+            Check.Equal(approval.TenRunFiles.ReportSha256, approvalBody.GetProperty("tenRunFiles").GetProperty("reportSha256").GetString()!);
+            Check.Equal(approval.ExternalApprovalSha256, approvalBody.GetProperty("externalApprovalSha256").GetString()!);
+        }
+        Check.Throws<InvalidDataException>(() => writer.RecordP95Approval(externalApprovalPath));
+
+        var hundredAttempts = Enumerable.Range(1, 100).Select(index => EvidenceAttempt(index + 100, true, now.AddMinutes(1))).ToArray();
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest("run-33333333333333333333333333333333", 100, hundredAttempts, approval.ApprovalRecordId)));
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts)));
+
+        const string forgedApprovalId = "approval-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        var forgedApprovalPath = Path.Combine(evidenceRoot, "approvals", forgedApprovalId + ".json");
+        var forgedDecisionPath = Path.Combine(evidenceRoot, "approvals", forgedApprovalId + ".decision.json");
+        var forgedApproval = JsonNode.Parse(File.ReadAllBytes(approvalPath))?.AsObject()
+            ?? throw new InvalidDataException("The approval test artifact could not be parsed.");
+        forgedApproval["approvalRecordId"] = forgedApprovalId;
+        forgedApproval["externalApprovalFileName"] = forgedApprovalId + ".decision.json";
+        File.WriteAllText(forgedApprovalPath, forgedApproval.ToJsonString(), new UTF8Encoding(false));
+        File.Copy(Path.Combine(evidenceRoot, "approvals", approval.ApprovalRecordId + ".decision.json"), forgedDecisionPath);
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts, forgedApprovalId)));
+        File.Delete(forgedApprovalPath);
+        File.Delete(forgedDecisionPath);
+
+        var overlappingAttempts = hundredAttempts.ToArray();
+        overlappingAttempts[0] = overlappingAttempts[0] with
+        {
+            Outcome = overlappingAttempts[0].Outcome with { TransactionId = tenAttempts[0].Outcome.TransactionId },
+        };
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, overlappingAttempts, approval.ApprovalRecordId)));
+
+        var originalTenReport = File.ReadAllBytes(tenFiles.ReportPath);
+        File.AppendAllText(tenFiles.ReportPath, "tamper", new UTF8Encoding(false));
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts, approval.ApprovalRecordId)));
+        File.WriteAllBytes(tenFiles.ReportPath, originalTenReport);
+
+        var originalApproval = File.ReadAllBytes(approvalPath);
+        var alteredApproval = JsonNode.Parse(originalApproval)?.AsObject()
+            ?? throw new InvalidDataException("The approval test artifact could not be parsed.");
+        alteredApproval["p95Milliseconds"] = approval.P95.TotalMilliseconds + 1;
+        File.WriteAllText(approvalPath, alteredApproval.ToJsonString(), new UTF8Encoding(false));
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts, approval.ApprovalRecordId)));
+        File.WriteAllBytes(approvalPath, originalApproval);
+
+        var preservedDecisionPath = Path.Combine(evidenceRoot, "approvals", approval.ApprovalRecordId + ".decision.json");
+        var originalPreservedDecision = File.ReadAllBytes(preservedDecisionPath);
+        File.AppendAllText(preservedDecisionPath, "tamper", new UTF8Encoding(false));
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts, approval.ApprovalRecordId)));
+        File.WriteAllBytes(preservedDecisionPath, originalPreservedDecision);
+
+        var hundredFiles = writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, hundredAttempts, approval.ApprovalRecordId));
+        var hundredReport = File.ReadAllText(hundredFiles.ReportPath);
+        Check.True(hundredReport.Contains("hardwareExecutionVerified: false", StringComparison.Ordinal), "The 100-run report must remain software-only.");
+        Check.True(hundredReport.Contains("approvalAuthorityVerifiedBySoftware: false", StringComparison.Ordinal), "The 100-run report must not claim approver authentication.");
+        Check.True(hundredReport.Contains("approvalRecordId: " + approval.ApprovalRecordId, StringComparison.Ordinal), "The 100-run report must identify its approval artifact.");
+        Check.True(hundredReport.Contains("approvedTenRunReportSha256: " + approval.TenRunFiles.ReportSha256, StringComparison.Ordinal), "The 100-run report must identify the bound 10-run report hash.");
+        Check.True(hundredReport.Contains("approvalRecordSha256: " + approval.ApprovalRecordSha256, StringComparison.Ordinal), "The 100-run report must bind the approval record hash.");
+        using (var hundredSummary = JsonDocument.Parse(File.ReadAllText(hundredFiles.SummaryPath)))
+        {
+            var body = hundredSummary.RootElement;
+            Check.Equal("SoftwareAggregatePass", body.GetProperty("verdict").GetString()!);
+            Check.False(body.GetProperty("hardwareExecutionVerified").GetBoolean(), "The 100-run summary must not claim hardware execution.");
+            Check.False(body.GetProperty("approvalAuthorityVerifiedBySoftware").GetBoolean(), "The 100-run summary must not claim approver authentication.");
+            var approvalBody = body.GetProperty("approval");
+            Check.Equal(approval.ApprovalRecordId, approvalBody.GetProperty("approvalRecordId").GetString()!);
+            Check.Equal(approval.TenRunFiles.SummarySha256, approvalBody.GetProperty("tenRunFiles").GetProperty("summarySha256").GetString()!);
+            Check.Equal(approval.ApprovalRecordSha256, approvalBody.GetProperty("approvalRecordSha256").GetString()!);
+        }
+        var hundredEventCount = 0;
+        foreach (var line in File.ReadLines(hundredFiles.TransactionEventsPath))
+        {
+            using var item = JsonDocument.Parse(line);
+            hundredEventCount++;
+            Check.False(item.RootElement.GetProperty("hardwareExecutionVerified").GetBoolean(), "A 100-run event must not claim hardware execution.");
+            Check.False(item.RootElement.GetProperty("approvalAuthorityVerifiedBySoftware").GetBoolean(), "A 100-run event must not claim approver authentication.");
+            Check.Equal(approval.ApprovalRecordId, item.RootElement.GetProperty("approvalRecordId").GetString()!);
+            Check.Equal(tenId, item.RootElement.GetProperty("approvedTenRunId").GetString()!);
+        }
+        Check.Equal(100, hundredEventCount);
+
+        Directory.Delete(Path.GetDirectoryName(hundredFiles.ReportPath)!, recursive: true);
+        var freshHundredAttempts = Enumerable.Range(1, 100).Select(index => EvidenceAttempt(index + 500, true, now.AddDays(1))).ToArray();
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(hundredId, 100, freshHundredAttempts, approval.ApprovalRecordId)));
+
+        const string otherTenId = "run-66666666666666666666666666666666";
+        var otherTenAttempts = Enumerable.Range(1, 10).Select(index => EvidenceAttempt(index + 700, true, now.AddDays(2))).ToArray();
+        var otherTenFiles = writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(otherTenId, 10, otherTenAttempts));
+        now = otherTenAttempts[^1].CompletedAtUtc.AddMinutes(1);
+        var otherApprovalPath = Path.Combine(root, "other-operator-p95-approval.json");
+        WriteExternalApproval(otherApprovalPath, otherTenId, hundredId, otherTenFiles, now);
+        Check.Throws<InvalidDataException>(() => writer.RecordP95Approval(otherApprovalPath));
+
+        var faultWriter = new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "fault"), () => now, name => { if (name == "summary.json") throw new IOException("synthetic write failure"); });
+        Check.Throws<IOException>(() => faultWriter.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest("run-88888888888888888888888888888888", 10, tenAttempts)));
+        var faultRuns = Path.Combine(root, "fault", "runs");
+        Check.False(Directory.Exists(Path.Combine(faultRuns, "run-88888888888888888888888888888888")), "A failed write must not publish a final run directory.");
+        Check.False(Directory.Exists(faultRuns) && Directory.EnumerateFileSystemEntries(faultRuns, "*.partial", SearchOption.AllDirectories).Any(), "A failed write must not leave partial evidence.");
+        var faultTransactions = Path.Combine(root, "fault", "transactions");
+        Check.False(Directory.Exists(faultTransactions) && Directory.EnumerateFileSystemEntries(faultTransactions).Any(), "A failed write must release transaction claims.");
+
+        var publishedFaultRoot = Path.Combine(root, "published-fault");
+        var publishedFaultWriter = new CaptureRecoveryOnlyRunEvidenceWriter(
+            publishedFaultRoot,
+            () => now,
+            afterPublish: _ => throw new IOException("synthetic post-publish failure"));
+        const string publishedFaultRunId = "run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        Check.Throws<IOException>(() => publishedFaultWriter.CreateAndPublish(
+            new CaptureRecoveryOnlyRunEvidenceRequest(publishedFaultRunId, 10, tenAttempts)));
+        Check.True(Directory.Exists(Path.Combine(publishedFaultRoot, "runs", publishedFaultRunId)), "A post-publish failure must leave the final evidence visible.");
+        Check.Equal(10, Directory.EnumerateFiles(Path.Combine(publishedFaultRoot, "transactions"), "*.claim").Count());
+
+        var missingCamA = EvidenceAttempt(1200, false);
+        var missingCamAOutcome = missingCamA.Outcome with { Originals = Array.Empty<CanonicalJpegOriginal>() };
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(
+            "run-cccccccccccccccccccccccccccccccc",
+            10,
+            [missingCamA with { Outcome = missingCamAOutcome }])));
+        var retainedCamA = EvidenceAttempt(1201, false);
+        var failedPartialFiles = writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest(
+            "run-dddddddddddddddddddddddddddddddd",
+            10,
+            [retainedCamA]));
+        Check.True(File.ReadAllText(failedPartialFiles.ReportPath).Contains("verdict: SoftwareAggregateFail", StringComparison.Ordinal), "A CAM-B failure with the CAM-A original retained must publish as a software aggregate failure.");
+
+        var invalid = EvidenceAttempt(999, true);
+        var badOutcome = invalid.Outcome with { TerminalState = DualHardwareCaptureTerminalState.FailedPartial, FailureCode = DualCameraFailureCode.None };
+        Check.Throws<InvalidDataException>(() => writer.CreateAndPublish(new CaptureRecoveryOnlyRunEvidenceRequest("run-99999999999999999999999999999999", 10, [invalid with { Outcome = badOutcome }])));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+
+    static void WriteExternalApproval(
+        string path,
+        string tenRunId,
+        string targetHundredRunId,
+        CaptureRecoveryOnlyRunEvidenceFiles files,
+        DateTimeOffset approvedAtUtc)
+    {
+        using var summary = JsonDocument.Parse(File.ReadAllText(files.SummaryPath));
+        var summaryBody = summary.RootElement;
+        var p95Milliseconds = summaryBody.GetProperty("p95Milliseconds").GetDouble();
+        var tenRunCompletedAtUtc = summaryBody.GetProperty("completedAtUtc").GetDateTimeOffset();
+        var hashes = new CaptureRecoveryOnlyRunFileHashes(
+            FileHash(files.ReportPath),
+            FileHash(files.SummaryPath),
+            FileHash(files.TransactionEventsPath),
+            p95Milliseconds);
+        var payload = new
+        {
+            approvalSchema = "a0.capture-recovery-only.p95-approval.v1",
+            evidenceScope = "SoftwareAggregationOnly",
+            hardwareExecutionVerified = false,
+            productionRunner = false,
+            capturePurpose = HardwareDualCaptureRecoveryOnlyExecution.CapturePurpose,
+            stitchOutcome = HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome,
+            a0QualityApproval = HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval,
+            approvalAuthorityVerifiedBySoftware = false,
+            decision = "Approved",
+            approverRole = "ProductOwner",
+            approvalBasis = "operator-approved-p95-v1",
+            tenRunId,
+            targetHundredRunId,
+            p95Milliseconds,
+            approvedAtUtc,
+            tenRunCompletedAtUtc,
+            tenRunFiles = hashes,
+        };
+        File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }),
+            new UTF8Encoding(false));
+
+        static string FileHash(string filePath) =>
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(filePath))).ToLowerInvariant();
+    }
+
+    static CaptureRecoveryOnlyRunAttempt EvidenceAttempt(int number, bool succeeded, DateTimeOffset? baseTime = null)
+    {
+        var id = Guid.NewGuid(); var started = (baseTime ?? DateTimeOffset.Parse("2026-08-31T00:00:00Z")).AddMinutes(number);
+        var originals = succeeded ? new CanonicalJpegOriginal[]
+        {
+            new("CAM-A", Path.Combine("C:\\synthetic-evidence", "CAM-A", "original.jpg"), 100, new string('a', 64), 7360, 4912, true),
+            new("CAM-B", Path.Combine("C:\\synthetic-evidence", "CAM-B", "original.jpg"), 101, new string('b', 64), 7360, 4912, true),
+        } : new CanonicalJpegOriginal[] { new("CAM-A", Path.Combine("C:\\synthetic-evidence", "CAM-A", "original.jpg"), 100, new string('a', 64), 7360, 4912, true) };
+        return new(started, started.AddMilliseconds(number), new HardwareDualCaptureRecoveryOnlyExecution(id,
+            succeeded ? DualHardwareCaptureTerminalState.Succeeded : DualHardwareCaptureTerminalState.FailedPartial,
+            succeeded ? DualCameraFailureCode.None : DualCameraFailureCode.CaptureCameraB,
+            succeeded ? null : "synthetic failure", originals, Path.Combine("C:\\synthetic-evidence", id.ToString("N")), false, 0));
     }
 }
 

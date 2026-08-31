@@ -36,7 +36,12 @@ try {
     Assert-Condition (Test-Path -LiteralPath $foundationTestExecutable -PathType Leaf) 'M3 foundation test executable was not produced by the solution build.'
     $testOutput = & $foundationTestExecutable 2>&1
     if ($LASTEXITCODE -ne 0) { throw "M3 foundation tests failed: $($testOutput -join [Environment]::NewLine)" }
-    Assert-Condition (($testOutput -join "`n").Contains('Foundation tests: 32/32 passed.')) 'M3 foundation test summary is missing or incomplete.'
+    $foundationPassLines = @($testOutput | Where-Object { $_ -match '^PASS ' })
+    Assert-Condition ($foundationPassLines.Count -gt 0) 'M3 foundation tests did not emit any PASS result.'
+    $foundationSummary = @($testOutput | Where-Object { $_ -match '^Foundation tests: (\d+)/(\d+) passed\.$' }) | Select-Object -Last 1
+    Assert-Condition ($null -ne $foundationSummary) 'M3 foundation test summary is missing.'
+    if ($foundationSummary -notmatch '^Foundation tests: (\d+)/(\d+) passed\.$') { throw 'M3 foundation test summary is malformed.' }
+    Assert-Condition ([int]$Matches[1] -eq $foundationPassLines.Count -and [int]$Matches[2] -eq $foundationPassLines.Count) 'M3 foundation test summary does not match emitted PASS lines.'
 
     $cmake = Get-Command cmake -ErrorAction Stop
     & $cmake.Source -S $RepositoryRoot -B $nativeBuildDirectory -A x64
@@ -57,7 +62,12 @@ try {
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($operatorShellTestOutput -join "`n").Contains('Operator shell tests: 58/58 passed.')) 'M3 operator shell test summary is missing or incomplete.'
+        $operatorPassLines = @($operatorShellTestOutput | Where-Object { $_ -match '^PASS ' })
+        Assert-Condition ($operatorPassLines.Count -gt 0) 'M3 operator shell tests did not emit any PASS result.'
+        $operatorSummary = @($operatorShellTestOutput | Where-Object { $_ -match '^Operator shell tests: (\d+)/(\d+) passed\.$' }) | Select-Object -Last 1
+        Assert-Condition ($null -ne $operatorSummary) 'M3 operator shell test summary is missing.'
+        if ($operatorSummary -notmatch '^Operator shell tests: (\d+)/(\d+) passed\.$') { throw 'M3 operator shell test summary is malformed.' }
+        Assert-Condition ([int]$Matches[1] -eq $operatorPassLines.Count -and [int]$Matches[2] -eq $operatorPassLines.Count) 'M3 operator shell test summary does not match emitted PASS lines.'
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -72,8 +82,8 @@ try {
     [xml]$windowXml = Get-Content -Raw -LiteralPath $windowPath
     $windowText = Get-Content -Raw -LiteralPath $windowPath
     $viewModelText = Get-Content -Raw -LiteralPath $viewModelPath
-    Assert-Condition ($windowXml.Window.Title.Contains('模擬動作') -and $windowXml.Window.Title.Contains('実機未接続')) 'Window title must remain visibly simulated.'
-    Assert-Condition ($windowText.Contains('AutomationProperties.Name="A0 Camera Stitcher 撮影画面 模擬動作 実機未接続"')) 'Window accessibility name must remain visibly simulated.'
+    Assert-Condition ($windowXml.Window.Title -eq '{Binding WindowTitle}' -and $viewModelText.Contains('public const string SimulationBanner = "模擬動作（実機未接続）"') -and $viewModelText.Contains('public string WindowTitle')) 'Window title must keep its runtime banner binding and explicit simulation banner.'
+    Assert-Condition ($windowText.Contains('AutomationProperties.Name="{Binding WindowAutomationName}"') -and $viewModelText.Contains('public string WindowAutomationName')) 'Window accessibility name must keep its runtime environment binding.'
     foreach ($marker in @('模擬動作（実機未接続）', 'NO AUTO RETRY', '模擬動作のライブ表示（実画像ではありません）', 'FailedPartial', '新しい撮影を準備', '確認なし', 'read-only', '1台構成', '2台構成', 'SelectedOperatingMode', 'CaptureButtonText')) {
         Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required marker: $marker"
     }
@@ -102,7 +112,7 @@ try {
     }
     # 機体照合オーバーレイ（issue #62・ADR-0025）
     foreach ($marker in @('機体照合（CAM-A / CAM-B の割当）', 'DualBinding.IsOverlayVisible', 'DualBinding.ShowCandidateCommand', 'DualBinding.AssignCameraACommand', 'DualBinding.AssignCameraBCommand', 'DualBinding.CompleteBindingCommand', 'DualBinding.ResidualRiskText', 'DualBinding.InvalidationText', '機体照合を表示（模擬）')) {
-        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required dual binding overlay binding/marker (issue #62): $marker"
+        Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required dual binding overlay binding/marker (issue #62): $marker"
     }
     # キーボードだけで到達できることと、読み上げ名が付いていることを markup 段で固定する。
     # WPF の Button は既定で Focusable かつ IsTabStop なので、守るべきなのは
@@ -157,7 +167,7 @@ try {
     Assert-Condition (-not $windowText.Contains('TabStripPlacement="Left"')) 'Issue #34 must remove the left-nav TabControl (TabStripPlacement="Left").'
     Assert-Condition (-not $windowText.Contains('Header="編集')) 'Issue #34 must not add an 編集 (Edit) top-level menu — no image-editing feature exists in this contract.'
     foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', 'このPCのフォルダへ保存(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '保守画面から撮影ダッシュボードへ戻る')) {
-        Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required menu bar binding/marker (issue #34): $marker"
+        Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required menu bar binding/marker (issue #34): $marker"
     }
     foreach ($marker in @('SelectedPage', 'PageTitle', 'ShowDashboardCommand', 'ShowSetupCommand', 'ShowCameraSettingsCommand', 'ShowDiagnosticsCommand', 'IsSingleCameraModeChecked', 'IsDualCameraModeChecked', 'IsLoupeZoom100Checked', 'IsLoupeZoom200Checked', 'IsTiltReadingVisible', 'DualCameraIdentityStatusText', 'AppVersionText')) {
         Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required menu bar view model marker (issue #34): $marker"
