@@ -506,6 +506,17 @@ catch (Exception exception)
 
 try
 {
+    await ActivatedCaptureHostNaturalNonZeroExitAllowsShutdownAsync();
+    Console.WriteLine("PASS an activated HardwareDual capture host that exits naturally with a nonzero code releases the lease and preserves diagnostics");
+}
+catch (Exception exception)
+{
+    failures.Add("an activated HardwareDual capture host that exits naturally with a nonzero code releases the lease and preserves diagnostics");
+    Console.Error.WriteLine($"FAIL an activated HardwareDual capture host that exits naturally with a nonzero code releases the lease and preserves diagnostics: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleFakeHostHappyPathAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
 }
@@ -4525,6 +4536,56 @@ static async Task ActivatedCaptureHostImmediateNaturalExitAllowsShutdownAsync()
     }
 }
 
+static async Task ActivatedCaptureHostNaturalNonZeroExitAllowsShutdownAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-activated-capture-natural-nonzero-exit-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable(
+            "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO",
+            "binding-activation-natural-nonzero-exit");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var binding = new DualBindingSessionClient(lifecycle);
+        await CompleteDualBindingAndActivateAsync(binding);
+        var processGeneration = lifecycle.CurrentProcessGeneration;
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(processGeneration),
+            "The synthetic nonzero-exit capture child did not exit naturally.");
+
+        var releaseCount = 0;
+        var close = await HardwareDualWindowShutdownGate.TryShutdownAsync(
+            () => Task.FromResult<DualBindingRefusal?>(null),
+            lifecycle.DisposeAsync,
+            () => releaseCount++);
+
+        Check.True(close.Completed,
+            $"A naturally exited activated host must not remain a shutdown block solely because its exit code is nonzero. BlockingCode={close.BlockingCode}");
+        Check.Equal(1, releaseCount);
+        Check.False(lifecycle.IsProcessGenerationAlive(processGeneration),
+            "The natural nonzero exit must release the process-generation lease.");
+        Check.True(lifecycle.LastObservedAgentExitCode == 37,
+            "The naturally exited activated host must preserve its exact nonzero exit code for diagnostics.");
+
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.Equal(0, entries.Count(entry => entry.Operation == DualBindingCameraAgentProtocol.Operations.CancelBinding));
+        Check.Equal(1, entries.Count(entry => entry.Operation == DualBindingCameraAgentProtocol.Operations.ActivateCapture));
+        Check.Equal(0, entries.Count(entry => entry.Operation == DualHardwareCameraAgentProtocol.Operations.ReservePairTransaction));
+        Check.Equal(0, entries.Count(entry => entry.Operation == DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly));
+        Check.Equal(0, entries.Count(entry => entry.Operation == DualHardwareCameraAgentProtocol.Operations.StartReservedPair));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static DualCameraAgentLifecycle CreateDualBindingTestLifecycle(string root)
 {
     var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
@@ -5482,9 +5543,13 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
     }
 
     var tracePath = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    var exitCodeText = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
+    var dieExitCode = int.TryParse(exitCodeText, out var parsedExitCode) ? parsedExitCode : 3;
+
     if (scenario is "binding-activation-capture-recovery-only" or
         "binding-activation-exit-timeout" or
-        "binding-activation-natural-exit")
+        "binding-activation-natural-exit" or
+        "binding-activation-natural-nonzero-exit")
     {
         if (bindingPipeName is null || wpdCameraMap is null || !File.Exists(wpdCameraMap))
         {
@@ -5499,8 +5564,10 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
             {
                 "binding-activation-exit-timeout" => TimeSpan.FromSeconds(7),
                 "binding-activation-natural-exit" => TimeSpan.FromMilliseconds(50),
+                "binding-activation-natural-nonzero-exit" => TimeSpan.FromMilliseconds(50),
                 _ => null,
-            });
+            },
+            scenario == "binding-activation-natural-nonzero-exit" ? 37 : 0);
     }
     if (scenario.StartsWith("binding-cancel", StringComparison.Ordinal))
     {
@@ -5510,9 +5577,6 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
         }
         return await RunDualBindingCancellationTestChildAsync(bindingPipeName, tracePath, scenario);
     }
-    var exitCodeText = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_EXIT_CODE");
-    var dieExitCode = int.TryParse(exitCodeText, out var parsedExitCode) ? parsedExitCode : 3;
-
     if (scenario == "die-before-listen")
     {
         // Simulates Native failing fast (e.g. on startup) before ever creating the
@@ -5862,7 +5926,8 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
     string bindingPipeName,
     string pairJournalRoot,
     string? tracePath,
-    TimeSpan? exitAfterActivation = null)
+    TimeSpan? exitAfterActivation = null,
+    int exitCodeAfterActivation = 0)
 {
     Directory.CreateDirectory(pairJournalRoot);
     using var shutdown = new CancellationTokenSource();
@@ -5892,7 +5957,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
             }
 
             await Task.Delay(activationExitDelay);
-            return 0;
+            return exitCodeAfterActivation;
         }
 
         if (await Task.WhenAny(captureCompleted.Task, Task.Delay(TimeSpan.FromSeconds(20))) != captureCompleted.Task)
@@ -5990,6 +6055,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
                 await AppendDualAgentTraceAsync(trace, pipeName, operation, TryGetDualAgentTransactionId(payload));
 
                 string responseJson;
+                var terminalResponse = false;
                 switch (operation)
                 {
                     case DualHardwareCameraAgentProtocol.Operations.GetCapabilities:
@@ -6041,7 +6107,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
                                     camAPath,
                                     camBPath),
                             });
-                        completed.TrySetResult();
+                        terminalResponse = true;
                         break;
                     }
 
@@ -6062,7 +6128,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
                                 new { transactionId = transactionIdHex, found = true, result = journalResult });
                         if (journalResult is not null)
                         {
-                            completed.TrySetResult();
+                            terminalResponse = true;
                         }
                         break;
                     }
@@ -6072,6 +6138,14 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
                 }
 
                 await WritePersistentTestFrameAsync(pipe, responseJson, cancellationToken);
+                // The parent may shut down this one-shot child immediately after it
+                // observes terminal completion. Publish that completion only after
+                // the matching response frame is fully written, otherwise a 50ms
+                // natural-exit test can tear down the pipe before the client reads it.
+                if (terminalResponse)
+                {
+                    completed.TrySetResult();
+                }
             }
             finally
             {

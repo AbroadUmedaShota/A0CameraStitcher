@@ -138,7 +138,9 @@ std::chrono::steady_clock::time_point SteadyDeadline(std::int64_t utc_100ns) {
         std::chrono::nanoseconds(remaining_ticks * 100);
 }
 
-void PublishCanonicalCopy(
+} // namespace
+
+void PublishVerifiedDualCaptureCanonicalOriginal(
     const FrameEvidence& frame,
     const fs::path& requested_path,
     std::chrono::steady_clock::time_point deadline) {
@@ -209,8 +211,6 @@ void PublishCanonicalCopy(
                              "Canonical original failed reread verification");
     }
 }
-
-} // namespace
 
 bool HasExpectedDualCaptureJpegDimensions(
     const std::vector<unsigned char>& bytes) noexcept {
@@ -299,7 +299,8 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
             // The core keeps the WPD object untouched until this callback
             // returns. Persist and verify the requested canonical original
             // (including dimensions) before making deletion eligible.
-            PublishCanonicalCopy(frame, canonical_original_path, deadline);
+            PublishVerifiedDualCaptureCanonicalOriginal(
+                frame, canonical_original_path, deadline);
         }, [&] {
             if (sdk_adapter_->PollInvalidation() != DualIdentityInvalidationReason::None) {
                 throw TransportError("dual_binding_invalidated",

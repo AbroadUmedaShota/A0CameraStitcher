@@ -4,6 +4,7 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -15,6 +16,14 @@ namespace a0::phase0 {
 // canonical reread before the exact WPD object becomes eligible for deletion.
 [[nodiscard]] bool HasExpectedDualCaptureJpegDimensions(
     const std::vector<unsigned char>& bytes) noexcept;
+
+// Publishes a recovered DualCamera original to its requested fixed local
+// destination only after source and canonical reread validation. Callers must
+// invoke this before making the exact WPD object eligible for deletion.
+void PublishVerifiedDualCaptureCanonicalOriginal(
+    const FrameEvidence& frame,
+    const std::filesystem::path& requested_path,
+    std::chrono::steady_clock::time_point deadline);
 
 // Real DualCamera leg backend. SDK candidate identity remains inside the
 // binding process; WPD uses a separately registered local alias map.

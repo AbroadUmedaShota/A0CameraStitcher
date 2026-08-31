@@ -1926,41 +1926,104 @@ void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
     Check(!HasExpectedDualCaptureJpegDimensions({0xFF, 0xD8, 0x01, 0xFF, 0xD9}),
         "the DualCamera dimension parser must reject a JPEG without SOF dimensions");
 
-    const auto root = NewTestRoot("dual-dimension-gate");
-    HybridWpdFake wpd;
-    HybridSdkFake sdk;
-    EvidenceWriter evidence(root / "artifacts", "run-dual-dimension-gate", sdk.SdkVersion());
+    {
+        const auto root = NewTestRoot("dual-canonical-success");
+        HybridWpdFake wpd;
+        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+            true, "cleanup-capability"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-success", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.terminal_state == "Complete" && fs::is_regular_file(canonical) &&
+                  !fs::exists(canonical.string() + ".partial"),
+            "valid dimensions must publish exactly one canonical original without a partial");
+        std::ifstream canonical_input(canonical, std::ios::binary);
+        const std::vector<unsigned char> canonical_bytes{
+            std::istreambuf_iterator<char>(canonical_input), std::istreambuf_iterator<char>()};
+        canonical_input.close();
+        Check(canonical_bytes == expected_dimensions_jpeg,
+            "canonical original must exactly match the verified recovered bytes");
+        Check(wpd.delete_attempts == 1 && wpd.delete_successes == 1 &&
+                  result.camera_card_delete_succeeded && result.spool_empty_after_cleanup &&
+                  wpd.spool_empty_after_checks == 1,
+            "valid canonical publish must permit one exact delete and post-delete empty check");
+        fs::remove_all(root);
+    }
 
-    const auto result = ExecuteHybridCaptureOnce(
-        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
-        std::nullopt,
-        [&](const FrameEvidence& frame) {
-            std::ifstream input(frame.path, std::ios::binary);
-            const std::vector<unsigned char> bytes{
-                std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-            if (input.bad() || !HasExpectedDualCaptureJpegDimensions(bytes)) {
-                throw TransportError(
-                    "dual_jpeg_dimensions_invalid",
-                    "DualCamera original dimensions are not exactly 7360x4912");
-            }
-        });
+    const auto check_failed_leg = [](const TransactionResult& result,
+                                     const HybridWpdFake& wpd,
+                                     const HybridSdkFake& sdk,
+                                     std::string_view name) {
+        Check(result.terminal_state == "FailedPartial" && result.frames.size() == 1 &&
+                  result.frames.front().success && fs::is_regular_file(result.frames.front().path),
+            std::string(name) + ": failure must retain the recovered PC evidence");
+        Check(wpd.delete_attempts == 0 && wpd.delete_successes == 0 &&
+                  !result.camera_card_delete_attempted,
+            std::string(name) + ": failure must preserve the exact WPD object");
+        Check(sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1 &&
+                  wpd.opens == 2 && wpd.closes == 2 && wpd.observes == 1 &&
+                  !sdk.open && !wpd.open,
+            std::string(name) + ": failure must close sessions after one capture without retry");
+    };
 
-    Check(result.terminal_state == "FailedPartial" &&
-              result.error_category == "dual_jpeg_dimensions_invalid",
-        "invalid DualCamera dimensions must fail the leg as FailedPartial");
-    Check(result.frames.size() == 1 && result.frames.front().success &&
-              fs::is_regular_file(result.frames.front().path),
-        "invalid dimensions must retain the verified PC original bytes");
-    Check(wpd.delete_attempts == 0 && wpd.delete_successes == 0 &&
-              !result.camera_card_delete_attempted,
-        "invalid dimensions must preserve the exact WPD object without delete");
-    Check(sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1 &&
-              wpd.opens == 2 && wpd.observes == 1,
-        "dimension validation must occur only after SDK close and WPD recovery, without retry");
-    Check(wpd.order == "Wopen;Wbaseline;Wclose;Wopen;Wobserve;Wclose;" &&
-              sdk.order == "Sopen;Scapture;Sclose;",
-        "dimension rejection must keep SDK and WPD sessions non-overlapping");
-    fs::remove_all(root);
+    {
+        const auto root = NewTestRoot("dual-dimension-gate");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-dimension-gate", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.error_category == "canonical_source_verification_failed",
+            "invalid dimensions must fail before canonical publish");
+        check_failed_leg(result, wpd, sdk, "invalid dimensions");
+        Check(!fs::exists(canonical) && !fs::exists(canonical.string() + ".partial"),
+            "invalid dimensions must not create a canonical original or partial");
+        fs::remove_all(root);
+    }
+
+    {
+        const auto root = NewTestRoot("dual-canonical-exists");
+        HybridWpdFake wpd;
+        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+            true, "cleanup-capability"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-exists", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        fs::create_directories(canonical.parent_path());
+        const std::vector<unsigned char> existing{0x01, 0x02, 0x03};
+        {
+            std::ofstream output(canonical, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(existing.data()),
+                static_cast<std::streamsize>(existing.size()));
+        }
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.error_category == "canonical_original_exists",
+            "an existing canonical original must fail closed");
+        check_failed_leg(result, wpd, sdk, "existing canonical original");
+        std::ifstream existing_input(canonical, std::ios::binary);
+        const std::vector<unsigned char> after{
+            std::istreambuf_iterator<char>(existing_input), std::istreambuf_iterator<char>()};
+        existing_input.close();
+        Check(after == existing && !fs::exists(canonical.string() + ".partial"),
+            "an existing canonical original must remain unchanged without a partial");
+        fs::remove_all(root);
+    }
 }
 
 void TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry() {
