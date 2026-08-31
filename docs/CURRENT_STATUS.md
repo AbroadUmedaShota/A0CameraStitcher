@@ -10,7 +10,7 @@
 
 ## 確認済み
 
-- [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。一方、production captureはSDK Moduleを保持したままWPDへ進むため現行のfull-close条件を満たさず、pair開始前の両カード一括preflightと同一bindingの10/100 runnerも未実装である。実撮影、delete、設定変更、USB操作は0件。
+- [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。安全修正`29b8671`はNative CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立reviewでpatch `PASS`となりpush済み。一方、production captureはSDK Moduleを保持したままWPDへ進むため現行のfull-close条件を満たさない。ライセンス済みSDKのheader 22件、sample 6件、PDF 10件の静的調査でも、Module reload後に同型D810を一意照合できる正式なper-body property/APIは確認できなかった。pair開始前の両カード一括preflightと同一bindingの10/100 runnerも未実装であり、Dual hardware readinessは`BLOCK`。実撮影、delete、設定変更、USB操作は0件。
 - 2026-08-29時点で、WPFの明示起動引数、承認済み`a0.dual-capture-profile.operator-approved.v1`、同一Agent内CAM-A/B割当から`CaptureRecoveryOnly`へのactivation、予約前durable snapshot、1 reserve／1 start、曖昧時same-ID照会、再起動時の再binding、CAM-B失敗時CAM-A原本保持、JPEG 7360×4912・size・SHA-256再検証、stitch `Pending`・A0品質`Unapproved`を実装した。通常`start-reserved-pair` schemaと通常合成経路は変更していない。この項目はsoftware-onlyで、実シャッター、実WPF操作、実機one-shotの合格を意味しない。
 - [2026-08-26 SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md): one-shot 1/1、10/10、p50 `14.036秒`、p95/max `14.643秒`、HG-0009承認、100/100初回成功、100回p50 `14.204秒`・p95 `14.430秒`・max `14.692秒`。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件だった。
 - PR #163でNikon SDK非同期バッファ寿命とSingleCamera WPD identity-v3経路を修正し、Release buildとfocused contractsを確認後にmainへマージした。GitHub ActionsはBilling制限により未実行であり、CI greenとは扱わない。

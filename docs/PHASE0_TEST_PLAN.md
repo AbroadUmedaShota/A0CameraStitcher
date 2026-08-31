@@ -106,7 +106,9 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 > SDK-only／WPD-onlyの読み取り専用事前ゲートは合格したが、現production backendは
 > session-local CAM-A/B tokenを保持するためSDK Moduleを残したままWPDを開く。
 > `SDK完全終了 → WPD`と`再列挙なし`を同時に満たせないため、設計判断と再レビューが
-> 完了するまでP0-B2以降を開始しない。詳細は
+> 完了するまでP0-B2以降を開始しない。ライセンス済みSDKのheader 22件、sample 6件、
+> PDF資料10件の静的調査でも、Module reload後に同型D810を一意照合できる正式な
+> per-body property/APIは確認できなかった。詳細は
 > [DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md)を参照する。
 
 ### P0-B1: 二台識別
