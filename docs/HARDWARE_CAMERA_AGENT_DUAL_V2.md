@@ -1,7 +1,21 @@
 # Dual Hardware Camera Agent v2 — Native Named Pipe host
 
-Status: Native host and session-bound real SDK/WPD backend implemented / Dual hardware acceptance pending
+Status: Native host implemented / Dual hardware capture blocked by SDK full-close versus session-token conflict
 Schema: `a0.camera-agent.hardware-dual.v2`
+
+## Safety hold (2026-08-31)
+
+Do not use the production binding backend for a real shutter operation yet. The
+current adapter closes the selected SDK source but retains the SDK Module so its
+session-local CAM-A/B tokens remain usable. Opening WPD in that state does not
+meet the accepted requirement that the SDK session and Module be fully ended
+before every WPD access. Calling `EndDualSession` instead destroys those tokens,
+so CAM-B and later pairs cannot continue without re-enumeration/rebinding.
+
+This is an architectural decision gate, not a successful hardware test. The
+read-only SDK-only and WPD-only probes remain valid because they run in separate
+fully closed processes. Real one-shot, 10-pair, 100-pair, and fault tests remain
+blocked. See [DualCamera safety audit 2026-08-31](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md).
 
 This document covers the production Native Named Pipe host process that serves
 the already-implemented Dual hardware v2 parser, durable pair journal store,
@@ -83,10 +97,11 @@ junction paths are all rejected before this process opens the pipe.
 launch contract. Each start request also carries frozen
 `captureProfileSnapshot`/`identitySnapshot` values that the dispatcher validates
 before dispatch. Supplying both `--binding-pipe-name` and `--wpd-camera-map`
-enables one process-owned real backend: the binding pipe first establishes a
+enables one process-owned backend: the binding pipe first establishes a
 memory-only, operator-confirmed CAM-A/B binding, all candidate Live View and SDK
-sources are fully closed, and the same process then serves the capture pipe
-without SDK re-enumeration. Omitting both options preserves the fail-closed
+source objects are closed, but the SDK Module remains loaded to retain the
+session-local tokens. This distinction is why the backend is under the safety
+hold above. Omitting both options preserves the fail-closed
 legacy host; starts return `PairDispatcherUnavailable` after full preflight.
 
 The additive `start-reserved-capture-recovery-only` operation is limited to
@@ -99,7 +114,8 @@ Its separate external/request profile schema is
 `a0.dual-capture-profile.operator-approved.v1` and accepts only `DualCamera`,
 `Nikon D810`, `JPEG Fine`, `L`, `7360x4912`, all of
 `cameraSettingWritesApproved`／`automaticRetryApproved`／
-`actualShutterSynchronizationGuaranteed=false`, and a bounded approval basis.
+`actualShutterSynchronizationGuaranteed=false`, and the fixed approval code
+`operator-approved-capture-recovery-only-v1`.
 Normal capture-profile or rig fields are rejected instead of inferred.
 
 ## Operations

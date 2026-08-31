@@ -445,7 +445,7 @@ static async Task DualHardwareCaptureRecoveryOnlyProtocolAsync()
         false,
         false,
         false,
-        "anonymous-operator-approval");
+        HardwareDualCaptureRecoveryOnlyProfile.RequiredApprovalBasis);
     var request = new DualHardwareCaptureRecoveryOnlyRequest(
         transactionId,
         $@"C:\A0CameraStitcher\transactions\{transactionId:N}",
@@ -507,6 +507,10 @@ static async Task DualHardwareCaptureRecoveryOnlyProtocolAsync()
         captureOnlyProfile with { AutomaticRetryApproved = true },
         captureOnlyProfile with { ActualShutterSynchronizationGuaranteed = true },
         captureOnlyProfile with { ApprovalBasis = "" },
+        captureOnlyProfile with { ApprovalBasis = "operator-approved-test" },
+        captureOnlyProfile with { ApprovalBasis = "D810-serial-123456" },
+        captureOnlyProfile with { ApprovalBasis = @"C:\operator\approval.json" },
+        captureOnlyProfile with { ApprovalBasis = "operator-name-approved" },
     })
     {
         Check.Throws<DualCameraFlowException>(() =>
@@ -570,6 +574,14 @@ static async Task DualHardwareCaptureRecoveryOnlyProtocolAsync()
         queryResponse, "capture-recovery-only-query", transactionId);
     Check.Equal(DualHardwarePairQueryState.Terminal, query.State);
     Check.Equal("Unapproved", query.Result!.A0QualityApproval);
+
+    var unsafeApprovalResult = queryResponse.Replace(
+        HardwareDualCaptureRecoveryOnlyProfile.RequiredApprovalBasis,
+        "operator-approved-test",
+        StringComparison.Ordinal);
+    Check.ThrowsHardwareProtocol("InvalidCaptureRecoveryOnlyResult", () =>
+        DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+            unsafeApprovalResult, "capture-recovery-only-query", transactionId));
 
     var rigMixedResult = queryResponse.Replace(
         "\"pixelDimensions\":\"7360x4912\",",

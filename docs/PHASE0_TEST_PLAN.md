@@ -102,6 +102,13 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ## Phase 0B: 二台順次撮影
 
+> **実機撮影停止（2026-08-31）**
+> SDK-only／WPD-onlyの読み取り専用事前ゲートは合格したが、現production backendは
+> session-local CAM-A/B tokenを保持するためSDK Moduleを残したままWPDを開く。
+> `SDK完全終了 → WPD`と`再列挙なし`を同時に満たせないため、設計判断と再レビューが
+> 完了するまでP0-B2以降を開始しない。詳細は
+> [DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md)を参照する。
+
 ### P0-B1: 二台識別
 
 - binding開始前のSDK台数確認には`A0CameraStitcher.DualCameraAgent --read-only-sdk-probe`を使う。このprobeは恒久identityや候補tokenを生成せず、D810 source数だけを読み取り、SDK process claim・source・moduleをすべて終了してから匿名結果を返す。D810が二台、`cleanupState=ended`、`terminalState=Pass`のすべてを満たす場合だけ次へ進む。

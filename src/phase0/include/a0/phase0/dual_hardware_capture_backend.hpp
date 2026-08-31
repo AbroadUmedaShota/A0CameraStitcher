@@ -6,8 +6,15 @@
 
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 namespace a0::phase0 {
+
+// CaptureRecoveryOnly accepts only the approved D810 JPEG Fine/L dimensions.
+// This is intentionally evaluated over both the recovered PC original and its
+// canonical reread before the exact WPD object becomes eligible for deletion.
+[[nodiscard]] bool HasExpectedDualCaptureJpegDimensions(
+    const std::vector<unsigned char>& bytes) noexcept;
 
 // Real DualCamera leg backend. SDK candidate identity remains inside the
 // binding process; WPD uses a separately registered local alias map.

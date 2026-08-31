@@ -55,6 +55,7 @@ using JsonParser = ::a0::common::protocol_json::BasicJsonParser<DualHardwareJson
 constexpr std::string_view kCameraMode = "DualCamera";
 constexpr std::string_view kCameraAliasA = "CAM-A";
 constexpr std::string_view kCameraAliasB = "CAM-B";
+constexpr std::string_view kCaptureRecoveryOnlyApprovalBasis = "operator-approved-capture-recovery-only-v1";
 
 
 [[noreturn]] void ProtocolFailure(std::string code, std::string message) {
@@ -292,8 +293,7 @@ void ValidateCaptureRecoveryOnlyProfile(const JsonValue& profile) {
         RequireField(profile, "automaticRetryApproved", JsonKind::boolean).boolean ||
         RequireField(profile, "actualShutterSynchronizationGuaranteed", JsonKind::boolean).boolean)
         ProtocolFailure("InvalidPairRequest", "capture-only profile claims an unapproved operation");
-    const auto& approval_basis = RequireField(profile, "approvalBasis", JsonKind::string).string;
-    if (!IsBoundedText(approval_basis, 128))
+    if (RequireField(profile, "approvalBasis", JsonKind::string).string != kCaptureRecoveryOnlyApprovalBasis)
         ProtocolFailure("InvalidPairRequest", "capture-only profile approval basis is invalid");
 }
 void ValidateRigProfile(const JsonValue& profile, std::int64_t started, std::int64_t now,

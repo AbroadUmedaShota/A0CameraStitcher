@@ -270,7 +270,7 @@ void CheckCaptureRecoveryOnlyTerminalJson(
                 "a0.dual-capture-profile.operator-approved.v1",
             std::string(message) + ": terminal must retain the capture-only profile schema");
         Check(TestJsonField(evidence, "captureProfileApprovalBasis", JsonKind::string).string ==
-                "operator-approved-test",
+                "operator-approved-capture-recovery-only-v1",
             std::string(message) + ": terminal must retain the capture-only approval basis");
         Check(TestJsonField(evidence, "cameraModel", JsonKind::string).string == "Nikon D810" &&
               TestJsonField(evidence, "imageFormat", JsonKind::string).string == "JPEG Fine" &&
@@ -301,7 +301,7 @@ std::string CaptureRecoveryOnlyPayload(
         "\"cameraMode\":\"DualCamera\",\"cameraModel\":\"Nikon D810\",\"imageFormat\":\"JPEG Fine\","
         "\"imageSize\":\"L\",\"pixelDimensions\":\"7360x4912\","
         "\"cameraSettingWritesApproved\":false,\"automaticRetryApproved\":false,"
-        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-test\"}"
+        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"}"
         ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
         "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
         "\"captureRecoveryOnlyApproved\":true}"
@@ -981,17 +981,32 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         "CaptureRecoveryOnly must reject an approval for automatic retry");
     const auto extra_capture_only_field = unavailable.Handle(Envelope(
         "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
-            "\"approvalBasis\":\"operator-approved-test\"",
-            "\"approvalBasis\":\"operator-approved-test\",\"profileId\":\"not-allowed\""),
+            "\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"",
+            "\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\",\"profileId\":\"not-allowed\""),
         "request-recovery-only-extra-field"));
     CheckContains(extra_capture_only_field, "\"resultCode\":\"UnexpectedField\"",
         "CaptureRecoveryOnly must reject ordinary profile fields");
     const auto missing_capture_only_field = unavailable.Handle(Envelope(
         "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
-            ",\"approvalBasis\":\"operator-approved-test\"", ""),
+            ",\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"", ""),
         "request-recovery-only-missing-field"));
     CheckContains(missing_capture_only_field, "\"resultCode\":\"UnexpectedField\"",
         "CaptureRecoveryOnly must require every approved profile field");
+
+    for (const auto& unsafe_approval_basis : {
+             "operator-approved-test",
+             "D810-serial-123456",
+             "C:/operator/approval.json",
+             "operator-name-approved",
+         }) {
+        const auto unsafe_approval = unavailable.Handle(Envelope(
+            "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
+                "\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"",
+                "\"approvalBasis\":\"" + std::string(unsafe_approval_basis) + "\""),
+            "request-recovery-only-unsafe-approval-basis"));
+        CheckContains(unsafe_approval, "\"resultCode\":\"InvalidPairRequest\"",
+            "CaptureRecoveryOnly must reject non-fixed approval basis values before backend dispatch");
+    }
 
     const auto normal_missing_rig = unavailable.Handle(Envelope(
         "start-reserved-pair", ReplaceOnce(StartPayload(),

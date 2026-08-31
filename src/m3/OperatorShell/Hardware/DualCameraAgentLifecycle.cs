@@ -63,6 +63,10 @@ public sealed class DualCameraAgentLifecycle :
     private bool _bindingSessionMayNeedCleanup;
     private bool _bindingCancellationResponseReceived;
     private bool _bindingCancellationSucceeded;
+    // Once activation succeeds the binding pipe is intentionally unavailable.
+    // The capture host must therefore be allowed to reach its own terminal state;
+    // shutdown must never cancel it or merely detach from a live process.
+    private bool _captureHostActivated;
     private bool _disposed;
     private long _processGeneration;
 
@@ -102,6 +106,13 @@ public sealed class DualCameraAgentLifecycle :
     public string AgentExecutablePath => _agentExecutablePath;
 
     public long CurrentProcessGeneration => Interlocked.Read(ref _processGeneration);
+
+    /// <summary>
+    /// Exit code observed during an orderly lifecycle shutdown. A non-zero code is
+    /// retained for truthful diagnostics, but an already-exited capture host no
+    /// longer holds the exclusive hardware lease indefinitely.
+    /// </summary>
+    public int? LastObservedAgentExitCode { get; private set; }
 
     public bool IsProcessGenerationAlive(long processGeneration)
     {
@@ -403,6 +414,8 @@ public sealed class DualCameraAgentLifecycle :
             _bindingSessionMayNeedCleanup = false;
             _bindingCancellationResponseReceived = false;
             _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
+            LastObservedAgentExitCode = null;
             return _wireOperations;
         }
         catch (HardwareCameraAgentLaunchException)
@@ -415,6 +428,7 @@ public sealed class DualCameraAgentLifecycle :
             _bindingSessionMayNeedCleanup = false;
             _bindingCancellationResponseReceived = false;
             _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
             throw;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -427,6 +441,7 @@ public sealed class DualCameraAgentLifecycle :
             _bindingSessionMayNeedCleanup = false;
             _bindingCancellationResponseReceived = false;
             _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
             throw new HardwareCameraAgentLaunchException("Dual Camera Agent の開始に失敗しました。", exception);
         }
     }
@@ -519,6 +534,7 @@ public sealed class DualCameraAgentLifecycle :
                 // cancellation is no longer valid and capture recovery owns its
                 // lifetime instead.
                 _bindingSessionMayNeedCleanup = false;
+                _captureHostActivated = true;
             }
             return;
         }
@@ -690,6 +706,7 @@ public sealed class DualCameraAgentLifecycle :
         _bindingSessionMayNeedCleanup = false;
         _bindingCancellationResponseReceived = false;
         _bindingCancellationSucceeded = false;
+        _captureHostActivated = false;
     }
 
     public async ValueTask DisposeAsync()
@@ -703,7 +720,11 @@ public sealed class DualCameraAgentLifecycle :
         try
         {
             Exception? shutdownFailure = null;
-            if (_bindingSessionMayNeedCleanup)
+            if (_captureHostActivated)
+            {
+                shutdownFailure = await WaitForActivatedCaptureHostExitAsync().ConfigureAwait(false);
+            }
+            else if (_bindingSessionMayNeedCleanup)
             {
                 if (!_bindingCancellationResponseReceived)
                 {
@@ -780,6 +801,7 @@ public sealed class DualCameraAgentLifecycle :
             _bindingSessionMayNeedCleanup = false;
             _bindingCancellationResponseReceived = false;
             _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
             _disposed = true;
             shutdownCompleted = true;
         }
@@ -790,6 +812,56 @@ public sealed class DualCameraAgentLifecycle :
             {
                 _operationGate.Dispose();
             }
+        }
+    }
+
+    private async Task<HardwareCameraAgentLaunchException?> WaitForActivatedCaptureHostExitAsync()
+    {
+        if (_process is not { } process)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host cannot be verified for natural exit; the exclusive hardware lease must remain held.",
+                requestMayHaveBeenDispatched: true);
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                await process.WaitForExitAsync(CancellationToken.None)
+                    .WaitAsync(BindingShutdownExitTimeout)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (TimeoutException exception)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host did not exit within the bounded wait; the exclusive hardware lease must remain held.",
+                exception,
+                requestMayHaveBeenDispatched: true);
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                return new HardwareCameraAgentLaunchException(
+                    "Activated capture host exit could not be confirmed; the exclusive hardware lease must remain held.",
+                    requestMayHaveBeenDispatched: true);
+            }
+
+            // An observed non-zero exit is not disguised as success in diagnostics,
+            // but the process has ended naturally, so retaining the physical lease
+            // would no longer protect any live hardware session.
+            LastObservedAgentExitCode = process.ExitCode;
+            return null;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host exit could not be inspected; the exclusive hardware lease must remain held.",
+                exception,
+                requestMayHaveBeenDispatched: true);
         }
     }
 

@@ -46,6 +46,8 @@ public sealed record HardwareDualCaptureRecoveryOnlyProfile(
     bool ActualShutterSynchronizationGuaranteed,
     string ApprovalBasis)
 {
+    public const string RequiredApprovalBasis = "operator-approved-capture-recovery-only-v1";
+
     public void Validate()
     {
         if (!string.Equals(
@@ -59,8 +61,7 @@ public sealed record HardwareDualCaptureRecoveryOnlyProfile(
             !string.Equals(PixelDimensions, "7360x4912", StringComparison.Ordinal) ||
             CameraSettingWritesApproved || AutomaticRetryApproved ||
             ActualShutterSynchronizationGuaranteed ||
-            string.IsNullOrWhiteSpace(ApprovalBasis) || ApprovalBasis.Length > 128 ||
-            ApprovalBasis.Any(char.IsControl))
+            !string.Equals(ApprovalBasis, RequiredApprovalBasis, StringComparison.Ordinal))
         {
             throw new DualCameraFlowException(
                 DualCameraFailureCode.InvalidProfile,

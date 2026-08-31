@@ -7,6 +7,7 @@
 #include "a0/phase0/fake_camera_transport.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 #include <atomic>
 #include <exception>
@@ -1916,6 +1917,52 @@ void TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter() {
     fs::remove_all(root);
 }
 
+void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
+    const std::vector<unsigned char> expected_dimensions_jpeg{
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x08, 0x08, 0x13,
+        0x30, 0x1C, 0xC0, 0x01, 0xFF, 0xD9};
+    Check(HasExpectedDualCaptureJpegDimensions(expected_dimensions_jpeg),
+        "the DualCamera dimension parser must accept exactly 7360x4912");
+    Check(!HasExpectedDualCaptureJpegDimensions({0xFF, 0xD8, 0x01, 0xFF, 0xD9}),
+        "the DualCamera dimension parser must reject a JPEG without SOF dimensions");
+
+    const auto root = NewTestRoot("dual-dimension-gate");
+    HybridWpdFake wpd;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(root / "artifacts", "run-dual-dimension-gate", sdk.SdkVersion());
+
+    const auto result = ExecuteHybridCaptureOnce(
+        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+        std::nullopt,
+        [&](const FrameEvidence& frame) {
+            std::ifstream input(frame.path, std::ios::binary);
+            const std::vector<unsigned char> bytes{
+                std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+            if (input.bad() || !HasExpectedDualCaptureJpegDimensions(bytes)) {
+                throw TransportError(
+                    "dual_jpeg_dimensions_invalid",
+                    "DualCamera original dimensions are not exactly 7360x4912");
+            }
+        });
+
+    Check(result.terminal_state == "FailedPartial" &&
+              result.error_category == "dual_jpeg_dimensions_invalid",
+        "invalid DualCamera dimensions must fail the leg as FailedPartial");
+    Check(result.frames.size() == 1 && result.frames.front().success &&
+              fs::is_regular_file(result.frames.front().path),
+        "invalid dimensions must retain the verified PC original bytes");
+    Check(wpd.delete_attempts == 0 && wpd.delete_successes == 0 &&
+              !result.camera_card_delete_attempted,
+        "invalid dimensions must preserve the exact WPD object without delete");
+    Check(sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1 &&
+              wpd.opens == 2 && wpd.observes == 1,
+        "dimension validation must occur only after SDK close and WPD recovery, without retry");
+    Check(wpd.order == "Wopen;Wbaseline;Wclose;Wopen;Wobserve;Wclose;" &&
+              sdk.order == "Sopen;Scapture;Sclose;",
+        "dimension rejection must keep SDK and WPD sessions non-overlapping");
+    fs::remove_all(root);
+}
+
 void TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry() {
     const auto root = NewTestRoot("hybrid-pair-success");
     HybridWpdFake wpd;
@@ -2812,6 +2859,7 @@ int main() {
         TestPairWatchdogStopsBeforeOpen();
         TestCloseFailureRetainsOriginalAndStopsPair();
         TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter();
+        TestDualCaptureDimensionGateRetainsOriginalAndWpdObject();
         TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry();
         TestHybridPairRecoveryDetectsInterruptionAfterCamA();
         TestHybridPairRecoveryClassifiesActiveStagesAndInvalidEvidence();

@@ -518,9 +518,10 @@ public static class DualHardwareCameraAgentProtocolCodec
                 result.Evidence.CaptureProfileSchemaVersion,
                 "a0.dual-capture-profile.operator-approved.v1",
                 StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(result.Evidence.CaptureProfileApprovalBasis) ||
-            result.Evidence.CaptureProfileApprovalBasis.Length > 128 ||
-            result.Evidence.CaptureProfileApprovalBasis.Any(char.IsControl) ||
+            !string.Equals(
+                result.Evidence.CaptureProfileApprovalBasis,
+                HardwareDualCaptureRecoveryOnlyProfile.RequiredApprovalBasis,
+                StringComparison.Ordinal) ||
             !string.Equals(result.Evidence.CameraModel, "Nikon D810", StringComparison.Ordinal) ||
             !string.Equals(result.Evidence.ImageFormat, "JPEG Fine", StringComparison.Ordinal) ||
             !string.Equals(result.Evidence.ImageSize, "L", StringComparison.Ordinal) ||

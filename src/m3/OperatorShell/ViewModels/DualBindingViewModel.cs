@@ -121,6 +121,10 @@ public sealed class DualBindingViewModel : ObservableObject
     private bool _shutdownBlocked;
     private string _invalidationText = string.Empty;
     private bool _isBusy;
+    // This remains true after the child has naturally exited. The dynamic
+    // IsCaptureHostActivated property correctly becomes false then, but shutdown
+    // must still never attempt to send cancel-binding to the retired pipe.
+    private bool _captureHostActivationAcknowledged;
 
     public DualBindingViewModel(DualBindingSessionClient client, bool isRequired = false)
     {
@@ -423,6 +427,7 @@ public sealed class DualBindingViewModel : ObservableObject
         var reply = await _client.ActivateCaptureAsync(cancellationToken).ConfigureAwait(true);
         if (reply.Value is not null)
         {
+            _captureHostActivationAcknowledged = true;
             OnPropertyChanged(nameof(IsCaptureHostActivated));
             NotifyCommandsChanged();
             Notify("機体照合を同じAgentの撮影処理へ引き継ぎました。", "info");
@@ -462,7 +467,7 @@ public sealed class DualBindingViewModel : ObservableObject
         // Activation already performed the native Live View/SDK handoff. The
         // binding pipe can no longer accept cancel-binding; process cleanup is
         // owned by DualCameraAgentLifecycle.DisposeAsync instead.
-        if (IsCaptureHostActivated)
+        if (_captureHostActivationAcknowledged)
         {
             return null;
         }
@@ -499,7 +504,11 @@ public sealed class DualBindingViewModel : ObservableObject
 
     public void ReportShutdownBlocked(string blockingCode)
     {
-        ClearSessionSurface();
+        // A timeout after ActivateCapture must keep the one-way handoff marker:
+        // the next explicit window-close attempt must wait again, never send the
+        // retired binding pipe a cancel-binding request because the child happened
+        // to exit between attempts.
+        ClearSessionSurface(preserveCaptureHostActivationAcknowledgement: true);
         IsShutdownBlocked = true;
         Phase = DualBindingPhase.Invalid;
         InvalidationText =
@@ -723,8 +732,12 @@ public sealed class DualBindingViewModel : ObservableObject
         _ => "不明",
     };
 
-    private void ClearSessionSurface()
+    private void ClearSessionSurface(bool preserveCaptureHostActivationAcknowledgement = false)
     {
+        if (!preserveCaptureHostActivationAcknowledgement)
+        {
+            _captureHostActivationAcknowledged = false;
+        }
         Candidates.Clear();
         SummaryLines.Clear();
         SelectedCandidate = null;

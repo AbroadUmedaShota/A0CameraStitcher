@@ -352,7 +352,7 @@ std::string CaptureRecoveryOnlyEnvelope(
         "\"cameraMode\":\"DualCamera\",\"cameraModel\":\"Nikon D810\",\"imageFormat\":\"JPEG Fine\","
         "\"imageSize\":\"L\",\"pixelDimensions\":\"7360x4912\","
         "\"cameraSettingWritesApproved\":false,\"automaticRetryApproved\":false,"
-        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-test\"}"
+        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"}"
         ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
         "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
         "\"captureRecoveryOnlyApproved\":true}"

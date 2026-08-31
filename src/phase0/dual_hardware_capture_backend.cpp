@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -18,6 +19,9 @@ namespace fs = std::filesystem;
 
 namespace a0::phase0 {
 namespace {
+
+constexpr std::uint16_t kDualCaptureOriginalWidth = 7360U;
+constexpr std::uint16_t kDualCaptureOriginalHeight = 4912U;
 
 std::string NormalizeSettingLabel(std::string_view label) {
     std::string normalized;
@@ -161,6 +165,7 @@ void PublishCanonicalCopy(
     const std::vector<unsigned char> bytes{
         std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     if (input.bad() || bytes.size() != frame.bytes || !IsValidJpeg(bytes) ||
+        !HasExpectedDualCaptureJpegDimensions(bytes) ||
         Sha256Hex(bytes) != frame.sha256) {
         throw TransportError("canonical_source_verification_failed",
                              "Verified recovery source could not be revalidated");
@@ -197,13 +202,50 @@ void PublishCanonicalCopy(
     const std::vector<unsigned char> persisted_bytes{
         std::istreambuf_iterator<char>(persisted), std::istreambuf_iterator<char>()};
     if (persisted.bad() || persisted_bytes.size() != frame.bytes ||
-        !IsValidJpeg(persisted_bytes) || Sha256Hex(persisted_bytes) != frame.sha256) {
+        !IsValidJpeg(persisted_bytes) ||
+        !HasExpectedDualCaptureJpegDimensions(persisted_bytes) ||
+        Sha256Hex(persisted_bytes) != frame.sha256) {
         throw TransportError("canonical_verification_failed",
                              "Canonical original failed reread verification");
     }
 }
 
 } // namespace
+
+bool HasExpectedDualCaptureJpegDimensions(
+    const std::vector<unsigned char>& bytes) noexcept {
+    if (!IsValidJpeg(bytes)) return false;
+    std::size_t offset = 2;
+    while (offset + 1 < bytes.size()) {
+        if (bytes[offset++] != 0xFFU) return false;
+        while (offset < bytes.size() && bytes[offset] == 0xFFU) ++offset;
+        if (offset >= bytes.size()) return false;
+        const unsigned char marker = bytes[offset++];
+        if (marker == 0x00U || marker == 0xD9U || marker == 0xDAU) return false;
+        if (marker == 0x01U || (marker >= 0xD0U && marker <= 0xD7U)) continue;
+        if (offset + 2 > bytes.size()) return false;
+        const std::size_t segment_length =
+            (static_cast<std::size_t>(bytes[offset]) << 8U) |
+            static_cast<std::size_t>(bytes[offset + 1]);
+        if (segment_length < 2 || segment_length > bytes.size() - offset) return false;
+        const bool is_start_of_frame =
+            marker >= 0xC0U && marker <= 0xCFU &&
+            marker != 0xC4U && marker != 0xC8U && marker != 0xCCU;
+        if (is_start_of_frame) {
+            if (segment_length < 7) return false;
+            const std::uint16_t height = static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(bytes[offset + 3]) << 8U) |
+                bytes[offset + 4]);
+            const std::uint16_t width = static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(bytes[offset + 5]) << 8U) |
+                bytes[offset + 6]);
+            return width == kDualCaptureOriginalWidth &&
+                height == kDualCaptureOriginalHeight;
+        }
+        offset += segment_length;
+    }
+    return false;
+}
 
 DualBoundPairCaptureBackend::DualBoundPairCaptureBackend(
     DualBindingCameraAgentDispatcher& binding_dispatcher,
@@ -253,7 +295,12 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
     BoundNikonCardCaptureTransport sdk(sdk_adapter_, token);
     const auto result = ExecuteHybridCaptureOnce(
         wpd, wpd, sdk, sdk, evidence, alias, *wpd_identity, token, {}, {}, {},
-        deadline, {}, [&] {
+        deadline, [&](const FrameEvidence& frame) {
+            // The core keeps the WPD object untouched until this callback
+            // returns. Persist and verify the requested canonical original
+            // (including dimensions) before making deletion eligible.
+            PublishCanonicalCopy(frame, canonical_original_path, deadline);
+        }, [&] {
             if (sdk_adapter_->PollInvalidation() != DualIdentityInvalidationReason::None) {
                 throw TransportError("dual_binding_invalidated",
                                      "Dual binding invalidated before shutter command");
@@ -270,7 +317,6 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
     outcome.spool_empty_after_delete = result.spool_empty_after_cleanup;
     if (!outcome.succeeded) return outcome;
 
-    PublishCanonicalCopy(result.frames.front(), canonical_original_path, deadline);
     outcome.succeeded = true;
     return outcome;
 }
