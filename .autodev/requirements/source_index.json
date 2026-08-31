@@ -1,7 +1,7 @@
 {
   "schema_version": "autodev.source-index.v1",
-  "requirements_version": "2.9.0",
-  "generated_at": "2026-08-27",
+  "requirements_version": "2.10.0",
+  "generated_at": "2026-08-31",
   "sources": [
     {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"]},
     {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","CON-001","CON-003","CON-004"]},

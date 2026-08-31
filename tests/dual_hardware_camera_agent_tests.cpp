@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -177,10 +178,14 @@ std::string Envelope(
     std::string_view operation,
     std::string_view payload,
     std::string_view request_id = "request-contract-1",
-    std::string_view schema = "a0.camera-agent.hardware-dual.v2",
+    std::string_view schema = {},
     std::string_view marker = "Hardware",
     std::string_view simulation = "false") {
-    return "{\"schemaVersion\":\"" + std::string(schema) +
+    const std::string_view resolved_schema = schema.empty() &&
+        operation == "start-reserved-capture-recovery-only"
+        ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+        : (schema.empty() ? kDualHardwareCameraAgentSchemaVersion : schema);
+    return "{\"schemaVersion\":\"" + std::string(resolved_schema) +
         "\",\"simulation\":" + std::string(simulation) +
         ",\"marker\":\"" + std::string(marker) +
         "\",\"requestId\":\"" + std::string(request_id) +
@@ -232,6 +237,17 @@ std::string StartPayload(
         "\"rigProfileFrozen\":true,\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true}"
         ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
         ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
+}
+
+std::string CaptureRecoveryOnlyEnvelope(
+    std::string_view operation,
+    std::string_view payload,
+    std::string_view request_id) {
+    return Envelope(
+        operation,
+        payload,
+        request_id,
+        kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion);
 }
 
 struct TestJsonFailure final {
@@ -322,17 +338,44 @@ DualHardwareCameraAgentDispatcher CreateFixedDispatcher(
 
 class RecordingFakePairBackend final : public DualHardwareFakePairCaptureBackend {
 public:
+    bool preflight_ready{true};
+    bool throw_preflight{};
+    std::optional<DualHardwarePairPreflightOutcome> forced_preflight_outcome;
+    std::size_t preflight_calls{};
+    std::vector<bool> preflight_capture_recovery_only;
+    std::vector<std::string> events;
     std::vector<DualHardwareFakeCaptureOutcome> outcomes;
     std::string throw_alias;
     std::vector<std::string> aliases;
     std::vector<fs::path> paths;
     std::vector<std::int64_t> deadlines;
     std::function<void(std::string_view, const fs::path&)> after_capture;
+    std::string invalidate_after_alias;
+    DualIdentityInvalidationReason invalidation_after_capture{
+        DualIdentityInvalidationReason::None};
+    DualIdentityInvalidationReason last_invalidation{
+        DualIdentityInvalidationReason::None};
+
+    DualHardwarePairPreflightOutcome PreflightPair(
+        bool capture_recovery_only,
+        std::int64_t) override {
+        ++preflight_calls;
+        preflight_capture_recovery_only.push_back(capture_recovery_only);
+        events.emplace_back("preflight");
+        if (throw_preflight) {
+            throw std::runtime_error("anonymous fake preflight failure");
+        }
+        if (forced_preflight_outcome) return *forced_preflight_outcome;
+        return {preflight_ready ? DualHardwarePairPreflightState::Ready :
+                DualHardwarePairPreflightState::HardwarePending,
+                DualIdentityInvalidationReason::None, false, false};
+    }
 
     DualHardwareFakeCaptureOutcome Capture(
         std::string_view alias,
         const fs::path& canonical_original_path,
         std::int64_t watchdog_deadline_100ns) override {
+        events.emplace_back("capture:" + std::string(alias));
         aliases.emplace_back(alias);
         paths.push_back(canonical_original_path);
         deadlines.push_back(watchdog_deadline_100ns);
@@ -346,7 +389,14 @@ public:
             WriteText(canonical_original_path, "anonymous-fake-original");
         }
         if (after_capture) after_capture(alias, canonical_original_path);
+        if (alias == invalidate_after_alias) {
+            last_invalidation = invalidation_after_capture;
+        }
         return outcome;
+    }
+
+    DualIdentityInvalidationReason LastBindingInvalidationReason() const noexcept override {
+        return last_invalidation;
     }
 };
 
@@ -395,6 +445,10 @@ void TestCapabilitiesAndRecognizedOperations() {
         "capabilities must require query-only recovery for the same transaction");
     CheckContains(capabilities, "\"automaticRetryCount\":0",
         "capabilities must prohibit automatic retries");
+    CheckNotContains(capabilities, "ordinaryPairCaptureAvailable",
+        "ordinary v2 capabilities must keep the pre-exception field shape");
+    CheckNotContains(capabilities, "captureRecoveryOnlyAvailable",
+        "an additive operation must not add a required v2 availability field");
 
     const auto reservation = dispatcher.Handle(Envelope(
         "reserve-pair-transaction", ReservationPayload()));
@@ -408,6 +462,11 @@ void TestCapabilitiesAndRecognizedOperations() {
         "start-reserved-pair", StartPayload()));
     CheckContains(start, "\"resultCode\":\"PairDispatcherUnavailable\"",
         "start must be recognized and fail typed while dispatch is absent");
+    CheckContains(start,
+        "\"payload\":{\"transactionId\":\"0123456789abcdef0123456789abcdef\",\"dispatchStarted\":false}",
+        "ordinary unavailable start must retain the exact legacy v2 payload shape");
+    CheckNotContains(start, "preflightBlock",
+        "ordinary v2 start must not gain CaptureRecoveryOnly preflight fields");
 
     const auto query = dispatcher.Handle(Envelope(
         "get-pair-transaction-result",
@@ -902,6 +961,11 @@ void TestFakePairBackendSuccessAndRestartQuery() {
         "ordinary pair terminal must retain its established rig profile identifier");
     CheckNotContains(response, "\"capturePurpose\":\"CaptureRecoveryOnly\"",
         "ordinary pair terminal must not acquire CaptureRecoveryOnly semantics");
+    Check(backend->preflight_calls == 1 &&
+          backend->preflight_capture_recovery_only == std::vector<bool>{false} &&
+          backend->events == std::vector<std::string>{
+              "preflight", "capture:CAM-A", "capture:CAM-B"},
+        "ordinary pair must preflight once before CAM-A and CAM-B");
     Check(backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
         "the fake orchestrator must invoke CAM-A then CAM-B exactly once");
     Check(backend->paths.size() == 2 &&
@@ -928,13 +992,165 @@ void TestFakePairBackendSuccessAndRestartQuery() {
     Check(backend->aliases.size() == 2, "restart query must not invoke the backend again");
 }
 
+void TestPairPreflightFailureIsConfirmedUndispatched() {
+    for (const bool throw_preflight : {false, true}) {
+        TempSandbox sandbox;
+        const std::string transaction_id = throw_preflight
+            ? "79797979797979797979797979797979"
+            : "78787878787878787878787878787878";
+        const fs::path store_root = sandbox.Child(
+            throw_preflight ? "preflight-throw-store" : "preflight-block-store");
+        const fs::path transaction_root = sandbox.Child(
+            throw_preflight ? "preflight-throw-transaction" :
+                              "preflight-block-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        backend->preflight_ready = false;
+        backend->throw_preflight = throw_preflight;
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+
+        const auto response = dispatcher.Handle(Envelope(
+            "start-reserved-capture-recovery-only",
+            CaptureRecoveryOnlyPayload(
+                transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()),
+            throw_preflight ? "request-preflight-throw" :
+                              "request-preflight-block"));
+        CheckContains(response, "\"success\":true",
+            "preflight block must return a valid correlated response");
+        CheckContains(response, "\"resultCode\":\"PairDispatchAccepted\"",
+            "preflight block must use the dispatch result envelope");
+        CheckContains(response,
+            throw_preflight
+                ? "\"dispatchState\":\"ConfirmedUndispatched\",\"preflightBlock\":{\"state\":\"BindingInvalidated\""
+                : "\"dispatchState\":\"ConfirmedUndispatched\",\"preflightBlock\":{\"state\":\"HardwarePending\"",
+            "preflight block must explicitly prove no dispatch occurred");
+        Check(backend->preflight_calls == 1 &&
+              backend->preflight_capture_recovery_only ==
+                  std::vector<bool>{true} &&
+              backend->events == std::vector<std::string>{"preflight"} &&
+              backend->aliases.empty() && backend->paths.empty(),
+            "preflight failure or exception must prevent both shutter paths");
+        const auto reserved = store->Query(transaction_id);
+        Check(reserved && reserved->state ==
+                  DualHardwarePairJournalState::reserved,
+            "confirmed-undispatched must leave the exact reservation closable");
+        const auto counters = dispatcher.SafetyCounters();
+        Check(counters.pair_dispatch_count == 0 &&
+              counters.automatic_retry_count == 0,
+            "preflight block must not count a dispatch or retry");
+
+        if (throw_preflight) {
+            Check(!reserved->confirmed_undispatched_preflight_block_json.empty(),
+                "fatal preflight block must be durable before the response can be lost");
+            auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+            auto restarted_backend = std::make_shared<RecordingFakePairBackend>();
+            DualHardwareCameraAgentDispatcher restarted(
+                restarted_store, [] { return FixedNow(); }, restarted_backend);
+            const auto queried = restarted.Handle(CaptureRecoveryOnlyEnvelope(
+                "get-pair-transaction-result",
+                "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-restart-preflight-query"));
+            CheckContains(queried, "\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+                "fresh host query after ACK loss must recover the fatal preflight block");
+            const auto replayed = restarted.Handle(Envelope(
+                "start-reserved-capture-recovery-only",
+                CaptureRecoveryOnlyPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                    transaction_root.generic_string()),
+                "request-restart-preflight-start"));
+            CheckContains(replayed, "\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+                "restarting the same blocked transaction must return its durable block");
+            Check(restarted_backend->preflight_calls == 0 && restarted_backend->aliases.empty(),
+                "a durable fatal preflight block must prevent a second preflight or shutter");
+            const auto fresh_closed = restarted.Handle(CaptureRecoveryOnlyEnvelope(
+                "close-reserved-pair-transaction",
+                "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-restart-preflight-close"));
+            CheckContains(fresh_closed,
+                "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+                "a fresh host must close the exact fatal reservation without dispatch");
+            Check(restarted.ShouldStop(),
+                "a fresh host must terminalize after closing a durable fatal preflight block");
+        }
+
+        const auto closed = dispatcher.Handle(CaptureRecoveryOnlyEnvelope(
+            "close-reserved-pair-transaction",
+            "{\"transactionId\":\"" + transaction_id + "\"}",
+            "request-close-preflight-block"));
+        CheckContains(closed,
+            "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "the caller must be able to durably close the exact reservation");
+        Check(dispatcher.ShouldStop() == throw_preflight,
+            "only fatal preflight may stop the host after its exact reservation close");
+
+        if (throw_preflight) {
+            auto closed_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+            DualHardwareCameraAgentDispatcher fresh_query(closed_store);
+            const auto queried = fresh_query.Handle(CaptureRecoveryOnlyEnvelope(
+                "get-pair-transaction-result",
+                "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-restart-preflight-closed-query"));
+            CheckContains(queried, "\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+                "closed tombstone must retain the fatal preflight block after restart");
+            Check(fresh_query.ShouldStop(),
+                "fresh host must terminalize after observing a closed fatal preflight tombstone");
+        }
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d";
+        const fs::path store_root = sandbox.Child("malformed-preflight-store");
+        const fs::path transaction_root = sandbox.Child("malformed-preflight-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        backend->forced_preflight_outcome = DualHardwarePairPreflightOutcome{
+            DualHardwarePairPreflightState::BindingInvalidated,
+            DualIdentityInvalidationReason::None, true, true};
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        const auto rejected = dispatcher.Handle(Envelope(
+            "start-reserved-capture-recovery-only",
+            CaptureRecoveryOnlyPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()),
+            "request-malformed-preflight"));
+        CheckContains(rejected, "\"resultCode\":\"InvalidPreflightOutcome\"",
+            "a malformed fatal preflight outcome must fail closed");
+        const auto reserved = store->Query(transaction_id);
+        Check(reserved && reserved->confirmed_undispatched_preflight_block_json.empty() &&
+              backend->aliases.empty(),
+            "a malformed fatal preflight outcome must not persist a block or start capture");
+    }
+}
+
 void TestCaptureRecoveryOnlyContractAndNoRetry() {
     DualHardwareCameraAgentDispatcher unavailable({}, [] { return FixedNow(); });
     const auto complete = unavailable.Handle(Envelope(
         "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(),
         "request-recovery-only-unavailable"));
+    CheckContains(complete,
+        "\"schemaVersion\":\"a0.camera-agent.hardware-dual-capture-recovery-only.v1\"",
+        "CaptureRecoveryOnly responses must use the isolated schema");
     CheckContains(complete, "\"resultCode\":\"PairDispatcherUnavailable\"",
         "a complete CaptureRecoveryOnly request must reach the unavailable backend boundary");
+
+    const auto wrong_protocol = unavailable.Handle(Envelope(
+        "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(),
+        "request-recovery-only-wrong-protocol",
+        kDualHardwareCameraAgentSchemaVersion));
+    CheckContains(wrong_protocol, "\"resultCode\":\"DualHardwareProtocolRequired\"",
+        "the stable ordinary v2 schema must reject CaptureRecoveryOnly start payloads");
+
+    const auto capture_only_query = unavailable.Handle(CaptureRecoveryOnlyEnvelope(
+        "get-pair-transaction-result",
+        "{\"transactionId\":\"0123456789abcdef0123456789abcdef\"}",
+        "request-recovery-only-query-unavailable"));
+    CheckContains(capture_only_query,
+        "\"schemaVersion\":\"a0.camera-agent.hardware-dual-capture-recovery-only.v1\"",
+        "CaptureRecoveryOnly same-ID query must stay on the isolated schema");
 
     const auto missing_approval = unavailable.Handle(Envelope(
         "start-reserved-capture-recovery-only", ReplaceOnce(CaptureRecoveryOnlyPayload(),
@@ -1026,7 +1242,10 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         std::string_view transaction_id,
         std::vector<DualHardwareFakeCaptureOutcome> outcomes,
         std::vector<std::chrono::system_clock::time_point> times =
-            std::vector<std::chrono::system_clock::time_point>(4, FixedNow())) {
+            std::vector<std::chrono::system_clock::time_point>(4, FixedNow()),
+        std::string invalidate_after_alias = {},
+        DualIdentityInvalidationReason invalidation_after_capture =
+            DualIdentityInvalidationReason::None) {
         auto sandbox = std::make_unique<TempSandbox>();
         const fs::path store_root = sandbox->Child(std::string(name) + "-store");
         const fs::path transaction_root = sandbox->Child(std::string(name) + "-transaction");
@@ -1034,6 +1253,8 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         (void)store->Reserve(transaction_id);
         auto backend = std::make_shared<RecordingFakePairBackend>();
         backend->outcomes = std::move(outcomes);
+        backend->invalidate_after_alias = std::move(invalidate_after_alias);
+        backend->invalidation_after_capture = invalidation_after_capture;
         auto time_index = std::make_shared<std::size_t>(0);
         DualHardwareCameraAgentDispatcher dispatcher(store,
             [times = std::move(times), time_index] {
@@ -1056,7 +1277,7 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
                                          std::string_view name) {
         auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
         DualHardwareCameraAgentDispatcher restarted(restarted_store);
-        const auto replay = restarted.Handle(Envelope("get-pair-transaction-result",
+        const auto replay = restarted.Handle(CaptureRecoveryOnlyEnvelope("get-pair-transaction-result",
             "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
             "request-recovery-only-replay-" + std::string(name)));
         CheckContains(replay, "\"resultCode\":\"PairTransactionFound\"",
@@ -1076,6 +1297,12 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         "CaptureRecoveryOnly success must not claim A0 quality approval");
     CheckNotContains(success_response, "rigProfile",
         "CaptureRecoveryOnly terminal evidence must not contain rig profile evidence");
+    Check(success_backend->preflight_calls == 1 &&
+          success_backend->preflight_capture_recovery_only ==
+              std::vector<bool>{true} &&
+          success_backend->events == std::vector<std::string>{
+              "preflight", "capture:CAM-A", "capture:CAM-B"},
+        "CaptureRecoveryOnly must preflight once before either shutter");
     Check(success_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"},
         "CaptureRecoveryOnly success must capture CAM-A then CAM-B exactly once without retry");
     Check(fs::is_regular_file(success_root / "CAM-A" / "original.jpg") &&
@@ -1107,6 +1334,45 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
     CheckCaptureRecoveryOnlyTerminalJson(b_failure_response, "FailedPartial",
         "CaptureRecoveryOnly CAM-B failure response");
     check_durable_replay(b_failure_store_root, b_failure_transaction_id, "FailedPartial", "b-failure");
+
+    auto [a_cleanup_sandbox, a_cleanup_response, a_cleanup_backend, a_cleanup_root,
+          a_cleanup_store, a_cleanup_transaction] = run(
+        "a-cleanup", "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a", {{false, true, true}},
+        std::vector<std::chrono::system_clock::time_point>(4, FixedNow()),
+        "CAM-A", DualIdentityInvalidationReason::SdkError);
+    CheckContains(a_cleanup_response, "\"terminalState\":\"Failed\"",
+        "CAM-A cleanup failure must terminalize as Failed");
+    CheckContains(a_cleanup_response, "\"bindingInvalidationReason\":\"SdkError\"",
+        "CAM-A cleanup failure must preserve the typed binding invalidation reason");
+    Check(a_cleanup_backend->aliases == std::vector<std::string>{"CAM-A"},
+        "CAM-A cleanup failure must prevent CAM-B from starting");
+
+    auto [b_cleanup_sandbox, b_cleanup_response, b_cleanup_backend, b_cleanup_root,
+          b_cleanup_store, b_cleanup_transaction] = run(
+        "b-cleanup", "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+        {{true, true, true}, {false, true, true}},
+        std::vector<std::chrono::system_clock::time_point>(4, FixedNow()), "CAM-B",
+        DualIdentityInvalidationReason::SdkError);
+    CheckContains(b_cleanup_response, "\"terminalState\":\"FailedPartial\"",
+        "CAM-B cleanup failure must terminalize as FailedPartial");
+    CheckContains(b_cleanup_response, "\"bindingInvalidationReason\":\"SdkError\"",
+        "CAM-B cleanup failure must preserve the typed binding invalidation reason");
+    Check(b_cleanup_backend->aliases == std::vector<std::string>{"CAM-A", "CAM-B"} &&
+          fs::is_regular_file(b_cleanup_root / "CAM-A" / "original.jpg"),
+        "CAM-B cleanup failure must retain CAM-A without retry");
+
+    auto [success_invalid_sandbox, success_invalid_response, success_invalid_backend,
+          success_invalid_root, success_invalid_store, success_invalid_transaction] = run(
+        "success-invalid", "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        {{true, true, true}, {true, true, true}},
+        std::vector<std::chrono::system_clock::time_point>(4, FixedNow()), "CAM-B",
+        DualIdentityInvalidationReason::SdkError);
+    CheckNotContains(success_invalid_response, "\"terminalState\":\"Succeeded\"",
+        "a success-shaped capture with an invalid binding must fail closed");
+    CheckContains(success_invalid_response, "\"terminalState\":\"FailedPartial\"",
+        "a success-shaped capture with an invalid binding must become FailedPartial");
+    CheckContains(success_invalid_response, "\"bindingInvalidationReason\":\"SdkError\"",
+        "defensive invalid-success terminalization must retain the reason");
 
     auto [a_exact_sandbox, a_exact_response, a_exact_backend, a_exact_root,
           a_exact_store_root, a_exact_transaction_id] = run(
@@ -1174,7 +1440,10 @@ void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
     const auto run = [](std::string_view name,
                          std::vector<DualHardwareFakeCaptureOutcome> outcomes,
                          std::string throw_alias,
-                         std::vector<std::chrono::system_clock::time_point> times) {
+                         std::vector<std::chrono::system_clock::time_point> times,
+                         std::string invalidate_after_alias = {},
+                         DualIdentityInvalidationReason invalidation_after_capture =
+                             DualIdentityInvalidationReason::None) {
         auto sandbox = std::make_unique<TempSandbox>();
         const std::string transaction_id = name == "a-fail"
             ? "88888888888888888888888888888888"
@@ -1188,6 +1457,8 @@ void TestFakePairBackendFailuresAndDeadlineAreNoRetry() {
         auto backend = std::make_shared<RecordingFakePairBackend>();
         backend->outcomes = std::move(outcomes);
         backend->throw_alias = std::move(throw_alias);
+        backend->invalidate_after_alias = std::move(invalidate_after_alias);
+        backend->invalidation_after_capture = invalidation_after_capture;
         auto time_index = std::make_shared<std::size_t>(0);
         DualHardwareCameraAgentDispatcher dispatcher(store, [times = std::move(times), time_index] {
             const auto index = (std::min)(*time_index, times.size() - 1);
@@ -1426,6 +1697,7 @@ int main() {
     TestInjectedPairStoreReservationAndRestartQuery();
     TestCloseReservedPairOperationIsExactAndDurable();
     TestFakePairBackendSuccessAndRestartQuery();
+    TestPairPreflightFailureIsConfirmedUndispatched();
     TestCaptureRecoveryOnlyContractAndNoRetry();
     TestFakePairBackendFailuresAndDeadlineAreNoRetry();
     TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch();

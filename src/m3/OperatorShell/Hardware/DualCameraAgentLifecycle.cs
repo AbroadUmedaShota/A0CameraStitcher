@@ -231,6 +231,25 @@ public sealed class DualCameraAgentLifecycle :
             (operations, token) => operations.QueryCaptureRecoveryOnlyTransactionAsync(transactionId, token),
             cancellationToken);
 
+    public async Task<DualHardwareCloseState> CloseCaptureRecoveryOnlyReservedPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.CloseCaptureRecoveryOnlyReservedPairTransactionAsync(
+                        transactionId,
+                        token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException)
+        {
+            return DualHardwareCloseState.ResponseUnknown;
+        }
+    }
+
     /// <summary>
     /// Serves the operator binding protocol through the same child process as the
     /// subsequent capture protocol. A WPD map is mandatory on this path; capture-only

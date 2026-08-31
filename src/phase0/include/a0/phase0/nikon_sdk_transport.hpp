@@ -36,6 +36,10 @@ public:
         std::chrono::seconds timeout) = 0;
     [[nodiscard]] virtual DualIdentityInvalidationReason PollDualInvalidation() = 0;
     virtual void EndDualSession(std::chrono::seconds timeout) = 0;
+    // Last-resort process isolation for an unconfirmed WPD cleanup boundary.
+    // This must not call the SDK: the owner is intentionally retained until
+    // process exit rather than risking a cross-transport API call.
+    virtual void AbandonDualSessionNoSdkCalls() noexcept = 0;
     struct ExitState {
         bool process_claim_retained{};
         bool module_retained{};
@@ -46,6 +50,23 @@ public:
         }
     };
     [[nodiscard]] virtual ExitState InspectDualSessionExitState() const noexcept = 0;
+};
+
+// Anonymous, in-process proof of the ADR-0028 boundary. The retained manager
+// Module and its process claim may remain active only while both SDK source
+// count and Live View are zero. Candidate tokens never cross this boundary.
+struct NikonDualRetainedModuleState {
+    bool process_claim_retained{};
+    bool module_retained{};
+    std::size_t open_source_count{};
+    bool live_view_active{};
+    std::size_t active_candidate_count{};
+
+    [[nodiscard]] bool ReadyForReadOnlyWpd() const noexcept {
+        return process_claim_retained && module_retained &&
+            open_source_count == 0 && !live_view_active &&
+            active_candidate_count == kDualIdentityRequiredCandidateCount;
+    }
 };
 
 // Derives the private SDK-side identity from documented, source-level MAID
@@ -148,6 +169,7 @@ public:
     void CloseDualSourceKeepingModule(std::chrono::seconds timeout) override;
     [[nodiscard]] DualIdentityInvalidationReason PollDualInvalidation() override;
     void EndDualSession(std::chrono::seconds timeout) override;
+    void AbandonDualSessionNoSdkCalls() noexcept override;
     [[nodiscard]] INikonDualSessionTransport::ExitState
         InspectDualSessionExitState() const noexcept override;
     [[nodiscard]] static bool LicensedAdapterAvailable() noexcept;
@@ -193,6 +215,9 @@ public:
         std::chrono::seconds transaction_timeout);
     void CloseBoundCapture(std::chrono::seconds timeout);
     void EndSession(std::chrono::seconds timeout);
+    void AbandonSessionNoSdkCalls() noexcept;
+    [[nodiscard]] NikonDualRetainedModuleState
+        InspectRetainedModuleState() const noexcept;
 
 private:
     [[nodiscard]] std::string CandidateToken(std::size_t ordinal) const;
@@ -204,6 +229,7 @@ private:
     DualIdentityInvalidationReason pending_invalidation_{
         DualIdentityInvalidationReason::None};
     bool explicit_end_attempted_{};
+    bool abandoned_{};
 };
 
 enum class DualSdkReadOnlyProbeError {

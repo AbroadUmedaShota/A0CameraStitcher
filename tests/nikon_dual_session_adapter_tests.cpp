@@ -1,7 +1,9 @@
+#include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -41,6 +43,7 @@ public:
     std::size_t end_count{};
     std::size_t capture_count{};
     std::size_t status_probe_count{};
+    std::size_t invalidation_poll_count{};
     std::size_t concurrent_source_violation_count{};
     std::vector<std::string> opened_tokens;
 
@@ -126,6 +129,7 @@ public:
     }
 
     DualIdentityInvalidationReason PollDualInvalidation() override {
+        ++invalidation_poll_count;
         return invalidation;
     }
 
@@ -146,9 +150,16 @@ public:
         }
     }
 
+    void AbandonDualSessionNoSdkCalls() noexcept override {
+        // Deliberately do not touch any SDK-shaped state or count EndSession.
+        abandoned = true;
+    }
+
     ExitState InspectDualSessionExitState() const noexcept override {
         return {process_claimed, module_active, source_open};
     }
+
+    bool abandoned{};
 
 private:
     void Open(std::string_view token, bool capture) {
@@ -164,6 +175,70 @@ private:
         capture_source = capture;
         ++source_open_count;
         opened_tokens.emplace_back(token);
+    }
+};
+
+constexpr std::string_view kPreflightCamA = "fixture-preflight-wpd-a";
+constexpr std::string_view kPreflightCamB = "fixture-preflight-wpd-b";
+
+CameraInfo PreflightCamera(std::string_view identity) {
+    return {"D810", "fixture-firmware", "photo", std::string(identity)};
+}
+
+IdentityMap PreflightMap() {
+    return IdentityMap(
+        "fixture-preflight-map.json",
+        std::string(kPreflightCamA),
+        std::string(kPreflightCamB));
+}
+
+class RecordingPairPreflightWpdTransport final
+    : public IWpdDualReadOnlyProbeTransport {
+public:
+    std::vector<std::vector<CameraInfo>> inventories{
+        {PreflightCamera(kPreflightCamA), PreflightCamera(kPreflightCamB)},
+        {PreflightCamera(kPreflightCamB), PreflightCamera(kPreflightCamA)},
+        {PreflightCamera(kPreflightCamA), PreflightCamera(kPreflightCamB)},
+    };
+    std::function<void(std::size_t)> on_access;
+    std::size_t inventory_index{};
+    std::size_t access_count{};
+    std::size_t cam_a_payload_count{};
+    std::size_t cam_b_payload_count{};
+    bool cleanup_leaves_session_open{};
+    bool session_open{};
+
+    std::vector<CameraInfo> EnumerateForDualReadOnlyProbe() override {
+        ObserveAccess();
+        if (inventory_index >= inventories.size()) {
+            throw std::runtime_error("unexpected extra preflight inventory");
+        }
+        return inventories[inventory_index++];
+    }
+
+    std::size_t InspectDualReadOnlySpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds) override {
+        ObserveAccess();
+        session_open = cleanup_leaves_session_open;
+        if (stable_identity == kPreflightCamA) return cam_a_payload_count;
+        if (stable_identity == kPreflightCamB) return cam_b_payload_count;
+        throw std::runtime_error("unexpected preflight WPD identity");
+    }
+
+    void CloseDualReadOnlyProbeSession(std::chrono::seconds) override {
+        ObserveAccess();
+        if (!cleanup_leaves_session_open) session_open = false;
+    }
+
+    bool DualReadOnlyProbeSessionOpen() const noexcept override {
+        return session_open;
+    }
+
+private:
+    void ObserveAccess() {
+        ++access_count;
+        if (on_access) on_access(access_count);
     }
 };
 
@@ -257,6 +332,21 @@ void TestDestructorClosesRetainedManager() {
         "adapter destruction must close a retained manager module");
 }
 
+void TestAbandonedSessionNeverCallsSdkDuringDestruction() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    {
+        NikonDualBindingSdkAdapter adapter(transport);
+        (void)adapter.EnumerateCandidates();
+        Check(ResolveDualCaptureWpdCleanup(adapter, false, false) ==
+                  DualIdentityInvalidationReason::SdkError,
+            "a failed checked WPD Close must invalidate even after local handle release");
+    }
+    Check(transport->abandoned && transport->end_count == 0,
+        "abandoned WPD boundary must not invoke SDK EndSession in adapter destruction");
+    Check(transport->capture_count == 0 && transport->invalidation_poll_count == 0,
+        "abandoned WPD boundary must not shutter, retry, or poll SDK");
+}
+
 void TestExplicitBindingCancellationEndsLiveViewAndManager() {
     auto transport = std::make_shared<RecordingDualSessionTransport>();
     NikonDualBindingSdkAdapter adapter(transport);
@@ -323,6 +413,168 @@ void TestCloseFailureEndsManagerAndInvalidatesSession() {
         "source close failure must invalidate the binding as an SDK error");
     Check(transport->begin_count == 1 && transport->capture_count == 0,
         "close failure must not retry or issue a capture command");
+}
+
+void TestPairPreflightEnforcesTheRetainedModuleOnlyBoundary() {
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        Check(adapter.EnumerateCandidates().size() == 2,
+            "preflight pass requires two session-local candidates");
+        RecordingPairPreflightWpdTransport wpd;
+        bool module_only_at_every_wpd_access = true;
+        bool sdk_poll_count_stable_during_wpd = true;
+        wpd.on_access = [&](std::size_t) {
+            module_only_at_every_wpd_access =
+                module_only_at_every_wpd_access &&
+                adapter.InspectRetainedModuleState().ReadyForReadOnlyWpd();
+            sdk_poll_count_stable_during_wpd =
+                sdk_poll_count_stable_during_wpd &&
+                sdk->invalidation_poll_count == 1;
+        };
+
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(result.ready &&
+              result.error == DualBoundPairPreflightError::None &&
+              result.wpd_result.terminal_state ==
+                  DualWpdReadOnlyProbeTerminalState::Pass &&
+              result.sdk_state_before_wpd.ReadyForReadOnlyWpd() &&
+              result.sdk_state_after_wpd.ReadyForReadOnlyWpd(),
+            "retained Module with zero sources and Live View off must pass");
+        Check(module_only_at_every_wpd_access &&
+              sdk_poll_count_stable_during_wpd && wpd.access_count == 5,
+            "every WPD read must observe Module-only state and zero SDK calls");
+        Check(sdk->begin_count == 1 && sdk->source_open_count == 0 &&
+              sdk->capture_count == 0 && sdk->status_probe_count == 0 &&
+              sdk->invalidation_poll_count == 2 && sdk->end_count == 0,
+            "preflight must not open a source, inspect settings, capture, retry, or end a valid binding");
+        adapter.EndSession(5s);
+        Check(sdk->end_count == 1 && !sdk->module_active,
+            "terminal cleanup must end the retained Module exactly once");
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        (void)adapter.EnumerateCandidates();
+        Check(adapter.StartLiveView(0),
+            "unsafe preflight fixture requires an active Live View source");
+        RecordingPairPreflightWpdTransport wpd;
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(!result.ready &&
+              result.error ==
+                  DualBoundPairPreflightError::SdkBoundaryUnsafeBeforeWpd &&
+              wpd.access_count == 0 && sdk->capture_count == 0,
+            "an open source or Live View must block before the first WPD read");
+        adapter.EndSession(5s);
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        (void)adapter.EnumerateCandidates();
+        sdk->module_active = false;
+        RecordingPairPreflightWpdTransport wpd;
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(!result.ready &&
+              result.error ==
+                  DualBoundPairPreflightError::SdkBoundaryUnsafeBeforeWpd &&
+              wpd.access_count == 0,
+            "a missing retained Module must never be treated as coexistence");
+        adapter.EndSession(5s);
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        (void)adapter.EnumerateCandidates();
+        RecordingPairPreflightWpdTransport wpd;
+        wpd.cam_b_payload_count = 1;
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(!result.ready &&
+              result.error == DualBoundPairPreflightError::WpdProbeBlocked &&
+              result.wpd_result.error == DualWpdReadOnlyProbeError::SpoolNotEmpty &&
+              sdk->capture_count == 0 && sdk->invalidation_poll_count == 2,
+            "either nonempty card must block both shutters without retry");
+        adapter.EndSession(5s);
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        (void)adapter.EnumerateCandidates();
+        sdk->invalidation = DualIdentityInvalidationReason::UsbReconnect;
+        RecordingPairPreflightWpdTransport wpd;
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(!result.ready &&
+              result.error ==
+                  DualBoundPairPreflightError::SdkInvalidatedBeforeWpd &&
+              result.invalidation_reason ==
+                  DualIdentityInvalidationReason::UsbReconnect &&
+              wpd.access_count == 0 && sdk->end_count == 1 &&
+              !sdk->module_active,
+            "invalidation before WPD must unload once and prevent all WPD access");
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(sdk);
+        (void)adapter.EnumerateCandidates();
+        RecordingPairPreflightWpdTransport wpd;
+        wpd.on_access = [&](std::size_t access_count) {
+            if (access_count == 5) {
+                sdk->invalidation =
+                    DualIdentityInvalidationReason::TopologyChanged;
+            }
+        };
+        const auto result = RunDualBoundPairPreflight(
+            adapter, wpd, PreflightMap(), 5s);
+        Check(!result.ready &&
+              result.error ==
+                  DualBoundPairPreflightError::SdkInvalidatedAfterWpd &&
+              result.invalidation_reason ==
+                  DualIdentityInvalidationReason::TopologyChanged &&
+              sdk->end_count == 1 && !sdk->module_active &&
+              sdk->capture_count == 0,
+            "invalidation observed after WPD must unload once before capture");
+    }
+
+    {
+        auto sdk = std::make_shared<RecordingDualSessionTransport>();
+        {
+            NikonDualBindingSdkAdapter adapter(sdk);
+            (void)adapter.EnumerateCandidates();
+            RecordingPairPreflightWpdTransport wpd;
+            wpd.cleanup_leaves_session_open = true;
+            const auto result = RunDualBoundPairPreflight(
+                adapter, wpd, PreflightMap(), 5s);
+            Check(!result.ready &&
+                  result.error == DualBoundPairPreflightError::WpdProbeBlocked &&
+                  result.wpd_result.cleanup == DualWpdReadOnlyProbeCleanup::Unconfirmed &&
+                  sdk->invalidation_poll_count == 1 && sdk->end_count == 0,
+                "unconfirmed WPD cleanup must issue no SDK call while WPD may be open");
+
+            const auto outcome = ResolveDualBoundPairPreflight(adapter, result);
+            Check(outcome.state ==
+                      DualHardwarePairPreflightState::CleanupUnconfirmed &&
+                  outcome.binding_invalidation_reason ==
+                      DualIdentityInvalidationReason::SdkError &&
+                  outcome.requires_rebinding &&
+                  outcome.host_terminal_after_reservation_close,
+                "production preflight resolution must type unconfirmed WPD cleanup as terminal");
+            Check(sdk->abandoned && sdk->end_count == 0 &&
+                  sdk->capture_count == 0 &&
+                  sdk->invalidation_poll_count == 1,
+                "production preflight resolution must abandon without SDK end, shutter, retry, or poll");
+        }
+        Check(sdk->end_count == 0,
+            "adapter destruction after unconfirmed WPD cleanup must not hide an SDK End call");
+    }
 }
 
 void TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens() {
@@ -459,9 +711,11 @@ int main() {
         TestInvalidationRevokesEveryCandidateWithoutRetry();
         TestCloseFailureEndsManagerAndInvalidatesSession();
         TestDestructorClosesRetainedManager();
+        TestAbandonedSessionNeverCallsSdkDuringDestruction();
         TestExplicitBindingCancellationEndsLiveViewAndManager();
         TestFailedBindingCancellationIsNotRetriedByDestructor();
         TestCaptureFailureInvalidatesAndEndsSessionWithoutRetry();
+        TestPairPreflightEnforcesTheRetainedModuleOnlyBoundary();
         TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens();
         TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens();
         TestReadOnlyProbeNormalizesStartAndInventoryFailures();

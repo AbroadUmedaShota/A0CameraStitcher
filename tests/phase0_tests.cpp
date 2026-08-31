@@ -204,7 +204,14 @@ public:
     [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownload(std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) override {
         ++capture_commands; throw TransportError("unexpected_wpd_capture", "WPD shutter must not be used");
     }
-    void Close(std::chrono::seconds) override { ++closes; open = false; order += "Wclose;"; }
+    void Close(std::chrono::seconds) override {
+        ++closes;
+        open = false;
+        order += "Wclose;";
+        if (fail_close_number > 0 && closes == fail_close_number) {
+            throw TransportError("close_failed", "configured WPD checked-close failure");
+        }
+    }
     [[nodiscard]] std::string BeginPostCardObservation(std::chrono::seconds) override {
         if (!open) throw TransportError("session_not_open", "baseline without WPD open");
         ++spool_empty_before_checks;
@@ -250,6 +257,7 @@ public:
     int spool_empty_before_checks{}; int spool_empty_after_checks{}; int delete_attempts{}; int delete_successes{}; std::string order;
     bool spool_empty_before{true}; bool spool_empty_after{true}; bool delete_fails{false}; bool fail_second_open{false};
     int fail_open_number{};
+    int fail_close_number{};
     std::string expected_cleanup_token{"cleanup-capability"};
     std::vector<ImageCandidate> candidates{{"private-object-id.jpg", {0xFF, 0xD8, 0x01, 0xFF, 0xD9}, true, "cleanup-capability"}};
     std::string observe_error_category;
@@ -2617,6 +2625,58 @@ void TestHybridSdkCloseFailureBlocksWpdReopenAndRetry() {
     fs::remove_all(root);
 }
 
+void TestHybridWpdCheckedCloseFailureStaysCleanupUnconfirmed() {
+    const auto root = NewTestRoot("hybrid-wpd-checked-close-failure");
+    HybridWpdFake wpd;
+    wpd.fail_close_number = 2;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(
+        root / "artifacts", "run-hybrid-wpd-checked-close-failure", sdk.SdkVersion());
+    const auto result = ExecuteHybridCaptureOnce(
+        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a");
+    Check(result.terminal_state == "FailedPartial" &&
+              result.error_category == "close_failed" &&
+              !result.wpd_cleanup_confirmed,
+        "a failed checked WPD Close must remain cleanup-unconfirmed even after local handle release");
+    Check(result.frames.size() == 1 && result.frames.front().success &&
+              fs::exists(result.frames.front().path),
+        "a final WPD Close failure must retain the already verified PC original");
+    Check(wpd.opens == 2 && wpd.closes == 2 && wpd.delete_attempts == 1 &&
+              sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1,
+        "a WPD checked-close failure must execute one attempt with no capture or cleanup retry");
+    fs::remove_all(root);
+}
+
+void TestHybridWpdCloseAndEvidenceFailurePreservesStickyCleanupState() {
+    const auto root = NewTestRoot("hybrid-wpd-close-evidence-failure");
+    HybridWpdFake wpd;
+    // Fail the baseline checked Close. No shutter command may be issued after
+    // this boundary, even if terminal evidence persistence also throws.
+    wpd.fail_close_number = 1;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(
+        root / "artifacts", "run-hybrid-wpd-close-evidence-failure", sdk.SdkVersion());
+    fs::create_directory(evidence.RunRoot() / "summary.json");
+    HybridCaptureCleanupState cleanup_state;
+    bool evidence_failure_observed = false;
+    try {
+        (void)ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a",
+            {}, {}, {}, std::nullopt, {}, {}, &cleanup_state);
+    } catch (const std::runtime_error& error) {
+        evidence_failure_observed =
+            std::string_view(error.what()) == "cannot write Phase 0 summary";
+    }
+    Check(evidence_failure_observed,
+        "the test must exercise a terminal evidence write failure after checked WPD Close failure");
+    Check(!cleanup_state.wpd_cleanup_confirmed,
+        "cleanup-unconfirmed must survive an exception thrown while persisting terminal evidence");
+    Check(wpd.opens == 1 && wpd.closes == 1 && sdk.opens == 0 &&
+              sdk.captures == 0 && sdk.closes == 0,
+        "a sticky cleanup-unconfirmed boundary must prevent every later SDK operation and retry");
+    fs::remove_all(root);
+}
+
 void TestHybridSpoolAndCleanupFailuresRetainPcOriginal() {
     {
         const auto root = NewTestRoot("hybrid-spool-not-empty");
@@ -2940,6 +3000,8 @@ int main() {
         TestHybridWatchdogClosesSdkAndStopsBeforeWpdRecovery();
         TestHybridWatchdogStopsCanonicalRenameAndDelete();
         TestHybridSdkCloseFailureBlocksWpdReopenAndRetry();
+        TestHybridWpdCheckedCloseFailureStaysCleanupUnconfirmed();
+        TestHybridWpdCloseAndEvidenceFailurePreservesStickyCleanupState();
         TestHybridSpoolAndCleanupFailuresRetainPcOriginal();
         TestHybridInvalidCandidatesAndMissingTokenNeverDelete();
         TestHybridCaptureArgumentConfirmations();

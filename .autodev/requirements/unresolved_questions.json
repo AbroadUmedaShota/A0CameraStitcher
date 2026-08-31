@@ -1,7 +1,7 @@
 {
   "schema_version": "autodev.unresolved-questions.v1",
-  "requirements_version": "2.9.0",
-  "generated_at": "2026-08-27",
+  "requirements_version": "2.10.0",
+  "generated_at": "2026-08-31",
   "questions": [
     {"id":"HG-0001","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"D810 two-camera A0 output acceptance criteria are undefined.","requested_decision":"After the D810 optical feasibility calculation, approve representative originals, orientation, effective DPI, exact pixels, crop/content loss, baseline calibration residual, per-capture automatic-correction target and hard limits, corrected alignment/color/seam failure criteria, and total p95 criteria.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"]},
     {"id":"HG-0002","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"The final D810 rig and optical configuration are undefined.","requested_decision":"Before M2, approve placement, camera orientation, lens pair, focal length, working distance, overlap, exposure/focus/white-balance policy, lighting, A0 calibration chart, setup procedure, profile validity period, and recalibration triggers.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"]},

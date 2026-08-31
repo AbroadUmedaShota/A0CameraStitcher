@@ -518,6 +518,22 @@ public sealed class DualBindingViewModel : ObservableObject
         Notify(InvalidationText, "block");
     }
 
+    /// <summary>
+    /// CaptureRecoveryOnly has retired the binding pipe. A typed capture-pipe invalidation clears
+    /// the local binding without sending a request through that stale pipe.
+    /// </summary>
+    public void ReportActivatedCaptureInvalidation(DualBindingInvalidationReason reason)
+    {
+        _client.InvalidateActivatedCaptureBinding(reason);
+        ClearSessionSurface();
+        Phase = DualBindingPhase.Invalid;
+        InvalidationText =
+            $"撮影処理中に機体照合が無効になりました（理由: {ReasonText(reason)}）。" +
+            "撮影は再試行せず、2台の割当を最初からやり直してください。";
+        Notify(InvalidationText, "block");
+        OnPropertyChanged(nameof(IsCaptureHostActivated));
+    }
+
     private bool CanAssign(string alias) =>
         !IsShutdownBlocked &&
         Phase == DualBindingPhase.Collecting &&

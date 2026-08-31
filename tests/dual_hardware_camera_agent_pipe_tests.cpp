@@ -254,8 +254,9 @@ void TestDeliveryAcknowledgmentIsRequired() {
 std::string Envelope(
     std::string_view operation,
     std::string_view payload,
-    std::string_view request_id) {
-    return "{\"schemaVersion\":\"a0.camera-agent.hardware-dual.v2\","
+    std::string_view request_id,
+    std::string_view schema = kDualHardwareCameraAgentSchemaVersion) {
+    return "{\"schemaVersion\":\"" + std::string(schema) + "\","
            "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"" +
         std::string(request_id) + "\",\"operation\":\"" + std::string(operation) +
         "\",\"payload\":" + std::string(payload) + "}";
@@ -358,7 +359,11 @@ std::string CaptureRecoveryOnlyEnvelope(
         "\"captureRecoveryOnlyApproved\":true}"
         ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
         ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
-    return Envelope("start-reserved-capture-recovery-only", payload, request_id);
+    return Envelope(
+        "start-reserved-capture-recovery-only",
+        payload,
+        request_id,
+        kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion);
 }
 
 // ---------------------------------------------------------------------

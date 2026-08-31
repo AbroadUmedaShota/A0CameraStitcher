@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using A0CameraStitcher.M3.Foundation.Hardware;
 
 namespace A0CameraStitcher.M3.Foundation.DualCamera;
 
@@ -216,7 +217,8 @@ public sealed record DualHardwareCaptureRecoveryOnlyEvidence(
     bool LiveViewStopAndCloseConfirmed,
     bool ExactDeleteConfirmedForEveryRetainedOriginal,
     bool BothSpoolsEmptyAfter,
-    int AutomaticRetryCount);
+    int AutomaticRetryCount,
+    DualBindingInvalidationReason BindingInvalidationReason = DualBindingInvalidationReason.None);
 
 public sealed record DualHardwareCaptureRecoveryOnlyResult(
     Guid TransactionId,
@@ -230,11 +232,26 @@ public sealed record DualHardwareCaptureRecoveryOnlyResult(
 
 public sealed record DualHardwareDispatchResult(
     DualHardwareDispatchState State,
-    DualHardwareCaptureResult? Result);
+    DualHardwareCaptureResult? Result,
+    DualHardwarePreflightBlock? PreflightBlock = null);
 
 public sealed record DualHardwareCaptureRecoveryOnlyDispatchResult(
     DualHardwareDispatchState State,
-    DualHardwareCaptureRecoveryOnlyResult? Result);
+    DualHardwareCaptureRecoveryOnlyResult? Result,
+    DualHardwarePreflightBlock? PreflightBlock = null);
+
+public enum DualHardwarePreflightBlockState
+{
+    HardwarePending,
+    BindingInvalidated,
+    CleanupUnconfirmed,
+}
+
+public sealed record DualHardwarePreflightBlock(
+    DualHardwarePreflightBlockState State,
+    DualBindingInvalidationReason BindingInvalidationReason,
+    bool RequiresRebinding,
+    bool HostTerminalAfterReservationClose);
 
 public enum DualHardwarePairQueryState
 {
@@ -252,11 +269,13 @@ public enum DualHardwareCloseState
 
 public sealed record DualHardwarePairQueryOutcome(
     DualHardwarePairQueryState State,
-    DualHardwareCaptureResult? Result);
+    DualHardwareCaptureResult? Result,
+    DualHardwarePreflightBlock? PreflightBlock = null);
 
 public sealed record DualHardwareCaptureRecoveryOnlyPairQueryOutcome(
     DualHardwarePairQueryState State,
-    DualHardwareCaptureRecoveryOnlyResult? Result);
+    DualHardwareCaptureRecoveryOnlyResult? Result,
+    DualHardwarePreflightBlock? PreflightBlock = null);
 
 public interface IDualHardwareCaptureOperations
 {
@@ -287,6 +306,10 @@ public interface IDualHardwareCaptureRecoveryOnlyOperations
         CancellationToken cancellationToken);
 
     Task<DualHardwareCaptureRecoveryOnlyPairQueryOutcome> QueryCaptureRecoveryOnlyTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken);
+
+    Task<DualHardwareCloseState> CloseCaptureRecoveryOnlyReservedPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken);
 }

@@ -48,6 +48,28 @@ bool IsSafePipeName(std::string_view value) noexcept {
     });
 }
 
+const char* PreflightErrorText(
+    DualBoundPairPreflightError error) noexcept {
+    switch (error) {
+    case DualBoundPairPreflightError::None: return "none";
+    case DualBoundPairPreflightError::SdkInvalidatedBeforeWpd:
+        return "sdkInvalidatedBeforeWpd";
+    case DualBoundPairPreflightError::SdkBoundaryUnsafeBeforeWpd:
+        return "sdkBoundaryUnsafeBeforeWpd";
+    case DualBoundPairPreflightError::WpdProbeBlocked:
+        return "wpdProbeBlocked";
+    case DualBoundPairPreflightError::SdkBoundaryUnsafeAfterWpd:
+        return "sdkBoundaryUnsafeAfterWpd";
+    case DualBoundPairPreflightError::SdkInvalidatedAfterWpd:
+        return "sdkInvalidatedAfterWpd";
+    }
+    return "sdkBoundaryUnsafeBeforeWpd";
+}
+
+const char* JsonBool(bool value) noexcept {
+    return value ? "true" : "false";
+}
+
 void PrintUsage() {
     std::wcerr
         << L"Usage: A0CameraStitcher.DualCameraAgent [--serve-once] "
@@ -258,37 +280,138 @@ int wmain(int argc, wchar_t** argv) {
                     "--wpd-camera-map is required for the read-only coexistence probe");
             }
             RequireExistingFixedLocalFile("--wpd-camera-map", *wpd_camera_map);
-            // The probe retains the Nikon SDK Module while WPD enumerates the
-            // same physical cameras. Serialize that real-camera access with
-            // every other Phase 0 process for the probe's complete lifetime.
-            HardwareProcessLease camera_control_lease;
-            NikonDualBindingSdkAdapter adapter;
-            const auto candidates = adapter.EnumerateCandidates();
-            WpdTransport wpd;
-            const auto wpd_cameras = wpd.Enumerate();
-            IdentityMap map(*wpd_camera_map);
-            std::size_t bound_count = 0;
-            std::size_t unbound_count = 0;
-            for (const auto& camera : wpd_cameras) {
-                map.FindAlias(camera.stable_identity) ? ++bound_count : ++unbound_count;
+            std::optional<std::size_t> sdk_count;
+            DualBoundPairPreflightResult preflight;
+            INikonDualSessionTransport::ExitState final_sdk_state;
+            bool sdk_cleanup_attempted = false;
+            bool sdk_cleanup_error = false;
+
+            // The process lease remains alive through WPD destruction and the
+            // one bounded SDK cleanup attempt. No cleanup retry is hidden by a
+            // second owner or an outer exception handler.
+            try {
+                HardwareProcessLease camera_control_lease;
+                std::shared_ptr<NikonDualBindingSdkAdapter> adapter;
+                try {
+                    IdentityMap map(*wpd_camera_map);
+                    adapter = std::make_shared<NikonDualBindingSdkAdapter>();
+                    sdk_count = adapter->EnumerateCandidates().size();
+                    {
+                        WpdTransport wpd;
+                        if (*sdk_count == kDualIdentityRequiredCandidateCount) {
+                            preflight = RunDualBoundPairPreflight(
+                                *adapter, wpd, map, std::chrono::seconds(10));
+                        }
+                    }
+                } catch (...) {
+                    // Fixed anonymous fields below are the only public error
+                    // boundary for licensed SDK, WPD, map, and host failures.
+                }
+                if (adapter) {
+                    const auto retained_before_cleanup =
+                        adapter->InspectRetainedModuleState();
+                    final_sdk_state = {
+                        retained_before_cleanup.process_claim_retained,
+                        retained_before_cleanup.module_retained,
+                        retained_before_cleanup.open_source_count != 0};
+                    const bool wpd_cleanup_unconfirmed =
+                        preflight.wpd_result.wpd_session_open_at_exit ||
+                        preflight.wpd_result.cleanup ==
+                            DualWpdReadOnlyProbeCleanup::Unconfirmed;
+                    if (wpd_cleanup_unconfirmed) {
+                        // No SDK cleanup is safe while WPD ownership is
+                        // unconfirmed. The adapter isolates itself until this
+                        // process exits instead of crossing that boundary.
+                        adapter->AbandonSessionNoSdkCalls();
+                    } else if (!final_sdk_state.FullyEnded()) {
+                        sdk_cleanup_attempted = true;
+                        try {
+                            adapter->EndSession(std::chrono::seconds(10));
+                        } catch (...) {
+                            sdk_cleanup_error = true;
+                        }
+                    }
+                    const auto retained = adapter->InspectRetainedModuleState();
+                    final_sdk_state = {
+                        retained.process_claim_retained,
+                        retained.module_retained,
+                        retained.open_source_count != 0};
+                }
+            } catch (...) {
+                // Lease construction failure is also represented only by the
+                // fixed Blocked result below.
             }
-            adapter.EndSession(std::chrono::seconds(10));
+
+            const bool module_retained_during_wpd =
+                preflight.wpd_result.wpd_access_attempted &&
+                preflight.sdk_state_before_wpd.module_retained &&
+                preflight.sdk_state_after_wpd.module_retained;
+            const bool source_open_during_wpd =
+                preflight.sdk_state_before_wpd.open_source_count != 0 ||
+                preflight.sdk_state_after_wpd.open_source_count != 0;
+            const bool live_view_active_during_wpd =
+                preflight.sdk_state_before_wpd.live_view_active ||
+                preflight.sdk_state_after_wpd.live_view_active;
+            const bool passed = sdk_count ==
+                    kDualIdentityRequiredCandidateCount &&
+                preflight.ready && module_retained_during_wpd &&
+                !source_open_during_wpd && !live_view_active_during_wpd &&
+                final_sdk_state.FullyEnded() && !sdk_cleanup_error;
+
             std::cout
                 << "{\"operation\":\"read-only-coexistence-probe\","
-                   "\"sdkD810Count\":" << candidates.size()
-                << ",\"wpdD810Count\":" << wpd_cameras.size()
-                << ",\"wpdBoundAliasCount\":" << bound_count
-                << ",\"wpdUnboundAliasCount\":" << unbound_count
-                << ",\"sdkModuleRetainedDuringWpd\":true,"
-                   "\"sdkSourceOpenDuringWpd\":false,"
-                   "\"captureCommandSent\":false,"
+                   "\"sdkD810Count\":";
+            if (sdk_count) std::cout << *sdk_count; else std::cout << "null";
+            std::cout << ",\"wpdD810Count\":";
+            if (preflight.wpd_result.wpd_d810_count) {
+                std::cout << *preflight.wpd_result.wpd_d810_count;
+            } else {
+                std::cout << "null";
+            }
+            std::cout
+                << ",\"camAMapMatchCount\":"
+                << preflight.wpd_result.cam_a_match_count
+                << ",\"camBMapMatchCount\":"
+                << preflight.wpd_result.cam_b_match_count
+                << ",\"camAPayloadObjectCount\":";
+            if (preflight.wpd_result.cam_a_payload_object_count) {
+                std::cout << *preflight.wpd_result.cam_a_payload_object_count;
+            } else {
+                std::cout << "null";
+            }
+            std::cout << ",\"camBPayloadObjectCount\":";
+            if (preflight.wpd_result.cam_b_payload_object_count) {
+                std::cout << *preflight.wpd_result.cam_b_payload_object_count;
+            } else {
+                std::cout << "null";
+            }
+            std::cout
+                << ",\"topologyStable\":"
+                << JsonBool(preflight.wpd_result.topology_stable)
+                << ",\"wpdSessionOpenAtExit\":"
+                << JsonBool(preflight.wpd_result.wpd_session_open_at_exit)
+                << ",\"sdkModuleRetainedDuringWpd\":"
+                << JsonBool(module_retained_during_wpd)
+                << ",\"sdkSourceOpenDuringWpd\":"
+                << JsonBool(source_open_during_wpd)
+                << ",\"liveViewActiveDuringWpd\":"
+                << JsonBool(live_view_active_during_wpd)
+                << ",\"sdkOperationInvokedDuringWpd\":false,"
+                   "\"sdkSessionEnded\":"
+                << JsonBool(final_sdk_state.FullyEnded())
+                << ",\"sdkCleanupAttempted\":"
+                << JsonBool(sdk_cleanup_attempted)
+                << ",\"captureCommandSent\":false,"
                    "\"cameraSettingsChanged\":false,"
                    "\"cameraObjectDeleteAttempted\":false,"
-                   "\"terminalState\":\""
-                << (candidates.size() == 2 && wpd_cameras.size() == 2
-                        ? "Pass" : "Blocked")
-                << "\"}\n";
-            return candidates.size() == 2 && wpd_cameras.size() == 2 ? 0 : 2;
+                   "\"vendorOperationExecuted\":false,"
+                   "\"automaticRetryCount\":0,"
+                   "\"realIdentifiersIncluded\":false,"
+                   "\"errorCategory\":\""
+                << PreflightErrorText(preflight.error)
+                << "\",\"terminalState\":\""
+                << (passed ? "Pass" : "Blocked") << "\"}\n";
+            return passed ? 0 : 2;
         }
         if (!pair_journal_root.has_value()) {
             throw std::invalid_argument("--pair-journal-root is required");

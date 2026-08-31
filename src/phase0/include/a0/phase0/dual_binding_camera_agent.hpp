@@ -253,6 +253,13 @@ public:
 
     [[nodiscard]] DualIdentitySessionBindingState BindingState() const noexcept;
 
+    // Same-process capture owner only. The caller has already ended, or made
+    // one bounded attempt to end, the retained SDK Module before publishing
+    // this invalidation. No protocol operation can make an invalid binding
+    // Ready again; a new operator binding is required.
+    void InvalidateCaptureBinding(
+        DualIdentityInvalidationReason reason) noexcept;
+
     // A production same-process host remains on the binding pipe after Ready.
     // It enters the capture pipe only after an explicit, freshness-checked
     // activate-capture request. Cancellation is terminal whether cleanup

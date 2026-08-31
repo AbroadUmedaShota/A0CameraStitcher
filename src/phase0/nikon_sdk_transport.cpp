@@ -261,7 +261,12 @@ NKERROR CALLBACK DataProc(NKREF reference, LPVOID raw_info, LPVOID raw_data) {
 class NikonSdkTransport::Impl {
 public:
     Impl() = default;
-    ~Impl() { CleanupNoThrow(); }
+    ~Impl() {
+        if (!abandoned_) CleanupNoThrow();
+    }
+
+    void AbandonNoSdkCalls() noexcept { abandoned_ = true; }
+    [[nodiscard]] bool Abandoned() const noexcept { return abandoned_; }
 
     std::string SdkVersion() const {
         return sdk_version_.empty() ? "D810-Remote-SDK-local" : sdk_version_;
@@ -2168,6 +2173,7 @@ private:
     std::vector<std::unique_ptr<CompletionState>> completions_;
     std::vector<std::unique_ptr<DownloadState>> downloads_;
     bool require_exactly_one_d810_{};
+    bool abandoned_{};
     SdkCommandTrace trace_;
 #ifndef NDEBUG
     std::thread::id run_completed_thread_{};
@@ -2177,7 +2183,12 @@ private:
 };
 
 NikonSdkTransport::NikonSdkTransport() : impl_(std::make_unique<Impl>()) {}
-NikonSdkTransport::~NikonSdkTransport() = default;
+NikonSdkTransport::~NikonSdkTransport() {
+    // An unconfirmed WPD owner may still be active.  Releasing this Impl would
+    // invoke vendor cleanup from a destructor, so intentionally retain it for
+    // the rest of the process instead.  This is a terminal isolation path.
+    if (impl_ && impl_->Abandoned()) (void)impl_.release();
+}
 std::string NikonSdkTransport::SdkVersion() const { return impl_->SdkVersion(); }
 std::vector<CameraInfo> NikonSdkTransport::Enumerate() { return impl_->Enumerate(); }
 SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(
@@ -2244,6 +2255,9 @@ DualIdentityInvalidationReason NikonSdkTransport::PollDualInvalidation() {
 void NikonSdkTransport::EndDualSession(std::chrono::seconds timeout) {
     impl_->EndDualSession(timeout);
 }
+void NikonSdkTransport::AbandonDualSessionNoSdkCalls() noexcept {
+    if (impl_) impl_->AbandonNoSdkCalls();
+}
 INikonDualSessionTransport::ExitState
 NikonSdkTransport::InspectDualSessionExitState() const noexcept {
     return impl_->InspectDualSessionExitState();
@@ -2292,6 +2306,7 @@ void NikonSdkTransport::OpenDualBoundCapture(std::string_view, std::chrono::seco
 void NikonSdkTransport::CloseDualSourceKeepingModule(std::chrono::seconds) { ThrowGated(); }
 DualIdentityInvalidationReason NikonSdkTransport::PollDualInvalidation() { ThrowGated(); }
 void NikonSdkTransport::EndDualSession(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::AbandonDualSessionNoSdkCalls() noexcept {}
 INikonDualSessionTransport::ExitState
 NikonSdkTransport::InspectDualSessionExitState() const noexcept {
     return {};
@@ -2310,7 +2325,7 @@ NikonDualBindingSdkAdapter::NikonDualBindingSdkAdapter(
     }
 }
 NikonDualBindingSdkAdapter::~NikonDualBindingSdkAdapter() {
-    if (!explicit_end_attempted_ &&
+    if (!abandoned_ && !explicit_end_attempted_ &&
         (!candidate_tokens_.empty() || open_live_view_ordinal_.has_value())) {
         try { transport_->EndDualSession(std::chrono::seconds(2)); } catch (...) {}
     }
@@ -2481,6 +2496,26 @@ void NikonDualBindingSdkAdapter::EndSession(std::chrono::seconds timeout) {
     transport_->EndDualSession(timeout);
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
+}
+
+void NikonDualBindingSdkAdapter::AbandonSessionNoSdkCalls() noexcept {
+    abandoned_ = true;
+    explicit_end_attempted_ = true;
+    candidate_tokens_.clear();
+    open_live_view_ordinal_.reset();
+    if (transport_) transport_->AbandonDualSessionNoSdkCalls();
+}
+
+NikonDualRetainedModuleState
+NikonDualBindingSdkAdapter::InspectRetainedModuleState() const noexcept {
+    const auto exit_state = transport_->InspectDualSessionExitState();
+    return {
+        exit_state.process_claim_retained,
+        exit_state.module_retained,
+        exit_state.source_open ? std::size_t{1} : std::size_t{0},
+        open_live_view_ordinal_.has_value(),
+        candidate_tokens_.size(),
+    };
 }
 
 namespace {

@@ -7,7 +7,7 @@
 ## 開始条件
 
 - Phase 0A前: `HG-0003A`（D810一台、MSVC/CMake、対象PC・USB構成・実行許可）と`HG-0006`（SDK使用許諾の本人同意と内部評価）が解消済み。
-- Phase 0B前: 恒久SDK body identityを前提とした旧bindingは無効であり、`HG-0003B`はADR-0025のsession-local operator binding承認で解消済みである。ただし過去の二台検出・空カード・割当結果は現在のReady証拠へ流用しない。実行のたびに、現行software SHA、licensed SDK build、同一Agent session内のCAM-A/B明示割当、Live View停止とSDK完全終了、SDK/WPD各二台、両専用カードpayload 0件を再確認し、操作者が一回撮影を明示承認した場合だけPhase 0Bを開始する。前提不一致時は`HardwarePending`または`Blocked`で停止する。
+- Phase 0B前: 恒久SDK body identityを前提とした旧bindingは無効であり、`HG-0003B`はADR-0025のsession-local operator binding承認で解消済みである。ADR-0028はcontrolled `CaptureRecoveryOnly`だけについて、SDK source/capture sessionをcloseした後のModule保持を許可する。ただし過去の二台検出・空カード・割当結果は現在のReady証拠へ流用しない。実行のたびに、現行software SHA、licensed SDK build、同一Agent session内のCAM-A/B明示割当、Live View停止とSDK source/capture session close、SDK/WPD各二台、両専用カードpayload 0件、pair-level preflight、coexistence probeを再確認し、操作者が一回撮影を明示承認した場合だけPhase 0Bを開始する。前提不一致時は`HardwarePending`または`Blocked`で停止する。
 - `HG-0001`と`HG-0002`はM2のA0品質・最終リグgateであり、通信専用チャートを使うPhase 0を止めない。
 - Phase 0ツールはカメラ設定とfirmwareを変更しない。
 
@@ -102,36 +102,38 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ## Phase 0B: 二台順次撮影
 
-> **実機撮影停止（2026-08-31）**
-> SDK-only／WPD-onlyの読み取り専用事前ゲートは合格したが、現production backendは
-> session-local CAM-A/B tokenを保持するためSDK Moduleを残したままWPDを開く。
-> `SDK完全終了 → WPD`と`再列挙なし`を同時に満たせないため、設計判断と再レビューが
-> 完了するまでP0-B2以降を開始しない。ライセンス済みSDKのheader 22件、sample 6件、
-> PDF資料10件の静的調査でも、Module reload後に同型D810を一意照合できる正式な
-> per-body property/APIは確認できなかった。詳細は
+> **実機撮影は技術gate待ち（2026-08-31）**
+> ADR-0028により、controlled `CaptureRecoveryOnly`ではSDK Moduleをbinding tokenの
+> ためだけに保持できる。WPD前にLive View、SDK source、capture sessionを閉じ、WPD中の
+> SDK operationを0にする条件は不変である。現sliceはproduction adapterのread-only
+> coexistence probeとP0-B2のone-shot前software gateまでであり、pair-level preflight、focused/full
+> 回帰、独立reviewが完了するまで実機one-shotを開始しない。WPD cleanupが未確認ならSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を返して再bindingを要求する。同一bindingの10/100 runnerと固定600秒host lifetimeの両立は未実装・未解決のため、P0-B2の10件性能計測とP0-B3はこのsliceから開始しない。
+> Module reload後に同型D810を一意照合できる正式なper-body property/APIは依然確認できないため、
+> この例外以外の永続identityへ読み替えない。詳細は
 > [DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md)を参照する。
 
 ### P0-B1: 二台識別
 
 - binding開始前のSDK台数確認には`A0CameraStitcher.DualCameraAgent --read-only-sdk-probe`を使う。このprobeは恒久identityや候補tokenを生成せず、D810 source数だけを読み取り、SDK process claim・source・moduleをすべて終了してから匿名結果を返す。D810が二台、`cleanupState=ended`、`terminalState=Pass`のすべてを満たす場合だけ次へ進む。
 - 同型D810二台ではMAID Name/Interface由来のgeneric inventoryが`identity_collision`で安全停止し得るため、その結果をDualの台数確認や個体対応付けへ流用しない。generic inventoryの衝突防止自体は維持する。
-- SDK-only probeの完全終了を確認した後に、`A0CameraStitcher.DualCameraAgent --read-only-wpd-probe --wpd-camera-map PATH`を別processで一回だけ実行し、WPDのD810二台、既存CAM-A/B alias map各一台、両専用カードpayload 0件、各WPD session close、topology不変を確認する。このWPD-only gateはSDK、capture、delete、camera settings、vendor operation、自動retryを行わない。SDK moduleを保持したままWPDを開く`--read-only-coexistence-probe`は、SDK/WPD非同時open要件の受入証拠にしない。
+- SDK-only probeの完全終了を確認した後に、`A0CameraStitcher.DualCameraAgent --read-only-wpd-probe --wpd-camera-map PATH`を別processで一回だけ実行し、WPDのD810二台、既存CAM-A/B alias map各一台、両専用カードpayload 0件、各WPD session close、topology不変を確認する。このWPD-only gateはSDK、capture、delete、camera settings、vendor operation、自動retryを行わない。
+- ADR-0028の必須coexistence probeはproduction adapterで一回だけ実行し、pair-level WPD preflight（D810 exact-two、CAM-A/B map exact-one、両card payload 0、全WPD session close）、WPD open前の全Live View/SDK source/capture session close、Module retained、WPD close、WPD open中SDK API operation 0を確認する。WPD cleanupが未確認ならSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を返して再bindingを要求する。このprobeはcapture、delete、camera settings、vendor operation、自動retryを行わず、transport boundaryだけを確認する。
 - ADR-0025に従い、恒久的なSDK識別子ではなく、同一Agent session内で操作者が二台を`CAM-A`と`CAM-B`へ明示割当する。候補数が二台以外、二重割当、割当漏れは`HardwarePending`として停止する。
-- Live Viewは候補一台ずつ表示し、候補切替時と割当完了時にLive View停止とSDK session完全終了を確認する。確認できなければbindingを無効化し、撮影へ進まない。
+- Live Viewは候補一台ずつ表示し、候補切替時と割当完了時にLive View停止とSDK source/capture session closeを確認する。ADR-0028のModule保持はbinding tokenだけのために限定し、確認できなければbindingを無効化してModuleをunloadし、撮影へ進まない。
 - binding完了後は、撮影中にSDK候補を再列挙しない。Agent再起動、USB再接続、台数またはtopology変更、SDK manager再生成、SDK errorではbindingを無効化し、操作者へ再割当を要求する。
-- 実撮影の直前に、SDKとWPDでD810が各二台だけであること、CAM-A/Bが各一台であること、各専用カードのpayloadが0件であることを読み取り専用で確認する。SDKとWPDは同時に開かない。
+- 実撮影の直前に、SDKとWPDでD810が各二台だけであること、CAM-A/Bが各一台であること、各専用カードのpayloadが0件であることをpair-level読み取り専用preflightで一括確認し、全WPD session closeを確認する。SDK source/capture sessionとWPD sessionは同時に開かず、Module保持中もWPD open中のSDK API operationは0とする。
 - カメラ設定、firmware、カードformat、一括削除は変更しない。匿名alias以外の実機識別情報を証跡へ残さない。
 
 ### P0-B2: 順次二台transaction
 
-Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約、通常開始、CaptureRecoveryOnly開始、結果照会、取消の六操作を提供する。実SDK/WPD backendはbinding modeのproduction Agent hostへ接続済みである。通常の`start-reserved-pair`は従来どおり承認済みrig profileを必須とする。`start-reserved-capture-recovery-only`は、明示承認されたtransport検証専用であり、rig profileを受け付けず、合成・再合成・合成画像exportを行わない。WPF software経路は明示起動引数、外部承認profile、再bindingを含めて接続済みだが、実WPF・実D810操作は未検証である。Phase 0の実機結果はone-shotを実行するまで`NotRun`とする。
+Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約、通常開始、結果照会、取消の既存payload/result shapeを維持する。CaptureRecoveryOnlyはv2 capabilitiesへ操作名だけをadditiveに広告し、その開始・同一ID照会・終了には別schema `a0.camera-agent.hardware-dual-capture-recovery-only.v1`を使う。binding modeのproduction Agent hostでは、通常の`start-reserved-pair`はADR-0028例外の対象外であり、既存v2 shapeの`PairDispatcherUnavailable`を返す。通常経路は従来どおり承認済みrig profileを必須とする。`start-reserved-capture-recovery-only`は明示承認されたtransport検証専用としてrig profileを受け付けず、合成・再合成・合成画像exportを行わない。WPF software経路は明示起動引数、外部承認profile、再bindingを含めて接続済みだが、実WPF・実D810操作は未検証である。Phase 0の実機結果はone-shotを実行するまで`NotRun`とする。
 
 #### 一回撮影
 
 操作者の明示承認後、最大一pairだけ実行する。
 
-1. current Ready binding、承認済み読み取り専用capture profile、Live View停止とSDK完全終了、両専用カードpayload 0件、`captureRecoveryOnlyApproved=true`を確認する。
-2. `CAM-A`をSDKで一回だけ撮影し、SDKを完全終了する。WPDで今回のJPEG一件だけを回収し、PCへ`.partial`保存する。
+1. current Ready binding、承認済み読み取り専用capture profile、Live View停止とSDK source/capture session close、pair-level両専用カードpayload 0件/全WPD close preflight、ADR-0028 coexistence probe合格、`captureRecoveryOnlyApproved=true`を確認する。
+2. `CAM-A`をSDKで一回だけ撮影し、SDK source/capture sessionをcloseする。ADR-0028のModule保持中はWPDで今回のJPEG一件だけを回収し、WPD open中のSDK API operation 0を記録してPCへ`.partial`保存する。
 3. JPEG形式、7360x4912、file size、SHA-256を検証し、atomic renameしたcanonical originalを再読込した後だけ、直前に取得したWPD object一件を削除する。カードpayload 0件への復帰を確認する。
 4. CAM-Aが完全に成功した場合だけ、`CAM-B`へ同じ手順を一回実行する。CAM-A失敗時はCAM-Bを開始しない。CAM-B失敗時はCAM-Aのcanonical originalを保持する。
 5. 自動retry、別alias探索、曖昧画像採用、未検証object削除を行わない。pair全体は共有180秒watchdog内で実行する。
@@ -141,12 +143,16 @@ Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約�
 
 #### 10件性能計測
 
+> **未実装・NotRun**: 同一bindingの10/100 runner、匿名集計、p95承認artifact、固定600秒host lifetimeとの両立を実装・検証するまで、この段階は実施しない。以下は将来の受入条件であり、coexistence probeまたはone-shotの合格を10/10の合格へ読み替えない。
+
 - 一回撮影合格後、同じ条件・同じcurrent bindingでCAM-A→CAM-Bを10pair実行する。SDK候補を再列挙しない。
 - 各pairの開始・完了時刻、結果、CAM-A/Bのfile sizeとSHA-256、error、retry countを保存する。p50、nearest-rank p95、maxを計算する。
 - 10/10を初回試行で完了し、誤pair、原画像消失、曖昧採用、誤削除、自動retryが各0件であることを合格条件とする。一件でも失敗した時点で停止し、失敗回を再実行で置き換えない。
 - 実測p95は製品責任者の明示承認対象として記録する。承認前にP0-B3を開始しない。p95承認はtransport耐久試験の継続許可であり、A0品質、合成品質、release、実シャッター同期の承認ではない。
 
 ### P0-B3: 100件安定性
+
+> **未実装・NotRun**: 10件性能計測とp95承認に加え、同一binding runnerおよび100回を扱えるhost lifetime方針を実装・検証するまで、この段階は開始しない。100/100 Passを主張しない。
 
 - 10件の実測p95を製品責任者が明示承認した後だけ、CaptureRecoveryOnlyを100pair連続で実行する。
 - transactionごとに両original、file size、SHA-256、各状態・時刻、error、retry count、匿名診断情報を保持する。合成は行わず、全結果を`StitchOutcome=Pending`、`A0QualityApproval=Unapproved`とする。

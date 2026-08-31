@@ -1,21 +1,29 @@
 # Dual Hardware Camera Agent v2 — Native Named Pipe host
 
-Status: Native host implemented / Dual hardware capture blocked by SDK full-close versus session-token conflict
-Schema: `a0.camera-agent.hardware-dual.v2`
+Status: Native host implemented / controlled Module-retention exception approved; hardware evidence pending
+Ordinary schema: `a0.camera-agent.hardware-dual.v2`
+CaptureRecoveryOnly start/query/close schema: `a0.camera-agent.hardware-dual-capture-recovery-only.v1`
 
-## Safety hold (2026-08-31)
+## Controlled Module-retention boundary (ADR-0028, 2026-08-31)
 
-Do not use the production binding backend for a real shutter operation yet. The
-current adapter closes the selected SDK source but retains the SDK Module so its
-session-local CAM-A/B tokens remain usable. Opening WPD in that state does not
-meet the accepted requirement that the SDK session and Module be fully ended
-before every WPD access. Calling `EndDualSession` instead destroys those tokens,
-so CAM-B and later pairs cannot continue without re-enumeration/rebinding.
+ADR-0028 permits the production binding backend to retain the SDK Module only
+for the opaque, memory-only CAM-A/B binding token during controlled Dual
+`CaptureRecoveryOnly`. Before every WPD open, it must close every candidate
+Live View, SDK source object, and SDK capture session. While WPD is open it
+must issue zero SDK API operations: no Live View, capture, candidate
+enumeration, or camera setting write. Module retention is not SDK/WPD session
+overlap and does not permit a second transport operation.
 
-This is an architectural decision gate, not a successful hardware test. The
-read-only SDK-only and WPD-only probes remain valid because they run in separate
-fully closed processes. Real one-shot, 10-pair, 100-pair, and fault tests remain
-blocked. See [DualCamera safety audit 2026-08-31](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md).
+Agent/binding-session terminal teardown and any binding invalidation (Agent restart, USB reconnect,
+camera count/topology change, SDK manager regeneration, or SDK error) unload
+the Module and invalidate the binding. The exception is limited to controlled
+`CaptureRecoveryOnly`; ordinary approved-rig capture-and-stitch remains
+unchanged. This implementation slice covers the coexistence probe and the
+software gate before one-shot only. Real one-shot and fault tests remain pending
+until the required preflight, coexistence probe, regression, and independent
+review gates pass. The same-binding 10-pair/100-pair runner is not implemented,
+and its compatibility with the fixed host lifetime is unresolved; neither run
+may start or be reported as Pass. See [DualCamera safety audit 2026-08-31](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md).
 
 This document covers the production Native Named Pipe host process that serves
 the already-implemented Dual hardware v2 parser, durable pair journal store,
@@ -98,18 +106,30 @@ launch contract. Each start request also carries frozen
 `captureProfileSnapshot`/`identitySnapshot` values that the dispatcher validates
 before dispatch. Supplying both `--binding-pipe-name` and `--wpd-camera-map`
 enables one process-owned backend: the binding pipe first establishes a
-memory-only, operator-confirmed CAM-A/B binding, all candidate Live View and SDK
-source objects are closed, but the SDK Module remains loaded to retain the
-session-local tokens. This distinction is why the backend is under the safety
-hold above. Omitting both options preserves the fail-closed
+memory-only, operator-confirmed CAM-A/B binding. Before WPD opens, all candidate
+Live View, SDK source objects, and SDK capture sessions are closed; the SDK
+Module alone remains loaded to retain session-local tokens. While WPD is open,
+the backend issues zero SDK API operations. If WPD cleanup cannot be confirmed,
+the backend issues no SDK API call (including `End`), isolates and terminals that
+Agent, reports the old binding invalidation reason upward, and requires a new
+binding. Agent/binding-session terminal teardown or invalidation unloads the
+Module and invalidates the binding. Omitting both options preserves the fail-closed
 legacy host; starts return `PairDispatcherUnavailable` after full preflight.
 
-The additive `start-reserved-capture-recovery-only` operation is limited to
+The `start-reserved-capture-recovery-only` capability is advertised additively
+by the ordinary v2 capabilities response, but its start/query/close envelopes
+use the separate `a0.camera-agent.hardware-dual-capture-recovery-only.v1`
+schema. The operation is limited to
 controlled Dual transport verification under ADR-0027. It omits rig evidence,
 requires an explicit `captureRecoveryOnlyApproved` confirmation, and reports
 `capturePurpose=CaptureRecoveryOnly`, `stitchOutcome=Pending`, and
 `a0QualityApproval=Unapproved`. It does not run a stitch or establish A0 quality.
-The ordinary `start-reserved-pair` request and approved-rig contract are unchanged.
+The ordinary v2 capabilities, reservation, start, query, and close payload/result
+shapes remain byte-shape compatible with the pre-exception contract. Ordinary
+`start-reserved-pair` is outside ADR-0028, so the production binding host returns
+the existing `PairDispatcherUnavailable` response without adding availability or
+preflight fields to v2. CaptureRecoveryOnly preflight state is exposed only by
+its separate schema.
 Its separate external/request profile schema is
 `a0.dual-capture-profile.operator-approved.v1` and accepts only `DualCamera`,
 `Nikon D810`, `JPEG Fine`, `L`, `7360x4912`, all of
@@ -124,8 +144,8 @@ Normal capture-profile or rig fields are rejected instead of inferred.
 | --- | --- | --- |
 | `get-dual-capabilities` | none | always succeeds |
 | `reserve-pair-transaction` | durable pair journal store | fails closed (`PairStoreUnavailable`) only if the store failed to construct |
-| `start-reserved-pair` | durable pair journal plus injected session-bound backend | requires identity, approved capture profile, approved rig profile, operator confirmations, and a current Ready binding; without a backend it fails `PairDispatcherUnavailable` after preflight |
-| `start-reserved-capture-recovery-only` | durable pair journal plus injected session-bound backend | requires identity, approved capture profile, capture-only confirmations, and a current Ready binding; no rig input or stitch; result remains `stitchOutcome=Pending` and A0 quality unapproved |
+| `start-reserved-pair` | durable pair journal plus injected session-bound backend | v2 payload/result shape and approved-rig validation remain unchanged; the production binding host returns the existing `PairDispatcherUnavailable` because this operation is outside ADR-0028 |
+| `start-reserved-capture-recovery-only` | durable pair journal plus injected session-bound backend | advertised as an additive capability in v2, but start/query/close use `a0.camera-agent.hardware-dual-capture-recovery-only.v1`; requires identity, approved capture profile, capture-only confirmations, and a current Ready binding; no rig input or stitch; result remains `stitchOutcome=Pending` and A0 quality unapproved |
 | `close-reserved-pair-transaction` | durable pair journal store | closes only the exact same-ID `Reserved` transaction before dispatch; missing, wrong-ID, `Dispatching`, and capture-terminal states are rejected |
 | `get-pair-transaction-result` | durable pair journal store | a same-ID query recovers a Reserved, `ClosedBeforeDispatch`, or capture-terminal transaction |
 
@@ -175,13 +195,27 @@ of requests -- including rejected or malformed ones -- keep the process
 alive indefinitely, in tension with the fixed maximum-lifetime contract
 already documented for the Single v2 continuous Live View host (see
 `HARDWARE_CAMERA_AGENT_V2.md`, "the native process also enforces a
-600-second maximum lifetime"). The Dual host is still designed for
-persistent multi-request use within that fixed 600s window (capabilities /
-reserve / start / same-ID close/query issued as separate pipe connections over one
-long-running process); it just does not extend its own lifetime in response
-to that use.
+600-second maximum lifetime"). The Dual host supports persistent multi-request
+use only within that fixed 600s window (capabilities / reserve / start /
+same-ID close/query issued as separate pipe connections over one long-running
+process); it does not extend its own lifetime in response to that use. This is
+sufficient for the current coexistence-probe and one-shot gate, but it is not
+an approved or verified host-lifetime strategy for 10-pair or 100-pair runs.
 
 ## Verification boundary
+
+### Required coexistence pre-gate
+
+Before any real shutter operation, the exact production adapter must complete a
+read-only coexistence probe. It must prove the pair-level WPD preflight (D810
+exact-two, CAM-A/B map exact-one, both cards payload zero, all WPD sessions
+closed), then prove source/capture session close before WPD open, Module
+retained, WPD sessions closed after inspection, and SDK API operation count zero
+throughout WPD open. If WPD cleanup is unconfirmed, it calls no SDK API (including
+`End`), isolates and terminals the Agent, reports the invalidation reason, and
+requires re-binding. The probe sends no capture, delete, setting write, vendor
+operation, or retry. It is transport-boundary evidence only: it does not prove a
+shutter, recovery, pair result, A0 quality, or release.
 
 Native contract tests (`tests/dual_hardware_camera_agent_tests.cpp` and
 `tests/dual_hardware_camera_agent_pipe_tests.cpp`)
@@ -202,9 +236,11 @@ redispatch. They also cover the strict rig-free CaptureRecoveryOnly request,
 Pending/A0-unapproved result, CAM-A-before-CAM-B ordering, partial retention,
 and zero retry with an injected deterministic backend. These software tests do
 not load or call a real camera. Real backend construction occurs only in the
-production executable when both binding options are supplied, and its claims
-remain subject to separate one-shot, 10-pair, approved-p95 100-pair, and fault
-evidence on the licensed Windows hardware PC.
+production executable when both binding options are supplied. Its current
+claim is limited to the coexistence-probe and one-shot software gate; real
+one-shot and fault evidence remain required on the licensed Windows hardware
+PC. A separate runner and host-lifetime decision are prerequisites for later
+10-pair, approved-p95, and 100-pair evidence.
 
 ## Known gaps (tracked, not fixed here)
 

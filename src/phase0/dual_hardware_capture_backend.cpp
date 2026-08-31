@@ -140,6 +140,120 @@ std::chrono::steady_clock::time_point SteadyDeadline(std::int64_t utc_100ns) {
 
 } // namespace
 
+DualBoundPairPreflightResult RunDualBoundPairPreflight(
+    NikonDualBindingSdkAdapter& sdk_adapter,
+    IWpdDualReadOnlyProbeTransport& wpd_transport,
+    const IdentityMap& identity_map,
+    std::chrono::seconds timeout) noexcept {
+    DualBoundPairPreflightResult result;
+    try {
+        result.invalidation_reason = sdk_adapter.PollInvalidation();
+        result.sdk_state_before_wpd =
+            sdk_adapter.InspectRetainedModuleState();
+        if (result.invalidation_reason != DualIdentityInvalidationReason::None) {
+            result.error =
+                DualBoundPairPreflightError::SdkInvalidatedBeforeWpd;
+            return result;
+        }
+        if (!result.sdk_state_before_wpd.ReadyForReadOnlyWpd()) {
+            result.error =
+                DualBoundPairPreflightError::SdkBoundaryUnsafeBeforeWpd;
+            return result;
+        }
+
+        // Deliberately no SDK adapter call occurs inside this synchronous WPD
+        // window. The narrow WPD interface cannot capture, delete, write a
+        // setting, issue a vendor operation, or retry.
+        result.wpd_result = RunDualWpdReadOnlyProbe(
+            wpd_transport, identity_map, timeout);
+        result.sdk_state_after_wpd =
+            sdk_adapter.InspectRetainedModuleState();
+
+        if (!result.sdk_state_after_wpd.ReadyForReadOnlyWpd()) {
+            result.error =
+                DualBoundPairPreflightError::SdkBoundaryUnsafeAfterWpd;
+            return result;
+        }
+        if (result.wpd_result.wpd_session_open_at_exit ||
+            result.wpd_result.cleanup == DualWpdReadOnlyProbeCleanup::Unconfirmed) {
+            // An SDK poll is itself an SDK operation. Do not issue it while a
+            // WPD session may still be open; the concrete WPD owner must first
+            // leave scope and then invalidate the binding.
+            result.error = DualBoundPairPreflightError::WpdProbeBlocked;
+            return result;
+        }
+
+        result.invalidation_reason = sdk_adapter.PollInvalidation();
+        if (result.invalidation_reason != DualIdentityInvalidationReason::None) {
+            result.error =
+                DualBoundPairPreflightError::SdkInvalidatedAfterWpd;
+            return result;
+        }
+        if (result.wpd_result.terminal_state !=
+            DualWpdReadOnlyProbeTerminalState::Pass) {
+            result.error = DualBoundPairPreflightError::WpdProbeBlocked;
+            return result;
+        }
+
+        result.error = DualBoundPairPreflightError::None;
+        result.ready = true;
+        return result;
+    } catch (...) {
+        result.sdk_state_after_wpd =
+            sdk_adapter.InspectRetainedModuleState();
+        return result;
+    }
+}
+
+DualHardwarePairPreflightOutcome ResolveDualBoundPairPreflight(
+    NikonDualBindingSdkAdapter& sdk_adapter,
+    const DualBoundPairPreflightResult& result) noexcept {
+    if (result.ready) {
+        return {DualHardwarePairPreflightState::Ready,
+                DualIdentityInvalidationReason::None, false, false};
+    }
+    if (result.invalidation_reason != DualIdentityInvalidationReason::None) {
+        // PollInvalidation already performed the one bounded SDK teardown.
+        return {DualHardwarePairPreflightState::BindingInvalidated,
+                result.invalidation_reason, true, true};
+    }
+
+    const bool wpd_cleanup_unconfirmed =
+        result.wpd_result.wpd_session_open_at_exit ||
+        result.wpd_result.cleanup == DualWpdReadOnlyProbeCleanup::Unconfirmed;
+    if (wpd_cleanup_unconfirmed) {
+        // No SDK operation is legal while WPD ownership remains uncertain.
+        sdk_adapter.AbandonSessionNoSdkCalls();
+        return {DualHardwarePairPreflightState::CleanupUnconfirmed,
+                DualIdentityInvalidationReason::SdkError, true, true};
+    }
+
+    const bool sdk_boundary_unsafe =
+        result.error ==
+            DualBoundPairPreflightError::SdkBoundaryUnsafeBeforeWpd ||
+        result.error ==
+            DualBoundPairPreflightError::SdkBoundaryUnsafeAfterWpd;
+    if (sdk_boundary_unsafe) {
+        // WPD cleanup is confirmed here, so one SDK teardown attempt is legal.
+        try { sdk_adapter.EndSession(std::chrono::seconds(2)); } catch (...) {}
+        return {DualHardwarePairPreflightState::BindingInvalidated,
+                DualIdentityInvalidationReason::SdkError, true, true};
+    }
+    return {DualHardwarePairPreflightState::HardwarePending,
+            DualIdentityInvalidationReason::None, false, false};
+}
+
+DualIdentityInvalidationReason ResolveDualCaptureWpdCleanup(
+    NikonDualBindingSdkAdapter& sdk_adapter,
+    bool wpd_session_open,
+    bool wpd_cleanup_confirmed) noexcept {
+    if (!wpd_session_open && wpd_cleanup_confirmed) {
+        return DualIdentityInvalidationReason::None;
+    }
+    sdk_adapter.AbandonSessionNoSdkCalls();
+    return DualIdentityInvalidationReason::SdkError;
+}
+
 void PublishVerifiedDualCaptureCanonicalOriginal(
     const FrameEvidence& frame,
     const fs::path& requested_path,
@@ -261,6 +375,41 @@ DualBoundPairCaptureBackend::DualBoundPairCaptureBackend(
     }
 }
 
+DualHardwarePairPreflightOutcome DualBoundPairCaptureBackend::PreflightPair(
+    bool capture_recovery_only,
+    std::int64_t watchdog_deadline_100ns) {
+    // ADR-0028 authorizes retained-Module coexistence only for the controlled
+    // non-stitching transport verification lane.
+    if (!capture_recovery_only) {
+        return {DualHardwarePairPreflightState::HardwarePending,
+                DualIdentityInvalidationReason::None, false, false};
+    }
+    if (
+        binding_dispatcher_.BindingState() !=
+            DualIdentitySessionBindingState::Ready) {
+        return {DualHardwarePairPreflightState::BindingInvalidated,
+                DualIdentityInvalidationReason::SdkError, true, true};
+    }
+    (void)SteadyDeadline(watchdog_deadline_100ns);
+
+    IdentityMap wpd_map(wpd_camera_map_);
+    DualBoundPairPreflightResult result;
+    {
+        // Keep the concrete WPD owner scoped to the read-only gate. If its
+        // cleanup is unconfirmed, destruction happens before any bounded SDK
+        // Module-end attempt below.
+        WpdTransport wpd;
+        result = RunDualBoundPairPreflight(
+            *sdk_adapter_, wpd, wpd_map, std::chrono::seconds(10));
+    }
+    const auto outcome = ResolveDualBoundPairPreflight(*sdk_adapter_, result);
+    if (outcome.requires_rebinding) {
+        binding_dispatcher_.InvalidateCaptureBinding(
+            outcome.binding_invalidation_reason);
+    }
+    return outcome;
+}
+
 DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
     std::string_view alias,
     const fs::path& canonical_original_path,
@@ -268,8 +417,15 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
     if (alias != "CAM-A" && alias != "CAM-B") {
         throw TransportError("dual_alias_invalid", "Dual capture alias is invalid");
     }
-    if (binding_dispatcher_.BindingState() != DualIdentitySessionBindingState::Ready ||
-        sdk_adapter_->PollInvalidation() != DualIdentityInvalidationReason::None) {
+    const auto invalidation = sdk_adapter_->PollInvalidation();
+    if (invalidation != DualIdentityInvalidationReason::None) {
+        capture_invalidation_reason_ = invalidation;
+        binding_dispatcher_.InvalidateCaptureBinding(invalidation);
+    }
+    if (binding_dispatcher_.BindingState() !=
+            DualIdentitySessionBindingState::Ready ||
+        invalidation != DualIdentityInvalidationReason::None ||
+        !sdk_adapter_->InspectRetainedModuleState().ReadyForReadOnlyWpd()) {
         throw TransportError("dual_binding_invalidated",
                              "Dual binding is not Ready or was invalidated");
     }
@@ -293,29 +449,74 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
                             "Nikon-D810-licensed-dual-session");
     WpdTransport wpd;
     BoundNikonCardCaptureTransport sdk(sdk_adapter_, token);
-    const auto result = ExecuteHybridCaptureOnce(
-        wpd, wpd, sdk, sdk, evidence, alias, *wpd_identity, token, {}, {}, {},
-        deadline, [&](const FrameEvidence& frame) {
+    TransactionResult result;
+    HybridCaptureCleanupState cleanup_state;
+    try {
+        result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, alias, *wpd_identity, token, {}, {}, {},
+            deadline, [&](const FrameEvidence& frame) {
             // The core keeps the WPD object untouched until this callback
             // returns. Persist and verify the requested canonical original
             // (including dimensions) before making deletion eligible.
             PublishVerifiedDualCaptureCanonicalOriginal(
                 frame, canonical_original_path, deadline);
-        }, [&] {
-            if (sdk_adapter_->PollInvalidation() != DualIdentityInvalidationReason::None) {
+            }, [&] {
+            const auto before_capture_invalidation = sdk_adapter_->PollInvalidation();
+            if (before_capture_invalidation != DualIdentityInvalidationReason::None) {
+                capture_invalidation_reason_ = before_capture_invalidation;
+                binding_dispatcher_.InvalidateCaptureBinding(before_capture_invalidation);
                 throw TransportError("dual_binding_invalidated",
                                      "Dual binding invalidated before shutter command");
             }
             RequireReadOnlyDualCaptureProfile(
                 sdk_adapter_->ProbeOpenCaptureSessionStatus(
                     std::chrono::seconds(5)));
-        });
+            }, &cleanup_state);
+    } catch (...) {
+        const bool wpd_session_open = wpd.DualReadOnlyProbeSessionOpen();
+        if (wpd_session_open || !cleanup_state.wpd_cleanup_confirmed) {
+            // WPD cleanup is not confirmed: absolutely no SDK poll/close/end
+            // may follow. Isolate this owner until process exit.
+            capture_invalidation_reason_ =
+                ResolveDualCaptureWpdCleanup(
+                    *sdk_adapter_, wpd_session_open,
+                    cleanup_state.wpd_cleanup_confirmed);
+            binding_dispatcher_.InvalidateCaptureBinding(capture_invalidation_reason_);
+        } else {
+            // Adapter failures retain a typed pending reason after their one
+            // bounded teardown. Polling that local reason here publishes the
+            // invalidation with this terminal result instead of deferring it
+            // until a later transaction.
+            const auto caught_invalidation = sdk_adapter_->PollInvalidation();
+            if (caught_invalidation != DualIdentityInvalidationReason::None) {
+                capture_invalidation_reason_ = caught_invalidation;
+                binding_dispatcher_.InvalidateCaptureBinding(caught_invalidation);
+            }
+        }
+        throw;
+    }
 
     DualHardwareFakeCaptureOutcome outcome;
     outcome.succeeded = result.terminal_state == "Complete" &&
         result.frames.size() == 1 && result.frames.front().success;
     outcome.exact_recovered_object_deleted = result.camera_card_delete_succeeded;
     outcome.spool_empty_after_delete = result.spool_empty_after_cleanup;
+    if (const auto cleanup_invalidation = ResolveDualCaptureWpdCleanup(
+            *sdk_adapter_, wpd.DualReadOnlyProbeSessionOpen(),
+            result.wpd_cleanup_confirmed &&
+                cleanup_state.wpd_cleanup_confirmed);
+        cleanup_invalidation != DualIdentityInvalidationReason::None) {
+        outcome.succeeded = false;
+        capture_invalidation_reason_ = cleanup_invalidation;
+        binding_dispatcher_.InvalidateCaptureBinding(capture_invalidation_reason_);
+    } else if (!outcome.succeeded &&
+        !sdk_adapter_->InspectRetainedModuleState().ReadyForReadOnlyWpd()) {
+        // The capture transport has already completed its bounded internal
+        // cleanup. Publish the invalidation with the retained originals, and
+        // require a new binding before any further pair can start.
+        capture_invalidation_reason_ = DualIdentityInvalidationReason::SdkError;
+        binding_dispatcher_.InvalidateCaptureBinding(capture_invalidation_reason_);
+    }
     if (!outcome.succeeded) return outcome;
 
     outcome.succeeded = true;

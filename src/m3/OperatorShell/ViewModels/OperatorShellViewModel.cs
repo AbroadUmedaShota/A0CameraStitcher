@@ -2402,6 +2402,13 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void ApplyCaptureRecoveryOnlyExecution(HardwareDualCaptureRecoveryOnlyExecution outcome)
     {
+        if (outcome.BindingInvalidationReason != DualBindingInvalidationReason.None)
+        {
+            // The binding pipe was retired during activation. Do not probe or cancel it; the
+            // typed capture result is the only safe signal that the old CAM-A/CAM-B assignment
+            // must be discarded.
+            DualBinding.ReportActivatedCaptureInvalidation(outcome.BindingInvalidationReason);
+        }
         LastTransactionId = outcome.TransactionId == Guid.Empty
             ? "未実行"
             : outcome.TransactionId.ToString("N");
@@ -2472,7 +2479,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             $"capturePurpose={HardwareDualCaptureRecoveryOnlyExecution.CapturePurpose} / " +
             $"stitchOutcome={HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome} / " +
             $"a0QualityApproval={HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval} / " +
-            $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode}";
+            $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode} / " +
+            $"bindingInvalidationReason={outcome.BindingInvalidationReason}";
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
         RaiseLoupeProperties();
         RecalculateAvailability();

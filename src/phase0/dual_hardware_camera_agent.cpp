@@ -399,12 +399,13 @@ std::string TryExtractSafeRequestId(std::string_view json) noexcept {
 std::string ResponsePrefix(
     std::string_view request_id,
     bool success,
-    std::string_view result_code) {
+    std::string_view result_code,
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
     const std::string safe_request_id = IsSafeRequestId(request_id)
         ? std::string(request_id)
         : "rejected";
     std::ostringstream output;
-    output << "{\"schemaVersion\":\"" << kDualHardwareCameraAgentSchemaVersion
+    output << "{\"schemaVersion\":\"" << schema_version
            << "\",\"simulation\":false,\"marker\":\""
            << kDualHardwareCameraAgentMarker << "\",\"requestId\":\""
            << safe_request_id << "\",\"success\":"
@@ -442,7 +443,8 @@ std::string BuildTerminalResult(
     const std::vector<std::pair<std::string, DualHardwareFakeCaptureOutcome>>& originals,
     const std::filesystem::path& transaction_directory,
     std::int64_t completed_at_100ns,
-    bool capture_recovery_only) {
+    bool capture_recovery_only,
+    DualIdentityInvalidationReason binding_invalidation_reason) {
     const auto& identity = RequireField(transaction, "identitySnapshot", JsonKind::object);
     const auto& capture = RequireField(transaction, "captureProfileSnapshot", JsonKind::object);
     std::string purpose_json;
@@ -466,6 +468,8 @@ std::string BuildTerminalResult(
             JsonEscape(RequireField(capture, "imageSize", JsonKind::string).string) +
             "\",\"pixelDimensions\":\"" +
             JsonEscape(RequireField(capture, "pixelDimensions", JsonKind::string).string) + "\"";
+        capture_evidence_json += ",\"bindingInvalidationReason\":\"" +
+            std::string(DualIdentityInvalidationReasonName(binding_invalidation_reason)) + "\"";
     } else {
         const auto& rig = RequireField(transaction, "rigProfileSnapshot", JsonKind::object);
         capture_evidence_json =
@@ -562,16 +566,79 @@ std::string ReservationResponse(
 
 std::string StartUnavailableResponse(
     std::string_view request_id,
-    std::string_view transaction_id) {
-    return ResponsePrefix(request_id, false, "PairDispatcherUnavailable") +
+    std::string_view transaction_id,
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
+    return ResponsePrefix(
+        request_id, false, "PairDispatcherUnavailable", schema_version) +
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"dispatchStarted\":false}}";
 }
 
+std::string_view TryExtractResponseSchema(std::string_view json) noexcept {
+    constexpr std::string_view key = "\"schemaVersion\"";
+    const std::size_t key_position = json.find(key);
+    if (key_position == std::string_view::npos) {
+        return kDualHardwareCameraAgentSchemaVersion;
+    }
+    const std::size_t colon = json.find(':', key_position + key.size());
+    if (colon == std::string_view::npos) {
+        return kDualHardwareCameraAgentSchemaVersion;
+    }
+    const std::size_t opening_quote = json.find('"', colon + 1);
+    if (opening_quote == std::string_view::npos) {
+        return kDualHardwareCameraAgentSchemaVersion;
+    }
+    const std::size_t closing_quote = json.find('"', opening_quote + 1);
+    if (closing_quote == std::string_view::npos) {
+        return kDualHardwareCameraAgentSchemaVersion;
+    }
+    const std::string_view value =
+        json.substr(opening_quote + 1, closing_quote - opening_quote - 1);
+    return value == kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+        ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+        : kDualHardwareCameraAgentSchemaVersion;
+}
+
+std::string ConfirmedUndispatchedResponse(
+    std::string_view request_id, std::string_view transaction_id,
+    std::string_view preflight_block = {},
+    std::string_view schema_version =
+        kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion) {
+    return ResponsePrefix(
+        request_id, true, "PairDispatchAccepted", schema_version) +
+        "{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"dispatchState\":\"ConfirmedUndispatched\"" +
+        (preflight_block.empty() ? "" : ",\"preflightBlock\":" + std::string(preflight_block)) +
+        ",\"result\":null}}";
+}
+
+constexpr std::string_view kHardwarePendingPreflightBlock =
+    "{\"state\":\"HardwarePending\",\"bindingInvalidationReason\":\"None\","
+    "\"requiresRebinding\":false,\"hostTerminalAfterReservationClose\":false}";
+
+std::string FatalPreflightBlockJson(
+    const DualHardwarePairPreflightOutcome& outcome) {
+    if ((outcome.state != DualHardwarePairPreflightState::BindingInvalidated &&
+            outcome.state != DualHardwarePairPreflightState::CleanupUnconfirmed) ||
+        outcome.binding_invalidation_reason == DualIdentityInvalidationReason::None ||
+        !outcome.requires_rebinding || !outcome.host_terminal_after_reservation_close) {
+        ProtocolFailure("InvalidPreflightOutcome", "fatal preflight outcome is malformed");
+    }
+    const std::string_view state = outcome.state ==
+        DualHardwarePairPreflightState::CleanupUnconfirmed
+        ? "CleanupUnconfirmed" : "BindingInvalidated";
+    return "{\"state\":\"" + std::string(state) +
+        "\",\"bindingInvalidationReason\":\"" +
+        std::string(DualIdentityInvalidationReasonName(
+            outcome.binding_invalidation_reason)) +
+        "\",\"requiresRebinding\":true,\"hostTerminalAfterReservationClose\":true}";
+}
+
 std::string QueryUnavailableResponse(
     std::string_view request_id,
-    std::string_view transaction_id) {
-    return ResponsePrefix(request_id, false, "PairStoreUnavailable") +
+    std::string_view transaction_id,
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
+    return ResponsePrefix(request_id, false, "PairStoreUnavailable", schema_version) +
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"found\":false,\"result\":null}}";
 }
@@ -580,11 +647,15 @@ std::string QueryResponse(
     std::string_view request_id,
     std::string_view transaction_id,
     std::string_view result_code,
-    bool found) {
-    return ResponsePrefix(request_id, false, result_code) +
+    bool found,
+    std::string_view preflight_block = {},
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
+    return ResponsePrefix(request_id, false, result_code, schema_version) +
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"found\":" + (found ? "true" : "false") +
-        ",\"result\":null}}";
+        ",\"result\":null" +
+        (preflight_block.empty() ? "" : ",\"preflightBlock\":" +
+            std::string(preflight_block)) + "}}";
 }
 
 std::string CloseResponse(
@@ -592,17 +663,22 @@ std::string CloseResponse(
     std::string_view transaction_id,
     bool success,
     std::string_view result_code,
-    bool closed_before_dispatch) {
-    return ResponsePrefix(request_id, success, result_code) +
+    bool closed_before_dispatch,
+    std::string_view preflight_block = {},
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
+    return ResponsePrefix(request_id, success, result_code, schema_version) +
         "{\"transactionId\":\"" + std::string(transaction_id) +
         "\",\"closedBeforeDispatch\":" +
-        (closed_before_dispatch ? "true" : "false") + "}}";
+        (closed_before_dispatch ? "true" : "false") +
+        (preflight_block.empty() ? "" : ",\"preflightBlock\":" +
+            std::string(preflight_block)) + "}}";
 }
 
 std::string ProtocolRejection(
     std::string_view request_id,
-    std::string_view result_code) {
-    return ResponsePrefix(request_id, false, result_code) +
+    std::string_view result_code,
+    std::string_view schema_version = kDualHardwareCameraAgentSchemaVersion) {
+    return ResponsePrefix(request_id, false, result_code, schema_version) +
         "{\"rejected\":true}}";
 }
 
@@ -654,11 +730,25 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
         RequireField(root, "operation", JsonKind::string).string;
     const auto& payload = RequireField(root, "payload", JsonKind::object);
 
-    if (schema != kDualHardwareCameraAgentSchemaVersion || simulation ||
-        marker != kDualHardwareCameraAgentMarker) {
+    const bool capture_recovery_only_protocol =
+        schema == kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion;
+    if ((schema != kDualHardwareCameraAgentSchemaVersion &&
+            !capture_recovery_only_protocol) ||
+        simulation || marker != kDualHardwareCameraAgentMarker) {
         ProtocolFailure(
             "DualHardwareProtocolRequired",
-            "request is not the required Dual hardware v2 protocol");
+            "request does not use a supported Dual hardware protocol");
+    }
+    const bool capture_recovery_only_operation =
+        operation == "start-reserved-capture-recovery-only" ||
+        operation == "get-pair-transaction-result" ||
+        operation == "close-reserved-pair-transaction";
+    if ((capture_recovery_only_protocol && !capture_recovery_only_operation) ||
+        (!capture_recovery_only_protocol &&
+            operation == "start-reserved-capture-recovery-only")) {
+        ProtocolFailure(
+            "DualHardwareProtocolRequired",
+            "operation uses the wrong Dual hardware protocol schema");
     }
     if (!IsSafeRequestId(request_id)) {
         ProtocolFailure(
@@ -667,6 +757,8 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
 
     DualHardwareCameraAgentRequest request;
     request.request_id = request_id;
+    request.capture_recovery_only_protocol =
+        capture_recovery_only_protocol;
     if (operation == "get-dual-capabilities") {
         RequireExactFields(payload, {"cameraMode"});
         ValidateCameraMode(payload);
@@ -753,9 +845,24 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
     std::string_view request_json) noexcept {
     const std::string extracted_request_id =
         TryExtractSafeRequestId(request_json);
+    const std::string_view extracted_response_schema =
+        TryExtractResponseSchema(request_json);
     try {
         auto request =
             ParseDualHardwareCameraAgentRequest(request_json);
+        if (!terminal_pending_transaction_id_.empty() &&
+            request.operation != DualHardwareCameraAgentOperation::close_reserved_pair_transaction &&
+            request.operation != DualHardwareCameraAgentOperation::get_pair_transaction_result &&
+            !((request.operation == DualHardwareCameraAgentOperation::start_reserved_pair ||
+                  request.operation == DualHardwareCameraAgentOperation::start_reserved_capture_recovery_only) &&
+                request.transaction_id == terminal_pending_transaction_id_)) {
+            return ProtocolRejection(
+                request.request_id,
+                "HostTerminalPendingReservationClose",
+                request.capture_recovery_only_protocol
+                    ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+                    : kDualHardwareCameraAgentSchemaVersion);
+        }
         switch (request.operation) {
         case DualHardwareCameraAgentOperation::get_dual_capabilities:
             return CapabilitiesResponse(request.request_id);
@@ -786,6 +893,9 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
         {
             const bool capture_recovery_only = request.operation ==
                 DualHardwareCameraAgentOperation::start_reserved_capture_recovery_only;
+            const std::string_view response_schema = capture_recovery_only
+                ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+                : kDualHardwareCameraAgentSchemaVersion;
             const JsonValue root = JsonParser(request_json).Parse();
             const auto& transaction = RequireField(RequireField(root, "payload", JsonKind::object), "transaction", JsonKind::object);
             const auto now = Clock100ns(utc_clock_);
@@ -808,10 +918,78 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
             }
             if (pair_store_ == nullptr || capture_backend_ == nullptr) {
                 return StartUnavailableResponse(
-                    request.request_id, request.transaction_id);
+                    request.request_id, request.transaction_id, response_schema);
             }
             bool dispatch_started = false;
             try {
+                const auto reserved = pair_store_->Query(request.transaction_id);
+                if (!reserved || reserved->state !=
+                        DualHardwarePairJournalState::reserved) {
+                    return ResponsePrefix(
+                               request.request_id, false, "PairStoreFailure",
+                               response_schema) +
+                        "{\"transactionId\":\"" + request.transaction_id +
+                        "\",\"dispatchStarted\":false}}";
+                }
+                if (!reserved->confirmed_undispatched_preflight_block_json.empty()) {
+                    if (!capture_recovery_only) {
+                        return StartUnavailableResponse(
+                            request.request_id, request.transaction_id);
+                    }
+                    terminal_pending_transaction_id_ = request.transaction_id;
+                    return ConfirmedUndispatchedResponse(request.request_id,
+                        request.transaction_id,
+                        reserved->confirmed_undispatched_preflight_block_json);
+                }
+
+                const auto capabilities = capture_backend_->Capabilities();
+                if (!capture_recovery_only &&
+                    !capabilities.ordinary_pair_capture_available) {
+                    return StartUnavailableResponse(
+                        request.request_id, request.transaction_id);
+                }
+                if (capture_recovery_only &&
+                    !capabilities.capture_recovery_only_available) {
+                    return ConfirmedUndispatchedResponse(
+                        request.request_id, request.transaction_id,
+                        kHardwarePendingPreflightBlock);
+                }
+                DualHardwarePairPreflightOutcome preflight;
+                try {
+                    preflight = capture_backend_->PreflightPair(
+                        capture_recovery_only,
+                        request.watchdog_deadline_100ns);
+                } catch (...) {
+                    preflight = {DualHardwarePairPreflightState::BindingInvalidated,
+                        DualIdentityInvalidationReason::SdkError, true, true};
+                }
+                if (preflight.state != DualHardwarePairPreflightState::Ready) {
+                    if (!capture_recovery_only) {
+                        return StartUnavailableResponse(
+                            request.request_id, request.transaction_id);
+                    }
+                    if (preflight.state == DualHardwarePairPreflightState::HardwarePending) {
+                        if (preflight.binding_invalidation_reason !=
+                                DualIdentityInvalidationReason::None ||
+                            preflight.requires_rebinding ||
+                            preflight.host_terminal_after_reservation_close) {
+                            ProtocolFailure("InvalidPreflightOutcome",
+                                "HardwarePending preflight outcome is malformed");
+                        }
+                        return ConfirmedUndispatchedResponse(
+                            request.request_id, request.transaction_id,
+                            kHardwarePendingPreflightBlock);
+                    }
+                    const std::string block = FatalPreflightBlockJson(preflight);
+                    (void)pair_store_->PersistReservedPreflightBlock(
+                        request.transaction_id, block);
+                    if (preflight.host_terminal_after_reservation_close) {
+                        terminal_pending_transaction_id_ = request.transaction_id;
+                    }
+                    return ConfirmedUndispatchedResponse(
+                        request.request_id, request.transaction_id, block);
+                }
+
                 (void)pair_store_->BeginDispatch(request.transaction_id);
                 dispatch_started = true;
                 ++safety_counters_.pair_dispatch_count;
@@ -822,13 +1000,30 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 const auto terminalize = [&](std::string_view state,
                                              std::string_view failure,
                                              std::int64_t completed) {
+                    const auto binding_invalidation_reason =
+                        capture_backend_->LastBindingInvalidationReason();
+                    const bool invalid_success =
+                        state == "Succeeded" &&
+                        binding_invalidation_reason !=
+                            DualIdentityInvalidationReason::None;
+                    const std::string_view terminal_state = invalid_success
+                        ? "FailedPartial" : state;
+                    const std::string_view terminal_failure = invalid_success
+                        ? "CaptureCameraB" : failure;
                     const std::string result = BuildTerminalResult(
-                        transaction, request.transaction_id, state, failure,
+                        transaction, request.transaction_id, terminal_state,
+                        terminal_failure,
                         originals, transaction_directory, completed,
-                        capture_recovery_only);
+                        capture_recovery_only,
+                        binding_invalidation_reason);
                     const auto persisted = pair_store_->CompleteTerminal(
-                        request.transaction_id, JournalStateFor(state), result);
-                    return ResponsePrefix(request.request_id, true, "PairDispatchAccepted") +
+                        request.transaction_id,
+                        JournalStateFor(terminal_state), result);
+                    if (binding_invalidation_reason !=
+                        DualIdentityInvalidationReason::None) should_stop_ = true;
+                    return ResponsePrefix(
+                        request.request_id, true, "PairDispatchAccepted",
+                        response_schema) +
                         "{\"transactionId\":\"" + request.transaction_id +
                         "\",\"dispatchState\":\"Completed\",\"result\":" +
                         persisted.terminal_result_json + "}}";
@@ -868,29 +1063,74 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 originals.emplace_back("CAM-B", b);
                 return terminalize("Succeeded", "None", after_b);
             } catch (const DualHardwarePairJournalStoreError&) {
-                return ResponsePrefix(request.request_id, false, "PairStoreFailure") +
+                return ResponsePrefix(
+                    request.request_id, false, "PairStoreFailure",
+                    response_schema) +
                     "{\"transactionId\":\"" + request.transaction_id +
                     "\",\"dispatchStarted\":" +
                     (dispatch_started ? "true" : "false") + "}}";
             }
         }
         case DualHardwareCameraAgentOperation::get_pair_transaction_result: {
+            const std::string_view response_schema =
+                request.capture_recovery_only_protocol
+                ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+                : kDualHardwareCameraAgentSchemaVersion;
             if (pair_store_ == nullptr) {
                 return QueryUnavailableResponse(
-                    request.request_id, request.transaction_id);
+                    request.request_id, request.transaction_id,
+                    response_schema);
             }
             try {
                 const auto record = pair_store_->Query(request.transaction_id);
                 if (record && record->state ==
                     DualHardwarePairJournalState::closed_before_dispatch) {
+                    if (!request.capture_recovery_only_protocol &&
+                        !record->confirmed_undispatched_preflight_block_json.empty()) {
+                        return QueryResponse(
+                            request.request_id, request.transaction_id,
+                            "PairStoreFailure", false);
+                    }
+                    if (!record->confirmed_undispatched_preflight_block_json.empty()) {
+                        should_stop_ = true;
+                    }
                     return ResponsePrefix(
                                request.request_id, true,
-                               "PairTransactionClosedBeforeDispatch") +
+                               "PairTransactionClosedBeforeDispatch",
+                               response_schema) +
                         "{\"transactionId\":\"" + request.transaction_id +
-                        "\",\"found\":true,\"result\":null}}";
+                        "\",\"found\":true,\"result\":null" +
+                        (record->confirmed_undispatched_preflight_block_json.empty()
+                            ? "" : ",\"preflightBlock\":" +
+                                record->confirmed_undispatched_preflight_block_json) + "}}";
+                }
+                if (record && !record->confirmed_undispatched_preflight_block_json.empty()) {
+                    if (!request.capture_recovery_only_protocol) {
+                        return QueryResponse(
+                            request.request_id, request.transaction_id,
+                            "PairStoreFailure", false);
+                    }
+                    terminal_pending_transaction_id_ = request.transaction_id;
+                    return QueryResponse(request.request_id,
+                        request.transaction_id,
+                        "PairTransactionReserved", true,
+                        record->confirmed_undispatched_preflight_block_json,
+                        response_schema);
                 }
                 if (record && !record->terminal_result_json.empty()) {
-                    return ResponsePrefix(request.request_id, true, "PairTransactionFound") +
+                    const bool is_capture_recovery_only =
+                        record->terminal_result_json.find(
+                            "\"capturePurpose\":\"CaptureRecoveryOnly\"") !=
+                        std::string::npos;
+                    if (is_capture_recovery_only !=
+                        request.capture_recovery_only_protocol) {
+                        return QueryResponse(
+                            request.request_id, request.transaction_id,
+                            "PairStoreFailure", false, {}, response_schema);
+                    }
+                    return ResponsePrefix(
+                        request.request_id, true, "PairTransactionFound",
+                        response_schema) +
                         "{\"transactionId\":\"" + request.transaction_id +
                         "\",\"found\":true,\"result\":" +
                         record->terminal_result_json + "}}";
@@ -899,20 +1139,31 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                     request.request_id, request.transaction_id,
                     record ? "PairTransactionReserved" :
                         "PairTransactionNotFound",
-                    record.has_value());
+                    record.has_value(), {}, response_schema);
             } catch (const DualHardwarePairJournalStoreError&) {
                 return QueryResponse(
                     request.request_id, request.transaction_id,
-                    "PairStoreFailure", false);
+                    "PairStoreFailure", false, {}, response_schema);
             }
         }
         case DualHardwareCameraAgentOperation::close_reserved_pair_transaction: {
+            const std::string_view response_schema =
+                request.capture_recovery_only_protocol
+                ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion
+                : kDualHardwareCameraAgentSchemaVersion;
             if (pair_store_ == nullptr) {
                 return CloseResponse(
                     request.request_id, request.transaction_id, false,
-                    "PairStoreUnavailable", false);
+                    "PairStoreUnavailable", false, {}, response_schema);
             }
             try {
+                const auto active = pair_store_->Query(request.transaction_id);
+                if (!request.capture_recovery_only_protocol && active &&
+                    !active->confirmed_undispatched_preflight_block_json.empty()) {
+                    return CloseResponse(
+                        request.request_id, request.transaction_id, false,
+                        "PairCloseRejected", false);
+                }
                 const auto closed =
                     pair_store_->CloseReservedBeforeDispatch(
                         request.transaction_id);
@@ -922,24 +1173,37 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                         DualHardwarePairJournalState::closed_before_dispatch &&
                     closed.automatic_retry_count == 0 &&
                     closed.terminal_result_json.empty();
+                if (confirmed && (!closed.confirmed_undispatched_preflight_block_json.empty() ||
+                        request.transaction_id == terminal_pending_transaction_id_)) {
+                    should_stop_ = true;
+                    terminal_pending_transaction_id_.clear();
+                }
                 return CloseResponse(
                     request.request_id, request.transaction_id, confirmed,
                     confirmed ? "PairTransactionClosedBeforeDispatch" :
                         "PairCloseRejected",
-                    confirmed);
+                    confirmed,
+                    confirmed
+                        ? std::string_view(
+                            closed.confirmed_undispatched_preflight_block_json)
+                        : std::string_view{},
+                    response_schema);
             } catch (const DualHardwarePairJournalStoreError&) {
                 return CloseResponse(
                     request.request_id, request.transaction_id, false,
-                    "PairCloseRejected", false);
+                    "PairCloseRejected", false, {}, response_schema);
             }
         }
         }
     } catch (const DualHardwareCameraAgentProtocolError& error) {
-        return ProtocolRejection(extracted_request_id, error.Code());
+        return ProtocolRejection(
+            extracted_request_id, error.Code(), extracted_response_schema);
     } catch (...) {
-        return ProtocolRejection(extracted_request_id, "AgentFailure");
+        return ProtocolRejection(
+            extracted_request_id, "AgentFailure", extracted_response_schema);
     }
-    return ProtocolRejection(extracted_request_id, "AgentFailure");
+    return ProtocolRejection(
+        extracted_request_id, "AgentFailure", extracted_response_schema);
 }
 
 DualHardwareCameraAgentSafetyCounters
@@ -955,10 +1219,7 @@ void DualHardwareCameraAgentDispatcher::OnIdle() noexcept {
 }
 
 bool DualHardwareCameraAgentDispatcher::ShouldStop() const noexcept {
-    // The Dual protocol has no operation that asks the host to terminate
-    // (no close-agent-session equivalent). The host's lifetime is bounded
-    // solely by the named-pipe server loop's own deadline.
-    return false;
+    return should_stop_;
 }
 
 } // namespace a0::phase0

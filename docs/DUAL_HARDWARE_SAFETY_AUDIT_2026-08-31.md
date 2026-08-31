@@ -2,7 +2,7 @@
 
 ## 判定
 
-`Blocked`。実機撮影は開始していない。SDK-only／WPD-onlyの読み取り専用ゲートは合格したが、現行要件を同時に満たすproduction撮影経路がない。
+`HardwarePending`。実機撮影は開始していない。SDK-only／WPD-onlyの読み取り専用ゲートは合格し、2026-08-31にADR-0028のSDK Module保持限定例外が承認された。pair-level preflightとproduction adapter coexistence probeは実装済みで、ソフトウェア回帰で検証済みである。ただし、このexact SHAでのAOPC-22-NOTE実機coexistence probeと、one-shot以降の実機証跡は未完了であり、実シャッター操作は開始しない。
 
 ## 確認済みの範囲
 
@@ -16,26 +16,23 @@
 
 これは撮影前の読み取り専用ゲートの合格であり、DualCamera撮影のPassではない。
 
-## 停止理由
+## 解消済みの設計判断と残る技術blocker
 
-### 1. SDK完全終了とsession-local token
+### 1. SDK Module保持限定例外
 
-CAM-A/Bの目視割当tokenは一つのSDK Module session内だけで有効である。`EndDualSession`でModuleを完全終了するとtokenは破棄される。一方、tokenを再列挙せずCAM-AからCAM-B、さらに10／100 pairへ使うにはModuleを保持する必要がある。
+CAM-A/Bの目視割当tokenは一つのSDK Module session内だけで有効である。`EndDualSession`でModuleを完全終了するとtokenは破棄される。一方、tokenを再列挙せずCAM-AからCAM-Bへ使うにはModuleを保持する必要がある。10／100 pairへの再利用は将来の設計意図であり、現sliceの完了範囲ではない。
 
-現backendはSDK sourceを閉じてもModuleを保持したままWPDへ進む。そのため、次の二条件を同時に満たせない。
-
-- WPDを開く前にSDK session／source／Moduleを完全終了する。
-- 同じ目視割当tokenを再列挙・再bindingなしで使い続ける。
+現backendはSDK sourceを閉じてもModuleを保持したままWPDへ進む。ADR-0028はcontrolled Dual `CaptureRecoveryOnly`に限りこのModule保持を承認した。ただしWPDを開く前に全Live View、SDK source、SDK capture sessionを完全終了し、WPD open中のSDK API operationを0にする。Agent/binding-session terminal teardownまたはbinding invalidationではModuleをunloadしてbindingをinvalidにする。
 
 AOPC-22-NOTE上のライセンス済みSDK資料を静的・読み取り専用で追加確認した。header 22件、sample source 6件、PDF資料10件の範囲では、同型D810二台で必ず異なり、USB再接続またはSDK Module unload／reload後も不変で、WPD側CAM-A/Bと安全に相関できる正式なper-body property/APIは見つからなかった。`Name`、`Interface`、Module内source ID、candidate ordinal、USB port、firmware／versionは恒久identityへ使用しない。SDK、WPD、Camera Agent、Live View、撮影等の実行系操作は0件である。
 
 ### 2. pair開始前の一括preflight
 
-production backendは一台ずつの`Capture(alias)` APIであり、CAM-A撮影前にWPD上のD810 exact 2、CAM-A/B map exact-one、両カードpayload 0、全session closeを一括確認するpair-level APIがない。CAM-Bの非空をCAM-A撮影後に初めて検出し得るため、現状ではshutter gateとして不十分である。
+production backendは、CAM-A撮影前にWPD上のD810 exact 2、CAM-A/B map exact-one、両カードpayload 0、全session closeを一括確認するpair-level preflightを実装した。preflight不合格または例外時は`ConfirmedUndispatched`で予約を維持し、CAM-A/Bの撮影を開始しない。これはソフトウェア回帰で検証済みであり、実機でのPass証跡ではない。
 
 ### 3. 10回／100回runner
 
-現WPFは一つのbinding activationにつき一pairだけを実行する。二回目は`CaptureAlreadyActivated`で停止する。10／100回の逐次実行、初回失敗停止、匿名結果一覧、p50／p95／max、p95承認artifactを扱うproduction runnerは未実装である。Native hostの固定600秒寿命も100回試験と両立しない。
+現WPFは一つのbinding activationにつき一pairだけを実行する。二回目は`CaptureAlreadyActivated`で停止する。10／100回の逐次実行、初回失敗停止、匿名結果一覧、p50／p95／max、p95承認artifactを扱うproduction runnerは未実装である。Native hostの固定600秒寿命も100回試験と両立しない。したがってpair preflight/coexistence probeの実装済み状態は、10／100回実機試験の開始条件を満たすものではない。
 
 ## 実装済みの安全修正
 
@@ -47,24 +44,23 @@ production backendは一台ずつの`Capture(alias)` APIであり、CAM-A撮影�
 - 実production canonical publisherを用いる回帰で、正常時だけdelete 1、不正寸法・既存canonicalでは`FailedPartial`、PC原画像保持、delete 0、撮影1回、retry 0、全session closeを確認した。
 - activation済みAgentが非0 exit codeで自然終了する回帰で、exact exit code保持、排他解放、cancel／capture再送 0を確認した。test hostのterminal通知はresponse frame書込み完了後へ固定した。
 
-これらは個別の安全欠陥を修正するが、SDK full-closeとtoken継続の設計矛盾は解消しない。
+これらは個別の安全欠陥を修正する。ADR-0028に対応するpair-level preflightとproduction adapter read-only coexistence probeも実装済みで、ソフトウェア契約・回帰で検証済みである。WPD cleanup未確認時はSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、binding失効理由を上位へ返して再bindingを必須にする。実機前の読み取り専用coexistence証跡、および実機one-shot以降の証跡は未完了である。
 
 ## 選択肢
 
-1. SDK Module保持を明示的な例外として承認し、source close中のWPD共存を実機で別途検証する。最短だが、現行のSDK/WPD分離要件を変更する。
+1. SDK Module保持を明示的な例外として承認し、source close中のWPD共存を実機で別途検証する。**選択・承認済み（ADR-0028）**。SDK/WPD source/capture session分離は維持し、Moduleはbinding tokenだけに限定する。
 2. 各camera legでSDKを完全終了し、操作者が毎回再bindingする。分離要件は守れるが、10／100回の無人耐久試験にはならない。
 3. SDK unloadを越えて同じD810を安全に選べる、文書化済みの恒久identity／SDK-WPD correlationを確立する。現行の厳格条件を維持できるが、今回確認したSDK資料には利用可能な方式がない。
 
-現行の安全要件を弱めない判断として、one-shotを含む実シャッター操作は引き続き停止する。短期one-shotだけなら2は安全側へ実装可能だが、legごとの操作者再bindingが必要で、同じbindingの10／100回耐久にはならない。自動10／100回を成立させるには3のメーカー根拠が必要である。1は現時点の証拠では採用せず、例外を検討する場合も製品責任者のADRと追加の実機共存・異常系証拠を必須とする。
+選択済みの1により、同じbindingでのone-shotへ進むための設計経路を再開できる。ただし実シャッター操作は、以下の技術gateを完了するまで停止する。10／100回はproduction runnerとhost lifetime方針の実装・検証後の別scopeであり、この例外承認、coexistence probe、またはone-shotからは開始しない。Module保持は合成、A0品質、実シャッター同期、releaseを承認しない。
 
 ## 再開条件
 
-- 上記いずれかの設計決定と仕様更新
-- pair-level両カードpreflightの実装とnegative test
-- 同一条件のfocused／全回帰合格
-- 新しい独立レビューの`PASS`
+- ADR-0028と要件・Agent contract・Phase 0計画・generated requirements/planの同期
+- pair-level両カードpreflight、production adapter read-only coexistence probe、focused／全回帰、独立reviewのソフトウェア証跡をexact SHAで固定する
+- AOPC-22-NOTEで同じexact SHAのread-only coexistence probeを実行し、source/capture session close、Module retained、WPD open中SDK operation 0、WPD closeを実機で確認する。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化し、再binding要求を記録する
 - AOPC-22-NOTEでexact SHA、clean、関連process 0
-- SDK/WPD分離条件と両カード空の再確認
+- SDK source/capture sessionとWPD sessionの分離、Module保持境界、両カード空、WPD cleanup確認の再確認
 - CAM-A/B物理目視対応のoperator coordination
 
-再開後もone-shotを最初に一回だけ行い、Pass後に10回、実測p95の明示承認後だけ100回へ進む。
+再開後の現scopeでは、coexistence probe合格後にone-shotを最初に一回だけ行う。10回、実測p95承認、100回は同一binding runnerとhost lifetime方針を別途実装・検証し、明示的に再開するまで`NotRun`／`HardwarePending`とする。

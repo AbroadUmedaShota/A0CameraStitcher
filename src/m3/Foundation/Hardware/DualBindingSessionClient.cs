@@ -422,6 +422,20 @@ public sealed class DualBindingSessionClient
         return reply.Refusal;
     }
 
+    /// <summary>
+    /// Applies a capture-pipe invalidation locally after activation. The binding pipe was retired
+    /// by activation, so this deliberately sends no protocol operation.
+    /// </summary>
+    public void InvalidateActivatedCaptureBinding(DualBindingInvalidationReason reason)
+    {
+        if (reason == DualBindingInvalidationReason.None)
+            throw new ArgumentOutOfRangeException(nameof(reason));
+
+        ResetSession();
+        State = DualBindingSessionState.Invalid;
+        InvalidationReason = reason;
+    }
+
     private DualBindingRefusal? RequireSession() =>
         SessionId.Length == 0
             ? new DualBindingRefusal

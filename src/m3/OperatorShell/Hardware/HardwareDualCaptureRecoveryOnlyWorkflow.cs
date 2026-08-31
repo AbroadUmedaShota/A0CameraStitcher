@@ -19,7 +19,8 @@ public sealed record HardwareDualCaptureRecoveryOnlyExecution(
     IReadOnlyList<CanonicalJpegOriginal> Originals,
     string TransactionDirectory,
     bool RecoveryPending,
-    int AutomaticRetryCount)
+    int AutomaticRetryCount,
+    DualBindingInvalidationReason BindingInvalidationReason = DualBindingInvalidationReason.None)
 {
     public const string CapturePurpose = "CaptureRecoveryOnly";
     public const string StitchOutcome = "Pending";
@@ -155,6 +156,9 @@ internal sealed record CaptureRecoveryOnlyDurableSnapshot
     public required CaptureRecoveryOnlyRecoveryIntent RecoveryIntent { get; init; }
 
     public required DualHardwareCaptureRecoveryOnlyRequest? PendingRequest { get; init; }
+
+    public DualBindingInvalidationReason BindingInvalidationReason { get; init; } =
+        DualBindingInvalidationReason.None;
 }
 
 /// <summary>
@@ -228,6 +232,29 @@ internal sealed class CaptureRecoveryOnlyTransactionSnapshotStore
         Write(state with { RecoveryIntent = CaptureRecoveryOnlyRecoveryIntent.CloseReservedBeforeDispatch });
     }
 
+    public void MarkConfirmedUndispatched(
+        Guid expectedTransactionId,
+        DualBindingInvalidationReason bindingInvalidationReason)
+    {
+        EnsureDirectoryIsSafe();
+        using var stateLock = AcquireLock();
+        var state = LoadCore();
+        if (state?.PendingRequest?.TransactionId != expectedTransactionId)
+            throw new InvalidOperationException("The expected CaptureRecoveryOnly transaction is no longer pending.");
+        var existing = state.BindingInvalidationReason;
+        if (existing != DualBindingInvalidationReason.None &&
+            bindingInvalidationReason != DualBindingInvalidationReason.None &&
+            existing != bindingInvalidationReason)
+            throw new InvalidOperationException(
+                "The CaptureRecoveryOnly binding invalidation reason conflicts with the durable transaction state.");
+        Write(state with
+        {
+            BindingInvalidationReason = bindingInvalidationReason != DualBindingInvalidationReason.None
+                ? bindingInvalidationReason
+                : existing,
+        });
+    }
+
     public void Clear(Guid expectedTransactionId)
     {
         EnsureDirectoryIsSafe();
@@ -240,6 +267,7 @@ internal sealed class CaptureRecoveryOnlyTransactionSnapshotStore
             SchemaVersion = SchemaVersion,
             RecoveryIntent = CaptureRecoveryOnlyRecoveryIntent.QueryTerminal,
             PendingRequest = null,
+            BindingInvalidationReason = DualBindingInvalidationReason.None,
         });
     }
 
@@ -536,6 +564,7 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                 return await CloseConfirmedUndispatchedAsync(
                         request,
                         "CaptureRecoveryOnly was confirmed undispatched.",
+                        dispatch.PreflightBlock?.BindingInvalidationReason ?? DualBindingInvalidationReason.None,
                         cancellationToken)
                     .ConfigureAwait(false);
             if (dispatch.State == DualHardwareDispatchState.Completed && dispatch.Result is not null)
@@ -568,6 +597,7 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                 return await CloseConfirmedUndispatchedAsync(
                         request,
                         "The exact reserved transaction still requires close confirmation.",
+                        state.BindingInvalidationReason,
                         cancellationToken)
                     .ConfigureAwait(false);
             return await QueryPendingAsync(request, cancellationToken).ConfigureAwait(false);
@@ -594,10 +624,17 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                 return await CloseConfirmedUndispatchedAsync(
                         request,
                         "The same-ID query confirmed that CaptureRecoveryOnly was not dispatched.",
+                        ResolveBindingInvalidationReason(query.PreflightBlock),
                         cancellationToken)
                     .ConfigureAwait(false);
             if (query.State == DualHardwarePairQueryState.ClosedBeforeDispatch)
             {
+                var bindingInvalidationReason = ResolveBindingInvalidationReason(query.PreflightBlock);
+                if (bindingInvalidationReason != DualBindingInvalidationReason.None)
+                {
+                    _store.MarkConfirmedUndispatched(request.TransactionId, bindingInvalidationReason);
+                    _pending = _store.Load();
+                }
                 if (!TryClear(request.TransactionId, out var clearFailure))
                     return Pending(clearFailure!);
                 return Failed(
@@ -605,7 +642,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                     DualHardwareCaptureTerminalState.HardwarePending,
                     DualCameraFailureCode.HardwarePending,
                     "The exact reservation was already closed before dispatch; no capture occurred.",
-                    request.TransactionDirectory);
+                    request.TransactionDirectory,
+                    bindingInvalidationReason);
             }
             if (query.State == DualHardwarePairQueryState.NotFound)
             {
@@ -674,7 +712,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                 // gate for a new shutter. The only legal follow-up is a same-ID
                 // query, even when the bad evidence arrived on the first reply.
                 RecoveryPending: true,
-                result.Evidence.AutomaticRetryCount);
+                result.Evidence.AutomaticRetryCount,
+                result.Evidence.BindingInvalidationReason);
         }
 
         if (!TryClear(request.TransactionId, out var clearFailure))
@@ -686,7 +725,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
                 new ReadOnlyCollection<CanonicalJpegOriginal>(verified),
                 request.TransactionDirectory,
                 RecoveryPending: true,
-                result.Evidence.AutomaticRetryCount);
+                result.Evidence.AutomaticRetryCount,
+                result.Evidence.BindingInvalidationReason);
 
         return new(
             request.TransactionId,
@@ -698,16 +738,19 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
             new ReadOnlyCollection<CanonicalJpegOriginal>(verified),
             request.TransactionDirectory,
             RecoveryPending: false,
-            result.Evidence.AutomaticRetryCount);
+            result.Evidence.AutomaticRetryCount,
+            result.Evidence.BindingInvalidationReason);
     }
 
     private async Task<HardwareDualCaptureRecoveryOnlyExecution> CloseConfirmedUndispatchedAsync(
         DualHardwareCaptureRecoveryOnlyRequest request,
         string reason,
+        DualBindingInvalidationReason bindingInvalidationReason,
         CancellationToken cancellationToken)
     {
         try
         {
+            _store.MarkConfirmedUndispatched(request.TransactionId, bindingInvalidationReason);
             _store.MarkCloseReservedBeforeDispatch(request.TransactionId);
             _pending = _store.Load();
         }
@@ -726,7 +769,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
             DualHardwareCaptureTerminalState.HardwarePending,
             DualCameraFailureCode.HardwarePending,
             reason + " The exact reservation was closed without capture.",
-            request.TransactionDirectory);
+            request.TransactionDirectory,
+            bindingInvalidationReason);
     }
 
     private async Task<DualHardwareCloseState> TryCloseAsync(
@@ -735,14 +779,27 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
     {
         try
         {
-            return await _pairOperations
-                .CloseReservedPairTransactionAsync(transactionId, cancellationToken)
+            return await _captureOperations
+                .CloseCaptureRecoveryOnlyReservedPairTransactionAsync(transactionId, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
             return DualHardwareCloseState.ResponseUnknown;
         }
+    }
+
+    private DualBindingInvalidationReason ResolveBindingInvalidationReason(
+        DualHardwarePreflightBlock? block)
+    {
+        var existing = _pending?.BindingInvalidationReason ?? DualBindingInvalidationReason.None;
+        var incoming = block?.BindingInvalidationReason ?? DualBindingInvalidationReason.None;
+        if (existing != DualBindingInvalidationReason.None &&
+            incoming != DualBindingInvalidationReason.None &&
+            existing != incoming)
+            throw new InvalidDataException(
+                "The same CaptureRecoveryOnly transaction returned conflicting binding invalidation reasons.");
+        return incoming != DualBindingInvalidationReason.None ? incoming : existing;
     }
 
     private void ValidateTerminal(
@@ -765,6 +822,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
             result.Evidence.WatchdogDeadlineUtc != request.WatchdogDeadlineUtc ||
             result.Evidence.WatchdogDeadlineUtc - result.Evidence.WatchdogStartedAtUtc != Watchdog ||
             result.Evidence.AutomaticRetryCount != 0 ||
+            (result.TerminalState == DualHardwareCaptureTerminalState.Succeeded &&
+             result.Evidence.BindingInvalidationReason != DualBindingInvalidationReason.None) ||
             !result.Evidence.LiveViewStopAndCloseConfirmed ||
             result.Evidence.CompletedAtUtc > result.Evidence.WatchdogDeadlineUtc ||
             (result.TerminalState == DualHardwareCaptureTerminalState.Succeeded) !=
@@ -830,7 +889,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
             Array.Empty<CanonicalJpegOriginal>(),
             request?.TransactionDirectory ?? string.Empty,
             RecoveryPending: true,
-            AutomaticRetryCount: 0);
+            AutomaticRetryCount: 0,
+            BindingInvalidationReason: _pending?.BindingInvalidationReason ?? DualBindingInvalidationReason.None);
     }
 
     private static HardwareDualCaptureRecoveryOnlyExecution Failed(
@@ -838,7 +898,8 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
         DualHardwareCaptureTerminalState terminalState,
         DualCameraFailureCode failureCode,
         string reason,
-        string transactionDirectory = "") =>
+        string transactionDirectory = "",
+        DualBindingInvalidationReason bindingInvalidationReason = DualBindingInvalidationReason.None) =>
         new(
             transactionId,
             terminalState,
@@ -847,5 +908,6 @@ internal sealed class HardwareDualCaptureRecoveryOnlyWorkflow : IHardwareDualCap
             Array.Empty<CanonicalJpegOriginal>(),
             transactionDirectory,
             RecoveryPending: terminalState == DualHardwareCaptureTerminalState.ResponseUnknown,
-            AutomaticRetryCount: 0);
+            AutomaticRetryCount: 0,
+            BindingInvalidationReason: bindingInvalidationReason);
 }

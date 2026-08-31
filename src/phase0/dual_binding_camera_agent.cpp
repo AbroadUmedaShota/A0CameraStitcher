@@ -869,6 +869,12 @@ DualIdentitySessionBindingState DualBindingCameraAgentDispatcher::BindingState()
     return binding_.State();
 }
 
+void DualBindingCameraAgentDispatcher::InvalidateCaptureBinding(
+    DualIdentityInvalidationReason reason) noexcept {
+    if (reason == DualIdentityInvalidationReason::None) return;
+    InvalidateSession(reason);
+}
+
 bool DualBindingCameraAgentDispatcher::CaptureTransitionRequested() const noexcept {
     return capture_transition_requested_;
 }
