@@ -1140,8 +1140,8 @@
                                                         BorderBrush="{StaticResource CautionBrush}" BorderThickness="1"
                                                         Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}">
                                                     <CheckBox IsChecked="{Binding IsCaptureRecoveryOnlyOperatorApproved}"
-                                                              AutomationProperties.Name="専用カード2枚が空で撮影回収のみを1回実行することを承認">
-                                                        <TextBlock Text="専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。"
+                                                              AutomationProperties.Name="{Binding CaptureRecoveryOnlyConfirmationAutomationName}">
+                                                        <TextBlock Text="{Binding CaptureRecoveryOnlyConfirmationText}"
                                                                    TextWrapping="Wrap" FontWeight="Medium"
                                                                    Foreground="{StaticResource CautionBrush}" />
                                                     </CheckBox>
@@ -1155,7 +1155,7 @@
                                                     <!-- 主ボタン（大）: 現在のフォーカス位置のまま撮影。序列は固定（#31方針どおりAF付きを主にしない） -->
                                                     <Button Grid.Column="0" Style="{StaticResource PrimaryActionButtonStyle}"
                                                             Command="{Binding CaptureCommand}" IsEnabled="{Binding CanCapture}"
-                                                            AutomationProperties.Name="主ボタン 確認なしで明示構成の新しい撮影を一回開始 現在のフォーカス位置のまま撮影">
+                                                            AutomationProperties.Name="{Binding CaptureButtonAutomationName}">
                                                         <TextBlock Text="{Binding CaptureButtonText}" TextAlignment="Center" TextWrapping="Wrap"
                                                                    FontSize="{StaticResource FontSizePrimaryAction}" FontWeight="Bold"
                                                                    Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
@@ -1179,7 +1179,7 @@
                                                            Style="{StaticResource MutedTextStyle}"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Visibility="{Binding ShowAutomaticStitchInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
-                                                <TextBlock Text="A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。"
+                                                <TextBlock Text="{Binding CaptureRecoveryOnlyInstructionText}"
                                                            Margin="0,8,0,0" TextWrapping="Wrap"
                                                            Foreground="{StaticResource CautionBrush}"
                                                            FontSize="{StaticResource FontSizeCompact}"
