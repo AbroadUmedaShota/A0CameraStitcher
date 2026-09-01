@@ -1422,13 +1422,18 @@ static async Task<int> RunContinuousLiveViewSessionChildAsync(
 
     if (!string.IsNullOrWhiteSpace(tracePath))
     {
+        // Publish only after the write handle is closed. File.Exists(tracePath)
+        // is the parent's completion signal, so creating the final path before
+        // WriteAllTextAsync completed allowed read/delete sharing violations.
+        var pendingTracePath = $"{tracePath}.{Guid.NewGuid():N}.pending";
         await File.WriteAllTextAsync(
-            tracePath,
+            pendingTracePath,
             JsonSerializer.Serialize(recorded.Select(entry => new
             {
                 operation = entry.Operation,
                 sessionId = entry.SessionId,
             })));
+        File.Move(pendingTracePath, tracePath);
     }
     return 0;
 }
@@ -4767,8 +4772,12 @@ static async Task DualCameraAgentLifecycleCleanupFailureStaysBlockingAsync()
         var client = new DualBindingSessionClient(lifecycle);
         Check.True((await client.BeginBindingAsync()).Succeeded, "binding must start before cleanup refusal");
         Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded, "Live View must be active before cleanup refusal");
+        var processGeneration = lifecycle.CurrentProcessGeneration;
         var cancellation = await client.CancelBindingAsync();
         Check.Equal("BindingCleanupFailed", cancellation.Refusal!.ResultCode);
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(processGeneration),
+            "the cleanup-refusing child did not reach its terminal exit");
 
         HardwareCameraAgentLaunchException? caught = null;
         try
