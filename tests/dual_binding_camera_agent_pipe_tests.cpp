@@ -227,6 +227,13 @@ void TestFullBindingSurvivesSeparateConnections() {
                 pipe_name,
                 Envelope("p-start2", "start-candidate-live-view",
                          R"({"sessionId":")" + session + R"(","candidateOrdinal":1})"));
+            const auto second_frame = SendRequest(
+                pipe_name,
+                Envelope("p-frame2", "get-candidate-live-view-frame",
+                         R"({"sessionId":")" + session + R"(","candidateOrdinal":1})"));
+            Check(
+                second_frame && second_frame->find("\"frameBase64\":") != std::string::npos,
+                "the second candidate also supplies current visual evidence before confirmation");
         }
         const auto confirmed = SendRequest(
             pipe_name,

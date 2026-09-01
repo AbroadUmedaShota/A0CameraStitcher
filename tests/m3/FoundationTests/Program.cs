@@ -2857,8 +2857,10 @@ static async Task<DualBindingSessionClient> BoundToBothAliasesAsync(
     var client = BindingClient(options, out var agent);
     await client.BeginBindingAsync();
     await client.StartCandidateLiveViewAsync(0);
+    await client.GetCandidateLiveViewFrameAsync(0);
     await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
     await client.StartCandidateLiveViewAsync(1);
+    await client.GetCandidateLiveViewFrameAsync(1);
     await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB);
     inspect?.Invoke(agent);
     return client;
@@ -2915,6 +2917,8 @@ static async Task DualBindingFiveOperationsReachReadyAsync()
         (await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA)).Succeeded,
         "The first alias must confirm.");
     Check.True((await client.StartCandidateLiveViewAsync(1)).Succeeded, "The second Live View must start.");
+    Check.True((await client.GetCandidateLiveViewFrameAsync(1)).Succeeded,
+        "The second candidate must return a current frame.");
     Check.True(
         (await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB)).Succeeded,
         "The second alias must confirm.");
@@ -2973,9 +2977,13 @@ static async Task DualBindingActivationExpiresWithProcessAsync()
 
     Check.True((await client.BeginBindingAsync()).Succeeded, "The first process must start binding.");
     Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded, "CAM-A Live View must start.");
+    Check.True((await client.GetCandidateLiveViewFrameAsync(0)).Succeeded,
+        "CAM-A must return a current frame.");
     Check.True((await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA)).Succeeded,
         "CAM-A must bind.");
     Check.True((await client.StartCandidateLiveViewAsync(1)).Succeeded, "CAM-B Live View must start.");
+    Check.True((await client.GetCandidateLiveViewFrameAsync(1)).Succeeded,
+        "CAM-B must return a current frame.");
     Check.True((await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB)).Succeeded,
         "CAM-B must bind.");
     Check.True((await client.CompleteBindingAsync()).Succeeded, "The first process binding must be Ready.");
@@ -3034,7 +3042,11 @@ static async Task DualBindingRefusesDuplicateAssignmentsAsync()
     var client = BindingClient(null, out _);
     await client.BeginBindingAsync();
     await client.StartCandidateLiveViewAsync(0);
+    await client.GetCandidateLiveViewFrameAsync(0);
     await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
+
+    await client.StartCandidateLiveViewAsync(1);
+    await client.GetCandidateLiveViewFrameAsync(1);
 
     var duplicateAlias = await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasA);
     Check.False(duplicateAlias.Succeeded, "CAM-A must not be assigned twice.");
@@ -3069,6 +3081,7 @@ static async Task DualBindingShowsOneLiveViewAtATimeAsync()
     Check.False(stale.Succeeded, "The candidate that stopped streaming must not produce a frame.");
     Check.Equal("LiveViewNotActive", stale.Refusal!.ResultCode);
 
+    await client.GetCandidateLiveViewFrameAsync(1);
     await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasA);
     Check.Equal(null, client.ActiveLiveViewOrdinal);
 
@@ -3092,6 +3105,7 @@ static async Task DualBindingQuiesceFailureNeverReachesReadyAsync()
     var stuck = BindingClient(new SimulatedDualBindingOptions { FailStopLiveView = true }, out _);
     await stuck.BeginBindingAsync();
     await stuck.StartCandidateLiveViewAsync(0);
+    await stuck.GetCandidateLiveViewFrameAsync(0);
     var quiesce = await stuck.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
     Check.False(quiesce.Succeeded, "A Live View that will not stop must be reported at confirm time.");
     Check.Equal("QuiesceIncomplete", quiesce.Refusal!.ResultCode);
@@ -3176,8 +3190,10 @@ static async Task DualBindingRebindStartsCleanAsync()
     Check.False(client.RequiresRebinding, "A fresh session must not still be asking for a re-binding.");
 
     await client.StartCandidateLiveViewAsync(0);
+    await client.GetCandidateLiveViewFrameAsync(0);
     await client.ConfirmAliasAsync(0, DualBindingCameraAgentProtocol.CameraAliasA);
     await client.StartCandidateLiveViewAsync(1);
+    await client.GetCandidateLiveViewFrameAsync(1);
     await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasB);
     Check.True((await client.CompleteBindingAsync()).Succeeded, "The re-bound session must complete.");
     Check.True(client.IsReady, "The re-bound session must reach Ready.");

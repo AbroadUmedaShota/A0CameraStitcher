@@ -123,8 +123,10 @@ struct Harness {
     std::string BindBothAliases() {
         const std::string session = StringFieldOf(Begin(), "sessionId");
         (void)dispatcher.Handle(StartLiveViewRequest(session, 0));
+        (void)dispatcher.Handle(FrameRequest(session, 0));
         (void)dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
         (void)dispatcher.Handle(StartLiveViewRequest(session, 1));
+        (void)dispatcher.Handle(FrameRequest(session, 1));
         (void)dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
         return session;
     }
@@ -313,6 +315,7 @@ void FiveOperationsBindTwoBodies() {
         "one assignment is not enough to leave candidate collection");
 
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
     const std::string confirmed_b =
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
     Check(
@@ -373,6 +376,7 @@ void NoResponseEverCarriesASourceObject() {
         harness.dispatcher.Handle(FrameRequest(session, 0)),
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA)),
         harness.dispatcher.Handle(StartLiveViewRequest(session, 1)),
+        harness.dispatcher.Handle(FrameRequest(session, 1)),
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB)),
         harness.dispatcher.Handle(CompleteBindingRequest(session)),
     };
@@ -437,9 +441,11 @@ void ReadyBindingRequiresExplicitFreshActivation() {
     const std::string transition_session =
         StringFieldOf(dispatcher.Handle(BeginBindingRequest()), "sessionId");
     (void)dispatcher.Handle(StartLiveViewRequest(transition_session, 0));
+    (void)dispatcher.Handle(FrameRequest(transition_session, 0));
     (void)dispatcher.Handle(
         ConfirmAliasRequest(transition_session, 0, kDualIdentityCameraAliasA));
     (void)dispatcher.Handle(StartLiveViewRequest(transition_session, 1));
+    (void)dispatcher.Handle(FrameRequest(transition_session, 1));
     (void)dispatcher.Handle(
         ConfirmAliasRequest(transition_session, 1, kDualIdentityCameraAliasB));
     Check(Succeeded(dispatcher.Handle(CompleteBindingRequest(transition_session))),
@@ -543,15 +549,25 @@ void BothCandidatesCanBeComparedBeforeEitherAliasIsConfirmed() {
         "switching candidates closes the first SDK source while retaining the session");
     (void)harness.dispatcher.Handle(FrameRequest(session, 1));
 
+    const std::string stale_confirmation =
+        harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
+    Check(
+        !Succeeded(stale_confirmation) && ResultCode(stale_confirmation) == "LiveViewFrameRequired",
+        "a preview from before switching candidates cannot authorize an alias confirmation");
+
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
     const std::string confirmed_a =
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
     const std::string confirmed_b =
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
     const std::string completed = harness.dispatcher.Handle(CompleteBindingRequest(session));
 
     Check(
         Succeeded(confirmed_a) && Succeeded(confirmed_b),
-        "both aliases can be confirmed after the operator compared both candidates");
+        "both aliases can be confirmed after each current preview is shown again");
     Check(
         Succeeded(completed) && ResultCode(completed) == "BindingCompleted",
         "the compare-before-assign flow reaches a fully quiesced binding");
@@ -617,6 +633,16 @@ void ARefusedLiveViewStartIsNotRecordedAsRunning() {
 // ---------------------------------------------------------------------------
 
 void FramesAreBoundedAndNeverTruncated() {
+    Harness missing_harness;
+    const std::string missing_session =
+        StringFieldOf(missing_harness.Begin(), "sessionId");
+    (void)missing_harness.dispatcher.Handle(StartLiveViewRequest(missing_session, 0));
+    Check(
+        ResultCode(missing_harness.dispatcher.Handle(
+            ConfirmAliasRequest(missing_session, 0, kDualIdentityCameraAliasA))) ==
+            "LiveViewFrameRequired",
+        "alias confirmation is refused before a current frame is returned");
+
     DualBindingFakeSdkOptions oversize;
     oversize.live_view_frame_bytes = kMaximumBindingLiveViewFrameBytes + 1U;
     Harness oversize_harness(oversize);
@@ -631,6 +657,11 @@ void FramesAreBoundedAndNeverTruncated() {
     Check(
         refused.find("\"frameBase64\"") == std::string::npos,
         "a refused frame carries no partial preview");
+    Check(
+        ResultCode(oversize_harness.dispatcher.Handle(
+            ConfirmAliasRequest(oversize_session, 0, kDualIdentityCameraAliasA))) ==
+            "LiveViewFrameRequired",
+        "an oversized refused frame cannot authorize alias confirmation");
 
     DualBindingFakeSdkOptions at_bound;
     at_bound.live_view_frame_bytes = kMaximumBindingLiveViewFrameBytes;
@@ -644,6 +675,15 @@ void FramesAreBoundedAndNeverTruncated() {
     Check(
         accepted.size() < 1024U * 1024U,
         "the largest allowed frame response still fits one pipe frame");
+    Check(
+        ResultCode(bound_harness.dispatcher.Handle(FrameRequest(bound_session, 1))) ==
+            "LiveViewNotActive",
+        "a failed refresh for another candidate is refused");
+    Check(
+        ResultCode(bound_harness.dispatcher.Handle(
+            ConfirmAliasRequest(bound_session, 0, kDualIdentityCameraAliasA))) ==
+            "LiveViewFrameRequired",
+        "a failed refresh clears an older successful preview before confirmation");
 
     DualBindingFakeSdkOptions empty;
     empty.live_view_frame_bytes = 0;
@@ -654,6 +694,11 @@ void FramesAreBoundedAndNeverTruncated() {
         ResultCode(empty_harness.dispatcher.Handle(FrameRequest(empty_session, 0))) ==
             "LiveViewFrameUnavailable",
         "an empty frame is reported as unavailable rather than as a preview");
+    Check(
+        ResultCode(empty_harness.dispatcher.Handle(
+            ConfirmAliasRequest(empty_session, 0, kDualIdentityCameraAliasA))) ==
+            "LiveViewFrameRequired",
+        "an empty refused frame cannot authorize alias confirmation");
 }
 
 // The preview is the only binary payload this protocol carries, and the whole
@@ -713,7 +758,11 @@ void AnAliasAndACandidateAreEachAssignedOnce() {
     Harness harness;
     const std::string session = StringFieldOf(harness.Begin(), "sessionId");
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
     (void)harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
+
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
 
     Check(
         ResultCode(harness.dispatcher.Handle(
@@ -749,12 +798,15 @@ void CompletionNeedsBothAliasesAndBothQuiesced() {
         "completing with no assignment at all is refused");
 
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
     (void)harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
     Check(
         ResultCode(harness.dispatcher.Handle(CompleteBindingRequest(session))) ==
             "AliasAssignmentIncomplete",
         "completing with one alias missing is refused");
 
+    (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
     (void)harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
     Check(
         Succeeded(harness.dispatcher.Handle(CompleteBindingRequest(session))),
@@ -778,6 +830,7 @@ void AnUnclosableSdkSessionBlocksCompletion() {
     Harness harness(options);
     const std::string session = StringFieldOf(harness.Begin(), "sessionId");
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
 
     const std::string confirmed =
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
@@ -790,6 +843,7 @@ void AnUnclosableSdkSessionBlocksCompletion() {
         "the response says which half of the quiesce failed");
 
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 1));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 1));
     (void)harness.dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
     Check(
         ResultCode(harness.dispatcher.Handle(CompleteBindingRequest(session))) ==
@@ -809,6 +863,7 @@ void AnUnstoppableLiveViewEndsTheSession() {
     Harness harness(options);
     const std::string session = StringFieldOf(harness.Begin(), "sessionId");
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
 
     const std::string confirmed =
         harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
@@ -833,6 +888,7 @@ void AnAssignedCandidateCannotBeViewedAgain() {
     Harness harness;
     const std::string session = StringFieldOf(harness.Begin(), "sessionId");
     (void)harness.dispatcher.Handle(StartLiveViewRequest(session, 0));
+    (void)harness.dispatcher.Handle(FrameRequest(session, 0));
     (void)harness.dispatcher.Handle(ConfirmAliasRequest(session, 0, kDualIdentityCameraAliasA));
 
     // Assigning the candidate closed its SDK session. Reopening Live View would
@@ -1015,7 +1071,8 @@ void CountersReflectWhatActuallyHappened() {
     Check(counters.rejected_stale_session_count == 0, "no stale session was addressed");
     // The frame after both aliases are confirmed has no Live View behind it, so
     // it is refused and must not be counted as a frame that was handed out.
-    Check(counters.live_view_frame_count == 0, "a refused frame request is not counted");
+    Check(counters.live_view_frame_count == 2,
+        "only the two successful current preview frames are counted");
 }
 
 } // namespace

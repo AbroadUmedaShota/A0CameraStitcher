@@ -925,6 +925,17 @@ catch (Exception exception)
 
 try
 {
+    await DualBindingRejectsUndecodablePreviewAsync();
+    Console.WriteLine("PASS the binding overlay refuses alias assignment when the current Live View frame cannot be decoded");
+}
+catch (Exception exception)
+{
+    failures.Add("binding overlay refuses alias assignment when the current Live View frame cannot be decoded");
+    Console.Error.WriteLine($"FAIL the binding overlay refuses alias assignment when the current Live View frame cannot be decoded: {exception}");
+}
+
+try
+{
     await HardwareDualDoesNotExposeSimulatedMainStageAsync();
     Console.WriteLine("PASS HardwareDual keeps simulated frames and controls out of the main stage");
 }
@@ -989,7 +1000,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {81 - failures.Count}/81 passed.");
+Console.WriteLine($"Operator shell tests: {86 - failures.Count}/86 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3010,7 +3021,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         var noRequestProviderViewModel = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "hardware-no-request-provider-journals")),
             hardwareFlow,
-            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(DecodableBindingAgent()));
         await noRequestProviderViewModel.InitializeAsync(CancellationToken.None);
         noRequestProviderViewModel.FixedLocalExportDirectory = exportRoot;
         noRequestProviderViewModel.AcceptSafetyCommand.Execute(null);
@@ -3032,7 +3043,7 @@ static async Task FormalDualCameraWpfFlowAsync()
                 HardwareDualCaptureProfile.ApprovedSynthetic(),
                 new HardwareDualOperatorConfirmations(true, true, true, true, true),
                 Guid.NewGuid()),
-            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(DecodableBindingAgent()));
         await hardwareViewModel.InitializeAsync(CancellationToken.None);
         hardwareViewModel.FixedLocalExportDirectory = exportRoot;
         hardwareViewModel.AcceptSafetyCommand.Execute(null);
@@ -3080,7 +3091,7 @@ static async Task FormalDualCameraWpfFlowAsync()
                     new HardwareDualOperatorConfirmations(true, true, true, true, true),
                     Guid.NewGuid());
             },
-            dualBindingTransport: new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
+            dualBindingTransport: new SimulatedDualBindingAgentTransport(DecodableBindingAgent()));
         await recoveryViewModel.InitializeAsync(CancellationToken.None);
         recoveryViewModel.AcceptSafetyCommand.Execute(null);
         await CompleteDualBindingAsync(recoveryViewModel.DualBinding);
@@ -3600,6 +3611,12 @@ static async Task InitializationFailureSurvivesReadinessRebuildsAsync()
 // Dual binding confirmation UI (ADR-0025, Issue #62)
 // ---------------------------------------------------------------------------
 
+static SimulatedDualBindingAgent DecodableBindingAgent() => new(new SimulatedDualBindingOptions
+{
+    LiveViewFrameBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+});
+
 static OperatorShellViewModel HardwareDualShellWithSimulatedBinding(
     string root,
     SimulatedDualBindingAgent agent,
@@ -3635,7 +3652,7 @@ static async Task HardwareDualDoesNotExposeSimulatedMainStageAsync()
         var frameSource = new FakeSimulatedLiveViewFrameSource();
         var shell = HardwareDualShellWithSimulatedBinding(
             root,
-            new SimulatedDualBindingAgent(),
+            DecodableBindingAgent(),
             pump,
             frameSource);
 
@@ -3671,7 +3688,11 @@ static async Task DualBindingOverlayGatesCaptureAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var agent = new SimulatedDualBindingAgent();
+        var agent = new SimulatedDualBindingAgent(new SimulatedDualBindingOptions
+        {
+            LiveViewFrameBase64 =
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        });
         var shell = HardwareDualShellWithSimulatedBinding(root, agent);
         await shell.InitializeAsync(CancellationToken.None);
         shell.AcceptSafetyCommand.Execute(null);
@@ -3702,14 +3723,10 @@ static async Task DualBindingOverlayGatesCaptureAsync()
         Check.Equal(1, agent.ActiveLiveViewCount);
         Check.Equal(0, agent.ConcurrentLiveViewViolationCount);
 
-        // The simulated agent returns generated bytes, so the screen says so instead of drawing
-        // something that could be mistaken for a camera frame.
-        Check.True(
-            shell.DualBinding.IsPreviewPlaceholderVisible,
-            "A frame that is not a decodable image must fall back to a labelled placeholder.");
-        Check.True(
-            shell.DualBinding.PreviewPlaceholderText.Contains("カメラ画像ではありません", StringComparison.Ordinal),
-            "The placeholder must say it is not a camera image.");
+        Check.True(shell.DualBinding.IsPreviewVisible,
+            "A decodable current Live View frame must be visible before alias assignment.");
+        Check.False(shell.DualBinding.IsPreviewPlaceholderVisible,
+            "A decoded Live View frame must not be replaced by a placeholder.");
 
         shell.DualBinding.AssignCameraACommand.Execute(null);
         await WaitUntilAsync(
@@ -3751,7 +3768,7 @@ static async Task DualBindingBlocksTheSingleCameraFallbackAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var agent = new SimulatedDualBindingAgent();
+        var agent = DecodableBindingAgent();
         var shell = HardwareDualShellWithSimulatedBinding(root, agent);
         await shell.InitializeAsync(CancellationToken.None);
         shell.AcceptSafetyCommand.Execute(null);
@@ -3792,7 +3809,7 @@ static async Task DualBindingOverlayAccessibilityAndBusyLockAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var agent = new SimulatedDualBindingAgent();
+        var agent = DecodableBindingAgent();
         var shell = HardwareDualShellWithSimulatedBinding(root, agent);
         await shell.InitializeAsync(CancellationToken.None);
         shell.AcceptSafetyCommand.Execute(null);
@@ -3857,7 +3874,7 @@ static async Task DualBindingOverlayInvalidationRestartsTheFlowAsync()
     var root = CreateHardwareTestRoot();
     try
     {
-        var agent = new SimulatedDualBindingAgent();
+        var agent = DecodableBindingAgent();
         var shell = HardwareDualShellWithSimulatedBinding(root, agent);
         await shell.InitializeAsync(CancellationToken.None);
         shell.AcceptSafetyCommand.Execute(null);
@@ -4294,9 +4311,48 @@ static async Task DualCameraAgentLifecycleIdentityPendingKeepsZeroProcessAsync()
     }
 }
 
+static async Task DualBindingRejectsUndecodablePreviewAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var agent = new SimulatedDualBindingAgent();
+        var shell = HardwareDualShellWithSimulatedBinding(root, agent);
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.AcceptSafetyCommand.Execute(null);
+        shell.DualBinding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(
+            () => shell.DualBinding.Candidates.Count == 2 && !shell.DualBinding.IsBusy,
+            "The binding session did not offer two candidates.");
+
+        shell.DualBinding.ShowCandidateCommand.Execute(shell.DualBinding.Candidates[0]);
+        await WaitUntilAsync(() => !shell.DualBinding.IsBusy,
+            "Showing the undecodable candidate did not settle.");
+
+        Check.True(shell.DualBinding.IsPreviewPlaceholderVisible,
+            "An undecodable frame must be identified as unavailable visual evidence.");
+        Check.True(
+            shell.DualBinding.PreviewPlaceholderText.Contains("画像として読み取れません", StringComparison.Ordinal),
+            "The placeholder must explain that the frame could not be decoded.");
+        Check.False(shell.DualBinding.AssignCameraACommand.CanExecute(null),
+            "CAM-A assignment must stay disabled without a decoded current frame.");
+        Check.False(shell.DualBinding.AssignCameraBCommand.CanExecute(null),
+            "CAM-B assignment must stay disabled without a decoded current frame.");
+
+        shell.DualBinding.AssignCameraACommand.Execute(null);
+        await Task.Delay(50);
+        Check.Equal(string.Empty, shell.DualBinding.Candidates[0].AssignedAlias);
+        Check.Equal(DualBindingPhase.Collecting, shell.DualBinding.Phase);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task ActivatedBindingInvalidationIsLocalAndBlocksCaptureAsync()
 {
-    var agent = new SimulatedDualBindingAgent();
+    var agent = DecodableBindingAgent();
     var transport = new CountingDualBindingTransport(agent);
     var client = new DualBindingSessionClient(transport);
     var binding = new DualBindingViewModel(client, isRequired: true);
@@ -5133,8 +5189,10 @@ static async Task DualCameraAgentLifecycleBindingActivationCaptureRecoveryOnlyAs
             {
                 "begin-binding",
                 "start-candidate-live-view",
+                "get-candidate-live-view-frame",
                 "confirm-alias",
                 "start-candidate-live-view",
+                "get-candidate-live-view-frame",
                 "confirm-alias",
                 "complete-binding",
                 "activate-capture",
@@ -5191,8 +5249,10 @@ static async Task CompleteDualBindingAndActivateAsync(DualBindingSessionClient b
 {
     Check.True((await binding.BeginBindingAsync()).Succeeded, "The binding must begin in the capture child.");
     Check.True((await binding.StartCandidateLiveViewAsync(0)).Succeeded, "CAM-A candidate Live View must be available.");
+    Check.True((await binding.GetCandidateLiveViewFrameAsync(0)).Succeeded, "CAM-A candidate must return a current frame.");
     Check.True((await binding.ConfirmAliasAsync(0, "CAM-A")).Succeeded, "The operator must bind CAM-A once.");
     Check.True((await binding.StartCandidateLiveViewAsync(1)).Succeeded, "CAM-B candidate Live View must be available.");
+    Check.True((await binding.GetCandidateLiveViewFrameAsync(1)).Succeeded, "CAM-B candidate must return a current frame.");
     Check.True((await binding.ConfirmAliasAsync(1, "CAM-B")).Succeeded, "The operator must bind CAM-B once.");
     Check.True((await binding.CompleteBindingAsync()).Succeeded, "The two explicit assignments must complete binding.");
     Check.True((await binding.ActivateCaptureAsync()).Succeeded, "The complete binding must be activated before capture.");
@@ -5360,7 +5420,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         var wpfWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
             Path.Combine(root, "wpf-recovery-only-products"), wpfOperations, wpfOperations,
             ApprovedCaptureRecoveryOnlyProfile());
-        var bindingTransport = new CountingBindingTransport(new SimulatedDualBindingAgent());
+        var bindingTransport = new CountingBindingTransport(DecodableBindingAgent());
         var shell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "wpf-journals")),
             ordinaryFlow,
@@ -5438,7 +5498,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             adapter, responseUnknownOnce: true, queryThrowsOnce: true);
         var initialWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
             wpfRecoveryRoot, wpfRecoveryOperations, wpfRecoveryOperations, ApprovedCaptureRecoveryOnlyProfile());
-        var initialRecoveryTransport = new CountingBindingTransport(new SimulatedDualBindingAgent());
+        var initialRecoveryTransport = new CountingBindingTransport(DecodableBindingAgent());
         var initialRecoveryShell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "wpf-same-id-initial-journals")), ordinaryFlow,
             dualBindingTransport: initialRecoveryTransport, captureRecoveryOnlyWorkflow: initialWpfRecovery);
@@ -5455,7 +5515,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
 
         var restartedWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
             wpfRecoveryRoot, wpfRecoveryOperations, wpfRecoveryOperations, ApprovedCaptureRecoveryOnlyProfile());
-        var restartedRecoveryTransport = new CountingBindingTransport(new SimulatedDualBindingAgent());
+        var restartedRecoveryTransport = new CountingBindingTransport(DecodableBindingAgent());
         var restartedRecoveryShell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "wpf-same-id-restarted-journals")), ordinaryFlow,
             dualBindingTransport: restartedRecoveryTransport, captureRecoveryOnlyWorkflow: restartedWpfRecovery);
@@ -5484,7 +5544,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         var refusalShell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "activation-refusal-journals")),
             ordinaryFlow,
-            dualBindingTransport: new CountingBindingTransport(new SimulatedDualBindingAgent(), refuseActivation: true),
+            dualBindingTransport: new CountingBindingTransport(DecodableBindingAgent(), refuseActivation: true),
             captureRecoveryOnlyWorkflow: refusalWorkflow);
         await refusalShell.InitializeAsync(CancellationToken.None);
         refusalShell.IsPhysicalShutterAckAccepted = true;
@@ -6613,7 +6673,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
     using var shutdown = new CancellationTokenSource();
     var captureCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var captureActivated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var bindingAgent = new SimulatedDualBindingAgent();
+    var bindingAgent = DecodableBindingAgent();
     var bindingTask = RunBindingPipeAsync(
         bindingPipeName,
         bindingAgent,

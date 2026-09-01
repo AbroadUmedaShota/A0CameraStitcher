@@ -301,6 +301,10 @@ private:
     // Empty session id plus this being set is impossible; both are cleared and
     // set together with the session.
     std::optional<std::size_t> active_live_view_ordinal_;
+    // Set only after this dispatcher returned one non-empty, bounded frame for the current
+    // candidate. Starting Live View again clears it, so an older preview cannot authorize a
+    // later alias confirmation.
+    std::optional<std::size_t> previewed_live_view_ordinal_;
     // Candidates whose Live View and SDK source were both closed during an
     // operator comparison. They remain eligible for alias confirmation without
     // being reopened; reopening one removes it from this set.

@@ -548,6 +548,7 @@ void DualBindingCameraAgentDispatcher::InvalidateSession(
         invalidation_reason_ = reason;
     }
     active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
     quiesced_ordinals_.clear();
 }
 
@@ -568,6 +569,7 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
     // does the same for its own state; this is the wire-level half of it.
     session_id_.clear();
     active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
     quiesced_ordinals_.clear();
     assigned_ordinals_.clear();
     invalidation_reason_ = DualIdentityInvalidationReason::None;
@@ -624,6 +626,9 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
 
 std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
     const DualBindingCameraAgentRequest& request) {
+    // Each display request starts a fresh visual-confirmation generation, even for the same
+    // candidate. Only a frame returned after this request can authorize confirmation.
+    previewed_live_view_ordinal_.reset();
     if (binding_.State() != DualIdentitySessionBindingState::CollectingCandidates) {
         return ProtocolRejection(
             request.request_id, "BindingNotCollecting",
@@ -691,6 +696,9 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
 
 std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
     const DualBindingCameraAgentRequest& request) {
+    // A failed refresh invalidates the previous visual evidence. The operator must confirm from
+    // the newest frame request, not from an older frame that the SDK can no longer reproduce.
+    previewed_live_view_ordinal_.reset();
     if (!active_live_view_ordinal_.has_value() ||
         *active_live_view_ordinal_ != request.candidate_ordinal) {
         return ProtocolRejection(
@@ -713,6 +721,7 @@ std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
             "the Live View frame exceeds the bounded preview size");
     }
     ++safety_counters_.live_view_frame_count;
+    previewed_live_view_ordinal_ = request.candidate_ordinal;
 
     std::ostringstream output;
     output << ResponsePrefix(request.request_id, true, "CandidateLiveViewFrame")
@@ -724,6 +733,36 @@ std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
 
 std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     const DualBindingCameraAgentRequest& request) {
+    if (binding_.State() != DualIdentitySessionBindingState::CollectingCandidates &&
+        binding_.State() != DualIdentitySessionBindingState::AwaitingQuiesce) {
+        return ProtocolRejection(
+            request.request_id, "BindingNotCollecting",
+            "alias confirmation requires an active binding session");
+    }
+    if (request.candidate_ordinal >= kDualIdentityRequiredCandidateCount) {
+        return ProtocolRejection(
+            request.request_id, "UnknownCandidateOrdinal",
+            "the candidate ordinal is not part of this binding session");
+    }
+    if (request.camera_alias != kDualIdentityCameraAliasA &&
+        request.camera_alias != kDualIdentityCameraAliasB) {
+        return ProtocolRejection(
+            request.request_id, "UnknownCameraAlias",
+            "the rig defines only CAM-A and CAM-B");
+    }
+    if (std::find(assigned_ordinals_.begin(), assigned_ordinals_.end(),
+                  request.candidate_ordinal) != assigned_ordinals_.end()) {
+        return ProtocolRejection(
+            request.request_id, "CandidateAlreadyAssigned",
+            "one candidate cannot be assigned to both aliases");
+    }
+    if (!previewed_live_view_ordinal_.has_value() ||
+        *previewed_live_view_ordinal_ != request.candidate_ordinal) {
+        return ProtocolRejection(
+            request.request_id, "LiveViewFrameRequired",
+            "alias confirmation requires a successful current Live View frame");
+    }
+
     // Throws on a duplicate candidate, a duplicate alias, an unknown ordinal or
     // an unknown alias; those are the binding core's decisions and are reported
     // with its codes.
@@ -754,6 +793,7 @@ std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
         quiesced_ordinals_.push_back(request.candidate_ordinal);
     }
     assigned_ordinals_.push_back(request.candidate_ordinal);
+    previewed_live_view_ordinal_.reset();
 
     if (!live_view_stopped || !sdk_session_closed) {
         // Reported immediately rather than only at complete-binding, so the
@@ -835,6 +875,7 @@ std::string DualBindingCameraAgentDispatcher::HandleCancelBinding(
     cancellation_succeeded_ = adapter_->EndBindingSession(std::chrono::seconds(10));
 
     active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
     quiesced_ordinals_.clear();
     assigned_ordinals_.clear();
     if (cancellation_succeeded_) {
