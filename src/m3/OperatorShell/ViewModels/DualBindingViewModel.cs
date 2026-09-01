@@ -708,6 +708,7 @@ public sealed class DualBindingViewModel : ObservableObject
             InvalidationText = refusal.ResultCode switch
             {
                 "BindingInvalidated" => $"binding が無効になりました（理由: {ReasonText(refusal.InvalidationReason)}）。最初からやり直してください。",
+                "BindingHostExpired" => "機体確認用Agentの10分の利用期限が切れました。新しいAgentへ以前の割当は引き継がず、最初からやり直してください。",
                 "SessionMismatch" => "Agent が再起動したため、以前の binding は失効しました。最初からやり直してください。",
                 _ => "ライブ表示の停止または SDK セッションの終了を確認できませんでした。最初からやり直してください。",
             };

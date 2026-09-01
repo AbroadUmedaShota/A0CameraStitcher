@@ -452,6 +452,28 @@ catch (Exception exception)
 
 try
 {
+    await ExpiredBindingHostDoesNotStartAReplacementAgentAsync();
+    Console.WriteLine("PASS an expired HardwareDual binding host invalidates locally without starting a replacement Agent");
+}
+catch (Exception exception)
+{
+    failures.Add("an expired HardwareDual binding host invalidates locally without starting a replacement Agent");
+    Console.Error.WriteLine($"FAIL an expired HardwareDual binding host invalidates locally without starting a replacement Agent: {exception}");
+}
+
+try
+{
+    await BindingHostExitDuringDispatchReturnsTypedExpiryAsync();
+    Console.WriteLine("PASS a HardwareDual binding host that exits during dispatch returns typed expiry without replacement");
+}
+catch (Exception exception)
+{
+    failures.Add("a HardwareDual binding host that exits during dispatch returns typed expiry without replacement");
+    Console.Error.WriteLine($"FAIL a HardwareDual binding host that exits during dispatch returns typed expiry without replacement: {exception}");
+}
+
+try
+{
     await HardwareDualShutdownGateRetainsLeaseOnFailureAsync();
     Console.WriteLine("PASS HardwareDual shutdown keeps the exclusive lease across every unconfirmed cleanup outcome");
 }
@@ -4346,6 +4368,142 @@ static async Task DualCameraAgentLifecycleBindingCancellationAsync()
     }
 }
 
+static async Task ExpiredBindingHostDoesNotStartAReplacementAgentAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-natural-expiry-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable(
+            "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO",
+            "binding-natural-exit-before-confirm");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var client = new DualBindingSessionClient(lifecycle);
+        Check.True((await client.BeginBindingAsync()).Succeeded,
+            "binding must start in the first Agent generation");
+        Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded,
+            "the first generation must acknowledge candidate Live View before expiring");
+        var expiredSessionId = client.SessionId;
+        var originalGeneration = lifecycle.CurrentProcessGeneration;
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(originalGeneration),
+            "the synthetic binding host did not exit naturally");
+
+        var confirmation = await client.ConfirmAliasAsync(0, "CAM-B");
+
+        Check.Equal("BindingHostExpired", confirmation.Refusal!.ResultCode);
+        Check.True(confirmation.Refusal.RequiresRebinding,
+            "an expired binding host must require a fresh operator assignment");
+        Check.Equal(originalGeneration, lifecycle.CurrentProcessGeneration);
+        Check.False(lifecycle.IsProcessGenerationAlive(originalGeneration),
+            "the expired generation must stay exited rather than being replaced");
+        Check.Equal(DualBindingSessionState.Invalid, client.State);
+        Check.Equal(0, client.Assignments.Count);
+
+        var guardedJson = await lifecycle.SendAsync(
+            DualBindingCameraAgentProtocolCodec.CreateConfirmAliasRequest(
+                "race-guard",
+                expiredSessionId,
+                0,
+                "CAM-B"),
+            originalGeneration);
+        var guarded = DualBindingCameraAgentProtocolCodec.DeserializeConfirmAliasResponse(
+            guardedJson,
+            "race-guard",
+            expiredSessionId,
+            "CAM-B");
+        Check.Equal("BindingHostExpired", guarded.Refusal!.ResultCode);
+        Check.True(lifecycle.LastObservedAgentExitCode == 0,
+            "the naturally expired binding host must preserve its zero exit code");
+        Check.Equal(originalGeneration, lifecycle.CurrentProcessGeneration);
+
+        var replacementClient = new DualBindingSessionClient(lifecycle);
+        Check.True((await replacementClient.BeginBindingAsync()).Succeeded,
+            "only an explicit fresh begin-binding may start the next Agent generation");
+        var replacementGeneration = lifecycle.CurrentProcessGeneration;
+        Check.True(replacementGeneration > originalGeneration,
+            "the explicit fresh binding must use a new process generation");
+
+        var staleJson = await lifecycle.SendAsync(
+            DualBindingCameraAgentProtocolCodec.CreateConfirmAliasRequest(
+                "stale-generation",
+                expiredSessionId,
+                0,
+                "CAM-B"),
+            originalGeneration);
+        var stale = DualBindingCameraAgentProtocolCodec.DeserializeConfirmAliasResponse(
+            staleJson,
+            "stale-generation",
+            expiredSessionId,
+            "CAM-B");
+        Check.Equal("BindingHostExpired", stale.Refusal!.ResultCode);
+        Check.Equal(replacementGeneration, lifecycle.CurrentProcessGeneration);
+        Check.True((await replacementClient.CancelBindingAsync()).Succeeded,
+            "the explicit replacement binding must still cancel cleanly");
+
+        await lifecycle.DisposeAsync();
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.True(
+            new[] { "begin-binding", "start-candidate-live-view", "begin-binding", "cancel-binding" }
+                .SequenceEqual(entries.Select(entry => entry.Operation)),
+            "neither stale request may reach the expired or explicitly replaced Agent generation");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task BindingHostExitDuringDispatchReturnsTypedExpiryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-exit-during-dispatch-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable(
+            "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO",
+            "binding-exit-during-confirm");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var client = new DualBindingSessionClient(lifecycle);
+        Check.True((await client.BeginBindingAsync()).Succeeded, "binding must begin before the dispatch race");
+        Check.True((await client.StartCandidateLiveViewAsync(0)).Succeeded,
+            "Live View must be active before the dispatch race");
+        var originalGeneration = lifecycle.CurrentProcessGeneration;
+
+        var confirmation = await client.ConfirmAliasAsync(0, "CAM-B");
+
+        Check.Equal("BindingHostExpired", confirmation.Refusal!.ResultCode);
+        Check.Equal(DualBindingSessionState.Invalid, client.State);
+        Check.Equal(0, client.Assignments.Count);
+        Check.Equal(originalGeneration, lifecycle.CurrentProcessGeneration);
+        Check.False(lifecycle.IsProcessGenerationAlive(originalGeneration),
+            "an in-flight host exit must not cause a replacement process");
+
+        await lifecycle.DisposeAsync();
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.True(
+            new[] { "begin-binding", "start-candidate-live-view", "confirm-alias" }
+                .SequenceEqual(entries.Select(entry => entry.Operation)),
+            "the dying generation may receive the in-flight request once, but no replacement may receive it");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task HardwareDualShutdownGateRetainsLeaseOnFailureAsync()
 {
     var cases = new[]
@@ -5916,7 +6074,8 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
             },
             scenario == "binding-activation-natural-nonzero-exit" ? 37 : 0);
     }
-    if (scenario.StartsWith("binding-cancel", StringComparison.Ordinal))
+    if (scenario.StartsWith("binding-cancel", StringComparison.Ordinal) ||
+        scenario is "binding-natural-exit-before-confirm" or "binding-exit-during-confirm")
     {
         if (bindingPipeName is null || wpdCameraMap is null || !File.Exists(wpdCameraMap))
         {
@@ -6263,6 +6422,15 @@ static async Task<int> RunDualBindingCancellationTestChildAsync(
             var operation = request.RootElement.GetProperty("operation").GetString()!;
             await AppendDualAgentTraceAsync(tracePath, bindingPipeName, operation, null);
             var responseJson = agent.Handle(requestJson);
+            if (scenario == "binding-exit-during-confirm" &&
+                operation == DualBindingCameraAgentProtocol.Operations.ConfirmAlias)
+            {
+                if (pipe.IsConnected)
+                {
+                    pipe.Disconnect();
+                }
+                return 0;
+            }
             await WritePersistentTestFrameAsync(pipe, responseJson, timeout.Token);
             if (pipe.IsConnected)
             {
@@ -6276,6 +6444,11 @@ static async Task<int> RunDualBindingCancellationTestChildAsync(
                     await Task.Delay(TimeSpan.FromSeconds(7));
                 }
                 return succeeded ? 0 : 2;
+            }
+            if (scenario == "binding-natural-exit-before-confirm" &&
+                operation == DualBindingCameraAgentProtocol.Operations.StartCandidateLiveView)
+            {
+                return 0;
             }
         }
         catch (OperationCanceledException)

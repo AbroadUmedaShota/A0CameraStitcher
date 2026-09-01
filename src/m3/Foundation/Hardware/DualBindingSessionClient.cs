@@ -22,9 +22,11 @@ public sealed class DualBindingSessionClient
 {
     private readonly IHardwareCameraAgentTransport _transport;
     private readonly IHardwareCameraAgentProcessLifetime? _processLifetime;
+    private readonly IHardwareCameraAgentGenerationBoundTransport? _generationBoundTransport;
     private readonly Func<string> _requestIdFactory;
     private readonly Func<DateTimeOffset> _utcNow;
     private bool _captureHostActivated;
+    private long? _bindingProcessGeneration;
     private long? _captureHostProcessGeneration;
 
     public DualBindingSessionClient(
@@ -35,6 +37,7 @@ public sealed class DualBindingSessionClient
         ArgumentNullException.ThrowIfNull(transport);
         _transport = transport;
         _processLifetime = transport as IHardwareCameraAgentProcessLifetime;
+        _generationBoundTransport = transport as IHardwareCameraAgentGenerationBoundTransport;
         _requestIdFactory = requestIdFactory ?? (() => $"binding-{Guid.NewGuid():N}");
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -100,6 +103,7 @@ public sealed class DualBindingSessionClient
             SessionId = started.SessionId;
             State = started.State;
             CandidateOrdinals = started.CandidateOrdinals;
+            _bindingProcessGeneration = _processLifetime?.CurrentProcessGeneration;
         }
         else
         {
@@ -113,6 +117,10 @@ public sealed class DualBindingSessionClient
         int candidateOrdinal,
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingLiveViewResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingLiveViewResult>.Refused(noSession);
@@ -120,7 +128,7 @@ public sealed class DualBindingSessionClient
 
         var requestId = _requestIdFactory();
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeStartLiveViewResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateStartLiveViewRequest(
                     requestId, SessionId, candidateOrdinal),
                 cancellationToken).ConfigureAwait(false),
@@ -150,6 +158,10 @@ public sealed class DualBindingSessionClient
         int candidateOrdinal,
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingFrameResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingFrameResult>.Refused(noSession);
@@ -157,7 +169,7 @@ public sealed class DualBindingSessionClient
 
         var requestId = _requestIdFactory();
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeFrameResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateFrameRequest(
                     requestId, SessionId, candidateOrdinal),
                 cancellationToken).ConfigureAwait(false),
@@ -177,6 +189,10 @@ public sealed class DualBindingSessionClient
         string cameraAlias,
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingAliasResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingAliasResult>.Refused(noSession);
@@ -209,7 +225,7 @@ public sealed class DualBindingSessionClient
 
         var requestId = _requestIdFactory();
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeConfirmAliasResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateConfirmAliasRequest(
                     requestId, SessionId, candidateOrdinal, cameraAlias),
                 cancellationToken).ConfigureAwait(false),
@@ -235,6 +251,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingReply<DualBindingCompleteResult>> CompleteBindingAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } processExited)
+        {
+            return DualBindingReply<DualBindingCompleteResult>.Refused(processExited);
+        }
         if (RequireSession() is { } noSession)
         {
             return DualBindingReply<DualBindingCompleteResult>.Refused(noSession);
@@ -243,7 +263,7 @@ public sealed class DualBindingSessionClient
         var requestId = _requestIdFactory();
         var confirmedAtUtc = _utcNow();
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeCompleteBindingResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateCompleteBindingRequest(
                     requestId,
                     SessionId,
@@ -274,6 +294,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingReply<DualBindingCaptureActivationResult>> ActivateCaptureAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } bindingHostExited)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(bindingHostExited);
+        }
         if (DetectExitedCaptureHost() is { } processExited)
         {
             return DualBindingReply<DualBindingCaptureActivationResult>.Refused(processExited);
@@ -305,7 +329,7 @@ public sealed class DualBindingSessionClient
 
         var requestId = _requestIdFactory();
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeActivateCaptureResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateActivateCaptureRequest(requestId, SessionId),
                 cancellationToken).ConfigureAwait(false),
             requestId,
@@ -335,6 +359,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingReply<DualBindingCancellationResult>> CancelBindingAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } bindingHostExited)
+        {
+            return DualBindingReply<DualBindingCancellationResult>.Refused(bindingHostExited);
+        }
         if (DetectExitedCaptureHost() is { } processExited)
         {
             return DualBindingReply<DualBindingCancellationResult>.Refused(processExited);
@@ -357,7 +385,7 @@ public sealed class DualBindingSessionClient
         var requestId = _requestIdFactory();
         var sessionId = SessionId;
         var reply = DualBindingCameraAgentProtocolCodec.DeserializeCancelBindingResponse(
-            await _transport.SendAsync(
+            await SendSessionRequestAsync(
                 DualBindingCameraAgentProtocolCodec.CreateCancelBindingRequest(requestId, sessionId),
                 cancellationToken).ConfigureAwait(false),
             requestId,
@@ -392,6 +420,10 @@ public sealed class DualBindingSessionClient
     public async Task<DualBindingRefusal?> VerifyBindingIsCurrentAsync(
         CancellationToken cancellationToken = default)
     {
+        if (DetectExitedBindingHost() is { } bindingHostExited)
+        {
+            return bindingHostExited;
+        }
         if (DetectExitedCaptureHost() is { } processExited)
         {
             return processExited;
@@ -445,6 +477,43 @@ public sealed class DualBindingSessionClient
             }
             : null;
 
+    private Task<string> SendSessionRequestAsync(
+        string requestJson,
+        CancellationToken cancellationToken)
+    {
+        if (_generationBoundTransport is not null && _bindingProcessGeneration is { } generation)
+        {
+            return _generationBoundTransport.SendAsync(requestJson, generation, cancellationToken);
+        }
+
+        return _transport.SendAsync(requestJson, cancellationToken);
+    }
+
+    private DualBindingRefusal? DetectExitedBindingHost()
+    {
+        if (_captureHostActivated ||
+            SessionId.Length == 0 ||
+            _processLifetime is null ||
+            _bindingProcessGeneration is not { } generation ||
+            _processLifetime.IsProcessGenerationAlive(generation))
+        {
+            return null;
+        }
+
+        var expiredSessionId = SessionId;
+        ResetSession();
+        State = DualBindingSessionState.Invalid;
+        InvalidationReason = DualBindingInvalidationReason.AgentRestart;
+        return new DualBindingRefusal
+        {
+            ResultCode = "BindingHostExpired",
+            SessionId = expiredSessionId,
+            State = DualBindingSessionState.Invalid,
+            InvalidationReason = DualBindingInvalidationReason.AgentRestart,
+            Detail = "The Camera Agent process that created this binding expired; no replacement Agent was started.",
+        };
+    }
+
     private DualBindingRefusal? DetectExitedCaptureHost()
     {
         if (!_captureHostActivated || CaptureHostActivated)
@@ -482,6 +551,7 @@ public sealed class DualBindingSessionClient
                 DiscardSessionArtifacts();
                 break;
 
+            case "BindingHostExpired":
             case "SessionMismatch":
                 // The agent is not serving this session at all: it restarted, or a newer session
                 // replaced it. Either way the id in hand is worthless.
@@ -537,6 +607,7 @@ public sealed class DualBindingSessionClient
         InvalidationReason = DualBindingInvalidationReason.None;
         CandidateOrdinals = Array.Empty<int>();
         _captureHostActivated = false;
+        _bindingProcessGeneration = null;
         _captureHostProcessGeneration = null;
         DiscardSessionArtifacts();
     }

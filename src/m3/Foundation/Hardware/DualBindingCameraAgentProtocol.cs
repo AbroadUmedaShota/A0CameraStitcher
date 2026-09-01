@@ -99,7 +99,7 @@ public sealed record DualBindingRefusal
 
     /// <summary>The session is gone or untrustworthy; only a fresh binding can recover.</summary>
     public bool RequiresRebinding =>
-        ResultCode is "BindingInvalidated" or "SessionMismatch" or "CandidateNotQuiesced" or
+        ResultCode is "BindingInvalidated" or "BindingHostExpired" or "SessionMismatch" or "CandidateNotQuiesced" or
             "BindingCleanupFailed";
 }
 
@@ -297,6 +297,41 @@ public static class DualBindingCameraAgentProtocolCodec
             requestId,
             DualBindingCameraAgentProtocol.Operations.CancelBinding,
             writer => writer.WriteString("sessionId", ValidatedSessionId(sessionId)));
+
+    /// <summary>
+    /// Local fail-closed response used when the process generation that owns a
+    /// binding disappears before or during dispatch. It deliberately has the same
+    /// envelope shape as a native refusal so every typed operation clears the stale
+    /// session through its normal response path.
+    /// </summary>
+    public static string CreateBindingHostExpiredResponse(string requestId, string sessionId)
+    {
+        ValidateRequestId(requestId);
+        var validatedSessionId = ValidatedSessionId(sessionId);
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schemaVersion", DualBindingCameraAgentProtocol.SchemaVersion);
+            writer.WriteBoolean("simulation", false);
+            writer.WriteString("marker", DualBindingCameraAgentProtocol.Marker);
+            writer.WriteString("requestId", requestId);
+            writer.WriteBoolean("success", false);
+            writer.WriteString("resultCode", "BindingHostExpired");
+            writer.WritePropertyName("payload");
+            writer.WriteStartObject();
+            writer.WriteString("sessionId", validatedSessionId);
+            writer.WriteString("state", DualBindingSessionState.Invalid.ToString());
+            writer.WriteString("invalidationReason", DualBindingInvalidationReason.AgentRestart.ToString());
+            writer.WriteString(
+                "detail",
+                "The Camera Agent process that created this binding expired; no replacement Agent was used.");
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
 
     public static DualBindingReply<DualBindingBeginResult> DeserializeBeginBindingResponse(
         string json,
