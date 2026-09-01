@@ -72,6 +72,13 @@ public sealed class DualBindingSessionClient
     public bool RequiresRebinding => State == DualBindingSessionState.Invalid;
 
     /// <summary>
+    /// Observes only the locally owned Agent process generation. No pipe request is
+    /// sent, so the WPF host can fail closed when the native binding host reaches its
+    /// absolute lifetime while the operator is still looking at a candidate.
+    /// </summary>
+    public DualBindingRefusal? ObserveBindingHostLifetime() => DetectExitedBindingHost();
+
+    /// <summary>
     /// True only after the native binding host acknowledged the one-way transition
     /// to its capture pipe. The binding pipe is retired at that point, so neither
     /// cancellation nor a freshness probe may be sent through it again.

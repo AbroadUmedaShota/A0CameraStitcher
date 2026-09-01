@@ -463,6 +463,17 @@ catch (Exception exception)
 
 try
 {
+    await ExpiredBindingHostClearsTheVisibleCandidateAsync();
+    Console.WriteLine("PASS an expired HardwareDual binding host clears the visible candidate without a wire request");
+}
+catch (Exception exception)
+{
+    failures.Add("an expired HardwareDual binding host clears the visible candidate without a wire request");
+    Console.Error.WriteLine($"FAIL an expired HardwareDual binding host clears the visible candidate without a wire request: {exception}");
+}
+
+try
+{
     await BindingHostExitDuringDispatchReturnsTypedExpiryAsync();
     Console.WriteLine("PASS a HardwareDual binding host that exits during dispatch returns typed expiry without replacement");
 }
@@ -967,7 +978,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {80 - failures.Count}/80 passed.");
+Console.WriteLine($"Operator shell tests: {81 - failures.Count}/81 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -4460,6 +4471,76 @@ static async Task ExpiredBindingHostDoesNotStartAReplacementAgentAsync()
     }
 }
 
+static async Task ExpiredBindingHostClearsTheVisibleCandidateAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-binding-visible-candidate-expiry-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    try
+    {
+        Environment.SetEnvironmentVariable(
+            "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO",
+            "binding-natural-exit-after-frame");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var binding = new DualBindingViewModel(
+            new DualBindingSessionClient(lifecycle),
+            isRequired: true);
+        binding.BeginBindingCommand.Execute(null);
+        await WaitUntilAsync(
+            () => binding.Candidates.Count == 2 && !binding.IsBusy,
+            "binding candidates were not presented before the expiry test");
+        binding.ShowCandidateCommand.Execute(binding.Candidates[0]);
+        await WaitUntilAsync(
+            () => binding.SelectedCandidate is not null && !binding.IsBusy,
+            "candidate preview did not settle before the expiry test");
+        Check.True(binding.IsPreviewVisible || binding.IsPreviewPlaceholderVisible,
+            "the candidate surface must be visible before its host expires");
+
+        var expiredGeneration = lifecycle.CurrentProcessGeneration;
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(expiredGeneration),
+            "the synthetic binding host did not exit after serving the frame");
+
+        binding.ObserveBindingHostLifetime();
+
+        Check.Equal(DualBindingPhase.Invalid, binding.Phase);
+        Check.True(binding.RequiresRebindingText,
+            "the operator must be told to start a fresh binding after host expiry");
+        Check.True(binding.InvalidationText.Contains("10分の利用期限", StringComparison.Ordinal),
+            "the typed expiry explanation must remain visible");
+        Check.Equal(0, binding.Candidates.Count);
+        Check.True(binding.SelectedCandidate is null,
+            "the selected candidate must not survive its Agent generation");
+        Check.False(binding.IsPreviewVisible,
+            "the stale camera image must be removed when its Agent generation exits");
+        Check.False(binding.IsPreviewPlaceholderVisible,
+            "the stale preview placeholder must be removed when its Agent generation exits");
+        Check.False(binding.AssignCameraACommand.CanExecute(null),
+            "CAM-A assignment must be disabled after host expiry");
+        Check.False(binding.AssignCameraBCommand.CanExecute(null),
+            "CAM-B assignment must be disabled after host expiry");
+        Check.Equal(expiredGeneration, lifecycle.CurrentProcessGeneration);
+        Check.False(lifecycle.IsProcessGenerationAlive(expiredGeneration),
+            "lifetime observation must not start a replacement Agent");
+
+        await lifecycle.DisposeAsync();
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.True(
+            new[] { "begin-binding", "start-candidate-live-view", "get-candidate-live-view-frame" }
+                .SequenceEqual(entries.Select(entry => entry.Operation)),
+            "lifetime observation must add no Agent request after the visible frame");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task BindingHostExitDuringDispatchReturnsTypedExpiryAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -6075,7 +6156,9 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
             scenario == "binding-activation-natural-nonzero-exit" ? 37 : 0);
     }
     if (scenario.StartsWith("binding-cancel", StringComparison.Ordinal) ||
-        scenario is "binding-natural-exit-before-confirm" or "binding-exit-during-confirm")
+        scenario is "binding-natural-exit-before-confirm" or
+            "binding-natural-exit-after-frame" or
+            "binding-exit-during-confirm")
     {
         if (bindingPipeName is null || wpdCameraMap is null || !File.Exists(wpdCameraMap))
         {
@@ -6445,8 +6528,10 @@ static async Task<int> RunDualBindingCancellationTestChildAsync(
                 }
                 return succeeded ? 0 : 2;
             }
-            if (scenario == "binding-natural-exit-before-confirm" &&
-                operation == DualBindingCameraAgentProtocol.Operations.StartCandidateLiveView)
+            if ((scenario == "binding-natural-exit-before-confirm" &&
+                 operation == DualBindingCameraAgentProtocol.Operations.StartCandidateLiveView) ||
+                (scenario == "binding-natural-exit-after-frame" &&
+                 operation == DualBindingCameraAgentProtocol.Operations.GetCandidateLiveViewFrame))
             {
                 return 0;
             }

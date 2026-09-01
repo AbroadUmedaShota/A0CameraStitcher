@@ -370,6 +370,27 @@ public sealed class DualBindingViewModel : ObservableObject
             _client.Evidence.Select(evidence => $"{evidence.CameraAlias} {evidence.ConfirmedAtUtc}"));
 
     /// <summary>
+    /// Called by the WPF lifetime monitor while an operator binding is active. This
+    /// is a local process-generation observation only: it never sends an Agent
+    /// request and never starts a replacement generation.
+    /// </summary>
+    public void ObserveBindingHostLifetime()
+    {
+        if (!IsRequired ||
+            IsBusy ||
+            _captureHostActivationAcknowledged ||
+            Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid)
+        {
+            return;
+        }
+
+        if (_client.ObserveBindingHostLifetime() is { } refusal)
+        {
+            ApplyRefusal(refusal);
+        }
+    }
+
+    /// <summary>
     /// Confirms the binding is still the one the Agent is serving, and reports it if not.
     /// </summary>
     /// <remarks>

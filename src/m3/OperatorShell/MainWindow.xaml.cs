@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -19,6 +20,7 @@ public partial class MainWindow : Window
     private readonly OperatorShellViewModel _viewModel;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
+    private readonly DispatcherTimer? _dualBindingHostLifetimeMonitor;
     private readonly ISimulatedLiveViewFrameSource _liveViewFrameSource = new SimulatedTestImageFrameSource();
     private readonly ISimulatedLiveViewFramePump _liveViewFramePump = new SimulatedLiveViewFramePump();
 
@@ -125,6 +127,16 @@ public partial class MainWindow : Window
                 dualBindingTransport: _dualAgentLifecycle,
                 captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow);
             DataContext = _viewModel;
+            if (_dualAgentLifecycle is not null)
+            {
+                _dualBindingHostLifetimeMonitor = new DispatcherTimer(
+                    DispatcherPriority.Background,
+                    Dispatcher)
+                {
+                    Interval = TimeSpan.FromMilliseconds(500),
+                };
+                _dualBindingHostLifetimeMonitor.Tick += OnDualBindingHostLifetimeMonitorTick;
+            }
             Loaded += OnLoaded;
             Closing += OnClosing;
         }
@@ -142,6 +154,7 @@ public partial class MainWindow : Window
         try
         {
             await _viewModel.InitializeAsync(_lifetime.Token);
+            _dualBindingHostLifetimeMonitor?.Start();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -169,6 +182,7 @@ public partial class MainWindow : Window
             return;
         }
         _shutdownStarted = true;
+        _dualBindingHostLifetimeMonitor?.Stop();
         IsEnabled = false;
         _lifetime.Cancel();
         if (_dualAgentLifecycle is not null)
@@ -196,6 +210,9 @@ public partial class MainWindow : Window
         _shutdownComplete = true;
         Close();
     }
+
+    private void OnDualBindingHostLifetimeMonitorTick(object? sender, EventArgs eventArgs) =>
+        _viewModel.DualBinding.ObserveBindingHostLifetime();
 
     // メニューバー（issue #34）の code-behind ハンドラ。「保存先を指定」「技術情報」
     // 「バージョン」「終了」はVMへ新しいコマンド/状態を追加しない純粋なUI操作（既存の
