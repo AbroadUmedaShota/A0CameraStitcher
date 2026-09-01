@@ -859,6 +859,21 @@ public sealed class DualCameraAgentLifecycle :
             {
                 shutdownFailure = await WaitForActivatedCaptureHostExitAsync().ConfigureAwait(false);
             }
+            else if (_bindingSessionMayNeedCleanup &&
+                     _bindingCancellationResponseReceived &&
+                     !_bindingCancellationSucceeded)
+            {
+                // A typed cleanup refusal is authoritative even when the child
+                // exits before DisposeAsync observes it. Checking HasExited first
+                // made this state timing-dependent and could release the lease as
+                // though cleanup had succeeded.
+                shutdownFailure = new HardwareCameraAgentLaunchException(
+                    "Dual binding cleanup was refused; the exclusive hardware lease must remain held.",
+                    requestMayHaveBeenDispatched: false,
+                    processExitCode: _process is { HasExited: true } failedProcess
+                        ? failedProcess.ExitCode
+                        : null);
+            }
             else if (_process is { HasExited: true } expiredBindingProcess)
             {
                 // A naturally expired binding host cannot retain the process-wide
@@ -874,15 +889,6 @@ public sealed class DualCameraAgentLifecycle :
                     shutdownFailure = new HardwareCameraAgentLaunchException(
                         "Dual binding cleanup was not acknowledged; the exclusive hardware lease must remain held.",
                         requestMayHaveBeenDispatched: false);
-                }
-                else if (!_bindingCancellationSucceeded)
-                {
-                    shutdownFailure = new HardwareCameraAgentLaunchException(
-                        "Dual binding cleanup was refused; the exclusive hardware lease must remain held.",
-                        requestMayHaveBeenDispatched: false,
-                        processExitCode: _process is { HasExited: true } failedProcess
-                            ? failedProcess.ExitCode
-                            : null);
                 }
                 else if (_process is not { } process)
                 {
