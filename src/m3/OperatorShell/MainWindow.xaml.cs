@@ -122,8 +122,12 @@ public partial class MainWindow : Window
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
-                liveViewFramePump: _liveViewFramePump,
-                liveViewFrameSource: _liveViewFrameSource,
+                liveViewFramePump: environment == DualCameraExecutionEnvironment.HardwareDual
+                    ? null
+                    : _liveViewFramePump,
+                liveViewFrameSource: environment == DualCameraExecutionEnvironment.HardwareDual
+                    ? null
+                    : _liveViewFrameSource,
                 dualBindingTransport: _dualAgentLifecycle,
                 captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow);
             DataContext = _viewModel;

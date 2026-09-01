@@ -706,6 +706,20 @@
                                         </Grid>
 
                                         <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
+                                                Visibility="{Binding IsHardwareDualStagePendingVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="実機2台 主画面プレビュー無効 機体照合で確認">
+                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">
+                                                <TextBlock Text="実機Live Viewは機体照合画面で確認"
+                                                           TextAlignment="Center" FontWeight="Bold"
+                                                           FontSize="{StaticResource FontSizeSection}"
+                                                           Foreground="{StaticResource AccentBrightBrush}" />
+                                                <TextBlock Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                                                           Style="{StaticResource MutedTextStyle}"
+                                                           Text="主画面には模擬画像を表示しません。CAM-A / CAM-Bの目視割当では、機体照合画面で候補を1台ずつ確認してください。" />
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
                                                 Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
                                                 AutomationProperties.Name="撮影回収専用モードの検証範囲">
                                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">

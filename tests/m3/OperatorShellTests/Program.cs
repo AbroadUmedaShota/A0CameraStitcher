@@ -925,6 +925,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareDualDoesNotExposeSimulatedMainStageAsync();
+    Console.WriteLine("PASS HardwareDual keeps simulated frames and controls out of the main stage");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual keeps simulated frames and controls out of the main stage");
+    Console.Error.WriteLine($"FAIL HardwareDual keeps simulated frames and controls out of the main stage: {exception}");
+}
+
+try
+{
     await DualBindingOverlayAccessibilityAndBusyLockAsync();
     Console.WriteLine("PASS the binding overlay names every control for a screen reader and locks while a request is in flight (issue #62)");
 }
@@ -3591,7 +3602,9 @@ static async Task InitializationFailureSurvivesReadinessRebuildsAsync()
 
 static OperatorShellViewModel HardwareDualShellWithSimulatedBinding(
     string root,
-    SimulatedDualBindingAgent agent)
+    SimulatedDualBindingAgent agent,
+    ISimulatedLiveViewFramePump? liveViewFramePump = null,
+    ISimulatedLiveViewFrameSource? liveViewFrameSource = null)
 {
     var adapter = new M2OfflineStitcherProcessAdapter(
         Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe"));
@@ -3608,7 +3621,49 @@ static OperatorShellViewModel HardwareDualShellWithSimulatedBinding(
             HardwareDualCaptureProfile.ApprovedSynthetic(),
             new HardwareDualOperatorConfirmations(true, true, true, true, true),
             Guid.NewGuid()),
+        liveViewFramePump: liveViewFramePump,
+        liveViewFrameSource: liveViewFrameSource,
         dualBindingTransport: new SimulatedDualBindingAgentTransport(agent));
+}
+
+static async Task HardwareDualDoesNotExposeSimulatedMainStageAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var pump = new FakeSimulatedLiveViewFramePump();
+        var frameSource = new FakeSimulatedLiveViewFrameSource();
+        var shell = HardwareDualShellWithSimulatedBinding(
+            root,
+            new SimulatedDualBindingAgent(),
+            pump,
+            frameSource);
+
+        await shell.InitializeAsync(CancellationToken.None);
+        shell.IsPhysicalShutterAckAccepted = true;
+        shell.IsExclusiveUseAckAccepted = true;
+        shell.AcceptSafetyCommand.Execute(null);
+
+        Check.True(shell.IsHardwareDualEnvironment, "The test must exercise HardwareDual.");
+        Check.False(shell.IsSimulatedFrameSourceAvailable, "HardwareDual must reject an injected simulated frame source.");
+        Check.False(shell.CanUseLiveView, "HardwareDual must not expose the simulated main-stage Live View command.");
+        Check.False(shell.CanUseSimulationStageControls, "HardwareDual must not expose simulated stage controls.");
+        Check.False(shell.CanChangeStageMode, "HardwareDual must not switch among simulated stage modes.");
+        Check.False(shell.IsStandardStageVisible, "HardwareDual must hide the simulated standard stage.");
+        Check.True(shell.IsHardwareDualStagePendingVisible, "HardwareDual must show an explicit non-simulated placeholder.");
+        Check.True(
+            shell.HardwareDualStagePendingText.Contains("機体照合画面", StringComparison.Ordinal) &&
+            shell.HardwareDualStagePendingText.Contains("模擬画像を表示しません", StringComparison.Ordinal),
+            "The placeholder must direct the operator to binding and explicitly deny simulated imagery.");
+
+        shell.ToggleLiveViewCommand.Execute(null);
+        Check.False(shell.IsLiveViewActive, "The blocked command must not activate simulated Live View.");
+        Check.Equal(0, pump.StartCalls.Count);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static async Task DualBindingOverlayGatesCaptureAsync()

@@ -236,8 +236,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
         _captureRecoveryOnlyWorkflow = captureRecoveryOnlyWorkflow;
-        _liveViewFramePump = liveViewFramePump;
-        _liveViewFrameSource = liveViewFrameSource;
+        var isHardwareDual = IsHardwareDualEnvironment;
+        _liveViewFramePump = isHardwareDual ? null : liveViewFramePump;
+        _liveViewFrameSource = isHardwareDual ? null : liveViewFrameSource;
         if (_dualCameraFlow is not null)
         {
             _dualCameraFlow.StateChanged += OnDualCameraStateChanged;
@@ -263,7 +264,6 @@ public sealed class OperatorShellViewModel : ObservableObject
         // なるまで撮影を開始できない。production composition は、同じ子AgentのPIDに束縛した
         // transport を明示注入する。注入されないHardwareDualは固定パイプ名へは接続せず、
         // NoLauncherProcessIdで必ずfail-closedにするため、模擬bindingを実機合格にはしない。
-        var isHardwareDual = IsHardwareDualEnvironment;
         if (isHardwareDual)
         {
             _statusMessage = captureRecoveryOnlyWorkflow is null
@@ -338,7 +338,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string MenuBarAutomationName => IsCaptureRecoveryOnlyMode
         ? "メニューバー ファイル カメラ ヘルプ"
         : "メニューバー ファイル カメラ 表示 ツール ヘルプ";
-    public bool CanUseSimulationStageControls => !IsCaptureRecoveryOnlyMode && !IsBusy;
+    public bool CanUseSimulationStageControls => !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode && !IsBusy;
 
     /// <summary>ヘルプ(H)メニューの「バージョン」項目用（issue #34）。実装時点でセマンティック
     /// バージョンの運用ルールは未確定のため、独自の番号を捏造せずビルド済みアセンブリのメタ
@@ -734,7 +734,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
     public string SelectedPage { get => _selectedPage; private set { if (SetProperty(ref _selectedPage, value)) OnPropertyChanged(nameof(PageTitle)); } }
     public string PageTitle => SelectedPage switch { "Setup" => "設置・校正", "CameraSettings" => "カメラ設定（read-only）", "Diagnostics" => "保存・診断", _ => "撮影ダッシュボード" };
-    public string LiveViewPlaceholder => $"{SelectedCamera}\n\n模擬動作のライブ表示（実画像ではありません）\n原画像・合成入力には使いません";
+    public string LiveViewPlaceholder => IsHardwareDualEnvironment
+        ? HardwareDualStagePendingText
+        : $"{SelectedCamera}\n\n模擬動作のライブ表示（実画像ではありません）\n原画像・合成入力には使いません";
     public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} ライブ表示を停止" : $"{SelectedCamera} ライブ表示を開始";
     public bool IsLiveViewActive
     {
@@ -790,9 +792,10 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public IReadOnlyList<string> SimulatedFramePatternOptions { get; } = SimulatedFramePatternCatalog.Labels;
 
-    public bool IsSimulatedFrameSourceAvailable => _liveViewFramePump is not null && _liveViewFrameSource is not null;
+    public bool IsSimulatedFrameSourceAvailable =>
+        !IsHardwareDualEnvironment && _liveViewFramePump is not null && _liveViewFrameSource is not null;
 
-    public bool CanChangeSimulatedFramePattern => !IsBusy;
+    public bool CanChangeSimulatedFramePattern => !IsHardwareDualEnvironment && !IsBusy;
 
     public string SelectedSimulatedFramePattern
     {
@@ -820,7 +823,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? pattern
             : SimulatedFramePatternCatalog.DefaultPattern;
 
-    public bool CanChangeStageMode => !IsCaptureRecoveryOnlyMode &&
+    public bool CanChangeStageMode => !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review);
 
     /// <summary>A / B キーからのステージ表示切替。表示モードを変えるだけで、
@@ -842,7 +845,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
     public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
     public bool IsStageReviewMode => UiState == OperatorUiState.Review;
-    public bool IsStandardStageVisible => !IsCaptureRecoveryOnlyMode;
+    public bool IsStandardStageVisible => !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
+    public bool IsHardwareDualStagePendingVisible => IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
+    public string HardwareDualStagePendingText =>
+        "実機Live Viewは機体照合画面で確認します。\n主画面には模擬画像を表示しません。";
     public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
     public bool IsStageSingleLiveMode => IsStageLiveNoteVisible && SelectedStageMode != StageModeCompositePreview;
     public bool IsStageCompositePreviewMode => IsStageLiveNoteVisible && SelectedStageMode == StageModeCompositePreview;
@@ -2065,7 +2071,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "1台構成のため対象外"
             : $"機体照合: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
 
-    public bool CanUseLiveView => !IsCaptureRecoveryOnlyMode && _availability.LiveView.Allowed;
+    public bool CanUseLiveView =>
+        !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode && _availability.LiveView.Allowed;
     public bool CanExport => !IsCaptureRecoveryOnlyMode && _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
     public bool CanRestitch => !IsCaptureRecoveryOnlyMode && _availability.Restitch.Allowed;
@@ -2829,6 +2836,11 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void ToggleLiveView()
     {
+        if (!CanUseLiveView)
+        {
+            return;
+        }
+
         IsLiveViewActive = !IsLiveViewActive;
         StatusMessage = IsLiveViewActive
             ? $"{SelectedCamera} のSimulated Live Viewを開始しました。プレビューは非原画像です。"
