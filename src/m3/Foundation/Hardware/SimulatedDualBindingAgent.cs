@@ -34,8 +34,10 @@ public sealed class SimulatedDualBindingAgent
     private DualBindingSessionState _state = DualBindingSessionState.None;
     private string _sessionId = string.Empty;
     private int? _activeLiveViewOrdinal;
+    private int? _previewedLiveViewOrdinal;
     private int _sessionCounter;
     private bool _enumerationInvalidationArmed;
+    private bool _captureHostActivated;
 
     public SimulatedDualBindingAgent(SimulatedDualBindingOptions? options = null)
     {
@@ -53,6 +55,10 @@ public sealed class SimulatedDualBindingAgent
 
     /// <summary>Non-zero would mean the client let two Live Views overlap.</summary>
     public int ConcurrentLiveViewViolationCount { get; private set; }
+
+    public int EndBindingSessionCount { get; private set; }
+
+    public bool CaptureHostActivated => _captureHostActivated;
 
     /// <summary>
     /// Raises a typed invalidation, as an Agent restart, USB reconnect, topology change, SDK
@@ -127,6 +133,11 @@ public sealed class SimulatedDualBindingAgent
                     "The named binding session is not the one this agent is serving.");
             }
 
+            if (operation == DualBindingCameraAgentProtocol.Operations.CancelBinding)
+            {
+                return CancelBinding(requestId);
+            }
+
             if (_pendingInvalidation != DualBindingInvalidationReason.None)
             {
                 Invalidate(_pendingInvalidation);
@@ -148,6 +159,8 @@ public sealed class SimulatedDualBindingAgent
                     ConfirmAlias(requestId, payload),
                 DualBindingCameraAgentProtocol.Operations.CompleteBinding =>
                     CompleteBinding(requestId),
+                DualBindingCameraAgentProtocol.Operations.ActivateCapture =>
+                    ActivateCapture(requestId),
                 _ => Rejection(requestId, "UnsupportedOperation", "The binding operation is unsupported."),
             };
         }
@@ -159,8 +172,10 @@ public sealed class SimulatedDualBindingAgent
         // leave an older session addressable.
         _sessionId = string.Empty;
         _activeLiveViewOrdinal = null;
+        _previewedLiveViewOrdinal = null;
         _invalidationReason = DualBindingInvalidationReason.None;
         _state = DualBindingSessionState.None;
+        _captureHostActivated = false;
         _candidates.Clear();
 
         // Drain whatever was queued for the session just discarded. Acting on it would refuse the
@@ -248,6 +263,7 @@ public sealed class SimulatedDualBindingAgent
 
     private string StartLiveView(string requestId, JsonElement payload)
     {
+        _previewedLiveViewOrdinal = null;
         if (_state != DualBindingSessionState.CollectingCandidates)
         {
             return Rejection(
@@ -318,17 +334,22 @@ public sealed class SimulatedDualBindingAgent
 
     private string GetFrame(string requestId, JsonElement payload)
     {
+        _previewedLiveViewOrdinal = null;
         if (!TryReadOrdinal(payload, out var ordinal) || _activeLiveViewOrdinal != ordinal)
         {
             return Rejection(requestId, "LiveViewNotActive", "No Live View is running for this candidate.");
         }
 
-        if (_options.LiveViewFrameBytes == 0)
+        var frame = _options.LiveViewFrameBase64 is { Length: > 0 } encoded
+            ? Convert.FromBase64String(encoded)
+            : new byte[_options.LiveViewFrameBytes];
+
+        if (frame.Length == 0)
         {
             return Rejection(requestId, "LiveViewFrameUnavailable", "The SDK returned no Live View frame.");
         }
 
-        if (_options.LiveViewFrameBytes > DualBindingCameraAgentProtocol.MaximumLiveViewFrameBytes)
+        if (frame.Length > DualBindingCameraAgentProtocol.MaximumLiveViewFrameBytes)
         {
             // Refused, never truncated: the operator decides which body they are looking at from
             // this image, and half an image is a wrong answer waiting to happen.
@@ -338,12 +359,15 @@ public sealed class SimulatedDualBindingAgent
                 "The Live View frame exceeds the bounded preview size.");
         }
 
-        var frame = new byte[_options.LiveViewFrameBytes];
-        for (var index = 0; index < frame.Length; index++)
+        if (_options.LiveViewFrameBase64 is null)
         {
-            frame[index] = (byte)((index + ordinal) & 0xFF);
+            for (var index = 0; index < frame.Length; index++)
+            {
+                frame[index] = (byte)((index + ordinal) & 0xFF);
+            }
         }
 
+        _previewedLiveViewOrdinal = ordinal;
         return Success(requestId, "CandidateLiveViewFrame", writer =>
         {
             writer.WriteString("sessionId", _sessionId);
@@ -395,7 +419,16 @@ public sealed class SimulatedDualBindingAgent
             return Rejection(requestId, "AliasAlreadyAssigned", $"{alias} was already assigned.");
         }
 
+        if (_previewedLiveViewOrdinal != ordinal)
+        {
+            return Rejection(
+                requestId,
+                "LiveViewFrameRequired",
+                "Alias confirmation requires a successful current Live View frame.");
+        }
+
         candidate.CameraAlias = alias;
+        _previewedLiveViewOrdinal = null;
 
         var liveViewStopped = !_options.FailStopLiveView;
         var sdkSessionClosed = !_options.FailCloseCandidateSession;
@@ -485,6 +518,63 @@ public sealed class SimulatedDualBindingAgent
         });
     }
 
+    private string ActivateCapture(string requestId)
+    {
+        if (_state != DualBindingSessionState.Ready)
+        {
+            return Rejection(
+                requestId,
+                "BindingNotReady",
+                "Capture activation requires a completed Ready binding.");
+        }
+
+        _captureHostActivated = true;
+        return Success(requestId, "CaptureHostActivated", writer =>
+        {
+            writer.WriteString("sessionId", _sessionId);
+            writer.WriteString("state", DualBindingSessionState.Ready.ToString());
+            writer.WriteBoolean("captureHostActivated", true);
+        });
+    }
+
+    private string CancelBinding(string requestId)
+    {
+        EndBindingSessionCount++;
+        var cancelledSession = _sessionId;
+        if (_options.FailEndBindingSession)
+        {
+            Invalidate(DualBindingInvalidationReason.SdkError);
+            return Rejection(requestId, "BindingCleanupFailed", "Binding SDK cleanup could not be confirmed.", writer =>
+            {
+                writer.WriteString("sessionId", cancelledSession);
+                writer.WriteString("state", DualBindingSessionState.Invalid.ToString());
+                writer.WriteString("invalidationReason", _invalidationReason.ToString());
+                writer.WriteString("detail", "Binding SDK cleanup could not be confirmed.");
+            });
+        }
+
+        foreach (var candidate in _candidates)
+        {
+            candidate.LiveViewActive = false;
+            candidate.LiveViewStopped = true;
+            candidate.SdkSessionClosed = true;
+        }
+        _activeLiveViewOrdinal = null;
+        _previewedLiveViewOrdinal = null;
+        _state = DualBindingSessionState.None;
+        _sessionId = string.Empty;
+        _captureHostActivated = false;
+        _candidates.Clear();
+        return Success(requestId, "BindingCancelled", writer =>
+        {
+            writer.WriteString("sessionId", cancelledSession);
+            writer.WriteString("state", DualBindingSessionState.None.ToString());
+            writer.WriteBoolean("liveViewStopped", true);
+            writer.WriteBoolean("sdkSessionClosed", true);
+            writer.WriteBoolean("sdkSessionEnded", true);
+        });
+    }
+
     private void Invalidate(DualBindingInvalidationReason reason)
     {
         _state = DualBindingSessionState.Invalid;
@@ -501,6 +591,7 @@ public sealed class SimulatedDualBindingAgent
         }
 
         _activeLiveViewOrdinal = null;
+        _previewedLiveViewOrdinal = null;
     }
 
     private Candidate? FindCandidate(int ordinal) =>
@@ -610,7 +701,9 @@ public sealed record SimulatedDualBindingOptions
     public bool FailStartLiveView { get; init; }
     public bool FailStopLiveView { get; init; }
     public bool FailCloseCandidateSession { get; init; }
+    public bool FailEndBindingSession { get; init; }
     public int LiveViewFrameBytes { get; init; } = 4096;
+    public string? LiveViewFrameBase64 { get; init; }
     public DualBindingInvalidationReason PendingInvalidation { get; init; } = DualBindingInvalidationReason.None;
     public DualBindingInvalidationReason InvalidationDuringEnumeration { get; init; } =
         DualBindingInvalidationReason.None;

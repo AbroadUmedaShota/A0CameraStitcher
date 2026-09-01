@@ -64,6 +64,8 @@ enum class DualBindingCameraAgentOperation {
     get_candidate_live_view_frame,
     confirm_alias,
     complete_binding,
+    activate_capture,
+    cancel_binding,
 };
 
 class DualBindingCameraAgentProtocolError final : public std::runtime_error {
@@ -121,6 +123,13 @@ public:
     // Ready instead of being retried or ignored.
     [[nodiscard]] virtual bool CloseCandidateSession(std::size_t ordinal) = 0;
 
+    // Ends every SDK object retained by this binding session, including an
+    // active Live View/source and the manager module. Cancellation is a
+    // terminal, single-attempt cleanup path: false is reported to the caller
+    // and must not be turned into an automatic retry.
+    [[nodiscard]] virtual bool EndBindingSession(
+        std::chrono::seconds timeout) noexcept = 0;
+
     // Any typed invalidation the adapter observed since the previous call, or
     // None. The protocol is request/response with no server push, so this is
     // polled at the start of every session-scoped operation and delivered as a
@@ -148,6 +157,7 @@ struct DualBindingFakeSdkOptions {
     bool fail_start_live_view{};
     bool fail_stop_live_view{};
     bool fail_close_candidate_session{};
+    bool fail_end_binding_session{};
     std::size_t live_view_frame_bytes{4096};
     // Already queued before the operation under test runs. Reported once by the
     // next PollInvalidation, then cleared.
@@ -178,6 +188,8 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> ReadLiveViewFrame(
         std::size_t ordinal) override;
     [[nodiscard]] bool CloseCandidateSession(std::size_t ordinal) override;
+    [[nodiscard]] bool EndBindingSession(
+        std::chrono::seconds timeout) noexcept override;
     [[nodiscard]] DualIdentityInvalidationReason PollInvalidation() override;
 
     void RaiseInvalidation(DualIdentityInvalidationReason reason) noexcept;
@@ -187,6 +199,7 @@ public:
     // Non-zero means the protocol layer allowed two Live Views to overlap.
     [[nodiscard]] std::size_t ConcurrentLiveViewViolationCount() const noexcept;
     [[nodiscard]] std::size_t ClosedCandidateSessionCount() const noexcept;
+    [[nodiscard]] std::size_t EndBindingSessionCount() const noexcept;
 
 private:
     DualBindingFakeSdkOptions options_;
@@ -194,6 +207,7 @@ private:
     std::vector<bool> session_closed_;
     std::size_t enumeration_count_{};
     std::size_t concurrent_live_view_violations_{};
+    std::size_t end_binding_session_count_{};
 };
 
 // Counters that can actually move.
@@ -214,7 +228,7 @@ struct DualBindingCameraAgentSafetyCounters {
     std::size_t rejected_stale_session_count{};
 };
 
-// Serves the five binding operations over one pure in-memory boundary.
+// Serves the binding operations over one pure in-memory boundary.
 //
 // Without an adapter every operation fails closed with SdkUnavailable: an agent
 // that cannot see any candidates must not invent a session for the operator to
@@ -223,7 +237,8 @@ class DualBindingCameraAgentDispatcher final {
 public:
     DualBindingCameraAgentDispatcher() noexcept = default;
     explicit DualBindingCameraAgentDispatcher(
-        std::shared_ptr<DualBindingSdkAdapter> adapter) noexcept;
+        std::shared_ptr<DualBindingSdkAdapter> adapter,
+        bool capture_transition_enabled = false) noexcept;
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -238,10 +253,26 @@ public:
 
     [[nodiscard]] DualIdentitySessionBindingState BindingState() const noexcept;
 
+    // Same-process capture owner only. The caller has already ended, or made
+    // one bounded attempt to end, the retained SDK Module before publishing
+    // this invalidation. No protocol operation can make an invalid binding
+    // Ready again; a new operator binding is required.
+    void InvalidateCaptureBinding(
+        DualIdentityInvalidationReason reason) noexcept;
+
+    // A production same-process host remains on the binding pipe after Ready.
+    // It enters the capture pipe only after an explicit, freshness-checked
+    // activate-capture request. Cancellation is terminal whether cleanup
+    // succeeds or fails, so the process never retains Live View for the host's
+    // full lifetime after the WPF owner has gone away.
+    [[nodiscard]] bool CaptureTransitionRequested() const noexcept;
+    [[nodiscard]] bool CancellationRequested() const noexcept;
+    [[nodiscard]] bool CancellationSucceeded() const noexcept;
+
     // Named-pipe host lifecycle hooks, same shape as the Dual v2 dispatcher.
-    // Binding has no idle-driven state and no operation that asks the host to
-    // stop, so these stay a no-op and false; the host's own absolute lifetime
-    // bound is what stops it.
+    // Idle remains a no-op. ShouldStop becomes true only after a delivered
+    // activate-capture or cancel-binding terminal request; Ready by itself
+    // stays addressable for a freshness probe, re-bind, or safe cancellation.
     void OnIdle() noexcept;
     [[nodiscard]] bool ShouldStop() const noexcept;
 
@@ -256,6 +287,10 @@ private:
         const DualBindingCameraAgentRequest& request);
     [[nodiscard]] std::string HandleCompleteBinding(
         const DualBindingCameraAgentRequest& request);
+    [[nodiscard]] std::string HandleActivateCapture(
+        const DualBindingCameraAgentRequest& request);
+    [[nodiscard]] std::string HandleCancelBinding(
+        const DualBindingCameraAgentRequest& request);
 
     void InvalidateSession(DualIdentityInvalidationReason reason) noexcept;
     [[nodiscard]] std::string InvalidatedRejection(std::string_view request_id) const;
@@ -266,6 +301,14 @@ private:
     // Empty session id plus this being set is impossible; both are cleared and
     // set together with the session.
     std::optional<std::size_t> active_live_view_ordinal_;
+    // Set only after this dispatcher returned one non-empty, bounded frame for the current
+    // candidate. Starting Live View again clears it, so an older preview cannot authorize a
+    // later alias confirmation.
+    std::optional<std::size_t> previewed_live_view_ordinal_;
+    // Candidates whose Live View and SDK source were both closed during an
+    // operator comparison. They remain eligible for alias confirmation without
+    // being reopened; reopening one removes it from this set.
+    std::vector<std::size_t> quiesced_ordinals_;
     // Candidates whose alias the operator already confirmed. The binding core
     // knows this too but exposes no accessor for it, and Live View has to be
     // refused for them: their SDK session is closed and reopening it would undo
@@ -280,6 +323,10 @@ private:
     std::uint64_t session_counter_{};
     std::string session_id_seed_;
     DualBindingCameraAgentSafetyCounters safety_counters_;
+    bool capture_transition_enabled_{false};
+    bool capture_transition_requested_{false};
+    bool cancellation_requested_{false};
+    bool cancellation_succeeded_{false};
 };
 
 // Failure-injection seam for named-pipe host contract tests only, identical in

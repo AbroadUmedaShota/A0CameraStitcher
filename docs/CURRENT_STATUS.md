@@ -1,18 +1,20 @@
 # 現在の開発状況
 
-更新日: 2026-08-27
+更新日: 2026-08-31
 
 ## 総合判定
 
-`in-progress`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCamera実機とA0合成品質も未完了である。
+`in-progress / Dual hardware HardwarePending`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCameraの現sliceは、production backendとWPF `CaptureRecoveryOnly` software経路、ADR-0028のModule保持境界、pair-level preflight、read-only coexistence probe、およびone-shot前のsoftware gateまでである。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化して再bindingを要求する。実機coexistence probeとone-shotは未実施、同一bindingの10/100 runnerも未実装で固定600秒host lifetimeとの両立も未解決である。したがってDualの10回／100回実機試験は開始せず、Passを主張しない。DualCameraは`HardwarePending`であり、A0合成品質も未完了である。
 
 第三者向けには[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)を入口とする。二台順次撮影のsoftware contractと安全停止は提示可能だが、実機二台撮影とA0品質の受入完了は主張しない。
 
 ## 確認済み
 
+- [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。安全修正`29b8671`はNative CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立reviewでpatch `PASS`となりpush済み。ADR-0028のproduction pair preflightとModule保持read-only coexistence probeは実装・ソフトウェア回帰済みだが、同一exact SHAでの実機coexistence probeと撮影証跡は未完了である。ライセンス済みSDKのheader 22件、sample 6件、PDF 10件の静的調査でも、Module reload後に同型D810を一意照合できる正式なper-body property/APIは確認できなかった。同一bindingの10/100 runnerは未実装であり、Dual hardware readinessは`HardwarePending`。実撮影、delete、設定変更、USB操作は0件。
+- 2026-08-29時点で、WPFの明示起動引数、承認済み`a0.dual-capture-profile.operator-approved.v1`、同一Agent内CAM-A/B割当から`CaptureRecoveryOnly`へのactivation、予約前durable snapshot、1 reserve／1 start、曖昧時same-ID照会、再起動時の再binding、CAM-B失敗時CAM-A原本保持、JPEG 7360×4912・size・SHA-256再検証、stitch `Pending`・A0品質`Unapproved`を実装した。通常`start-reserved-pair` schemaと通常合成経路は変更していない。この項目はsoftware-onlyで、実シャッター、実WPF操作、実機one-shotの合格を意味しない。
 - [2026-08-26 SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md): one-shot 1/1、10/10、p50 `14.036秒`、p95/max `14.643秒`、HG-0009承認、100/100初回成功、100回p50 `14.204秒`・p95 `14.430秒`・max `14.692秒`。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件だった。
 - PR #163でNikon SDK非同期バッファ寿命とSingleCamera WPD identity-v3経路を修正し、Release buildとfocused contractsを確認後にmainへマージした。GitHub ActionsはBilling制限により未実行であり、CI greenとは扱わない。
-- 2026-08-17時点でDual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約→開始→同一ID照会、.NETのReserved／terminal typed recovery、厳密なsemantic preflightを実装済みである。fake backend限定orchestratorはCAM-A→CAM-Bを各最大一回、自動retry 0、共有180秒deadlineで実行する。A失敗時はBを開始せず、B失敗時はA原本を保持する。terminalはtransaction ID別にatomic publish・再読込検証され、その後だけactiveを削除する。過去結果を残したまま次pairを予約でき、再起動後も同一IDで照会できる。Foundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release CTest各10/10、M3 Release/Debug、正式DualCamera WPF flowが合格した。production Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続であり、既定は`PairDispatcherUnavailable`／`HardwarePending`、実カメラ操作0件である。
+- 2026-08-17時点でDual専用schema `a0.camera-agent.hardware-dual.v2`の4操作、durable pair store、予約→開始→同一ID照会、.NETのReserved／terminal typed recovery、厳密なsemantic preflightを実装済みである。fake backend限定orchestratorはCAM-A→CAM-Bを各最大一回、自動retry 0、共有180秒deadlineで実行する。A失敗時はBを開始せず、B失敗時はA原本を保持する。terminalはtransaction ID別にatomic publish・再読込検証され、その後だけactiveを削除する。過去結果を残したまま次pairを予約でき、再起動後も同一IDで照会できる。Foundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release CTest各10/10、M3 Release/Debug、正式DualCamera WPF flowが合格した。当時はproduction Dual経路が未接続だったが、この制約は上記2026-08-29のsoftware実装で更新された。実機受入が未完了で`HardwarePending`である点は変わらない。
 - 正式camera modelはNikon D810であり、明示的な`SingleCamera`または`DualCamera`をUSBで運用する。`SingleCamera`はCAM-A、WPD serial digest、SDK/WPD各exactly-one current session、canonical original一件、stitch `NotApplicable`、byte-identical `7360×4912` export、30日read-only profileとする。`DualCamera`は従来どおり固定平面A0原稿をCAM-A→CAM-Bで順次撮影・合成する。
 - modeはactive transaction外で明示選択し、接続台数から推定しない。`DualCamera`の一台不足を`SingleCamera`へ自動降格せず、active中のmode変更を禁止する。
 - D810一台の電源再投入後PnP再列挙とWPD側CAM-A continuityを匿名証拠化。SDK側の旧continuity結論はephemeral source ID使用のため無効化され、接続中二台のidentity-v2衝突によりidentity strategyはBlockedである。

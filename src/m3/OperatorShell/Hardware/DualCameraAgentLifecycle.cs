@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.Foundation.Hardware;
 
@@ -25,7 +26,13 @@ namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 /// unmodified Foundation code): only DualCameraProductFlow.RecoverAndStitchAsync ever
 /// calls QueryPairTransactionAsync again for an already-dispatched transaction.
 /// </summary>
-public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, IAsyncDisposable
+public sealed class DualCameraAgentLifecycle :
+    IDualHardwareCaptureOperations,
+    IDualHardwareCaptureRecoveryOnlyOperations,
+    IHardwareCameraAgentTransport,
+    IHardwareCameraAgentGenerationBoundTransport,
+    IHardwareCameraAgentProcessLifetime,
+    IAsyncDisposable
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
 
@@ -33,11 +40,13 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
     // longer than the native shared 180s dispatch watchdog so the client never times
     // out a call before the Agent's own watchdog would already have resolved it.
     private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(240);
+    private static readonly TimeSpan BindingShutdownExitTimeout = TimeSpan.FromSeconds(5);
 
     private readonly string _agentExecutablePath;
     private readonly string _pairJournalRootPath;
     private readonly string _approvedCaptureProfilePath;
     private readonly string _dualIdentityProofPath;
+    private readonly string? _wpdCameraMapPath;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
 
     private Process? _process;
@@ -49,14 +58,25 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
     private Task<string>? _standardOutput;
     private Task<string>? _standardError;
     private string? _pipeName;
+    private string? _bindingPipeName;
     private DualHardwareCameraAgentOperations? _wireOperations;
+    private IHardwareCameraAgentTransport? _bindingWireTransport;
+    private bool _bindingSessionMayNeedCleanup;
+    private bool _bindingCancellationResponseReceived;
+    private bool _bindingCancellationSucceeded;
+    // Once activation succeeds the binding pipe is intentionally unavailable.
+    // The capture host must therefore be allowed to reach its own terminal state;
+    // shutdown must never cancel it or merely detach from a live process.
+    private bool _captureHostActivated;
     private bool _disposed;
+    private long _processGeneration;
 
     public DualCameraAgentLifecycle(
         string agentExecutablePath,
         string pairJournalRootPath,
         string approvedCaptureProfilePath,
-        string dualIdentityProofPath)
+        string dualIdentityProofPath,
+        string? wpdCameraMapPath = null)
     {
         if (string.IsNullOrWhiteSpace(agentExecutablePath))
         {
@@ -79,9 +99,39 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         _pairJournalRootPath = Path.GetFullPath(pairJournalRootPath);
         _approvedCaptureProfilePath = Path.GetFullPath(approvedCaptureProfilePath);
         _dualIdentityProofPath = Path.GetFullPath(dualIdentityProofPath);
+        _wpdCameraMapPath = string.IsNullOrWhiteSpace(wpdCameraMapPath)
+            ? null
+            : Path.GetFullPath(wpdCameraMapPath);
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
+
+    public long CurrentProcessGeneration => Interlocked.Read(ref _processGeneration);
+
+    /// <summary>
+    /// Exit code observed during an orderly lifecycle shutdown. A non-zero code is
+    /// retained for truthful diagnostics, but an already-exited capture host no
+    /// longer holds the exclusive hardware lease indefinitely.
+    /// </summary>
+    public int? LastObservedAgentExitCode { get; private set; }
+
+    public bool IsProcessGenerationAlive(long processGeneration)
+    {
+        if (processGeneration <= 0 || processGeneration != CurrentProcessGeneration)
+        {
+            return false;
+        }
+
+        var process = Volatile.Read(ref _process);
+        try
+        {
+            return process is { HasExited: false } && processGeneration == CurrentProcessGeneration;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            return false;
+        }
+    }
 
     public bool AgentExecutableAvailable
     {
@@ -135,12 +185,222 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         }
     }
 
+    public async Task<DualHardwareCaptureRecoveryOnlyDispatchResult> StartReservedCaptureRecoveryOnlyAsync(
+        DualHardwareCaptureRecoveryOnlyRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.StartReservedCaptureRecoveryOnlyAsync(request, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException exception)
+        {
+            return new(
+                exception.RequestMayHaveBeenDispatched
+                    ? DualHardwareDispatchState.ResponseUnknown
+                    : DualHardwareDispatchState.ConfirmedUndispatched,
+                null);
+        }
+    }
+
+    public async Task EnsureCaptureRecoveryOnlyAvailableAsync(CancellationToken cancellationToken)
+    {
+        await RunSerializedAsync(
+                async (operations, token) =>
+                {
+                    await operations.EnsureCaptureRecoveryOnlyAvailableAsync(token).ConfigureAwait(false);
+                    return true;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public Task<DualHardwarePairQueryOutcome> QueryPairTransactionAsync(
         Guid transactionId,
         CancellationToken cancellationToken) =>
         RunSerializedAsync(
             (operations, token) => operations.QueryPairTransactionAsync(transactionId, token),
             cancellationToken);
+
+    public Task<DualHardwareCaptureRecoveryOnlyPairQueryOutcome> QueryCaptureRecoveryOnlyTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken) =>
+        RunSerializedAsync(
+            (operations, token) => operations.QueryCaptureRecoveryOnlyTransactionAsync(transactionId, token),
+            cancellationToken);
+
+    public async Task<DualHardwareCloseState> CloseCaptureRecoveryOnlyReservedPairTransactionAsync(
+        Guid transactionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunSerializedAsync(
+                    (operations, token) => operations.CloseCaptureRecoveryOnlyReservedPairTransactionAsync(
+                        transactionId,
+                        token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (HardwareCameraAgentLaunchException)
+        {
+            return DualHardwareCloseState.ResponseUnknown;
+        }
+    }
+
+    /// <summary>
+    /// Serves the operator binding protocol through the same child process as the
+    /// subsequent capture protocol. A WPD map is mandatory on this path; capture-only
+    /// callers that do not use session binding retain their existing behavior.
+    /// </summary>
+    public Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default) =>
+        SendBindingAsync(requestJson, expectedProcessGeneration: null, cancellationToken);
+
+    public Task<string> SendAsync(
+        string requestJson,
+        long expectedProcessGeneration,
+        CancellationToken cancellationToken = default)
+    {
+        if (expectedProcessGeneration <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedProcessGeneration));
+        }
+
+        return SendBindingAsync(requestJson, expectedProcessGeneration, cancellationToken);
+    }
+
+    private async Task<string> SendBindingAsync(
+        string requestJson,
+        long? expectedProcessGeneration,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(requestJson);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_wpdCameraMapPath is null)
+            {
+                throw new HardwareCameraAgentLaunchException(
+                    "Dual binding requires an existing WPD camera map.",
+                    requestMayHaveBeenDispatched: false);
+            }
+
+            var operation = ReadBindingOperation(requestJson);
+            if (expectedProcessGeneration is not null &&
+                operation == DualBindingCameraAgentProtocol.Operations.BeginBinding)
+            {
+                throw new InvalidOperationException("begin-binding cannot be scoped to an existing process generation.");
+            }
+
+            IHardwareCameraAgentTransport bindingTransport;
+            if (expectedProcessGeneration is { } generation)
+            {
+                if (!IsProcessGenerationAlive(generation) || _bindingWireTransport is null)
+                {
+                    return CreateBindingHostExpiredResponse(requestJson, generation);
+                }
+                bindingTransport = _bindingWireTransport;
+            }
+            else
+            {
+                bindingTransport = operation == DualBindingCameraAgentProtocol.Operations.BeginBinding
+                    ? EnsureBindingProcessStarted()
+                    : EnsureExistingBindingProcess();
+            }
+            var cleanupRequiredBeforeRequest = _bindingSessionMayNeedCleanup;
+            if (operation == DualBindingCameraAgentProtocol.Operations.BeginBinding)
+            {
+                // Until a complete response proves otherwise, begin-binding may
+                // have reached Native and opened the retained SDK session.
+                _bindingSessionMayNeedCleanup = true;
+            }
+
+            try
+            {
+                var responseJson = await bindingTransport.SendAsync(requestJson, cancellationToken).ConfigureAwait(false);
+                RecordBindingLifecycleResponse(operation, requestJson, responseJson);
+                return responseJson;
+            }
+            catch (Exception exception) when (
+                expectedProcessGeneration is not null &&
+                exception is HardwareCameraAgentConnectException or IOException)
+            {
+                if (await HasProcessGenerationExitedAfterFailureAsync(expectedProcessGeneration.Value)
+                    .ConfigureAwait(false))
+                {
+                    return CreateBindingHostExpiredResponse(requestJson, expectedProcessGeneration.Value);
+                }
+
+                throw;
+            }
+            catch (HardwareCameraAgentConnectException)
+                when (operation == DualBindingCameraAgentProtocol.Operations.BeginBinding)
+            {
+                // Server identity is checked before any request byte is written.
+                // A connect/identity failure therefore cannot have started the
+                // new binding; preserve only an older session, if one existed.
+                _bindingSessionMayNeedCleanup = cleanupRequiredBeforeRequest;
+                throw;
+            }
+        }
+        finally
+        {
+            _operationGate.Release();
+        }
+    }
+
+    private async Task<bool> HasProcessGenerationExitedAfterFailureAsync(long expectedProcessGeneration)
+    {
+        if (!IsProcessGenerationAlive(expectedProcessGeneration))
+        {
+            return true;
+        }
+
+        var process = _process;
+        if (process is null || expectedProcessGeneration != CurrentProcessGeneration)
+        {
+            return true;
+        }
+
+        try
+        {
+            await process.WaitForExitAsync(CancellationToken.None)
+                .WaitAsync(TimeSpan.FromMilliseconds(250))
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            // A live same-generation process means this is an ordinary pipe
+            // failure, not proof that the binding host expired.
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            return true;
+        }
+
+        return !IsProcessGenerationAlive(expectedProcessGeneration);
+    }
+
+    private string CreateBindingHostExpiredResponse(string requestJson, long expectedProcessGeneration)
+    {
+        if (expectedProcessGeneration == CurrentProcessGeneration &&
+            _process is { HasExited: true } expiredProcess)
+        {
+            LastObservedAgentExitCode = expiredProcess.ExitCode;
+        }
+
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        var requestId = root.GetProperty("requestId").GetString()
+            ?? throw new InvalidDataException("Dual binding requestId is missing.");
+        var sessionId = root.GetProperty("payload").GetProperty("sessionId").GetString()
+            ?? throw new InvalidDataException("Dual binding sessionId is missing.");
+        return DualBindingCameraAgentProtocolCodec.CreateBindingHostExpiredResponse(requestId, sessionId);
+    }
 
     public async Task<DualHardwareCloseState> CloseReservedPairTransactionAsync(
         Guid transactionId,
@@ -226,6 +486,10 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         // a Native process that is guaranteed to fail closed on its own moments later.
         EnsureRequiredArtifactFileExists(_approvedCaptureProfilePath, "承認済みcapture profile");
         EnsureRequiredArtifactFileExists(_dualIdentityProofPath, "dual identity proof");
+        if (_wpdCameraMapPath is not null)
+        {
+            EnsureRequiredArtifactFileExists(_wpdCameraMapPath, "WPD camera map");
+        }
 
         // Validate the local path chain (fixed drive, no reparse point/junction) before
         // ever creating anything through it -- Directory.CreateDirectory silently
@@ -241,9 +505,12 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         // name every launch, in the same pattern as Single v2. Never connect to a
         // fixed/default name -- that risks a fail-open connection to a stale host.
         var pipeName = $"{DualHardwareCameraAgentProtocol.DefaultPipeName}.{Guid.NewGuid():N}";
+        var bindingPipeName = _wpdCameraMapPath is null
+            ? null
+            : $"{DualBindingCameraAgentProtocol.DefaultPipeName}.{Guid.NewGuid():N}";
         var process = new Process
         {
-            StartInfo = CreateStartInfo(pipeName),
+            StartInfo = CreateStartInfo(pipeName, bindingPipeName),
             EnableRaisingEvents = true,
         };
         try
@@ -252,31 +519,77 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             {
                 throw new HardwareCameraAgentLaunchException("Dual Camera Agent を開始できませんでした。");
             }
+            Interlocked.Increment(ref _processGeneration);
             _process = process;
             _standardOutput = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
             _standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
             _pipeName = pipeName;
+            _bindingPipeName = bindingPipeName;
             _wireOperations = new DualHardwareCameraAgentOperations(
                 pipeName, process.Id, ConnectTimeout, ResponseTimeout);
+            _bindingWireTransport = bindingPipeName is null
+                ? null
+                : new NamedPipeHardwareCameraAgentTransport(
+                    bindingPipeName, process.Id, ConnectTimeout, ResponseTimeout);
+            _bindingSessionMayNeedCleanup = false;
+            _bindingCancellationResponseReceived = false;
+            _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
+            LastObservedAgentExitCode = null;
             return _wireOperations;
         }
         catch (HardwareCameraAgentLaunchException)
         {
             process.Dispose();
             _pipeName = null;
+            _bindingPipeName = null;
             _wireOperations = null;
+            _bindingWireTransport = null;
+            _bindingSessionMayNeedCleanup = false;
+            _bindingCancellationResponseReceived = false;
+            _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
             throw;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             process.Dispose();
             _pipeName = null;
+            _bindingPipeName = null;
             _wireOperations = null;
+            _bindingWireTransport = null;
+            _bindingSessionMayNeedCleanup = false;
+            _bindingCancellationResponseReceived = false;
+            _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
             throw new HardwareCameraAgentLaunchException("Dual Camera Agent の開始に失敗しました。", exception);
         }
     }
 
-    private ProcessStartInfo CreateStartInfo(string pipeName)
+    private IHardwareCameraAgentTransport EnsureBindingProcessStarted()
+    {
+        _ = EnsureProcessStarted();
+        return _bindingWireTransport ?? throw new HardwareCameraAgentLaunchException(
+            "Dual binding requires a binding pipe and WPD camera map.",
+            requestMayHaveBeenDispatched: false);
+    }
+
+    private IHardwareCameraAgentTransport EnsureExistingBindingProcess()
+    {
+        if (_process is { HasExited: false } && _bindingWireTransport is not null)
+        {
+            return _bindingWireTransport;
+        }
+
+        throw new HardwareCameraAgentLaunchException(
+            "The Dual binding host has exited; a session-scoped operation cannot start a replacement Agent.",
+            requestMayHaveBeenDispatched: false,
+            processExitCode: _process is { HasExited: true } exitedProcess
+                ? exitedProcess.ExitCode
+                : null);
+    }
+
+    private ProcessStartInfo CreateStartInfo(string pipeName, string? bindingPipeName)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -303,7 +616,84 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
             Path.GetDirectoryName(_dualIdentityProofPath)!);
         startInfo.ArgumentList.Add("--dual-identity-proof");
         startInfo.ArgumentList.Add(_dualIdentityProofPath);
+        if (bindingPipeName is not null && _wpdCameraMapPath is not null)
+        {
+            EnsureRequiredArtifactFileExists(_wpdCameraMapPath, "WPD camera map");
+            startInfo.ArgumentList.Add("--binding-pipe-name");
+            startInfo.ArgumentList.Add(bindingPipeName);
+            startInfo.ArgumentList.Add("--wpd-camera-map");
+            startInfo.ArgumentList.Add(_wpdCameraMapPath);
+        }
         return startInfo;
+    }
+
+    private void RecordBindingLifecycleResponse(
+        string operation,
+        string requestJson,
+        string responseJson)
+    {
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        var requestId = root.GetProperty("requestId").GetString()
+            ?? throw new InvalidDataException("Dual binding requestId is missing.");
+
+        if (operation == DualBindingCameraAgentProtocol.Operations.BeginBinding)
+        {
+            var beginReply = DualBindingCameraAgentProtocolCodec.DeserializeBeginBindingResponse(
+                responseJson,
+                requestId);
+            _bindingSessionMayNeedCleanup = beginReply.Succeeded;
+            _bindingCancellationResponseReceived = false;
+            _bindingCancellationSucceeded = false;
+            return;
+        }
+
+        if (operation is not (
+                DualBindingCameraAgentProtocol.Operations.ActivateCapture or
+                DualBindingCameraAgentProtocol.Operations.CancelBinding))
+        {
+            return;
+        }
+
+        var sessionId = root.GetProperty("payload").GetProperty("sessionId").GetString()
+            ?? throw new InvalidDataException("Dual binding sessionId is missing.");
+        if (operation == DualBindingCameraAgentProtocol.Operations.ActivateCapture)
+        {
+            var activationReply = DualBindingCameraAgentProtocolCodec.DeserializeActivateCaptureResponse(
+                responseJson,
+                requestId,
+                sessionId);
+            if (activationReply.Succeeded)
+            {
+                // The same Native process now owns the capture pipe. Binding
+                // cancellation is no longer valid and capture recovery owns its
+                // lifetime instead.
+                _bindingSessionMayNeedCleanup = false;
+                _captureHostActivated = true;
+            }
+            return;
+        }
+
+        var cancellationReply = DualBindingCameraAgentProtocolCodec.DeserializeCancelBindingResponse(
+            responseJson,
+            requestId,
+            sessionId);
+        _bindingCancellationResponseReceived = true;
+        _bindingCancellationSucceeded = cancellationReply.Succeeded;
+    }
+
+    private static string ReadBindingOperation(string requestJson)
+    {
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("operation", out var operation) ||
+            operation.ValueKind != JsonValueKind.String ||
+            operation.GetString() is not { Length: > 0 } operationName)
+        {
+            throw new InvalidDataException("Dual binding operation is missing.");
+        }
+        return operationName;
     }
 
     private async Task<HardwareCameraAgentLaunchException> CreateConnectFailureAsync(
@@ -445,7 +835,13 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         _standardOutput = null;
         _standardError = null;
         _pipeName = null;
+        _bindingPipeName = null;
         _wireOperations = null;
+        _bindingWireTransport = null;
+        _bindingSessionMayNeedCleanup = false;
+        _bindingCancellationResponseReceived = false;
+        _bindingCancellationSucceeded = false;
+        _captureHostActivated = false;
     }
 
     public async ValueTask DisposeAsync()
@@ -454,21 +850,161 @@ public sealed class DualCameraAgentLifecycle : IDualHardwareCaptureOperations, I
         {
             return;
         }
-        _disposed = true;
         await _operationGate.WaitAsync().ConfigureAwait(false);
+        var shutdownCompleted = false;
         try
         {
+            Exception? shutdownFailure = null;
+            if (_captureHostActivated)
+            {
+                shutdownFailure = await WaitForActivatedCaptureHostExitAsync().ConfigureAwait(false);
+            }
+            else if (_process is { HasExited: true } expiredBindingProcess)
+            {
+                // A naturally expired binding host cannot retain the process-wide
+                // hardware lease. Preserve its exit code and permit orderly UI
+                // shutdown without inventing a cleanup acknowledgment.
+                LastObservedAgentExitCode = expiredBindingProcess.ExitCode;
+                _bindingSessionMayNeedCleanup = false;
+            }
+            else if (_bindingSessionMayNeedCleanup)
+            {
+                if (!_bindingCancellationResponseReceived)
+                {
+                    shutdownFailure = new HardwareCameraAgentLaunchException(
+                        "Dual binding cleanup was not acknowledged; the exclusive hardware lease must remain held.",
+                        requestMayHaveBeenDispatched: false);
+                }
+                else if (!_bindingCancellationSucceeded)
+                {
+                    shutdownFailure = new HardwareCameraAgentLaunchException(
+                        "Dual binding cleanup was refused; the exclusive hardware lease must remain held.",
+                        requestMayHaveBeenDispatched: false,
+                        processExitCode: _process is { HasExited: true } failedProcess
+                            ? failedProcess.ExitCode
+                            : null);
+                }
+                else if (_process is not { } process)
+                {
+                    shutdownFailure = new HardwareCameraAgentLaunchException(
+                        "Dual binding cleanup was acknowledged, but the Agent process cannot be verified as exited.",
+                        requestMayHaveBeenDispatched: false);
+                }
+                else
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            await process.WaitForExitAsync(CancellationToken.None)
+                                .WaitAsync(BindingShutdownExitTimeout)
+                                .ConfigureAwait(false);
+                        }
+                        if (process.ExitCode != 0)
+                        {
+                            shutdownFailure = new HardwareCameraAgentLaunchException(
+                                $"Dual binding cleanup was acknowledged but Agent exited with code {process.ExitCode}.",
+                                requestMayHaveBeenDispatched: false,
+                                processExitCode: process.ExitCode);
+                        }
+                        else
+                        {
+                            _bindingSessionMayNeedCleanup = false;
+                        }
+                    }
+                    catch (TimeoutException exception)
+                    {
+                        shutdownFailure = new HardwareCameraAgentLaunchException(
+                            "Dual binding cleanup response was delivered, but Agent did not exit within the bounded wait.",
+                            exception,
+                            requestMayHaveBeenDispatched: false);
+                    }
+                }
+            }
+
+            if (shutdownFailure is not null)
+            {
+                // Do not dispose the Process handle or semaphore: the caller keeps
+                // its window and exclusive hardware lease alive in a Blocking state.
+                // A later operator close is an explicit attempt, never an automatic
+                // retry; force-kill remains prohibited.
+                throw shutdownFailure;
+            }
+
             // Never kill a Dual Camera Agent process. Once a pair transaction may
             // have been dispatched, only the native max-lifetime and durable pair
             // journal own its resolution; disposing the .NET Process handle here
             // does not send any kill signal to the still-running native process.
             _process?.Dispose();
             _process = null;
+            _pipeName = null;
+            _bindingPipeName = null;
+            _wireOperations = null;
+            _bindingWireTransport = null;
+            _bindingSessionMayNeedCleanup = false;
+            _bindingCancellationResponseReceived = false;
+            _bindingCancellationSucceeded = false;
+            _captureHostActivated = false;
+            _disposed = true;
+            shutdownCompleted = true;
         }
         finally
         {
             _operationGate.Release();
-            _operationGate.Dispose();
+            if (shutdownCompleted)
+            {
+                _operationGate.Dispose();
+            }
+        }
+    }
+
+    private async Task<HardwareCameraAgentLaunchException?> WaitForActivatedCaptureHostExitAsync()
+    {
+        if (_process is not { } process)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host cannot be verified for natural exit; the exclusive hardware lease must remain held.",
+                requestMayHaveBeenDispatched: true);
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                await process.WaitForExitAsync(CancellationToken.None)
+                    .WaitAsync(BindingShutdownExitTimeout)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (TimeoutException exception)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host did not exit within the bounded wait; the exclusive hardware lease must remain held.",
+                exception,
+                requestMayHaveBeenDispatched: true);
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                return new HardwareCameraAgentLaunchException(
+                    "Activated capture host exit could not be confirmed; the exclusive hardware lease must remain held.",
+                    requestMayHaveBeenDispatched: true);
+            }
+
+            // An observed non-zero exit is not disguised as success in diagnostics,
+            // but the process has ended naturally, so retaining the physical lease
+            // would no longer protect any live hardware session.
+            LastObservedAgentExitCode = process.ExitCode;
+            return null;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return new HardwareCameraAgentLaunchException(
+                "Activated capture host exit could not be inspected; the exclusive hardware lease must remain held.",
+                exception,
+                requestMayHaveBeenDispatched: true);
         }
     }
 

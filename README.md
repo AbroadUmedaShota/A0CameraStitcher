@@ -4,9 +4,9 @@
 
 ## 現在の段階
 
-総合状態は`in-progress`です。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、Product Ownerによるp95 `14.643秒`承認、100/100耐久を完了しました。111件の原画像再検証も合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件です。ただし、実WPF画面からの100回操作、撮影を挟むContinuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体の判定は`Partial`です。詳細は[SingleCamera実機結果](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照してください。DualCameraは二台前提を維持し、実capture backendと実機受入が残るため`HardwarePending`のままです。
+総合状態は`in-progress`です。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、Product Ownerによるp95 `14.643秒`承認、100/100耐久を完了しました。111件の原画像再検証も合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件です。ただし、実WPF画面からの100回操作、撮影を挟むContinuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体の判定は`Partial`です。詳細は[SingleCamera実機結果](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照してください。DualCameraは二台前提を維持し、実capture backendと同一Agent内CAM-A/B割当は実装済みですが、実機one-shot／10回／承認後100回が未完了のため`HardwarePending`のままです。
 
-DualCameraのsoftware-only側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`の4操作（capabilities、pair予約、予約済みpair開始、同一ID結果照会）、durable pair store、厳密なidentity／capture profile／rig profile／operator confirmation／180秒deadlineの事前検証を実装済みです。fake backend限定でCAM-A→CAM-Bを各一回・自動retry 0で実行し、A失敗時はBを開始せず、B失敗時はA原本を保持し、複数terminal journalを再起動後も同一IDで照会できます。ただしproduction Dual Named Pipe／Agent host、実SDK・WPD・camera backend、製品composition／WPF実撮影は未接続で、既定経路は`PairDispatcherUnavailable`／`HardwarePending`のままです。
+DualCameraのsoftware側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`、durable pair store、同一Agent session内の明示CAM-A/B割当、実SDK撮影→SDK完全終了→WPD回収・検証・exact-object cleanupを順次行うproduction backendを実装済みです。通常の合成経路とは別に、承認済み外部profileを厳密読込する`CaptureRecoveryOnly`をWPFへ接続し、CAM-A→CAM-B各最大一回、自動retry 0、曖昧時same-ID照会だけ、B失敗時A原本保持、合成`Pending`・A0品質`Unapproved`をsoftware contractとして検証しています。これは実機二台撮影の合格証拠ではなく、実WPF one-shotまでは撮影可能状態を主張しません。
 
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。一台の実Camera Agent撮影・回収・耐久は合格しましたが、実WPF UI受入は未完了です。二台順次撮影の安全なsoftware contractは提示可能である一方、実機二台撮影とA0品質の受入は未完了です。
 

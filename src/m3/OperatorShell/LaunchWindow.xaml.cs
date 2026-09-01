@@ -28,8 +28,17 @@ public partial class LaunchWindow : Window
     private void OnSimulatedClick(object sender, RoutedEventArgs eventArgs) =>
         OpenAndClose(() => new MainWindow());
 
-    private void OnHardwareDualClick(object sender, RoutedEventArgs eventArgs) =>
-        OpenAndClose(() => new MainWindow(DualCameraExecutionEnvironment.HardwareDual));
+    private void OnHardwareDualClick(object sender, RoutedEventArgs eventArgs)
+    {
+        // The HardwareDual binding host needs an operator-provided, existing WPD
+        // identity map. This launcher deliberately has no path picker or default:
+        // guessing one would weaken the fixed-local, explicit-map boundary.
+        MessageBox.Show(
+            "実機2台は --hardware-dual --wpd-camera-map <既存の固定ローカルmap> を指定して起動してください。",
+            "A0 Camera Stitcher — 実機2台の起動条件",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+    }
 
     // Every launch path is funneled through here so the exclusive hardware-operator
     // session lease (acquired by HardwareSingleCameraWindow and, for HardwareDual, by

@@ -299,6 +299,15 @@ bool DualBindingFakeSdkAdapter::CloseCandidateSession(std::size_t ordinal) {
     return true;
 }
 
+bool DualBindingFakeSdkAdapter::EndBindingSession(
+    std::chrono::seconds) noexcept {
+    ++end_binding_session_count_;
+    if (options_.fail_end_binding_session) return false;
+    std::fill(live_view_active_.begin(), live_view_active_.end(), false);
+    std::fill(session_closed_.begin(), session_closed_.end(), true);
+    return true;
+}
+
 DualIdentityInvalidationReason DualBindingFakeSdkAdapter::PollInvalidation() {
     const DualIdentityInvalidationReason reason = options_.pending_invalidation;
     options_.pending_invalidation = DualIdentityInvalidationReason::None;
@@ -327,6 +336,10 @@ std::size_t DualBindingFakeSdkAdapter::ConcurrentLiveViewViolationCount()
 std::size_t DualBindingFakeSdkAdapter::ClosedCandidateSessionCount() const noexcept {
     return static_cast<std::size_t>(
         std::count(session_closed_.begin(), session_closed_.end(), true));
+}
+
+std::size_t DualBindingFakeSdkAdapter::EndBindingSessionCount() const noexcept {
+    return end_binding_session_count_;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +430,18 @@ DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
         request.operation = DualBindingCameraAgentOperation::complete_binding;
         return request;
     }
+    if (operation == "activate-capture") {
+        RequireExactFields(payload, {"sessionId"});
+        request.session_id = require_session_id();
+        request.operation = DualBindingCameraAgentOperation::activate_capture;
+        return request;
+    }
+    if (operation == "cancel-binding") {
+        RequireExactFields(payload, {"sessionId"});
+        request.session_id = require_session_id();
+        request.operation = DualBindingCameraAgentOperation::cancel_binding;
+        return request;
+    }
     ProtocolFailure("UnsupportedOperation", "binding protocol operation is unsupported");
 }
 
@@ -425,8 +450,10 @@ DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
 // ---------------------------------------------------------------------------
 
 DualBindingCameraAgentDispatcher::DualBindingCameraAgentDispatcher(
-    std::shared_ptr<DualBindingSdkAdapter> adapter) noexcept
-    : adapter_(std::move(adapter)) {}
+    std::shared_ptr<DualBindingSdkAdapter> adapter,
+    bool capture_transition_enabled) noexcept
+    : adapter_(std::move(adapter)),
+      capture_transition_enabled_(capture_transition_enabled) {}
 
 std::string DualBindingCameraAgentDispatcher::Handle(
     std::string_view request_json) noexcept {
@@ -456,6 +483,14 @@ std::string DualBindingCameraAgentDispatcher::Handle(
                 request.request_id, "SessionMismatch",
                 "the named binding session is not the one this agent is serving");
         }
+
+        // Cancellation is allowed even after a typed invalidation. Its job is
+        // to release resources owned by this exact session; refusing cleanup
+        // because the binding is already untrustworthy could leave Live View
+        // and the SDK module open until the host lifetime expires.
+        if (request.operation == DualBindingCameraAgentOperation::cancel_binding) {
+            return HandleCancelBinding(request);
+        }
         const DualIdentityInvalidationReason observed = adapter_->PollInvalidation();
         if (observed != DualIdentityInvalidationReason::None) {
             InvalidateSession(observed);
@@ -473,6 +508,10 @@ std::string DualBindingCameraAgentDispatcher::Handle(
                 return HandleConfirmAlias(request);
             case DualBindingCameraAgentOperation::complete_binding:
                 return HandleCompleteBinding(request);
+            case DualBindingCameraAgentOperation::activate_capture:
+                return HandleActivateCapture(request);
+            case DualBindingCameraAgentOperation::cancel_binding:
+                break;
             case DualBindingCameraAgentOperation::begin_binding:
                 break;
         }
@@ -509,6 +548,8 @@ void DualBindingCameraAgentDispatcher::InvalidateSession(
         invalidation_reason_ = reason;
     }
     active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
 }
 
 std::string DualBindingCameraAgentDispatcher::InvalidatedRejection(
@@ -528,8 +569,11 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
     // does the same for its own state; this is the wire-level half of it.
     session_id_.clear();
     active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
     assigned_ordinals_.clear();
     invalidation_reason_ = DualIdentityInvalidationReason::None;
+    capture_transition_requested_ = false;
 
     // Drain any event left over from the session just discarded. It describes a
     // session nobody can name any more, so acting on it would invalidate the new
@@ -582,6 +626,9 @@ std::string DualBindingCameraAgentDispatcher::HandleBeginBinding(
 
 std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
     const DualBindingCameraAgentRequest& request) {
+    // Each display request starts a fresh visual-confirmation generation, even for the same
+    // candidate. Only a frame returned after this request can authorize confirmation.
+    previewed_live_view_ordinal_.reset();
     if (binding_.State() != DualIdentitySessionBindingState::CollectingCandidates) {
         return ProtocolRejection(
             request.request_id, "BindingNotCollecting",
@@ -604,17 +651,27 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
     }
     if (active_live_view_ordinal_.has_value() &&
         *active_live_view_ordinal_ != request.candidate_ordinal) {
-        // Switching bodies is a normal part of the operator's flow, so the other
-        // Live View is stopped here rather than making the caller do it. What is
-        // never allowed is two running at once: if the stop fails, the new one
-        // does not start.
-        if (!adapter_->StopLiveView(*active_live_view_ordinal_)) {
+        // Switching bodies is a normal part of comparison. Nikon keeps the
+        // Source open after Live View stops, so both the stream and Source must
+        // quiesce before another candidate is opened under the retained Module.
+        const std::size_t previous_ordinal = *active_live_view_ordinal_;
+        if (!adapter_->StopLiveView(previous_ordinal)) {
             InvalidateSession(DualIdentityInvalidationReason::SdkError);
             return ProtocolRejection(
                 request.request_id, "LiveViewStopFailed",
                 "the previously running Live View could not be stopped");
         }
         active_live_view_ordinal_.reset();
+        if (!adapter_->CloseCandidateSession(previous_ordinal)) {
+            InvalidateSession(DualIdentityInvalidationReason::SdkError);
+            return ProtocolRejection(
+                request.request_id, "SdkSessionCloseFailed",
+                "the previously viewed candidate SDK session could not be closed");
+        }
+        if (std::find(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                      previous_ordinal) == quiesced_ordinals_.end()) {
+            quiesced_ordinals_.push_back(previous_ordinal);
+        }
     }
     if (!active_live_view_ordinal_.has_value()) {
         if (!adapter_->StartLiveView(request.candidate_ordinal)) {
@@ -623,6 +680,10 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
                 "the SDK refused to start Live View for this candidate");
         }
         active_live_view_ordinal_ = request.candidate_ordinal;
+        quiesced_ordinals_.erase(
+            std::remove(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                        request.candidate_ordinal),
+            quiesced_ordinals_.end());
         ++safety_counters_.live_view_start_count;
     }
 
@@ -635,6 +696,9 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
 
 std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
     const DualBindingCameraAgentRequest& request) {
+    // A failed refresh invalidates the previous visual evidence. The operator must confirm from
+    // the newest frame request, not from an older frame that the SDK can no longer reproduce.
+    previewed_live_view_ordinal_.reset();
     if (!active_live_view_ordinal_.has_value() ||
         *active_live_view_ordinal_ != request.candidate_ordinal) {
         return ProtocolRejection(
@@ -657,6 +721,7 @@ std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
             "the Live View frame exceeds the bounded preview size");
     }
     ++safety_counters_.live_view_frame_count;
+    previewed_live_view_ordinal_ = request.candidate_ordinal;
 
     std::ostringstream output;
     output << ResponsePrefix(request.request_id, true, "CandidateLiveViewFrame")
@@ -668,16 +733,51 @@ std::string DualBindingCameraAgentDispatcher::HandleGetCandidateLiveViewFrame(
 
 std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     const DualBindingCameraAgentRequest& request) {
+    if (binding_.State() != DualIdentitySessionBindingState::CollectingCandidates &&
+        binding_.State() != DualIdentitySessionBindingState::AwaitingQuiesce) {
+        return ProtocolRejection(
+            request.request_id, "BindingNotCollecting",
+            "alias confirmation requires an active binding session");
+    }
+    if (request.candidate_ordinal >= kDualIdentityRequiredCandidateCount) {
+        return ProtocolRejection(
+            request.request_id, "UnknownCandidateOrdinal",
+            "the candidate ordinal is not part of this binding session");
+    }
+    if (request.camera_alias != kDualIdentityCameraAliasA &&
+        request.camera_alias != kDualIdentityCameraAliasB) {
+        return ProtocolRejection(
+            request.request_id, "UnknownCameraAlias",
+            "the rig defines only CAM-A and CAM-B");
+    }
+    if (std::find(assigned_ordinals_.begin(), assigned_ordinals_.end(),
+                  request.candidate_ordinal) != assigned_ordinals_.end()) {
+        return ProtocolRejection(
+            request.request_id, "CandidateAlreadyAssigned",
+            "one candidate cannot be assigned to both aliases");
+    }
+    if (!previewed_live_view_ordinal_.has_value() ||
+        *previewed_live_view_ordinal_ != request.candidate_ordinal) {
+        return ProtocolRejection(
+            request.request_id, "LiveViewFrameRequired",
+            "alias confirmation requires a successful current Live View frame");
+    }
+
     // Throws on a duplicate candidate, a duplicate alias, an unknown ordinal or
     // an unknown alias; those are the binding core's decisions and are reported
     // with its codes.
     binding_.ConfirmAlias(request.candidate_ordinal, request.camera_alias);
 
-    // The operator's flow is view -> assign -> stop, so the assignment is what
-    // ends this candidate's Live View. Both results are observed, never assumed.
-    const bool live_view_stopped = adapter_->StopLiveView(request.candidate_ordinal);
+    // A candidate may already be quiesced because the operator compared both
+    // previews before deciding their aliases. Reuse that observed result rather
+    // than reopening the Source solely to close it again.
+    const bool already_quiesced =
+        std::find(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
+                  request.candidate_ordinal) != quiesced_ordinals_.end();
+    const bool live_view_stopped =
+        already_quiesced || adapter_->StopLiveView(request.candidate_ordinal);
     const bool sdk_session_closed =
-        adapter_->CloseCandidateSession(request.candidate_ordinal);
+        already_quiesced || adapter_->CloseCandidateSession(request.candidate_ordinal);
     if (live_view_stopped && active_live_view_ordinal_.has_value() &&
         *active_live_view_ordinal_ == request.candidate_ordinal) {
         active_live_view_ordinal_.reset();
@@ -689,7 +789,11 @@ std::string DualBindingCameraAgentDispatcher::HandleConfirmAlias(
     // start against a Live View that never stopped.
     binding_.ConfirmCandidateQuiesced(
         request.candidate_ordinal, live_view_stopped, sdk_session_closed);
+    if (live_view_stopped && sdk_session_closed && !already_quiesced) {
+        quiesced_ordinals_.push_back(request.candidate_ordinal);
+    }
     assigned_ordinals_.push_back(request.candidate_ordinal);
+    previewed_live_view_ordinal_.reset();
 
     if (!live_view_stopped || !sdk_session_closed) {
         // Reported immediately rather than only at complete-binding, so the
@@ -743,6 +847,59 @@ std::string DualBindingCameraAgentDispatcher::HandleCompleteBinding(
     return output.str();
 }
 
+std::string DualBindingCameraAgentDispatcher::HandleActivateCapture(
+    const DualBindingCameraAgentRequest& request) {
+    if (!capture_transition_enabled_) {
+        return ProtocolRejection(
+            request.request_id, "CaptureTransitionUnavailable",
+            "this binding host is not configured to enter a capture host");
+    }
+    if (binding_.State() != DualIdentitySessionBindingState::Ready) {
+        return ProtocolRejection(
+            request.request_id, "BindingNotReady",
+            "capture activation requires a completed Ready binding");
+    }
+
+    capture_transition_requested_ = true;
+    std::ostringstream output;
+    output << ResponsePrefix(request.request_id, true, "CaptureHostActivated")
+           << "{\"sessionId\":\"" << session_id_
+           << "\",\"state\":\"Ready\",\"captureHostActivated\":true}}";
+    return output.str();
+}
+
+std::string DualBindingCameraAgentDispatcher::HandleCancelBinding(
+    const DualBindingCameraAgentRequest& request) {
+    cancellation_requested_ = true;
+    const std::string cancelled_session = session_id_;
+    cancellation_succeeded_ = adapter_->EndBindingSession(std::chrono::seconds(10));
+
+    active_live_view_ordinal_.reset();
+    previewed_live_view_ordinal_.reset();
+    quiesced_ordinals_.clear();
+    assigned_ordinals_.clear();
+    if (cancellation_succeeded_) {
+        binding_ = DualIdentitySessionBinding{};
+        session_id_.clear();
+        invalidation_reason_ = DualIdentityInvalidationReason::None;
+        std::ostringstream output;
+        output << ResponsePrefix(request.request_id, true, "BindingCancelled")
+               << "{\"sessionId\":\"" << cancelled_session
+               << "\",\"state\":\"None\",\"liveViewStopped\":true"
+                  ",\"sdkSessionClosed\":true,\"sdkSessionEnded\":true}}";
+        return output.str();
+    }
+
+    InvalidateSession(DualIdentityInvalidationReason::SdkError);
+    std::ostringstream output;
+    output << ResponsePrefix(request.request_id, false, "BindingCleanupFailed")
+           << "{\"sessionId\":\"" << cancelled_session
+           << "\",\"state\":\"Invalid\",\"invalidationReason\":\""
+           << DualIdentityInvalidationReasonName(invalidation_reason_)
+           << "\",\"detail\":\"binding SDK cleanup could not be confirmed\"}}";
+    return output.str();
+}
+
 std::string DualBindingCameraAgentDispatcher::BoundSourceObjectForCapture(
     std::string_view camera_alias) {
     return binding_.BoundSourceObjectForCapture(camera_alias);
@@ -753,6 +910,24 @@ DualIdentitySessionBindingState DualBindingCameraAgentDispatcher::BindingState()
     return binding_.State();
 }
 
+void DualBindingCameraAgentDispatcher::InvalidateCaptureBinding(
+    DualIdentityInvalidationReason reason) noexcept {
+    if (reason == DualIdentityInvalidationReason::None) return;
+    InvalidateSession(reason);
+}
+
+bool DualBindingCameraAgentDispatcher::CaptureTransitionRequested() const noexcept {
+    return capture_transition_requested_;
+}
+
+bool DualBindingCameraAgentDispatcher::CancellationRequested() const noexcept {
+    return cancellation_requested_;
+}
+
+bool DualBindingCameraAgentDispatcher::CancellationSucceeded() const noexcept {
+    return cancellation_succeeded_;
+}
+
 DualBindingCameraAgentSafetyCounters
 DualBindingCameraAgentDispatcher::SafetyCounters() const noexcept {
     return safety_counters_;
@@ -760,6 +935,8 @@ DualBindingCameraAgentDispatcher::SafetyCounters() const noexcept {
 
 void DualBindingCameraAgentDispatcher::OnIdle() noexcept {}
 
-bool DualBindingCameraAgentDispatcher::ShouldStop() const noexcept { return false; }
+bool DualBindingCameraAgentDispatcher::ShouldStop() const noexcept {
+    return capture_transition_requested_ || cancellation_requested_;
+}
 
 } // namespace a0::phase0

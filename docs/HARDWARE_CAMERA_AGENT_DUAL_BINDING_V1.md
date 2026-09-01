@@ -1,6 +1,6 @@
 # Dual Binding Camera Agent v1 — session-local operator binding protocol
 
-Status: Protocol, host loop and fake SDK adapter implemented / no launcher executable, no real SDK adapter
+Status: Protocol, Nikon SDK adapter, same-process DualCamera Agent host, and WPF binding transport implemented / product capture remains HardwarePending
 Schema: `a0.camera-agent.hardware-dual-binding.v1`
 Decision: ADR-0025 · Issue: #61 (core: #9)
 
@@ -13,15 +13,15 @@ allowed back out.
 ## Why it is a separate protocol
 
 `a0.camera-agent.hardware-dual.v2` is stable and ADR-0025 leaves it unchanged,
-so binding got its own schema, its own marker and its own pipe instead of five
-more v2 operations.
+so binding got its own schema, its own marker and its own pipe instead of adding
+binding state to the v2 transaction protocol.
 
 The marker differs from v2's `Hardware` on purpose. A v2 request can therefore
 never be accepted here by accident, and a binding request can never be accepted
 by the v2 host, without either dispatcher having to know the other exists.
 Contract tests assert both directions.
 
-## The five operations
+## The seven operations
 
 | Operation | Payload | On success |
 | --- | --- | --- |
@@ -30,11 +30,13 @@ Contract tests assert both directions.
 | `get-candidate-live-view-frame` | `sessionId`, `candidateOrdinal` | `frameBytes`, `frameBase64` |
 | `confirm-alias` | `sessionId`, `candidateOrdinal`, `cameraAlias` | `cameraAlias`, `state` |
 | `complete-binding` | `sessionId`, `confirmedAtUtc` | `state`, `evidence[]` |
+| `activate-capture` | `sessionId` | `state=Ready`, `captureHostActivated=true` |
+| `cancel-binding` | `sessionId` | checked Live View / source / SDK-session cleanup |
 
 There is no `stop-candidate-live-view`. Stopping is not an operator decision, it
 is a consequence of two decisions they already make: switching to the other body
 stops the one they were looking at, and assigning an alias ends that body's Live
-View and closes its SDK session. Exposing a sixth operation would let a client
+View and closes its SDK session. Exposing a dedicated stop operation would let a client
 reach a state — "assigned but still streaming" — that the binding core is
 specifically built to refuse.
 
@@ -54,10 +56,16 @@ begin-binding                       -> sessionId, candidates [0,1]
   confirm-alias 1 CAM-A             -> body 1 stops, its SDK session closes
   start-candidate-live-view 0
   confirm-alias 0 CAM-B             -> body 0 stops, its SDK session closes
-complete-binding                    -> Ready, evidence published
+complete-binding                    -> Ready, evidence published; binding pipe remains active
+  complete-binding again            -> read-only freshness/invalidation probe
+  activate-capture                  -> same process retires binding pipe and opens capture pipe
+  OR cancel-binding                 -> checked cleanup, response delivery, process exit
 ```
 
-Capture then reaches the bound source object through
+`Ready` alone does not enter the capture pipe. This separation keeps cancellation,
+re-binding, and the just-before-capture invalidation probe reachable. Only a
+successful `activate-capture` may perform the one-way transition. Capture then
+reaches the bound source object through
 `BoundSourceObjectForCapture`, which is a process-local seam and never appears
 on the wire.
 
@@ -67,8 +75,8 @@ Published evidence is exactly the ADR-0025 allowlist, straight from the core:
 `cameraAlias`, `providerId`, `providerVersion`, `confirmedAtUtc`,
 `invalidationReason`.
 
-Excluded, and asserted excluded by contract test on every one of the five
-responses: SDK source-object tokens, serials, raw identifiers, and preview
+Excluded, and asserted excluded by contract test on all publishable responses:
+SDK source-object tokens, serials, raw identifiers, and preview
 frames. Candidate ordinals appear on the wire — the operator has to be able to
 say "the one I am looking at now" — but only as session-local selectors: they
 are meaningless once the session ends and never appear in evidence.
@@ -104,6 +112,12 @@ polled. A request naming some other session can therefore neither learn the live
 session's state nor consume the invalidation event the live session's next
 request needs to see.
 
+`cancel-binding` is the one deliberate ordering exception after that exact
+session match: it performs cleanup even when the binding is already Invalid.
+Otherwise a USB/SDK error could make the binding untrustworthy and at the same
+time prevent the owner from releasing its still-retained resources. A stale
+session still receives `SessionMismatch` and touches nothing.
+
 Invalidation is polled and reported typed, using the core's reasons:
 `AgentRestart`, `UsbReconnect`, `CameraCountChanged`, `TopologyChanged`,
 `SdkManagerRecreated`, `SdkError`. The protocol is request/response with no
@@ -130,7 +144,8 @@ a client still remembers is a `SessionMismatch`, whatever that id is.
 ### There is no per-session expiry
 
 A session ends when the host's absolute lifetime runs out, when a newer session
-replaces it, or when it is invalidated. There is deliberately no separate TTL.
+replaces it, when it is invalidated, or after a terminal `cancel-binding` /
+`activate-capture`. There is deliberately no separate TTL.
 
 The risk a TTL would address — an operator viewing a Live View, walking away, and
 confirming an alias much later for a body that has since been swapped — is
@@ -180,25 +195,32 @@ Default pipe name: `A0CameraStitcher.CameraAgent.HardwareDualBinding.v1`. As
 with the other hosts, per-session pipe-name uniqueness is the launcher's
 responsibility.
 
-## What is deliberately not here
+## Current product boundary
 
-**No launcher executable.** There is no `A0CameraStitcher.DualBindingAgent.exe`.
-The only adapter that exists is the fake one, so shipping a launcher would ship a
-product process whose entire behavior is a simulation of binding two cameras —
-precisely the "Agent product execution" this Issue's safety boundary excludes.
-The host loop is implemented and tested; the executable arrives with the real
-adapter.
+There is no separate `A0CameraStitcher.DualBindingAgent.exe`. The production
+`A0CameraStitcher.DualCameraAgent.exe` owns the binding pipe first and, only after
+`activate-capture`, the existing Dual v2 capture pipe. The same process and the
+same `NikonDualBindingSdkAdapter` retain the private candidate tokens across that
+transition.
 
-**No real SDK adapter.** `DualBindingSdkAdapter` is the seam; the Nikon
-implementation is Issue #10. That the whole flow, including every rejection
-path, is reachable without a camera is the point of the seam, not a gap in it.
+WPF can launch that process with an explicit fixed-local WPD map and perform the
+operator CAM-A/CAM-B binding. Closing the window before capture sends one typed
+`cancel-binding`, waits for the response, and verifies natural process exit; it
+never kills the process or retries cleanup.
 
-**No WPF UI.** The confirmation screen is Issue #62.
+This wiring does **not** make ordinary product capture Ready. The production
+identity source remains `HardwarePending`. The separate `CaptureRecoveryOnly`
+controller is available only through explicit hardware-dual launch arguments,
+strict external approval files, a fresh Ready binding, and an operator checkbox;
+it never selects the ordinary stitch path. No result in this protocol proves A0
+image quality, shutter synchronization, or general hardware release readiness.
 
 ## Test coverage
 
 | Suite | What it covers |
 | --- | --- |
-| `dual_binding_camera_agent_contracts` | Envelope, all five operations, candidate cardinality 0/1/2/3, duplicate and empty source objects, duplicate alias and duplicate candidate, bounded frames, quiesce failures, session mismatch, restart, all six typed invalidations, evidence allowlist |
-| `dual_binding_camera_agent_pipe_contracts` | Full binding across separate connections, restarted host refusing the previous session, 1 MiB boundary, zero-length/partial/disconnect fail-closed, missing acknowledgment |
+| `dual_binding_camera_agent_contracts` | Envelope, all seven operations, explicit Ready-to-capture activation, single-attempt cancellation, candidate cardinality 0/1/2/3, duplicate and empty source objects, duplicate alias and candidate, bounded frames, quiesce failures, session mismatch, restart, all six typed invalidations, evidence allowlist |
+| `dual_binding_camera_agent_pipe_contracts` | Full binding across separate connections, cancellation response before host exit, restarted host refusing the previous session, 1 MiB boundary, zero-length/partial/disconnect fail-closed, missing acknowledgment |
+| `nikon_dual_session_adapter_contracts` | Checked cancellation of Live View/source/module and suppression of a destructor retry after explicit cleanup failure |
+| `A0CameraStitcher.M3.FoundationTests`, `A0CameraStitcher.M3.OperatorShellTests` | Typed activation/cancellation codec and client state, explicit WPD-map launch, same-process binding shutdown and natural exit |
 | `dual_hardware_camera_agent_contracts`, `dual_hardware_camera_agent_pipe_contracts` | v2 non-regression — unchanged by this work |

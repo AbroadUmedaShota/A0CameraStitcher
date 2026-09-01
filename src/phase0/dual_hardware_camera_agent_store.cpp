@@ -300,14 +300,48 @@ std::string HexDecode(std::string_view value) {
     return decoded;
 }
 
+bool IsFatalPreflightBlock(std::string_view value) noexcept {
+    constexpr std::string_view suffix =
+        "\",\"requiresRebinding\":true,\"hostTerminalAfterReservationClose\":true}";
+    constexpr std::string_view prefix =
+        "{\"state\":\"";
+    constexpr std::string_view reason_marker =
+        "\",\"bindingInvalidationReason\":\"";
+    if (!value.starts_with(prefix) || !value.ends_with(suffix)) return false;
+    const auto state_end = value.find('"', prefix.size());
+    if (state_end == std::string_view::npos ||
+        value.substr(state_end, reason_marker.size()) != reason_marker) return false;
+    const auto reason_start = state_end + reason_marker.size();
+    const auto reason_end = value.find('"', reason_start);
+    if (reason_end == std::string_view::npos ||
+        value.substr(reason_end) != suffix) return false;
+    const auto state = value.substr(prefix.size(), state_end - prefix.size());
+    const auto reason = value.substr(reason_start, reason_end - reason_start);
+    const bool known_reason = reason == "AgentRestart" || reason == "UsbReconnect" ||
+        reason == "CameraCountChanged" || reason == "TopologyChanged" ||
+        reason == "SdkManagerRecreated" || reason == "SdkError";
+    return known_reason &&
+        (state == "BindingInvalidated" || state == "CleanupUnconfirmed");
+}
+
 std::string SerializeV2(
     std::string_view id, DualHardwarePairJournalState state,
-    std::string_view result = {}) {
+    std::string_view result = {}, std::string_view preflight_block = {}) {
+    const bool block_allowed = state == DualHardwarePairJournalState::reserved ||
+        state == DualHardwarePairJournalState::closed_before_dispatch;
+    if (!preflight_block.empty() &&
+        (!IsFatalPreflightBlock(preflight_block) || !block_allowed)) {
+        StoreFailure("JournalInvalid", "reserved preflight block is invalid");
+    }
     std::string json = std::string(kV2Prefix) + std::string(id) +
         "\",\"state\":\"" + StateName(state) +
         "\",\"automaticRetryCount\":0";
     if (IsCaptureTerminal(state)) {
         json += ",\"terminalResultHex\":\"" + HexEncode(result) + "\"";
+    }
+    if (!preflight_block.empty()) {
+        json += ",\"confirmedUndispatchedPreflightBlockHex\":\"" +
+            HexEncode(preflight_block) + "\"";
     }
     return json + "}";
 }
@@ -352,8 +386,21 @@ DualHardwarePairJournalRecord ParseRecord(const std::string& json) {
     else StoreFailure("JournalInvalid", "pair journal state is unsupported");
     const std::string tail = rest.substr(end);
     if (!IsCaptureTerminal(state)) {
-        if (tail != retry_suffix) StoreFailure("JournalInvalid", "pair journal JSON is malformed");
-        return {transaction_id, state, 0, {}};
+        if (tail == retry_suffix) return {transaction_id, state, 0, {}};
+        constexpr std::string_view preflight_prefix =
+            "\",\"automaticRetryCount\":0,\"confirmedUndispatchedPreflightBlockHex\":\"";
+        if (!tail.starts_with(preflight_prefix) || !tail.ends_with("\"}")) {
+            StoreFailure("JournalInvalid", "pair journal JSON is malformed");
+        }
+        const auto encoded = std::string_view(tail).substr(
+            preflight_prefix.size(), tail.size() - preflight_prefix.size() - 2U);
+        const std::string block = HexDecode(encoded);
+        const bool block_allowed = state == DualHardwarePairJournalState::reserved ||
+            state == DualHardwarePairJournalState::closed_before_dispatch;
+        if (!block_allowed || !IsFatalPreflightBlock(block)) {
+            StoreFailure("JournalInvalid", "reserved preflight block is invalid");
+        }
+        return {transaction_id, state, 0, {}, block};
     }
     constexpr std::string_view terminal_prefix = "\",\"automaticRetryCount\":0,\"terminalResultHex\":\"";
     if (!tail.starts_with(terminal_prefix) || !tail.ends_with("\"}"))
@@ -710,11 +757,47 @@ DualHardwarePairJournalRecord DualHardwarePairJournalStore::BeginDispatch(
         StoreFailure("TransactionIdMismatch", "pair transaction is not the active reservation");
     if (active->state != DualHardwarePairJournalState::reserved)
         StoreFailure("DispatchAlreadyStarted", "pair transaction dispatch already started");
+    if (!active->confirmed_undispatched_preflight_block_json.empty())
+        StoreFailure("DispatchBlocked", "pair transaction has a fatal preflight block");
     ReplaceAndVerify(ActiveDirectory(root_), JournalPath(root_),
         SerializeV2(transaction_id, DualHardwarePairJournalState::dispatching));
     const auto persisted = ReadActiveRecord(root_);
     if (persisted.state != DualHardwarePairJournalState::dispatching)
         StoreFailure("JournalInvalid", "dispatch transition did not persist");
+    return persisted;
+}
+
+DualHardwarePairJournalRecord
+DualHardwarePairJournalStore::PersistReservedPreflightBlock(
+    std::string_view transaction_id, std::string_view preflight_block_json) {
+    ValidateTransactionId(transaction_id);
+    if (!IsFatalPreflightBlock(preflight_block_json)) {
+        StoreFailure("JournalInvalid", "reserved preflight block is invalid");
+    }
+    if (TryReadTerminalRecord(root_, transaction_id)) {
+        StoreFailure("DispatchAlreadyStarted", "pair transaction is already terminal");
+    }
+    const auto active = TryReadActiveRecord(root_);
+    if (!active || active->transaction_id != transaction_id) {
+        StoreFailure("TransactionIdMismatch", "pair transaction is not the active reservation");
+    }
+    if (active->state != DualHardwarePairJournalState::reserved) {
+        StoreFailure("DispatchAlreadyStarted", "pair transaction dispatch already started");
+    }
+    if (!active->confirmed_undispatched_preflight_block_json.empty()) {
+        if (active->confirmed_undispatched_preflight_block_json != preflight_block_json) {
+            StoreFailure("JournalInvalid", "reserved preflight block conflicts with durable record");
+        }
+        return *active;
+    }
+    ReplaceAndVerify(ActiveDirectory(root_), JournalPath(root_), SerializeV2(
+        transaction_id, DualHardwarePairJournalState::reserved, {},
+        preflight_block_json));
+    const auto persisted = ReadActiveRecord(root_);
+    if (persisted.state != DualHardwarePairJournalState::reserved ||
+        persisted.confirmed_undispatched_preflight_block_json != preflight_block_json) {
+        StoreFailure("JournalInvalid", "reserved preflight block did not persist");
+    }
     return persisted;
 }
 
@@ -777,9 +860,9 @@ DualHardwarePairJournalStore::CloseReservedBeforeDispatch(
     partial += ".partial";
     WriteExclusiveAndFlush(
         partial,
-        SerializeV2(
-            transaction_id,
-            DualHardwarePairJournalState::closed_before_dispatch));
+        SerializeV2(transaction_id,
+            DualHardwarePairJournalState::closed_before_dispatch, {},
+            active->confirmed_undispatched_preflight_block_json));
     if (!MoveFileExW(
             partial.c_str(), final_path.c_str(), MOVEFILE_WRITE_THROUGH)) {
         StoreFailure("StoreIoFailure", "atomic close tombstone publication failed");
@@ -788,7 +871,9 @@ DualHardwarePairJournalStore::CloseReservedBeforeDispatch(
     if (!persisted || persisted->transaction_id != transaction_id ||
         persisted->state !=
             DualHardwarePairJournalState::closed_before_dispatch ||
-        !persisted->terminal_result_json.empty()) {
+        !persisted->terminal_result_json.empty() ||
+        persisted->confirmed_undispatched_preflight_block_json !=
+            active->confirmed_undispatched_preflight_block_json) {
         StoreFailure("JournalInvalid", "close tombstone reread did not match");
     }
     if (!DeleteFileW(JournalPath(root_).c_str()) ||

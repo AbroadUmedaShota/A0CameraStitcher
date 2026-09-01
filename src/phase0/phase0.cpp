@@ -536,6 +536,12 @@ std::optional<std::string> IdentityMap::FindAlias(std::string_view stable_identi
     return std::nullopt;
 }
 
+std::optional<std::string> IdentityMap::FindIdentity(std::string_view alias) const {
+    if (alias == "CAM-A") return cam_a_;
+    if (alias == "CAM-B") return cam_b_;
+    return std::nullopt;
+}
+
 void IdentityMap::ValidateBinding(std::string_view alias, std::string_view stable_identity) const {
     if (alias != "CAM-A" && alias != "CAM-B") {
         throw std::runtime_error("camera alias must be CAM-A or CAM-B");
@@ -1379,8 +1385,12 @@ TransactionResult ExecuteHybridCaptureOnce(
     const std::function<void()>& before_pc_original_rename,
     std::optional<std::chrono::steady_clock::time_point> transaction_deadline,
     const std::function<void(const FrameEvidence&)>& before_camera_object_delete,
-    const std::function<void()>& before_sdk_capture) {
+    const std::function<void()>& before_sdk_capture,
+    HybridCaptureCleanupState* cleanup_state) {
     TransactionResult result;
+    if (cleanup_state != nullptr) {
+        cleanup_state->wpd_cleanup_confirmed = true;
+    }
     result.run_id = evidence.RunId();
     result.transaction_id = "hybrid-tx-" + NewRunId().substr(4);
     const auto started = std::chrono::steady_clock::now();
@@ -1414,6 +1424,19 @@ TransactionResult ExecuteHybridCaptureOnce(
             throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
         }
     };
+    const auto close_wpd = [&](std::chrono::seconds timeout) {
+        try {
+            wpd_session.Close(timeout);
+        } catch (...) {
+            // Releasing a local handle before a failed checked Close does not
+            // prove that the device-side WPD session ended.
+            result.wpd_cleanup_confirmed = false;
+            if (cleanup_state != nullptr) {
+                cleanup_state->wpd_cleanup_confirmed = false;
+            }
+            throw;
+        }
+    };
     try {
         ensure_active();
         evidence.RecordState(result.transaction_id, "HybridWpdBaselineOpen", camera_alias);
@@ -1425,7 +1448,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         result.spool_empty_before_capture = true;
         evidence.RecordState(result.transaction_id, "HybridSpoolEmptyBefore", camera_alias);
         wpd_open = false;
-        wpd_session.Close(budget(timeouts.close));
+        close_wpd(budget(timeouts.close));
         ensure_active();
 
         evidence.RecordState(result.transaction_id, "HybridSdkCardCapture", camera_alias);
@@ -1508,17 +1531,17 @@ TransactionResult ExecuteHybridCaptureOnce(
         result.spool_empty_after_cleanup = true;
         evidence.RecordState(result.transaction_id, "HybridSpoolEmptyAfter", camera_alias);
         wpd_open = false;
-        wpd_session.Close(budget(timeouts.close));
+        close_wpd(budget(timeouts.close));
         ensure_active();
         result.terminal_state = "Complete";
     } catch (const TransportError& error) {
         if (sdk_open) { try { sdk_session.Close(timeouts.close); } catch (...) {} }
-        if (wpd_open) { try { wpd_session.Close(timeouts.close); } catch (...) {} }
+        if (wpd_open) { try { close_wpd(timeouts.close); } catch (...) {} }
         if (!token.empty()) wpd.AbandonPostCardObservation(token);
         fail(error.Category(), error.what());
     } catch (const std::exception& error) {
         if (sdk_open) { try { sdk_session.Close(timeouts.close); } catch (...) {} }
-        if (wpd_open) { try { wpd_session.Close(timeouts.close); } catch (...) {} }
+        if (wpd_open) { try { close_wpd(timeouts.close); } catch (...) {} }
         if (!token.empty()) wpd.AbandonPostCardObservation(token);
         fail("transport_exception", error.what());
     }

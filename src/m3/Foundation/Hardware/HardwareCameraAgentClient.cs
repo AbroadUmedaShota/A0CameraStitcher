@@ -9,6 +9,34 @@ public interface IHardwareCameraAgentTransport
     Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional process-lifetime contract for a transport whose server can be replaced while the
+/// client object remains alive. A session-local authorization is valid only for the exact process
+/// generation that acknowledged it.
+/// </summary>
+public interface IHardwareCameraAgentProcessLifetime
+{
+    long CurrentProcessGeneration { get; }
+
+    bool IsProcessGenerationAlive(long processGeneration);
+}
+
+/// <summary>
+/// Sends a session-scoped request only to the exact process generation that created
+/// the session. Implementations must perform the generation check inside the same
+/// serialization boundary as dispatch so a replacement process can never receive a
+/// stale session request.
+/// </summary>
+public interface IHardwareCameraAgentGenerationBoundTransport :
+    IHardwareCameraAgentTransport,
+    IHardwareCameraAgentProcessLifetime
+{
+    Task<string> SendAsync(
+        string requestJson,
+        long expectedProcessGeneration,
+        CancellationToken cancellationToken = default);
+}
+
 public class HardwareCameraAgentConnectException : IOException
 {
     internal HardwareCameraAgentConnectException(

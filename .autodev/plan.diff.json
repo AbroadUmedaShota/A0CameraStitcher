@@ -1,25 +1,32 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.14.0",
-  "base_plan_version": "2.13.0",
+  "plan_version": "2.15.0",
+  "base_plan_version": "2.14.0",
   "generated_at": "2026-08-27",
-  "summary": "Record the 2026-08-26 SingleCamera hardware results, close the approved HG-0009 p95 gate, and keep WPF end-to-end, continuous Live View handoff, physical fault, Dual hardware, A0 quality, and release acceptance separate.",
+  "summary": "Add the explicitly approved Dual CaptureRecoveryOnly transport-verification path and gate it as one-shot, 10-pair measurement, explicit measured-p95 approval, then 100-pair durability and fault evidence without stitching or A0 quality claims.",
   "added_milestones": [],
-  "changed_milestones": [],
+  "changed_milestones": [
+    "M1B"
+  ],
   "removed_milestones": [],
-  "added_work_items": [],
+  "added_work_items": [
+    "WI-0016A"
+  ],
   "changed_work_items": [
-    "WI-0012",
-    "WI-0035",
+    "WI-0015",
+    "WI-0016",
+    "WI-0017",
+    "WI-0018",
     "WI-0042"
   ],
   "removed_work_items": [],
   "breaking_changes": [],
   "non_completion_guards": [
-    "Camera Agent one-shot, ten-run p95, and 100-run durability do not prove real WPF end-to-end acceptance",
-    "standalone Live View does not prove ten continuous Live View capture handoffs",
-    "software failure recovery does not prove physical USB disconnect or storage failure behavior",
-    "SingleCamera evidence does not prove Dual hardware operation, stitching, A0 output quality, packaging, or release",
+    "CaptureRecoveryOnly captures and verifies both originals but never stitches; it must report StitchOutcome Pending and A0 quality Unapproved",
+    "a passing one-shot or ten-pair run does not authorize the 100-pair run until the measured p95 is explicitly approved",
+    "a failed one-shot, characterization pair, durability pair, or fault transaction stops that stage and must not be replaced by retry",
+    "physical USB disconnect, power, or card actions remain operator-gated and are not implied by software fault tests",
+    "CaptureRecoveryOnly evidence does not prove approved-rig behavior, stitching, A0 output quality, packaging, release, or shutter synchronization",
     "GitHub Actions remains billing-blocked and must not be reported green",
     "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"
   ]

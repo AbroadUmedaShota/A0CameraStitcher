@@ -254,8 +254,9 @@ void TestDeliveryAcknowledgmentIsRequired() {
 std::string Envelope(
     std::string_view operation,
     std::string_view payload,
-    std::string_view request_id) {
-    return "{\"schemaVersion\":\"a0.camera-agent.hardware-dual.v2\","
+    std::string_view request_id,
+    std::string_view schema = kDualHardwareCameraAgentSchemaVersion) {
+    return "{\"schemaVersion\":\"" + std::string(schema) + "\","
            "\"simulation\":false,\"marker\":\"Hardware\",\"requestId\":\"" +
         std::string(request_id) + "\",\"operation\":\"" + std::string(operation) +
         "\",\"payload\":" + std::string(payload) + "}";
@@ -337,6 +338,32 @@ std::string StartEnvelope(
         ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
         ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
     return Envelope("start-reserved-pair", payload, request_id);
+}
+
+std::string CaptureRecoveryOnlyEnvelope(
+    std::string_view transaction_id,
+    std::string_view request_id) {
+    const std::string payload =
+        "{\"cameraMode\":\"DualCamera\",\"orderedRequiredAliases\":[\"CAM-A\",\"CAM-B\"]"
+        ",\"transaction\":{\"transactionId\":\"" + std::string(transaction_id) +
+        "\",\"transactionDirectory\":\"C:/anonymous/capture-recovery-only\""
+        ",\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"pipe-test-ready\","
+        "\"observedAtUtc\":\"2026-08-14T00:00:00Z\",\"expiresAtUtc\":\"2026-08-14T01:00:00+00:00\"}"
+        ",\"captureProfileSnapshot\":{\"schemaVersion\":\"a0.dual-capture-profile.operator-approved.v1\","
+        "\"cameraMode\":\"DualCamera\",\"cameraModel\":\"Nikon D810\",\"imageFormat\":\"JPEG Fine\","
+        "\"imageSize\":\"L\",\"pixelDimensions\":\"7360x4912\","
+        "\"cameraSettingWritesApproved\":false,\"automaticRetryApproved\":false,"
+        "\"actualShutterSynchronizationGuaranteed\":false,\"approvalBasis\":\"operator-approved-capture-recovery-only-v1\"}"
+        ",\"operatorConfirmations\":{\"identitySnapshotApproved\":true,\"captureProfileFrozen\":true,"
+        "\"liveViewStoppedAndClosed\":true,\"bothCardsConfirmedEmpty\":true,"
+        "\"captureRecoveryOnlyApproved\":true}"
+        ",\"startedAtUtc\":\"2026-08-14T00:00:00+00:00\""
+        ",\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"}}";
+    return Envelope(
+        "start-reserved-capture-recovery-only",
+        payload,
+        request_id,
+        kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion);
 }
 
 // ---------------------------------------------------------------------
@@ -704,6 +731,18 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
               started_again->find("\"resultCode\":\"PairDispatcherUnavailable\"") !=
                   std::string::npos,
         "a repeated start attempt must remain PairDispatcherUnavailable");
+
+    const auto capture_only = SendRequest(
+        pipe_name, CaptureRecoveryOnlyEnvelope(
+            transaction_id, "pipe-contract-capture-recovery-only"));
+    Check(capture_only.has_value(),
+        "CaptureRecoveryOnly start must be delivered over the real host");
+    if (capture_only) {
+        CheckContains(*capture_only, "\"resultCode\":\"PairDispatcherUnavailable\"",
+            "CaptureRecoveryOnly must reach the same unavailable backend boundary");
+        CheckContains(*capture_only, "\"dispatchStarted\":false",
+            "unavailable CaptureRecoveryOnly must not start dispatch");
+    }
 
     // This query must happen here, while the host is still up -- see the
     // function-level comment above. It also completes the coverage that a

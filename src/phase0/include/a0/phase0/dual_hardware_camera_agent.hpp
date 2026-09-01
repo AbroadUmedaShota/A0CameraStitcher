@@ -1,5 +1,7 @@
 #pragma once
 
+#include "a0/phase0/dual_binding_camera_agent.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,23 +26,53 @@ struct DualHardwareFakeCaptureOutcome {
     bool spool_empty_after_delete{true};
 };
 
-class DualHardwareFakePairCaptureBackend {
+enum class DualHardwarePairPreflightState { Ready, HardwarePending, BindingInvalidated, CleanupUnconfirmed };
+struct DualHardwarePairPreflightOutcome {
+    DualHardwarePairPreflightState state{DualHardwarePairPreflightState::HardwarePending};
+    DualIdentityInvalidationReason binding_invalidation_reason{DualIdentityInvalidationReason::None};
+    bool requires_rebinding{};
+    bool host_terminal_after_reservation_close{};
+};
+struct DualHardwarePairCaptureCapabilities {
+    bool ordinary_pair_capture_available{};
+    bool capture_recovery_only_available{};
+};
+
+class DualHardwarePairCaptureBackend {
 public:
-    virtual ~DualHardwareFakePairCaptureBackend() = default;
+    virtual ~DualHardwarePairCaptureBackend() = default;
+    // Runs once for the complete pair before the durable journal crosses into
+    // Dispatching. A false result is confirmed-undispatched: no shutter was
+    // sent and the exact reservation remains eligible for explicit closure.
+    [[nodiscard]] virtual DualHardwarePairPreflightOutcome PreflightPair(
+        bool capture_recovery_only,
+        std::int64_t watchdog_deadline_100ns) = 0;
+    [[nodiscard]] virtual DualHardwarePairCaptureCapabilities Capabilities() const noexcept { return {true, true}; }
+    [[nodiscard]] virtual DualIdentityInvalidationReason LastBindingInvalidationReason() const noexcept {
+        return DualIdentityInvalidationReason::None;
+    }
     [[nodiscard]] virtual DualHardwareFakeCaptureOutcome Capture(
         std::string_view alias,
         const std::filesystem::path& canonical_original_path,
         std::int64_t watchdog_deadline_100ns) = 0;
 };
 
+// Compatibility name retained for the existing deterministic contract-test
+// backends. Production hosts inject DualHardwarePairCaptureBackend directly.
+using DualHardwareFakePairCaptureBackend = DualHardwarePairCaptureBackend;
+
 inline constexpr std::string_view kDualHardwareCameraAgentSchemaVersion =
     "a0.camera-agent.hardware-dual.v2";
+inline constexpr std::string_view
+    kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion =
+        "a0.camera-agent.hardware-dual-capture-recovery-only.v1";
 inline constexpr std::string_view kDualHardwareCameraAgentMarker = "Hardware";
 
 enum class DualHardwareCameraAgentOperation {
     get_dual_capabilities,
     reserve_pair_transaction,
     start_reserved_pair,
+    start_reserved_capture_recovery_only,
     get_pair_transaction_result,
     close_reserved_pair_transaction,
 };
@@ -60,6 +92,7 @@ struct DualHardwareCameraAgentRequest {
     DualHardwareCameraAgentOperation operation{
         DualHardwareCameraAgentOperation::get_dual_capabilities};
     std::string transaction_id;
+    bool capture_recovery_only_protocol{};
     std::int64_t identity_observed_at_100ns{};
     std::int64_t identity_expires_at_100ns{};
     std::int64_t capture_profile_valid_until_100ns{};
@@ -93,20 +126,19 @@ public:
     DualHardwareCameraAgentDispatcher(
         std::shared_ptr<DualHardwarePairJournalStore> pair_store,
         DualHardwareUtcClock utc_clock,
-        std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend);
+        std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend);
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
     [[nodiscard]] DualHardwareCameraAgentSafetyCounters SafetyCounters()
         const noexcept;
 
-    // Named-pipe host lifecycle hooks (AR-08a-2B host integration). Neither
-    // method changes protocol, parsing, or capture semantics: the Dual
-    // protocol has no idle-driven backend state and no operation that asks
-    // the host to stop, so OnIdle is a no-op and ShouldStop is always false.
-    // The host process's own lifetime bound (see
-    // RunDualHardwareCameraAgentNamedPipeServer) is what keeps a Dual host
-    // from running forever.
+    // Named-pipe host lifecycle hooks (AR-08a-2B host integration). OnIdle is
+    // a no-op because the Dual protocol has no idle-driven backend state.
+    // ShouldStop becomes true only after a response has terminalized an
+    // invalid binding, or after the exact reserved transaction blocked by a
+    // fatal preflight has been closed before dispatch. Otherwise the host is
+    // bounded by RunDualHardwareCameraAgentNamedPipeServer's fixed lifetime.
     void OnIdle() noexcept;
     [[nodiscard]] bool ShouldStop() const noexcept;
 
@@ -115,8 +147,10 @@ private:
     // A null store preserves the fail-closed PairStoreUnavailable behavior.
     std::shared_ptr<DualHardwarePairJournalStore> pair_store_;
     DualHardwareUtcClock utc_clock_;
-    std::shared_ptr<DualHardwareFakePairCaptureBackend> fake_backend_;
+    std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend_;
     DualHardwareCameraAgentSafetyCounters safety_counters_;
+    bool should_stop_{};
+    std::string terminal_pending_transaction_id_;
 };
 
 // Failure-injection seam for named-pipe host contract tests only. Production

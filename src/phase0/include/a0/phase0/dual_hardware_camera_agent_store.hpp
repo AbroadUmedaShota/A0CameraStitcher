@@ -32,6 +32,10 @@ struct DualHardwarePairJournalRecord {
     DualHardwarePairJournalState state{DualHardwarePairJournalState::reserved};
     int automatic_retry_count{};
     std::string terminal_result_json;
+    // A fatal preflight is still Reserved (no shutter was dispatched), but its
+    // typed fail-closed reason must survive an ACK loss and host restart.
+    // Empty is the legacy/ordinary reservation representation.
+    std::string confirmed_undispatched_preflight_block_json;
 };
 
 class DualHardwarePairJournalStoreError final : public std::runtime_error {
@@ -81,6 +85,9 @@ public:
         std::string_view transaction_id) const;
     [[nodiscard]] DualHardwarePairJournalRecord BeginDispatch(
         std::string_view transaction_id);
+    [[nodiscard]] DualHardwarePairJournalRecord PersistReservedPreflightBlock(
+        std::string_view transaction_id,
+        std::string_view preflight_block_json);
     [[nodiscard]] DualHardwarePairJournalRecord CloseReservedBeforeDispatch(
         std::string_view transaction_id);
     [[nodiscard]] DualHardwarePairJournalRecord CompleteTerminal(

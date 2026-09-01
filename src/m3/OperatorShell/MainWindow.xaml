@@ -4,8 +4,8 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:converters="clr-namespace:A0CameraStitcher.M3.OperatorShell.Converters"
         xmlns:controls="clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls"
-        Title="A0 Camera Stitcher — 模擬動作（実機未接続）"
-        AutomationProperties.Name="A0 Camera Stitcher 撮影画面 模擬動作 実機未接続"
+        Title="{Binding WindowTitle}"
+        AutomationProperties.Name="{Binding WindowAutomationName}"
         Width="1600" Height="900" MinWidth="1280" MinHeight="720"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource DesktopBrush}"
@@ -80,7 +80,7 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- 実機に触れていないことは常時見えていなければならない。畳まない・隠さない。 -->
+                        <!-- 実行環境と検証範囲は常時見えていなければならない。畳まない・隠さない。 -->
                         <Border DockPanel.Dock="Left" Margin="8,0,0,0" Height="22" Padding="9,0" VerticalAlignment="Center"
                                 Background="{StaticResource CautionBadgeBrush}" BorderBrush="{StaticResource CautionBorderBrush}"
                                 BorderThickness="1">
@@ -88,7 +88,7 @@
                                        FontFamily="{StaticResource MonoFontFamily}"
                                        FontSize="{StaticResource FontSizeCompact}" FontWeight="Bold"
                                        Foreground="{StaticResource CautionBrush}"
-                                       AutomationProperties.Name="状態チップ 実行環境 SIMULATED表示" />
+                                       AutomationProperties.Name="{Binding EnvironmentStatusAutomationName}" />
                         </Border>
 
                         <!-- 同意を見送った場合の復帰口。未同意の間だけ出す。 -->
@@ -129,12 +129,14 @@
                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
                     <DockPanel LastChildFill="False">
                         <Menu DockPanel.Dock="Left" Margin="8,0,0,0"
-                              AutomationProperties.Name="メニューバー ファイル カメラ 表示 ツール ヘルプ">
-                            <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー 保存先の指定 このPCのフォルダへ保存 終了">
+                              AutomationProperties.Name="{Binding MenuBarAutomationName}">
+                            <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー">
                                 <MenuItem Header="保存先を指定(_L)..." Click="ChooseExportDirectory_Click"
                                           IsEnabled="{Binding CanChangeExportDirectory}"
+                                          Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                           AutomationProperties.Name="ファイル 保存先を指定 フォルダ選択ダイアログを開く このPC内のみ" />
                                 <MenuItem Header="このPCのフォルダへ保存(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
+                                          Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                           AutomationProperties.Name="ファイル このPCのフォルダへ保存 確認済みの単体原画像または合成結果を保存" />
                                 <Separator />
                                 <MenuItem Header="終了(_X)" Click="ExitMenuItem_Click"
@@ -159,18 +161,19 @@
                                      既存コードの慣例（校正未実装ボタン等）と同じ disabled プレースホルダとして
                                      構成のみ用意する。 -->
                                 <MenuItem Header="観測値の30日profile承認（本シェルでは未実装）" IsEnabled="False"
-                                          AutomationProperties.Name="カメラ 観測値の30日profile承認 本SIMULATEDシェルでは未実装" />
+                                          AutomationProperties.Name="カメラ 観測値の30日profile承認 本画面では未実装" />
                                 <MenuItem Header="{Binding DualCameraIdentityStatusText}" IsEnabled="False"
                                           AutomationProperties.Name="カメラ identity状態 読み取り専用表示" />
-                                <!-- 模擬動作で機体照合の流れだけを確認するための表示切替。実機の合格判定ではない。
-                                     HardwareDual では起動時から必須なのでこの項目は無効になる。 -->
-                                <MenuItem Header="機体照合を表示（模擬）(_B)" Command="{Binding ShowBindingDemoCommand}"
-                                          AutomationProperties.Name="カメラ 機体照合を表示 模擬動作 実機の合格判定ではない" />
+                                <!-- Simulationでは機体照合の流れだけを確認する表示切替。
+                                     HardwareDualでは実機割当そのものだが、起動時から必須なのでこの項目は無効になる。 -->
+                                <MenuItem Header="{Binding BindingMenuHeader}" Command="{Binding ShowBindingDemoCommand}"
+                                          AutomationProperties.Name="{Binding BindingMenuAutomationName}" />
                                 <Separator />
                                 <MenuItem Header="readiness再検査(_R)" Command="{Binding PrepareNewCaptureCommand}" IsEnabled="{Binding CanPrepareNewCapture}"
                                           AutomationProperties.Name="カメラ readiness再検査 read-only 新しい撮影を準備" />
                             </MenuItem>
-                            <MenuItem Header="表示(_V)" AutomationProperties.Name="表示メニュー オーバーレイトグル 拡大エリア倍率 傾き読み値表示切替">
+                            <MenuItem Header="表示(_V)" AutomationProperties.Name="表示メニュー オーバーレイトグル 拡大エリア倍率 傾き読み値表示切替"
+                                      Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <MenuItem Header="方眼グリッド" IsCheckable="True" IsChecked="{Binding IsGridOverlayEnabled, Mode=TwoWay}"
                                           AutomationProperties.Name="表示 方眼グリッド表示切替" />
                                 <MenuItem Header="トンボ" IsCheckable="True" IsChecked="{Binding IsTombOverlayEnabled, Mode=TwoWay}"
@@ -192,7 +195,8 @@
                                 <MenuItem Header="傾き読み値の表示" IsCheckable="True" IsChecked="{Binding IsTiltReadingVisible, Mode=TwoWay}"
                                           AutomationProperties.Name="表示 傾き読み値の表示切替" />
                             </MenuItem>
-                            <MenuItem Header="ツール(_T)" AutomationProperties.Name="ツールメニュー 設置校正 再合成別job 保存診断">
+                            <MenuItem Header="ツール(_T)" AutomationProperties.Name="ツールメニュー 設置校正 再合成別job 保存診断"
+                                      Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <MenuItem Header="設置・校正(_S)" Command="{Binding ShowSetupCommand}" IsEnabled="{Binding CanOpenMaintenance}"
                                           AutomationProperties.Name="ツール 設置・校正 保守画面へ移動" />
                                 <MenuItem Header="再合成（別job）(_R)" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}"
@@ -211,6 +215,7 @@
                         <!-- 表示設定のリセット。1回目は確認待ち、2回目で確定する。 -->
                         <Button DockPanel.Dock="Right" Margin="0,0,8,0" Padding="10,0" MinHeight="22" VerticalAlignment="Center"
                                 Content="{Binding ResetButtonText}" Command="{Binding ResetViewCommand}"
+                                Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                 FontSize="{StaticResource FontSizeBody}"
                                 AutomationProperties.Name="表示設定のリセット 2回押しで確定">
                             <Button.Style>
@@ -228,6 +233,7 @@
                         <!-- 構図グリッドの分割数。案件ごとに割り付けが違うので3分割固定にしない。 -->
                         <ToggleButton x:Name="GridSettingsToggle" DockPanel.Dock="Right" Margin="0,0,8,0" MinHeight="22"
                                       VerticalAlignment="Center"
+                                      Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                       AutomationProperties.Name="グリッド設定を開く 列数と行数の指定">
                             <ToggleButton.Style>
                                 <Style TargetType="ToggleButton">
@@ -344,7 +350,8 @@
                                 </Grid.RowDefinitions>
 
                                 <!-- 表示切替行 -->
-                                <DockPanel Grid.Row="0" LastChildFill="False">
+                                <DockPanel Grid.Row="0" LastChildFill="False"
+                                           Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <TextBlock DockPanel.Dock="Left" Text="ライブ表示" Style="{StaticResource SectionTitleStyle}"
                                                VerticalAlignment="Center" />
                                     <TextBlock DockPanel.Dock="Left" Margin="12,0,0,0" VerticalAlignment="Center"
@@ -370,6 +377,11 @@
                                             AutomationProperties.Name="ライブ表示の開始と停止" />
                                 </DockPanel>
 
+                                <TextBlock Grid.Row="0" Text="撮影・回収のみ（実機プレビューは機体照合画面で確認）"
+                                           Style="{StaticResource SectionTitleStyle}"
+                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="撮影回収専用モード 実機プレビューは機体照合画面だけで使用" />
+
                                 <!-- カメラ状態行: 接続・機体照合・設定・カードの確認結果を常時見せる -->
                                 <Grid Grid.Row="1" Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions>
@@ -386,7 +398,7 @@
                                                        Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center" />
                                             <TextBlock Margin="10,0,0,0" Text="{Binding CameraAStatus}" VerticalAlignment="Center"
                                                        Style="{StaticResource MonoTextStyle}" TextTrimming="CharacterEllipsis"
-                                                       AutomationProperties.Name="CAM-A simulated status" />
+                                                       AutomationProperties.Name="CAM-A 状態表示" />
                                         </DockPanel>
                                     </Border>
                                     <Border Grid.Column="2" Background="{StaticResource CardBrush}"
@@ -398,7 +410,7 @@
                                                        Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center" />
                                             <TextBlock Margin="10,0,0,0" Text="{Binding CameraBStatus}" VerticalAlignment="Center"
                                                        Style="{StaticResource MonoTextStyle}" TextTrimming="CharacterEllipsis"
-                                                       AutomationProperties.Name="CAM-B simulated status" />
+                                                       AutomationProperties.Name="CAM-B 状態表示" />
                                         </DockPanel>
                                     </Border>
                                 </Grid>
@@ -407,7 +419,9 @@
                                 <Border Grid.Row="2" Margin="0,10,0,0" Background="{StaticResource StageBrush}"
                                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                                     <Grid x:Name="StageDisplayArea" ClipToBounds="True"
-                                          AutomationProperties.Name="ステージ表示エリア 模擬動作の表示">
+                                          AutomationProperties.Name="ステージ表示エリア プレビューと結果の表示">
+
+                                        <Grid Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
 
                                         <!-- 撮影/合成処理中の表示は、下の進捗オーバーレイが一枚で受け持つ。
                                              ここに同じ文言を置くと、半透明のオーバーレイ越しに二重像になる。 -->
@@ -689,6 +703,38 @@
                                                 </Border>
                                             </Grid>
                                         </Border>
+                                        </Grid>
+
+                                        <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
+                                                Visibility="{Binding IsHardwareDualStagePendingVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="実機2台 主画面プレビュー無効 機体照合で確認">
+                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">
+                                                <TextBlock Text="実機Live Viewは機体照合画面で確認"
+                                                           TextAlignment="Center" FontWeight="Bold"
+                                                           FontSize="{StaticResource FontSizeSection}"
+                                                           Foreground="{StaticResource AccentBrightBrush}" />
+                                                <TextBlock Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                                                           Style="{StaticResource MutedTextStyle}"
+                                                           Text="主画面には模擬画像を表示しません。CAM-A / CAM-Bの目視割当では、機体照合画面で候補を1台ずつ確認してください。" />
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
+                                                Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                AutomationProperties.Name="撮影回収専用モードの検証範囲">
+                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">
+                                                <TextBlock Text="実機2台の撮影・原画像回収のみ"
+                                                           TextAlignment="Center" FontWeight="Bold"
+                                                           FontSize="{StaticResource FontSizeSection}"
+                                                           Foreground="{StaticResource AccentBrightBrush}" />
+                                                <TextBlock Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                                                           Style="{StaticResource MutedTextStyle}"
+                                                           Text="このメイン画面には実機Live Viewを表示しません。CAM-A / CAM-Bの目視割当は、機体照合画面で1台ずつ確認します。" />
+                                                <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                                                           Foreground="{StaticResource CautionBrush}"
+                                                           Text="合成・A0品質判定・実シャッター同期保証は本試験の対象外です。確認対象は、撮影後に検証して固定ローカルへ保持した原画像2枚です。" />
+                                            </StackPanel>
+                                        </Border>
 
                                         <!-- 通知はステージ上端に出して、操作した直後の視線の先で気づけるようにする。 -->
                                         <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,10,0,0"
@@ -792,7 +838,8 @@
                                 <!-- 傾き読み値（issue #32）: ステージ下部の常駐行。LV frameからの原稿エッジ検出による
                                      面内回転（ROLL）角と許容範囲チップを示す。ガイドであり合否は判定しない
                                      （docs/OPERATOR_UI_SPEC.md 設置ガイドオーバーレイと傾き読み値 節）。 -->
-                                <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False">
+                                <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False"
+                                           Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <StackPanel DockPanel.Dock="Left" Orientation="Horizontal"
                                                 Visibility="{Binding IsTiltReadingVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                 AutomationProperties.Name="傾き読み値 常駐行 ROLL角 許容範囲チップ">
@@ -823,6 +870,17 @@
                                     <TextBlock DockPanel.Dock="Right" Text="Info" Margin="0,0,8,0" VerticalAlignment="Center"
                                                Style="{StaticResource SeverityTagStyle}"
                                                Foreground="{StaticResource InfoBrush}" />
+                                </DockPanel>
+
+                                <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False"
+                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           AutomationProperties.Name="撮影回収専用モードの補足">
+                                    <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center"
+                                               Style="{StaticResource MutedTextStyle}"
+                                               Text="実機Live Viewは機体照合専用 ／ 合成・A0品質判定なし ／ 実シャッター同期未保証" />
+                                    <TextBlock DockPanel.Dock="Right" Text="CaptureRecoveryOnly" VerticalAlignment="Center"
+                                               FontFamily="{StaticResource MonoFontFamily}"
+                                               Foreground="{StaticResource CautionBrush}" />
                                 </DockPanel>
 
                                 <TextBlock x:Name="TechnicalDetailRow" Grid.Row="4" Margin="0,8,0,0"
@@ -1006,13 +1064,14 @@
                                                        FontSize="{StaticResource FontSizeCompact}"
                                                        Style="{StaticResource MutedTextStyle}"
                                                        AutomationProperties.LiveSetting="Polite" />
-                                            <TextBlock Text="保存先（このPC内のフォルダのみ）" Margin="0,10,0,0"
+                                            <TextBlock Text="{Binding OutputDirectoryLabel}" Margin="0,10,0,0"
                                                        Style="{StaticResource MutedTextStyle}"
                                                        FontSize="{StaticResource FontSizeCompact}" />
                                             <DockPanel Margin="0,4,0,0">
                                                 <Button DockPanel.Dock="Right" Content="選択…" Margin="8,0,0,0" Padding="12,4"
                                                         Click="ChooseExportDirectory_Click"
                                                         IsEnabled="{Binding CanChangeExportDirectory}"
+                                                        Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="操作者が選ぶ保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
                                                 <Border Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
                                                         BorderThickness="1" Padding="7,5">
@@ -1022,7 +1081,7 @@
                                                                FontFamily="{StaticResource MonoFontFamily}"
                                                                FontSize="{StaticResource FontSizeCompact}"
                                                                Foreground="{StaticResource TextSecondaryBrush}"
-                                                               AutomationProperties.Name="現在の保存先" />
+                                                               AutomationProperties.Name="{Binding OutputDirectory, StringFormat='現在の保存先 {0}'}" />
                                                 </Border>
                                             </DockPanel>
 
@@ -1077,6 +1136,16 @@
                                                  CheckingReadinessもここに含む）: 撮影ボタン2種 -->
                                             <StackPanel Visibility="{Binding IsActionZonePreparing, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="アクションゾーン state1 準備中 設置判定と撮影ボタン">
+                                                <Border Margin="0,0,0,10" Padding="10" Background="{StaticResource RightColumnBrush}"
+                                                        BorderBrush="{StaticResource CautionBrush}" BorderThickness="1"
+                                                        Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                    <CheckBox IsChecked="{Binding IsCaptureRecoveryOnlyOperatorApproved}"
+                                                              AutomationProperties.Name="専用カード2枚が空で撮影回収のみを1回実行することを承認">
+                                                        <TextBlock Text="専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。"
+                                                                   TextWrapping="Wrap" FontWeight="Medium"
+                                                                   Foreground="{StaticResource CautionBrush}" />
+                                                    </CheckBox>
+                                                </Border>
                                                 <Grid>
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -1109,7 +1178,12 @@
                                                 <TextBlock Text="A→Bの順に撮影し、完了後に合成へ進みます。" Margin="0,8,0,0"
                                                            Style="{StaticResource MutedTextStyle}"
                                                            FontSize="{StaticResource FontSizeCompact}"
-                                                           Visibility="{Binding StageCompositeApplicable, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                           Visibility="{Binding ShowAutomaticStitchInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                <TextBlock Text="A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。"
+                                                           Margin="0,8,0,0" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource CautionBrush}"
+                                                           FontSize="{StaticResource FontSizeCompact}"
+                                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
                                                 <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"

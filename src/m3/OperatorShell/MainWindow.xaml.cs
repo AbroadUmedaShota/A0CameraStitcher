@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -19,6 +20,7 @@ public partial class MainWindow : Window
     private readonly OperatorShellViewModel _viewModel;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
+    private readonly DispatcherTimer? _dualBindingHostLifetimeMonitor;
     private readonly ISimulatedLiveViewFrameSource _liveViewFrameSource = new SimulatedTestImageFrameSource();
     private readonly ISimulatedLiveViewFramePump _liveViewFramePump = new SimulatedLiveViewFramePump();
 
@@ -42,8 +44,27 @@ public partial class MainWindow : Window
 
     public MainWindow(
         DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,
-        string? dualCameraAgentExecutablePath = null)
+        string? dualCameraAgentExecutablePath = null,
+        string? dualWpdCameraMapPath = null,
+        bool captureRecoveryOnly = false,
+        string? approvedCaptureProfilePath = null,
+        string? dualIdentityProofPath = null)
     {
+        if (captureRecoveryOnly && environment != DualCameraExecutionEnvironment.HardwareDual)
+        {
+            throw new ArgumentException(
+                "CaptureRecoveryOnly requires the explicit HardwareDual environment.",
+                nameof(captureRecoveryOnly));
+        }
+        if (captureRecoveryOnly &&
+            (string.IsNullOrWhiteSpace(approvedCaptureProfilePath) ||
+             string.IsNullOrWhiteSpace(dualIdentityProofPath)))
+        {
+            throw new ArgumentException(
+                "CaptureRecoveryOnly requires explicit approved capture-profile and dual-identity-proof files.",
+                nameof(approvedCaptureProfilePath));
+        }
+
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
         // hardware operator window (Single or Dual) may be open in this Windows logon
         // session, so a mode switch can only start Dual after Single has fully exited.
@@ -63,8 +84,15 @@ public partial class MainWindow : Window
                 environment == DualCameraExecutionEnvironment.HardwareDual
                     ? "dual-camera-hardware-products"
                     : "dual-camera-test-synthetic-products");
+            IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null;
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
             {
+                var resolvedCaptureProfilePath = captureRecoveryOnly
+                    ? Path.GetFullPath(approvedCaptureProfilePath!)
+                    : Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json");
+                var resolvedIdentityProofPath = captureRecoveryOnly
+                    ? Path.GetFullPath(dualIdentityProofPath!)
+                    : Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json");
                 _dualAgentLifecycle = new DualCameraAgentLifecycle(
                     CameraAgentExecutablePolicy.Resolve(
                         AppContext.BaseDirectory,
@@ -72,20 +100,47 @@ public partial class MainWindow : Window
                             AppContext.BaseDirectory,
                             "A0CameraStitcher.DualCameraAgent.exe")),
                     Path.Combine(dualProductRoot, "agent-pair-journal"),
-                    Path.Combine(dualProductRoot, "camera-agent", "approved-dual-capture-profile.json"),
-                    Path.Combine(dualProductRoot, "phase0", "dual-identity-proof.json"));
+                    resolvedCaptureProfilePath,
+                    resolvedIdentityProofPath,
+                    dualWpdCameraMapPath ?? throw new ArgumentException(
+                        "HardwareDual requires an existing WPD camera map.",
+                        nameof(dualWpdCameraMapPath)));
+                if (captureRecoveryOnly)
+                {
+                    var captureProfile = HardwareDualCaptureRecoveryOnlyProfileFile.Load(
+                        resolvedCaptureProfilePath);
+                    captureRecoveryOnlyWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                        dualProductRoot,
+                        _dualAgentLifecycle,
+                        _dualAgentLifecycle,
+                        captureProfile);
+                }
             }
-            // The identity source is left unconfigured (HardwarePending) in production:
-            // no real DualCamera identity provider exists yet, so HardwareDual never
-            // reaches Ready and this lifecycle is constructed but never launches a
-            // process or reaches a camera. Connecting a real identity provider and
-            // flipping this to Ready is explicitly out of scope for this change.
+            // The product identity source remains unconfigured (HardwarePending):
+            // wiring the operator's one-process binding transport does not make the
+            // product capture identity Ready or permit a capture by itself.
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
-                liveViewFramePump: _liveViewFramePump,
-                liveViewFrameSource: _liveViewFrameSource);
+                liveViewFramePump: environment == DualCameraExecutionEnvironment.HardwareDual
+                    ? null
+                    : _liveViewFramePump,
+                liveViewFrameSource: environment == DualCameraExecutionEnvironment.HardwareDual
+                    ? null
+                    : _liveViewFrameSource,
+                dualBindingTransport: _dualAgentLifecycle,
+                captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow);
             DataContext = _viewModel;
+            if (_dualAgentLifecycle is not null)
+            {
+                _dualBindingHostLifetimeMonitor = new DispatcherTimer(
+                    DispatcherPriority.Background,
+                    Dispatcher)
+                {
+                    Interval = TimeSpan.FromMilliseconds(500),
+                };
+                _dualBindingHostLifetimeMonitor.Tick += OnDualBindingHostLifetimeMonitorTick;
+            }
             Loaded += OnLoaded;
             Closing += OnClosing;
         }
@@ -103,6 +158,7 @@ public partial class MainWindow : Window
         try
         {
             await _viewModel.InitializeAsync(_lifetime.Token);
+            _dualBindingHostLifetimeMonitor?.Start();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -130,32 +186,37 @@ public partial class MainWindow : Window
             return;
         }
         _shutdownStarted = true;
+        _dualBindingHostLifetimeMonitor?.Stop();
         IsEnabled = false;
         _lifetime.Cancel();
-        try
+        if (_dualAgentLifecycle is not null)
         {
-            if (_dualAgentLifecycle is not null)
+            // The gate releases the exclusive lease only after both the typed
+            // binding cleanup acknowledgment and the child's natural exit are
+            // confirmed. Any refusal, response loss or timeout leaves this
+            // window open and the lease held; it never retries or kills Native.
+            var outcome = await HardwareDualWindowShutdownGate.TryShutdownAsync(
+                () => _viewModel.DualBinding.CancelBindingOnShutdownAsync(),
+                _dualAgentLifecycle.DisposeAsync,
+                () => _sessionLease?.Dispose());
+            if (!outcome.Completed)
             {
-                try
-                {
-                    await _dualAgentLifecycle.DisposeAsync();
-                }
-                catch (Exception exception) when (exception is not OutOfMemoryException)
-                {
-                    // Never force-kill an Agent whose pair-dispatch state may be
-                    // ambiguous. Durable recovery resolves it on the next launch.
-                }
+                _viewModel.DualBinding.ReportShutdownBlocked(outcome.BlockingCode);
+                _shutdownStarted = false;
+                IsEnabled = true;
+                return;
             }
         }
-        finally
-        {
-            _liveViewFramePump.Dispose();
-            _lifetime.Dispose();
-            _sessionLease?.Dispose();
-            _shutdownComplete = true;
-            Close();
-        }
+
+        _liveViewFramePump.Dispose();
+        _lifetime.Dispose();
+        _sessionLease?.Dispose();
+        _shutdownComplete = true;
+        Close();
     }
+
+    private void OnDualBindingHostLifetimeMonitorTick(object? sender, EventArgs eventArgs) =>
+        _viewModel.DualBinding.ObserveBindingHostLifetime();
 
     // メニューバー（issue #34）の code-behind ハンドラ。「保存先を指定」「技術情報」
     // 「バージョン」「終了」はVMへ新しいコマンド/状態を追加しない純粋なUI操作（既存の

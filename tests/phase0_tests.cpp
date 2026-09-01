@@ -7,6 +7,7 @@
 #include "a0/phase0/fake_camera_transport.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 #include <atomic>
 #include <exception>
@@ -203,7 +204,14 @@ public:
     [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownload(std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) override {
         ++capture_commands; throw TransportError("unexpected_wpd_capture", "WPD shutter must not be used");
     }
-    void Close(std::chrono::seconds) override { ++closes; open = false; order += "Wclose;"; }
+    void Close(std::chrono::seconds) override {
+        ++closes;
+        open = false;
+        order += "Wclose;";
+        if (fail_close_number > 0 && closes == fail_close_number) {
+            throw TransportError("close_failed", "configured WPD checked-close failure");
+        }
+    }
     [[nodiscard]] std::string BeginPostCardObservation(std::chrono::seconds) override {
         if (!open) throw TransportError("session_not_open", "baseline without WPD open");
         ++spool_empty_before_checks;
@@ -249,6 +257,7 @@ public:
     int spool_empty_before_checks{}; int spool_empty_after_checks{}; int delete_attempts{}; int delete_successes{}; std::string order;
     bool spool_empty_before{true}; bool spool_empty_after{true}; bool delete_fails{false}; bool fail_second_open{false};
     int fail_open_number{};
+    int fail_close_number{};
     std::string expected_cleanup_token{"cleanup-capability"};
     std::vector<ImageCandidate> candidates{{"private-object-id.jpg", {0xFF, 0xD8, 0x01, 0xFF, 0xD9}, true, "cleanup-capability"}};
     std::string observe_error_category;
@@ -1916,6 +1925,115 @@ void TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter() {
     fs::remove_all(root);
 }
 
+void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
+    const std::vector<unsigned char> expected_dimensions_jpeg{
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x08, 0x08, 0x13,
+        0x30, 0x1C, 0xC0, 0x01, 0xFF, 0xD9};
+    Check(HasExpectedDualCaptureJpegDimensions(expected_dimensions_jpeg),
+        "the DualCamera dimension parser must accept exactly 7360x4912");
+    Check(!HasExpectedDualCaptureJpegDimensions({0xFF, 0xD8, 0x01, 0xFF, 0xD9}),
+        "the DualCamera dimension parser must reject a JPEG without SOF dimensions");
+
+    {
+        const auto root = NewTestRoot("dual-canonical-success");
+        HybridWpdFake wpd;
+        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+            true, "cleanup-capability"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-success", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.terminal_state == "Complete" && fs::is_regular_file(canonical) &&
+                  !fs::exists(canonical.string() + ".partial"),
+            "valid dimensions must publish exactly one canonical original without a partial");
+        std::ifstream canonical_input(canonical, std::ios::binary);
+        const std::vector<unsigned char> canonical_bytes{
+            std::istreambuf_iterator<char>(canonical_input), std::istreambuf_iterator<char>()};
+        canonical_input.close();
+        Check(canonical_bytes == expected_dimensions_jpeg,
+            "canonical original must exactly match the verified recovered bytes");
+        Check(wpd.delete_attempts == 1 && wpd.delete_successes == 1 &&
+                  result.camera_card_delete_succeeded && result.spool_empty_after_cleanup &&
+                  wpd.spool_empty_after_checks == 1,
+            "valid canonical publish must permit one exact delete and post-delete empty check");
+        fs::remove_all(root);
+    }
+
+    const auto check_failed_leg = [](const TransactionResult& result,
+                                     const HybridWpdFake& wpd,
+                                     const HybridSdkFake& sdk,
+                                     std::string_view name) {
+        Check(result.terminal_state == "FailedPartial" && result.frames.size() == 1 &&
+                  result.frames.front().success && fs::is_regular_file(result.frames.front().path),
+            std::string(name) + ": failure must retain the recovered PC evidence");
+        Check(wpd.delete_attempts == 0 && wpd.delete_successes == 0 &&
+                  !result.camera_card_delete_attempted,
+            std::string(name) + ": failure must preserve the exact WPD object");
+        Check(sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1 &&
+                  wpd.opens == 2 && wpd.closes == 2 && wpd.observes == 1 &&
+                  !sdk.open && !wpd.open,
+            std::string(name) + ": failure must close sessions after one capture without retry");
+    };
+
+    {
+        const auto root = NewTestRoot("dual-dimension-gate");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-dimension-gate", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.error_category == "canonical_source_verification_failed",
+            "invalid dimensions must fail before canonical publish");
+        check_failed_leg(result, wpd, sdk, "invalid dimensions");
+        Check(!fs::exists(canonical) && !fs::exists(canonical.string() + ".partial"),
+            "invalid dimensions must not create a canonical original or partial");
+        fs::remove_all(root);
+    }
+
+    {
+        const auto root = NewTestRoot("dual-canonical-exists");
+        HybridWpdFake wpd;
+        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+            true, "cleanup-capability"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-exists", sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        fs::create_directories(canonical.parent_path());
+        const std::vector<unsigned char> existing{0x01, 0x02, 0x03};
+        {
+            std::ofstream output(canonical, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(existing.data()),
+                static_cast<std::streamsize>(existing.size()));
+        }
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            });
+        Check(result.error_category == "canonical_original_exists",
+            "an existing canonical original must fail closed");
+        check_failed_leg(result, wpd, sdk, "existing canonical original");
+        std::ifstream existing_input(canonical, std::ios::binary);
+        const std::vector<unsigned char> after{
+            std::istreambuf_iterator<char>(existing_input), std::istreambuf_iterator<char>()};
+        existing_input.close();
+        Check(after == existing && !fs::exists(canonical.string() + ".partial"),
+            "an existing canonical original must remain unchanged without a partial");
+        fs::remove_all(root);
+    }
+}
+
 void TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry() {
     const auto root = NewTestRoot("hybrid-pair-success");
     HybridWpdFake wpd;
@@ -2507,6 +2625,58 @@ void TestHybridSdkCloseFailureBlocksWpdReopenAndRetry() {
     fs::remove_all(root);
 }
 
+void TestHybridWpdCheckedCloseFailureStaysCleanupUnconfirmed() {
+    const auto root = NewTestRoot("hybrid-wpd-checked-close-failure");
+    HybridWpdFake wpd;
+    wpd.fail_close_number = 2;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(
+        root / "artifacts", "run-hybrid-wpd-checked-close-failure", sdk.SdkVersion());
+    const auto result = ExecuteHybridCaptureOnce(
+        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a");
+    Check(result.terminal_state == "FailedPartial" &&
+              result.error_category == "close_failed" &&
+              !result.wpd_cleanup_confirmed,
+        "a failed checked WPD Close must remain cleanup-unconfirmed even after local handle release");
+    Check(result.frames.size() == 1 && result.frames.front().success &&
+              fs::exists(result.frames.front().path),
+        "a final WPD Close failure must retain the already verified PC original");
+    Check(wpd.opens == 2 && wpd.closes == 2 && wpd.delete_attempts == 1 &&
+              sdk.opens == 1 && sdk.captures == 1 && sdk.closes == 1,
+        "a WPD checked-close failure must execute one attempt with no capture or cleanup retry");
+    fs::remove_all(root);
+}
+
+void TestHybridWpdCloseAndEvidenceFailurePreservesStickyCleanupState() {
+    const auto root = NewTestRoot("hybrid-wpd-close-evidence-failure");
+    HybridWpdFake wpd;
+    // Fail the baseline checked Close. No shutter command may be issued after
+    // this boundary, even if terminal evidence persistence also throws.
+    wpd.fail_close_number = 1;
+    HybridSdkFake sdk;
+    EvidenceWriter evidence(
+        root / "artifacts", "run-hybrid-wpd-close-evidence-failure", sdk.SdkVersion());
+    fs::create_directory(evidence.RunRoot() / "summary.json");
+    HybridCaptureCleanupState cleanup_state;
+    bool evidence_failure_observed = false;
+    try {
+        (void)ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a",
+            {}, {}, {}, std::nullopt, {}, {}, &cleanup_state);
+    } catch (const std::runtime_error& error) {
+        evidence_failure_observed =
+            std::string_view(error.what()) == "cannot write Phase 0 summary";
+    }
+    Check(evidence_failure_observed,
+        "the test must exercise a terminal evidence write failure after checked WPD Close failure");
+    Check(!cleanup_state.wpd_cleanup_confirmed,
+        "cleanup-unconfirmed must survive an exception thrown while persisting terminal evidence");
+    Check(wpd.opens == 1 && wpd.closes == 1 && sdk.opens == 0 &&
+              sdk.captures == 0 && sdk.closes == 0,
+        "a sticky cleanup-unconfirmed boundary must prevent every later SDK operation and retry");
+    fs::remove_all(root);
+}
+
 void TestHybridSpoolAndCleanupFailuresRetainPcOriginal() {
     {
         const auto root = NewTestRoot("hybrid-spool-not-empty");
@@ -2812,6 +2982,7 @@ int main() {
         TestPairWatchdogStopsBeforeOpen();
         TestCloseFailureRetainsOriginalAndStopsPair();
         TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter();
+        TestDualCaptureDimensionGateRetainsOriginalAndWpdObject();
         TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry();
         TestHybridPairRecoveryDetectsInterruptionAfterCamA();
         TestHybridPairRecoveryClassifiesActiveStagesAndInvalidEvidence();
@@ -2829,6 +3000,8 @@ int main() {
         TestHybridWatchdogClosesSdkAndStopsBeforeWpdRecovery();
         TestHybridWatchdogStopsCanonicalRenameAndDelete();
         TestHybridSdkCloseFailureBlocksWpdReopenAndRetry();
+        TestHybridWpdCheckedCloseFailureStaysCleanupUnconfirmed();
+        TestHybridWpdCloseAndEvidenceFailurePreservesStickyCleanupState();
         TestHybridSpoolAndCleanupFailuresRetainPcOriginal();
         TestHybridInvalidCandidatesAndMissingTokenNeverDelete();
         TestHybridCaptureArgumentConfirmations();

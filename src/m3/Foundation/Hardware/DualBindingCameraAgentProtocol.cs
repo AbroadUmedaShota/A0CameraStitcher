@@ -46,6 +46,8 @@ public static class DualBindingCameraAgentProtocol
         public const string GetCandidateLiveViewFrame = "get-candidate-live-view-frame";
         public const string ConfirmAlias = "confirm-alias";
         public const string CompleteBinding = "complete-binding";
+        public const string ActivateCapture = "activate-capture";
+        public const string CancelBinding = "cancel-binding";
 
         public static IReadOnlyList<string> Required { get; } = Array.AsReadOnly([
             BeginBinding,
@@ -53,6 +55,8 @@ public static class DualBindingCameraAgentProtocol
             GetCandidateLiveViewFrame,
             ConfirmAlias,
             CompleteBinding,
+            ActivateCapture,
+            CancelBinding,
         ]);
     }
 
@@ -95,7 +99,8 @@ public sealed record DualBindingRefusal
 
     /// <summary>The session is gone or untrustworthy; only a fresh binding can recover.</summary>
     public bool RequiresRebinding =>
-        ResultCode is "BindingInvalidated" or "SessionMismatch" or "CandidateNotQuiesced";
+        ResultCode is "BindingInvalidated" or "BindingHostExpired" or "SessionMismatch" or "CandidateNotQuiesced" or
+            "BindingCleanupFailed";
 }
 
 /// <summary>Success value or a typed refusal. Exactly one is present.</summary>
@@ -170,6 +175,22 @@ public sealed record DualBindingCompleteResult
     public required string SessionId { get; init; }
     public required DualBindingSessionState State { get; init; }
     public required IReadOnlyList<DualBindingEvidence> Evidence { get; init; }
+}
+
+public sealed record DualBindingCaptureActivationResult
+{
+    public required string SessionId { get; init; }
+    public required DualBindingSessionState State { get; init; }
+    public required bool CaptureHostActivated { get; init; }
+}
+
+public sealed record DualBindingCancellationResult
+{
+    public required string SessionId { get; init; }
+    public required DualBindingSessionState State { get; init; }
+    public required bool LiveViewStopped { get; init; }
+    public required bool SdkSessionClosed { get; init; }
+    public required bool SdkSessionEnded { get; init; }
 }
 
 public static class DualBindingCameraAgentProtocolCodec
@@ -263,6 +284,53 @@ public static class DualBindingCameraAgentProtocolCodec
                 writer.WriteString("sessionId", ValidatedSessionId(sessionId));
                 writer.WriteString("confirmedAtUtc", confirmedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
             });
+    }
+
+    public static string CreateActivateCaptureRequest(string requestId, string sessionId) =>
+        Serialize(
+            requestId,
+            DualBindingCameraAgentProtocol.Operations.ActivateCapture,
+            writer => writer.WriteString("sessionId", ValidatedSessionId(sessionId)));
+
+    public static string CreateCancelBindingRequest(string requestId, string sessionId) =>
+        Serialize(
+            requestId,
+            DualBindingCameraAgentProtocol.Operations.CancelBinding,
+            writer => writer.WriteString("sessionId", ValidatedSessionId(sessionId)));
+
+    /// <summary>
+    /// Local fail-closed response used when the process generation that owns a
+    /// binding disappears before or during dispatch. It deliberately has the same
+    /// envelope shape as a native refusal so every typed operation clears the stale
+    /// session through its normal response path.
+    /// </summary>
+    public static string CreateBindingHostExpiredResponse(string requestId, string sessionId)
+    {
+        ValidateRequestId(requestId);
+        var validatedSessionId = ValidatedSessionId(sessionId);
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schemaVersion", DualBindingCameraAgentProtocol.SchemaVersion);
+            writer.WriteBoolean("simulation", false);
+            writer.WriteString("marker", DualBindingCameraAgentProtocol.Marker);
+            writer.WriteString("requestId", requestId);
+            writer.WriteBoolean("success", false);
+            writer.WriteString("resultCode", "BindingHostExpired");
+            writer.WritePropertyName("payload");
+            writer.WriteStartObject();
+            writer.WriteString("sessionId", validatedSessionId);
+            writer.WriteString("state", DualBindingSessionState.Invalid.ToString());
+            writer.WriteString("invalidationReason", DualBindingInvalidationReason.AgentRestart.ToString());
+            writer.WriteString(
+                "detail",
+                "The Camera Agent process that created this binding expired; no replacement Agent was used.");
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(buffer.ToArray());
     }
 
     public static DualBindingReply<DualBindingBeginResult> DeserializeBeginBindingResponse(
@@ -451,6 +519,66 @@ public static class DualBindingCameraAgentProtocolCodec
             State = DualBindingSessionState.Ready,
             Evidence = evidence.AsReadOnly(),
         });
+    }
+
+    public static DualBindingReply<DualBindingCaptureActivationResult> DeserializeActivateCaptureResponse(
+        string json,
+        string expectedRequestId,
+        string expectedSessionId)
+    {
+        using var document = ParseResponse(json, expectedRequestId, out var success, out var resultCode);
+        var payload = document.RootElement.GetProperty("payload");
+        if (!success)
+        {
+            return DualBindingReply<DualBindingCaptureActivationResult>.Refused(ReadRefusal(resultCode, payload));
+        }
+
+        if (resultCode != "CaptureHostActivated" ||
+            ReadState(payload) != DualBindingSessionState.Ready ||
+            !ReadBoolean(payload, "captureHostActivated"))
+        {
+            throw Violation("ForgedBindingResponse", "Capture activation did not preserve a Ready binding.");
+        }
+
+        return DualBindingReply<DualBindingCaptureActivationResult>.Accepted(
+            new DualBindingCaptureActivationResult
+            {
+                SessionId = RequireSessionMatch(payload, expectedSessionId),
+                State = DualBindingSessionState.Ready,
+                CaptureHostActivated = true,
+            });
+    }
+
+    public static DualBindingReply<DualBindingCancellationResult> DeserializeCancelBindingResponse(
+        string json,
+        string expectedRequestId,
+        string expectedSessionId)
+    {
+        using var document = ParseResponse(json, expectedRequestId, out var success, out var resultCode);
+        var payload = document.RootElement.GetProperty("payload");
+        if (!success)
+        {
+            return DualBindingReply<DualBindingCancellationResult>.Refused(ReadRefusal(resultCode, payload));
+        }
+
+        if (resultCode != "BindingCancelled" ||
+            ReadState(payload) != DualBindingSessionState.None ||
+            !ReadBoolean(payload, "liveViewStopped") ||
+            !ReadBoolean(payload, "sdkSessionClosed") ||
+            !ReadBoolean(payload, "sdkSessionEnded"))
+        {
+            throw Violation("ForgedBindingResponse", "Binding cancellation did not confirm complete SDK cleanup.");
+        }
+
+        return DualBindingReply<DualBindingCancellationResult>.Accepted(
+            new DualBindingCancellationResult
+            {
+                SessionId = RequireSessionMatch(payload, expectedSessionId),
+                State = DualBindingSessionState.None,
+                LiveViewStopped = true,
+                SdkSessionClosed = true,
+                SdkSessionEnded = true,
+            });
     }
 
     private static string Serialize(string requestId, string operation, Action<Utf8JsonWriter> writePayload)

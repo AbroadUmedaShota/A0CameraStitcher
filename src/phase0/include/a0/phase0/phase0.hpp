@@ -372,6 +372,7 @@ public:
         std::optional<std::string> cam_a,
         std::optional<std::string> cam_b);
     [[nodiscard]] std::optional<std::string> FindAlias(std::string_view stable_identity) const;
+    [[nodiscard]] std::optional<std::string> FindIdentity(std::string_view alias) const;
     void ValidateBinding(std::string_view alias, std::string_view stable_identity) const;
     void Bind(std::string_view alias, std::string_view stable_identity);
     [[nodiscard]] const std::filesystem::path& Path() const noexcept;
@@ -490,6 +491,14 @@ struct TransactionResult {
     bool camera_card_delete_attempted{false};
     bool camera_card_delete_succeeded{false};
     bool spool_empty_after_cleanup{false};
+    bool wpd_cleanup_confirmed{true};
+};
+
+// Survives exceptions thrown after the WPD close boundary (for example while
+// persisting terminal evidence). A caller that owns retained SDK state must
+// inspect this before issuing any SDK operation in its exception path.
+struct HybridCaptureCleanupState {
+    bool wpd_cleanup_confirmed{true};
 };
 
 struct LiveViewProbeResult {
@@ -788,7 +797,8 @@ private:
     const std::function<void()>& before_pc_original_rename = {},
     std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt,
     const std::function<void(const FrameEvidence&)>& before_camera_object_delete = {},
-    const std::function<void()>& before_sdk_capture = {});
+    const std::function<void()>& before_sdk_capture = {},
+    HybridCaptureCleanupState* cleanup_state = nullptr);
 [[nodiscard]] HybridPairResult ExecuteHybridCapturePair(
     ICameraTransport& wpd_session,
     IPostCardObservationTransport& wpd,

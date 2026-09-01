@@ -118,8 +118,14 @@ public sealed class DualBindingViewModel : ObservableObject
     private string _previewPlaceholderText = string.Empty;
     private string _noticeText = string.Empty;
     private string _noticeKind = "info";
+    private bool _shutdownBlocked;
     private string _invalidationText = string.Empty;
     private bool _isBusy;
+    private bool _hasDecodedPreviewForSelectedCandidate;
+    // This remains true after the child has naturally exited. The dynamic
+    // IsCaptureHostActivated property correctly becomes false then, but shutdown
+    // must still never attempt to send cancel-binding to the retired pipe.
+    private bool _captureHostActivationAcknowledged;
 
     public DualBindingViewModel(DualBindingSessionClient client, bool isRequired = false)
     {
@@ -132,11 +138,13 @@ public sealed class DualBindingViewModel : ObservableObject
         // recovery as restarting the app.
         BeginBindingCommand = new AsyncRelayCommand(
             BeginBindingAsync,
-            () => Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid or DualBindingPhase.Ready,
+            () => !IsShutdownBlocked &&
+                !IsCaptureHostActivated &&
+                Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid or DualBindingPhase.Ready,
             ReportFailure);
         ShowCandidateCommand = new AsyncRelayCommand<DualBindingCandidateViewModel>(
             ShowCandidateAsync,
-            candidate => Phase == DualBindingPhase.Collecting && !candidate.IsAssigned,
+            candidate => !IsShutdownBlocked && Phase == DualBindingPhase.Collecting && !candidate.IsAssigned,
             ReportFailure);
         AssignCameraACommand = new AsyncRelayCommand(
             () => ConfirmAliasAsync(DualBindingCameraAgentProtocol.CameraAliasA),
@@ -148,7 +156,7 @@ public sealed class DualBindingViewModel : ObservableObject
             ReportFailure);
         CompleteBindingCommand = new AsyncRelayCommand(
             CompleteBindingAsync,
-            () => Phase == DualBindingPhase.Summary,
+            () => !IsShutdownBlocked && Phase == DualBindingPhase.Summary,
             ReportFailure);
     }
 
@@ -212,6 +220,13 @@ public sealed class DualBindingViewModel : ObservableObject
     /// downstream could tell.
     /// </summary>
     public bool IsReady => Phase == DualBindingPhase.Ready;
+
+    /// <summary>
+    /// True after the one-time handoff from the binding pipe to the capture pipe.
+    /// The same Agent process and the same CAM-A/B assignment remain in force;
+    /// re-binding and binding-pipe freshness probes are no longer valid.
+    /// </summary>
+    public bool IsCaptureHostActivated => _client.CaptureHostActivated;
 
     public bool IsSummaryVisible => Phase == DualBindingPhase.Summary;
 
@@ -356,6 +371,27 @@ public sealed class DualBindingViewModel : ObservableObject
             _client.Evidence.Select(evidence => $"{evidence.CameraAlias} {evidence.ConfirmedAtUtc}"));
 
     /// <summary>
+    /// Called by the WPF lifetime monitor while an operator binding is active. This
+    /// is a local process-generation observation only: it never sends an Agent
+    /// request and never starts a replacement generation.
+    /// </summary>
+    public void ObserveBindingHostLifetime()
+    {
+        if (!IsRequired ||
+            IsBusy ||
+            _captureHostActivationAcknowledged ||
+            Phase is DualBindingPhase.NotStarted or DualBindingPhase.Invalid)
+        {
+            return;
+        }
+
+        if (_client.ObserveBindingHostLifetime() is { } refusal)
+        {
+            ApplyRefusal(refusal);
+        }
+    }
+
+    /// <summary>
     /// Confirms the binding is still the one the Agent is serving, and reports it if not.
     /// </summary>
     /// <remarks>
@@ -366,6 +402,15 @@ public sealed class DualBindingViewModel : ObservableObject
     public async Task<bool> VerifyBindingIsCurrentAsync(CancellationToken cancellationToken = default)
     {
         if (!IsRequired)
+        {
+            return true;
+        }
+
+        // After activation the binding pipe is intentionally closed and the
+        // capture host owns the same session-local assignment. Native validates
+        // that topology on capture; sending complete-binding again would be an
+        // invalid cross-protocol operation.
+        if (IsCaptureHostActivated)
         {
             return true;
         }
@@ -385,9 +430,137 @@ public sealed class DualBindingViewModel : ObservableObject
         return false;
     }
 
+    /// <summary>
+    /// Performs the exactly-once Ready binding handoff immediately before the
+    /// first CaptureRecoveryOnly reservation. A refusal is shown and no capture
+    /// operation may follow it.
+    /// </summary>
+    public async Task<bool> ActivateCaptureAsync(CancellationToken cancellationToken = default)
+    {
+        if (IsCaptureHostActivated)
+        {
+            return true;
+        }
+        if (!IsReady)
+        {
+            return false;
+        }
+
+        var reply = await _client.ActivateCaptureAsync(cancellationToken).ConfigureAwait(true);
+        if (reply.Value is not null)
+        {
+            _captureHostActivationAcknowledged = true;
+            OnPropertyChanged(nameof(IsCaptureHostActivated));
+            NotifyCommandsChanged();
+            Notify("機体照合を同じAgentの撮影処理へ引き継ぎました。", "info");
+            return true;
+        }
+
+        ApplyRefusal(reply.Refusal!);
+        OnPropertyChanged(nameof(IsCaptureHostActivated));
+        return false;
+    }
+
+    /// <summary>
+    /// True when window shutdown could not prove SDK cleanup and natural Agent
+    /// exit. The binding UI remains visible but every operation is locked while
+    /// the process-wide hardware lease stays owned.
+    /// </summary>
+    public bool IsShutdownBlocked
+    {
+        get => _shutdownBlocked;
+        private set
+        {
+            if (SetProperty(ref _shutdownBlocked, value))
+            {
+                NotifyCommandsChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Window-shutdown path for a hardware binding that has not transitioned to
+    /// capture. The native acknowledgment proves that Live View and the retained
+    /// SDK session were ended; there is no retry if cleanup is refused.
+    /// </summary>
+    public async Task<DualBindingRefusal?> CancelBindingOnShutdownAsync(
+        CancellationToken cancellationToken = default)
+    {
+        // Activation already performed the native Live View/SDK handoff. The
+        // binding pipe can no longer accept cancel-binding; process cleanup is
+        // owned by DualCameraAgentLifecycle.DisposeAsync instead.
+        if (_captureHostActivationAcknowledged)
+        {
+            return null;
+        }
+
+        var reply = await _client.CancelBindingAsync(cancellationToken).ConfigureAwait(true);
+        if (reply.Value is not null)
+        {
+            ClearSessionSurface();
+            Phase = DualBindingPhase.NotStarted;
+            InvalidationText = string.Empty;
+            Notify("機体照合を終了し、SDKセッションを閉じました。", "info");
+            return null;
+        }
+
+        if (reply.Refusal is { ResultCode: "NoBindingSession" })
+        {
+            return null;
+        }
+
+        if (reply.Refusal is { } refusal)
+        {
+            ApplyRefusal(refusal);
+            return refusal;
+        }
+
+        return new DualBindingRefusal
+        {
+            ResultCode = "BindingCleanupFailed",
+            State = DualBindingSessionState.Invalid,
+            InvalidationReason = DualBindingInvalidationReason.SdkError,
+            Detail = "Binding cancellation returned no result.",
+        };
+    }
+
+    public void ReportShutdownBlocked(string blockingCode)
+    {
+        // A timeout after ActivateCapture must keep the one-way handoff marker:
+        // the next explicit window-close attempt must wait again, never send the
+        // retired binding pipe a cancel-binding request because the child happened
+        // to exit between attempts.
+        ClearSessionSurface(preserveCaptureHostActivationAcknowledgement: true);
+        IsShutdownBlocked = true;
+        Phase = DualBindingPhase.Invalid;
+        InvalidationText =
+            "実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。" +
+            "自動再試行やAgentの強制終了は行いません。実機操作を止めたまま技術担当者が確認してください。" +
+            $"（状態: {blockingCode}）";
+        Notify(InvalidationText, "block");
+    }
+
+    /// <summary>
+    /// CaptureRecoveryOnly has retired the binding pipe. A typed capture-pipe invalidation clears
+    /// the local binding without sending a request through that stale pipe.
+    /// </summary>
+    public void ReportActivatedCaptureInvalidation(DualBindingInvalidationReason reason)
+    {
+        _client.InvalidateActivatedCaptureBinding(reason);
+        ClearSessionSurface();
+        Phase = DualBindingPhase.Invalid;
+        InvalidationText =
+            $"撮影処理中に機体照合が無効になりました（理由: {ReasonText(reason)}）。" +
+            "撮影は再試行せず、2台の割当を最初からやり直してください。";
+        Notify(InvalidationText, "block");
+        OnPropertyChanged(nameof(IsCaptureHostActivated));
+    }
+
     private bool CanAssign(string alias) =>
+        !IsShutdownBlocked &&
         Phase == DualBindingPhase.Collecting &&
         SelectedCandidate is { IsAssigned: false } &&
+        _hasDecodedPreviewForSelectedCandidate &&
         !Candidates.Any(candidate => string.Equals(candidate.AssignedAlias, alias, StringComparison.Ordinal));
 
     private async Task BeginBindingAsync()
@@ -397,6 +570,7 @@ public sealed class DualBindingViewModel : ObservableObject
         {
             ClearSessionSurface();
             var reply = await _client.BeginBindingAsync().ConfigureAwait(true);
+            OnPropertyChanged(nameof(IsCaptureHostActivated));
             if (reply.Value is not { } started)
             {
                 ApplyRefusal(reply.Refusal!);
@@ -423,6 +597,11 @@ public sealed class DualBindingViewModel : ObservableObject
         IsBusy = true;
         try
         {
+            _hasDecodedPreviewForSelectedCandidate = false;
+            PreviewImage = null;
+            PreviewPlaceholderText = string.Empty;
+            NotifyCommandsChanged();
+
             // Starting this one stops the other: the agent allows exactly one Live View, and the
             // screen must never render two previews side by side. Comparing them at a glance is
             // precisely the mistake this flow is shaped to prevent.
@@ -439,6 +618,7 @@ public sealed class DualBindingViewModel : ObservableObject
             {
                 PreviewImage = null;
                 PreviewPlaceholderText = "ライブ表示を取得できませんでした";
+                _hasDecodedPreviewForSelectedCandidate = false;
                 ApplyRefusal(frame.Refusal!);
                 return;
             }
@@ -463,22 +643,26 @@ public sealed class DualBindingViewModel : ObservableObject
             image.Freeze();
             PreviewImage = image;
             PreviewPlaceholderText = string.Empty;
+            _hasDecodedPreviewForSelectedCandidate = true;
+            NotifyCommandsChanged();
         }
         catch (Exception exception) when (exception is NotSupportedException or ArgumentException or IOException)
         {
-            // The simulated agent returns generated bytes, not an image, and says so rather than
-            // drawing something an operator could mistake for a camera frame.
+            // Alias assignment is fail-closed when the frame cannot be decoded. A generated or
+            // corrupt placeholder must never be usable as visual evidence for CAM-A/CAM-B.
             PreviewImage = null;
-            PreviewPlaceholderText = string.Create(
-                CultureInfo.InvariantCulture,
-                $"模擬フレーム {preview.FrameBytes:N0} バイト（カメラ画像ではありません）");
+            PreviewPlaceholderText = string.Create(CultureInfo.InvariantCulture,
+                $"ライブ表示を確認できません（{preview.FrameBytes:N0} バイト、画像として読み取れません）");
+            _hasDecodedPreviewForSelectedCandidate = false;
+            NotifyCommandsChanged();
         }
     }
 
     private async Task ConfirmAliasAsync(string alias)
     {
-        if (SelectedCandidate is not { } candidate)
+        if (SelectedCandidate is not { } candidate || !_hasDecodedPreviewForSelectedCandidate)
         {
+            Notify("画像として確認できた現在のライブ表示がないため、割り当てできません。", "caution");
             return;
         }
 
@@ -497,6 +681,7 @@ public sealed class DualBindingViewModel : ObservableObject
             // preview it produced is gone too.
             PreviewImage = null;
             PreviewPlaceholderText = string.Empty;
+            _hasDecodedPreviewForSelectedCandidate = false;
             SelectedCandidate = null;
 
             if (Candidates.All(item => item.IsAssigned))
@@ -557,6 +742,7 @@ public sealed class DualBindingViewModel : ObservableObject
             InvalidationText = refusal.ResultCode switch
             {
                 "BindingInvalidated" => $"binding が無効になりました（理由: {ReasonText(refusal.InvalidationReason)}）。最初からやり直してください。",
+                "BindingHostExpired" => "機体確認用Agentの10分の利用期限が切れました。新しいAgentへ以前の割当は引き継がず、最初からやり直してください。",
                 "SessionMismatch" => "Agent が再起動したため、以前の binding は失効しました。最初からやり直してください。",
                 _ => "ライブ表示の停止または SDK セッションの終了を確認できませんでした。最初からやり直してください。",
             };
@@ -579,6 +765,7 @@ public sealed class DualBindingViewModel : ObservableObject
         "LiveViewNotActive" => "この候補のライブ表示は動作していません。",
         "LiveViewFrameUnavailable" => "ライブ表示のフレームを取得できませんでした。",
         "LiveViewFrameTooLarge" => "ライブ表示のフレームが上限を超えています。",
+        "LiveViewFrameRequired" => "現在の候補のライブ表示を確認してから割り当ててください。",
         "CandidateCountNotTwo" => "接続台数が 2 台ではありません。2 台だけ接続してやり直してください。",
         "DuplicateCandidateSourceObject" => "2 台を区別できませんでした。接続し直してやり直してください。",
         "CandidateSourceObjectMissing" => "候補の取得に失敗しました。接続し直してやり直してください。",
@@ -597,13 +784,18 @@ public sealed class DualBindingViewModel : ObservableObject
         _ => "不明",
     };
 
-    private void ClearSessionSurface()
+    private void ClearSessionSurface(bool preserveCaptureHostActivationAcknowledgement = false)
     {
+        if (!preserveCaptureHostActivationAcknowledgement)
+        {
+            _captureHostActivationAcknowledged = false;
+        }
         Candidates.Clear();
         SummaryLines.Clear();
         SelectedCandidate = null;
         PreviewImage = null;
         PreviewPlaceholderText = string.Empty;
+        _hasDecodedPreviewForSelectedCandidate = false;
         OnPropertyChanged(nameof(EvidenceSummaryText));
     }
 
