@@ -71,6 +71,8 @@ public sealed class AsyncRelayCommand(
 
     public event EventHandler? CanExecuteChanged;
 
+    public bool IsExecuting => _isExecuting;
+
     public bool CanExecute(object? parameter) => !_isExecuting && (canExecute?.Invoke() ?? true);
 
     public async void Execute(object? parameter)
