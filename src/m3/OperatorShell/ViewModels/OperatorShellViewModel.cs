@@ -398,7 +398,6 @@ public sealed class OperatorShellViewModel : ObservableObject
     public ICommand ResetViewCommand => _resetViewCommand;
     public ICommand DeclineSafetyCommand => _declineSafetyCommand;
     public ICommand CaptureCommand => _captureCommand;
-    internal bool IsCaptureCommandExecuting => _captureCommand.IsExecuting;
     public ICommand CaptureWithAutoFocusCommand => _captureWithAutoFocusCommand;
     public ICommand DiagnosticCommand => _diagnosticCommand;
     public ICommand PrepareNewCaptureCommand => _prepareNewCaptureCommand;

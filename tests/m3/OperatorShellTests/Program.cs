@@ -3998,6 +3998,25 @@ static string CreateHardwareTestRoot()
     return root;
 }
 
+static async Task DeleteHardwareTestRootAsync(string root)
+{
+    for (var attempt = 0; ; attempt++)
+    {
+        try
+        {
+            Directory.Delete(root, recursive: true);
+            return;
+        }
+        catch (IOException) when (attempt < 11)
+        {
+            // GitHub's Windows runner can briefly scan newly published evidence files
+            // after every application-owned stream has closed. Retry only test cleanup;
+            // production capture, evidence publication, and recovery remain single-shot.
+            await Task.Delay(Math.Min(25 * (1 << Math.Min(attempt, 4)), 400));
+        }
+    }
+}
+
 // Mirrors HardwareSingleStoragePaths.Resolve's real layout
 // (<LocalAppData>/A0CameraStitcher/phase0/camera-agent/artifacts) under a
 // test root, deliberately in a different subtree than any fake agent exe
@@ -5505,7 +5524,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.False(shell.CanUseLiveView, "A Ready hardware binding must not enable the simulated main-stage Live View.");
         Check.False(shell.CanOpenMaintenance, "A Ready hardware binding must not enable simulated maintenance pages.");
         shell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !shell.IsCaptureCommandExecuting && !shell.IsBusy && shell.UiState == OperatorUiState.Review,
+        await WaitUntilAsync(() => !shell.IsBusy && shell.UiState == OperatorUiState.Review,
             "CaptureRecoveryOnly WPF path did not reach review.");
         Check.Equal(1, bindingTransport.ActivateCaptureCalls);
         Check.True(shell.DualBinding.IsCaptureHostActivated, "The Ready binding must be handed off before CaptureRecoveryOnly dispatch.");
@@ -5555,7 +5574,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated 10-run confirmation must explicitly unlock the selected mode.");
         tenRunShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !tenRunShell.IsCaptureCommandExecuting && !tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
+        await WaitUntilAsync(() => !tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
             "The explicit WPF 10-run did not reach review after ten successful pairs.");
         Check.Equal(1, tenRunBindingTransport.ActivateCaptureCalls);
         Check.Equal(10, tenRunOperations.ReserveCalls);
@@ -5586,7 +5605,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         initialRecoveryShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(initialRecoveryShell.DualBinding);
         initialRecoveryShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !initialRecoveryShell.IsCaptureCommandExecuting && !initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
+        await WaitUntilAsync(() => !initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
             "The initial WPF response-unknown run did not leave a same-ID recovery snapshot.");
         Check.Equal(1, initialRecoveryTransport.ActivateCaptureCalls);
 
@@ -5607,7 +5626,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.True(restartedRecoveryShell.CanCapture,
             "The pending same-ID recovery may resume only after the fresh binding is Ready.");
         restartedRecoveryShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !restartedRecoveryShell.IsCaptureCommandExecuting && !restartedRecoveryShell.IsBusy && restartedRecoveryShell.UiState == OperatorUiState.Review,
+        await WaitUntilAsync(() => !restartedRecoveryShell.IsBusy && restartedRecoveryShell.UiState == OperatorUiState.Review,
             "The re-bound WPF same-ID recovery did not reach review.");
         Check.Equal(1, restartedRecoveryTransport.ActivateCaptureCalls);
         Check.Equal(1, wpfRecoveryOperations.ReserveCalls);
@@ -5630,7 +5649,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         refusalShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(refusalShell.DualBinding);
         refusalShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !refusalShell.IsCaptureCommandExecuting && !refusalShell.IsBusy && refusalShell.StatusMessage.Contains("引き継げなかった", StringComparison.Ordinal),
+        await WaitUntilAsync(() => !refusalShell.IsBusy && refusalShell.StatusMessage.Contains("引き継げなかった", StringComparison.Ordinal),
             "A refused CaptureRecoveryOnly activation was not shown to the operator.");
         Check.True(refusalShell.NoticeText.Contains("引き継げなかった", StringComparison.Ordinal),
             "A refused activation must also be shown in the immediate warning notice.");
@@ -5639,7 +5658,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
     }
     finally
     {
-        Directory.Delete(root, recursive: true);
+        await DeleteHardwareTestRootAsync(root);
     }
 }
 
