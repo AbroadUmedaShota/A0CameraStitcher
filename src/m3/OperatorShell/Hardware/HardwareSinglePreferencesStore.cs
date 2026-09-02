@@ -19,12 +19,15 @@ internal sealed class HardwareSinglePreferencesStore
 
     public async Task<HardwareSinglePreferences?> LoadAsync(CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(_path))
+        try
+        {
+            EnsureRegularLocalPreferencesFile(_path);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
-
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_path);
 
         // Check the size on the same handle used to read/parse below, not on
         // a separate FileInfo query: a FileInfo.Length check followed by a
@@ -77,6 +80,15 @@ internal sealed class HardwareSinglePreferencesStore
         exportDirectory = Path.GetFullPath(exportDirectory);
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(exportDirectory);
         return new HardwareSinglePreferences(exportDirectory);
+    }
+
+    private static void EnsureRegularLocalPreferencesFile(string path)
+    {
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(path);
+        if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new InvalidDataException("保存先設定ファイルは通常のローカルファイルである必要があります。");
+        }
     }
 
     public async Task SaveAsync(string exportDirectory, CancellationToken cancellationToken = default)
