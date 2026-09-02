@@ -48,7 +48,8 @@ public partial class MainWindow : Window
         string? dualWpdCameraMapPath = null,
         bool captureRecoveryOnly = false,
         string? approvedCaptureProfilePath = null,
-        string? dualIdentityProofPath = null)
+        string? dualIdentityProofPath = null,
+        int captureRecoveryRunCount = 1)
     {
         if (captureRecoveryOnly && environment != DualCameraExecutionEnvironment.HardwareDual)
         {
@@ -63,6 +64,13 @@ public partial class MainWindow : Window
             throw new ArgumentException(
                 "CaptureRecoveryOnly requires explicit approved capture-profile and dual-identity-proof files.",
                 nameof(approvedCaptureProfilePath));
+        }
+        if (captureRecoveryRunCount is not (1 or CaptureRecoveryOnlyTenRunCoordinator.RequestedCount) ||
+            (captureRecoveryRunCount == CaptureRecoveryOnlyTenRunCoordinator.RequestedCount && !captureRecoveryOnly))
+        {
+            throw new ArgumentException(
+                "CaptureRecoveryOnly run count must be the default 1 or the explicit value 10.",
+                nameof(captureRecoveryRunCount));
         }
 
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
@@ -85,6 +93,7 @@ public partial class MainWindow : Window
                     ? "dual-camera-hardware-products"
                     : "dual-camera-test-synthetic-products");
             IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null;
+            CaptureRecoveryOnlyTenRunCoordinator? captureRecoveryOnlyTenRunCoordinator = null;
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
             {
                 var resolvedCaptureProfilePath = captureRecoveryOnly
@@ -114,6 +123,14 @@ public partial class MainWindow : Window
                         _dualAgentLifecycle,
                         _dualAgentLifecycle,
                         captureProfile);
+                    if (captureRecoveryRunCount == CaptureRecoveryOnlyTenRunCoordinator.RequestedCount)
+                    {
+                        var evidenceWriter = new CaptureRecoveryOnlyRunEvidenceWriter(
+                            Path.Combine(dualProductRoot, "capture-recovery-only-evidence"));
+                        captureRecoveryOnlyTenRunCoordinator = new CaptureRecoveryOnlyTenRunCoordinator(
+                            captureRecoveryOnlyWorkflow,
+                            evidenceWriter);
+                    }
                 }
             }
             // The product identity source remains unconfigured (HardwarePending):
@@ -129,7 +146,8 @@ public partial class MainWindow : Window
                     ? null
                     : _liveViewFrameSource,
                 dualBindingTransport: _dualAgentLifecycle,
-                captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow);
+                captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow,
+                captureRecoveryOnlyTenRunCoordinator: captureRecoveryOnlyTenRunCoordinator);
             DataContext = _viewModel;
             if (_dualAgentLifecycle is not null)
             {

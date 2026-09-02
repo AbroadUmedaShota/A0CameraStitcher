@@ -39,7 +39,8 @@ public partial class App : Application
                     options.DualWpdCameraMapPath,
                     options.CaptureRecoveryOnly,
                     options.ApprovedCaptureProfilePath,
-                    options.DualIdentityProofPath),
+                    options.DualIdentityProofPath,
+                    options.CaptureRecoveryRunCount),
                 _ => new LaunchWindow(options.SingleCameraAgentExecutablePath),
             };
         }
@@ -85,7 +86,8 @@ public sealed record ApplicationLaunchOptions(
     string? DualWpdCameraMapPath,
     bool CaptureRecoveryOnly,
     string? ApprovedCaptureProfilePath,
-    string? DualIdentityProofPath)
+    string? DualIdentityProofPath,
+    int CaptureRecoveryRunCount)
 {
     public static ApplicationLaunchOptions Parse(IReadOnlyList<string> arguments, string baseDirectory)
     {
@@ -101,6 +103,7 @@ public sealed record ApplicationLaunchOptions(
         string? configuredApprovedCaptureProfile = null;
         string? configuredDualIdentityProof = null;
         var captureRecoveryOnly = false;
+        int? configuredCaptureRecoveryRunCount = null;
         var modeSeen = false;
         for (var index = 0; index < arguments.Count; index++)
         {
@@ -158,6 +161,15 @@ public sealed record ApplicationLaunchOptions(
 
                     captureRecoveryOnly = true;
                     break;
+                case "--capture-recovery-run-count":
+                    if (configuredCaptureRecoveryRunCount is not null || ++index >= arguments.Count ||
+                        !int.TryParse(arguments[index], out var runCount) || runCount != 10)
+                    {
+                        throw new ArgumentException("--capture-recovery-run-count は明示値 10 を一度だけ指定してください。");
+                    }
+
+                    configuredCaptureRecoveryRunCount = runCount;
+                    break;
                 case "--approved-capture-profile":
                     if (configuredApprovedCaptureProfile is not null || ++index >= arguments.Count ||
                         string.IsNullOrWhiteSpace(arguments[index]))
@@ -210,6 +222,10 @@ public sealed record ApplicationLaunchOptions(
         {
             throw new ArgumentException("--capture-recovery-only には既存の --approved-capture-profile と --dual-identity-proof が必要です。");
         }
+        if (configuredCaptureRecoveryRunCount is not null && !captureRecoveryOnly)
+        {
+            throw new ArgumentException("--capture-recovery-run-count 10 には --capture-recovery-only が必要です。");
+        }
 
         var normalizedBase = Path.GetFullPath(baseDirectory);
         var singleDefault = Path.Combine(normalizedBase, "A0CameraStitcher.CameraAgent.exe");
@@ -251,7 +267,8 @@ public sealed record ApplicationLaunchOptions(
             dualWpdMapPath,
             captureRecoveryOnly,
             approvedCaptureProfilePath,
-            dualIdentityProofPath);
+            dualIdentityProofPath,
+            configuredCaptureRecoveryRunCount ?? 1);
     }
 
     private static string ResolveExistingFixedLocalMap(string candidate)
