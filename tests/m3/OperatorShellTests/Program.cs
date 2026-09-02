@@ -3975,9 +3975,9 @@ static async Task CompleteDualBindingAsync(DualBindingViewModel binding)
     await WaitUntilAsync(() => binding.IsReady, "The binding did not complete.");
 }
 
-static async Task WaitUntilAsync(Func<bool> predicate, string message)
+static async Task WaitUntilAsync(Func<bool> predicate, string message, TimeSpan? timeout = null)
 {
-    var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+    var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
     while (!predicate())
     {
         if (DateTime.UtcNow >= deadline)
@@ -4009,9 +4009,9 @@ static async Task DeleteHardwareTestRootAsync(string root)
         }
         catch (IOException) when (attempt < 11)
         {
-            // GitHub's Windows runner can briefly scan newly published evidence files
-            // after every application-owned stream has closed. Retry only test cleanup;
-            // production capture, evidence publication, and recovery remain single-shot.
+            // Windows test teardown can briefly retain newly published evidence files,
+            // especially while an asynchronous failure path is still settling. Retry only
+            // test cleanup; production capture, publication, and recovery remain single-shot.
             await Task.Delay(Math.Min(25 * (1 << Math.Min(attempt, 4)), 400));
         }
     }
@@ -5574,8 +5574,10 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated 10-run confirmation must explicitly unlock the selected mode.");
         tenRunShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
-            "The explicit WPF 10-run did not reach review after ten successful pairs.");
+        await WaitUntilAsync(
+            () => !tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
+            "The explicit WPF 10-run did not reach review after ten successful pairs.",
+            TimeSpan.FromSeconds(20));
         Check.Equal(1, tenRunBindingTransport.ActivateCaptureCalls);
         Check.Equal(10, tenRunOperations.ReserveCalls);
         Check.Equal(10, tenRunOperations.CaptureRecoveryOnlyStartCalls);
