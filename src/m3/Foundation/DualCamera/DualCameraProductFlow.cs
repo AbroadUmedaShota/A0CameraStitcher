@@ -871,7 +871,9 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             StitchJobs = _stitchJobs.ToArray(),
             Export = export ?? previous?.Export,
             FailureCode = failureCode ?? previous?.FailureCode ?? DualCameraFailureCode.None,
-            FailureReason = failureReason,
+            FailureReason = failureCode.HasValue
+                ? failureReason
+                : failureReason ?? previous?.FailureReason,
             AutomaticRetryCount = 0,
         };
     }

@@ -721,10 +721,20 @@ static async Task OutputFailuresAsync()
         var failed = await flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
         Check.Equal(DualCameraFailureCode.StitchFailed, failed.FailureCode);
+        Check.Equal("deterministic stitch failure", failed.FailureReason ?? string.Empty);
         Check.Equal(2, failed.Capture!.Originals.Count);
         Check.True(failed.Capture.Originals.All(original => File.Exists(original.Path)));
         Check.Equal(1, bridge.StitchCalls);
         Check.Equal(0, failed.AutomaticRetryCount);
+
+        var continuationReasons = new List<string?>();
+        flow.StateChanged += (_, state) => continuationReasons.Add(state.FailureReason);
+        var restitchFailed = await flow.RestitchAsync();
+        Check.Equal(DualCameraFailureCode.StitchFailed, restitchFailed.FailureCode);
+        Check.Equal("deterministic stitch failure", restitchFailed.FailureReason ?? string.Empty);
+        Check.True(continuationReasons.Count > 0);
+        Check.True(continuationReasons.All(reason => reason == "deterministic stitch failure"));
+        Check.Equal(2, bridge.StitchCalls);
     });
 
     await WithRootAsync(async root =>
