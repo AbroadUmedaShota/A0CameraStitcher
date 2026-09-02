@@ -60,8 +60,15 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
 
     public DualHardwareCaptureRequest? LoadPending()
     {
-        if (!Directory.Exists(_stateDirectory)) return null;
-        EnsureDirectoryIsSafe();
+        try
+        {
+            EnsureDirectoryIsSafe();
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
         using var stateLock = AcquireStateLock();
         return LoadCore()?.PendingRequest;
     }
@@ -89,9 +96,15 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
     {
         if (expectedTransactionId == Guid.Empty)
             throw new InvalidDataException("The expected HardwareDual transaction ID is invalid.");
-        if (!Directory.Exists(_stateDirectory))
-            throw new InvalidOperationException("No HardwareDual transaction snapshot is pending.");
-        EnsureDirectoryIsSafe();
+        try
+        {
+            EnsureDirectoryIsSafe();
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new InvalidOperationException("No HardwareDual transaction snapshot is pending.", exception);
+        }
         using var stateLock = AcquireStateLock();
         var state = LoadCore();
         if (state?.PendingRequest?.TransactionId != expectedTransactionId)
@@ -136,8 +149,15 @@ internal sealed class HardwareDualTransactionSnapshotStore : IDualHardwareRecove
 
     private HardwareDualDurableSnapshot? LoadCore()
     {
-        if (!File.Exists(_statePath)) return null;
-        EnsureRegularStateFile(_statePath);
+        try
+        {
+            EnsureRegularStateFile(_statePath);
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
         // Check the size against the stream before allocating/reading, not
         // after (File.ReadAllBytes would otherwise read an oversized file in
         // full first, which the ViewModel's catch filters do not treat as a

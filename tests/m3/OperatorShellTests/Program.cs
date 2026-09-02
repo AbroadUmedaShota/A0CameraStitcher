@@ -248,6 +248,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareSiblingStoresFailClosedBoundaryAsync();
+    Console.WriteLine("PASS hardware sibling stores treat absence as empty and occlusion as fail-closed");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware sibling stores treat absence as empty and occlusion as fail-closed");
+    Console.Error.WriteLine($"FAIL hardware sibling stores treat absence as empty and occlusion as fail-closed: {exception}");
+}
+
+try
+{
     HardwareLaunchOptionsAreExplicit();
     Console.WriteLine("PASS app launch options keep hardware and simulation explicit");
 }
@@ -1000,7 +1011,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {86 - failures.Count}/86 passed.");
+Console.WriteLine($"Operator shell tests: {87 - failures.Count}/87 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -1716,6 +1727,47 @@ static async Task HardwareSinglePreferencesStoreRejectsOversizedFileAsync()
 
         var store = new HardwareSinglePreferencesStore(preferencesPath);
         await Check.ThrowsAsync<InvalidDataException>(() => store.LoadAsync());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareSiblingStoresFailClosedBoundaryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var missingPreferencesPath = Path.Combine(root, "missing-preferences", "preferences.json");
+        var missingPreferencesStore = new HardwareSinglePreferencesStore(missingPreferencesPath);
+        Check.True(
+            await missingPreferencesStore.LoadAsync() is null,
+            "A genuinely missing preferences file must load as empty.");
+
+        var occludedPreferencesPath = Path.Combine(root, "occluded-preferences", "preferences.json");
+        Directory.CreateDirectory(occludedPreferencesPath);
+        var occludedPreferencesStore = new HardwareSinglePreferencesStore(occludedPreferencesPath);
+        await Check.ThrowsAsync<InvalidDataException>(() => occludedPreferencesStore.LoadAsync());
+
+        var missingDualStore = new HardwareDualTransactionSnapshotStore(
+            Path.Combine(root, "missing-dual-product"));
+        Check.True(
+            missingDualStore.LoadPending() is null,
+            "A genuinely missing Dual recovery directory must load as empty.");
+
+        var occludedDirectoryProductRoot = Path.Combine(root, "occluded-dual-directory");
+        Directory.CreateDirectory(occludedDirectoryProductRoot);
+        File.WriteAllText(Path.Combine(occludedDirectoryProductRoot, "recovery-state"), "not a directory");
+        var occludedDirectoryStore = new HardwareDualTransactionSnapshotStore(occludedDirectoryProductRoot);
+        Check.Throws<InvalidOperationException>(() => occludedDirectoryStore.LoadPending());
+
+        var occludedStateProductRoot = Path.Combine(root, "occluded-dual-state");
+        var occludedStateDirectory = Path.Combine(occludedStateProductRoot, "recovery-state");
+        Directory.CreateDirectory(Path.Combine(occludedStateDirectory, "pending-transaction.json"));
+        var occludedStateStore = new HardwareDualTransactionSnapshotStore(occludedStateProductRoot);
+        Check.Throws<InvalidDataException>(() => occludedStateStore.LoadPending());
+        Check.Throws<InvalidDataException>(() => occludedStateStore.LoadPendingIntent(Guid.NewGuid()));
     }
     finally
     {
