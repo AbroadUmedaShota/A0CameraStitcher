@@ -3097,9 +3097,12 @@ static async Task FormalDualCameraWpfFlowAsync()
 
         var hardwareAdapter = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
         var hardwareOperations = new WpfHardwareDualFakeOperations(hardwareAdapter);
+        var hardwareProductRoot = Path.Combine(root, "hardware-fake-products");
         var hardwareFlow = new DualCameraProductFlow(
-            Path.Combine(root, "hardware-fake-products"),
-            new HardwareDualCaptureSource(hardwareOperations),
+            hardwareProductRoot,
+            new HardwareDualCaptureSource(
+                hardwareOperations,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(hardwareProductRoot)),
             hardwareAdapter,
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
         var noRequestProviderViewModel = new OperatorShellViewModel(
@@ -3233,6 +3236,15 @@ static async Task FormalDualCameraWpfFlowAsync()
             snapshotStartedAt.AddSeconds(180));
         var snapshotStore = new HardwareDualTransactionSnapshotStore(recoveryProductRoot);
         snapshotStore.SavePending(snapshotRequest);
+        Check.True(
+            File.ReadAllText(recoveryStatePath).Contains(
+                "a0.hardware-dual-transaction-snapshot.v3",
+                StringComparison.Ordinal),
+            "New HardwareDual snapshots must be persisted as v3.");
+        Check.Equal(
+            DualHardwareRecoveryIntent.ReservationOutcomeUnknown,
+            snapshotStore.LoadPendingIntent(snapshotTransactionId));
+        snapshotStore.MarkMayHaveDispatched(snapshotTransactionId);
         Check.Equal(
             DualHardwareRecoveryIntent.MayHaveDispatched,
             snapshotStore.LoadPendingIntent(snapshotTransactionId));
@@ -3251,6 +3263,26 @@ static async Task FormalDualCameraWpfFlowAsync()
                 new System.Text.Json.Serialization.JsonStringEnumConverter(),
             },
         };
+        File.WriteAllText(
+            recoveryStatePath,
+            JsonSerializer.Serialize(
+                new
+                {
+                    schemaVersion = "a0.hardware-dual-transaction-snapshot.v2",
+                    recoveryIntent = DualHardwareRecoveryIntent.MayHaveDispatched,
+                    pendingRequest = snapshotRequest,
+                },
+                legacyOptions));
+        var migratedPrevious = new HardwareDualTransactionSnapshotStore(
+            recoveryProductRoot);
+        Check.Equal(
+            snapshotTransactionId,
+            migratedPrevious.LoadPending()!.TransactionId);
+        Check.Equal(
+            DualHardwareRecoveryIntent.MayHaveDispatched,
+            migratedPrevious.LoadPendingIntent(snapshotTransactionId));
+        migratedPrevious.ClearPending(snapshotTransactionId);
+
         File.WriteAllText(
             recoveryStatePath,
             JsonSerializer.Serialize(
@@ -3709,11 +3741,14 @@ static OperatorShellViewModel HardwareDualShellWithSimulatedBinding(
 {
     var adapter = new M2OfflineStitcherProcessAdapter(
         Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe"));
+    var productRoot = Path.Combine(root, "binding-products");
     return new OperatorShellViewModel(
         new SimulationFoundationService(Path.Combine(root, "binding-journals")),
         new DualCameraProductFlow(
-            Path.Combine(root, "binding-products"),
-            new HardwareDualCaptureSource(new WpfHardwareDualFakeOperations(adapter)),
+            productRoot,
+            new HardwareDualCaptureSource(
+                new WpfHardwareDualFakeOperations(adapter),
+                recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
             adapter,
             new FixedDualCameraIdentitySnapshotSource(
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady())),
@@ -5119,16 +5154,21 @@ static async Task DualCameraAgentLifecycleFakeHostHappyPathAsync()
 
         await using var lifecycle = CreateDualAgentTestLifecycle(root);
         var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+        var productRoot = Path.Combine(root, "products");
         var flow = new DualCameraProductFlow(
-            Path.Combine(root, "products"),
-            new HardwareDualCaptureSource(lifecycle),
+            productRoot,
+            new HardwareDualCaptureSource(
+                lifecycle,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
             stitcher,
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
 
         var transactionId = Guid.NewGuid();
         var state = await flow.CaptureAndStitchAsync(HardwareDualTestRequest(transactionId));
 
-        Check.Equal(DualCameraFailureCode.None, state.FailureCode);
+        Check.True(
+            state.FailureCode == DualCameraFailureCode.None,
+            $"The reserve-start fake-host path failed: {state.FailureCode}: {state.FailureReason}");
         Check.Equal(2, state.Capture!.Originals.Count);
         Check.True(
             state.Stitch is { Succeeded: true },
@@ -5519,9 +5559,12 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(0, partialOperations.AutomaticRetryCount);
 
         var wpfOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
+        var ordinaryProductRoot = Path.Combine(root, "wpf-ordinary-products");
         var ordinaryFlow = new DualCameraProductFlow(
-            Path.Combine(root, "wpf-ordinary-products"),
-            new HardwareDualCaptureSource(wpfOperations),
+            ordinaryProductRoot,
+            new HardwareDualCaptureSource(
+                wpfOperations,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(ordinaryProductRoot)),
             new NeverCaptureDualBridge(),
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
         var wpfWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
@@ -6428,9 +6471,12 @@ static async Task DualCameraAgentLifecycleRestartRecoveryAsync()
 
             await using var lifecycle = CreateDualAgentTestLifecycle(root);
             var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+            var productRoot = Path.Combine(root, "products");
             var flow = new DualCameraProductFlow(
-                Path.Combine(root, "products"),
-                new HardwareDualCaptureSource(lifecycle),
+                productRoot,
+                new HardwareDualCaptureSource(
+                    lifecycle,
+                    recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
                 stitcher,
                 new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
 
@@ -6500,9 +6546,12 @@ static async Task DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync()
 
         await using var lifecycle = CreateDualAgentTestLifecycle(root);
         var stitcher = new M2OfflineStitcherProcessAdapter(DualCameraM2AdapterPath());
+        var productRoot = Path.Combine(root, "products");
         var flow = new DualCameraProductFlow(
-            Path.Combine(root, "products"),
-            new HardwareDualCaptureSource(lifecycle),
+            productRoot,
+            new HardwareDualCaptureSource(
+                lifecycle,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
             stitcher,
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
 
