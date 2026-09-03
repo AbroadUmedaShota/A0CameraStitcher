@@ -68,31 +68,22 @@ jobs:
       - name: Classify validation scope
         id: scope
         run: |
+          . (Join-Path $env:GITHUB_WORKSPACE 'scripts/Resolve-CiValidationScope.ps1')
           $runFull = $true
           $reason = 'manual full validation'
 
           if ('${{ github.event_name }}' -eq 'pull_request') {
             $baseSha = '${{ github.event.pull_request.base.sha }}'
-            $changedFiles = @(git diff --name-only "$baseSha...HEAD")
+            # Disable rename detection so a source -> docs rename exposes the
+            # source deletion and cannot be misclassified as docs-only.
+            $changedFiles = @(git diff --name-only --no-renames "$baseSha...HEAD")
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to classify changed paths against $baseSha."
             }
 
-            $docsOnly = $changedFiles.Count -gt 0
-            foreach ($path in $changedFiles) {
-              $normalized = $path.Replace('\\', '/')
-              $isDocumentation =
-                $normalized.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase) -or
-                $normalized.StartsWith('docs/', [StringComparison]::OrdinalIgnoreCase) -or
-                $normalized.StartsWith('.github/ISSUE_TEMPLATE/', [StringComparison]::OrdinalIgnoreCase)
-              if (-not $isDocumentation) {
-                $docsOnly = $false
-                break
-              }
-            }
-
-            $runFull = -not $docsOnly
-            $reason = if ($docsOnly) { 'documentation-only PR' } else { 'code, build, test, workflow, or unknown path changed' }
+            $scope = Get-CiValidationScope -ChangedPaths $changedFiles
+            $runFull = [bool]$scope.RunFull
+            $reason = [string]$scope.Reason
           }
           elseif ('${{ inputs.full_validation }}' -ne 'true') {
             $runFull = $false
@@ -102,6 +93,14 @@ jobs:
           "run_full=$($runFull.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "reason=$reason" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "Validation scope: run_full=$runFull; reason=$reason"
+
+      # This is intentionally cheap and always runs after checkout, including
+      # docs-only PRs, so the lightweight lane continuously exercises the
+      # classifier boundary rather than trusting an untested allowlist.
+      - name: CI validation scope classifier regression
+        id: scope-regression
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: ./scripts/Test-CiValidationScope.ps1
 
       # No global.json is checked in, so the .NET SDK version is pinned
       # explicitly here instead of being inferred from the repo.

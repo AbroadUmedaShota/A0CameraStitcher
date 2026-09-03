@@ -38,7 +38,7 @@ The full suite remains one Windows job with no matrix:
 4. M3 simulated foundation Debug and Release.
 5. Formal WPF DualCamera flow Release.
 
-The workflow always runs for a target PR. It does not use event-level path filters, so the stable check name reaches a terminal result for documentation-only changes. Unknown or unclassified paths run the full suite. `concurrency.cancel-in-progress` remains enabled for superseded commits on the same PR.
+The workflow always runs for a target PR. It does not use event-level path filters, so the stable check name reaches a terminal result for documentation-only changes. The shared PowerShell classifier allows only pure Markdown (`.md`/`.markdown`) paths into the lightweight lane. Machine-consumed artifacts such as `docs/schemas/**`, non-Markdown files, unknown/empty path sets, mixed changes, and the source side of a source-to-docs rename run the full suite; PR path enumeration uses `git diff --no-renames` to expose both sides. A cheap classifier regression step runs locally and in the workflow before any expensive stage. `concurrency.cancel-in-progress` remains enabled for superseded commits on the same PR.
 
 The job timeout is reduced from 90 to 45 minutes to cap runaway consumption while retaining roughly twice the observed normal runtime. The existing shared native build directory remains in use. No dependency cache or matrix split is added in this change: the solution currently has no external NuGet package set that would justify `setup-dotnet` caching, and native cache correctness across SDK-less/SDK-linked boundaries needs separate measurement before cached binaries can be trusted. A split matrix would also multiply Windows job rounding and alter failure-reporting semantics.
 
