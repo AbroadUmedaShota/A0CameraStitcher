@@ -18,14 +18,17 @@
 name: Windows Software-Only CI
 
 on:
-  push:
-    branches:
-      - main
-      - codex/main-feature-integration
   pull_request:
     branches:
       - main
       - codex/main-feature-integration
+  workflow_dispatch:
+    inputs:
+      full_validation:
+        description: "Run the full Windows software-only suite"
+        required: true
+        type: boolean
+        default: true
 
 # Cancel a stale run on the same branch/PR when a newer one starts, without
 # touching runs that belong to other branches or PRs, so unrelated pushes
@@ -41,7 +44,7 @@ jobs:
   software-only:
     name: "Software-only build/test (no camera/SDK hardware)"
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
@@ -56,17 +59,62 @@ jobs:
       - name: Checkout
         id: checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Keep the required workflow terminal for every PR. Only an all-docs
+      # change may skip the expensive suite; any unknown path fails safe to a
+      # full run. The job/check name stays stable for existing merge gates.
+      - name: Classify validation scope
+        id: scope
+        run: |
+          $runFull = $true
+          $reason = 'manual full validation'
+
+          if ('${{ github.event_name }}' -eq 'pull_request') {
+            $baseSha = '${{ github.event.pull_request.base.sha }}'
+            $changedFiles = @(git diff --name-only "$baseSha...HEAD")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to classify changed paths against $baseSha."
+            }
+
+            $docsOnly = $changedFiles.Count -gt 0
+            foreach ($path in $changedFiles) {
+              $normalized = $path.Replace('\\', '/')
+              $isDocumentation =
+                $normalized.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase) -or
+                $normalized.StartsWith('docs/', [StringComparison]::OrdinalIgnoreCase) -or
+                $normalized.StartsWith('.github/ISSUE_TEMPLATE/', [StringComparison]::OrdinalIgnoreCase)
+              if (-not $isDocumentation) {
+                $docsOnly = $false
+                break
+              }
+            }
+
+            $runFull = -not $docsOnly
+            $reason = if ($docsOnly) { 'documentation-only PR' } else { 'code, build, test, workflow, or unknown path changed' }
+          }
+          elseif ('${{ inputs.full_validation }}' -ne 'true') {
+            $runFull = $false
+            $reason = 'manual lightweight validation requested'
+          }
+
+          "run_full=$($runFull.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "reason=$reason" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "Validation scope: run_full=$runFull; reason=$reason"
 
       # No global.json is checked in, so the .NET SDK version is pinned
       # explicitly here instead of being inferred from the repo.
       - name: Setup .NET 10 SDK
         id: setup-dotnet
+        if: ${{ steps.scope.outputs.run_full == 'true' }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
 
       - name: Show toolchain versions
         id: toolchain-info
+        if: ${{ steps.scope.outputs.run_full == 'true' }}
         run: |
           dotnet --info
           cmake --version
@@ -90,10 +138,12 @@ jobs:
       # evidence still said software-only.
       - name: Configure CMake (SDK-less)
         id: cxx-configure
+        if: ${{ steps.scope.outputs.run_full == 'true' }}
         run: cmake -S . -B build/wpf-m2-adapter -A x64
 
       - name: Build SDK-less C++ (Debug)
         id: cxx-debug-build
+        if: ${{ steps.scope.outputs.run_full == 'true' && steps.cxx-configure.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           cmake --build build/wpf-m2-adapter --config Debug -- /m:1 /nodeReuse:false
@@ -102,14 +152,14 @@ jobs:
 
       - name: CTest SDK-less C++ (Debug)
         id: cxx-debug-test
-        if: ${{ !cancelled() && steps.cxx-debug-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.cxx-debug-build.outcome == 'success' }}
         run: ctest --test-dir build/wpf-m2-adapter -C Debug -j 1 --output-on-failure
 
       # Gated on the configure step only (not on the Debug build/test above),
       # so a Debug-side failure does not hide whether Release still builds.
       - name: Build SDK-less C++ (Release)
         id: cxx-release-build
-        if: ${{ !cancelled() && steps.cxx-configure.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.cxx-configure.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           cmake --build build/wpf-m2-adapter --config Release -- /m:1 /nodeReuse:false
@@ -118,12 +168,12 @@ jobs:
 
       - name: CTest SDK-less C++ (Release)
         id: cxx-release-test
-        if: ${{ !cancelled() && steps.cxx-release-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.cxx-release-build.outcome == 'success' }}
         run: ctest --test-dir build/wpf-m2-adapter -C Release -j 1 --output-on-failure
 
       - name: Camera Agent incremental packaging regression (SDK-less)
         id: camera-agent-packaging
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           ./scripts/Test-CameraAgentPackagingIncremental.ps1 -Configuration Debug
@@ -143,7 +193,7 @@ jobs:
       # steps, must not hide whether the others still pass.
       - name: M3 simulated foundation (Debug)
         id: m3-debug
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           ./scripts/Test-M3Simulated.ps1 -Configuration Debug
@@ -152,7 +202,7 @@ jobs:
 
       - name: M3 simulated foundation (Release)
         id: m3-release
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           ./scripts/Test-M3Simulated.ps1 -Configuration Release
@@ -168,7 +218,7 @@ jobs:
       # above: independent of their outcome and of the C++ steps.
       - name: Formal WPF DualCamera flow (Release)
         id: wpf-release
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
           ./scripts/Test-DualCameraWpfFlow.ps1 -Configuration Release
@@ -194,6 +244,8 @@ jobs:
           )
 
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Windows software-only CI'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Scope: `${{ steps.scope.outputs.reason }}`.'
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'This run is software-only regression evidence (SDK-less C++, M3 simulated, and the formal WPF DualCamera flow, none of them touching a licensed SDK or a physical camera). It does **not** certify hardware acceptance, camera/SDK connectivity, or Phase 0 hardware readiness; those gates are tracked separately in docs/PHASE0_TEST_PLAN.md.'
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
