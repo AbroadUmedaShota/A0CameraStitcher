@@ -7,6 +7,7 @@ using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 using System.Buffers.Binary;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
@@ -639,6 +640,17 @@ catch (Exception exception)
 
 try
 {
+    await DualCameraAgentLifecycleInitializationFailureRecoveryAsync();
+    Console.WriteLine("PASS HardwareDual Agent lifecycle initialization failure leaves no disposed process and permits a fresh launch");
+}
+catch (Exception exception)
+{
+    failures.Add("HardwareDual Agent lifecycle initialization failure leaves no disposed process and permits a fresh launch");
+    Console.Error.WriteLine($"FAIL HardwareDual Agent lifecycle initialization failure leaves no disposed process and permits a fresh launch: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecyclePipeFailureWithoutProcessExitAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle pipe failure without process exit resumes on the same process");
 }
@@ -1011,7 +1023,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {87 - failures.Count}/87 passed.");
+Console.WriteLine($"Operator shell tests: {88 - failures.Count}/88 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -6226,6 +6238,144 @@ static DualCameraAgentLifecycle CreateDualAgentTestLifecycle(string root)
         Path.Combine(root, "agent-pair-journal"),
         captureProfilePath,
         identityProofPath);
+}
+
+static DualCameraAgentLifecycle CreateInjectedDualAgentTestLifecycle(
+    string root,
+    Func<Process, (Task<string> StandardOutput, Task<string> StandardError)> redirectedOutputReader,
+    Func<Process, bool> unpublishedProcessTerminator)
+{
+    var captureProfilePath = Path.Combine(root, "camera-agent", "approved-dual-capture-profile.json");
+    var identityProofPath = Path.Combine(root, "phase0", "dual-identity-proof.json");
+    WriteDualAgentTestArtifactFiles(captureProfilePath, identityProofPath);
+    return new DualCameraAgentLifecycle(
+        DualCameraAgentTestHostPath(),
+        Path.Combine(root, "agent-pair-journal"),
+        captureProfilePath,
+        identityProofPath,
+        wpdCameraMapPath: null,
+        redirectedOutputReader: redirectedOutputReader,
+        unpublishedProcessTerminator: unpublishedProcessTerminator);
+}
+
+static async Task DualCameraAgentLifecycleInitializationFailureRecoveryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var tracePath = Path.Combine(root, "dual-agent-trace.jsonl");
+    var previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    var previousTrace = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE");
+    var firstProcessExitConfirmed = false;
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "happy");
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
+        var initializationAttempts = 0;
+        await using var lifecycle = CreateInjectedDualAgentTestLifecycle(
+            root,
+            process =>
+            {
+                if (Interlocked.Increment(ref initializationAttempts) == 1)
+                {
+                    throw new IOException("Synthetic redirected-output initialization failure.");
+                }
+                return (
+                    process.StandardOutput.ReadToEndAsync(CancellationToken.None),
+                    process.StandardError.ReadToEndAsync(CancellationToken.None));
+            },
+            process =>
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                firstProcessExitConfirmed = process.WaitForExit(5000) && process.HasExited;
+                return firstProcessExitConfirmed;
+            });
+
+        await Check.ThrowsAsync<HardwareCameraAgentLaunchException>(
+            () => lifecycle.ReservePairTransactionAsync(Guid.NewGuid(), CancellationToken.None));
+        Check.Equal(0L, lifecycle.CurrentProcessGeneration);
+        Check.False(lifecycle.IsProcessGenerationAlive(1),
+            "a failed initialization must not publish a disposed Process or generation");
+        Check.True(firstProcessExitConfirmed,
+            "the first child must be confirmed exited before replacement is allowed");
+
+        var retryTransactionId = Guid.NewGuid();
+        Check.True(
+            await lifecycle.ReservePairTransactionAsync(retryTransactionId, CancellationToken.None),
+            "the operation following an initialization failure must start a fresh Agent");
+        Check.Equal(1L, lifecycle.CurrentProcessGeneration);
+        Check.True(lifecycle.IsProcessGenerationAlive(1),
+            "the replacement Agent generation must be live");
+
+        var entries = ReadDualAgentTraceEntries(tracePath);
+        Check.Equal(1, entries.Count(entry =>
+            entry.Operation == DualHardwareCameraAgentProtocol.Operations.ReservePairTransaction));
+        Check.True(entries
+                .Where(entry => entry.TransactionId is not null)
+                .All(entry => entry.TransactionId == retryTransactionId.ToString("N")),
+            "the unpublished failed process must not receive any transaction request");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+
+    root = CreateHardwareTestRoot();
+    previousScenario = Environment.GetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+    Process? blockedProcess = null;
+    int? blockedProcessId = null;
+    var blockedReaderCalls = 0;
+    DualCameraAgentLifecycle? blockedLifecycle = null;
+    try
+    {
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", "happy");
+        blockedLifecycle = CreateInjectedDualAgentTestLifecycle(
+            root,
+            process =>
+            {
+                blockedReaderCalls++;
+                blockedProcess ??= process;
+                blockedProcessId ??= process.Id;
+                throw new IOException("Synthetic redirected-output initialization failure.");
+            },
+            process =>
+            {
+                blockedProcess ??= process;
+                return false;
+            });
+
+        await Check.ThrowsAsync<HardwareCameraAgentLaunchException>(
+            () => blockedLifecycle.ReservePairTransactionAsync(Guid.NewGuid(), CancellationToken.None));
+        Check.True(blockedProcess is not null && !blockedProcess.HasExited,
+            "the termination-failure test requires a still-live first child");
+        await Check.ThrowsAsync<HardwareCameraAgentLaunchException>(
+            () => blockedLifecycle.ReservePairTransactionAsync(Guid.NewGuid(), CancellationToken.None));
+        Check.Equal(0L, blockedLifecycle.CurrentProcessGeneration);
+        Check.Equal(1, blockedReaderCalls);
+        Check.Equal(blockedProcessId!.Value, blockedProcess!.Id);
+        await Check.ThrowsAsync<HardwareCameraAgentLaunchException>(
+            async () => await blockedLifecycle.DisposeAsync());
+
+        blockedProcess.Kill(entireProcessTree: true);
+        Check.True(blockedProcess.WaitForExit(5000),
+            "the retained unpublished child must exit before lifecycle disposal can complete");
+        await blockedLifecycle.DisposeAsync();
+        blockedLifecycle = null;
+    }
+    finally
+    {
+        if (blockedLifecycle is not null && blockedProcess is { HasExited: false })
+        {
+            blockedProcess.Kill(entireProcessTree: true);
+            blockedProcess.WaitForExit(5000);
+            await blockedLifecycle.DisposeAsync();
+        }
+        Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static DualHardwareCaptureRequest BuildDualAgentTestCaptureRequest(string root, Guid transactionId)

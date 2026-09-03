@@ -47,6 +47,9 @@ public sealed class DualCameraAgentLifecycle :
     private readonly string _approvedCaptureProfilePath;
     private readonly string _dualIdentityProofPath;
     private readonly string? _wpdCameraMapPath;
+    private readonly Func<Process, (Task<string> StandardOutput, Task<string> StandardError)>
+        _redirectedOutputReader;
+    private readonly Func<Process, bool> _unpublishedProcessTerminator;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
 
     private Process? _process;
@@ -68,6 +71,7 @@ public sealed class DualCameraAgentLifecycle :
     // The capture host must therefore be allowed to reach its own terminal state;
     // shutdown must never cancel it or merely detach from a live process.
     private bool _captureHostActivated;
+    private bool _unpublishedProcessTerminationUnconfirmed;
     private bool _disposed;
     private long _processGeneration;
 
@@ -77,6 +81,25 @@ public sealed class DualCameraAgentLifecycle :
         string approvedCaptureProfilePath,
         string dualIdentityProofPath,
         string? wpdCameraMapPath = null)
+        : this(
+            agentExecutablePath,
+            pairJournalRootPath,
+            approvedCaptureProfilePath,
+            dualIdentityProofPath,
+            wpdCameraMapPath,
+            ReadRedirectedOutput,
+            TryTerminateUnpublishedProcess)
+    {
+    }
+
+    internal DualCameraAgentLifecycle(
+        string agentExecutablePath,
+        string pairJournalRootPath,
+        string approvedCaptureProfilePath,
+        string dualIdentityProofPath,
+        string? wpdCameraMapPath,
+        Func<Process, (Task<string> StandardOutput, Task<string> StandardError)> redirectedOutputReader,
+        Func<Process, bool> unpublishedProcessTerminator)
     {
         if (string.IsNullOrWhiteSpace(agentExecutablePath))
         {
@@ -102,6 +125,10 @@ public sealed class DualCameraAgentLifecycle :
         _wpdCameraMapPath = string.IsNullOrWhiteSpace(wpdCameraMapPath)
             ? null
             : Path.GetFullPath(wpdCameraMapPath);
+        _redirectedOutputReader = redirectedOutputReader ??
+            throw new ArgumentNullException(nameof(redirectedOutputReader));
+        _unpublishedProcessTerminator = unpublishedProcessTerminator ??
+            throw new ArgumentNullException(nameof(unpublishedProcessTerminator));
     }
 
     public string AgentExecutablePath => _agentExecutablePath;
@@ -465,9 +492,36 @@ public sealed class DualCameraAgentLifecycle :
     /// </summary>
     private DualHardwareCameraAgentOperations EnsureProcessStarted()
     {
-        if (_process is { HasExited: false } && _pipeName is not null && _wireOperations is not null)
+        if (_process is not null)
         {
-            return _wireOperations;
+            try
+            {
+                if (!_process.HasExited)
+                {
+                    if (_unpublishedProcessTerminationUnconfirmed)
+                    {
+                        throw new HardwareCameraAgentLaunchException(
+                            "The prior Dual Camera Agent initialization failed and child termination is unconfirmed; replacement is prohibited.",
+                            requestMayHaveBeenDispatched: false);
+                    }
+                    if (_pipeName is not null && _wireOperations is not null)
+                    {
+                        return _wireOperations;
+                    }
+
+                    throw new HardwareCameraAgentLaunchException(
+                        "A live Dual Camera Agent has incomplete client state; starting a replacement is prohibited.",
+                        requestMayHaveBeenDispatched: false);
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException or ObjectDisposedException)
+            {
+                // A partially initialized launch used to leave a disposed Process in
+                // this field. Clear every companion reference before retrying so the
+                // disposed handle cannot poison all future operations.
+                ClearPublishedProcessState();
+            }
         }
 
         DisposeExitedProcess();
@@ -513,57 +567,124 @@ public sealed class DualCameraAgentLifecycle :
             StartInfo = CreateStartInfo(pipeName, bindingPipeName),
             EnableRaisingEvents = true,
         };
+        var processStarted = false;
         try
         {
             if (!process.Start())
             {
                 throw new HardwareCameraAgentLaunchException("Dual Camera Agent を開始できませんでした。");
             }
-            Interlocked.Increment(ref _processGeneration);
-            _process = process;
-            _standardOutput = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-            _standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
-            _pipeName = pipeName;
-            _bindingPipeName = bindingPipeName;
-            _wireOperations = new DualHardwareCameraAgentOperations(
+            processStarted = true;
+            var (standardOutput, standardError) = _redirectedOutputReader(process);
+            var wireOperations = new DualHardwareCameraAgentOperations(
                 pipeName, process.Id, ConnectTimeout, ResponseTimeout);
-            _bindingWireTransport = bindingPipeName is null
+            var bindingWireTransport = bindingPipeName is null
                 ? null
                 : new NamedPipeHardwareCameraAgentTransport(
                     bindingPipeName, process.Id, ConnectTimeout, ResponseTimeout);
+
+            // Publish only a fully initialized process bundle. Generation changes
+            // before the Process reference becomes visible, so concurrent observers
+            // fail closed during the tiny publication window instead of accepting a
+            // new process under the previous generation.
+            Interlocked.Increment(ref _processGeneration);
+            _standardOutput = standardOutput;
+            _standardError = standardError;
+            _pipeName = pipeName;
+            _bindingPipeName = bindingPipeName;
+            _wireOperations = wireOperations;
+            _bindingWireTransport = bindingWireTransport;
             _bindingSessionMayNeedCleanup = false;
             _bindingCancellationResponseReceived = false;
             _bindingCancellationSucceeded = false;
             _captureHostActivated = false;
             LastObservedAgentExitCode = null;
-            return _wireOperations;
+            Volatile.Write(ref _process, process);
+            return wireOperations;
         }
-        catch (HardwareCameraAgentLaunchException)
+        catch (HardwareCameraAgentLaunchException exception)
         {
-            process.Dispose();
-            _pipeName = null;
-            _bindingPipeName = null;
-            _wireOperations = null;
-            _bindingWireTransport = null;
-            _bindingSessionMayNeedCleanup = false;
-            _bindingCancellationResponseReceived = false;
-            _bindingCancellationSucceeded = false;
-            _captureHostActivated = false;
-            throw;
+            throw HandleInitializationFailure(process, processStarted, exception);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            process.Dispose();
-            _pipeName = null;
-            _bindingPipeName = null;
-            _wireOperations = null;
-            _bindingWireTransport = null;
-            _bindingSessionMayNeedCleanup = false;
-            _bindingCancellationResponseReceived = false;
-            _bindingCancellationSucceeded = false;
-            _captureHostActivated = false;
-            throw new HardwareCameraAgentLaunchException("Dual Camera Agent の開始に失敗しました。", exception);
+            var launchException = new HardwareCameraAgentLaunchException(
+                "Dual Camera Agent の開始に失敗しました。",
+                exception);
+            throw HandleInitializationFailure(process, processStarted, launchException);
         }
+    }
+
+    private static (Task<string> StandardOutput, Task<string> StandardError) ReadRedirectedOutput(
+        Process process) =>
+        (
+            process.StandardOutput.ReadToEndAsync(CancellationToken.None),
+            process.StandardError.ReadToEndAsync(CancellationToken.None));
+
+    private HardwareCameraAgentLaunchException HandleInitializationFailure(
+        Process process,
+        bool processStarted,
+        HardwareCameraAgentLaunchException initializationFailure)
+    {
+        if (!processStarted || _unpublishedProcessTerminator(process))
+        {
+            process.Dispose();
+            ClearPublishedProcessState();
+            return initializationFailure;
+        }
+
+        // The child may already hold the native process lease even though no wire
+        // request was sent. Retain the handle and latch a blocking state until its
+        // exit can be observed; forgetting it would allow an unsafe replacement.
+        ClearPublishedProcessState();
+        _unpublishedProcessTerminationUnconfirmed = true;
+        Volatile.Write(ref _process, process);
+        return new HardwareCameraAgentLaunchException(
+            "Dual Camera Agent initialization failed and the unpublished child could not be confirmed exited; replacement is prohibited.",
+            initializationFailure,
+            requestMayHaveBeenDispatched: false);
+    }
+
+    private static bool TryTerminateUnpublishedProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                // No wire transport has been published and no request can have been
+                // sent yet. Only this pre-dispatch initialization failure may stop a
+                // child automatically; established Agent processes remain governed by
+                // the normal no-force-kill lifecycle contract.
+                process.Kill(entireProcessTree: true);
+                if (!process.WaitForExit((int)BindingShutdownExitTimeout.TotalMilliseconds))
+                {
+                    return false;
+                }
+            }
+            return process.HasExited;
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or System.ComponentModel.Win32Exception or
+            NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private void ClearPublishedProcessState()
+    {
+        _process = null;
+        _standardOutput = null;
+        _standardError = null;
+        _pipeName = null;
+        _bindingPipeName = null;
+        _wireOperations = null;
+        _bindingWireTransport = null;
+        _bindingSessionMayNeedCleanup = false;
+        _bindingCancellationResponseReceived = false;
+        _bindingCancellationSucceeded = false;
+        _captureHostActivated = false;
+        _unpublishedProcessTerminationUnconfirmed = false;
     }
 
     private IHardwareCameraAgentTransport EnsureBindingProcessStarted()
@@ -824,24 +945,23 @@ public sealed class DualCameraAgentLifecycle :
         {
             return;
         }
-        if (!_process.HasExited)
+        try
         {
-            // A live process is reused as-is; EnsureProcessStarted only reaches this
-            // point once the cached process/pipe/wire operations are already stale.
+            if (!_process.HasExited)
+            {
+                throw new HardwareCameraAgentLaunchException(
+                    "A live Dual Camera Agent cannot be replaced while its client state is incomplete.",
+                    requestMayHaveBeenDispatched: false);
+            }
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or ObjectDisposedException)
+        {
+            ClearPublishedProcessState();
             return;
         }
         _process.Dispose();
-        _process = null;
-        _standardOutput = null;
-        _standardError = null;
-        _pipeName = null;
-        _bindingPipeName = null;
-        _wireOperations = null;
-        _bindingWireTransport = null;
-        _bindingSessionMayNeedCleanup = false;
-        _bindingCancellationResponseReceived = false;
-        _bindingCancellationSucceeded = false;
-        _captureHostActivated = false;
+        ClearPublishedProcessState();
     }
 
     public async ValueTask DisposeAsync()
@@ -855,7 +975,33 @@ public sealed class DualCameraAgentLifecycle :
         try
         {
             Exception? shutdownFailure = null;
-            if (_captureHostActivated)
+            if (_unpublishedProcessTerminationUnconfirmed)
+            {
+                try
+                {
+                    if (_process is not { } unpublishedProcess || !unpublishedProcess.HasExited)
+                    {
+                        shutdownFailure = new HardwareCameraAgentLaunchException(
+                            "The unpublished Dual Camera Agent child is not confirmed exited; the exclusive hardware lease must remain held.",
+                            requestMayHaveBeenDispatched: false);
+                    }
+                    else
+                    {
+                        LastObservedAgentExitCode = unpublishedProcess.ExitCode;
+                        _unpublishedProcessTerminationUnconfirmed = false;
+                    }
+                }
+                catch (Exception exception) when (
+                    exception is InvalidOperationException or ObjectDisposedException or
+                    System.ComponentModel.Win32Exception)
+                {
+                    shutdownFailure = new HardwareCameraAgentLaunchException(
+                        "The unpublished Dual Camera Agent child exit cannot be inspected; the exclusive hardware lease must remain held.",
+                        exception,
+                        requestMayHaveBeenDispatched: false);
+                }
+            }
+            else if (_captureHostActivated)
             {
                 shutdownFailure = await WaitForActivatedCaptureHostExitAsync().ConfigureAwait(false);
             }
