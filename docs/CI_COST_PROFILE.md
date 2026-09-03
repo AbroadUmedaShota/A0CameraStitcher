@@ -1,6 +1,6 @@
 # CI cost profile
 
-Last reviewed: 2026-09-03 JST
+Last reviewed: 2026-09-04 JST
 
 ## Repository and billing context
 
@@ -48,7 +48,18 @@ The job timeout is reduced from 90 to 45 minutes to cap runaway consumption whil
 - At an illustrative 20 merged code PRs per month, the expected total falls from about 800-920 to 400-460 Windows runner minutes, saving about 400-460 runner minutes. Recalculate from the actual monthly PR count.
 - Documentation-only PRs avoid about 18-22 runner minutes compared with a full run.
 - GitHub's current billed-minute multiplier, included allowance, remaining balance, and spending limit are unconfirmed because billing API access is unavailable. Runner wall time is used here and must not be represented as the final invoice amount.
-- Local implementation and review are authorized by the owner's 2026-09-03 instruction. Activating a full private Windows run remains pending explicit cost approval because its expected duration exceeds 10 minutes.
+- Local implementation and review are authorized by the owner's 2026-09-03 instruction. Full private Windows runs require explicit scoped cost approval because their expected duration exceeds 10 minutes; the one-time approval below does not authorize later runs.
+
+### One-time PR #173 approval (2026-09-04 JST)
+
+- Approval: the owner authorized the known PR #173 M2 reservation-journal fix and one additional Windows Software-Only CI run, conveyed by the integration command task `01a067d0-12f9-7cd1-80d0-07f1de90f4a3`; recorded at 2026-09-04 08:20 JST. This covers one push after local preparation, its canonical PR run, and merge only after the exact-SHA check succeeds and independent review passes.
+- Approved change: M2 commit `cdaa8e805cfa2dd5432e1c7ba52b787e23d2db89` plus test-summary correction `4611f660a51badb364b5d2fb73ae97143cfe3636`. The branch incorporates main `9f6527b2873c455a1d9db2eabbc2d14e81f6e8a1` to use the merged CI-cost controls, plus this required approval record. No unrelated product changes are included.
+- Cost basis: one `windows-latest` job, no matrix, approximately 20-23 runner minutes; per-job whole-minute rounding applies. The preceding exact-SHA full run `33778790465` took 20m42s (21 rounded runner minutes). The 45-minute timeout remains the execution ceiling, not the typical estimate.
+- Monthly increment authorized by this decision: one run in September 2026, approximately 20-23 runner minutes in total (one job multiplied by one run); no recurring run budget is granted. Billed multipliers and currency cost remain unknown and are not equated with runner wall time.
+- Allowance status as of 2026-09-04 08:20 JST: owner/visibility rechecked as personal `AbroadUmedaShota`, private repository. Billing usage API returned HTTP 404 and required the unavailable `user` scope; current allowance, remaining balance and spending limit are unknown. The prior successful run proves prior allocation only, not free capacity. The owner approved the stated estimate with this uncertainty surfaced.
+- Trigger scope: the existing PR `synchronize` event is the only authorized full run. No manual dispatch, automatic rerun, verify-only PR, additional paid run, or duplicate main-push full suite is authorized. On CI failure or billing/quota/spending-limit block, stop and report without a chargeable retry.
+- Gate status: branch-protection and ruleset APIs returned HTTP 403 (plan restriction) on this recheck. This does not waive the accepted exact-SHA full CI and independent-review gates, nor authorize any protection change.
+- Excluded: hardware, SDK/USB/capture, production, distribution and release. Record the actual run ID/result and merge result in PR #173 / Issue #151 without another CI-triggering push solely to update this log.
 
 ## Recheck conditions
 
