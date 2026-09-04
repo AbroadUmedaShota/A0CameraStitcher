@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.ObjectModel;
 using System.Security.Cryptography;
+using A0CameraStitcher.M3.Foundation.Storage;
 
 namespace A0CameraStitcher.M3.Foundation.DualCamera;
 
@@ -24,6 +25,9 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
     private DualCameraIdentitySnapshot _transactionIdentity = DualCameraIdentitySnapshot.HardwarePending();
     private Guid? _responseUnknownTransactionId;
     private bool _active;
+
+    internal Action<string, string>? BeforeExportPublishForTesting { get; init; }
+    internal Action? AfterExportFlushForTesting { get; init; }
 
     public event EventHandler<DualCameraProductState>? StateChanged;
 
@@ -316,31 +320,81 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         BeginContinuation(requireSuccessfulStitch: true);
         var exportJobId = Guid.NewGuid();
         var destination = Path.Combine(directory, $"a0-stitched-{exportJobId:N}.jpg");
+        var stagingDirectory = Path.Combine(directory, $".a0-export-{exportJobId:N}.partial");
+        var stagingPath = Path.Combine(stagingDirectory, "verified-candidate.jpg");
         SetStage(DualCameraProductStage.Review, DualCameraStageStatus.Succeeded, "Operator proceeded from result review to explicit export");
         SetStage(DualCameraProductStage.Export, DualCameraStageStatus.Active, "Explicit export started");
+        var published = false;
         try
         {
             var stitch = Current!.Stitch!;
-            await _stitcher.ExportAsync(stitch.OutputPath, destination, cancellationToken).ConfigureAwait(false);
-            if (!File.ReadAllBytes(stitch.OutputPath).SequenceEqual(File.ReadAllBytes(destination)))
-            {
-                throw new IOException("Export verification was not byte-identical.");
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory))
+                throw new IOException("Export staging directory already exists.");
+            Directory.CreateDirectory(stagingDirectory);
+            if ((File.GetAttributes(stagingDirectory) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("Export staging directory must not be a reparse point.");
 
-            SetStage(DualCameraProductStage.Export, DualCameraStageStatus.Succeeded, "Explicit byte-identical export verified");
-            lock (_sync)
-            {
-                _current = Snapshot(export: new DualCameraExportResult(exportJobId, destination, true, DualCameraFailureCode.None, null));
-            }
-            return CompleteOperation();
+            // Keep the source immutable through both native export and app verification.
+            // The native adapter requires a .jpg destination and retains its own
+            // partial/validation/locked-rename contract inside this diagnostic directory.
+            using var source = new FileStream(stitch.OutputPath, FileMode.Open, FileAccess.Read,
+                FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await _stitcher.ExportAsync(stitch.OutputPath, stagingPath, cancellationToken).ConfigureAwait(false);
+            if ((File.GetAttributes(stagingPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                throw new IOException("Export staging artifact must be a regular file.");
+            using var staged = WindowsDurableFilePublisher.OpenLockedForVerifiedPublish(stagingPath);
+            await VerifyExportBytesAsync(source, staged, cancellationToken).ConfigureAwait(false);
+            BeforeExportPublishForTesting?.Invoke(stagingPath, destination);
+            cancellationToken.ThrowIfCancellationRequested();
+            // Commit point: rename this exact verified handle without replacing any file.
+            WindowsDurableFilePublisher.PublishLocked(staged, destination, replaceExisting: false,
+                cancellationToken, AfterExportFlushForTesting);
+            published = true;
         }
-        catch (OperationCanceledException exception)
+        catch (OperationCanceledException exception) when (!published)
         {
-            return FailExport(exportJobId, destination, DualCameraFailureCode.Interrupted, exception.Message);
+            return FailExport(exportJobId, DualCameraFailureCode.Interrupted, exception.Message);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (!published)
         {
-            return FailExport(exportJobId, destination, DualCameraFailureCode.ExportFailed, exception.Message);
+            return FailExport(exportJobId, DualCameraFailureCode.ExportFailed, exception.Message);
+        }
+        catch (IOException) when (published)
+        {
+            // A handle-close error cannot undo a completed locked publication.
+            // Never delete the committed file or relabel it as an unpublished failure.
+        }
+
+        // Only remove an empty directory owned by this job. Failed candidates and
+        // competing replacement files remain diagnostic, never final product output.
+        try { Directory.Delete(stagingDirectory, recursive: false); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
+        lock (_sync)
+        {
+            _current = Snapshot(export: new DualCameraExportResult(exportJobId, destination, true, DualCameraFailureCode.None, null),
+                failureCode: DualCameraFailureCode.None);
+        }
+        SetStage(DualCameraProductStage.Export, DualCameraStageStatus.Succeeded, "Explicit byte-identical export verified");
+        return CompleteOperation();
+    }
+
+    private static async Task VerifyExportBytesAsync(FileStream source, FileStream staged, CancellationToken cancellationToken)
+    {
+        if (source.Length == 0 || source.Length != staged.Length)
+            throw new IOException("Export verification was not byte-identical.");
+        var sourceBuffer = new byte[128 * 1024];
+        var stagedBuffer = new byte[sourceBuffer.Length];
+        for (long remaining = source.Length; remaining > 0;)
+        {
+            var count = (int)Math.Min(remaining, sourceBuffer.Length);
+            await source.ReadExactlyAsync(sourceBuffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            await staged.ReadExactlyAsync(stagedBuffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            if (!sourceBuffer.AsSpan(0, count).SequenceEqual(stagedBuffer.AsSpan(0, count)))
+                throw new IOException("Export verification was not byte-identical.");
+            remaining -= count;
         }
     }
 
@@ -710,16 +764,15 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         return state;
     }
 
-    private DualCameraProductState FailExport(Guid jobId, string destination, DualCameraFailureCode code, string reason)
+    private DualCameraProductState FailExport(Guid jobId, DualCameraFailureCode code, string reason)
     {
-        var outputPath = File.Exists(destination) ? destination : null;
         DualCameraProductState state;
         lock (_sync)
         {
             _active = false;
             _stages[DualCameraProductStage.Export] = new(DualCameraProductStage.Export, DualCameraStageStatus.Failed, reason);
             _current = Snapshot(
-                export: new DualCameraExportResult(jobId, outputPath, false, code, reason),
+                export: new DualCameraExportResult(jobId, null, false, code, reason),
                 failureCode: code,
                 failureReason: reason);
             state = _current;

@@ -54,6 +54,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("capture A and B failures retain only verified originals", CaptureFailuresAsync),
     ("interruption retains originals and never retries", InterruptionAsync),
     ("stitch and export failures preserve product artifacts", OutputFailuresAsync),
+    ("export failures never publish a final JPEG", ExportPublicationFailuresAsync),
+    ("export commits only its verified handle and never replaces a destination", ExportPublicationBoundaryAsync),
     ("HardwareDual anonymous fake completes capture stitch review export", HardwareDualEndToEndAsync),
     ("HardwareDual preflight negatives have zero capture side effects", HardwareDualPreflightNegativesAsync),
     ("HardwareDual Agent negatives retain only safe originals and never retry", HardwareDualAgentNegativesAsync),
@@ -757,6 +759,137 @@ static async Task OutputFailuresAsync()
         Check.Equal(1, bridge.ExportCalls);
         Check.Equal(0, failed.AutomaticRetryCount);
     });
+}
+
+static async Task ExportPublicationFailuresAsync()
+{
+    foreach (var failure in new[] { "mismatch", "same-length-mismatch", "last-chunk-mismatch", "throw-after-write", "cancel-after-write" })
+    {
+        await WithRootAsync(async root =>
+        {
+            using var cancellation = new CancellationTokenSource();
+            var bridge = new FailureBridge();
+            var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource());
+            var captured = await flow.CaptureAndStitchAsync(
+                DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+            var originalBytes = File.ReadAllBytes(captured.Stitch!.OutputPath);
+            if (failure == "last-chunk-mismatch")
+            {
+                // Synthetic byte-copy seam, not a JPEG decoder test. Exercise
+                // two complete comparison buffers and a non-aligned final chunk.
+                originalBytes = Enumerable.Range(0, 2 * 128 * 1024 + 17).Select(i => (byte)(i % 251)).ToArray();
+                File.WriteAllBytes(captured.Stitch.OutputPath, originalBytes);
+            }
+            var directory = Path.Combine(root, "export");
+            Directory.CreateDirectory(directory);
+            var existing = Path.Combine(directory, "existing.jpg");
+            File.WriteAllText(existing, "keep-existing");
+            bridge.ExportAction = (_, destination, _) =>
+            {
+                var candidate = originalBytes.ToArray();
+                if (failure == "same-length-mismatch") candidate[0] ^= 1;
+                if (failure == "last-chunk-mismatch") candidate[^1] ^= 1;
+                File.WriteAllBytes(destination, failure == "mismatch" ? new byte[] { 1, 2, 3 } : candidate);
+                if (failure == "throw-after-write") throw new IOException("injected failure after staging write");
+                if (failure == "cancel-after-write") cancellation.Cancel();
+            };
+            var failed = await flow.ExportAsync(directory, cancellation.Token);
+            Check.False(failed.Export!.Succeeded);
+            Check.Equal(failure == "cancel-after-write" ? DualCameraFailureCode.Interrupted : DualCameraFailureCode.ExportFailed, failed.FailureCode);
+            Check.True(failed.Export.OutputPath is null);
+            Check.Equal(1, Directory.GetFiles(directory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+            Check.Equal("keep-existing", File.ReadAllText(existing));
+            Check.True(File.ReadAllBytes(captured.Stitch.OutputPath).SequenceEqual(originalBytes));
+            Check.True(captured.Capture!.Originals.All(original => File.Exists(original.Path)));
+            Check.Equal(1, bridge.ExportCalls);
+            Check.Equal(0, failed.AutomaticRetryCount);
+            Check.True(Directory.GetFiles(directory, "*.jpg", SearchOption.AllDirectories).Length > 1);
+            bridge.ExportAction = null;
+            var retried = await flow.ExportAsync(directory);
+            Check.True(retried.Export!.Succeeded);
+            Check.Equal(DualCameraFailureCode.None, retried.FailureCode);
+            Check.True(retried.FailureReason is null);
+            Check.True(File.ReadAllBytes(retried.Export.OutputPath!).SequenceEqual(originalBytes));
+            Check.Equal(2, bridge.ExportCalls); // Explicit operator retry is a new export job.
+        });
+    }
+}
+
+static async Task ExportPublicationBoundaryAsync()
+{
+    foreach (var scenario in new[] { "cancel-before", "cancel-after-flush", "destination-exists", "replace-staging", "cancel-after" })
+    {
+        await WithRootAsync(async root =>
+        {
+            using var cancellation = new CancellationTokenSource();
+            var bridge = new FailureBridge();
+            var hookCalls = 0;
+            string? finalPath = null;
+            string? stagedPath = null;
+            var flow = new DualCameraProductFlow(root, bridge, bridge, SyntheticIdentitySource())
+            {
+                AfterExportFlushForTesting = () =>
+                {
+                    if (scenario == "cancel-after-flush") cancellation.Cancel();
+                },
+                BeforeExportPublishForTesting = (staged, final) =>
+                {
+                    hookCalls++;
+                    finalPath = final;
+                    stagedPath = staged;
+                    Check.False(File.Exists(final));
+                    Check.Throws<IOException>(() => File.WriteAllText(staged, "cannot mutate locked bytes"));
+                    if (scenario == "cancel-before") cancellation.Cancel();
+                    if (scenario == "destination-exists") File.WriteAllText(final, "keep-collision");
+                    if (scenario == "replace-staging")
+                    {
+                        File.Move(staged, staged + ".moved");
+                        File.WriteAllText(staged, "unverified replacement");
+                    }
+                },
+            };
+            var captured = await flow.CaptureAndStitchAsync(
+                DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
+            var expected = File.ReadAllBytes(captured.Stitch!.OutputPath);
+            bridge.ExportAction = (source, destination, _) =>
+            {
+                Check.Throws<IOException>(() => File.WriteAllText(source, "source must stay immutable"));
+                File.Copy(source, destination);
+            };
+            flow.StateChanged += (_, state) =>
+            {
+                if (scenario == "cancel-after" && state.Export?.Succeeded == true) cancellation.Cancel();
+            };
+            var directory = Path.Combine(root, "export");
+            Directory.CreateDirectory(directory);
+            var result = await flow.ExportAsync(directory, cancellation.Token);
+            Check.Equal(1, hookCalls);
+            if (scenario is "cancel-before" or "cancel-after-flush" or "destination-exists")
+            {
+                Check.False(result.Export!.Succeeded);
+                Check.True(result.Export.OutputPath is null);
+                Check.Equal(scenario == "destination-exists" ? DualCameraFailureCode.ExportFailed : DualCameraFailureCode.Interrupted, result.FailureCode);
+                if (scenario == "destination-exists") Check.Equal("keep-collision", File.ReadAllText(finalPath!));
+                else Check.False(File.Exists(finalPath));
+                Check.True(File.Exists(stagedPath));
+            }
+            else
+            {
+                Check.True(result.Export!.Succeeded);
+                Check.True(File.ReadAllBytes(finalPath!).SequenceEqual(expected));
+                if (scenario == "replace-staging")
+                {
+                    Check.Equal("unverified replacement", File.ReadAllText(stagedPath!));
+                    Check.False(File.Exists(stagedPath + ".moved"));
+                }
+                else Check.Equal(0, Directory.GetDirectories(directory).Length);
+            }
+            Check.False(result.IsActive);
+            Check.Equal(1, bridge.ExportCalls);
+            Check.Equal(0, result.AutomaticRetryCount);
+            Check.True(File.ReadAllBytes(captured.Stitch.OutputPath).SequenceEqual(expected));
+        });
+    }
 }
 
 static async Task HardwareDualEndToEndAsync()
@@ -2045,11 +2178,18 @@ sealed class FailureBridge : ITestSyntheticCamera, IOfflineStitcherAdapter
             new OfflineStitchArtifact(output, 1, 1, profile.ProfileId, manifestFileName));
     }
 
+    public Action<string, string, CancellationToken>? ExportAction { get; set; }
+
     public Task ExportAsync(string stitchedJpeg, string destinationJpeg, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ExportCalls++;
         if (FailExport) throw new IOException("deterministic export failure");
+        if (ExportAction is not null)
+        {
+            ExportAction(stitchedJpeg, destinationJpeg, cancellationToken);
+            return Task.CompletedTask;
+        }
         File.Copy(stitchedJpeg, destinationJpeg, overwrite: false);
         return Task.CompletedTask;
     }
