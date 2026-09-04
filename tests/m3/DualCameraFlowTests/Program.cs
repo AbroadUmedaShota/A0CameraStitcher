@@ -59,6 +59,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("HardwareDual Agent negatives retain only safe originals and never retry", HardwareDualAgentNegativesAsync),
     ("HardwareDual unknown recovery ignores current identity and profile inputs", HardwareDualFrozenRecoveryAsync),
     ("HardwareDual unknown recovery survives process restart", HardwareDualRestartRecoveryAsync),
+    ("HardwareDual reservation is journaled before Agent dispatch and recovers fail-closed", HardwareDualReservationJournalAsync),
     ("HardwareDual restart recovery retains mismatched snapshots", HardwareDualRestartMismatchAsync),
     ("HardwareDual active identity and profile snapshots remain frozen", HardwareDualSnapshotFreezeAsync),
 };
@@ -949,7 +950,11 @@ static async Task HardwareDualSnapshotFreezeAsync()
         var identitySource = new MutableIdentitySource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
         var operations = new BlockingDualHardwareOperations();
         var stitcher = new FailureBridge();
-        var flow = new DualCameraProductFlow(root, new HardwareDualCaptureSource(operations), stitcher, identitySource);
+        var flow = new DualCameraProductFlow(
+            root,
+            new HardwareDualCaptureSource(operations, recoveryStore: new MemoryDualHardwareRecoveryStore()),
+            stitcher,
+            identitySource);
         var active = flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateHardwareDual(
                 profile,
@@ -1008,7 +1013,7 @@ static async Task HardwareDualFrozenRecoveryAsync()
             var stitcher = new FailureBridge();
             IDualCameraProductFlow flow = new DualCameraProductFlow(
                 root,
-                new HardwareDualCaptureSource(operations),
+                new HardwareDualCaptureSource(operations, recoveryStore: new MemoryDualHardwareRecoveryStore()),
                 stitcher,
                 identitySource);
             var transactionId = Guid.NewGuid();
@@ -1116,7 +1121,7 @@ static async Task HardwareDualRestartRecoveryAsync()
             new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
         var persistenceFailure = await blockedBeforeDispatch.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()));
         Check.Equal(DualCameraFailureCode.AgentResponseUnknown, persistenceFailure.FailureCode);
-        Check.Equal(1, undispatchedOperations.ReserveCalls);
+        Check.Equal(0, undispatchedOperations.ReserveCalls);
         Check.Equal(0, undispatchedOperations.StartCalls);
         Check.Equal(0, undispatchedOperations.QueryCalls);
 
@@ -1136,6 +1141,142 @@ static async Task HardwareDualRestartRecoveryAsync()
     });
 
     await HardwareDualConfirmedUndispatchedCleanupAsync();
+}
+
+static async Task HardwareDualReservationJournalAsync()
+{
+    await WithRootAsync(async root =>
+    {
+        var events = new List<string>();
+        var store = new MemoryDualHardwareRecoveryStore { Events = events };
+        var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success)
+        {
+            Events = events,
+        };
+        var flow = new DualCameraProductFlow(
+            root,
+            new HardwareDualCaptureSource(operations, recoveryStore: store),
+            new FailureBridge(),
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+        var completed = await flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()));
+        Check.Equal(DualCameraFailureCode.None, completed.FailureCode);
+        Check.True(events.Take(4).SequenceEqual(
+            ["save-reservation-unknown", "reserve", "mark-may-have-dispatched", "start"]));
+        Check.Equal(1, store.MarkMayHaveDispatchedCalls);
+    });
+
+    foreach (var reserveFailure in new[] { "throw", "reject" })
+    {
+        await WithRootAsync(async root =>
+        {
+            var transactionId = Guid.NewGuid();
+            var store = new MemoryDualHardwareRecoveryStore();
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success)
+            {
+                ThrowOnReserve = reserveFailure == "throw",
+                ReserveAccepted = reserveFailure != "reject",
+                QueryStateOverride = reserveFailure == "throw"
+                    ? DualHardwarePairQueryState.NotFound
+                    : DualHardwarePairQueryState.ClosedBeforeDispatch,
+            };
+            var first = new DualCameraProductFlow(
+                root,
+                new HardwareDualCaptureSource(operations, recoveryStore: store),
+                new FailureBridge(),
+                new FixedDualCameraIdentitySnapshotSource(
+                    DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+            var unknown = await first.CaptureAndStitchAsync(HardwareRequest(transactionId));
+            Check.Equal(DualCameraFailureCode.AgentResponseUnknown, unknown.FailureCode);
+            Check.Equal(1, operations.ReserveCalls);
+            Check.Equal(0, operations.StartCalls);
+            Check.Equal(DualHardwareRecoveryIntent.ReservationOutcomeUnknown, store.Intent);
+
+            var restarted = new DualCameraProductFlow(
+                root,
+                new HardwareDualCaptureSource(operations, recoveryStore: store),
+                new FailureBridge(),
+                new FixedDualCameraIdentitySnapshotSource(
+                    DualCameraIdentitySnapshot.HardwarePending()));
+            var recovered = await restarted.RecoverAndStitchAsync(transactionId);
+            Check.Equal(DualCameraFailureCode.HardwarePending, recovered.FailureCode);
+            Check.True(store.Pending is null);
+            Check.Equal(1, operations.QueryCalls);
+            Check.Equal(0, operations.CloseCalls);
+        });
+    }
+
+    await WithRootAsync(async root =>
+    {
+        var transactionId = Guid.NewGuid();
+        var store = new MemoryDualHardwareRecoveryStore { ThrowOnMarkMayHaveDispatched = true };
+        var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success)
+        {
+            QueryStateOverride = DualHardwarePairQueryState.Reserved,
+        };
+        var first = new DualCameraProductFlow(
+            root,
+            new HardwareDualCaptureSource(operations, recoveryStore: store),
+            new FailureBridge(),
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+        var blocked = await first.CaptureAndStitchAsync(HardwareRequest(transactionId));
+        Check.Equal(DualCameraFailureCode.AgentResponseUnknown, blocked.FailureCode);
+        Check.Equal(1, operations.ReserveCalls);
+        Check.Equal(0, operations.StartCalls);
+        Check.Equal(DualHardwareRecoveryIntent.ReservationOutcomeUnknown, store.Intent);
+
+        var restarted = new DualCameraProductFlow(
+            root,
+            new HardwareDualCaptureSource(operations, recoveryStore: store),
+            new FailureBridge(),
+            new FixedDualCameraIdentitySnapshotSource(
+                DualCameraIdentitySnapshot.HardwarePending()));
+        var closed = await restarted.RecoverAndStitchAsync(transactionId);
+        Check.Equal(DualCameraFailureCode.HardwarePending, closed.FailureCode);
+        Check.True(store.Pending is null);
+        Check.Equal(1, operations.QueryCalls);
+        Check.Equal(1, operations.CloseCalls);
+        Check.True(operations.CloseTransactionIds.SequenceEqual([transactionId]));
+    });
+
+    foreach (var state in new[]
+    {
+        DualHardwarePairQueryState.Terminal,
+        DualHardwarePairQueryState.Reserved,
+    })
+    {
+        await WithRootAsync(async root =>
+        {
+            var transactionId = Guid.NewGuid();
+            var store = new MemoryDualHardwareRecoveryStore();
+            var operations = new FakeDualHardwareOperations(HardwareFakeScenario.Success)
+            {
+                ReserveAccepted = false,
+                QueryStateOverride = state,
+                ThrowOnQuery = state == DualHardwarePairQueryState.Reserved,
+            };
+            var flow = new DualCameraProductFlow(
+                root,
+                new HardwareDualCaptureSource(operations, recoveryStore: store),
+                new FailureBridge(),
+                new FixedDualCameraIdentitySnapshotSource(
+                    DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+            Check.Equal(
+                DualCameraFailureCode.AgentResponseUnknown,
+                (await flow.CaptureAndStitchAsync(HardwareRequest(transactionId))).FailureCode);
+            Check.Equal(
+                DualCameraFailureCode.AgentResponseUnknown,
+                (await flow.RecoverAndStitchAsync(transactionId)).FailureCode);
+            Check.Equal(transactionId, store.Pending!.TransactionId);
+            Check.Equal(0, store.ClearCalls);
+            Check.Equal(0, operations.StartCalls);
+            Check.Equal(1, operations.ReserveCalls);
+        });
+    }
 }
 
 static async Task HardwareDualRestartMismatchAsync()
@@ -1329,7 +1470,9 @@ static async Task HardwareDualConfirmedUndispatchedCleanupAsync()
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
 
         var blocked = await flow.CaptureAndStitchAsync(HardwareRequest(Guid.NewGuid()));
-        Check.Equal(DualCameraFailureCode.AgentResponseUnknown, blocked.FailureCode);
+        Check.Equal(DualCameraFailureCode.HardwarePending, blocked.FailureCode);
+        Check.Equal(0, operations.ReserveCalls);
+        Check.Equal(0, operations.StartCalls);
         Check.Equal(0, operations.CloseCalls);
         Check.Equal(0, operations.QueryCalls);
     });
@@ -1382,7 +1525,7 @@ static DualCameraProductFlow HardwareFlow(
     IOfflineStitcherAdapter stitcher,
     DualCameraIdentitySnapshot? identity = null) => new(
         root,
-        new HardwareDualCaptureSource(operations),
+        new HardwareDualCaptureSource(operations, recoveryStore: new MemoryDualHardwareRecoveryStore()),
         stitcher,
         new FixedDualCameraIdentitySnapshotSource(identity ?? DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
 
@@ -1501,13 +1644,20 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
     public DualHardwareCloseState CloseState { get; set; } =
         DualHardwareCloseState.ClosedBeforeDispatch;
     public HardwareFakeScenario RecoveryScenario { get; init; } = HardwareFakeScenario.Success;
+    public bool ReserveAccepted { get; init; } = true;
+    public bool ThrowOnReserve { get; init; }
+    public bool ThrowOnQuery { get; init; }
+    public DualHardwarePairQueryState? QueryStateOverride { get; init; }
+    public List<string>? Events { get; init; }
 
     public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken)
     {
         _ = transactionId;
         cancellationToken.ThrowIfCancellationRequested();
         ReserveCalls++;
-        return Task.FromResult(true);
+        Events?.Add("reserve");
+        if (ThrowOnReserve) throw new IOException("Synthetic reservation response failure.");
+        return Task.FromResult(ReserveAccepted);
     }
 
     public Task<DualHardwareDispatchResult> StartReservedPairAsync(
@@ -1516,6 +1666,7 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
     {
         cancellationToken.ThrowIfCancellationRequested();
         StartCalls++;
+        Events?.Add("start");
         if (scenario == HardwareFakeScenario.DispatchThrows)
             throw new IOException("Synthetic response delivery failure.");
         if (scenario == HardwareFakeScenario.ResponseUnknown)
@@ -1611,6 +1762,10 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
         _ = transactionId;
         cancellationToken.ThrowIfCancellationRequested();
         QueryCalls++;
+        Events?.Add("query");
+        if (ThrowOnQuery) throw new IOException("Synthetic reservation query failure.");
+        if (QueryStateOverride is { } queryState)
+            return Task.FromResult(new DualHardwarePairQueryOutcome(queryState, null));
         if (scenario == HardwareFakeScenario.ResponseUnknown &&
             RecoveryScenario == HardwareFakeScenario.QueryThrowsOnRecovery &&
             QueryCalls >= 2)
@@ -1632,6 +1787,7 @@ sealed class FakeDualHardwareOperations(HardwareFakeScenario scenario) : IDualHa
     {
         cancellationToken.ThrowIfCancellationRequested();
         CloseCalls++;
+        Events?.Add("close");
         CloseTransactionIds.Add(transactionId);
         return Task.FromResult(CloseState);
     }
@@ -1643,10 +1799,13 @@ sealed class MemoryDualHardwareRecoveryStore : IDualHardwareRecoveryStore
     public int SaveCalls { get; private set; }
     public int ClearCalls { get; private set; }
     public int MarkCloseCalls { get; private set; }
+    public int MarkMayHaveDispatchedCalls { get; private set; }
     public bool ThrowOnMarkClose { get; init; }
+    public bool ThrowOnMarkMayHaveDispatched { get; init; }
     public int ClearFailuresRemaining { get; set; }
+    public List<string>? Events { get; init; }
     public DualHardwareRecoveryIntent Intent { get; private set; } =
-        DualHardwareRecoveryIntent.MayHaveDispatched;
+        DualHardwareRecoveryIntent.ReservationOutcomeUnknown;
 
     public DualHardwareCaptureRequest? LoadPending() => Pending;
 
@@ -1655,8 +1814,21 @@ sealed class MemoryDualHardwareRecoveryStore : IDualHardwareRecoveryStore
         if (Pending is not null && Pending != request)
             throw new InvalidOperationException("A different recovery snapshot is already pending.");
         Pending = request;
-        Intent = DualHardwareRecoveryIntent.MayHaveDispatched;
+        Intent = DualHardwareRecoveryIntent.ReservationOutcomeUnknown;
         SaveCalls++;
+        Events?.Add("save-reservation-unknown");
+    }
+
+    public void MarkMayHaveDispatched(Guid expectedTransactionId)
+    {
+        if (Pending?.TransactionId != expectedTransactionId ||
+            Intent != DualHardwareRecoveryIntent.ReservationOutcomeUnknown)
+            throw new InvalidOperationException("The expected reservation-unknown snapshot is not pending.");
+        if (ThrowOnMarkMayHaveDispatched)
+            throw new IOException("Synthetic dispatch-intent persistence failure.");
+        Intent = DualHardwareRecoveryIntent.MayHaveDispatched;
+        MarkMayHaveDispatchedCalls++;
+        Events?.Add("mark-may-have-dispatched");
     }
 
     public DualHardwareRecoveryIntent LoadPendingIntent(Guid expectedTransactionId)
@@ -1686,7 +1858,7 @@ sealed class MemoryDualHardwareRecoveryStore : IDualHardwareRecoveryStore
             throw new IOException("Synthetic pending-clear failure.");
         }
         Pending = null;
-        Intent = DualHardwareRecoveryIntent.MayHaveDispatched;
+        Intent = DualHardwareRecoveryIntent.ReservationOutcomeUnknown;
         ClearCalls++;
     }
 }

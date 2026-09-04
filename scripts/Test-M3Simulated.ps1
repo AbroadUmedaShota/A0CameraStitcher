@@ -57,7 +57,12 @@ try {
         Assert-Condition (Test-Path -LiteralPath $dualCameraFlowTestExecutable -PathType Leaf) 'DualCamera flow test executable was not produced by the solution build.'
         $dualCameraFlowOutput = & $dualCameraFlowTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "DualCamera flow tests failed: $($dualCameraFlowOutput -join [Environment]::NewLine)" }
-        Assert-Condition (($dualCameraFlowOutput -join "`n").Contains('DualCamera flow tests: 18/18 passed.')) 'DualCamera flow test summary is missing or incomplete.'
+        $dualCameraPassLines = @($dualCameraFlowOutput | Where-Object { $_ -match '^PASS ' })
+        Assert-Condition ($dualCameraPassLines.Count -gt 0) 'DualCamera flow tests did not emit any PASS result.'
+        $dualCameraSummary = @($dualCameraFlowOutput | Where-Object { $_ -match '^DualCamera flow tests: (\d+)/(\d+) passed\.$' }) | Select-Object -Last 1
+        Assert-Condition ($null -ne $dualCameraSummary) 'DualCamera flow test summary is missing.'
+        if ($dualCameraSummary -notmatch '^DualCamera flow tests: (\d+)/(\d+) passed\.$') { throw 'DualCamera flow test summary is malformed.' }
+        Assert-Condition ([int]$Matches[1] -eq $dualCameraPassLines.Count -and [int]$Matches[2] -eq $dualCameraPassLines.Count) 'DualCamera flow test summary does not match emitted PASS lines.'
 
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1

@@ -46,8 +46,17 @@ try {
     try {
         $env:A0_M2_ADAPTER_PATH = Join-Path $RepositoryRoot "build/wpf-m2-adapter/$Configuration/A0CameraStitcher.M2Adapter.exe"
         $dualOutput = & $dualTestExecutable 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not (($dualOutput -join "`n").Contains('DualCamera flow tests: 18/18 passed.'))) {
+        if ($LASTEXITCODE -ne 0) {
             throw "Focused DualCamera product E2E failed: $($dualOutput -join [Environment]::NewLine)"
+        }
+        $dualPassLines = @($dualOutput | Where-Object { $_ -match '^PASS ' })
+        if ($dualPassLines.Count -eq 0) { throw 'Focused DualCamera product E2E did not emit any PASS result.' }
+        $dualSummary = @($dualOutput | Where-Object { $_ -match '^DualCamera flow tests: (\d+)/(\d+) passed\.$' }) | Select-Object -Last 1
+        if ($null -eq $dualSummary -or $dualSummary -notmatch '^DualCamera flow tests: (\d+)/(\d+) passed\.$') {
+            throw 'Focused DualCamera product E2E summary is missing or malformed.'
+        }
+        if ([int]$Matches[1] -ne $dualPassLines.Count -or [int]$Matches[2] -ne $dualPassLines.Count) {
+            throw 'Focused DualCamera product E2E summary does not match emitted PASS lines.'
         }
         Remove-Item Env:A0_M2_ADAPTER_PATH -ErrorAction SilentlyContinue
         $operatorOutput = & $operatorTestExecutable 2>&1
