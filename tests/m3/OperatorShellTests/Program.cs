@@ -29,6 +29,17 @@ if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
 }
 const string dualChildScenarioVariable = "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO";
 
+if (args is ["--formal-wpf-flow"])
+{
+    var diagnosticFailures = 0;
+    foreach (var test in new Func<Task>[] { AsyncCommandCompletionAsync, FormalDualCameraWpfFlowAsync, FormalDualCameraExportFailureProgressAsync })
+    {
+        try { await test(); }
+        catch (Exception exception) { diagnosticFailures++; Console.WriteLine(exception); }
+    }
+    return diagnosticFailures == 0 ? 0 : 1;
+}
+
 // Shared with tests that must pre-write a Live View preview (whose canonical
 // path only depends on runId + alias, not transactionId, so it can be
 // written before the transaction ID is known) at a location that will later
@@ -157,6 +168,17 @@ catch (Exception exception)
 {
     failures.Add("expired ready dual identity blocks WPF transaction start");
     Console.Error.WriteLine($"FAIL expired ready dual identity blocks WPF transaction start: {exception}");
+}
+
+try
+{
+    await AsyncCommandCompletionAsync();
+    Console.WriteLine("PASS async command completion includes delayed execution and busy reset");
+}
+catch (Exception exception)
+{
+    failures.Add("async command completion includes delayed execution and busy reset");
+    Console.Error.WriteLine($"FAIL async command completion includes delayed execution and busy reset: {exception}");
 }
 
 try
@@ -1023,7 +1045,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {88 - failures.Count}/88 passed.");
+Console.WriteLine($"Operator shell tests: {89 - failures.Count}/89 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -3096,7 +3118,10 @@ static async Task FormalDualCameraWpfFlowAsync()
             "HardwareDual accessibility text must not identify the whole window as simulated.");
 
         var hardwareAdapter = new M2OfflineStitcherProcessAdapter(bundledAdapterPath);
-        var hardwareOperations = new WpfHardwareDualFakeOperations(hardwareAdapter);
+        // A valid delayed capture must finish through the actual command task,
+        // even when it exceeds the former 5s UI-poll assertion.
+        var hardwareOperations = new WpfHardwareDualFakeOperations(
+            hardwareAdapter, captureDelay: TimeSpan.FromMilliseconds(5200));
         var hardwareProductRoot = Path.Combine(root, "hardware-fake-products");
         var hardwareFlow = new DualCameraProductFlow(
             hardwareProductRoot,
@@ -3142,7 +3167,7 @@ static async Task FormalDualCameraWpfFlowAsync()
             "HardwareDual must not start a capture before the operator has confirmed the binding.");
         await CompleteDualBindingAsync(hardwareViewModel.DualBinding);
         Check.True(hardwareViewModel.CanCapture, "Explicit fake Agent, Ready identity, approved profiles, and confirmations must enable the software-only HardwareDual path.");
-        hardwareViewModel.CaptureCommand.Execute(null);
+        await ExecuteNativeCommandAsync(hardwareViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => hardwareViewModel.TransactionStartCount == 1 && !hardwareViewModel.IsBusy,
             "HardwareDual WPF fake capture did not finish.");
@@ -3150,7 +3175,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal(1, hardwareOperations.StartCalls);
         Check.True(hardwareViewModel.RetainedOriginals.Contains("CAM-A: original.jpg", StringComparison.Ordinal), "HardwareDual WPF must retain CAM-A original.");
         Check.True(hardwareViewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "HardwareDual WPF must retain CAM-B original.");
-        hardwareViewModel.ExportCommand.Execute(null);
+        await ExecuteNativeCommandAsync(hardwareViewModel.ExportCommand);
         await WaitUntilAsync(
             () => !hardwareViewModel.IsBusy && hardwareViewModel.ExportResult.Contains("このPCのフォルダへ保存しました", StringComparison.Ordinal),
             "HardwareDual WPF fixed-local export did not finish.");
@@ -3182,7 +3207,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         await recoveryViewModel.InitializeAsync(CancellationToken.None);
         recoveryViewModel.AcceptSafetyCommand.Execute(null);
         await CompleteDualBindingAsync(recoveryViewModel.DualBinding);
-        recoveryViewModel.CaptureCommand.Execute(null);
+        await ExecuteNativeCommandAsync(recoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
             "HardwareDual WPF response-unknown state was not retained.");
@@ -3205,7 +3230,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         await restartedRecoveryViewModel.InitializeAsync(CancellationToken.None);
         restartedRecoveryViewModel.AcceptSafetyCommand.Execute(null);
         Check.True(restartedRecoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after restart with current identity Pending.");
-        restartedRecoveryViewModel.CaptureCommand.Execute(null);
+        await ExecuteNativeCommandAsync(restartedRecoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !restartedRecoveryViewModel.IsBusy && restartedRecoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
             "HardwareDual WPF saved transaction recovery did not finish after restart.");
@@ -3318,7 +3343,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         viewModel.AcceptSafetyCommand.Execute(null);
         Check.True(viewModel.CanCapture, "The typed TestSynthetic dual flow must be ready.");
 
-        viewModel.CaptureCommand.Execute(null);
+        await ExecuteNativeCommandAsync(viewModel.CaptureCommand);
         await WaitUntilAsync(
             () => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy,
             "The formal dual-camera capture did not finish.");
@@ -3331,13 +3356,13 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal("待機", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
         var firstJob = viewModel.LastStitchJobId;
 
-        viewModel.RestitchCommand.Execute(null);
+        await ExecuteNativeCommandAsync(viewModel.RestitchCommand);
         await WaitUntilAsync(
             () => !viewModel.IsBusy && !string.Equals(firstJob, viewModel.LastStitchJobId, StringComparison.Ordinal),
             "Formal restitch did not publish a distinct job.");
         Check.True(viewModel.CanExport, "The reviewed restitch must be explicitly exportable.");
 
-        viewModel.ExportCommand.Execute(null);
+        await ExecuteNativeCommandAsync(viewModel.ExportCommand);
         await WaitUntilAsync(
             () => !viewModel.IsBusy && viewModel.ExportResult.Contains("このPCのフォルダへ保存しました", StringComparison.Ordinal),
             "Formal fixed-local export did not finish.");
@@ -3349,7 +3374,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         viewModel.PrepareNewCaptureCommand.Execute(null);
         await WaitUntilAsync(() => viewModel.CanCapture, "A new formal diagnostic capture was not prepared.");
         viewModel.SelectedDiagnosticScenario = "CAM-B撮影失敗";
-        viewModel.DiagnosticCommand.Execute(null);
+        await ExecuteNativeCommandAsync(viewModel.DiagnosticCommand);
         await WaitUntilAsync(
             () => viewModel.TransactionStartCount == 2 && !viewModel.IsBusy,
             "The typed CAM-B failure diagnostic did not finish.");
@@ -3395,7 +3420,7 @@ static async Task FormalDualCameraExportFailureProgressAsync()
         await viewModel.InitializeAsync(CancellationToken.None);
         viewModel.FixedLocalExportDirectory = exportRoot;
         viewModel.AcceptSafetyCommand.Execute(null);
-        viewModel.CaptureCommand.Execute(null);
+        await ExecuteNativeCommandAsync(viewModel.CaptureCommand);
         await WaitUntilAsync(
             () => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy,
             "The export-failure fixture capture did not finish.");
@@ -4072,6 +4097,40 @@ static async Task CompleteDualBindingAsync(DualBindingViewModel binding)
         "The binding screen did not reach the confirmation summary.");
     binding.CompleteBindingCommand.Execute(null);
     await WaitUntilAsync(() => binding.IsReady, "The binding did not complete.");
+}
+
+static async Task AsyncCommandCompletionAsync()
+{
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var calls = 0;
+    var command = new AsyncRelayCommand(async () => { calls++; await release.Task; });
+    var completion = command.ExecuteAsync(null);
+    try
+    {
+        Check.False(command.CanExecute(null), "A pending command must remain guarded.");
+        await command.ExecuteAsync(null);
+        Check.Equal(1, calls);
+        Check.False(completion.IsCompleted, "The execution task must remain pending until the operation completes.");
+    }
+    finally { release.TrySetResult(); }
+    await completion.WaitAsync(TimeSpan.FromSeconds(5));
+    Check.True(command.CanExecute(null), "Completion must include the busy reset.");
+    Exception? reported = null;
+    var failure = new AsyncRelayCommand(() => throw new IOException("controlled command failure"), onException: error => reported = error);
+    await failure.ExecuteAsync(null);
+    Check.True(reported is IOException, "The awaitable path must retain ICommand exception reporting.");
+    Check.True(failure.CanExecute(null), "A failed command must release its busy guard.");
+}
+
+static async Task ExecuteNativeCommandAsync(System.Windows.Input.ICommand command)
+{
+    Check.True(command.CanExecute(null), "The native workflow command must be enabled before execution.");
+    var elapsed = Stopwatch.StartNew();
+    // Await the actual command, including UI updates and busy reset. The 30s
+    // harness ceiling detects a stuck integration; it is not a product p95.
+    // The previous 5s UI-poll deadline rejected a valid 6.8s delayed capture.
+    await ((AsyncRelayCommand)command).ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(30));
+    Console.WriteLine($"Native WPF command completed in {elapsed.ElapsedMilliseconds} ms.");
 }
 
 static async Task WaitUntilAsync(Func<bool> predicate, string message, TimeSpan? timeout = null)
@@ -9070,7 +9129,8 @@ sealed class GatedDualBindingTransport(SimulatedDualBindingAgent agent, Task gat
 
 sealed class WpfHardwareDualFakeOperations(
     ITestSyntheticCamera camera,
-    bool responseUnknownOnce = false) : IDualHardwareCaptureOperations
+    bool responseUnknownOnce = false,
+    TimeSpan captureDelay = default) : IDualHardwareCaptureOperations
 {
     private DualHardwareCaptureRequest? _unknownRequest;
     public int ReserveCalls { get; private set; }
@@ -9088,6 +9148,7 @@ sealed class WpfHardwareDualFakeOperations(
         CancellationToken cancellationToken)
     {
         StartCalls++;
+        if (captureDelay > TimeSpan.Zero) await Task.Delay(captureDelay, cancellationToken);
         if (responseUnknownOnce)
         {
             _unknownRequest = request;
