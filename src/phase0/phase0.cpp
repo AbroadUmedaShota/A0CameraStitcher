@@ -1442,6 +1442,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridWpdBaselineOpen", camera_alias);
         wpd_session.Open(wpd_identity, budget(timeouts.open));
         wpd_open = true;
+        evidence.RecordState(result.transaction_id, "HybridWpdBaselineOpened", camera_alias);
         ensure_active();
         token = wpd.BeginPostCardObservation(budget(timeouts.open));
         ensure_active();
@@ -1449,11 +1450,13 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridSpoolEmptyBefore", camera_alias);
         wpd_open = false;
         close_wpd(budget(timeouts.close));
+        evidence.RecordState(result.transaction_id, "HybridWpdBaselineClosed", camera_alias);
         ensure_active();
 
         evidence.RecordState(result.transaction_id, "HybridSdkCardCapture", camera_alias);
         sdk_session.Open(sdk_identity, budget(timeouts.open));
         sdk_open = true;
+        evidence.RecordState(result.transaction_id, "HybridSdkSessionOpened", camera_alias);
         ensure_active();
         if (before_sdk_capture) {
             evidence.RecordState(
@@ -1466,6 +1469,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         sdk.CaptureToCard(
             budget(timeouts.image_event),
             budget(timeouts.image_event + timeouts.download));
+        evidence.RecordState(result.transaction_id, "HybridSdkCaptureCompleted", camera_alias);
         // A failed close is terminal: opening WPD afterwards could overlap a
         // still-owned SDK session.
         if (std::chrono::steady_clock::now() >= deadline) {
@@ -1475,6 +1479,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         }
         sdk_open = false;
         sdk_session.Close(budget(timeouts.close));
+        evidence.RecordState(result.transaction_id, "HybridSdkSessionClosed", camera_alias);
         ensure_active();
 
         if (before_wpd_recovery) {
@@ -1488,6 +1493,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridWpdObserveOpen", camera_alias);
         wpd_session.Open(wpd_identity, budget(timeouts.open));
         wpd_open = true;
+        evidence.RecordState(result.transaction_id, "HybridWpdRecoveryOpened", camera_alias);
         ensure_active();
         const auto candidates = wpd.ObserveAndDownloadPostCardCapture(
             token,
@@ -1532,6 +1538,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridSpoolEmptyAfter", camera_alias);
         wpd_open = false;
         close_wpd(budget(timeouts.close));
+        evidence.RecordState(result.transaction_id, "HybridWpdRecoveryClosed", camera_alias);
         ensure_active();
         result.terminal_state = "Complete";
     } catch (const TransportError& error) {

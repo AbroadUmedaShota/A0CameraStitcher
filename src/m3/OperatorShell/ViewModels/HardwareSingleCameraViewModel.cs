@@ -16,6 +16,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private HardwareOriginalExporter _exporter;
     private readonly HardwareSinglePreferencesStore? _preferencesStore;
     private readonly HardwareSingleCaptureProfileStore? _profileStore;
+    private readonly IHardwareSingleHandoffEvidenceCollector? _handoffEvidenceCollector;
     private readonly TimeProvider _timeProvider;
     private HardwarePendingTransaction? _pendingTransaction;
     private HardwareSingleReadinessResult? _readiness;
@@ -59,7 +60,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         IHardwareSingleAppStateStore stateStore,
         HardwareOriginalExporter exporter,
         TimeProvider? timeProvider = null)
-        : this(operations, stateStore, exporter, null, null, timeProvider)
+        : this(operations, stateStore, exporter, null, null, timeProvider, null)
     {
     }
 
@@ -69,7 +70,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         HardwareOriginalExporter exporter,
         HardwareSinglePreferencesStore? preferencesStore,
         HardwareSingleCaptureProfileStore? profileStore,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IHardwareSingleHandoffEvidenceCollector? handoffEvidenceCollector = null)
     {
         _operations = operations ?? throw new ArgumentNullException(nameof(operations));
         _continuousLiveViewOperations = operations as IHardwareContinuousLiveViewOperations;
@@ -78,6 +80,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _preferencesStore = preferencesStore;
         _profileStore = profileStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _handoffEvidenceCollector = handoffEvidenceCollector;
         // An injected exporter is an explicit destination chosen by the caller.
         // The product composition supplies a preference store, so its default
         // LocalAppData path remains only a folder-picker starting point until a
@@ -743,12 +746,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 .ConfigureAwait(true);
             if (!reply.Success)
             {
+                _handoffEvidenceCollector?.ObserveLiveViewStartUnconfirmed(sessionId);
                 LiveViewSummary = $"開始失敗: {reply.Payload.ErrorCategory}";
                 ActivityText = "継続Live Viewは開始されませんでした。撮影は実行していません。";
                 return;
             }
 
             _continuousLiveViewSessionId = sessionId;
+            _handoffEvidenceCollector?.ObserveLiveViewStarted(reply.Payload);
             _liveViewHandoffRequested = false;
             IsContinuousLiveViewActive = true;
             LiveViewSummary = "継続表示中（preview only）";
@@ -759,6 +764,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
+            _handoffEvidenceCollector?.ObserveLiveViewStartUnconfirmed(sessionId);
             LiveViewSummary = "開始失敗";
             ActivityText = "継続Live Viewを開始できませんでした。撮影は実行していません。";
             TechnicalDetail += $"\ncontinuous_live_view_start_failed: {SafeMessage(exception)}";
@@ -787,11 +793,13 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
         try
         {
+            _handoffEvidenceCollector?.ObserveLiveViewStopRequested(_continuousLiveViewSessionId);
             var reply = await _continuousLiveViewOperations
                 .StopLiveViewAsync(_continuousLiveViewSessionId)
                 .ConfigureAwait(true);
             if (!reply.Success || reply.Payload.SdkSessionOpen || reply.Payload.LiveViewRunning)
             {
+                _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
                 LiveViewSummary = $"停止未確認: {reply.Payload.ErrorCategory}";
                 ActivityText = "Live View停止とSDK closeを確認できません。撮影を開始しません。";
                 if (!reply.Payload.SdkSessionOpen && !reply.Payload.LiveViewRunning)
@@ -805,6 +813,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 return false;
             }
 
+            _handoffEvidenceCollector?.ObserveLiveViewStopped(reply.Payload);
             IsContinuousLiveViewActive = false;
             _continuousLiveViewLoopCancellation?.Dispose();
             _continuousLiveViewLoopCancellation = null;
@@ -815,6 +824,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
+            _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
             LiveViewSummary = "停止結果を確認できません";
             ActivityText = "Live View停止状態が不明です。撮影を開始しません。";
             TechnicalDetail += $"\ncontinuous_live_view_stop_unconfirmed: {SafeMessage(exception)}";
@@ -894,6 +904,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 PreviewImage = image;
                 PreviewPath = string.Empty;
                 LiveViewSummary = $"継続表示中 / frame {reply.Payload.FrameNumber:N0} / {frame.Length:N0} bytes";
+                _handoffEvidenceCollector?.ObserveLiveViewFrame(sessionId, reply.Payload.FrameNumber);
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
@@ -921,6 +932,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
 
         var restartContinuousLiveView = IsContinuousLiveViewActive;
+        if (_handoffEvidenceCollector is not null)
+        {
+            _handoffEvidenceCollector.BeginHandoff(
+                restartContinuousLiveView ? _continuousLiveViewSessionId ?? string.Empty : string.Empty);
+        }
         if (restartContinuousLiveView)
         {
             IsBusy = true;
@@ -943,6 +959,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             readiness.CaptureProfileSha256,
             readiness.CaptureProfileExpiresAtUtc!.Value);
         var transactionId = HardwareCameraAgentProtocolCodec.CreateTransactionId();
+        _handoffEvidenceCollector?.ObserveTransactionBound(transactionId);
         var pending = new HardwarePendingTransaction
         {
             OperatingMode = "SingleCamera",
@@ -981,6 +998,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             pending = pending with { CaptureRequestDispatchAttempted = true };
             _pendingTransaction = pending;
             dispatchAttempted = true;
+            _handoffEvidenceCollector?.ObserveCaptureDispatchAttempted(transactionId);
             ActivityText = $"{alias} を一回撮影中。自動再試行はしません…";
             CaptureSummary = "撮影・PC永続化・exact cleanup処理中";
             PreviewPath = string.Empty;
@@ -991,12 +1009,16 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 .ConfigureAwait(true);
             if (reply.Payload.TerminalState is "Reserved" or "InProgress")
             {
+                _handoffEvidenceCollector?.ObserveCaptureResponseUnknown(transactionId, dispatchAttempted: true);
                 ActivityText = "transactionは処理中です。新規撮影せず結果を再照会してください。";
                 CaptureSummary = "未確定（自動再試行なし）";
                 return;
             }
 
             await ApplyTerminalResultAsync(reply).ConfigureAwait(true);
+            _handoffEvidenceCollector?.ObserveCaptureResult(
+                reply.Payload,
+                applicationOriginalVerified: _verifiedOriginal is not null);
             if (restartContinuousLiveView && reply.Success &&
                 reply.Payload.TerminalState == "Complete")
             {
@@ -1063,6 +1085,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                     $"app_state_reservation_failed: {SafeMessage(exception)}\n" +
                     "capture request dispatched: false\nautomatic retry count: 0";
             }
+
+            _handoffEvidenceCollector?.ObserveCaptureResponseUnknown(transactionId, dispatchAttempted);
         }
         finally
         {

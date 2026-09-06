@@ -32,7 +32,9 @@ public partial class App : Application
             window = options.Mode switch
             {
                 ApplicationLaunchMode.Simulated => new MainWindow(),
-                ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(options.SingleCameraAgentExecutablePath),
+                ApplicationLaunchMode.HardwareSingle => new HardwareSingleCameraWindow(
+                    options.SingleCameraAgentExecutablePath,
+                    options.SingleHandoffEvidenceSourceSha),
                 ApplicationLaunchMode.HardwareDual => new MainWindow(
                     DualCameraExecutionEnvironment.HardwareDual,
                     options.DualCameraAgentExecutablePath,
@@ -87,7 +89,8 @@ public sealed record ApplicationLaunchOptions(
     bool CaptureRecoveryOnly,
     string? ApprovedCaptureProfilePath,
     string? DualIdentityProofPath,
-    int CaptureRecoveryRunCount)
+    int CaptureRecoveryRunCount,
+    string? SingleHandoffEvidenceSourceSha)
 {
     public static ApplicationLaunchOptions Parse(IReadOnlyList<string> arguments, string baseDirectory)
     {
@@ -104,6 +107,8 @@ public sealed record ApplicationLaunchOptions(
         string? configuredDualIdentityProof = null;
         var captureRecoveryOnly = false;
         int? configuredCaptureRecoveryRunCount = null;
+        int? configuredSingleHandoffCount = null;
+        string? configuredSingleHandoffSourceSha = null;
         var modeSeen = false;
         for (var index = 0; index < arguments.Count; index++)
         {
@@ -170,6 +175,24 @@ public sealed record ApplicationLaunchOptions(
 
                     configuredCaptureRecoveryRunCount = runCount;
                     break;
+                case "--single-handoff-acceptance-count":
+                    if (configuredSingleHandoffCount is not null || ++index >= arguments.Count ||
+                        !int.TryParse(arguments[index], out var handoffCount) || handoffCount != 10)
+                    {
+                        throw new ArgumentException("--single-handoff-acceptance-count は明示値 10 を一度だけ指定してください。");
+                    }
+
+                    configuredSingleHandoffCount = handoffCount;
+                    break;
+                case "--source-sha":
+                    if (configuredSingleHandoffSourceSha is not null || ++index >= arguments.Count ||
+                        !IsLowerHex(arguments[index], 40))
+                    {
+                        throw new ArgumentException("--source-sha は40文字のlower-hexを一度だけ指定してください。");
+                    }
+
+                    configuredSingleHandoffSourceSha = arguments[index];
+                    break;
                 case "--approved-capture-profile":
                     if (configuredApprovedCaptureProfile is not null || ++index >= arguments.Count ||
                         string.IsNullOrWhiteSpace(arguments[index]))
@@ -226,6 +249,15 @@ public sealed record ApplicationLaunchOptions(
         {
             throw new ArgumentException("--capture-recovery-run-count 10 には --capture-recovery-only が必要です。");
         }
+        if ((configuredSingleHandoffCount is not null || configuredSingleHandoffSourceSha is not null) &&
+            mode != ApplicationLaunchMode.HardwareSingle)
+        {
+            throw new ArgumentException("Single handoff acceptance引数は--hardware-singleと一緒に指定してください。");
+        }
+        if ((configuredSingleHandoffCount is null) != (configuredSingleHandoffSourceSha is null))
+        {
+            throw new ArgumentException("--single-handoff-acceptance-count 10 と --source-sha は両方必要です。");
+        }
 
         var normalizedBase = Path.GetFullPath(baseDirectory);
         var singleDefault = Path.Combine(normalizedBase, "A0CameraStitcher.CameraAgent.exe");
@@ -268,7 +300,8 @@ public sealed record ApplicationLaunchOptions(
             captureRecoveryOnly,
             approvedCaptureProfilePath,
             dualIdentityProofPath,
-            configuredCaptureRecoveryRunCount ?? 1);
+            configuredCaptureRecoveryRunCount ?? 1,
+            configuredSingleHandoffSourceSha);
     }
 
     private static string ResolveExistingFixedLocalMap(string candidate)
@@ -299,4 +332,8 @@ public sealed record ApplicationLaunchOptions(
             throw new ArgumentException($"{optionName} は固定ローカルドライブ上の既存通常ファイルである必要があります。");
         }
     }
+
+    private static bool IsLowerHex(string value, int length) =>
+        value.Length == length && value.All(character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }

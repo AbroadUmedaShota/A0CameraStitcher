@@ -359,6 +359,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareSingleHandoffEvidenceCollectorContractAsync();
+    Console.WriteLine("PASS hardware Single handoff evidence requires exact anonymous ordered 10/10");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware Single handoff evidence requires exact anonymous ordered 10/10");
+    Console.Error.WriteLine($"FAIL hardware Single handoff evidence requires exact anonymous ordered 10/10: {exception}");
+}
+
+try
+{
     await HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync();
     Console.WriteLine("PASS hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it");
 }
@@ -1045,7 +1056,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {89 - failures.Count}/89 passed.");
+Console.WriteLine($"Operator shell tests: {90 - failures.Count}/90 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2110,17 +2121,32 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         // so this file's location is unrelated to artifactsRoot.
         var framePath = Path.Combine(root, "agent", "run-live-1", "preview.jpg");
         var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        var evidenceCollector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "handoff-evidence"),
+            artifactsRoot,
+            new string('a', 40));
         var operations = new FakeContinuousHardwareOperations(frameBytes)
         {
             AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
             AgentArtifactsRoot = artifactsRoot,
             CaptureResultFactory = (transactionId, alias) =>
-                CompleteCapture(artifactsRoot, transactionId, alias).Result,
+            {
+                var result = CompleteCapture(artifactsRoot, transactionId, alias).Result;
+                WriteSingleHandoffAgentEvents(
+                    artifactsRoot,
+                    result.RunId,
+                    transactionId,
+                    SuccessfulHandoffAgentStates());
+                return result;
+            },
         };
         var viewModel = new HardwareSingleCameraViewModel(
             operations,
             new HardwareSingleAppStateStore(Path.Combine(root, "state")),
-            new HardwareOriginalExporter(Path.Combine(root, "exports")));
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            preferencesStore: null,
+            profileStore: null,
+            handoffEvidenceCollector: evidenceCollector);
         await viewModel.InitializeAsync();
         viewModel.ExclusiveCameraControlConfirmed = true;
         await viewModel.CheckReadinessAsync();
@@ -2135,6 +2161,10 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         // read (FirstFrame) completing no longer guarantees PreviewImage has been set yet.
         await WaitForPreviewImageAsync(viewModel, TimeSpan.FromSeconds(2));
         Check.True(viewModel.PreviewImage is not null, "A verified in-memory JPEG frame must be displayed.");
+        await WaitUntilAsync(
+            () => operations.FrameCount >= 2,
+            "The initial continuous session did not produce two verified frames.",
+            TimeSpan.FromSeconds(2));
 
         await viewModel.CaptureAsync();
         Check.Equal(1, operations.CaptureCallCount);
@@ -2147,8 +2177,21 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
             operations.CallOrder.IndexOf("stop") < operations.CallOrder.IndexOf("capture"),
             "SDK Live View stop and close must precede capture dispatch.");
 
+        var framesBeforeRestartObservation = operations.FrameCount;
+        await WaitUntilAsync(
+            () => operations.FrameCount >= framesBeforeRestartObservation + 2,
+            "The restarted continuous session did not produce two verified frames.",
+            TimeSpan.FromSeconds(2));
         await viewModel.StopContinuousLiveViewAsync();
         Check.False(viewModel.IsContinuousLiveViewActive, "Explicit stop must close the continuous session.");
+        evidenceCollector.Seal();
+        await evidenceCollector.FlushAsync();
+        using (var evidence = JsonDocument.Parse(File.ReadAllText(evidenceCollector.EvidencePath)))
+        {
+            Check.Equal(1, evidence.RootElement.GetProperty("attemptedHandoffs").GetInt32());
+            Check.Equal(1, evidence.RootElement.GetProperty("completedHandoffs").GetInt32());
+            Check.Equal("Incomplete", evidence.RootElement.GetProperty("terminalState").GetString()!);
+        }
         await viewModel.ShutdownAsync();
         viewModel.Dispose();
 
@@ -2184,6 +2227,493 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        Directory.CreateDirectory(artifactsRoot);
+        var tick = 0L;
+        var clockBase = new DateTimeOffset(2026, 9, 6, 0, 0, 0, TimeSpan.Zero);
+        DateTimeOffset NextTime() => clockBase.AddMilliseconds(Interlocked.Increment(ref tick));
+        var collector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "evidence"),
+            artifactsRoot,
+            new string('a', 40),
+            NextTime);
+
+        for (var index = 1; index <= 10; index++)
+        {
+            var initialSessionId = index.ToString("x32");
+            collector.ObserveLiveViewStarted(ContinuousLiveViewResult(initialSessionId, "Started", running: true));
+            collector.ObserveLiveViewFrame(initialSessionId, 1);
+            collector.ObserveLiveViewFrame(initialSessionId, 2);
+            collector.BeginHandoff(initialSessionId);
+            collector.ObserveLiveViewStopRequested(initialSessionId);
+            collector.ObserveLiveViewStopped(ContinuousLiveViewResult(initialSessionId, "Stopped", running: false));
+
+            var transactionId = (1000 + index).ToString("x32");
+            var agentRunId = $"run-evidence-{index}";
+            WriteSingleHandoffAgentEvents(artifactsRoot, agentRunId, transactionId, SuccessfulHandoffAgentStates());
+            var result = CompleteCapture(artifactsRoot, transactionId, "CAM-A").Result with
+            {
+                RunId = agentRunId,
+            };
+            collector.ObserveTransactionBound(transactionId);
+            collector.ObserveCaptureDispatchAttempted(transactionId);
+            collector.ObserveCaptureResult(result, applicationOriginalVerified: true);
+
+            var restartSessionId = (100 + index).ToString("x32");
+            collector.ObserveLiveViewStarted(ContinuousLiveViewResult(restartSessionId, "Started", running: true));
+            collector.ObserveLiveViewFrame(restartSessionId, 1);
+            collector.ObserveLiveViewFrame(restartSessionId, 2);
+            collector.ObserveLiveViewStopRequested(restartSessionId);
+            collector.ObserveLiveViewStopped(ContinuousLiveViewResult(restartSessionId, "Stopped", running: false));
+        }
+        await collector.FlushAsync();
+        Check.True(
+            ReadTerminalState(collector.EvidencePath) == "InProgress",
+            "Exact 10/10 must not become Complete until the run is durably sealed.");
+        collector.Seal();
+        await collector.FlushAsync();
+
+        var published = File.ReadAllText(collector.EvidencePath);
+        using (var document = JsonDocument.Parse(published))
+        {
+            var summary = document.RootElement;
+            Check.Equal(HardwareSingleHandoffEvidenceCollector.SchemaVersion, summary.GetProperty("schemaVersion").GetString()!);
+            Check.Equal(10, summary.GetProperty("requestedHandoffs").GetInt32());
+            Check.Equal(10, summary.GetProperty("attemptedHandoffs").GetInt32());
+            Check.Equal(10, summary.GetProperty("completedHandoffs").GetInt32());
+            Check.Equal(0, summary.GetProperty("failures").GetInt32());
+            Check.Equal("Complete", summary.GetProperty("terminalState").GetString()!);
+            Check.Equal(0, summary.GetProperty("automaticRetryCount").GetInt32());
+            Check.False(summary.GetProperty("realIdentifiersIncluded").GetBoolean(), "Anonymous evidence must explicitly exclude real identifiers.");
+            Check.Equal(10, summary.GetProperty("attempts").GetArrayLength());
+            var topLevelNames = summary.EnumerateObject().Select(item => item.Name).Order().ToArray();
+            var expectedTopLevelNames = new[]
+            {
+                "attemptedHandoffs", "attempts", "automaticRetryCount", "completedHandoffs",
+                "evidenceRunId", "evidenceScope", "failures", "lastErrorCategory",
+                "lastHandoffState", "persistenceHealthy", "realIdentifiersIncluded",
+                "requestedHandoffs", "schemaVersion", "sealedRun", "sourceSha", "terminalState",
+            }.Order().ToArray();
+            Check.True(
+                expectedTopLevelNames.SequenceEqual(topLevelNames, StringComparer.Ordinal),
+                "The anonymous summary must expose only the fixed top-level allowlist.");
+        }
+        Check.False(published.Contains("serial-secret", StringComparison.Ordinal), "Untrusted Agent detail must not enter the anonymous summary.");
+        Check.False(published.Contains(artifactsRoot, StringComparison.OrdinalIgnoreCase), "Local paths must not enter the anonymous summary.");
+
+        // A successful-looking capture with a duplicate/out-of-order Agent trace is Invalid,
+        // not a shortened Pass.
+        var invalidCollector = NewCollector("invalid", artifactsRoot, NextTime);
+        var invalidSession = new string('b', 32);
+        BeginCollectorAttempt(invalidCollector, invalidSession);
+        var invalidTransaction = new string('c', 32);
+        var invalidRun = "run-invalid-order";
+        var invalidStates = SuccessfulHandoffAgentStates().ToList();
+        (invalidStates[3], invalidStates[4]) = (invalidStates[4], invalidStates[3]);
+        invalidStates.Insert(5, invalidStates[5]);
+        WriteSingleHandoffAgentEvents(artifactsRoot, invalidRun, invalidTransaction, invalidStates);
+        var invalidResult = CompleteCapture(artifactsRoot, invalidTransaction, "CAM-A").Result with { RunId = invalidRun };
+        invalidCollector.ObserveTransactionBound(invalidTransaction);
+        invalidCollector.ObserveCaptureDispatchAttempted(invalidTransaction);
+        invalidCollector.ObserveCaptureResult(invalidResult, true);
+        invalidCollector.Seal();
+        await invalidCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(invalidCollector.EvidencePath));
+
+        var unknownStateCollector = NewCollector("unknown-state", artifactsRoot, NextTime);
+        var unknownStateSession = "0000000000000000000000000000000a";
+        BeginCollectorAttempt(unknownStateCollector, unknownStateSession);
+        var unknownStateTransaction = "0000000000000000000000000000000b";
+        var unknownStateRun = "run-unknown-state";
+        var unknownStates = SuccessfulHandoffAgentStates().ToList();
+        unknownStates.Insert(3, "UnrecognizedAcceptanceEvent");
+        WriteSingleHandoffAgentEvents(artifactsRoot, unknownStateRun, unknownStateTransaction, unknownStates);
+        var unknownStateResult = CompleteCapture(artifactsRoot, unknownStateTransaction, "CAM-A").Result with
+        {
+            RunId = unknownStateRun,
+        };
+        unknownStateCollector.ObserveTransactionBound(unknownStateTransaction);
+        unknownStateCollector.ObserveCaptureDispatchAttempted(unknownStateTransaction);
+        unknownStateCollector.ObserveCaptureResult(unknownStateResult, true);
+        unknownStateCollector.Seal();
+        await unknownStateCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(unknownStateCollector.EvidencePath));
+
+        var duplicateJsonCollector = NewCollector("duplicate-json", artifactsRoot, NextTime);
+        var duplicateJsonSession = "20000000000000000000000000000001";
+        BeginCollectorAttempt(duplicateJsonCollector, duplicateJsonSession);
+        var duplicateJsonTransaction = "20000000000000000000000000000002";
+        var duplicateJsonRun = "run-duplicate-json";
+        WriteSingleHandoffAgentEvents(
+            artifactsRoot,
+            duplicateJsonRun,
+            duplicateJsonTransaction,
+            SuccessfulHandoffAgentStates());
+        var duplicateJsonPath = Path.Combine(artifactsRoot, duplicateJsonRun, "events.jsonl");
+        var duplicateJsonLines = File.ReadAllLines(duplicateJsonPath, Encoding.UTF8);
+        duplicateJsonLines[2] = duplicateJsonLines[2].Replace(
+            "\"state\":\"HybridWpdBaselineOpen\"",
+            "\"state\":\"HybridFailed\",\"state\":\"HybridWpdBaselineOpen\"",
+            StringComparison.Ordinal);
+        File.WriteAllLines(duplicateJsonPath, duplicateJsonLines, Encoding.UTF8);
+        var duplicateJsonResult = CompleteCapture(artifactsRoot, duplicateJsonTransaction, "CAM-A").Result with
+        {
+            RunId = duplicateJsonRun,
+        };
+        duplicateJsonCollector.ObserveTransactionBound(duplicateJsonTransaction);
+        duplicateJsonCollector.ObserveCaptureDispatchAttempted(duplicateJsonTransaction);
+        duplicateJsonCollector.ObserveCaptureResult(duplicateJsonResult, true);
+        duplicateJsonCollector.Seal();
+        await duplicateJsonCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(duplicateJsonCollector.EvidencePath));
+
+        var failureTraceCollector = NewCollector("failure-trace", artifactsRoot, NextTime);
+        var failureTraceSession = "0000000000000000000000000000000e";
+        BeginCollectorAttempt(failureTraceCollector, failureTraceSession);
+        var failureTraceTransaction = "0000000000000000000000000000000f";
+        var failureTraceRun = "run-failure-trace";
+        var failureTraceStates = SuccessfulHandoffAgentStates().ToList();
+        failureTraceStates.Insert(failureTraceStates.Count - 1, "HybridFailed");
+        WriteSingleHandoffAgentEvents(artifactsRoot, failureTraceRun, failureTraceTransaction, failureTraceStates);
+        var failureTraceResult = CompleteCapture(artifactsRoot, failureTraceTransaction, "CAM-A").Result with
+        {
+            RunId = failureTraceRun,
+        };
+        failureTraceCollector.ObserveTransactionBound(failureTraceTransaction);
+        failureTraceCollector.ObserveCaptureDispatchAttempted(failureTraceTransaction);
+        failureTraceCollector.ObserveCaptureResult(failureTraceResult, true);
+        failureTraceCollector.Seal();
+        await failureTraceCollector.FlushAsync();
+        Check.Equal("FailedPartial", ReadTerminalState(failureTraceCollector.EvidencePath));
+
+        var foreignTraceCollector = NewCollector("foreign-trace", artifactsRoot, NextTime);
+        var foreignTraceSession = "10000000000000000000000000000001";
+        BeginCollectorAttempt(foreignTraceCollector, foreignTraceSession);
+        var foreignTraceTransaction = "10000000000000000000000000000002";
+        var foreignTraceRun = "run-foreign-trace";
+        WriteSingleHandoffAgentEvents(
+            artifactsRoot,
+            foreignTraceRun,
+            foreignTraceTransaction,
+            SuccessfulHandoffAgentStates(),
+            eventRunId: "run-other");
+        var foreignTraceResult = CompleteCapture(artifactsRoot, foreignTraceTransaction, "CAM-A").Result with
+        {
+            RunId = foreignTraceRun,
+        };
+        foreignTraceCollector.ObserveTransactionBound(foreignTraceTransaction);
+        foreignTraceCollector.ObserveCaptureDispatchAttempted(foreignTraceTransaction);
+        foreignTraceCollector.ObserveCaptureResult(foreignTraceResult, true);
+        foreignTraceCollector.Seal();
+        await foreignTraceCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(foreignTraceCollector.EvidencePath));
+
+        // Missing trace and foreign/late session observations cannot become Pass.
+        var missingCollector = NewCollector("missing", artifactsRoot, NextTime);
+        var missingSession = new string('d', 32);
+        BeginCollectorAttempt(missingCollector, missingSession);
+        var missingTransaction = new string('e', 32);
+        var missingResult = CompleteCapture(artifactsRoot, missingTransaction, "CAM-A").Result with { RunId = "run-missing" };
+        missingCollector.ObserveTransactionBound(missingTransaction);
+        missingCollector.ObserveCaptureDispatchAttempted(missingTransaction);
+        missingCollector.ObserveCaptureResult(missingResult, true);
+        missingCollector.Seal();
+        await missingCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(missingCollector.EvidencePath));
+
+        var foreignCollector = NewCollector("foreign", artifactsRoot, NextTime);
+        var ownedSession = new string('1', 32);
+        foreignCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(ownedSession, "Started", true));
+        foreignCollector.ObserveLiveViewFrame(new string('2', 32), 1);
+        foreignCollector.Seal();
+        await foreignCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(foreignCollector.EvidencePath));
+
+        var lateFrameCollector = NewCollector("late-frame", artifactsRoot, NextTime);
+        var lateFrameSession = "0000000000000000000000000000000c";
+        lateFrameCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(lateFrameSession, "Started", true));
+        lateFrameCollector.ObserveLiveViewFrame(lateFrameSession, 1);
+        lateFrameCollector.ObserveLiveViewFrame(lateFrameSession, 2);
+        lateFrameCollector.ObserveLiveViewStopRequested(lateFrameSession);
+        lateFrameCollector.ObserveLiveViewStopped(ContinuousLiveViewResult(lateFrameSession, "Stopped", false));
+        lateFrameCollector.ObserveLiveViewFrame(lateFrameSession, 3);
+        lateFrameCollector.Seal();
+        await lateFrameCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(lateFrameCollector.EvidencePath));
+
+        var duplicateSessionCollector = NewCollector("duplicate-session", artifactsRoot, NextTime);
+        var duplicateSession = "0000000000000000000000000000000d";
+        duplicateSessionCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(duplicateSession, "Started", true));
+        duplicateSessionCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(duplicateSession, "Started", true));
+        duplicateSessionCollector.Seal();
+        await duplicateSessionCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(duplicateSessionCollector.EvidencePath));
+
+        var reusedSessionCollector = NewCollector("reused-session", artifactsRoot, NextTime);
+        var reusedSession = "10000000000000000000000000000003";
+        BeginCollectorAttempt(reusedSessionCollector, reusedSession);
+        var reusedSessionTransaction = "10000000000000000000000000000004";
+        var reusedSessionRun = "run-reused-session";
+        WriteSingleHandoffAgentEvents(
+            artifactsRoot,
+            reusedSessionRun,
+            reusedSessionTransaction,
+            SuccessfulHandoffAgentStates());
+        var reusedSessionResult = CompleteCapture(artifactsRoot, reusedSessionTransaction, "CAM-A").Result with
+        {
+            RunId = reusedSessionRun,
+        };
+        reusedSessionCollector.ObserveTransactionBound(reusedSessionTransaction);
+        reusedSessionCollector.ObserveCaptureDispatchAttempted(reusedSessionTransaction);
+        reusedSessionCollector.ObserveCaptureResult(reusedSessionResult, true);
+        reusedSessionCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(reusedSession, "Started", true));
+        reusedSessionCollector.Seal();
+        await reusedSessionCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(reusedSessionCollector.EvidencePath));
+
+        var reusedTransactionCollector = NewCollector("reused-transaction", artifactsRoot, NextTime);
+        var firstReplaySession = "10000000000000000000000000000005";
+        BeginCollectorAttempt(reusedTransactionCollector, firstReplaySession);
+        var replayTransaction = "10000000000000000000000000000006";
+        var replayRun = "run-reused-transaction";
+        WriteSingleHandoffAgentEvents(artifactsRoot, replayRun, replayTransaction, SuccessfulHandoffAgentStates());
+        var replayResult = CompleteCapture(artifactsRoot, replayTransaction, "CAM-A").Result with { RunId = replayRun };
+        reusedTransactionCollector.ObserveTransactionBound(replayTransaction);
+        reusedTransactionCollector.ObserveCaptureDispatchAttempted(replayTransaction);
+        reusedTransactionCollector.ObserveCaptureResult(replayResult, true);
+        var replayRestartSession = "10000000000000000000000000000007";
+        reusedTransactionCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(replayRestartSession, "Started", true));
+        reusedTransactionCollector.ObserveLiveViewFrame(replayRestartSession, 1);
+        reusedTransactionCollector.ObserveLiveViewFrame(replayRestartSession, 2);
+        reusedTransactionCollector.ObserveLiveViewStopRequested(replayRestartSession);
+        reusedTransactionCollector.ObserveLiveViewStopped(ContinuousLiveViewResult(replayRestartSession, "Stopped", false));
+        BeginCollectorAttempt(reusedTransactionCollector, "10000000000000000000000000000008");
+        reusedTransactionCollector.ObserveTransactionBound(replayTransaction);
+        reusedTransactionCollector.Seal();
+        await reusedTransactionCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(reusedTransactionCollector.EvidencePath));
+
+        var reusedRunCollector = NewCollector("reused-run", artifactsRoot, NextTime);
+        var reusedRunInitialSession = "20000000000000000000000000000003";
+        BeginCollectorAttempt(reusedRunCollector, reusedRunInitialSession);
+        var firstRunTransaction = "20000000000000000000000000000004";
+        var reusedRun = "run-replayed-across-transactions";
+        WriteSingleHandoffAgentEvents(artifactsRoot, reusedRun, firstRunTransaction, SuccessfulHandoffAgentStates());
+        var firstRunResult = CompleteCapture(artifactsRoot, firstRunTransaction, "CAM-A").Result with { RunId = reusedRun };
+        reusedRunCollector.ObserveTransactionBound(firstRunTransaction);
+        reusedRunCollector.ObserveCaptureDispatchAttempted(firstRunTransaction);
+        reusedRunCollector.ObserveCaptureResult(firstRunResult, true);
+        var reusedRunRestartSession = "20000000000000000000000000000005";
+        reusedRunCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(reusedRunRestartSession, "Started", true));
+        reusedRunCollector.ObserveLiveViewFrame(reusedRunRestartSession, 1);
+        reusedRunCollector.ObserveLiveViewFrame(reusedRunRestartSession, 2);
+        reusedRunCollector.ObserveLiveViewStopRequested(reusedRunRestartSession);
+        reusedRunCollector.ObserveLiveViewStopped(ContinuousLiveViewResult(reusedRunRestartSession, "Stopped", false));
+        BeginCollectorAttempt(reusedRunCollector, "20000000000000000000000000000006");
+        var secondRunTransaction = "20000000000000000000000000000007";
+        reusedRunCollector.ObserveTransactionBound(secondRunTransaction);
+        reusedRunCollector.ObserveCaptureDispatchAttempted(secondRunTransaction);
+        reusedRunCollector.ObserveCaptureResult(
+            CompleteCapture(artifactsRoot, secondRunTransaction, "CAM-A").Result with { RunId = reusedRun },
+            true);
+        reusedRunCollector.Seal();
+        await reusedRunCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(reusedRunCollector.EvidencePath));
+
+        // A failure after exact delete retains the actual attempted/succeeded values.
+        var failedCollector = NewCollector("failed", artifactsRoot, NextTime);
+        var failedSession = new string('3', 32);
+        BeginCollectorAttempt(failedCollector, failedSession);
+        var failedTransaction = new string('4', 32);
+        var failedRun = "run-delete-then-fail";
+        var prefix = SuccessfulHandoffAgentStates().TakeWhile(state => state != "HybridSpoolEmptyAfter").ToList();
+        prefix.Add("FailedPartial");
+        WriteSingleHandoffAgentEvents(artifactsRoot, failedRun, failedTransaction, prefix);
+        var failedEventsPath = Path.Combine(artifactsRoot, failedRun, "events.jsonl");
+        var failedEventLines = File.ReadAllLines(failedEventsPath, Encoding.UTF8);
+        failedEventLines[^1] = failedEventLines[^1].Replace(
+            ",\"cameraAlias\":\"CAM-A\"",
+            string.Empty,
+            StringComparison.Ordinal);
+        File.WriteAllLines(failedEventsPath, failedEventLines, Encoding.UTF8);
+        var failedResult = CompleteCapture(artifactsRoot, failedTransaction, "CAM-A").Result with
+        {
+            RunId = failedRun,
+            TerminalState = "FailedPartial",
+            ErrorCategory = "empty_after_failed",
+            SpoolEmptyAfterCleanup = false,
+        };
+        failedCollector.ObserveTransactionBound(failedTransaction);
+        failedCollector.ObserveCaptureDispatchAttempted(failedTransaction);
+        failedCollector.ObserveCaptureResult(failedResult, true);
+        failedCollector.Seal();
+        await failedCollector.FlushAsync();
+        using (var failedDocument = JsonDocument.Parse(File.ReadAllText(failedCollector.EvidencePath)))
+        {
+            var failedSummary = failedDocument.RootElement;
+            Check.Equal("FailedPartial", failedSummary.GetProperty("terminalState").GetString()!);
+            var failedAttempt = failedSummary.GetProperty("attempts")[0];
+            Check.True(failedAttempt.GetProperty("cameraObjectDeleteAttempted").GetBoolean(), "Delete attempted must survive a later failure.");
+            Check.True(failedAttempt.GetProperty("cameraObjectDeleteSucceeded").GetBoolean(), "Delete success must survive a later failure.");
+            Check.False(failedAttempt.GetProperty("spoolEmptyAfterCleanup").GetBoolean(), "The later empty-after failure must remain visible.");
+        }
+
+        // Persistence failure is swallowed by the observation surface. A later successful
+        // publish is permanently Invalid and can never recover to Complete.
+        var persistCalls = 0;
+        var persistenceCollector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "persistence"),
+            artifactsRoot,
+            new string('f', 40),
+            NextTime,
+            _ =>
+            {
+                if (Interlocked.Increment(ref persistCalls) == 1)
+                {
+                    throw new IOException("synthetic persistence failure with serial-secret");
+                }
+            });
+        var persistenceSession = "00000000000000000000000000000009";
+        persistenceCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(persistenceSession, "Started", true));
+        persistenceCollector.ObserveLiveViewFrame(persistenceSession, 1);
+        persistenceCollector.Seal();
+        await persistenceCollector.FlushAsync();
+        Check.Equal("Invalid", ReadTerminalState(persistenceCollector.EvidencePath));
+        Check.False(
+            File.ReadAllText(persistenceCollector.EvidencePath).Contains("serial-secret", StringComparison.Ordinal),
+            "Persistence exception text must not enter evidence.");
+
+        // A cleanly closed partial run is explicit Incomplete rather than Pass.
+        var partialCollector = NewCollector("partial", artifactsRoot, NextTime);
+        partialCollector.ObserveLiveViewStarted(ContinuousLiveViewResult(new string('5', 32), "Started", true));
+        partialCollector.Seal();
+        await partialCollector.FlushAsync();
+        Check.Equal("Incomplete", ReadTerminalState(partialCollector.EvidencePath));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    HardwareSingleHandoffEvidenceCollector NewCollector(
+        string name,
+        string agentArtifactsRoot,
+        Func<DateTimeOffset> utcNow) =>
+        new(Path.Combine(root, name), agentArtifactsRoot, new string('a', 40), utcNow);
+}
+
+static void BeginCollectorAttempt(HardwareSingleHandoffEvidenceCollector collector, string sessionId)
+{
+    collector.ObserveLiveViewStarted(ContinuousLiveViewResult(sessionId, "Started", running: true));
+    collector.ObserveLiveViewFrame(sessionId, 1);
+    collector.ObserveLiveViewFrame(sessionId, 2);
+    collector.BeginHandoff(sessionId);
+    collector.ObserveLiveViewStopRequested(sessionId);
+    collector.ObserveLiveViewStopped(ContinuousLiveViewResult(sessionId, "Stopped", running: false));
+}
+
+static HardwareContinuousLiveViewResult ContinuousLiveViewResult(
+    string sessionId,
+    string state,
+    bool running) => new()
+{
+    CameraMode = "SingleCamera",
+    CameraAlias = "CAM-A",
+    SessionId = sessionId,
+    State = state,
+    FrameNumber = 0,
+    FrameSize = 0,
+    FrameSha256 = string.Empty,
+    FrameJpegBase64 = string.Empty,
+    PreviewIsOriginal = false,
+    PreviewIsStitchInput = false,
+    SdkSessionOpen = running,
+    LiveViewRunning = running,
+    HeartbeatTimeoutSeconds = 20,
+    MaximumSessionSeconds = 600,
+    RealIdentifiersIncluded = false,
+    ErrorCategory = string.Empty,
+    ErrorDetail = string.Empty,
+};
+
+static IReadOnlyList<string> SuccessfulHandoffAgentStates() =>
+[
+    "HybridWpdBaselineOpen",
+    "HybridWpdBaselineOpened",
+    "HybridSpoolEmptyBefore",
+    "HybridWpdBaselineClosed",
+    "HybridSdkCardCapture",
+    "HybridSdkSessionOpened",
+    "HybridSdkCaptureCompleted",
+    "HybridSdkSessionClosed",
+    "HybridWpdObserveOpen",
+    "HybridWpdRecoveryOpened",
+    "HybridRecoveredExactlyOneCandidate",
+    "HybridPersistPcOriginal",
+    "Persisted",
+    "HybridPcOriginalVerified",
+    "HybridCameraObjectDeleteStarted",
+    "HybridCameraObjectDeleted",
+    "HybridSpoolEmptyAfter",
+    "HybridWpdRecoveryClosed",
+    "Complete",
+];
+
+static void WriteSingleHandoffAgentEvents(
+    string artifactsRoot,
+    string runId,
+    string transactionId,
+    IReadOnlyList<string> states,
+    string? eventRunId = null,
+    string cameraAlias = "CAM-A")
+{
+    var runRoot = Path.Combine(artifactsRoot, runId);
+    Directory.CreateDirectory(runRoot);
+    var timestamp = new DateTimeOffset(2026, 9, 6, 1, 0, 0, TimeSpan.Zero);
+    var correlatedRunId = eventRunId ?? runId;
+    var lines = new List<string>
+    {
+        JsonSerializer.Serialize(new
+        {
+            timestamp = timestamp.AddMilliseconds(-2).ToString("O"),
+            runId = correlatedRunId,
+            state = "CameraProfile",
+            cameraAlias,
+            model = "Nikon D810",
+        }),
+        JsonSerializer.Serialize(new
+        {
+            timestamp = timestamp.AddMilliseconds(-1).ToString("O"),
+            runId = correlatedRunId,
+            transactionId = "preflight",
+            state = "HardwareAgentCaptureProfileFrozen",
+            cameraAlias,
+        }),
+    };
+    lines.AddRange(states.Select((state, index) => JsonSerializer.Serialize(new
+    {
+        timestamp = timestamp.AddMilliseconds(index).ToString("O"),
+        runId = correlatedRunId,
+        transactionId,
+        state,
+        cameraAlias,
+        errorDetail = "serial-secret local-path-secret",
+    })));
+    File.WriteAllLines(Path.Combine(runRoot, "events.jsonl"), lines, Encoding.UTF8);
+}
+
+static string ReadTerminalState(string evidencePath)
+{
+    using var document = JsonDocument.Parse(File.ReadAllText(evidencePath));
+    return document.RootElement.GetProperty("terminalState").GetString()
+        ?? throw new InvalidDataException("Evidence terminalState is missing.");
 }
 
 // GitHub Issue #141 stage 1: stopping continuous Live View must not cancel an in-flight
@@ -2518,6 +3048,14 @@ static void HardwareLaunchOptionsAreExplicit()
         var hardware = ApplicationLaunchOptions.Parse(["--hardware-single", "--camera-agent", explicitAgent], baseDirectory);
         Check.Equal(ApplicationLaunchMode.HardwareSingle, hardware.Mode);
         Check.Equal(explicitAgent, hardware.SingleCameraAgentExecutablePath);
+        var singleHandoffAcceptance = ApplicationLaunchOptions.Parse(
+            [
+                "--hardware-single", "--camera-agent", explicitAgent,
+                "--single-handoff-acceptance-count", "10",
+                "--source-sha", new string('a', 40),
+            ],
+            baseDirectory);
+        Check.Equal(new string('a', 40), singleHandoffAcceptance.SingleHandoffEvidenceSourceSha!);
         Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--hardware-dual"], baseDirectory));
         var hardwareDual = ApplicationLaunchOptions.Parse(
             ["--hardware-dual", "--camera-agent", explicitAgent, "--wpd-camera-map", wpdCameraMap],
@@ -2570,6 +3108,14 @@ static void HardwareLaunchOptionsAreExplicit()
         Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--simulated", "--camera-agent", explicitAgent], baseDirectory));
         Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--capture-recovery-only"], baseDirectory));
         Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(["--capture-recovery-run-count", "10"], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--hardware-single", "--single-handoff-acceptance-count", "10"], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--hardware-single", "--source-sha", new string('a', 40)], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--hardware-single", "--single-handoff-acceptance-count", "1", "--source-sha", new string('a', 40)], baseDirectory));
+        Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+            ["--simulated", "--single-handoff-acceptance-count", "10", "--source-sha", new string('a', 40)], baseDirectory));
         Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
             ["--hardware-dual", "--wpd-camera-map", wpdCameraMap, "--capture-recovery-only",
                 "--capture-recovery-run-count", "100", "--approved-capture-profile", approvedCaptureProfile,
@@ -9750,6 +10296,8 @@ sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
     public int StartCount { get; private set; }
 
     public int StopCount { get; private set; }
+
+    public ulong FrameCount => _frameNumber;
 
     public bool FailNextStop { get; set; }
 

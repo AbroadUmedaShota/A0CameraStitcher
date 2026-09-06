@@ -9,6 +9,7 @@
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/wpd_transport.hpp"
+#include <array>
 #include <atomic>
 #include <exception>
 #include <filesystem>
@@ -986,6 +987,26 @@ void TestSuccessfulLiveViewHandoff() {
     Check(wpd.opens == 2 && wpd.observes == 1 && wpd.delete_attempts == 1 &&
               sdk.opens == 1 && sdk.captures == 1,
         "successful handoff should execute one cleanup-confirmed hybrid capture without retry");
+    const auto events = ReadAll(evidence.RunRoot() / "events.jsonl");
+    const std::array ordered_boundaries{
+        "HybridWpdBaselineOpened",
+        "HybridWpdBaselineClosed",
+        "HybridSdkSessionOpened",
+        "HybridSdkCaptureCompleted",
+        "HybridSdkSessionClosed",
+        "HybridWpdRecoveryOpened",
+        "HybridPcOriginalVerified",
+        "HybridCameraObjectDeleted",
+        "HybridSpoolEmptyAfter",
+        "HybridWpdRecoveryClosed",
+    };
+    std::size_t prior = 0;
+    for (const auto* boundary : ordered_boundaries) {
+        const auto position = events.find(boundary, prior);
+        Check(position != std::string::npos,
+            std::string("successful handoff evidence is missing ") + boundary);
+        prior = position + std::char_traits<char>::length(boundary);
+    }
     std::size_t jpeg_count = 0;
     for (const auto& entry : fs::recursive_directory_iterator(evidence.RunRoot())) {
         if (entry.is_regular_file() && entry.path().extension() == ".jpg") ++jpeg_count;
