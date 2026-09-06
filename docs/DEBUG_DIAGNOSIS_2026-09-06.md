@@ -133,3 +133,20 @@ main/PR履歴、Issue/コメント等の9月4日監査は前文書の範囲を�
 
 公開するとActions履歴・ログも公開されるため、コードだけを審査対象にしなかった。
 影響の根拠は [GitHub公式のvisibility変更説明](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility)。
+
+### 9月6日 公開判断の完了追記
+
+上記は公開承認前の監査記録。オーナーの匿名化・公開承認後、Issue #101の
+Windowsユーザー名を `REDACTED_USER` に置換した。旧本文が編集履歴に残ることが
+判明したため一時的にPRIVATEへ戻し、旧revisionの恒久削除について明示承認を得た。
+旧revisionは `2026-09-06T00:19:14Z` に削除済みで、GraphQLの差分取得結果は
+`deleted` のみ。現revisionの非匿名Windowsユーザーパスは0、3コメント内の該当パスも0。
+削除済み内容は復元できず、編集者・日時のメタデータは残る。
+
+独立reviewerの再判定PASS後にPUBLICへ変更し、未認証APIで公開状態と現本文の
+匿名化を確認した。main SHA `2553c118e48cb82686677b962703322fa4f203dd` の
+[初回公開後CI](https://github.com/AbroadUmedaShota/A0CameraStitcher/actions/runs/34001141350)
+を手動で開始した。開始時点では実行中であり、成功の証拠にはまだ含めない。
+既存の標準 `windows-latest` 1ジョブ、45分上限、full validation 1回を使用する。
+Publicリポジトリの標準ランナーは[GitHub公式の無料対象](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
+SDK配布・実機受入・アプリ配布の承認へは拡張しない。
