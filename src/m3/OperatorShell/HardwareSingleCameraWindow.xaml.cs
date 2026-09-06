@@ -12,10 +12,13 @@ public partial class HardwareSingleCameraWindow : Window
     private readonly HardwareSingleAppSessionLease _sessionLease;
     private readonly PersistentHardwareCameraAgentOperations _operations;
     private readonly HardwareSingleCameraViewModel _viewModel;
+    private readonly HardwareSingleHandoffEvidenceCollector? _handoffEvidenceCollector;
     private bool _shutdownStarted;
     private bool _shutdownComplete;
 
-    public HardwareSingleCameraWindow(string cameraAgentExecutablePath)
+    public HardwareSingleCameraWindow(
+        string cameraAgentExecutablePath,
+        string? handoffEvidenceSourceSha = null)
     {
         _sessionLease = HardwareSingleAppSessionLease.Acquire();
         try
@@ -30,12 +33,19 @@ public partial class HardwareSingleCameraWindow : Window
                 storagePaths.AgentArtifactsRoot,
                 storagePaths.CaptureProfilePath,
                 storagePaths.SingleIdentityV3Path);
+            _handoffEvidenceCollector = handoffEvidenceSourceSha is null
+                ? null
+                : new HardwareSingleHandoffEvidenceCollector(
+                    storagePaths.HandoffEvidenceRoot,
+                    storagePaths.AgentArtifactsRoot,
+                    handoffEvidenceSourceSha);
             _viewModel = new HardwareSingleCameraViewModel(
                 _operations,
                 new HardwareSingleAppStateStore(storagePaths.StateDirectory),
                 new HardwareOriginalExporter(storagePaths.DefaultExportDirectory),
                 preferencesStore,
-                profileStore);
+                profileStore,
+                handoffEvidenceCollector: _handoffEvidenceCollector);
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closing += OnClosing;
@@ -115,6 +125,20 @@ public partial class HardwareSingleCameraWindow : Window
             {
                 // Never force-kill an agent whose capture dispatch state may be
                 // ambiguous. Durable recovery resolves it on the next launch.
+            }
+            if (_handoffEvidenceCollector is not null)
+            {
+                _handoffEvidenceCollector.Seal();
+                try
+                {
+                    await _handoffEvidenceCollector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch (Exception exception) when (
+                    exception is not OutOfMemoryException)
+                {
+                    // Acceptance evidence is observation-only. Missing or incomplete
+                    // output can never be a Pass and must not interfere with Agent cleanup.
+                }
             }
         }
         finally

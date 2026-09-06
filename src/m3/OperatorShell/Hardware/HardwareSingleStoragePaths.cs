@@ -8,7 +8,8 @@ internal sealed record HardwareSingleStoragePaths(
     string PreferencesPath,
     string CaptureProfilePath,
     string SingleIdentityV3Path,
-    string AgentArtifactsRoot)
+    string AgentArtifactsRoot,
+    string HandoffEvidenceRoot)
 {
     public string ExportDirectory => DefaultExportDirectory;
 
@@ -38,6 +39,7 @@ internal sealed record HardwareSingleStoragePaths(
             // (which has no "phase0" segment) -- don't; it would point this
             // process's canonical-path checks at a different directory than
             // where the agent actually writes by default.
-            Path.Combine(productRoot, "phase0", "camera-agent", "artifacts"));
+            Path.Combine(productRoot, "phase0", "camera-agent", "artifacts"),
+            Path.Combine(productRoot, "hardware-single", "handoff-evidence"));
     }
 }

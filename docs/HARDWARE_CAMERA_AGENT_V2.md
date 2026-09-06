@@ -53,6 +53,34 @@ Only a verified terminal `CaptureComplete` causes a new v2 session to start.
 Failed, partial, reserved, in-progress, disconnected, or invalid capture results
 remain stopped and are never retried automatically.
 
+## Opt-in ten-handoff acceptance evidence
+
+The hardware Single window enables the observation-only collector only when it
+is started with both `--single-handoff-acceptance-count 10` and
+`--source-sha <40-lower-hex>`. Ordinary launcher and hardware operation do not
+create an acceptance run. The collector writes
+`a0.hardware-single-handoff-acceptance.v1` under the fixed-local
+`%LOCALAPPDATA%\A0CameraStitcher\hardware-single\handoff-evidence` root.
+
+One accepted handoff requires at least two ordered verified frames before the
+capture, a confirmed v2 stop/SDK close, one v1 dispatch with retry count zero,
+the time-ordered Agent trace from WPD baseline through SDK capture, canonical
+original verification, exact delete, empty-after and WPD recovery close, then
+at least two ordered frames from a new v2 session and its explicit final stop.
+The run becomes `Complete` only when it is sealed after exactly
+requested/attempted/completed 10, failures 0, and the tenth restarted session
+is stopped. Early close is
+`Incomplete`; missing, corrupt, duplicate, foreign-session, late or out-of-order
+observations are `Invalid`; a typed operation failure is `FailedPartial`.
+
+Observation is queued off the UI/camera path. Persistence or parsing failure
+cannot dispatch, retry, delete, change a timeout, or alter the existing stop and
+capture order. It only prevents an acceptance Pass. Output is an allowlist of
+the schema/scope, supplied source SHA, opaque run/session/transaction IDs, UTC
+timestamps, state/count/boolean results and normalized failure categories. It
+does not copy preview/image data, hashes from preview, serials, SDK/WPD raw
+identifiers, profile values, local/user paths, or exception details.
+
 ## Verification boundary
 
 Native contract tests drive the production backend through a narrow injected SDK
@@ -65,6 +93,8 @@ correlation is retained for rejection envelopes despite whitespace, field order,
 unknown payload fields, or duplicate payload fields; no raw substring detection is
 used. Foundation tests cover strict JSON, canonical base64, and JPEG validation.
 Operator tests cover in-memory frame display, stop-before-capture ordering, v1
-handoff=false, success-only restart, and zero capture when stop is unconfirmed.
+handoff=false, success-only restart, zero capture when stop is unconfirmed, and
+the opt-in collector's exact 10/10, partial, persistence-failure, missing,
+duplicate, foreign-session, out-of-order and post-delete failure results.
 These are software-only tests: no actual D810 Live View, WPF interaction,
 empty-card capture, or ten-handoff acceptance is claimed.
