@@ -1056,7 +1056,7 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {89 - failures.Count}/89 passed.");
+Console.WriteLine($"Operator shell tests: {90 - failures.Count}/90 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
