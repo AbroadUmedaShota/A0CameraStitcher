@@ -160,6 +160,9 @@ struct DualHardwareCameraAgentPipeFailureInjectionForTesting {
     bool fail_response_body_write{};
     bool fail_delivery_ack_wait{};
     bool fail_response_flush{};
+    // Controls only the absolute host-lifetime clock in contract tests.
+    // Frame/ACK timeouts keep their real monotonic clock. Empty in production.
+    std::function<std::uint64_t()> lifetime_ticks_for_testing;
 };
 
 // Serves the Dual hardware v2 protocol over one dedicated local named pipe,

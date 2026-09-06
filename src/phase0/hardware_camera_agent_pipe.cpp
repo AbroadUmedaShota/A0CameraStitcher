@@ -296,7 +296,8 @@ int RunNamedPipeServerLoop(
     Dispatcher& dispatcher,
     bool serve_once,
     const FailureInjection& failure_injection,
-    std::chrono::milliseconds lifetime_budget) {
+    std::chrono::milliseconds lifetime_budget,
+    const std::function<std::uint64_t()>& lifetime_ticks_for_testing = {}) {
     if (!IsSafePipeName(pipe_name)) {
         throw std::invalid_argument("hardware Camera Agent pipe name is invalid");
     }
@@ -305,11 +306,14 @@ int RunNamedPipeServerLoop(
     CurrentLogonPipeSecurity security;
     const ULONGLONG lifetime_budget_ms = static_cast<ULONGLONG>(
         std::max(lifetime_budget, std::chrono::milliseconds(0)).count());
-    const ULONGLONG server_deadline = GetTickCount64() + lifetime_budget_ms;
+    const auto lifetime_now = [&]() -> ULONGLONG {
+        return lifetime_ticks_for_testing ? lifetime_ticks_for_testing() : GetTickCount64();
+    };
+    const ULONGLONG server_deadline = lifetime_now() + lifetime_budget_ms;
 
     for (;;) {
         dispatcher.OnIdle();
-        if (dispatcher.ShouldStop() || (!serve_once && GetTickCount64() >= server_deadline)) {
+        if (dispatcher.ShouldStop() || (!serve_once && lifetime_now() >= server_deadline)) {
             return 0;
         }
         const HANDLE pipe = CreateNamedPipeW(
@@ -415,7 +419,8 @@ int RunDualHardwareCameraAgentNamedPipeServer(
         dispatcher,
         serve_once,
         failure_injection,
-        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)));
+        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)),
+        failure_injection.lifetime_ticks_for_testing);
 }
 
 int RunDualBindingCameraAgentNamedPipeServer(

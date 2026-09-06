@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -55,6 +56,16 @@ void CheckContains(
     std::string_view expected,
     std::string_view message) {
     Check(value.find(expected) != std::string_view::npos, message);
+}
+
+void JoinPersistentHost(std::future<int>& server) {
+    if (server.wait_for(std::chrono::seconds(8)) != std::future_status::ready) {
+        // This executable has no hardware backend. Fail the test process instead
+        // of hanging in future::get if the fixed-deadline contract regresses.
+        std::cerr << "FAIL: persistent host did not stop at the fixed deadline\n" << std::flush;
+        std::_Exit(1);
+    }
+    Check(server.get() == 0, "a fixed-deadline shutdown must exit 0");
 }
 
 std::string UniqueSuffix() {
@@ -526,26 +537,20 @@ void TestMalformedJsonBodyGetsTypedRejectionOverRealHost() {
 // proving: (a) the persistent multi-request contract, (b) capabilities/
 // reserve/query match the existing typed contract when served through the
 // real host, and (c) duplicate delivery of the same reservation is rejected
-// rather than silently re-accepted. All four round trips must complete well
-// inside lifetime_budget_for_testing, which -- like production -- is a fixed
-// deadline computed once at launch and never extended by activity (see the
-// lifetime-policy doc comment on RunDualHardwareCameraAgentNamedPipeServer);
-// it lets the host reach that deadline quickly instead of waiting out the
-// real 600s production budget.
+// rather than silently re-accepted. Keep the lifetime clock fixed during
+// durable I/O, then advance it explicitly. This is a protocol test, not a
+// claim that six filesystem/pipe round trips always finish within 4.5s.
 // ---------------------------------------------------------------------
 void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     const fs::path root = MakeTempRoot("persistent");
     auto store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
     DualHardwareCameraAgentDispatcher dispatcher(store);
     const std::string pipe_name = PipeNameFor("persistent");
+    std::atomic<std::uint64_t> lifetime_ticks{1000};
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
-            pipe_name, dispatcher, /*serve_once=*/false, {},
-            // Keep this budget under the 5000 ms accept-wait granularity: the loop
-            // only re-checks the deadline after an accept wait or a handled
-            // connection, so a budget >= 5000 ms delays shutdown by another
-            // full accept cycle and overruns the wait_for below. All requests
-            // except the last must complete within this window.
+            pipe_name, dispatcher, /*serve_once=*/false,
+            {.lifetime_ticks_for_testing = [&] { return lifetime_ticks.load(); }},
             std::chrono::milliseconds(4500));
     });
 
@@ -565,6 +570,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     }
 
     const auto reserved = SendRequest(pipe_name, ReservationEnvelope(transaction_id));
+    lifetime_ticks.store(2000);
     Check(reserved.has_value(), "reservation must be delivered over the real host");
     if (reserved) {
         CheckContains(*reserved, "\"resultCode\":\"PairTransactionReserved\"",
@@ -578,6 +584,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
     // must not create a second reservation.
     const auto duplicate = SendRequest(
         pipe_name, ReservationEnvelope(transaction_id, "pipe-contract-reserve-dup"));
+    lifetime_ticks.store(2500);
     Check(duplicate.has_value(), "the duplicate reservation attempt must be delivered");
     if (duplicate) {
         CheckContains(*duplicate, "\"success\":false",
@@ -590,6 +597,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
 
     const auto queried = SendRequest(
         pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-1"));
+    lifetime_ticks.store(3000);
     Check(queried.has_value(), "the same-ID query must be delivered over the real host");
     if (queried) {
         CheckContains(*queried, "\"resultCode\":\"PairTransactionReserved\"",
@@ -601,6 +609,7 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
 
     const auto closed = SendRequest(
         pipe_name, CloseEnvelope(transaction_id));
+    lifetime_ticks.store(3500);
     Check(closed.has_value(), "the exact close must be delivered over the real host");
     if (closed) {
         CheckContains(*closed, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
@@ -608,6 +617,9 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
         CheckContains(*closed, "\"closedBeforeDispatch\":true",
             "a real-host close must not acknowledge before the tombstone reread");
     }
+    // Regression: a slow client exceeds the old shortened test lifetime.
+    // The semantic clock remains inside the deadline; no product budget changes.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5600));
     const auto closed_query = SendRequest(
         pipe_name, QueryEnvelope(transaction_id, "pipe-contract-query-closed"));
     Check(closed_query.has_value(), "the close tombstone query must be delivered");
@@ -618,27 +630,9 @@ void TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery() {
             "a close tombstone must never forge a capture result");
     }
 
-    // The persistent-mode accept loop only re-checks the fixed deadline
-    // between connection attempts, and each attempt waits up to a fixed 5s
-    // for a new connection before looping back (unchanged, shared behavior
-    // -- see RunNamedPipeServerLoop). So the observed shutdown latency after
-    // the last completed request is bounded by that ~5s accept-wait
-    // granularity added to lifetime_budget_for_testing, not by the budget
-    // alone; 8s gives comfortable margin without waiting out the real 600s
-    // budget.
-    //
-    // server.get() is called unconditionally (not only when wait_for
-    // reported ready) precisely so the async task's completion is always
-    // waited for before this thread touches `dispatcher` again below:
-    // std::future::get() blocks until the task truly finishes, which is
-    // what establishes happens-before with the server thread's last write
-    // to dispatcher's internal state. Reading dispatcher.SafetyCounters()
-    // after only a timed-out wait_for(), without also unconditionally
-    // blocking on get(), would race with a still-running server thread.
-    Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
-        "the persistent Dual host must terminate at its fixed launch deadline");
-    Check(server.get() == 0,
-        "a fixed-deadline shutdown after only completed deliveries must exit 0");
+    lifetime_ticks.store(5500); // Exactly the fixed launch deadline.
+    // One already-pending accept may still take 5s. Join before reading counters.
+    JoinPersistentHost(server);
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
@@ -694,14 +688,11 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
     auto store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
     DualHardwareCameraAgentDispatcher dispatcher(store, [] { return FixedNow(); });
     const std::string pipe_name = PipeNameFor("start-unavailable");
+    std::atomic<std::uint64_t> lifetime_ticks{1000};
     auto server = std::async(std::launch::async, [&] {
         return RunDualHardwareCameraAgentNamedPipeServer(
-            pipe_name, dispatcher, /*serve_once=*/false, {},
-            // Keep this budget under the 5000 ms accept-wait granularity: the loop
-            // only re-checks the deadline after an accept wait or a handled
-            // connection, so a budget >= 5000 ms delays shutdown by another
-            // full accept cycle and overruns the wait_for below. All requests
-            // except the last must complete within this window.
+            pipe_name, dispatcher, /*serve_once=*/false,
+            {.lifetime_ticks_for_testing = [&] { return lifetime_ticks.load(); }},
             std::chrono::milliseconds(4500));
     });
 
@@ -756,14 +747,9 @@ void TestBackendUnavailableStartFailsClosedAfterFullPreflight() {
             "a failed-closed start must leave the transaction Reserved, not silently terminal");
     }
 
-    // See the matching comment in
-    // TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery for why
-    // this waits well past lifetime_budget_for_testing alone, and for why
-    // server.get() is called unconditionally before dispatcher is touched
-    // again below.
-    Check(server.wait_for(std::chrono::seconds(8)) == std::future_status::ready,
-        "the start-unavailable host must terminate at its fixed launch deadline");
-    Check(server.get() == 0, "a fixed-deadline shutdown must exit 0");
+    lifetime_ticks.store(5500);
+    // One already-pending accept may still take 5s. Join before reading counters.
+    JoinPersistentHost(server);
 
     const auto counters = dispatcher.SafetyCounters();
     Check(counters.pair_dispatch_count == 0,
@@ -883,7 +869,11 @@ void TestResponseUnknownRecoveryHasZeroReplayAcrossHostRestarts() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--persistent-contract") {
+        TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery();
+        return failures == 0 ? 0 : 1;
+    }
     TestDeliveryAcknowledgmentIsRequired();
     TestMaximumFrameBoundaryMatchesSingleContract();
     TestZeroLengthAndPartialFramesFailClosedWithoutDispatch();

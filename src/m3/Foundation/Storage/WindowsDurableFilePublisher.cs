@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-namespace A0CameraStitcher.M3.OperatorShell.Hardware;
+namespace A0CameraStitcher.M3.Foundation.Storage;
 
 internal static partial class WindowsDurableFilePublisher
 {
@@ -62,7 +62,9 @@ internal static partial class WindowsDurableFilePublisher
     public static void PublishLocked(
         FileStream verifiedStagingFile,
         string destinationPath,
-        bool replaceExisting)
+        bool replaceExisting,
+        CancellationToken cancellationToken = default,
+        Action? afterFlushForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(verifiedStagingFile);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -73,6 +75,8 @@ internal static partial class WindowsDurableFilePublisher
         }
 
         verifiedStagingFile.Flush(flushToDisk: true);
+        afterFlushForTesting?.Invoke();
+        cancellationToken.ThrowIfCancellationRequested();
         RenameOpenHandle(
             verifiedStagingFile.SafeFileHandle,
             Path.GetFullPath(destinationPath),

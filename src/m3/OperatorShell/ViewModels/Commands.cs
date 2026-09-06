@@ -73,7 +73,11 @@ public sealed class AsyncRelayCommand(
 
     public bool CanExecute(object? parameter) => !_isExecuting && (canExecute?.Invoke() ?? true);
 
-    public async void Execute(object? parameter)
+    public async void Execute(object? parameter) => await ExecuteAsync(parameter).ConfigureAwait(true);
+
+    // The ICommand entry point and integration tests share the same guard,
+    // exception handling, and completion (including the busy reset).
+    internal async Task ExecuteAsync(object? parameter)
     {
         if (!CanExecute(parameter))
         {
