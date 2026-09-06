@@ -181,6 +181,8 @@ P0-B3完了後、通常runと分けて、可能な範囲のsoftware timeout、SD
 
 software-only回帰はFoundation 22/22、DualCamera 18/18、Operator Shell 22/22、SDK-less／licensed Debug/Release全CTest各10/10、`Test-M3Simulated.ps1` Release/Debug、正式DualCamera WPF flowに合格した。このslice自体はカメラ、WPD、カード、Live View、設定write、delete、format、`0x9207`、retryを実行していない。`HG-0003B`は後にADR-0025のsession-local bindingで解消され、SingleCamera実機1/10/100は2026-08-26に別証跡で合格したが、Dual実機、最終リグ、A0閾値、実写品質は未検証である。
 
+2026-09-06時点の検証対象source SHA `fd3ed8c0f294caa6dbea9dcf9f7e5e1f9072453d`でlicensed SDK adapterを有効化し、native Debug/Release CTest各20/20、M3 simulated Debug/Release、focused DualCamera WPF Debug/Releaseへ再基準化して合格した。経路検査上のcamera command、PnP、USB/WPD、実機操作は各0であり、runtime telemetryではない。Phase 0B one-shotは引き続き`NotRun`である。
+
 ## P0判定
 
 1. `GO-HYBRID-SEQUENTIAL`: Phase 0A/Bの全条件とLive View handoff条件を満たした。

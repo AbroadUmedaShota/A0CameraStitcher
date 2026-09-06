@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-08-31
+更新日: 2026-09-06
 
 ## 総合判定
 
@@ -10,6 +10,7 @@
 
 ## 確認済み
 
+- 2026-09-06時点の検証対象source SHA `fd3ed8c0f294caa6dbea9dcf9f7e5e1f9072453d`でlicensed SDK adapterを有効化し、native Debug/Release CTest各20/20、M3 simulated Debug/Release、focused DualCamera WPF Debug/Releaseに合格した。経路検査上のcamera command、PnP、USB/WPD、実機操作は各0であり、runtime telemetryではない。これはIssue #10のsoftware-only検証であってDual実機受入ではない。
 - [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。安全修正`29b8671`はNative CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立reviewでpatch `PASS`となりpush済み。ADR-0028のproduction pair preflightとModule保持read-only coexistence probeは実装・ソフトウェア回帰済みだが、同一exact SHAでの実機coexistence probeと撮影証跡は未完了である。ライセンス済みSDKのheader 22件、sample 6件、PDF 10件の静的調査でも、Module reload後に同型D810を一意照合できる正式なper-body property/APIは確認できなかった。同一bindingの10/100 runnerは未実装であり、Dual hardware readinessは`HardwarePending`。実撮影、delete、設定変更、USB操作は0件。
 - 2026-08-29時点で、WPFの明示起動引数、承認済み`a0.dual-capture-profile.operator-approved.v1`、同一Agent内CAM-A/B割当から`CaptureRecoveryOnly`へのactivation、予約前durable snapshot、1 reserve／1 start、曖昧時same-ID照会、再起動時の再binding、CAM-B失敗時CAM-A原本保持、JPEG 7360×4912・size・SHA-256再検証、stitch `Pending`・A0品質`Unapproved`を実装した。通常`start-reserved-pair` schemaと通常合成経路は変更していない。この項目はsoftware-onlyで、実シャッター、実WPF操作、実機one-shotの合格を意味しない。
 - [2026-08-26 SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md): one-shot 1/1、10/10、p50 `14.036秒`、p95/max `14.643秒`、HG-0009承認、100/100初回成功、100回p50 `14.204秒`・p95 `14.430秒`・max `14.692秒`。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件だった。
@@ -70,7 +71,7 @@
 |---|---|---|
 | M1A one-shot、10/10 | 2026-08-26に完了 | one-shot 1/1、10/10、p95承認、Camera Agent経路100/100を実績として維持 |
 | M1A fault、handoff | software recoveryは合格。物理USB切断とContinuous Live View handoff 10回は未実施 | 実機操作者の明示確認後に残試験を個別実施 |
-| M1B二台試験 | 二台接続時のSDK identity collisionは、2026-08-20のADR-0025でsession-local operator bindingへ置換して解消した。恒久的な機体識別は作らず、割当はAgent process内のmemory-onlyで、Single identity-v3は流用しない | core（#9）・binding Agent protocol（#61）・確認UI（#62）はsoftware実装済み。実capture backend（#10）と実機受入が残り、DualCameraは`HardwarePending` |
+| M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF software経路、licensed SDK Debug/Release回帰はsoftware実装・検証済み。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | 実機pair-level preflight、coexistence probe、CaptureRecoveryOnly one-shotを別の明示実機ゲートで受入する。DualCameraはそれまで`HardwarePending` |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
 | SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。実WPF 100件とLive View handoffは未完了 | WPF end-to-end one-shot後、UI操作・export・状態表示を含む100件受入 |
 | 配布 | native dependency再配布未承認 | `HG-0005` |
@@ -80,7 +81,7 @@
 ## 次の安全な順番
 
 1. SingleCameraの残作業を、Continuous Live View handoff 10回、実WPF end-to-end、物理異常系へ限定する
-2. DualCameraのproduction real capture backend（Issue #10）をsoftware contractで完成させる
+2. DualCameraは実機開始条件を再確認し、CaptureRecoveryOnly one-shotを独立した実機ゲートとして受入する
 3. 実D810二台でone-shot、10組、100組、fault matrixを順に実施する
 4. `HG-0001/0002`承認後にA0合成品質へ進む
 
