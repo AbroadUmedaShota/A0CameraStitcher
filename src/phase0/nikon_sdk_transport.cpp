@@ -20,6 +20,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <iomanip>
 #include <limits>
@@ -35,6 +36,49 @@
 
 namespace a0::phase0 {
 namespace fs = std::filesystem;
+
+std::vector<std::uint32_t> InspectNikonD810InventorySources(
+    const std::vector<std::uint32_t>& source_ids,
+    const std::function<void(std::uint32_t)>& open_source,
+    const std::function<bool()>& inspect_current_source_is_d810,
+    const std::function<bool()>& close_current_source_once) {
+    if (!open_source || !inspect_current_source_is_d810 ||
+        !close_current_source_once) {
+        throw std::invalid_argument("Nikon inventory operations are required");
+    }
+
+    std::vector<std::uint32_t> d810_ids;
+    for (const std::uint32_t source_id : source_ids) {
+        open_source(source_id);
+
+        bool is_d810 = false;
+        std::exception_ptr inspection_failure;
+        try {
+            is_d810 = inspect_current_source_is_d810();
+        } catch (...) {
+            inspection_failure = std::current_exception();
+        }
+
+        bool close_confirmed = false;
+        try {
+            close_confirmed = close_current_source_once();
+        } catch (...) {
+            close_confirmed = false;
+        }
+        if (!close_confirmed) {
+            throw TransportError(
+                "inventory_close_failed",
+                "Nikon inventory source close could not be confirmed");
+        }
+        if (inspection_failure) {
+            std::rethrow_exception(inspection_failure);
+        }
+        if (is_d810) {
+            d810_ids.push_back(source_id);
+        }
+    }
+    return d810_ids;
+}
 
 std::string DeriveNikonSdkStableIdentity(
     std::string_view source_name,
@@ -1826,23 +1870,34 @@ private:
         const std::vector<ULONG>& ids,
         std::chrono::steady_clock::time_point deadline,
         std::string_view category) {
-        std::vector<ULONG> d810_ids;
-        for (const ULONG id : ids) {
-            MaidObject& candidate = AcquireSessionMaidObject(category);
-            OpenChild(module_, candidate, id, category);
-            try {
-                EnumerateCapabilities(candidate, deadline, category);
-                if (GetUnsigned(candidate, kNkMAIDCapability_CameraType,
-                        deadline, category) == kNkMAIDCameraType_D810) {
-                    d810_ids.push_back(id);
+        std::vector<std::uint32_t> source_ids(ids.begin(), ids.end());
+        MaidObject* candidate = nullptr;
+        const auto inspected = InspectNikonD810InventorySources(
+            source_ids,
+            [&](std::uint32_t id) {
+                candidate = &AcquireSessionMaidObject(category);
+                OpenChild(module_, *candidate, static_cast<ULONG>(id), category);
+            },
+            [&] {
+                EnumerateCapabilities(*candidate, deadline, category);
+                return GetUnsigned(*candidate, kNkMAIDCapability_CameraType,
+                           deadline, category) == kNkMAIDCameraType_D810;
+            },
+            [&] {
+                if (candidate == nullptr || !candidate->opened || entry_ == nullptr) {
+                    return false;
                 }
-                CloseObjectNoThrow(candidate);
-            } catch (...) {
-                CloseObjectNoThrow(candidate);
-                throw;
-            }
-        }
-        return d810_ids;
+                const NKERROR result = Call(
+                    &candidate->value, kNkMAIDCommand_Close, 0,
+                    kNkMAIDDataType_Null, 0);
+                if (result != kNkMAIDResult_NoError &&
+                    result != kNkMAIDResult_ZombieObject) {
+                    return false;
+                }
+                candidate->opened = false;
+                return true;
+            });
+        return std::vector<ULONG>(inspected.begin(), inspected.end());
     }
 
     std::vector<ULONG> WaitForSourceIds(
