@@ -20,6 +20,123 @@ void Check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+class RecordingInventorySource {
+public:
+    std::size_t fail_close_number{};
+    std::size_t unknown_close_number{};
+    std::size_t open_count{};
+    std::size_t inspect_count{};
+    std::size_t close_count{};
+    std::size_t concurrent_open_count{};
+    bool source_open{};
+    std::uint32_t current_source{};
+    std::vector<std::string> events;
+
+    void Open(std::uint32_t source_id) {
+        if (source_open) {
+            ++concurrent_open_count;
+            throw std::runtime_error("inventory source overlap");
+        }
+        source_open = true;
+        current_source = source_id;
+        ++open_count;
+        events.emplace_back("open:" + std::to_string(source_id));
+    }
+
+    bool InspectIsD810() {
+        if (!source_open) throw std::runtime_error("inventory inspect without open source");
+        ++inspect_count;
+        events.emplace_back("inspect:" + std::to_string(current_source));
+        return current_source != 30;
+    }
+
+    bool CloseOnce() {
+        if (!source_open) throw std::runtime_error("inventory close without open source");
+        ++close_count;
+        events.emplace_back("close:" + std::to_string(current_source));
+        if (unknown_close_number != 0 && close_count == unknown_close_number) {
+            throw std::runtime_error("inventory close completion unknown");
+        }
+        if (fail_close_number != 0 && close_count == fail_close_number) {
+            return false;
+        }
+        source_open = false;
+        return true;
+    }
+};
+
+void TestInventoryCloseFailureStopsBeforeOpeningNextSource() {
+    RecordingInventorySource source;
+    source.fail_close_number = 1;
+    bool typed_failure = false;
+    std::size_t successful_returns = 0;
+
+    try {
+        (void)InspectNikonD810InventorySources(
+            {10, 20},
+            [&](std::uint32_t id) { source.Open(id); },
+            [&] { return source.InspectIsD810(); },
+            [&] { return source.CloseOnce(); });
+        ++successful_returns;
+    } catch (const TransportError& error) {
+        typed_failure = error.Category() == "inventory_close_failed";
+    }
+
+    Check(typed_failure,
+        "an unconfirmed inventory source close must return a typed failure");
+    Check(source.open_count == 1 && source.inspect_count == 1 &&
+              source.close_count == 1 && source.concurrent_open_count == 0,
+        "close failure must stop before opening, inspecting, or closing a second source");
+    Check(source.source_open && successful_returns == 0,
+        "unconfirmed source state must not be rewritten as closed or publish candidates");
+    Check(source.events == std::vector<std::string>{
+              "open:10", "inspect:10", "close:10"},
+        "inventory close failure must have no retry or later-source operation");
+}
+
+void TestInventoryUnknownCloseCompletionStopsWithoutRetry() {
+    RecordingInventorySource source;
+    source.unknown_close_number = 1;
+    bool typed_failure = false;
+
+    try {
+        (void)InspectNikonD810InventorySources(
+            {10, 20},
+            [&](std::uint32_t id) { source.Open(id); },
+            [&] { return source.InspectIsD810(); },
+            [&] { return source.CloseOnce(); });
+    } catch (const TransportError& error) {
+        typed_failure = error.Category() == "inventory_close_failed";
+    }
+
+    Check(typed_failure && source.source_open,
+        "unknown close completion must remain open-state uncertain and typed failed");
+    Check(source.open_count == 1 && source.close_count == 1 &&
+              source.concurrent_open_count == 0,
+        "unknown close completion must not retry close or open the next source");
+}
+
+void TestInventoryWalkRemainsSequentialWhenEveryCloseIsConfirmed() {
+    RecordingInventorySource source;
+
+    const auto d810_ids = InspectNikonD810InventorySources(
+        {10, 20},
+        [&](std::uint32_t id) { source.Open(id); },
+        [&] { return source.InspectIsD810(); },
+        [&] { return source.CloseOnce(); });
+
+    Check(d810_ids == std::vector<std::uint32_t>{10, 20},
+        "both inspected D810 ids may be returned only after checked close");
+    Check(source.open_count == 2 && source.inspect_count == 2 &&
+              source.close_count == 2 && source.concurrent_open_count == 0 &&
+              !source.source_open,
+        "normal two-camera inventory must preserve one open/read/checked-close sequence per source");
+    Check(source.events == std::vector<std::string>{
+              "open:10", "inspect:10", "close:10",
+              "open:20", "inspect:20", "close:20"},
+        "normal inventory must never open the next source before checked close");
+}
+
 class RecordingDualSessionTransport final : public INikonDualSessionTransport {
 public:
     std::vector<std::string> tokens{"session-token-a", "session-token-b"};
@@ -577,7 +694,7 @@ void TestPairPreflightEnforcesTheRetainedModuleOnlyBoundary() {
     }
 }
 
-void TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens() {
+void TestReadOnlyProbeEndsSessionWithoutPublishingBindingTokens() {
     auto transport = std::make_shared<RecordingDualSessionTransport>();
 
     const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
@@ -585,11 +702,11 @@ void TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens() {
           result.error == DualSdkReadOnlyProbeError::None &&
           result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
           result.terminal_state == DualSdkReadOnlyProbeTerminalState::Pass,
-        "Dual SDK read-only probe must report exactly two candidates and end the session");
+        "Dual SDK read-only probe must report exactly two inspected candidates and end the session");
     Check(transport->read_only_begin_count == 1 && transport->begin_count == 0 &&
           transport->end_count == 1 &&
           !transport->module_active && transport->source_open_count == 0,
-        "probe must not generate binding tokens and must end without opening a source");
+        "the transport-level fake must not generate binding tokens or retain an open source");
     Check(transport->capture_count == 0 && transport->status_probe_count == 0,
         "Dual SDK read-only probe must not inspect settings or send a capture command");
 
@@ -706,6 +823,9 @@ void TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed() {
 
 int main() {
     try {
+        TestInventoryCloseFailureStopsBeforeOpeningNextSource();
+        TestInventoryUnknownCloseCompletionStopsWithoutRetry();
+        TestInventoryWalkRemainsSequentialWhenEveryCloseIsConfirmed();
         TestSequentialBindingAndBoundCaptureReuseOneModule();
         TestSecondLiveViewCannotOverlapFirst();
         TestInvalidationRevokesEveryCandidateWithoutRetry();
@@ -716,7 +836,7 @@ int main() {
         TestFailedBindingCancellationIsNotRetriedByDestructor();
         TestCaptureFailureInvalidatesAndEndsSessionWithoutRetry();
         TestPairPreflightEnforcesTheRetainedModuleOnlyBoundary();
-        TestReadOnlyProbeEndsSessionWithoutOpeningSourceOrPublishingTokens();
+        TestReadOnlyProbeEndsSessionWithoutPublishingBindingTokens();
         TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens();
         TestReadOnlyProbeNormalizesStartAndInventoryFailures();
         TestReadOnlyProbeBlocksCleanupErrorAfterConfirmedEnd();

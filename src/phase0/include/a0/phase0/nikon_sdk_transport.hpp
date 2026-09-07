@@ -3,9 +3,21 @@
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 #include "a0/phase0/phase0.hpp"
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <vector>
 
 namespace a0::phase0 {
+
+// SDK-independent control-flow seam for the real D810 inventory walk. Every
+// successful source open is followed by exactly one checked close before the
+// next source can be opened or a matching id can be published.
+[[nodiscard]] std::vector<std::uint32_t> InspectNikonD810InventorySources(
+    const std::vector<std::uint32_t>& source_ids,
+    const std::function<void(std::uint32_t)>& open_source,
+    const std::function<bool()>& inspect_current_source_is_d810,
+    const std::function<bool()>& close_current_source_once);
 
 class INikonDualSessionTransport {
 public:
