@@ -17,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 
 namespace fs = std::filesystem;
@@ -739,6 +740,7 @@ ApprovedCaptureProfile ParseApprovedCaptureProfile(std::string_view json) {
 
 std::string JsonEscape(std::string_view value) {
     std::ostringstream output;
+    output.exceptions(std::ios::badbit | std::ios::failbit);
     constexpr char kHex[] = "0123456789ABCDEF";
     for (const unsigned char character : value) {
         switch (character) {
@@ -1888,7 +1890,7 @@ std::string TryExtractRequestId(std::string_view json) noexcept {
         }
         return found->second.string;
     } catch (...) {
-        return "rejected";
+        return {};
     }
 }
 
@@ -2925,6 +2927,7 @@ HardwareCameraAgentRequest ParseHardwareCameraAgentRequest(std::string_view json
 std::string SerializeHardwareCameraAgentResponse(const HardwareCameraAgentResponse& response) {
     const std::string request_id = IsSafeRequestId(response.request_id) ? response.request_id : "rejected";
     std::ostringstream output;
+    output.exceptions(std::ios::badbit | std::ios::failbit);
     const std::string_view schema = response.schema_version == kHardwareCameraAgentLiveViewSchemaVersion
         ? kHardwareCameraAgentLiveViewSchemaVersion
         : kHardwareCameraAgentSchemaVersion;
@@ -4669,11 +4672,15 @@ void ProductionHardwareCameraAgentBackend::OnAgentIdle() noexcept {
 HardwareCameraAgentDispatcher::HardwareCameraAgentDispatcher(IHardwareCameraAgentBackend& backend)
     : backend_(backend) {}
 
+static_assert(std::is_nothrow_default_constructible_v<std::string>);
+static_assert(std::is_nothrow_move_constructible_v<std::string>);
+
 std::string HardwareCameraAgentDispatcher::Handle(std::string_view request_json) noexcept {
-    const std::string extracted_request_id = TryExtractRequestId(request_json);
-    const std::string response_schema = TryParseResponseSchemaVersion(request_json)
-        .value_or(std::string(kHardwareCameraAgentSchemaVersion));
     try {
+        const std::string extracted_request_id = TryExtractRequestId(request_json);
+        const std::string response_schema = TryParseResponseSchemaVersion(request_json)
+            .value_or(std::string(kHardwareCameraAgentSchemaVersion));
+        try {
         const HardwareCameraAgentRequest request = ParseHardwareCameraAgentRequest(request_json);
         HardwareCameraAgentResponse response;
         response.schema_version = request.schema_version;
@@ -4772,19 +4779,22 @@ std::string HardwareCameraAgentDispatcher::Handle(std::string_view request_json)
                 : response.continuous_live_view->error_category;
         }
         return SerializeHardwareCameraAgentResponse(response);
-    } catch (const HardwareCameraAgentProtocolError& error) {
-        auto response = ProtocolRejection(extracted_request_id, error.Code(), error.what());
-        response.schema_version = response_schema;
-        return SerializeHardwareCameraAgentResponse(response);
-    } catch (const TransportError& error) {
-        auto response = AgentFailure(extracted_request_id, error.Category(), error.what());
-        response.schema_version = response_schema;
-        return SerializeHardwareCameraAgentResponse(response);
-    } catch (const std::exception&) {
-        auto response = AgentFailure(
-            extracted_request_id, "AgentFailure", "hardware Camera Agent operation failed closed");
-        response.schema_version = response_schema;
-        return SerializeHardwareCameraAgentResponse(response);
+        } catch (const HardwareCameraAgentProtocolError& error) {
+            auto response = ProtocolRejection(extracted_request_id, error.Code(), error.what());
+            response.schema_version = response_schema;
+            return SerializeHardwareCameraAgentResponse(response);
+        } catch (const TransportError& error) {
+            auto response = AgentFailure(extracted_request_id, error.Category(), error.what());
+            response.schema_version = response_schema;
+            return SerializeHardwareCameraAgentResponse(response);
+        } catch (const std::exception&) {
+            auto response = AgentFailure(
+                extracted_request_id, "AgentFailure", "hardware Camera Agent operation failed closed");
+            response.schema_version = response_schema;
+            return SerializeHardwareCameraAgentResponse(response);
+        }
+    } catch (...) {
+        return {};
     }
 }
 
