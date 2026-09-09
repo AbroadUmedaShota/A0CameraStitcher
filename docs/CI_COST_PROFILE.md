@@ -1,10 +1,41 @@
 # CI cost profile
 
-Last reviewed: 2026-09-04 JST
+Last reviewed: 2026-09-09 JST
 
-## Repository and billing context
+## Current public-repository decision (2026-09-09 JST)
 
 | Item | Current evidence |
+| --- | --- |
+| Repository | `AbroadUmedaShota/A0CameraStitcher` |
+| Visibility | Public, rechecked from the live repository on 2026-09-09 JST |
+| Runner | Standard GitHub-hosted `windows-latest`; one job with no matrix |
+| Canonical check | `Software-only build/test (no camera/SDK hardware)` |
+| Automatic PR triggers | One run for `opened`, `synchronize`, or `reopened` on a pull request targeting `main` or `codex/main-feature-integration` |
+| Main push | No workflow trigger; expected additional run count is zero |
+| Typical wall-clock time | About 21-23 minutes; the most recent full run `34318797863` took 21m10s |
+| Execution ceiling | 45 minutes from the job timeout |
+| Standard-runner charge | Expected to be zero while the repository remains public and uses a standard GitHub-hosted runner, per [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories) |
+
+For the Issue #151 M7 WPD enumeration fix, the proposed CI budget is exactly one
+full pull-request run. The initial branch push does not trigger this workflow.
+Additional pushes after the pull request is open, reruns, and manual dispatches
+are not included. If CI or review requires a correction, classify the result
+first and obtain a new scoped decision before starting another hosted run.
+
+This decision covers runner execution only. It does not claim that account-wide
+artifact, log, or cache storage is free or unlimited. The current workflow does
+not explicitly upload artifacts or configure a dependency cache; any future
+artifact upload, cache, larger runner, private visibility, matrix expansion, or
+additional trigger requires a separate cost re-evaluation. This record is a
+preflight estimate, not evidence that the M7 run has been authorized or started.
+
+## Historical private-repository context (2026-09-04, retained)
+
+The following evidence and approval record describe the repository before it
+became public. They are retained for audit history and do not describe the
+current visibility or current standard-runner charging rule.
+
+| Item | Evidence recorded on 2026-09-04 |
 | --- | --- |
 | Repository | `AbroadUmedaShota/A0CameraStitcher` |
 | Visibility | Private |
@@ -42,7 +73,7 @@ The workflow always runs for a target PR. It does not use event-level path filte
 
 The job timeout is reduced from 90 to 45 minutes to cap runaway consumption while retaining roughly twice the observed normal runtime. The existing shared native build directory remains in use. No dependency cache or matrix split is added in this change: the solution currently has no external NuGet package set that would justify `setup-dotnet` caching, and native cache correctness across SDK-less/SDK-linked boundaries needs separate measurement before cached binaries can be trusted. A split matrix would also multiply Windows job rounding and alter failure-reporting semantics.
 
-## Cost estimate and approval
+## Historical private-repository cost estimate and approval
 
 - One merged code PR previously consumed about 40-46 Windows runner minutes across the PR run and duplicate main-push run. The new trigger model consumes about 20-23 minutes, a reduction of about 20-23 runner minutes (approximately 50%) per merged code PR.
 - At an illustrative 20 merged code PRs per month, the expected total falls from about 800-920 to 400-460 Windows runner minutes, saving about 400-460 runner minutes. Recalculate from the actual monthly PR count.
@@ -64,4 +95,4 @@ The job timeout is reduced from 90 to 45 minutes to cap runaway consumption whil
 
 ## Recheck conditions
 
-Revisit this profile before widening triggers or matrices, changing runner OS/SKU, adding a full post-merge suite, making the repository public, changing the billing plan/owner, or after a material change in observed runtime. Hardware, licensed SDK, packaging/release, and real-camera evidence remain outside this workflow and require their own explicit trigger and acceptance record.
+Revisit this profile before widening triggers or matrices, changing runner OS/SKU, adding a full post-merge suite, changing repository visibility, adding artifact or cache storage, changing the billing plan/owner, or after a material change in observed runtime. Hardware, licensed SDK, packaging/release, and real-camera evidence remain outside this workflow and require their own explicit trigger and acceptance record.
