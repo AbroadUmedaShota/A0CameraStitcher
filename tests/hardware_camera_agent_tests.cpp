@@ -10,23 +10,84 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace a0::phase0;
 
 namespace {
+enum class M6AllocationFaultMode { none, persistent_all, persistent_large, exact_ordinal };
+thread_local M6AllocationFaultMode m6_fault_mode = M6AllocationFaultMode::none;
+thread_local std::size_t m6_allocation_ordinal = 0;
+thread_local std::size_t m6_fault_ordinal = 0;
+thread_local std::size_t m6_failed_allocations = 0;
+}
+
+void* operator new(std::size_t size) {
+    const auto ordinal = ++m6_allocation_ordinal;
+    const bool fail =
+        m6_fault_mode == M6AllocationFaultMode::persistent_all ||
+        (m6_fault_mode == M6AllocationFaultMode::persistent_large && size >= 64U) ||
+        (m6_fault_mode == M6AllocationFaultMode::exact_ordinal &&
+            ordinal == m6_fault_ordinal);
+    if (fail) {
+        ++m6_failed_allocations;
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size == 0 ? 1 : size)) return memory;
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size) {
+    return ::operator new(size);
+}
+
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete[](void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
+
+namespace {
+
+void ArmM6PersistentFault() noexcept {
+    m6_allocation_ordinal = 0;
+    m6_failed_allocations = 0;
+#if defined(NDEBUG)
+    m6_fault_mode = M6AllocationFaultMode::persistent_all;
+#else
+    // MSVC Debug allocates an iterator proxy while constructing the empty
+    // std::string fallback. This restricted mode is coverage, not proof of
+    // total-OOM survivability; the isolated debug characterization below
+    // records that limitation explicitly.
+    m6_fault_mode = M6AllocationFaultMode::persistent_large;
+#endif
+}
+
+void ArmM6ExactOrdinal(std::size_t ordinal) noexcept {
+    m6_allocation_ordinal = 0;
+    m6_failed_allocations = 0;
+    m6_fault_ordinal = ordinal;
+    m6_fault_mode = M6AllocationFaultMode::exact_ordinal;
+}
+
+void DisarmM6Fault() noexcept {
+    m6_fault_mode = M6AllocationFaultMode::none;
+}
 
 int failures = 0;
 constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
@@ -114,7 +175,7 @@ std::string CaptureEnvelope(std::string_view transaction_id, bool live_view = fa
             "\"liveViewHandoffRequested\":" + (live_view ? "true" : "false") + "}");
 }
 
-class FakeBackend final : public IHardwareCameraAgentBackend {
+class FakeBackend : public IHardwareCameraAgentBackend {
 public:
     SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
         ++readiness_calls;
@@ -319,6 +380,88 @@ public:
     bool return_malformed_live_view{};
 };
 
+class UnknownExceptionBackend final : public FakeBackend {
+public:
+    SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        ++dispatch_calls;
+        throw 151;
+    }
+
+    int dispatch_calls{};
+};
+
+class NonAllocatingStandardException final : public std::exception {
+public:
+    const char* what() const noexcept override {
+        return "synthetic backend failure whose typed error response requires an allocating detail string";
+    }
+};
+
+class SecondaryAllocationFailureBackend final : public FakeBackend {
+public:
+    SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        ++dispatch_calls;
+        ArmM6PersistentFault();
+        throw NonAllocatingStandardException{};
+    }
+
+    int dispatch_calls{};
+};
+
+class SerializationAllocationFailureBackend final : public FakeBackend {
+public:
+    SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
+        auto result = FakeBackend::GetSingleReadiness(alias);
+        ArmM6PersistentFault();
+        return result;
+    }
+};
+
+class PreparedSerializationBackend final : public FakeBackend {
+public:
+    explicit PreparedSerializationBackend(bool long_escaped) {
+        FakeBackend seed;
+        result_ = seed.GetSingleReadiness("CAM-A");
+        if (long_escaped) {
+            result_.firmware =
+                std::string(160, 'f') + "\n\t\"escaped-firmware-marker\"";
+        }
+    }
+
+    SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
+        ++readiness_calls;
+        if (alias != "CAM-A") throw std::logic_error("unexpected prepared alias");
+        return std::move(result_);
+    }
+
+private:
+    SingleCameraReadinessResult result_;
+};
+
+template <typename Exception>
+class TypedSecondaryAllocationFailureBackend final : public FakeBackend {
+public:
+    explicit TypedSecondaryAllocationFailureBackend(Exception exception, bool arm_fault)
+        : exception_(std::move(exception)), arm_fault_(arm_fault) {}
+
+    SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        ++dispatch_calls;
+        struct ArmWhileUnwinding final {
+            bool enabled{};
+            int depth{std::uncaught_exceptions()};
+            ~ArmWhileUnwinding() noexcept {
+                if (enabled && std::uncaught_exceptions() > depth) ArmM6PersistentFault();
+            }
+        } guard{arm_fault_};
+        throw exception_;
+    }
+
+    int dispatch_calls{};
+private:
+    Exception exception_;
+    bool arm_fault_{};
+};
+
 std::string JsonEscapeForTest(std::string_view value) {
     std::string output;
     for (const char character : value) {
@@ -500,6 +643,10 @@ void TestStrictProtocolAndTypedResponses() {
     HardwareCameraAgentDispatcher dispatcher(backend);
     const std::string readiness = dispatcher.Handle(Envelope(
         "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}"));
+    const std::string expected_readiness =
+        R"({"schemaVersion":"a0.camera-agent.hardware.v1","simulation":false,"marker":"Hardware","requestId":"req-1","success":true,"resultCode":"SingleReady","payload":{"cameraMode":"SingleCamera","cameraAlias":"CAM-A","ready":true,"sdkCameraCount":1,"wpdCameraCount":1,"sdkIdentityBound":true,"wpdIdentityBound":true,"sdkAliasMatches":true,"wpdAliasMatches":true,"sdkStatusProbed":true,"spoolInspected":true,"spoolPayloadObjectCount":0,"spoolKnownEmpty":true,"firmware":"unknown","liveViewStatus":"off","liveViewStatusAvailable":true,"captureProfileApproved":true,"captureProfileId":"approved-test-profile","captureProfileVersion":1,"captureProfileSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","captureProfileCameraAlias":"CAM-A","profileExpiresAtUtc":"2099-12-31T23:59:59Z","captureProfileAliasMatches":true,"settingsMatchApprovedProfile":true,"observedSettings":{"fileType":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"compressionLevel":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"imageSize":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"exposureMode":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"shutterSpeed":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"aperture":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"sensitivity":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"whiteBalanceMode":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},"focusMode":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null}},"readOnly":true,"captureCommandSent":false,"cameraObjectDeleteAttempted":false,"cameraSettingsChanged":false,"realIdentifiersIncluded":false,"failureCategory":"","failureDetail":""}})";
+    Check(readiness == expected_readiness,
+        "non-faulted readiness must preserve the exact v1 success schema and every field");
     Check(readiness.find("\"resultCode\":\"SingleReady\"") != std::string::npos,
         "readiness should be typed as SingleReady");
     Check(readiness.find("\"readOnly\":true") != std::string::npos,
@@ -1959,6 +2106,323 @@ void TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch() {
     }
 }
 
+int RunM6EmptyResponsePipeChild(bool serve_once) {
+    UnknownExceptionBackend backend;
+    HardwareCameraAgentDispatcher dispatcher(backend);
+    const std::string pipe_name =
+        "A0CameraStitcher.CameraAgent.Hardware.v1.m6-empty-" + NewRunId();
+    const std::wstring full_pipe_name =
+        L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
+    auto server = std::async(std::launch::async, [&] {
+        return RunHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, serve_once);
+    });
+
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        pipe = CreateFileW(
+            full_pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+            OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (pipe == INVALID_HANDLE_VALUE) return 20;
+
+    const std::string request =
+        Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+    const std::uint32_t request_length = static_cast<std::uint32_t>(request.size());
+    const std::array<unsigned char, 4> header{
+        static_cast<unsigned char>(request_length & 0xFFU),
+        static_cast<unsigned char>((request_length >> 8U) & 0xFFU),
+        static_cast<unsigned char>((request_length >> 16U) & 0xFFU),
+        static_cast<unsigned char>((request_length >> 24U) & 0xFFU),
+    };
+    if (!WriteAll(pipe, header.data(), header.size()) ||
+        !WriteAll(pipe, request.data(), request.size())) {
+        CloseHandle(pipe);
+        return 21;
+    }
+    std::array<unsigned char, 4> response_header{};
+    std::size_t response_header_bytes = 0;
+    while (response_header_bytes < response_header.size()) {
+        DWORD read = 0;
+        const BOOL ok = ReadFile(
+            pipe,
+            response_header.data() + response_header_bytes,
+            static_cast<DWORD>(response_header.size() - response_header_bytes),
+            &read,
+            nullptr);
+        response_header_bytes += read;
+        if (!ok || read == 0) break;
+    }
+    CloseHandle(pipe);
+    if (server.wait_for(std::chrono::seconds(8)) != std::future_status::ready) {
+        return 22;
+    }
+    const int server_exit = server.get();
+    return response_header_bytes == 0 && server_exit == 3 &&
+        backend.dispatch_calls == 1 ? 0 : 23;
+}
+
+bool IsCompleteM6FailureEnvelope(std::string_view response) {
+    return response.starts_with("{\"schemaVersion\":\"a0.camera-agent.hardware.v1\"") &&
+        response.find("\"simulation\":false") != std::string_view::npos &&
+        response.find("\"marker\":\"Hardware\"") != std::string_view::npos &&
+        response.find("\"requestId\":") != std::string_view::npos &&
+        response.find("\"success\":false") != std::string_view::npos &&
+        response.find("\"resultCode\":") != std::string_view::npos &&
+        response.find("\"payload\":{\"cameraAccess\":\"None\"") !=
+            std::string_view::npos &&
+        response.find("\"rejectionCode\":") != std::string_view::npos &&
+        response.find("\"errorDetail\":") != std::string_view::npos &&
+        response.find("\"realIdentifiersIncluded\":false") !=
+            std::string_view::npos &&
+        response.ends_with("}}");
+}
+
+template <typename Exception>
+int RunM6TypedCatchChild(Exception exception, bool faulted) {
+    TypedSecondaryAllocationFailureBackend<Exception> backend(
+        std::move(exception), faulted);
+    HardwareCameraAgentDispatcher dispatcher(backend);
+    const std::string request =
+        Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+    if (!faulted) DisarmM6Fault();
+    const std::string response = dispatcher.Handle(request);
+    const auto failed = m6_failed_allocations;
+    DisarmM6Fault();
+    if (faulted) {
+        return response.empty() && backend.dispatch_calls == 1 && failed > 0 ? 0 : 31;
+    }
+    bool typed_route = false;
+    if constexpr (std::is_same_v<Exception, HardwareCameraAgentProtocolError>) {
+        typed_route = response.find("\"resultCode\":\"ProtocolRejected\"") !=
+                std::string::npos &&
+            response.find("\"rejectionCode\":\"protocol_test\"") !=
+                std::string::npos;
+    } else if constexpr (std::is_same_v<Exception, TransportError>) {
+        typed_route = response.find("\"resultCode\":\"transport_test\"") !=
+                std::string::npos &&
+            response.find("\"rejectionCode\":\"\"") != std::string::npos;
+    } else {
+        typed_route = response.find("\"resultCode\":\"AgentFailure\"") !=
+            std::string::npos;
+    }
+    return IsCompleteM6FailureEnvelope(response) && typed_route &&
+        backend.dispatch_calls == 1 ? 0 : 32;
+}
+
+int RunM6ExceptionBoundaryChild(std::string_view scenario) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+    std::set_terminate([] { std::_Exit(90); });
+
+    if (scenario == "unknown") {
+        UnknownExceptionBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string response = dispatcher.Handle(
+            Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}"));
+        return response.empty() && backend.dispatch_calls == 1 ? 0 : 10;
+    }
+    if (scenario == "preamble-oom") {
+        FakeBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        std::string request =
+            Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+        request.replace(request.find("req-1"), 5, std::string(128, 'r'));
+        ArmM6PersistentFault();
+        const std::string response = dispatcher.Handle(request);
+        const auto failed = m6_failed_allocations;
+        DisarmM6Fault();
+        return response.empty() && backend.readiness_calls == 0 && failed > 0 ? 0 : 11;
+    }
+    if (scenario == "handler-oom") {
+        SecondaryAllocationFailureBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string request =
+            Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+        const std::string response = dispatcher.Handle(request);
+        const auto failed = m6_failed_allocations;
+        DisarmM6Fault();
+        return response.empty() && backend.dispatch_calls == 1 && failed > 0 ? 0 : 12;
+    }
+    if (scenario == "serializer-oom") {
+        SerializationAllocationFailureBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string request =
+            Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+        const std::string response = dispatcher.Handle(request);
+        const auto failed = m6_failed_allocations;
+        DisarmM6Fault();
+        return response.empty() && backend.readiness_calls == 1 && failed > 0 ? 0 : 13;
+    }
+    if (scenario == "protocol-catch-oom") {
+        return RunM6TypedCatchChild(
+            HardwareCameraAgentProtocolError("protocol_test", std::string(160, 'p')), true);
+    }
+    if (scenario == "transport-catch-oom") {
+        return RunM6TypedCatchChild(
+            TransportError("transport_test", std::string(160, 't')), true);
+    }
+    if (scenario == "standard-catch-oom") {
+        return RunM6TypedCatchChild(NonAllocatingStandardException{}, true);
+    }
+    if (scenario == "protocol-catch-control") {
+        return RunM6TypedCatchChild(
+            HardwareCameraAgentProtocolError("protocol_test", "ordinary protocol failure"), false);
+    }
+    if (scenario == "transport-catch-control") {
+        return RunM6TypedCatchChild(
+            TransportError("transport_test", "ordinary transport failure"), false);
+    }
+    if (scenario == "standard-catch-control") {
+        return RunM6TypedCatchChild(NonAllocatingStandardException{}, false);
+    }
+    if (scenario == "debug-empty-string-characterization") {
+        ArmM6PersistentFault();
+        std::string empty;
+        const auto failed = m6_failed_allocations;
+        const auto allocations = m6_allocation_ordinal;
+        DisarmM6Fault();
+#if defined(NDEBUG)
+        return empty.empty() && failed == 0 && allocations == 0 ? 0 : 41;
+#else
+        return empty.empty() && failed == 0 && allocations > 0 ? 42 : 43;
+#endif
+    }
+    const auto ordinal_separator = scenario.rfind('-');
+    if ((scenario.starts_with("escape-ordinal-") ||
+         scenario.starts_with("outer-ordinal-")) &&
+        ordinal_separator != std::string_view::npos) {
+        const std::string ordinal_text(scenario.substr(ordinal_separator + 1));
+        const auto ordinal = static_cast<std::size_t>(std::strtoull(
+            ordinal_text.c_str(), nullptr, 10));
+        if (ordinal == 0) return 51;
+        std::string baseline;
+        std::string response;
+        int dispatches = 0;
+        if (scenario.starts_with("escape-ordinal-")) {
+            PreparedSerializationBackend baseline_backend(true);
+            HardwareCameraAgentDispatcher baseline_dispatcher(baseline_backend);
+            baseline = baseline_dispatcher.Handle(
+                Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}"));
+            PreparedSerializationBackend backend(true);
+            HardwareCameraAgentDispatcher dispatcher(backend);
+            const auto request = Envelope(
+                "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+            ArmM6ExactOrdinal(ordinal);
+            response = dispatcher.Handle(request);
+            dispatches = backend.readiness_calls;
+        } else {
+            PreparedSerializationBackend baseline_backend(false);
+            HardwareCameraAgentDispatcher baseline_dispatcher(baseline_backend);
+            baseline = baseline_dispatcher.Handle(
+                Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}"));
+            PreparedSerializationBackend backend(false);
+            HardwareCameraAgentDispatcher dispatcher(backend);
+            const auto request = Envelope(
+                "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+            ArmM6ExactOrdinal(ordinal);
+            response = dispatcher.Handle(request);
+            dispatches = backend.readiness_calls;
+        }
+        const auto failed = m6_failed_allocations;
+        DisarmM6Fault();
+        if (failed == 0) return response == baseline ? 100 : 52;
+        const bool safe = response.empty() || response == baseline ||
+            IsCompleteM6FailureEnvelope(response);
+        return safe && dispatches <= 1 ? (dispatches == 1 ? 101 : 0) : 53;
+    }
+    if (scenario == "pipe-once") return RunM6EmptyResponsePipeChild(true);
+    if (scenario == "pipe-persistent") return RunM6EmptyResponsePipeChild(false);
+    return 14;
+}
+
+DWORD LaunchM6Child(std::string_view scenario) {
+    std::array<wchar_t, 32768> executable{};
+    const DWORD length = GetModuleFileNameW(
+        nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (length == 0 || length >= executable.size()) return 0xFFFFFFFEU;
+    std::wstring command = L"\"" + std::wstring(executable.data(), length) +
+        L"\" --m6-child " + std::wstring(scenario.begin(), scenario.end());
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(
+            executable.data(), command.data(), nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        return 0xFFFFFFFDU;
+    }
+    CloseHandle(process.hThread);
+    const DWORD wait = WaitForSingleObject(process.hProcess, 10000U);
+    if (wait != WAIT_OBJECT_0) {
+        TerminateProcess(process.hProcess, 124U);
+        WaitForSingleObject(process.hProcess, 5000U);
+    }
+    DWORD exit_code = 0xFFFFFFFFU;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hProcess);
+    return exit_code;
+}
+
+void TestM6ExceptionBoundaryAndEmptyPipeResponse() {
+    static_assert(std::is_nothrow_default_constructible_v<std::string>);
+    static_assert(std::is_nothrow_move_constructible_v<std::string>);
+    for (const std::string_view scenario : {
+             "unknown", "preamble-oom", "handler-oom", "serializer-oom",
+             "protocol-catch-oom", "transport-catch-oom", "standard-catch-oom",
+             "protocol-catch-control", "transport-catch-control",
+             "standard-catch-control",
+             "pipe-once", "pipe-persistent"}) {
+        const DWORD exit_code = LaunchM6Child(scenario);
+        Check(exit_code == 0,
+            std::string("M6 isolated child must fail closed for scenario ") +
+                std::string(scenario) + " (exit=" + std::to_string(exit_code) + ")");
+    }
+    const DWORD debug_characterization =
+        LaunchM6Child("debug-empty-string-characterization");
+#if defined(NDEBUG)
+    Check(debug_characterization == 0,
+        "Release empty-string fallback must remain allocation-free under fail-all");
+#else
+    Check(debug_characterization == 42,
+        "Debug must explicitly record the measured small-allocation iterator-proxy limitation");
+#endif
+
+#if defined(NDEBUG)
+    std::size_t outer_last_fault = 0;
+    std::size_t escape_last_fault = 0;
+    for (const std::string_view sweep : {"outer-ordinal-", "escape-ordinal-"}) {
+        int faulted_cases = 0;
+        int post_dispatch_faults = 0;
+        std::size_t last_fault = 0;
+        for (std::size_t ordinal = 1; ordinal <= 192; ++ordinal) {
+            const DWORD exit_code = LaunchM6Child(
+                std::string(sweep) + std::to_string(ordinal));
+            Check(exit_code == 0 || exit_code == 100 || exit_code == 101,
+                std::string("M6 allocation ordinal must produce only a complete response or empty fallback for ") +
+                    std::string(sweep) + std::to_string(ordinal) +
+                    " (exit=" + std::to_string(exit_code) + ")");
+            const bool faulted = exit_code == 0 || exit_code == 101;
+            faulted_cases += faulted ? 1 : 0;
+            post_dispatch_faults += exit_code == 101 ? 1 : 0;
+            if (faulted) last_fault = ordinal;
+        }
+        Check(faulted_cases > 0,
+            std::string(sweep) + "sweep must hit at least one Handle allocation");
+        Check(post_dispatch_faults > 0,
+            std::string(sweep) + "sweep must fault after the prepared backend dispatch");
+        const DWORD beyond_last = LaunchM6Child(std::string(sweep) + "999");
+        Check(beyond_last == 100,
+            std::string(sweep) + "sweep must include an exact-success beyond-last control");
+        if (sweep == "outer-ordinal-") outer_last_fault = last_fault;
+        else escape_last_fault = last_fault;
+    }
+    Check(escape_last_fault > outer_last_fault,
+        "the long escaped field must add separately observed JsonEscape allocation ordinals beyond the common outer serializer");
+#endif
+}
+
 std::string LiveViewV2Envelope(
     std::string_view operation,
     std::string_view payload) {
@@ -2969,11 +3433,20 @@ void TestContinuousLiveViewV2Protocol() {
     const auto frame = dispatcher.Handle(LiveViewV2Envelope(
         "read-live-view-frame",
         "{\"sessionId\":\"" + session + "\"}"));
-    Check(frame.find("\"state\":\"Frame\"") != std::string::npos &&
-          frame.find("\"frameJpegBase64\":\"/9j/2Q==\"") != std::string::npos &&
-          frame.find("\"previewIsOriginal\":false") != std::string::npos &&
-          backend.continuous_frame_calls == 1,
-        "hardware v2 frame must remain a non-original bounded payload");
+    const std::string expected_frame =
+        "{\"schemaVersion\":\"a0.camera-agent.hardware.v2\",\"simulation\":false,"
+        "\"marker\":\"Hardware\",\"requestId\":\"req-v2\",\"success\":true,"
+        "\"resultCode\":\"Frame\",\"payload\":{\"cameraMode\":\"SingleCamera\","
+        "\"cameraAlias\":\"CAM-A\",\"sessionId\":\"" + session +
+        "\",\"state\":\"Frame\",\"frameNumber\":1,\"frameSize\":4,"
+        "\"frameSha256\":\"" + std::string(64, 'd') +
+        "\",\"frameJpegBase64\":\"/9j/2Q==\",\"previewIsOriginal\":false,"
+        "\"previewIsStitchInput\":false,\"sdkSessionOpen\":true,"
+        "\"liveViewRunning\":true,\"heartbeatTimeoutSeconds\":20,"
+        "\"maximumSessionSeconds\":600,\"realIdentifiersIncluded\":false,"
+        "\"errorCategory\":\"\",\"errorDetail\":\"\"}}";
+    Check(frame == expected_frame && backend.continuous_frame_calls == 1,
+        "non-faulted v2 frame must preserve every root and payload field exactly");
 
     const auto stop = dispatcher.Handle(LiveViewV2Envelope(
         "stop-live-view",
@@ -3530,11 +4003,15 @@ void TestContinuousLiveViewFrameBudgetIsolation() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--m6-child") {
+        return RunM6ExceptionBoundaryChild(argv[2]);
+    }
     TestStrictProtocolAndTypedResponses();
     TestServeOnceRejectsPartialFrameWithoutDispatch();
     TestNamedPipeMaximumFrameBoundary();
     TestNamedPipeDeliveryFailuresExitNonzeroWithoutRedispatch();
+    TestM6ExceptionBoundaryAndEmptyPipeResponse();
     TestDurableJournalRecoveryContracts();
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();

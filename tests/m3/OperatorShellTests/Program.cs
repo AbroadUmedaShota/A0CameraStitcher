@@ -1124,6 +1124,118 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
             }
         }
 
+        // M6 T6: a real child accepts capture-single and closes the pipe before
+        // the response header. The durable synthetic state and canonical
+        // original must survive a fresh view-model instance, which may issue
+        // only the same transaction-id query.
+        var stateRoot = Path.Combine(root, "capture-eof-state");
+        var commandLogPath = Path.Combine(root, "capture-eof-commands.jsonl");
+        var store = new HardwareSingleAppStateStore(stateRoot);
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "capture-eof-recovery");
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", stateRoot);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", commandLogPath);
+
+        string transactionId;
+        string originalPath;
+        byte[] originalBytes;
+        string originalHash;
+        long originalLastWriteUtcTicks;
+        await using (var operations = new PersistentHardwareCameraAgentOperations(
+            executablePath,
+            storagePaths.AgentArtifactsRoot,
+            profilePath,
+            identityPath))
+        {
+            var viewModel = new HardwareSingleCameraViewModel(
+                operations,
+                store,
+                new HardwareOriginalExporter(Path.Combine(root, "capture-eof-exports")));
+            await viewModel.InitializeAsync();
+            viewModel.ExclusiveCameraControlConfirmed = true;
+            await viewModel.CheckReadinessAsync();
+            viewModel.DedicatedSpoolScopeConfirmed = true;
+            viewModel.ExactObjectDeleteConfirmed = true;
+            Check.True(viewModel.CanCapture, "Real VM prerequisites must enable the one capture attempt.");
+
+            await viewModel.CaptureAsync();
+            transactionId = viewModel.LastTransactionId;
+            var durableAfterEof = await store.LoadPendingAsync();
+            Check.True(
+                durableAfterEof is { CaptureRequestDispatchAttempted: true } &&
+                durableAfterEof.TransactionId == transactionId,
+                "Real VM capture EOF must retain the durable dispatched pending transaction.");
+            Check.False(viewModel.CanCapture, "The same VM must block recapture after ambiguous EOF.");
+            await viewModel.CaptureAsync();
+            await viewModel.RecoverTransactionAsync();
+
+            var captureObservation = JsonDocument.Parse(
+                (await File.ReadAllLinesAsync(commandLogPath))[0]);
+            using (captureObservation)
+            {
+                var observed = captureObservation.RootElement;
+                Check.Equal("capture-single", observed.GetProperty("operation").GetString()!);
+                Check.Equal(transactionId, observed.GetProperty("transactionId").GetString()!);
+                Check.True(observed.GetProperty("pendingExists").GetBoolean(),
+                    "Pending state must exist before the child receives capture-single.");
+                Check.True(observed.GetProperty("pendingTransactionMatches").GetBoolean(),
+                    "The durable transaction id must match the received request.");
+                Check.True(observed.GetProperty("pendingProfileMatches").GetBoolean(),
+                    "The durable frozen profile must match the received request.");
+                Check.True(observed.GetProperty("dispatchAttempted").GetBoolean(),
+                    "Dispatch-attempted must be durable before request receipt.");
+                originalPath = observed.GetProperty("originalPath").GetString()!;
+                originalBytes = await File.ReadAllBytesAsync(originalPath);
+                originalHash = observed.GetProperty("originalSha256").GetString()!;
+                originalLastWriteUtcTicks = observed.GetProperty("originalLastWriteUtcTicks").GetInt64();
+                Check.Equal(originalBytes.Length, observed.GetProperty("originalSize").GetInt32());
+                Check.Equal(originalHash,
+                    Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant());
+            }
+        }
+
+        await using (var restartedOperations = new PersistentHardwareCameraAgentOperations(
+            executablePath,
+            storagePaths.AgentArtifactsRoot,
+            profilePath,
+            identityPath))
+        {
+            var restarted = new HardwareSingleCameraViewModel(
+                restartedOperations,
+                new HardwareSingleAppStateStore(stateRoot),
+                new HardwareOriginalExporter(Path.Combine(root, "capture-eof-exports-restarted")));
+            await restarted.InitializeAsync();
+            Check.False(restarted.CanCapture, "A fresh VM must remain blocked by the same pending transaction.");
+        }
+
+        var commands = (await File.ReadAllLinesAsync(commandLogPath))
+            .Select(line => JsonDocument.Parse(line))
+            .ToArray();
+        try
+        {
+            Check.Equal(3, commands.Length);
+            Check.Equal(1, commands.Count(command =>
+                command.RootElement.GetProperty("operation").GetString() == "capture-single"));
+            Check.Equal(1, commands.Sum(command =>
+                command.RootElement.GetProperty("artifactWriteCount").GetInt32()));
+            Check.Equal(0, commands.Sum(command =>
+                command.RootElement.GetProperty("deleteCommandCount").GetInt32()));
+            Check.True(commands.Skip(1).All(command =>
+                command.RootElement.GetProperty("operation").GetString() == "get-transaction-result" &&
+                command.RootElement.GetProperty("transactionId").GetString() == transactionId),
+                "After EOF, the child must observe only same-ID query commands (no delete command exists on this path).");
+        }
+        finally
+        {
+            foreach (var command in commands) command.Dispose();
+        }
+        var bytesAfterRecovery = await File.ReadAllBytesAsync(originalPath);
+        Check.Equal(originalBytes.Length, bytesAfterRecovery.Length);
+        Check.Equal(originalHash,
+            Convert.ToHexString(SHA256.HashData(bytesAfterRecovery)).ToLowerInvariant());
+        Check.Equal(originalLastWriteUtcTicks, File.GetLastWriteTimeUtc(originalPath).Ticks);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", null);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", null);
+
         var tracePath = Path.Combine(root, "composition.json");
         Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "typed-fail-closed");
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
@@ -1159,6 +1271,9 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
     {
         Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", null);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", null);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", null);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", null);
         Directory.Delete(root, recursive: true);
     }
 }
@@ -1353,7 +1468,27 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     await pipe.WaitForConnectionAsync(timeout.Token);
     var requestJson = await ReadPersistentTestFrameAsync(pipe, timeout.Token);
+    if (scenario == "capture-eof-recovery")
+    {
+        return await RunCaptureEofRecoveryChildAsync(pipe, requestJson, arguments, timeout.Token);
+    }
     using var request = JsonDocument.Parse(requestJson);
+    var requestTracePath = Environment.GetEnvironmentVariable(
+        "A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE");
+    if (!string.IsNullOrWhiteSpace(requestTracePath))
+    {
+        var requestRoot = request.RootElement;
+        var payload = requestRoot.GetProperty("payload");
+        await File.WriteAllTextAsync(
+            requestTracePath,
+            JsonSerializer.Serialize(new
+            {
+                operation = requestRoot.GetProperty("operation").GetString(),
+                transactionId = payload.TryGetProperty("transactionId", out var transactionId)
+                    ? transactionId.GetString()
+                    : null,
+            }));
+    }
 
     if (scenario == "before-response")
     {
@@ -1423,6 +1558,133 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
         new JsonSerializerOptions(JsonSerializerDefaults.Web));
     await WritePersistentTestFrameAsync(pipe, responseJson, timeout.Token);
     return 0;
+}
+
+static async Task<int> RunCaptureEofRecoveryChildAsync(
+    NamedPipeServerStream pipe,
+    string firstRequestJson,
+    IReadOnlyList<string> arguments,
+    CancellationToken cancellationToken)
+{
+    var requestJson = firstRequestJson;
+    while (true)
+    {
+        using var request = JsonDocument.Parse(requestJson);
+        var root = request.RootElement;
+        var operation = root.GetProperty("operation").GetString() ?? string.Empty;
+        var requestId = root.GetProperty("requestId").GetString() ?? string.Empty;
+        var payload = root.GetProperty("payload");
+        var transactionId = payload.TryGetProperty("transactionId", out var transaction)
+            ? transaction.GetString() ?? string.Empty
+            : string.Empty;
+
+        if (operation == "get-single-readiness")
+        {
+            var readinessResponse = JsonSerializer.Serialize(new
+            {
+                schemaVersion = HardwareCameraAgentProtocol.SchemaVersion,
+                simulation = false,
+                marker = HardwareCameraAgentProtocol.Marker,
+                requestId,
+                success = true,
+                resultCode = "SingleReady",
+                payload = HardwareTestData.ReadyHardware("CAM-A"),
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await WritePersistentTestFrameAsync(pipe, readinessResponse, cancellationToken);
+            pipe.Disconnect();
+            await pipe.WaitForConnectionAsync(cancellationToken);
+            requestJson = await ReadPersistentTestFrameAsync(pipe, cancellationToken);
+            continue;
+        }
+
+        var artifactsIndex = arguments.ToList().IndexOf("--artifacts-root");
+        if (artifactsIndex < 0 || artifactsIndex + 1 >= arguments.Count)
+        {
+            return 66;
+        }
+        var artifactsRoot = arguments[artifactsIndex + 1];
+        var stateRoot = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT");
+        var commandLogPath = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG");
+
+        if (operation == "capture-single")
+        {
+            HardwarePendingTransaction? pending = null;
+            if (!string.IsNullOrWhiteSpace(stateRoot))
+            {
+                pending = await new HardwareSingleAppStateStore(stateRoot).LoadPendingAsync(cancellationToken);
+            }
+            var profileMatches = pending is not null &&
+                pending.CaptureProfileId == payload.GetProperty("expectedCaptureProfileId").GetString() &&
+                pending.CaptureProfileVersion == payload.GetProperty("expectedCaptureProfileVersion").GetInt32() &&
+                pending.CaptureProfileSha256 == payload.GetProperty("expectedCaptureProfileSha256").GetString();
+            var (result, originalPath) = FailedPartialCapture(artifactsRoot, transactionId, "CAM-A");
+            result = result with
+            {
+                CameraObjectDeleteAttempted = false,
+                CameraObjectDeleteSucceeded = false,
+            };
+            var syntheticResultPath = Path.Combine(stateRoot!, "synthetic-transaction-result.json");
+            await File.WriteAllTextAsync(
+                syntheticResultPath,
+                JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                cancellationToken);
+            var originalBytes = await File.ReadAllBytesAsync(originalPath, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(commandLogPath))
+            {
+                await File.AppendAllTextAsync(commandLogPath, JsonSerializer.Serialize(new
+                {
+                    operation,
+                    transactionId,
+                    pendingExists = pending is not null,
+                    pendingTransactionMatches = pending?.TransactionId == transactionId,
+                    pendingProfileMatches = profileMatches,
+                    dispatchAttempted = pending?.CaptureRequestDispatchAttempted == true,
+                    originalPath,
+                    originalSize = originalBytes.Length,
+                    originalSha256 = Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant(),
+                    originalLastWriteUtcTicks = File.GetLastWriteTimeUtc(originalPath).Ticks,
+                    artifactWriteCount = 1,
+                    deleteCommandCount = 0,
+                }) + Environment.NewLine, cancellationToken);
+            }
+            WriteSyntheticSensitiveStderr();
+            return 37;
+        }
+
+        if (operation == "get-transaction-result")
+        {
+            var syntheticResultPath = Path.Combine(stateRoot!, "synthetic-transaction-result.json");
+            var result = JsonSerializer.Deserialize<HardwareSingleCaptureResult>(
+                await File.ReadAllTextAsync(syntheticResultPath, cancellationToken),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new InvalidDataException("Synthetic transaction result is missing.");
+            if (result.TransactionId != transactionId) return 68;
+            if (!string.IsNullOrWhiteSpace(commandLogPath))
+            {
+                await File.AppendAllTextAsync(commandLogPath, JsonSerializer.Serialize(new
+                {
+                    operation,
+                    transactionId,
+                    artifactWriteCount = 0,
+                    deleteCommandCount = 0,
+                }) + Environment.NewLine, cancellationToken);
+            }
+            var response = JsonSerializer.Serialize(new
+            {
+                schemaVersion = HardwareCameraAgentProtocol.SchemaVersion,
+                simulation = false,
+                marker = HardwareCameraAgentProtocol.Marker,
+                requestId,
+                success = true,
+                resultCode = result.ErrorCategory,
+                payload = result,
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await WritePersistentTestFrameAsync(pipe, response, cancellationToken);
+            return 0;
+        }
+
+        return 67;
+    }
 }
 
 // GitHub Issue #143 regression coverage: PersistentHardwareCameraAgentOperations keeps
@@ -10164,6 +10426,8 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
 
     public string? LastTransactionExpectedCameraAlias { get; private set; }
 
+    public string? LastTransactionId { get; private set; }
+
     public bool LastTransactionExpectedHandoff { get; private set; }
 
     public List<string> CallOrder { get; } = [];
@@ -10263,6 +10527,7 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
     {
         TransactionResultCallCount++;
         CallOrder.Add("get-result");
+        LastTransactionId = transactionId;
         LastTransactionExpectedCameraAlias = expectedCameraAlias;
         LastTransactionExpectedProfile = expectedProfile;
         LastTransactionExpectedHandoff = expectedLiveViewHandoffRequested;

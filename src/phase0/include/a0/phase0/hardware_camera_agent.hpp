@@ -582,6 +582,9 @@ private:
 class HardwareCameraAgentDispatcher final {
 public:
     explicit HardwareCameraAgentDispatcher(IHardwareCameraAgentBackend& backend);
+    // Empty means that no complete response could be serialized. The pipe
+    // server must terminate the connection without writing a frame. It does
+    // not prove whether the backend operation was dispatched or completed.
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
     [[nodiscard]] bool ShouldStop() const noexcept;
     void OnIdle() noexcept;
