@@ -770,6 +770,8 @@ public sealed class DualBindingViewModel : ObservableObject
         "DuplicateCandidateSourceObject" => "2 台を区別できませんでした。接続し直してやり直してください。",
         "CandidateSourceObjectMissing" => "候補の取得に失敗しました。接続し直してやり直してください。",
         "SdkUnavailable" => "カメラ接続が利用できません。",
+        "SdkSessionBusy" => "別のSDKセッションがカメラを使用中です。ほかのカメラ操作を終了してからやり直してください。",
+        "SdkOperationFailed" => "SDK処理に失敗しました。カメラ接続を確認してからやり直してください。",
         _ => $"binding の操作が拒否されました（{refusal.ResultCode}）。",
     };
 

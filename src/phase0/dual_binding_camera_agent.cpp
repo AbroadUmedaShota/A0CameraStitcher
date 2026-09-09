@@ -1,6 +1,7 @@
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 
 #include "a0/common/protocol_json.hpp"
+#include "a0/phase0/phase0.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -123,6 +124,16 @@ std::string ResponsePrefix(
            << (success ? "true" : "false") << ",\"resultCode\":\"" << result_code
            << "\",\"payload\":";
     return output.str();
+}
+
+std::string_view BindingTransportResultCode(std::string_view category) noexcept {
+    if (category == "session_busy") return "SdkSessionBusy";
+    if (category == "sdk_load_failed" || category == "licensed_adapter_unavailable") {
+        return "SdkUnavailable";
+    }
+    if (category == "camera_count_mismatch") return "CandidateCountNotTwo";
+    if (category == "identity_collision") return "DuplicateCandidateSourceObject";
+    return "SdkOperationFailed";
 }
 
 std::string_view StateName(DualIdentitySessionBindingState state) noexcept {
@@ -525,6 +536,14 @@ std::string DualBindingCameraAgentDispatcher::Handle(
         // would give the same refusal two names depending on which side of the
         // seam noticed it.
         return ProtocolRejection(extracted_request_id, error.Code(), error.what());
+    } catch (const TransportError& error) {
+        // Preserve only the bounded transport category. Vendor exception text can
+        // contain machine-specific details, while collapsing every SDK failure to
+        // AgentFailure makes a safe operator correction impossible to choose.
+        return ProtocolRejection(
+            extracted_request_id,
+            BindingTransportResultCode(error.Category()),
+            "SDK binding failed closed");
     } catch (const std::exception&) {
         return ProtocolRejection(
             extracted_request_id, "AgentFailure", "binding agent failed to handle the request");

@@ -56,6 +56,7 @@ add_library(a0_phase0_core
     src/phase0/phase0.cpp
     src/phase0/fake_camera_transport.cpp
     src/phase0/hardware_process_lease.cpp
+    src/phase0/nikon_sdk_runtime_path.cpp
     src/phase0/nikon_sdk_transport.cpp
     src/phase0/wpd_alias_proof.cpp
     src/phase0/wpd_transport.cpp
@@ -65,11 +66,9 @@ target_compile_definitions(a0_phase0_core PRIVATE UNICODE _UNICODE NOMINMAX)
 target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 PortableDeviceGuids)
 
 if(A0_NIKON_SDK_AVAILABLE)
-    file(TO_CMAKE_PATH "${A0_NIKON_MODULE}" A0_NIKON_MODULE_NORMALIZED)
     target_include_directories(a0_phase0_core PRIVATE "${A0_NIKON_INCLUDE_DIR}")
     target_compile_definitions(a0_phase0_core PRIVATE
-        A0_NIKON_SDK_AVAILABLE=1
-        A0_NIKON_SDK_MODULE_PATH="${A0_NIKON_MODULE_NORMALIZED}")
+        A0_NIKON_SDK_AVAILABLE=1)
     message(STATUS "Nikon D810 licensed adapter enabled from ignored local SDK root")
 elseif(NIKON_D810_SDK_ROOT)
     message(WARNING "NIKON_D810_SDK_ROOT is incomplete or ambiguous; building the gated stub")
@@ -209,6 +208,22 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME sdk_buffer_arena_contracts COMMAND a0_sdk_buffer_arena_tests)
 
+    add_executable(a0_nikon_sdk_runtime_path_tests
+        tests/nikon_sdk_runtime_path_tests.cpp)
+    target_link_libraries(a0_nikon_sdk_runtime_path_tests PRIVATE a0_phase0_core)
+    target_include_directories(a0_nikon_sdk_runtime_path_tests PRIVATE src/phase0)
+    if(A0_NIKON_SDK_AVAILABLE)
+        target_compile_definitions(a0_nikon_sdk_runtime_path_tests PRIVATE
+            A0_TEST_NIKON_SDK_ENABLED=1)
+    endif()
+    if(MSVC)
+        target_compile_options(a0_nikon_sdk_runtime_path_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_nikon_sdk_runtime_path_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME nikon_sdk_runtime_path_contracts
+        COMMAND a0_nikon_sdk_runtime_path_tests)
+
     add_executable(a0_phase0_cli_safety_tests tests/phase0_cli_safety_tests.cpp)
     target_link_libraries(a0_phase0_cli_safety_tests PRIVATE a0_phase0_core)
     if(MSVC)
@@ -296,6 +311,10 @@ if(BUILD_TESTING)
     add_executable(a0_dual_binding_camera_agent_tests
         tests/dual_binding_camera_agent_tests.cpp)
     target_link_libraries(a0_dual_binding_camera_agent_tests PRIVATE a0_phase0_core)
+    if(NOT A0_NIKON_SDK_AVAILABLE)
+        target_compile_definitions(a0_dual_binding_camera_agent_tests PRIVATE
+            A0_TEST_NIKON_SDK_STUB=1)
+    endif()
     if(MSVC)
         target_compile_options(a0_dual_binding_camera_agent_tests PRIVATE /W4 /permissive- /EHsc)
     else()

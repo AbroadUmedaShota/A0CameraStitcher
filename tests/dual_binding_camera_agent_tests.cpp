@@ -1,4 +1,8 @@
 #include "a0/phase0/dual_binding_camera_agent.hpp"
+#include "a0/phase0/phase0.hpp"
+#ifdef A0_TEST_NIKON_SDK_STUB
+#include "a0/phase0/nikon_sdk_transport.hpp"
+#endif
 
 #include <iostream>
 #include <memory>
@@ -130,6 +134,27 @@ struct Harness {
         (void)dispatcher.Handle(ConfirmAliasRequest(session, 1, kDualIdentityCameraAliasB));
         return session;
     }
+};
+
+class FailingEnumerationAdapter final : public DualBindingSdkAdapter {
+public:
+    explicit FailingEnumerationAdapter(std::string category)
+        : category_(std::move(category)) {}
+
+    std::vector<std::string> EnumerateCandidates() override {
+        throw TransportError(category_, "machine-specific SDK detail must not cross the boundary");
+    }
+    bool StartLiveView(std::size_t) override { return false; }
+    bool StopLiveView(std::size_t) override { return false; }
+    std::vector<std::uint8_t> ReadLiveViewFrame(std::size_t) override { return {}; }
+    bool CloseCandidateSession(std::size_t) override { return false; }
+    bool EndBindingSession(std::chrono::seconds) noexcept override { return true; }
+    DualIdentityInvalidationReason PollInvalidation() override {
+        return DualIdentityInvalidationReason::None;
+    }
+
+private:
+    std::string category_;
 };
 
 // ---------------------------------------------------------------------------
@@ -279,6 +304,49 @@ void AnAgentWithNoSdkFailsClosed() {
         dispatcher.BindingState() == DualIdentitySessionBindingState::None,
         "a refused begin-binding leaves no binding behind");
 }
+
+void SdkEnumerationFailuresKeepOnlySafeTypedCategories() {
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"session_busy", "SdkSessionBusy"},
+        {"sdk_load_failed", "SdkUnavailable"},
+        {"licensed_adapter_unavailable", "SdkUnavailable"},
+        {"camera_count_mismatch", "CandidateCountNotTwo"},
+        {"identity_collision", "DuplicateCandidateSourceObject"},
+        {"dual_inventory_failed", "SdkOperationFailed"},
+        {R"(C:\private\sdk\Type0014.md3)", "SdkOperationFailed"},
+    };
+    for (const auto& [category, expected_code] : cases) {
+        auto adapter = std::make_shared<FailingEnumerationAdapter>(category);
+        DualBindingCameraAgentDispatcher dispatcher(adapter);
+        const std::string response = dispatcher.Handle(BeginBindingRequest());
+        Check(!Succeeded(response) && ResultCode(response) == expected_code,
+            "SDK enumeration failure keeps its safe typed category");
+        Check(response.find("machine-specific SDK detail") == std::string::npos,
+            "SDK enumeration failure does not expose machine-specific detail");
+        Check(response.find(category) == std::string::npos,
+            "SDK enumeration failure does not expose its unrestricted internal category");
+        Check(dispatcher.BindingState() == DualIdentitySessionBindingState::None,
+            "SDK enumeration failure leaves no binding session");
+        const auto counters = dispatcher.SafetyCounters();
+        Check(counters.binding_session_count == 0 && counters.live_view_start_count == 0,
+            "SDK enumeration failure publishes no candidate session or Live View");
+    }
+}
+
+#ifdef A0_TEST_NIKON_SDK_STUB
+void SdklessConcreteAdapterFailsClosedAsUnavailable() {
+    auto adapter = std::make_shared<NikonDualBindingSdkAdapter>();
+    DualBindingCameraAgentDispatcher dispatcher(adapter);
+    const std::string response = dispatcher.Handle(BeginBindingRequest());
+    Check(!Succeeded(response) && ResultCode(response) == "SdkUnavailable",
+        "the SDK-less concrete adapter is reported as unavailable");
+    Check(dispatcher.BindingState() == DualIdentitySessionBindingState::None,
+        "the SDK-less concrete adapter creates no binding session");
+    const auto counters = dispatcher.SafetyCounters();
+    Check(counters.binding_session_count == 0 && counters.live_view_start_count == 0,
+        "the SDK-less concrete adapter publishes no candidates or Live View");
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // The five operations end to end
@@ -1083,6 +1151,10 @@ int main() {
     EveryCandidateCountExceptTwoIsRefused();
     DuplicateAndMissingSourceObjectsAreRefused();
     AnAgentWithNoSdkFailsClosed();
+    SdkEnumerationFailuresKeepOnlySafeTypedCategories();
+#ifdef A0_TEST_NIKON_SDK_STUB
+    SdklessConcreteAdapterFailsClosedAsUnavailable();
+#endif
     FiveOperationsBindTwoBodies();
     CompletedEvidenceIsExactlyTheAllowlist();
     ReadyBindingRequiresExplicitFreshActivation();
