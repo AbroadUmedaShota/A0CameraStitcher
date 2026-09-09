@@ -108,6 +108,35 @@ void ValidateWpdEnumeratedObjectCount(
 // entry in the reported range is constructed.
 void ValidateWpdEnumeratedObjectId(std::string_view category, const wchar_t* id);
 
+namespace detail {
+
+// Owns the provider-allocated IDs returned through a WPD enumeration buffer.
+// The injectable deleter keeps ownership failure paths directly testable
+// without creating a COM manager or touching a physical device.
+class WpdEnumeratedObjectIdBuffer final {
+public:
+    using Deleter = void (*)(wchar_t*) noexcept;
+
+    WpdEnumeratedObjectIdBuffer(std::size_t capacity, Deleter deleter);
+    ~WpdEnumeratedObjectIdBuffer();
+
+    WpdEnumeratedObjectIdBuffer(const WpdEnumeratedObjectIdBuffer&) = delete;
+    WpdEnumeratedObjectIdBuffer& operator=(const WpdEnumeratedObjectIdBuffer&) = delete;
+    WpdEnumeratedObjectIdBuffer(WpdEnumeratedObjectIdBuffer&&) = delete;
+    WpdEnumeratedObjectIdBuffer& operator=(WpdEnumeratedObjectIdBuffer&&) = delete;
+
+    [[nodiscard]] wchar_t** Data() noexcept;
+    [[nodiscard]] std::size_t Capacity() const noexcept;
+    [[nodiscard]] wchar_t* operator[](std::size_t index) const;
+    [[nodiscard]] std::wstring CopyAndRelease(std::size_t index);
+
+private:
+    std::vector<wchar_t*> ids_;
+    Deleter deleter_;
+};
+
+} // namespace detail
+
 // Bounds how many objects a single content-tree walk may enumerate. A
 // dedicated capture spool never legitimately holds more than a few thousand
 // objects; the budget is set comfortably above realistic professional-card

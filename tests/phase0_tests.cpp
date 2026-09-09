@@ -9,6 +9,7 @@
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/wpd_transport.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
@@ -66,6 +67,30 @@ static_assert(!ExposesLiveViewRead<NikonSdkStatusExecutor>);
 static_assert(!ExposesLiveViewStop<NikonSdkStatusExecutor>);
 
 int failures = 0;
+
+std::array<wchar_t*, 8> fake_wpd_object_id_frees{};
+std::size_t fake_wpd_object_id_free_count = 0;
+
+void RecordFakeWpdObjectIdFree(wchar_t* id) noexcept {
+    if (fake_wpd_object_id_free_count < fake_wpd_object_id_frees.size()) {
+        fake_wpd_object_id_frees[fake_wpd_object_id_free_count] = id;
+    }
+    ++fake_wpd_object_id_free_count;
+}
+
+void ResetFakeWpdObjectIdFrees() {
+    fake_wpd_object_id_frees.fill(nullptr);
+    fake_wpd_object_id_free_count = 0;
+}
+
+std::size_t FakeWpdObjectIdFreeCallsFor(const wchar_t* expected) {
+    const std::size_t recorded_count =
+        std::min(fake_wpd_object_id_free_count, fake_wpd_object_id_frees.size());
+    return static_cast<std::size_t>(std::count(
+        fake_wpd_object_id_frees.begin(),
+        fake_wpd_object_id_frees.begin() + recorded_count,
+        expected));
+}
 
 enum class FakeLiveViewFailure {
     none,
@@ -2854,6 +2879,52 @@ void TestWpdEnumeratedObjectIdValidationFailsClosed() {
         "a WPD enumerator that reports a slot as fetched while leaving the ID null must fail closed");
 }
 
+void TestWpdDeviceIdBufferReleasesPartialProviderOutputOnFailure() {
+    wchar_t first_id[] = L"partial-device-a";
+    wchar_t second_id[] = L"partial-device-b";
+    ResetFakeWpdObjectIdFrees();
+
+    try {
+        detail::WpdEnumeratedObjectIdBuffer ids(3, RecordFakeWpdObjectIdFree);
+        ids.Data()[0] = first_id;
+        ids.Data()[2] = second_id;
+        throw TransportError("inventory_failed", "simulated GetDevices failure after partial output");
+    } catch (const TransportError& error) {
+        Check(error.Category() == "inventory_failed",
+            "the simulated partial GetDevices failure must retain its failure category");
+    }
+
+    Check(fake_wpd_object_id_free_count == 2 &&
+              FakeWpdObjectIdFreeCallsFor(first_id) == 1 &&
+              FakeWpdObjectIdFreeCallsFor(second_id) == 1 &&
+              FakeWpdObjectIdFreeCallsFor(nullptr) == 0,
+        "a failed GetDevices call must release each partially populated device ID exactly once");
+}
+
+void TestWpdDeviceIdBufferDoesNotReleaseTransferredIdTwice() {
+    wchar_t first_id[] = L"complete-device-a";
+    wchar_t second_id[] = L"complete-device-b";
+    ResetFakeWpdObjectIdFrees();
+
+    {
+        detail::WpdEnumeratedObjectIdBuffer ids(2, RecordFakeWpdObjectIdFree);
+        ids.Data()[0] = first_id;
+        ids.Data()[1] = second_id;
+        Check(ids.CopyAndRelease(0) == L"complete-device-a",
+            "the device ID owner must copy the selected ID before releasing it");
+        Check(fake_wpd_object_id_free_count == 1 &&
+                  FakeWpdObjectIdFreeCallsFor(first_id) == 1 &&
+                  FakeWpdObjectIdFreeCallsFor(second_id) == 0,
+            "a transferred device ID must be released exactly once before scope cleanup");
+    }
+
+    Check(fake_wpd_object_id_free_count == 2 &&
+              FakeWpdObjectIdFreeCallsFor(first_id) == 1 &&
+              FakeWpdObjectIdFreeCallsFor(second_id) == 1 &&
+              FakeWpdObjectIdFreeCallsFor(nullptr) == 0,
+        "scope cleanup must release only the remaining device ID exactly once");
+}
+
 void TestWpdContentScanBudgetValidationFailsClosed() {
     ValidateWpdContentScanBudget("probe_category", 0, 200'000);
     ValidateWpdContentScanBudget("probe_category", 200'000, 200'000);
@@ -3030,6 +3101,8 @@ int main() {
         TestWpdStreamReadLengthValidationFailsClosed();
         TestWpdEnumeratedObjectCountValidationFailsClosed();
         TestWpdEnumeratedObjectIdValidationFailsClosed();
+        TestWpdDeviceIdBufferReleasesPartialProviderOutputOnFailure();
+        TestWpdDeviceIdBufferDoesNotReleaseTransferredIdTwice();
         TestWpdContentScanBudgetValidationFailsClosed();
         TestHybridZeroMultipleAndLateCandidatesFailWithoutRetry();
         TestHybridCaptureFailureAndObservationTokenAreFailClosed();
