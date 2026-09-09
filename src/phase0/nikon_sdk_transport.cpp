@@ -14,6 +14,7 @@
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/sdk_buffer_arena.hpp"
 #include "a0/phase0/sdk_pending_command.hpp"
+#include "nikon_sdk_runtime_path.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef A0_NIKON_SDK_MODULE_PATH
+#error "Licensed SDK paths must be resolved at runtime, never embedded in Agent binaries."
+#endif
 
 namespace a0::phase0 {
 namespace fs = std::filesystem;
@@ -1796,7 +1801,13 @@ private:
     }
 
     void OpenModule(std::chrono::steady_clock::time_point deadline) {
-        const fs::path module_path = fs::path(A0_NIKON_SDK_MODULE_PATH);
+        const auto resolved_module = detail::ResolveNikonSdkModuleFromEnvironment();
+        if (!resolved_module) {
+            throw TransportError(
+                "sdk_load_failed",
+                "Nikon D810 SDK runtime module is unavailable, untrusted, or incomplete");
+        }
+        const fs::path& module_path = *resolved_module;
         const std::wstring directory = module_path.parent_path().wstring();
         dll_directory_ = AddDllDirectory(directory.c_str());
         if (dll_directory_ == nullptr) throw TransportError("sdk_load_failed", "SDK DLL directory could not be registered");
@@ -2318,11 +2329,7 @@ NikonSdkTransport::InspectDualSessionExitState() const noexcept {
     return impl_->InspectDualSessionExitState();
 }
 bool NikonSdkTransport::LicensedAdapterAvailable() noexcept {
-    try {
-        return fs::exists(fs::path(A0_NIKON_SDK_MODULE_PATH));
-    } catch (...) {
-        return false;
-    }
+    return detail::ResolveNikonSdkModuleFromEnvironment().has_value();
 }
 
 #else

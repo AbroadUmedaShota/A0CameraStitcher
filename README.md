@@ -132,8 +132,15 @@ dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.cs
 ```powershell
 cmake -S . -B build-sdk -G "Visual Studio 17 2022" -A x64 '-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk'
 cmake --build build-sdk --config Release --target A0CameraStitcher.CameraAgent
+$sdkRoot = (Resolve-Path .tools/nikon/d810-remote-sdk).Path
+$sdkModules = @(Get-ChildItem -LiteralPath $sdkRoot -Recurse -File -Filter Type0014.md3 |
+    Where-Object { $_.FullName.Replace('\', '/') -match '/Module/Win/Binary Files/x64/Type0014\.md3$' })
+if ($sdkModules.Count -ne 1) { throw 'Nikon D810 x64 runtime module must be unique.' }
+$env:NIKON_D810_SDK_MODULE_PATH = $sdkModules[0].FullName
 dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj -c Release -- --hardware-single --camera-agent .\build-sdk\Release\A0CameraStitcher.CameraAgent.exe
 ```
+
+SDK対応AgentはローカルSDKの絶対パスをバイナリへ埋め込みません。実行時は、Agentを起動する同じprocess環境の`NIKON_D810_SDK_MODULE_PATH`で、信頼できる固定ローカルドライブ上の正規x64 moduleを明示します。remote path、reparse point、未設定、不足、誤った配置はfail-closedです。SDKは取得元を確認したローカル隔離配置だけを指定してください。
 
 実機SingleのContinuous Live View handoff 10回を受入証跡付きで実施する場合だけ、上記へ
 `--single-handoff-acceptance-count 10 --source-sha <実際にbuildした40文字lower-hex SHA>`を追加します。
