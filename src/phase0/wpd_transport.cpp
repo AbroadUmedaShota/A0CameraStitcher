@@ -71,6 +71,10 @@ constexpr std::size_t kMaximumScannedContentObjects = 200'000;
 // duration of a single call so that outer check cannot be starved.
 constexpr auto kContentScanDeadline = std::chrono::seconds(60);
 
+void FreeWpdEnumeratedObjectId(wchar_t* id) noexcept {
+    CoTaskMemFree(id);
+}
+
 std::string HResultText(HRESULT result) {
     std::ostringstream text;
     text << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(8)
@@ -505,6 +509,44 @@ void ValidateWpdEnumeratedObjectId(std::string_view category, const wchar_t* id)
     }
 }
 
+detail::WpdEnumeratedObjectIdBuffer::WpdEnumeratedObjectIdBuffer(
+    std::size_t capacity,
+    Deleter deleter)
+    : ids_(capacity, nullptr), deleter_(deleter) {
+    if (deleter_ == nullptr) {
+        throw std::invalid_argument("WPD object ID deleter must not be null");
+    }
+}
+
+detail::WpdEnumeratedObjectIdBuffer::~WpdEnumeratedObjectIdBuffer() {
+    for (wchar_t*& id : ids_) {
+        if (id != nullptr) {
+            deleter_(id);
+            id = nullptr;
+        }
+    }
+}
+
+wchar_t** detail::WpdEnumeratedObjectIdBuffer::Data() noexcept {
+    return ids_.data();
+}
+
+std::size_t detail::WpdEnumeratedObjectIdBuffer::Capacity() const noexcept {
+    return ids_.size();
+}
+
+wchar_t* detail::WpdEnumeratedObjectIdBuffer::operator[](std::size_t index) const {
+    return ids_.at(index);
+}
+
+std::wstring detail::WpdEnumeratedObjectIdBuffer::CopyAndRelease(std::size_t index) {
+    wchar_t*& id = ids_.at(index);
+    std::wstring copied(id);
+    deleter_(id);
+    id = nullptr;
+    return copied;
+}
+
 void ValidateWpdContentScanBudget(
     std::string_view category,
     std::size_t scanned_object_count,
@@ -544,34 +586,27 @@ public:
         Check(manager->RefreshDeviceList(), "inventory_failed", "refresh WPD devices");
         DWORD count = 0;
         Check(manager->GetDevices(nullptr, &count), "inventory_failed", "count WPD devices");
-        std::vector<PWSTR> ids(count, nullptr);
-        if (count != 0) Check(manager->GetDevices(ids.data(), &count), "inventory_failed", "enumerate WPD devices");
-        // IPortableDeviceManager::GetDevices allocates each populated ID with
-        // CoTaskMemAlloc. This guard frees whatever remains no matter how the
-        // loop below is exited (a Check() failure partway through, the
-        // identity_collision throw, or normal completion), so an exception
-        // raised while processing one device never leaks the CoTaskMemAlloc
-        // buffers for the devices not yet reached. Mirrors the equivalent
-        // guard in the content-enumeration loop below.
-        struct FreeRemainingIds final {
-            std::vector<PWSTR>& ids;
-            ~FreeRemainingIds() {
-                for (PWSTR& id : ids) {
-                    if (id != nullptr) {
-                        CoTaskMemFree(id);
-                        id = nullptr;
-                    }
-                }
+        // The owner must exist before the provider-owned call because a failed
+        // GetDevices may still have populated part of the output array.
+        detail::WpdEnumeratedObjectIdBuffer ids(count, FreeWpdEnumeratedObjectId);
+        if (count != 0) {
+            const HRESULT enumerated = manager->GetDevices(ids.Data(), &count);
+            if (FAILED(enumerated)) {
+                Check(enumerated, "inventory_failed", "enumerate WPD devices");
             }
-        } free_remaining_ids{ids};
+            // The second call owns this out-count. A hot-plug or malformed
+            // provider response must not turn it into an index beyond the
+            // buffer sized from the first call.
+            ValidateWpdEnumeratedObjectCount(
+                "inventory_failed", static_cast<std::size_t>(count), ids.Capacity());
+            for (DWORD index = 0; index < count; ++index) {
+                ValidateWpdEnumeratedObjectId("inventory_failed", ids[index]);
+            }
+        }
 
         std::vector<CameraInfo> cameras;
         for (DWORD index = 0; index < count; ++index) {
-            std::wstring id = ids[index] == nullptr ? L"" : ids[index];
-            if (ids[index] != nullptr) {
-                CoTaskMemFree(ids[index]);
-                ids[index] = nullptr;
-            }
+            std::wstring id = ids.CopyAndRelease(index);
             const std::wstring friendly = DeviceFriendlyName(manager.Get(), id.c_str());
             if (!ContainsD810(friendly)) continue;
             // Inventory only reads capabilities, firmware, and the standard
