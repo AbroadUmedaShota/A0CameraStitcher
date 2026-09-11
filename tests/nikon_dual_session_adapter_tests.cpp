@@ -20,6 +20,147 @@ void Check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+void TestReadOnlySourceWaitReturnsNormalizedPublishedIds() {
+    const auto started = std::chrono::steady_clock::time_point{};
+    auto current = started;
+    std::size_t pump_count = 0;
+    std::size_t read_count = 0;
+    std::size_t wait_count = 0;
+
+    const auto ids = WaitForNikonSdkReadOnlySourceIds(
+        started + 5s,
+        [&] { ++pump_count; },
+        [&] {
+            ++read_count;
+            return read_count == 1
+                ? std::vector<std::uint32_t>{}
+                : std::vector<std::uint32_t>{20, 10, 20};
+        },
+        [&] { ++wait_count; current += 50ms; },
+        [&] { return current; });
+
+    Check(ids == std::vector<std::uint32_t>{10, 20} &&
+              pump_count == 2 && read_count == 2 && wait_count == 1,
+        "read-only source wait must normalize published ids and stop immediately on success");
+}
+
+void TestReadOnlySourceWaitRejectsDeadlineReachedDuringCallbacks() {
+    const auto started = std::chrono::steady_clock::time_point{};
+    for (const auto elapsed : {50ms, 75ms}) {
+        for (const bool expire_during_pump : {false, true}) {
+            auto current = started;
+            std::size_t pump_count = 0;
+            std::size_t read_count = 0;
+            std::size_t wait_count = 0;
+            bool timeout_typed = false;
+            try {
+                (void)WaitForNikonSdkReadOnlySourceIds(
+                    started + 50ms,
+                    [&] {
+                        ++pump_count;
+                        if (expire_during_pump) current = started + elapsed;
+                    },
+                    [&] {
+                        ++read_count;
+                        current = started + elapsed;
+                        return std::vector<std::uint32_t>{10, 20};
+                    },
+                    [&] { ++wait_count; },
+                    [&] { return current; });
+            } catch (const TransportError& error) {
+                timeout_typed =
+                    error.Category() == "dual_read_only_source_wait_timeout";
+            }
+            Check(timeout_typed && pump_count == 1 &&
+                      read_count == (expire_during_pump ? 0u : 1u) && wait_count == 0,
+                "expired source callbacks must not publish late ids or start another operation");
+        }
+    }
+}
+
+void TestReadOnlySourceWaitHasDeterministicTimeoutAndFailureCategories() {
+    const auto started = std::chrono::steady_clock::time_point{};
+    auto current = started;
+    std::size_t pump_count = 0;
+    std::size_t wait_count = 0;
+    bool timeout_typed = false;
+    try {
+        (void)WaitForNikonSdkReadOnlySourceIds(
+            started + 150ms,
+            [&] { ++pump_count; },
+            [] { return std::vector<std::uint32_t>{}; },
+            [&] { ++wait_count; current += 50ms; },
+            [&] { return current; });
+    } catch (const TransportError& error) {
+        timeout_typed =
+            error.Category() == "dual_read_only_source_wait_timeout";
+    }
+    Check(timeout_typed && pump_count == 3 && wait_count == 3,
+        "empty source publication must stop at the injected deadline with no hidden retry");
+
+    current = started;
+    wait_count = 0;
+    timeout_typed = false;
+    try {
+        (void)WaitForNikonSdkReadOnlySourceIds(
+            started + 50ms,
+            [] {},
+            [&] {
+                current = started + 50ms;
+                return std::vector<std::uint32_t>{};
+            },
+            [&] { ++wait_count; },
+            [&] { return current; });
+    } catch (const TransportError& error) {
+        timeout_typed =
+            error.Category() == "dual_read_only_source_wait_timeout";
+    }
+    Check(timeout_typed && wait_count == 0,
+        "source reads that reach the deadline must not schedule another wait");
+
+    std::size_t read_count = 0;
+    bool failure_typed = false;
+    try {
+        (void)WaitForNikonSdkReadOnlySourceIds(
+            started + 5s,
+            [] {},
+            [&]() -> std::vector<std::uint32_t> {
+                ++read_count;
+                throw std::runtime_error("injected-sensitive-source-read-detail");
+            },
+            [] {},
+            [started] { return started; });
+    } catch (const TransportError& error) {
+        failure_typed =
+            error.Category() == "dual_read_only_source_wait_failed" &&
+            std::string{error.what()}.find("injected-sensitive") ==
+                std::string::npos;
+    }
+    Check(failure_typed && read_count == 1,
+        "source wait exceptions must be normalized without leaking details or retrying");
+
+    std::size_t wait_failure_count = 0;
+    failure_typed = false;
+    try {
+        (void)WaitForNikonSdkReadOnlySourceIds(
+            started + 5s,
+            [] {},
+            [] { return std::vector<std::uint32_t>{}; },
+            [&] {
+                ++wait_failure_count;
+                throw std::runtime_error("injected-sensitive-wait-detail");
+            },
+            [started] { return started; });
+    } catch (const TransportError& error) {
+        failure_typed =
+            error.Category() == "dual_read_only_source_wait_failed" &&
+            std::string{error.what()}.find("injected-sensitive") ==
+                std::string::npos;
+    }
+    Check(failure_typed && wait_failure_count == 1,
+        "source wait scheduling exceptions must be normalized without leaking details or retrying");
+}
+
 class RecordingInventorySource {
 public:
     std::size_t fail_close_number{};
@@ -29,6 +170,7 @@ public:
     std::size_t close_count{};
     std::size_t concurrent_open_count{};
     bool source_open{};
+    bool close_unconfirmed{};
     std::uint32_t current_source{};
     std::vector<std::string> events;
 
@@ -76,7 +218,8 @@ void TestInventoryCloseFailureStopsBeforeOpeningNextSource() {
             {10, 20},
             [&](std::uint32_t id) { source.Open(id); },
             [&] { return source.InspectIsD810(); },
-            [&] { return source.CloseOnce(); });
+            [&] { return source.CloseOnce(); },
+            source.close_unconfirmed);
         ++successful_returns;
     } catch (const TransportError& error) {
         typed_failure = error.Category() == "inventory_close_failed";
@@ -87,7 +230,7 @@ void TestInventoryCloseFailureStopsBeforeOpeningNextSource() {
     Check(source.open_count == 1 && source.inspect_count == 1 &&
               source.close_count == 1 && source.concurrent_open_count == 0,
         "close failure must stop before opening, inspecting, or closing a second source");
-    Check(source.source_open && successful_returns == 0,
+    Check(source.source_open && source.close_unconfirmed && successful_returns == 0,
         "unconfirmed source state must not be rewritten as closed or publish candidates");
     Check(source.events == std::vector<std::string>{
               "open:10", "inspect:10", "close:10"},
@@ -104,12 +247,13 @@ void TestInventoryUnknownCloseCompletionStopsWithoutRetry() {
             {10, 20},
             [&](std::uint32_t id) { source.Open(id); },
             [&] { return source.InspectIsD810(); },
-            [&] { return source.CloseOnce(); });
+            [&] { return source.CloseOnce(); },
+            source.close_unconfirmed);
     } catch (const TransportError& error) {
         typed_failure = error.Category() == "inventory_close_failed";
     }
 
-    Check(typed_failure && source.source_open,
+    Check(typed_failure && source.source_open && source.close_unconfirmed,
         "unknown close completion must remain open-state uncertain and typed failed");
     Check(source.open_count == 1 && source.close_count == 1 &&
               source.concurrent_open_count == 0,
@@ -123,13 +267,14 @@ void TestInventoryWalkRemainsSequentialWhenEveryCloseIsConfirmed() {
         {10, 20},
         [&](std::uint32_t id) { source.Open(id); },
         [&] { return source.InspectIsD810(); },
-        [&] { return source.CloseOnce(); });
+        [&] { return source.CloseOnce(); },
+        source.close_unconfirmed);
 
     Check(d810_ids == std::vector<std::uint32_t>{10, 20},
         "both inspected D810 ids may be returned only after checked close");
     Check(source.open_count == 2 && source.inspect_count == 2 &&
               source.close_count == 2 && source.concurrent_open_count == 0 &&
-              !source.source_open,
+              !source.source_open && !source.close_unconfirmed,
         "normal two-camera inventory must preserve one open/read/checked-close sequence per source");
     Check(source.events == std::vector<std::string>{
               "open:10", "inspect:10", "close:10",
@@ -144,7 +289,11 @@ public:
     bool fail_close{};
     bool fail_capture{};
     bool fail_read_only_start{};
-    bool fail_read_only_inventory{};
+    bool fail_read_only_with_non_transport_exception{};
+    bool read_only_close_unconfirmed{};
+    bool read_only_close_throws{};
+    RecordingInventorySource read_only_inventory;
+    std::string read_only_failure_category;
     bool fail_end_after_cleanup{};
     bool fail_end_before_cleanup{};
     std::size_t read_only_d810_count{2};
@@ -162,22 +311,49 @@ public:
     std::size_t status_probe_count{};
     std::size_t invalidation_poll_count{};
     std::size_t concurrent_source_violation_count{};
+    std::chrono::seconds last_read_only_timeout{};
     std::vector<std::string> opened_tokens;
 
-    std::size_t BeginDualReadOnlyProbe(std::chrono::seconds) override {
+    std::size_t BeginDualReadOnlyProbe(std::chrono::seconds timeout) override {
         ++read_only_begin_count;
+        last_read_only_timeout = timeout;
         if (fail_read_only_start) {
             throw TransportError(
                 "sdk_load_failed", "injected-sensitive-start-detail");
         }
         process_claimed = true;
         module_active = true;
-        if (fail_read_only_inventory) {
+        if (fail_read_only_with_non_transport_exception) {
+            process_claimed = false;
+            module_active = false;
+            throw std::runtime_error("injected-sensitive-non-transport-detail");
+        }
+        if (read_only_failure_category == "inventory_close_failed") {
+            read_only_inventory.fail_close_number = read_only_close_throws ? 0 : 1;
+            read_only_inventory.unknown_close_number = read_only_close_throws ? 1 : 0;
+            try {
+                return InspectNikonD810InventorySources(
+                    {10, 20},
+                    [&](std::uint32_t id) { read_only_inventory.Open(id); },
+                    [&] { return read_only_inventory.InspectIsD810(); },
+                    [&] { return read_only_inventory.CloseOnce(); },
+                    read_only_close_unconfirmed).size();
+            } catch (...) {
+                // Model rollback/unload dropping all SDK-shaped handles. The
+                // shared production inventory seam must preserve uncertainty.
+                process_claimed = false;
+                module_active = false;
+                source_open = false;
+                read_only_inventory.source_open = false;
+                throw;
+            }
+        }
+        if (!read_only_failure_category.empty()) {
             process_claimed = false;
             module_active = false;
             throw TransportError(
-                "dual_read_only_inventory_failed",
-                "injected-sensitive-inventory-detail");
+                read_only_failure_category,
+                "injected-sensitive-read-only-detail");
         }
         return read_only_d810_count;
     }
@@ -273,7 +449,8 @@ public:
     }
 
     ExitState InspectDualSessionExitState() const noexcept override {
-        return {process_claimed, module_active, source_open};
+        return {process_claimed, module_active,
+            source_open || read_only_close_unconfirmed};
     }
 
     bool abandoned{};
@@ -705,8 +882,9 @@ void TestReadOnlyProbeEndsSessionWithoutPublishingBindingTokens() {
         "Dual SDK read-only probe must report exactly two inspected candidates and end the session");
     Check(transport->read_only_begin_count == 1 && transport->begin_count == 0 &&
           transport->end_count == 1 &&
+          transport->last_read_only_timeout == 5s &&
           !transport->module_active && transport->source_open_count == 0,
-        "the transport-level fake must not generate binding tokens or retain an open source");
+        "the transport-level fake must receive the deadline without generating tokens or retaining a source");
     Check(transport->capture_count == 0 && transport->status_probe_count == 0,
         "Dual SDK read-only probe must not inspect settings or send a capture command");
 
@@ -750,30 +928,144 @@ void TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens() {
     }
 }
 
-void TestReadOnlyProbeNormalizesStartAndInventoryFailures() {
-    for (const bool fail_start : {true, false}) {
+void TestReadOnlyProbePublishesAnonymousFailureStages() {
+    struct FailureCase {
+        const char* transport_category;
+        DualSdkReadOnlyProbeError expected;
+        const char* public_category;
+    };
+    constexpr FailureCase cases[] = {
+        {"dual_read_only_inventory_failed",
+            DualSdkReadOnlyProbeError::SdkInventoryFailed,
+            "sdkInventoryFailed"},
+        {"dual_read_only_source_wait_timeout",
+            DualSdkReadOnlyProbeError::SdkSourceWaitTimeout,
+            "sdkSourceWaitTimeout"},
+        {"dual_read_only_source_wait_failed",
+            DualSdkReadOnlyProbeError::SdkSourceWaitFailed,
+            "sdkSourceWaitFailed"},
+        {"dual_read_only_metadata_projection_failed",
+            DualSdkReadOnlyProbeError::SdkMetadataProjectionFailed,
+            "sdkMetadataProjectionFailed"},
+        {"inventory_close_failed",
+            DualSdkReadOnlyProbeError::SdkInventorySourceCloseFailed,
+            "sdkInventorySourceCloseFailed"},
+    };
+
+    {
         auto transport = std::make_shared<RecordingDualSessionTransport>();
-        transport->fail_read_only_start = fail_start;
-        transport->fail_read_only_inventory = !fail_start;
+        transport->fail_read_only_start = true;
 
         const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
-        const auto expected = fail_start
-            ? DualSdkReadOnlyProbeError::SdkStartFailed
-            : DualSdkReadOnlyProbeError::SdkInventoryFailed;
         Check(!result.sdk_d810_count.has_value() &&
-              result.exit_state.FullyEnded() && result.error == expected &&
+              result.exit_state.FullyEnded() &&
+              result.error == DualSdkReadOnlyProbeError::SdkStartFailed &&
               result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
               result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
-            "start and inventory failures must be normalized after confirmed cleanup");
+            "SDK startup failure must remain distinct after confirmed cleanup");
         Check(transport->read_only_begin_count == 1 && transport->end_count == 0 &&
               transport->begin_count == 0 && transport->source_open_count == 0 &&
-              transport->capture_count == 0,
-            "failed read-only begin must not retry, bind, or issue camera commands");
+              transport->capture_count == 0 &&
+              transport->last_read_only_timeout == 5s,
+            "failed SDK startup must remain deadline-bound and must not retry or bind");
         const auto json = SerializeDualSdkReadOnlyProbeResult(result);
-        Check(json.find("injected-sensitive") == std::string::npos &&
+        Check(json.find("\"errorCategory\":\"sdkStartFailed\"") !=
+                  std::string::npos &&
+              json.find("injected-sensitive") == std::string::npos &&
               json.find("\"sdkD810Count\":null") != std::string::npos &&
               json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
-            "SDK failure details must never cross the fixed JSON boundary");
+            "SDK startup details must never cross the anonymous JSON boundary");
+    }
+
+    for (const auto& failure : cases) {
+        auto transport = std::make_shared<RecordingDualSessionTransport>();
+        transport->read_only_failure_category = failure.transport_category;
+
+        const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+        const bool close_unconfirmed =
+            failure.expected ==
+                DualSdkReadOnlyProbeError::SdkInventorySourceCloseFailed;
+        Check(!result.sdk_d810_count.has_value() &&
+              result.exit_state.FullyEnded() == !close_unconfirmed &&
+              result.error == failure.expected &&
+              result.cleanup == (close_unconfirmed
+                  ? DualSdkReadOnlyProbeCleanup::Unconfirmed
+                  : DualSdkReadOnlyProbeCleanup::Ended) &&
+              result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked,
+            "each SDK inventory stage must retain its fixed typed category after cleanup");
+        Check(transport->read_only_begin_count == 1 &&
+              transport->end_count == (close_unconfirmed ? 1u : 0u) &&
+              transport->begin_count == 0 && transport->source_open_count == 0 &&
+              transport->capture_count == 0 &&
+              transport->last_read_only_timeout == 5s,
+            "each inventory failure must remain deadline-bound without retry, binding, or camera commands");
+        const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+        Check(json.find(std::string{"\"errorCategory\":\""} +
+                  failure.public_category + "\"") != std::string::npos &&
+              json.find(failure.transport_category) == std::string::npos &&
+              json.find("injected-sensitive") == std::string::npos &&
+              json.find("\"sdkD810Count\":null") != std::string::npos &&
+              json.find(close_unconfirmed
+                  ? "\"cleanupState\":\"unconfirmed\""
+                  : "\"cleanupState\":\"ended\"") != std::string::npos &&
+              json.find(close_unconfirmed
+                  ? "\"sdkSessionEnded\":false"
+                  : "\"sdkSessionEnded\":true") != std::string::npos &&
+              json.find("\"terminalState\":\"Blocked\"") != std::string::npos,
+            "inventory diagnostics must expose only fixed public categories and cleanup facts");
+    }
+
+    {
+        auto transport = std::make_shared<RecordingDualSessionTransport>();
+        transport->fail_read_only_with_non_transport_exception = true;
+        const auto result = RunDualSdkReadOnlyProbe(*transport, 5s);
+        const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+        Check(result.error == DualSdkReadOnlyProbeError::SdkOperationFailed &&
+              result.cleanup == DualSdkReadOnlyProbeCleanup::Ended &&
+              result.exit_state.FullyEnded() &&
+              transport->read_only_begin_count == 1 &&
+              transport->last_read_only_timeout == 5s &&
+              json.find("\"errorCategory\":\"sdkOperationFailed\"") !=
+                  std::string::npos &&
+              json.find("injected-sensitive") == std::string::npos,
+            "unexpected SDK exceptions must remain anonymous and cleanup-confirmed without retry");
+    }
+}
+
+void TestReadOnlyProbePreservesSharedInventoryUncertaintyAfterCleanup() {
+    for (const bool close_throws : {false, true}) {
+        RecordingDualSessionTransport transport;
+        transport.read_only_failure_category = "inventory_close_failed";
+        transport.read_only_close_throws = close_throws;
+        const auto result = RunDualSdkReadOnlyProbe(transport, 5s);
+        const auto json = SerializeDualSdkReadOnlyProbeResult(result);
+        Check(transport.read_only_inventory.open_count == 1 &&
+                  transport.read_only_inventory.close_count == 1 &&
+                  transport.read_only_begin_count == 1 && transport.end_count == 1,
+            "shared inventory close failure must stop after one source and one checked close");
+        Check(!transport.process_claimed && !transport.module_active &&
+                  !transport.source_open && !transport.read_only_inventory.source_open &&
+                  transport.read_only_close_unconfirmed && !result.exit_state.FullyEnded() &&
+                  result.error == DualSdkReadOnlyProbeError::SdkInventorySourceCloseFailed &&
+                  result.cleanup == DualSdkReadOnlyProbeCleanup::Unconfirmed &&
+                  result.terminal_state == DualSdkReadOnlyProbeTerminalState::Blocked &&
+                  json.find("\"sdkSessionEnded\":false") != std::string::npos,
+            "dropping SDK handles must not erase shared inventory close uncertainty");
+
+        bool repeated_walk_blocked = false;
+        try {
+            (void)InspectNikonD810InventorySources(
+                {10, 20},
+                [&](std::uint32_t id) { transport.read_only_inventory.Open(id); },
+                [&] { return transport.read_only_inventory.InspectIsD810(); },
+                [&] { return transport.read_only_inventory.CloseOnce(); },
+                transport.read_only_close_unconfirmed);
+        } catch (const TransportError& error) {
+            repeated_walk_blocked = error.Category() == "inventory_close_failed";
+        }
+        Check(repeated_walk_blocked && transport.read_only_inventory.open_count == 1 &&
+                  transport.read_only_inventory.close_count == 1,
+            "a sticky unconfirmed inventory must reject any later walk without retry");
     }
 }
 
@@ -823,6 +1115,9 @@ void TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed() {
 
 int main() {
     try {
+        TestReadOnlySourceWaitReturnsNormalizedPublishedIds();
+        TestReadOnlySourceWaitRejectsDeadlineReachedDuringCallbacks();
+        TestReadOnlySourceWaitHasDeterministicTimeoutAndFailureCategories();
         TestInventoryCloseFailureStopsBeforeOpeningNextSource();
         TestInventoryUnknownCloseCompletionStopsWithoutRetry();
         TestInventoryWalkRemainsSequentialWhenEveryCloseIsConfirmed();
@@ -838,7 +1133,8 @@ int main() {
         TestPairPreflightEnforcesTheRetainedModuleOnlyBoundary();
         TestReadOnlyProbeEndsSessionWithoutPublishingBindingTokens();
         TestReadOnlyProbeBlocksZeroOneAndThreeCandidatesWithoutTokens();
-        TestReadOnlyProbeNormalizesStartAndInventoryFailures();
+        TestReadOnlyProbePublishesAnonymousFailureStages();
+        TestReadOnlyProbePreservesSharedInventoryUncertaintyAfterCleanup();
         TestReadOnlyProbeBlocksCleanupErrorAfterConfirmedEnd();
         TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed();
         std::cout << "Nikon Dual session adapter contracts passed\n";

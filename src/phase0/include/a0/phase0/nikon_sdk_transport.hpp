@@ -10,14 +10,26 @@
 
 namespace a0::phase0 {
 
+// SDK-independent source-publication wait seam used by the real read-only
+// inventory path. The injected clock and wait operation keep timeout behavior
+// deterministic in software-only tests without loading the licensed SDK.
+[[nodiscard]] std::vector<std::uint32_t> WaitForNikonSdkReadOnlySourceIds(
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<void()>& pump_callbacks,
+    const std::function<std::vector<std::uint32_t>()>& read_source_ids,
+    const std::function<void()>& wait_iteration,
+    const std::function<std::chrono::steady_clock::time_point()>& now);
+
 // SDK-independent control-flow seam for the real D810 inventory walk. Every
 // successful source open is followed by exactly one checked close before the
-// next source can be opened or a matching id can be published.
+// next source can be opened or a matching id can be published. The caller owns
+// the sticky close-uncertain state and must retain it even after SDK unload.
 [[nodiscard]] std::vector<std::uint32_t> InspectNikonD810InventorySources(
     const std::vector<std::uint32_t>& source_ids,
     const std::function<void(std::uint32_t)>& open_source,
     const std::function<bool()>& inspect_current_source_is_d810,
-    const std::function<bool()>& close_current_source_once);
+    const std::function<bool()>& close_current_source_once,
+    bool& close_unconfirmed);
 
 class INikonDualSessionTransport {
 public:
@@ -249,6 +261,10 @@ enum class DualSdkReadOnlyProbeError {
     CameraCountMismatch,
     SdkStartFailed,
     SdkInventoryFailed,
+    SdkSourceWaitTimeout,
+    SdkSourceWaitFailed,
+    SdkMetadataProjectionFailed,
+    SdkInventorySourceCloseFailed,
     SdkOperationFailed,
     HostSetupFailed,
 };
