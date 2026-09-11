@@ -340,6 +340,7 @@ class RecordingFakePairBackend final : public DualHardwareFakePairCaptureBackend
 public:
     bool preflight_ready{true};
     bool throw_preflight{};
+    DualHardwarePairCaptureCapabilities capabilities{true, true};
     std::optional<DualHardwarePairPreflightOutcome> forced_preflight_outcome;
     std::size_t preflight_calls{};
     std::vector<bool> preflight_capture_recovery_only;
@@ -369,6 +370,10 @@ public:
         return {preflight_ready ? DualHardwarePairPreflightState::Ready :
                 DualHardwarePairPreflightState::HardwarePending,
                 DualIdentityInvalidationReason::None, false, false};
+    }
+
+    DualHardwarePairCaptureCapabilities Capabilities() const noexcept override {
+        return capabilities;
     }
 
     DualHardwareFakeCaptureOutcome Capture(
@@ -1684,6 +1689,237 @@ void TestDispatcherOwnsInjectedStoreLifetime() {
         "a null store must retain all zero-side-effect counters");
 }
 
+void TestHostLifetimeAdmissionPreventsPairDispatch() {
+    constexpr std::uint64_t enough = 185'000;
+    constexpr std::uint64_t insufficient = 184'999;
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "82828282828282828282828282828282";
+        const fs::path store_root = sandbox.Child("host-budget-enough-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-enough-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        std::size_t budget_checks{};
+        const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-enough"),
+            [&] { ++budget_checks; return enough; });
+        CheckContains(response, "\"terminalState\":\"Succeeded\"",
+            "exact host admission budget must permit the existing pair dispatch");
+        Check(budget_checks == 2 && backend->preflight_calls == 1 &&
+              backend->aliases.size() == 2,
+            "a successful pair must check the absolute host budget before preflight and dispatch");
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "83838383838383838383838383838383";
+        const std::string other_id = "84848484848484848484848484848484";
+        const fs::path store_root = sandbox.Child("host-budget-normal-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-normal-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        const auto request = Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-normal");
+        const auto response = dispatcher.Handle(request, [] { return insufficient; });
+        CheckContains(response, "\"resultCode\":\"PairDispatcherUnavailable\"",
+            "insufficient host time must retain the ordinary unavailable response shape");
+        Check(backend->preflight_calls == 0 && backend->aliases.empty() &&
+              dispatcher.SafetyCounters().pair_dispatch_count == 0 &&
+              dispatcher.SafetyCounters().automatic_retry_count == 0,
+            "ordinary host admission rejection must not preflight, capture, dispatch, or retry");
+        const auto repeated = dispatcher.Handle(request, [] { return enough; });
+        CheckContains(repeated, "\"dispatchStarted\":false",
+            "the blocked ordinary transaction must not become dispatchable on a later request");
+        Check(backend->preflight_calls == 0 && backend->aliases.empty(),
+            "a blocked ordinary transaction must remain free of camera work even if time later appears sufficient");
+        const auto other = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(other_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-other"),
+            [] { return enough; });
+        CheckContains(other, "\"resultCode\":\"HostTerminalPendingReservationClose\"",
+            "an ordinary host-time block must reject other transactions until its exact close");
+        const auto queried = dispatcher.Handle(Envelope("get-pair-transaction-result",
+            "{\"transactionId\":\"" + transaction_id + "\"}",
+            "request-host-budget-normal-query"));
+        CheckContains(queried, "\"found\":true,\"result\":null",
+            "a blocked ordinary reservation must remain queryable");
+        CheckContains(queried, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "ordinary host rejection must durably prevent a same-ID dispatch after response loss");
+        CheckNotContains(queried, "Succeeded",
+            "confirmed no-dispatch must never be reported as successful capture");
+        Check(dispatcher.ShouldStop(),
+            "ordinary tombstone query must end the spent host without requiring a second close");
+        {
+            auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+            auto restarted_backend = std::make_shared<RecordingFakePairBackend>();
+            DualHardwareCameraAgentDispatcher restarted(
+                restarted_store, [] { return FixedNow(); }, restarted_backend);
+            const auto restarted_query = restarted.Handle(Envelope("get-pair-transaction-result",
+                "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-host-budget-normal-restart-query"));
+            CheckContains(restarted_query, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+                "a fresh host must recover ordinary no-dispatch proof without the original ACK");
+            const auto restarted_start = restarted.Handle(request, [] { return enough; });
+            CheckContains(restarted_start, "\"dispatchStarted\":false",
+                "a fresh host must not restart the same host-budget-rejected transaction");
+            Check(restarted_backend->preflight_calls == 0 && restarted_backend->aliases.empty() &&
+                  restarted.SafetyCounters().pair_dispatch_count == 0 &&
+                  restarted.SafetyCounters().automatic_retry_count == 0,
+                "ordinary restart recovery must remain free of preflight, capture, dispatch, and retry");
+            const auto idempotent_close = restarted.Handle(Envelope("close-reserved-pair-transaction",
+                "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-host-budget-normal-close"));
+            CheckContains(idempotent_close, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+                "the no-dispatch tombstone must retain idempotent close compatibility before a new reservation");
+            const auto new_reservation = restarted.Handle(Envelope(
+                "reserve-pair-transaction", ReservationPayload(other_id),
+                "request-host-budget-normal-new-host-reserve"));
+            CheckContains(new_reservation, "\"resultCode\":\"PairTransactionReserved\"",
+                "a fresh host may reserve a new ID after old no-dispatch proof is recovered");
+        }
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "85858585858585858585858585858585";
+        const fs::path store_root = sandbox.Child("host-budget-recovery-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-recovery-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        const auto response = dispatcher.Handle(Envelope(
+            "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(
+                transaction_id, "[\"CAM-A\",\"CAM-B\"]", transaction_root.generic_string()),
+            "request-host-budget-recovery"), [] { return insufficient; });
+        CheckContains(response,
+            "\"dispatchState\":\"ConfirmedUndispatched\",\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+            "capture-recovery host admission rejection must prove no dispatch");
+        CheckContains(response, "\"bindingInvalidationReason\":\"AgentRestart\"",
+            "capture-recovery host admission rejection must use the existing fatal block contract");
+        Check(backend->preflight_calls == 0 && backend->aliases.empty() &&
+              dispatcher.SafetyCounters().pair_dispatch_count == 0 &&
+              dispatcher.SafetyCounters().automatic_retry_count == 0,
+            "capture-recovery host admission rejection must not preflight, capture, dispatch, or retry");
+        const auto repeated = dispatcher.Handle(Envelope(
+            "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(
+                transaction_id, "[\"CAM-A\",\"CAM-B\"]", transaction_root.generic_string()),
+            "request-host-budget-recovery-repeat"), [] { return enough; });
+        CheckContains(repeated, "\"dispatchState\":\"ConfirmedUndispatched\"",
+            "a blocked capture-recovery transaction must not revive when time later appears sufficient");
+        Check(backend->preflight_calls == 0 && backend->aliases.empty(),
+            "a repeated capture-recovery host block must remain free of camera work");
+        const auto queried = dispatcher.Handle(CaptureRecoveryOnlyEnvelope(
+            "get-pair-transaction-result", "{\"transactionId\":\"" + transaction_id + "\"}",
+            "request-host-budget-recovery-query"));
+        CheckContains(queried, "\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+            "capture-recovery host admission block must be durable for same-ID query");
+        {
+            auto restarted_store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+            auto restarted_backend = std::make_shared<RecordingFakePairBackend>();
+            DualHardwareCameraAgentDispatcher restarted(
+                restarted_store, [] { return FixedNow(); }, restarted_backend);
+            const auto restarted_query = restarted.Handle(CaptureRecoveryOnlyEnvelope(
+                "get-pair-transaction-result", "{\"transactionId\":\"" + transaction_id + "\"}",
+                "request-host-budget-recovery-restart-query"));
+            CheckContains(restarted_query, "\"preflightBlock\":{\"state\":\"BindingInvalidated\"",
+                "a fresh host must recover the fatal host-budget block after response loss");
+            const auto restarted_start = restarted.Handle(Envelope(
+                "start-reserved-capture-recovery-only", CaptureRecoveryOnlyPayload(
+                    transaction_id, "[\"CAM-A\",\"CAM-B\"]", transaction_root.generic_string()),
+                "request-host-budget-recovery-restart"), [] { return enough; });
+            CheckContains(restarted_start, "\"dispatchState\":\"ConfirmedUndispatched\"",
+                "a fresh host must not revive the same capture-recovery transaction");
+            Check(restarted_backend->preflight_calls == 0 && restarted_backend->aliases.empty() &&
+                  restarted.SafetyCounters().pair_dispatch_count == 0 &&
+                  restarted.SafetyCounters().automatic_retry_count == 0,
+                "capture-recovery restart must remain free of preflight, capture, dispatch, and retry");
+        }
+        const auto closed = dispatcher.Handle(CaptureRecoveryOnlyEnvelope(
+            "close-reserved-pair-transaction", "{\"transactionId\":\"" + transaction_id + "\"}",
+            "request-host-budget-recovery-close"));
+        CheckContains(closed, "\"resultCode\":\"PairTransactionClosedBeforeDispatch\"",
+            "capture-recovery host admission reservation must be exactly closable");
+        Check(dispatcher.ShouldStop(),
+            "capture-recovery host must stop after its fatal reservation closes");
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "86868686868686868686868686868686";
+        const fs::path store_root = sandbox.Child("host-budget-after-preflight-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-after-preflight-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        std::vector<std::uint64_t> budgets{enough, insufficient};
+        std::size_t index{};
+        const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-after-preflight"),
+            [&] { return budgets.at(index++); });
+        CheckContains(response, "\"dispatchStarted\":false",
+            "a budget exhausted by preflight must not cross BeginDispatch");
+        Check(backend->preflight_calls == 1 && backend->aliases.empty() &&
+              dispatcher.SafetyCounters().pair_dispatch_count == 0,
+            "post-preflight host admission must prevent both camera captures and dispatch");
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "87878787878787878787878787878787";
+        const fs::path store_root = sandbox.Child("host-budget-exception-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-exception-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-exception"),
+            []() -> std::uint64_t { throw std::runtime_error("anonymous clock failure"); });
+        CheckContains(response, "\"dispatchStarted\":false",
+            "a host clock exception must fail closed before dispatch");
+        Check(backend->preflight_calls == 0 && backend->aliases.empty(),
+            "a host clock exception must not preflight or capture");
+    }
+
+    {
+        TempSandbox sandbox;
+        const std::string transaction_id = "89898989898989898989898989898989";
+        const fs::path store_root = sandbox.Child("host-budget-capabilities-store");
+        const fs::path transaction_root = sandbox.Child("host-budget-capabilities-transaction");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(store_root);
+        (void)store->Reserve(transaction_id);
+        auto backend = std::make_shared<RecordingFakePairBackend>();
+        backend->capabilities.ordinary_pair_capture_available = false;
+        DualHardwareCameraAgentDispatcher dispatcher(
+            store, [] { return FixedNow(); }, backend);
+        std::size_t budget_checks{};
+        const auto response = dispatcher.Handle(Envelope("start-reserved-pair",
+            StartPayload(transaction_id, "[\"CAM-A\",\"CAM-B\"]",
+                transaction_root.generic_string()), "request-host-budget-capabilities"),
+            [&] { ++budget_checks; return enough; });
+        CheckContains(response, "\"resultCode\":\"PairDispatcherUnavailable\"",
+            "existing unavailable backend capability rejection must win before host admission");
+        Check(budget_checks == 0 && backend->preflight_calls == 0 && backend->aliases.empty(),
+            "an unavailable backend must not consume host admission or access cameras");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1703,6 +1939,7 @@ int main() {
     TestTerminalPublishFailureKeepsDispatchingAndDoesNotRedispatch();
     TestStoreFailureIsFixedAndRedacted();
     TestDispatcherOwnsInjectedStoreLifetime();
+    TestHostLifetimeAdmissionPreventsPairDispatch();
     if (failures != 0) {
         std::cerr << failures << " Dual hardware Camera Agent test(s) failed\n";
         return 1;

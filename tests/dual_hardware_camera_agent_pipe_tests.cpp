@@ -14,6 +14,7 @@
 
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
+#include "a0/phase0/agent_host_lifetime.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -30,11 +31,13 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace a0::phase0;
@@ -183,6 +186,12 @@ std::optional<std::string> SendRequest(
         CloseHandle(pipe);
         return std::nullopt;
     }
+    // Wait for the server's disconnect, so callers advancing an injected
+    // clock cannot race the server's acceptance of the just-written ACK.
+    unsigned char trailing{};
+    DWORD trailing_read{};
+    (void)ReadFile(pipe, &trailing, 1, &trailing_read, nullptr);
+    Check(trailing_read == 0, "the server must not append bytes after a complete response");
     CloseHandle(pipe);
     return response;
 }
@@ -287,20 +296,22 @@ std::string ReservationEnvelope(
 
 std::string QueryEnvelope(
     std::string_view transaction_id,
-    std::string_view request_id = "pipe-contract-query") {
+    std::string_view request_id = "pipe-contract-query",
+    std::string_view schema = kDualHardwareCameraAgentSchemaVersion) {
     return Envelope(
         "get-pair-transaction-result",
         "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
-        request_id);
+        request_id, schema);
 }
 
 std::string CloseEnvelope(
     std::string_view transaction_id,
-    std::string_view request_id = "pipe-contract-close") {
+    std::string_view request_id = "pipe-contract-close",
+    std::string_view schema = kDualHardwareCameraAgentSchemaVersion) {
     return Envelope(
         "close-reserved-pair-transaction",
         "{\"transactionId\":\"" + std::string(transaction_id) + "\"}",
-        request_id);
+        request_id, schema);
 }
 
 // Fixed clock/timestamps mirror dual_hardware_camera_agent_tests.cpp exactly,
@@ -867,9 +878,367 @@ void TestResponseUnknownRecoveryHasZeroReplayAcrossHostRestarts() {
     }
 }
 
+void TestEarlyAckDoesNotProveResponseConsumption() {
+    constexpr std::uint32_t maximum = 1024U * 1024U;
+    for (const bool consume_response : {true, false}) {
+        const auto pipe_name = PipeNameFor("early-ack");
+        DualHardwareCameraAgentDispatcher dispatcher;
+        std::atomic<bool> at_ack{false};
+        auto server = std::async(std::launch::async, [&] {
+            return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, true,
+                {.before_stage_for_testing = [&](std::string_view stage) {
+                    if (stage == "ack") at_ack.store(true);
+                }});
+        });
+        const HANDLE pipe = ConnectClient(pipe_name, std::chrono::seconds(5));
+        Check(pipe != INVALID_HANDLE_VALUE, "early-ACK client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const auto request = CapabilitiesEnvelope("early-ack");
+            const auto header = LengthHeader(static_cast<std::uint32_t>(request.size()));
+            Check(WriteAll(pipe, header.data(), header.size()) &&
+                  WriteAll(pipe, request.data(), request.size()) &&
+                  WriteAll(pipe, &kDeliveryAcknowledgment, 1),
+                "early ACK must be submitted without reading any response bytes");
+            const auto observed_by = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!at_ack.load() && std::chrono::steady_clock::now() < observed_by) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Check(at_ack.load(), "server must reach response ACK processing");
+            Check(server.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready,
+                "an early ACK cannot complete delivery while the entire response remains unread");
+            if (consume_response) {
+                std::array<unsigned char, 4> response_header{};
+                const bool header_read = ReadAll(pipe, response_header.data(), response_header.size());
+                Check(header_read, "the response must survive until the client reads it");
+                if (header_read) {
+                    const auto length = ParseLengthHeader(response_header);
+                    Check(length > 0 && length <= maximum,
+                        "early-ACK response must retain valid framing");
+                    if (length > 0 && length <= maximum) {
+                        std::string body(length, '\0');
+                        Check(ReadAll(pipe, body.data(), body.size()),
+                            "only full response consumption can complete delivery");
+                    }
+                }
+                // Keep the connection alive until the server observes the full read.
+                if (server.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                    std::cerr << "FAIL: full-read delivery did not complete\n" << std::flush;
+                    std::_Exit(1);
+                }
+            }
+            CloseHandle(pipe);
+        }
+        if (server.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            std::cerr << "FAIL: early-ACK server did not stop after read/disconnect\n" << std::flush;
+            std::_Exit(1);
+        }
+        Check(server.get() == (consume_response ? 0 : 3),
+            "full read confirms delivery; an unread disconnect remains code 3");
+        Check(dispatcher.SafetyCounters().camera_access_count == 0 &&
+              dispatcher.SafetyCounters().pair_dispatch_count == 0 &&
+              dispatcher.SafetyCounters().automatic_retry_count == 0,
+            "early-ACK proof uses no camera, capture, or retry");
+    }
+}
+
+void TestDeadlineAfterAcceptedConnection() {
+    const std::string pipe_name = PipeNameFor("accepted-deadline");
+    DualHardwareCameraAgentDispatcher dispatcher;
+    std::atomic<std::uint64_t> ticks{1000};
+    auto server = std::async(std::launch::async, [&] {
+        return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, false,
+            {.lifetime_ticks_for_testing = [&] { return ticks.load(); }},
+            std::chrono::milliseconds(4500));
+    });
+    const HANDLE pipe = ConnectClient(pipe_name, std::chrono::seconds(5));
+    Check(pipe != INVALID_HANDLE_VALUE, "deadline regression client must connect");
+    if (pipe != INVALID_HANDLE_VALUE) {
+        // The connection was admitted in time; the complete frame was not.
+        ticks.store(5500);
+        const auto request = CapabilitiesEnvelope("accepted-deadline");
+        const auto header = LengthHeader(static_cast<std::uint32_t>(request.size()));
+        (void)WriteAll(pipe, header.data(), header.size());
+        (void)WriteAll(pipe, request.data(), request.size());
+        unsigned char response{};
+        DWORD read{};
+        const bool delivered = ReadFile(pipe, &response, 1, &read, nullptr) && read != 0;
+        Check(!delivered, "an expired accepted connection must not dispatch or return a response");
+        CloseHandle(pipe);
+    }
+    ticks.store(5500);
+    JoinPersistentHost(server);
+}
+
+void TestHostLifetimeArithmeticAndSharedOrigin() {
+    std::uint64_t ticks = 1000;
+    AgentHostLifetime lifetime(600000, [&] { return ticks; });
+    Check(lifetime.RemainingMilliseconds() == 600000, "host starts with exactly 600 seconds");
+    ticks = 600000;
+    Check(lifetime.RemainingMilliseconds() == 1000, "t=599 seconds leaves only one second");
+    ticks = 601000;
+    Check(lifetime.RemainingMilliseconds() == 0, "the exact absolute boundary expires");
+    ticks = 1000;
+    Check(lifetime.RemainingMilliseconds() == 0, "an expired clock never replenishes the host");
+
+    ticks = 1000;
+    AgentHostLifetime backwards(600000, [&] { return ticks; });
+    ticks = 2000;
+    (void)backwards.RemainingMilliseconds();
+    ticks = 1999;
+    Check(backwards.RemainingMilliseconds() == 0, "clock rollback fails closed");
+    ticks = std::numeric_limits<std::uint64_t>::max() - 100;
+    AgentHostLifetime wrapped(600000, [&] { return ticks; });
+    ticks = 25;
+    Check(wrapped.RemainingMilliseconds() == 599874, "tick wrap does not overflow the deadline");
+    AgentHostLifetime zero(0, [&] { return ticks; });
+    Check(zero.RemainingMilliseconds() == 0, "a zero budget is already expired");
+    AgentHostLifetime throwing(600000, []() -> std::uint64_t { throw 1; });
+    Check(throwing.RemainingMilliseconds() == 0, "a failed clock cannot grant time");
+
+    // A successor pipe cannot reset a process budget consumed by binding.
+    ticks = 0;
+    AgentHostLifetime shared(600000, [&] { return ticks; });
+    ticks = 600000;
+    for (int successor = 0; successor != 2; ++successor) {
+        DualHardwareCameraAgentDispatcher dispatcher;
+        int accepts = 0;
+        const int result = RunDualHardwareCameraAgentNamedPipeServer(
+            PipeNameFor("shared-expired"), dispatcher, false,
+            {.before_stage_for_testing = [&](std::string_view) { ++accepts; }},
+            std::nullopt, &shared);
+        Check(result == 0 && accepts == 0,
+            "a shared expired origin must reject successor hosts before pipe I/O");
+    }
+}
+
+void TestEveryIoStageUsesRemainingHostBudget() {
+    for (const std::string_view target : {"accept", "header", "body", "dispatch",
+             "response-header", "response-body", "ack", "flush"}) {
+        for (const bool expire : {false, true}) {
+            if (!expire && (target == "dispatch" || target == "flush")) continue;
+            const auto root = MakeTempRoot("stage-budget");
+            auto store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
+            DualHardwareCameraAgentDispatcher dispatcher(store);
+            const auto pipe_name = PipeNameFor("stage-budget");
+            const std::string id = "90909090909090909090909090909090";
+            std::atomic<std::uint64_t> ticks{0};
+            bool triggered = false;
+            std::vector<std::pair<std::string, std::uint32_t>> waits;
+            auto server = std::async(std::launch::async, [&] {
+                return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, false,
+                    {.lifetime_ticks_for_testing = [&] { return ticks.load(); },
+                     .before_stage_for_testing = [&](std::string_view stage) {
+                         if (!triggered && stage == target) {
+                             triggered = true;
+                             ticks.store(expire ? 600000 : 599990);
+                         }
+                     },
+                     .wait_timeout_for_testing = [&](std::string_view stage, std::uint32_t ms) {
+                         waits.emplace_back(stage, ms);
+                     }});
+            });
+            if (!(target == "accept" && expire)) {
+                (void)SendRequest(pipe_name, ReservationEnvelope(id, "stage-budget-reserve"));
+            }
+            if (!expire) ticks.store(600000);
+            if (server.wait_for(std::chrono::seconds(8)) != std::future_status::ready) {
+                std::cerr << "FAIL: stage-budget server failed to stop\n" << std::flush;
+                std::_Exit(1);
+            }
+            const int result = server.get();
+            const bool after_dispatch = target == "response-header" ||
+                target == "response-body" || target == "ack" || target == "flush";
+            Check(triggered, "every target I/O stage must be exercised");
+            if (expire) {
+                Check(result == (after_dispatch ? 3 : 0),
+                    "expired delivery is unknown, while an undispatched frame remains undispatched");
+                Check(std::none_of(waits.begin(), waits.end(), [&](const auto& wait) {
+                    return wait.first == target;
+                }), "zero remaining time must not submit I/O at the expired stage");
+                Check(store->Query(id).has_value() == after_dispatch,
+                    "only an already-dispatched reservation survives a delivery timeout");
+            } else {
+                bool observed = false;
+                for (const auto& wait : waits) {
+                    if (wait.first != target) continue;
+                    observed = true;
+                    Check(wait.second > 0 && wait.second <= 10,
+                        "accept/read/write/ACK timeout must be clamped to the last 10ms");
+                }
+                Check(observed, "the clamped timeout must reach the actual I/O seam");
+            }
+            const auto counters = dispatcher.SafetyCounters();
+            Check(counters.pair_dispatch_count == 0 && counters.camera_access_count == 0 &&
+                    counters.automatic_retry_count == 0,
+                "stage expiry never dispatches, accesses a camera, or retries");
+        }
+    }
+}
+
+class AdmissionProbeBackend final : public DualHardwarePairCaptureBackend {
+public:
+    int preflight_calls{};
+    int capture_calls{};
+    DualHardwarePairPreflightOutcome PreflightPair(bool, std::int64_t) override {
+        ++preflight_calls;
+        return {}; // Pending: this test never acquires hardware or writes images.
+    }
+    DualHardwareFakeCaptureOutcome Capture(std::string_view, const fs::path&, std::int64_t) override {
+        ++capture_calls;
+        return {};
+    }
+};
+
+void TestRealPipeForwardsHostAdmissionAndPreservesQuery() {
+    for (const bool recovery : {false, true}) {
+        for (const std::uint64_t remaining : {1000ULL, 184999ULL, 185000ULL}) {
+            const auto root = MakeTempRoot("admission");
+            auto store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
+            auto backend = std::make_shared<AdmissionProbeBackend>();
+            DualHardwareCameraAgentDispatcher dispatcher(store, [] { return FixedNow(); }, backend);
+            const std::string id = "81818181818181818181818181818181";
+            (void)store->Reserve(id);
+            std::atomic<std::uint64_t> ticks{0};
+            bool advanced = false;
+            const auto pipe_name = PipeNameFor("admission");
+            auto server = std::async(std::launch::async, [&] {
+                return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, false,
+                    {.lifetime_ticks_for_testing = [&] { return ticks.load(); },
+                     .before_stage_for_testing = [&](std::string_view stage) {
+                         if (!advanced && stage == "dispatch") {
+                             advanced = true;
+                             ticks.store(600000 - remaining);
+                         }
+                     }});
+            });
+            const auto response = SendRequest(pipe_name, recovery
+                ? CaptureRecoveryOnlyEnvelope(id, "admission-start")
+                : StartEnvelope(id, "admission-start"));
+            Check(response.has_value(), "host admission must return its fixed typed refusal");
+            if (response) CheckContains(*response, recovery ? "ConfirmedUndispatched" : "PairDispatcherUnavailable",
+                "normal and CR retain their existing typed no-dispatch schemas");
+            if (remaining < 185000) {
+                const auto new_id = SendRequest(pipe_name, ReservationEnvelope(
+                    "92929292929292929292929292929292", "admission-old-host-new-id"));
+                Check(new_id.has_value(), "old host must deliver the typed new-ID refusal");
+                if (new_id) CheckContains(*new_id, "HostTerminalPendingReservationClose",
+                    "a spent host must reject new IDs before same-ID query/close recovery");
+            }
+            const auto query = SendRequest(pipe_name, QueryEnvelope(id, "admission-query",
+                recovery ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion : kDualHardwareCameraAgentSchemaVersion));
+            Check(query.has_value(), "same-ID query must remain available after no-dispatch");
+            if (recovery || remaining >= 185000) {
+                const auto close = SendRequest(pipe_name, CloseEnvelope(id, "admission-close",
+                    recovery ? kDualHardwareCameraAgentCaptureRecoveryOnlySchemaVersion : kDualHardwareCameraAgentSchemaVersion));
+                Check(close.has_value(), "CR and ordinary pending reservations retain explicit close");
+            } else {
+                if (query) CheckContains(*query, "PairTransactionClosedBeforeDispatch",
+                    "ordinary recovery must deliver its tombstone before host exit");
+                // Foundation does not issue close after a ClosedBeforeDispatch query.
+                JoinPersistentHost(server);
+            }
+            ticks.store(600000);
+            if (server.valid()) JoinPersistentHost(server);
+            Check(backend->preflight_calls == (remaining >= 185000 ? 1 : 0),
+                "host budget must be forwarded and re-evaluated after the complete frame");
+            Check(backend->capture_calls == 0 && dispatcher.SafetyCounters().pair_dispatch_count == 0 &&
+                    dispatcher.SafetyCounters().automatic_retry_count == 0,
+                "admission refusals make no capture, dispatch, or retry");
+            if (!recovery && remaining < 185000) {
+                auto fresh_store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
+                DualHardwareCameraAgentDispatcher fresh(fresh_store);
+                const auto fresh_pipe = PipeNameFor("admission-fresh");
+                auto fresh_server = std::async(std::launch::async, [&] {
+                    return RunDualHardwareCameraAgentNamedPipeServer(fresh_pipe, fresh, true);
+                });
+                const auto reserved = SendRequest(fresh_pipe, ReservationEnvelope(
+                    "92929292929292929292929292929292", "admission-fresh-new-id"));
+                Check(reserved.has_value(), "fresh host new-ID reservation must be delivered");
+                if (reserved) CheckContains(*reserved, "\"accepted\":true",
+                    "only a fresh host can resume with a new transaction ID");
+                JoinPersistentHost(fresh_server);
+            }
+        }
+    }
+}
+
+void TestHostBudgetClosedQueryWithoutAckIsUnknown() {
+    for (const bool disconnect : {false, true}) {
+        const auto root = MakeTempRoot("closed-query-no-ack");
+        auto store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
+        auto backend = std::make_shared<AdmissionProbeBackend>();
+        DualHardwareCameraAgentDispatcher dispatcher(store, [] { return FixedNow(); }, backend);
+        const std::string id = "93939393939393939393939393939393";
+        (void)store->Reserve(id);
+        std::atomic<std::uint64_t> ticks{0};
+        const auto pipe_name = PipeNameFor("closed-query-no-ack");
+        auto server = std::async(std::launch::async, [&] {
+            return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, false,
+                {.lifetime_ticks_for_testing = [&] { return ticks.load(); },
+                 .before_stage_for_testing = [&](std::string_view stage) {
+                     if (stage == "dispatch") ticks.store(599000);
+                 }});
+        });
+        const auto refused = SendRequest(pipe_name, StartEnvelope(id, "closed-query-start"));
+        Check(refused.has_value(), "the no-dispatch refusal must be delivered first");
+        const HANDLE pipe = ConnectClient(pipe_name, std::chrono::seconds(5));
+        Check(pipe != INVALID_HANDLE_VALUE, "the same-ID query must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const auto request = QueryEnvelope(id, "closed-query-without-ack");
+            const auto header = LengthHeader(static_cast<std::uint32_t>(request.size()));
+            Check(WriteAll(pipe, header.data(), header.size()) &&
+                  WriteAll(pipe, request.data(), request.size()), "same-ID query must be submitted");
+            std::array<unsigned char, 4> response_header{};
+            const bool header_read = ReadAll(pipe, response_header.data(), response_header.size());
+            Check(header_read, "closed query must not exit before delivering its response");
+            if (header_read) {
+                const auto length = ParseLengthHeader(response_header);
+                if (length > 0 && length <= 1024U * 1024U) {
+                    std::string body(length, '\0');
+                    Check(ReadAll(pipe, body.data(), body.size()), "closed query frame must be complete");
+                    CheckContains(body, "PairTransactionClosedBeforeDispatch",
+                        "the no-ACK query must still contain durable no-dispatch proof");
+                } else {
+                    Check(false, "closed query response length must be bounded");
+                }
+            }
+            // Intentionally send no ACK: either leave the pipe connected or close it.
+            if (disconnect) CloseHandle(pipe);
+        }
+        if (server.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+            std::cerr << "FAIL: no-ACK closed query exceeded its bounded wait\n" << std::flush;
+            std::_Exit(1);
+        }
+        if (pipe != INVALID_HANDLE_VALUE && !disconnect) CloseHandle(pipe);
+        Check(server.get() == 3, "a missing query ACK/disconnect must stay unknown, not success");
+        auto recovered_store = std::make_shared<DualHardwarePairJournalStore>(root / "journal");
+        const auto recovered = recovered_store->Query(id);
+        Check(recovered && recovered->state == DualHardwarePairJournalState::closed_before_dispatch &&
+              recovered->terminal_result_json.empty(),
+            "ACK loss must preserve restart-queryable no-dispatch proof without a capture result");
+        Check(backend->preflight_calls == 0 && backend->capture_calls == 0 &&
+              dispatcher.SafetyCounters().pair_dispatch_count == 0 &&
+              dispatcher.SafetyCounters().automatic_retry_count == 0,
+            "closed-query recovery must not preflight, capture, dispatch, or retry");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--delivery-proof-contract") {
+        TestEarlyAckDoesNotProveResponseConsumption();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--host-deadline-contract") {
+        TestEarlyAckDoesNotProveResponseConsumption();
+        TestDeadlineAfterAcceptedConnection();
+        TestHostLifetimeArithmeticAndSharedOrigin();
+        TestEveryIoStageUsesRemainingHostBudget();
+        TestRealPipeForwardsHostAdmissionAndPreservesQuery();
+        TestHostBudgetClosedQueryWithoutAckIsUnknown();
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--persistent-contract") {
         TestPersistentMultiRequestCapabilitiesReserveDuplicateAndQuery();
         return failures == 0 ? 0 : 1;
@@ -882,6 +1251,12 @@ int main(int argc, char** argv) {
     TestClientDisconnectBeforeFrameCompletesNeverDispatches();
     TestBackendUnavailableStartFailsClosedAfterFullPreflight();
     TestResponseUnknownRecoveryHasZeroReplayAcrossHostRestarts();
+    TestEarlyAckDoesNotProveResponseConsumption();
+    TestDeadlineAfterAcceptedConnection();
+    TestHostLifetimeArithmeticAndSharedOrigin();
+    TestEveryIoStageUsesRemainingHostBudget();
+    TestRealPipeForwardsHostAdmissionAndPreservesQuery();
+    TestHostBudgetClosedQueryWithoutAckIsUnknown();
     if (failures != 0) {
         std::cerr << failures << " Dual hardware Camera Agent pipe test(s) failed\n";
         return 1;

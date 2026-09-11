@@ -4001,6 +4001,62 @@ void TestContinuousLiveViewFrameBudgetIsolation() {
     fs::remove_all(root, cleanup_error);
 }
 
+void TestSingleHostDeadlineAndServeOnceCompatibility() {
+    for (const bool serve_once : {false, true}) {
+        FakeBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string name = "A0CameraStitcher.CameraAgent.Hardware.v1.deadline-" + NewRunId();
+        const std::wstring full = L"\\\\.\\pipe\\" + std::wstring(name.begin(), name.end());
+        std::atomic<std::uint64_t> ticks{0};
+        auto server = std::async(std::launch::async, [&] {
+            return RunHardwareCameraAgentNamedPipeServer(name, dispatcher, serve_once,
+                {.lifetime_ticks_for_testing = [&] { return ticks.load(); },
+                 .before_stage_for_testing = [&](std::string_view stage) {
+                     if (stage == "dispatch") ticks.store(600000);
+                 }});
+        });
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (pipe == INVALID_HANDLE_VALUE && std::chrono::steady_clock::now() < deadline) {
+            pipe = CreateFileW(full.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                OPEN_EXISTING, 0, nullptr);
+            if (pipe == INVALID_HANDLE_VALUE) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        Check(pipe != INVALID_HANDLE_VALUE, "Single deadline client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const auto request = Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+            const auto size = static_cast<std::uint32_t>(request.size());
+            const std::array<unsigned char, 4> header{
+                static_cast<unsigned char>(size), static_cast<unsigned char>(size >> 8),
+                static_cast<unsigned char>(size >> 16), static_cast<unsigned char>(size >> 24)};
+            (void)WriteAll(pipe, header.data(), header.size());
+            (void)WriteAll(pipe, request.data(), request.size());
+            std::array<unsigned char, 4> response_header{};
+            const bool delivered = ReadAll(pipe, response_header.data(), response_header.size());
+            Check(delivered == serve_once,
+                "persistent Single must not dispatch at expiry; serve_once keeps its existing contract");
+            if (delivered) {
+                const auto length = static_cast<std::uint32_t>(response_header[0]) |
+                    (static_cast<std::uint32_t>(response_header[1]) << 8) |
+                    (static_cast<std::uint32_t>(response_header[2]) << 16) |
+                    (static_cast<std::uint32_t>(response_header[3]) << 24);
+                std::string response(length, '\0');
+                Check(ReadAll(pipe, response.data(), response.size()), "Single response must be complete");
+                (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1);
+            }
+            CloseHandle(pipe);
+        }
+        ticks.store(600000);
+        if (server.wait_for(std::chrono::seconds(8)) != std::future_status::ready) {
+            std::cerr << "FAIL: Single deadline host did not stop\n" << std::flush;
+            std::_Exit(1);
+        }
+        Check(server.get() == 0, "Single host must retain its delivered/idle exit contract");
+        Check(backend.readiness_calls == (serve_once ? 1 : 0) && backend.capture_calls == 0,
+            "expiry must skip Single backend access without affecting serve_once dispatch");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -4028,6 +4084,7 @@ int main(int argc, char** argv) {
     TestContinuousLiveViewFrameBudgetIsolation();
     TestTimeoutEnvironmentOverrides();
     TestRealEnvironmentVariableWrapsWin32Api();
+    TestSingleHostDeadlineAndServeOnceCompatibility();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;
