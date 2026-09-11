@@ -1,10 +1,15 @@
 {
   "schema_version": "autodev.unresolved-questions.v1",
-  "requirements_version": "2.10.0",
-  "generated_at": "2026-08-31",
+  "requirements_version": "2.11.0",
+  "generated_at": "2026-09-12",
   "questions": [
-    {"id":"HG-0001","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"D810 two-camera A0 output acceptance criteria are undefined.","requested_decision":"After the D810 optical feasibility calculation, approve representative originals, orientation, effective DPI, exact pixels, crop/content loss, baseline calibration residual, per-capture automatic-correction target and hard limits, corrected alignment/color/seam failure criteria, and total p95 criteria.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"]},
-    {"id":"HG-0002","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"The final D810 rig and optical configuration are undefined.","requested_decision":"Before M2, approve placement, camera orientation, lens pair, focal length, working distance, overlap, exposure/focus/white-balance policy, lighting, A0 calibration chart, setup procedure, profile validity period, and recalibration triggers.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"]},
-    {"id":"HG-0005","reason_category":"risk","reason_severity":"important-decision","required_role":"product-owner","summary":"Product redistribution terms for Nikon SDK material and other native dependencies are not approved.","requested_decision":"Before packaging, approve the installer and redistribution boundary for Nikon SDK, OpenCV, and other native dependencies.","blocking_scope":"release","blocking_work_item_ids":["WI-0040"]}
-  ]
+    {"id":"HG-0001","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"D810 two-camera A0 output acceptance criteria are undefined.","requested_decision":"After the D810 optical feasibility calculation, approve representative originals, orientation, effective DPI, exact pixels, crop/content loss, baseline calibration residual, per-capture automatic-correction target and hard limits, corrected alignment/color/seam failure criteria, and total p95 criteria.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"source_refs":["docs/PRODUCT_REQUIREMENTS.md#7-MVP受入条件","docs/DECISIONS.md#ADR-0021-設置は自動補正可能範囲までとし固定profile上限付き補正を使う"]},
+    {"id":"HG-0002","reason_category":"requirements","reason_severity":"important-decision","required_role":"product-owner","summary":"The final D810 rig and optical configuration are undefined.","requested_decision":"Before M2, approve placement, camera orientation, lens pair, focal length, working distance, overlap, exposure/focus/white-balance policy, lighting, A0 calibration chart, setup procedure, profile validity period, and recalibration triggers.","blocking_scope":"milestone","blocking_work_item_ids":["WI-0020","WI-0021","WI-0022","WI-0023","WI-0024"],"source_refs":["docs/PRODUCT_REQUIREMENTS.md#7-MVP受入条件","docs/DECISIONS.md#ADR-0021-設置は自動補正可能範囲までとし固定profile上限付き補正を使う"]},
+    {"id":"HG-0005","reason_category":"risk","reason_severity":"important-decision","required_role":"product-owner","summary":"Product redistribution terms for Nikon SDK material and other native dependencies are not approved.","requested_decision":"Before packaging, approve the installer and redistribution boundary for Nikon SDK, OpenCV, and other native dependencies.","blocking_scope":"release","blocking_work_item_ids":["WI-0040"],"source_refs":["docs/DECISIONS.md#ADR-0007-SDK内部評価と製品再配布を分離","docs/PRODUCT_REQUIREMENTS.md#制約"]}
+  ],
+  "synchronization": {
+    "source_commit": "0b446acc5d2062cca7c7c140e505c6020ee7bcd3",
+    "decision_changes": "none",
+    "note": "All three existing human decisions and their blocking scopes are preserved. operator-resume and product-owner-p95-approval remain execution gates in plan.json and plan.graph.json; no new decision or completion is inferred."
+  }
 }

@@ -1,23 +1,20 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.15.0",
-  "base_plan_version": "2.14.0",
-  "generated_at": "2026-08-27",
-  "summary": "Add the explicitly approved Dual CaptureRecoveryOnly transport-verification path and gate it as one-shot, 10-pair measurement, explicit measured-p95 approval, then 100-pair durability and fault evidence without stitching or A0 quality claims.",
+  "plan_version": "2.16.0",
+  "base_plan_version": "2.15.0",
+  "generated_at": "2026-09-12",
+  "summary": "Synchronize post-PR186 requirements and M1B planning: separate required behavior from observed implementation and hardware acceptance. The same-binding 10-pair runner is implemented; the mandatory 100-pair runner is not. The 600-second server/request budget is not a hard-kill guarantee. Preserve the one-shot -> 10 -> measured-p95 approval -> 100 acceptance chain, all IDs/dependencies/human decisions, and the complete previous diff.",
   "added_milestones": [],
   "changed_milestones": [
     "M1B"
   ],
   "removed_milestones": [],
-  "added_work_items": [
-    "WI-0016A"
-  ],
+  "added_work_items": [],
   "changed_work_items": [
     "WI-0015",
     "WI-0016",
-    "WI-0017",
-    "WI-0018",
-    "WI-0042"
+    "WI-0016A",
+    "WI-0017"
   ],
   "removed_work_items": [],
   "breaking_changes": [],
@@ -27,7 +24,46 @@
     "a failed one-shot, characterization pair, durability pair, or fault transaction stops that stage and must not be replaced by retry",
     "physical USB disconnect, power, or card actions remain operator-gated and are not implied by software fault tests",
     "CaptureRecoveryOnly evidence does not prove approved-rig behavior, stitching, A0 output quality, packaging, release, or shutter synchronization",
-    "GitHub Actions remains billing-blocked and must not be reported green",
-    "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"
+    "CI and local software validation do not establish hardware acceptance. Any billing/quota block encountered must be recorded as environment-blocked, not Pass.",
+    "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed",
+    "The implemented 10-pair runner has no established Dual hardware acceptance; the unimplemented 100-pair runner remains a future mandatory requirement.",
+    "The 600-second default is a server/request lifetime budget, not a guaranteed process-exit deadline; cleanup may exceed it and hardware-run compatibility is not established.",
+    "This synchronization does not run hardware, close human decisions, promote completion, reprioritize work, or authorize release. PRODUCT_REQUIREMENTS.md:35-39 remains a pinned pre-synchronization note outside this six-file scope."
+  ],
+  "source_commit": "0b446acc5d2062cca7c7c140e505c6020ee7bcd3",
+  "history": [
+    {
+      "schema_version": "autodev.plan-diff.v1",
+      "plan_version": "2.15.0",
+      "base_plan_version": "2.14.0",
+      "generated_at": "2026-08-27",
+      "summary": "Add the explicitly approved Dual CaptureRecoveryOnly transport-verification path and gate it as one-shot, 10-pair measurement, explicit measured-p95 approval, then 100-pair durability and fault evidence without stitching or A0 quality claims.",
+      "added_milestones": [],
+      "changed_milestones": [
+        "M1B"
+      ],
+      "removed_milestones": [],
+      "added_work_items": [
+        "WI-0016A"
+      ],
+      "changed_work_items": [
+        "WI-0015",
+        "WI-0016",
+        "WI-0017",
+        "WI-0018",
+        "WI-0042"
+      ],
+      "removed_work_items": [],
+      "breaking_changes": [],
+      "non_completion_guards": [
+        "CaptureRecoveryOnly captures and verifies both originals but never stitches; it must report StitchOutcome Pending and A0 quality Unapproved",
+        "a passing one-shot or ten-pair run does not authorize the 100-pair run until the measured p95 is explicitly approved",
+        "a failed one-shot, characterization pair, durability pair, or fault transaction stops that stage and must not be replaced by retry",
+        "physical USB disconnect, power, or card actions remain operator-gated and are not implied by software fault tests",
+        "CaptureRecoveryOnly evidence does not prove approved-rig behavior, stitching, A0 output quality, packaging, release, or shutter synchronization",
+        "GitHub Actions remains billing-blocked and must not be reported green",
+        "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed"
+      ]
+    }
   ]
 }
