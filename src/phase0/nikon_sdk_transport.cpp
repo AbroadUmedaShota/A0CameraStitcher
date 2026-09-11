@@ -42,17 +42,61 @@
 namespace a0::phase0 {
 namespace fs = std::filesystem;
 
+std::vector<std::uint32_t> WaitForNikonSdkReadOnlySourceIds(
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<void()>& pump_callbacks,
+    const std::function<std::vector<std::uint32_t>()>& read_source_ids,
+    const std::function<void()>& wait_iteration,
+    const std::function<std::chrono::steady_clock::time_point()>& now) {
+    if (!pump_callbacks || !read_source_ids || !wait_iteration || !now) {
+        throw std::invalid_argument("Nikon read-only source wait operations are required");
+    }
+
+    while (now() < deadline) {
+        std::vector<std::uint32_t> ids;
+        try {
+            pump_callbacks();
+            if (now() >= deadline) break;
+            ids = read_source_ids();
+        } catch (...) {
+            throw TransportError(
+                "dual_read_only_source_wait_failed",
+                "SDK source publication operation failed");
+        }
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        if (now() >= deadline) break;
+        if (!ids.empty()) return ids;
+        try {
+            wait_iteration();
+        } catch (...) {
+            throw TransportError(
+                "dual_read_only_source_wait_failed",
+                "SDK source publication operation failed");
+        }
+    }
+    throw TransportError(
+        "dual_read_only_source_wait_timeout",
+        "SDK source publication did not complete before the read-only deadline");
+}
+
 std::vector<std::uint32_t> InspectNikonD810InventorySources(
     const std::vector<std::uint32_t>& source_ids,
     const std::function<void(std::uint32_t)>& open_source,
     const std::function<bool()>& inspect_current_source_is_d810,
-    const std::function<bool()>& close_current_source_once) {
+    const std::function<bool()>& close_current_source_once,
+    bool& close_unconfirmed) {
     if (!open_source || !inspect_current_source_is_d810 ||
         !close_current_source_once) {
         throw std::invalid_argument("Nikon inventory operations are required");
     }
 
     std::vector<std::uint32_t> d810_ids;
+    if (close_unconfirmed) {
+        throw TransportError(
+            "inventory_close_failed",
+            "Nikon inventory source close could not be confirmed");
+    }
     for (const std::uint32_t source_id : source_ids) {
         open_source(source_id);
 
@@ -71,6 +115,7 @@ std::vector<std::uint32_t> InspectNikonD810InventorySources(
             close_confirmed = false;
         }
         if (!close_confirmed) {
+            close_unconfirmed = true;
             throw TransportError(
                 "inventory_close_failed",
                 "Nikon inventory source close could not be confirmed");
@@ -473,10 +518,9 @@ public:
         try {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             OpenModule(deadline);
-            const auto ids =
-                WaitForSourceIds(deadline, "dual_read_only_inventory_failed");
+            const auto ids = WaitForDualReadOnlySourceIds(deadline);
             return D810SourceIds(
-                ids, deadline, "dual_read_only_inventory_failed").size();
+                ids, deadline, "dual_read_only_metadata_projection_failed").size();
         } catch (...) {
             CleanupNoThrow();
             throw;
@@ -597,7 +641,7 @@ public:
             claimed_,
             module_.opened || entry_ != nullptr || module_handle_ != nullptr ||
                 ptp_handle_ != nullptr || dll_directory_ != nullptr,
-            source_.opened,
+            source_.opened || inventory_source_close_unconfirmed_,
         };
     }
 
@@ -1907,7 +1951,8 @@ private:
                 }
                 candidate->opened = false;
                 return true;
-            });
+            },
+            inventory_source_close_unconfirmed_);
         return std::vector<ULONG>(inspected.begin(), inspected.end());
     }
 
@@ -1925,6 +1970,24 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         return ids;
+    }
+
+    std::vector<ULONG> WaitForDualReadOnlySourceIds(
+        std::chrono::steady_clock::time_point deadline) {
+        const auto ids = WaitForNikonSdkReadOnlySourceIds(
+            deadline,
+            [this] { Pump(module_, "dual_read_only_source_wait_failed"); },
+            [this, deadline] {
+                auto published = Children(
+                    module_, deadline, "dual_read_only_source_wait_failed");
+                published.insert(
+                    published.end(), module_sources_.begin(), module_sources_.end());
+                return std::vector<std::uint32_t>(
+                    published.begin(), published.end());
+            },
+            [] { std::this_thread::sleep_for(std::chrono::milliseconds(50)); },
+            [] { return std::chrono::steady_clock::now(); });
+        return std::vector<ULONG>(ids.begin(), ids.end());
     }
 
     void OpenChild(MaidObject& parent, MaidObject& child, ULONG id, std::string_view category) {
@@ -2239,6 +2302,9 @@ private:
     std::vector<std::unique_ptr<CompletionState>> completions_;
     std::vector<std::unique_ptr<DownloadState>> downloads_;
     bool require_exactly_one_d810_{};
+    // Unloading the SDK cannot prove that a failed inventory child Close
+    // completed. Preserve that uncertainty in the terminal exit state.
+    bool inventory_source_close_unconfirmed_{};
     bool abandoned_{};
     SdkCommandTrace trace_;
 #ifndef NDEBUG
@@ -2592,6 +2658,18 @@ DualSdkReadOnlyProbeError ClassifyDualReadOnlyProbeError(
     if (error.Category() == "dual_read_only_inventory_failed") {
         return DualSdkReadOnlyProbeError::SdkInventoryFailed;
     }
+    if (error.Category() == "dual_read_only_source_wait_timeout") {
+        return DualSdkReadOnlyProbeError::SdkSourceWaitTimeout;
+    }
+    if (error.Category() == "dual_read_only_source_wait_failed") {
+        return DualSdkReadOnlyProbeError::SdkSourceWaitFailed;
+    }
+    if (error.Category() == "dual_read_only_metadata_projection_failed") {
+        return DualSdkReadOnlyProbeError::SdkMetadataProjectionFailed;
+    }
+    if (error.Category() == "inventory_close_failed") {
+        return DualSdkReadOnlyProbeError::SdkInventorySourceCloseFailed;
+    }
     return DualSdkReadOnlyProbeError::SdkOperationFailed;
 }
 
@@ -2601,6 +2679,10 @@ const char* DualReadOnlyProbeErrorText(DualSdkReadOnlyProbeError error) noexcept
     case DualSdkReadOnlyProbeError::CameraCountMismatch: return "cameraCountMismatch";
     case DualSdkReadOnlyProbeError::SdkStartFailed: return "sdkStartFailed";
     case DualSdkReadOnlyProbeError::SdkInventoryFailed: return "sdkInventoryFailed";
+    case DualSdkReadOnlyProbeError::SdkSourceWaitTimeout: return "sdkSourceWaitTimeout";
+    case DualSdkReadOnlyProbeError::SdkSourceWaitFailed: return "sdkSourceWaitFailed";
+    case DualSdkReadOnlyProbeError::SdkMetadataProjectionFailed: return "sdkMetadataProjectionFailed";
+    case DualSdkReadOnlyProbeError::SdkInventorySourceCloseFailed: return "sdkInventorySourceCloseFailed";
     case DualSdkReadOnlyProbeError::SdkOperationFailed: return "sdkOperationFailed";
     case DualSdkReadOnlyProbeError::HostSetupFailed: return "hostSetupFailed";
     }

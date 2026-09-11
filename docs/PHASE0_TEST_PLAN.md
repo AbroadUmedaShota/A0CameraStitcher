@@ -102,12 +102,15 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 
 ## Phase 0B: 二台順次撮影
 
-> **実機撮影は技術gate待ち（2026-08-31）**
+> **実装と実機受入の区分（2026-09-12）**
 > ADR-0028により、controlled `CaptureRecoveryOnly`ではSDK Moduleをbinding tokenの
 > ためだけに保持できる。WPD前にLive View、SDK source、capture sessionを閉じ、WPD中の
-> SDK operationを0にする条件は不変である。現sliceはproduction adapterのread-only
-> coexistence probeとP0-B2のone-shot前software gateまでであり、pair-level preflight、focused/full
-> 回帰、独立reviewが完了するまで実機one-shotを開始しない。WPD cleanupが未確認ならSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を返して再bindingを要求する。同一bindingの10/100 runnerと固定600秒host lifetimeの両立は未実装・未解決のため、P0-B2の10件性能計測とP0-B3はこのsliceから開始しない。
+> SDK operationを0にする条件は不変である。production adapterのpair-level preflight、read-only
+> coexistence probe、`CaptureRecoveryOnly` backend・WPF経路、および同一bindingの10回runnerは実装済みである。
+> 実機one-shotは前提gateの確認後、10件性能計測は実機one-shot合格後に実施する。これらの実機受入は未完了である。
+> WPD cleanupが未確認ならSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を返して再bindingを要求する。
+> 同一bindingの100回runnerは未実装である。既定600秒はserver/request稼働時間予算であり、processの強制終了時刻ではない。
+> 安全な終了処理は予算を超える可能性があり、連続試験との適合を示す実機証拠も未取得である。現在の区分は[開発状況](CURRENT_STATUS.md)を参照する。
 > Module reload後に同型D810を一意照合できる正式なper-body property/APIは依然確認できないため、
 > この例外以外の永続identityへ読み替えない。詳細は
 > [DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md)を参照する。
@@ -115,6 +118,7 @@ Standalone Live Viewは実機確認済みである。[run-1785917554163-1](evide
 ### P0-B1: 二台識別
 
 - binding開始前のSDK台数確認には`A0CameraStitcher.DualCameraAgent --read-only-sdk-probe`を使う。このprobeは恒久identityや候補tokenを生成せず、D810 source数だけを読み取り、SDK process claim・source・moduleをすべて終了してから匿名結果を返す。D810が二台、`cleanupState=ended`、`terminalState=Pass`のすべてを満たす場合だけ次へ進む。
+- SDK-only probeの匿名`errorCategory`は、SDK開始失敗、source公開待ちtimeout、source待ち処理失敗、D810 metadata判定失敗、inventory source close未確認、台数不一致を区別する。実識別子、SDK戻り値、例外文、ローカルパスは公開せず、どの失敗でもcleanup確認前に次のtransportや再試行へ進まない。
 - 同型D810二台ではMAID Name/Interface由来のgeneric inventoryが`identity_collision`で安全停止し得るため、その結果をDualの台数確認や個体対応付けへ流用しない。generic inventoryの衝突防止自体は維持する。
 - SDK-only probeの完全終了を確認した後に、`A0CameraStitcher.DualCameraAgent --read-only-wpd-probe --wpd-camera-map PATH`を別processで一回だけ実行し、WPDのD810二台、既存CAM-A/B alias map各一台、両専用カードpayload 0件、各WPD session close、topology不変を確認する。このWPD-only gateはSDK、capture、delete、camera settings、vendor operation、自動retryを行わない。
 - ADR-0028の必須coexistence probeはproduction adapterで一回だけ実行し、pair-level WPD preflight（D810 exact-two、CAM-A/B map exact-one、両card payload 0、全WPD session close）、WPD open前の全Live View/SDK source/capture session close、Module retained、WPD close、WPD open中SDK API operation 0を確認する。WPD cleanupが未確認ならSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を返して再bindingを要求する。このprobeはcapture、delete、camera settings、vendor operation、自動retryを行わず、transport boundaryだけを確認する。
@@ -143,7 +147,7 @@ Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約�
 
 #### 10件性能計測
 
-> **未実装・NotRun**: 同一bindingの10/100 runner、匿名集計、p95承認artifact、固定600秒host lifetimeとの両立を実装・検証するまで、この段階は実施しない。以下は将来の受入条件であり、coexistence probeまたはone-shotの合格を10/10の合格へ読み替えない。
+> **10回runner実装済み／実機NotRun**: [同一bindingの10回runner](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)と[匿名集計・p95承認記録](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)は実装済みである。実機one-shotの合格と前提gateを確認してから以下を実施する。記録処理やcoexistence probe、one-shotの合格を、10/10の実機合格や実測p95の承認へ読み替えない。
 
 - 一回撮影合格後、同じ条件・同じcurrent bindingでCAM-A→CAM-Bを10pair実行する。SDK候補を再列挙しない。
 - 各pairの開始・完了時刻、結果、CAM-A/Bのfile sizeとSHA-256、error、retry countを保存する。p50、nearest-rank p95、maxを計算する。
@@ -152,7 +156,7 @@ Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約�
 
 ### P0-B3: 100件安定性
 
-> **未実装・NotRun**: 10件性能計測とp95承認に加え、同一binding runnerおよび100回を扱えるhost lifetime方針を実装・検証するまで、この段階は開始しない。100/100 Passを主張しない。
+> **100回runner未実装／実機NotRun**: 10件性能計測と実測p95承認に加え、同一bindingの100回runnerの実装・検証、およびhost lifetime方針の適合確認まで、この段階は開始しない。集計・承認記録処理が100件を扱えることは、100回runnerの実装や100/100の実機合格を意味しない。
 
 - 10件の実測p95を製品責任者が明示承認した後だけ、CaptureRecoveryOnlyを100pair連続で実行する。
 - transactionごとに両original、file size、SHA-256、各状態・時刻、error、retry count、匿名診断情報を保持する。合成は行わず、全結果を`StitchOutcome=Pending`、`A0QualityApproval=Unapproved`とする。
