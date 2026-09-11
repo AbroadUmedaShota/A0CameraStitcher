@@ -1,18 +1,23 @@
 {
   "schema_version": "autodev.source-index.v1",
-  "requirements_version": "2.10.0",
-  "generated_at": "2026-08-31",
+  "requirements_version": "2.11.0",
+  "generated_at": "2026-09-12",
   "sources": [
     {"path":"docs/PRODUCT_REQUIREMENTS.md","kind":"canonical-human-requirements","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"]},
     {"path":"docs/PHASE0_TEST_PLAN.md","kind":"verification-contract","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","CON-001","CON-003","CON-004"]},
     {"path":"docs/ARCHITECTURE.md","kind":"candidate-architecture","requirement_ids":["FR-MODE-001","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","NFR-OBS-001","CON-001","CON-003","CON-004"]},
     {"path":"docs/HARDWARE_CAMERA_AGENT_V1.md","kind":"implementation-boundary-contract","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-DATA-001","FR-DATA-002","FR-EXP-001","NFR-OBS-001","NFR-SEC-001","CON-001","CON-003","CON-004"]},
     {"path":"docs/HARDWARE_CAMERA_AGENT_V2.md","kind":"implementation-boundary-contract","requirement_ids":["FR-LV-001","FR-LV-002","FR-UI-003","NFR-OBS-001","NFR-SEC-001","CON-001","CON-003"]},
-    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["FR-MODE-001","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-EXP-001","FR-STI-003","FR-STI-005","FR-STI-006","CON-001","CON-002","CON-003","CON-004"]},
+    {"path":"docs/DECISIONS.md","kind":"architecture-decisions","requirement_ids":["FR-MODE-001","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-LV-001","FR-LV-002","FR-EXP-001","FR-STI-003","FR-STI-005","FR-STI-006","CON-001","CON-002","CON-003","CON-004","FR-CAP-001","FR-CAP-002","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001"]},
     {"path":"docs/HARDWARE_CAMERA_AGENT_DUAL_V2.md","kind":"implementation-boundary-contract","requirement_ids":["FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-DATA-001","FR-DATA-002","NFR-OBS-001","NFR-SEC-001","CON-001","CON-003","CON-004"]},
     {"path":"docs/M2_PRE_GATE.md","kind":"software-only-verification-boundary","requirement_ids":["FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006"]},
     {"path":"docs/FEATURE_VERIFICATION_PLAN.md","kind":"verification-contract","requirement_ids":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-LV-001","FR-LV-002","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-003"]},
-    {"path":"docs/REFERENCE_CONVERSATION.md","kind":"superseded-reference-history","requirement_ids":[]}
+    {"path":"docs/REFERENCE_CONVERSATION.md","kind":"superseded-reference-history","requirement_ids":[]},
+    {"path":"docs/OPERATOR_UI_SPEC.md","kind":"operator-ui-contract","requirement_ids":["FR-UI-001","FR-UI-002","FR-UI-003"]},
+    {"path":"docs/CURRENT_STATUS.md","kind":"current-status-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
+    {"path":"src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
+    {"path":"src/m3/OperatorShell/App.xaml.cs","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
+    {"path":"src/phase0/include/a0/phase0/agent_host_lifetime.hpp","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]}
   ],
   "external_references": [
     {"url":"https://sdk.nikonimaging.com/apply/","use":"D810 Camera Remote SDK availability and license entry"},
@@ -26,5 +31,143 @@
     {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/device-properties","use":"WPD_DEVICE_DATETIME characterization; hardware evidence rejects it as an attribution predicate"},
     {"url":"https://learn.microsoft.com/en-us/previous-versions/ms739522(v=vs.85)","use":"Standard WPD exact-object deletion API and per-object result contract"},
     {"url":"https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/delete-object-options","use":"Non-recursive WPD deletion option required by the single-object spool contract"}
-  ]
+  ],
+  "source_commit": "0b446acc5d2062cca7c7c140e505c6020ee7bcd3",
+  "source_locations": [
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#カメラ制御",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "カメラ制御",
+      "line": 22
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0023-明示的なSingleCameraとDualCamera製品mode",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0023: 明示的なSingleCameraとDualCamera製品mode",
+      "line": 160
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0024-SingleCamera先行製品契約をCAM-Aと原画像保存に固定する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0024: SingleCamera先行製品契約をCAM-Aと原画像保存に固定する",
+      "line": 172
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0025-DualCameraをAgent-session内の操作者Live-View割当へ限定して再開する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0025: DualCameraをAgent session内の操作者Live View割当へ限定して再開する",
+      "line": 184
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0028-DualCameraのSDK-Module保持を限定例外として許可する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0028: DualCameraのSDK Module保持を限定例外として許可する",
+      "line": 218
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0027-Dual実機撮影方式の検証にCaptureRecoveryOnlyを限定許可する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0027: Dual実機撮影方式の検証にCaptureRecoveryOnlyを限定許可する",
+      "line": 208
+    },
+    {
+      "source_ref": "docs/PHASE0_TEST_PLAN.md#P0-A4-一台選択式Live-Viewとhybrid-handoff",
+      "path": "docs/PHASE0_TEST_PLAN.md",
+      "heading": "P0-A4: 一台選択式Live Viewとhybrid handoff",
+      "line": 68
+    },
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#キャリブレーションと合成",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "キャリブレーションと合成",
+      "line": 41
+    },
+    {
+      "source_ref": "docs/ARCHITECTURE.md#合成処理",
+      "path": "docs/ARCHITECTURE.md",
+      "heading": "合成処理",
+      "line": 108
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0021-設置は自動補正可能範囲までとし固定profile上限付き補正を使う",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0021: 設置は自動補正可能範囲までとし固定profile＋上限付き補正を使う",
+      "line": 143,
+      "resolution": "legacy-anchor-resolved-by-stable-adr-id"
+    },
+    {
+      "source_ref": "docs/FEATURE_VERIFICATION_PLAN.md#Setup-assist受入contract",
+      "path": "docs/FEATURE_VERIFICATION_PLAN.md",
+      "heading": "Setup-assist受入contract",
+      "line": 49
+    },
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#保存と操作",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "保存と操作",
+      "line": 50
+    },
+    {
+      "source_ref": "docs/OPERATOR_UI_SPEC.md",
+      "path": "docs/OPERATOR_UI_SPEC.md",
+      "line": 1
+    },
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#非機能要件",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "4. 非機能要件",
+      "line": 59
+    },
+    {
+      "source_ref": "docs/PHASE0_TEST_PLAN.md#P0-B3-100件安定性",
+      "path": "docs/PHASE0_TEST_PLAN.md",
+      "heading": "P0-B3: 100件安定性",
+      "line": 157
+    },
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#制約",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "5. 制約",
+      "line": 68
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0005-D750からD810へ正式変更",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0005: D750からD810へ正式変更",
+      "line": 28
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0017-標準WPD不成立後はone-shot-hybrid経路を採用する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0017: 標準WPD不成立後のone-shot hybrid評価",
+      "line": 116,
+      "resolution": "legacy-anchor-resolved-by-stable-adr-id"
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0019-WPD-device-clock-cutoffによるhybrid画像帰属を撤回する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0019: WPD device clock cutoffによるhybrid画像帰属を撤回する",
+      "line": 130
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0020-dedicated-emptycleared-cardをsingle-slot-transient-spoolとして評価する",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0020: dedicated empty/cleared cardをsingle-slot transient spoolとして使用する",
+      "line": 136,
+      "resolution": "legacy-anchor-resolved-by-stable-adr-id"
+    },
+    {
+      "source_ref": "docs/DECISIONS.md#ADR-0007-SDK内部評価と製品再配布を分離",
+      "path": "docs/DECISIONS.md",
+      "heading": "ADR-0007: SDK内部評価と製品再配布を分離",
+      "line": 41
+    },
+    {
+      "source_ref": "docs/PRODUCT_REQUIREMENTS.md#7-MVP受入条件",
+      "path": "docs/PRODUCT_REQUIREMENTS.md",
+      "heading": "7. MVP受入条件",
+      "line": 96
+    }
+  ],
+  "synchronization_note": "Existing source refs and external reference history are retained. source_locations pins legacy references to verified headings at source_commit; it does not revive superseded ADR decisions. Current implementation and acceptance observations are separate in normalized.json. PRODUCT_REQUIREMENTS.md:35-39 is the pre-synchronization generated-record snapshot, not a new hardware approval."
 }
