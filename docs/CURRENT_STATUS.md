@@ -1,17 +1,28 @@
 # 現在の開発状況
 
-更新日: 2026-09-06
+更新日: 2026-09-11
 
 ## 総合判定
 
-`in-progress / Dual hardware HardwarePending`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCameraの現sliceは、production backendとWPF `CaptureRecoveryOnly` software経路、ADR-0028のModule保持境界、pair-level preflight、read-only coexistence probe、およびone-shot前のsoftware gateまでである。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化して再bindingを要求する。実機coexistence probeとone-shotは未実施、同一bindingの10/100 runnerも未実装で固定600秒host lifetimeとの両立も未解決である。したがってDualの10回／100回実機試験は開始せず、Passを主張しない。DualCameraは`HardwarePending`であり、A0合成品質も未完了である。
+`in-progress / Dual hardware HardwarePending`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCameraは、production backendとWPF `CaptureRecoveryOnly`（撮影・原画像回収のみ）、ADR-0028のModule保持境界、pair-level preflight、read-only coexistence probe、および同一bindingの10回runnerをsoftware実装済みである。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化して再bindingを要求する。一方、同一bindingの100回runnerは未実装であり、Dualの実機coexistence probe、one-shot、10回／100回の受入証拠は未完了である。既定600秒のserver/request稼働時間予算は実装済みだが、processの強制終了時刻の保証ではなく、安全な終了処理が予算を超える可能性がある。連続試験との適合を示す実機証拠はない。実装済みを実機Passへ読み替えず、DualCameraは`HardwarePending`、合成は`Pending`、A0品質は`Unapproved`を維持する。
+
+### 二台撮影で、できていること・残っていること
+
+| 項目 | ソフトウェアの状態 | 実機での確認 |
+|---|---|---|
+| 1組の撮影と原画像2枚の回収・保存（CaptureRecoveryOnly） | 実装済み。合成は行わない | 受入未完了 |
+| 同じCAM-A/B割当で10組を順番に実行 | 10回runner実装済み。HardwareDualの他の必須引数と併用し、`--capture-recovery-only --capture-recovery-run-count 10`で明示起動。失敗時停止、自動retryなし | 10組の受入・実測p95承認は未完了 |
+| 同じCAM-A/B割当で100組を順番に実行 | 100回runner未実装 | 耐久受入未完了 |
+| 時間・SHA-256の集計とp95承認記録 | 記録処理は実装済み。100件の記録を扱えることと、100回の撮影を実行できることは別 | 実機実行や承認者の権限をソフトウェア集計だけでは証明しない |
+
+根拠は[10回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。この更新はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たなビルド・テスト・実機操作の結果ではない。
 
 第三者向けには[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)を入口とする。二台順次撮影のsoftware contractと安全停止は提示可能だが、実機二台撮影とA0品質の受入完了は主張しない。
 
 ## 確認済み
 
 - 2026-09-06時点の検証対象source SHA `fd3ed8c0f294caa6dbea9dcf9f7e5e1f9072453d`でlicensed SDK adapterを有効化し、native Debug/Release CTest各20/20、M3 simulated Debug/Release、focused DualCamera WPF Debug/Releaseに合格した。経路検査上のcamera command、PnP、USB/WPD、実機操作は各0であり、runtime telemetryではない。これはIssue #10のsoftware-only検証であってDual実機受入ではない。
-- [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。安全修正`29b8671`はNative CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立reviewでpatch `PASS`となりpush済み。ADR-0028のproduction pair preflightとModule保持read-only coexistence probeは実装・ソフトウェア回帰済みだが、同一exact SHAでの実機coexistence probeと撮影証跡は未完了である。ライセンス済みSDKのheader 22件、sample 6件、PDF 10件の静的調査でも、Module reload後に同型D810を一意照合できる正式なper-body property/APIは確認できなかった。同一bindingの10/100 runnerは未実装であり、Dual hardware readinessは`HardwarePending`。実撮影、delete、設定変更、USB操作は0件。
+- [2026-08-31 DualCamera安全監査](DUAL_HARDWARE_SAFETY_AUDIT_2026-08-31.md): AOPC-22-NOTEのSDK-only／WPD-only読み取り専用ゲートはD810各2台、CAM-A/B map各1、両payload 0、全session close、process 0でPassした。安全修正`29b8671`はNative CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立reviewでpatch `PASS`となりpush済み。ADR-0028のproduction pair preflightとModule保持read-only coexistence probeは実装・ソフトウェア回帰済みだが、同一exact SHAでの実機coexistence probeと撮影証跡は未完了である。ライセンス済みSDKのheader 22件、sample 6件、PDF 10件の静的調査でも、Module reload後に同型D810を一意照合できる正式なper-body property/APIは確認できなかった。同監査時点では同一bindingの10/100 runnerは未実装と記録された。その後10回runnerは実装済みとなったが、100回runnerとDual実機受入は未完了であり、readinessは`HardwarePending`を維持する。同監査での実撮影、delete、設定変更、USB操作は0件。
 - 2026-08-29時点で、WPFの明示起動引数、承認済み`a0.dual-capture-profile.operator-approved.v1`、同一Agent内CAM-A/B割当から`CaptureRecoveryOnly`へのactivation、予約前durable snapshot、1 reserve／1 start、曖昧時same-ID照会、再起動時の再binding、CAM-B失敗時CAM-A原本保持、JPEG 7360×4912・size・SHA-256再検証、stitch `Pending`・A0品質`Unapproved`を実装した。通常`start-reserved-pair` schemaと通常合成経路は変更していない。この項目はsoftware-onlyで、実シャッター、実WPF操作、実機one-shotの合格を意味しない。
 - [2026-08-26 SingleCamera実機結果](SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md): one-shot 1/1、10/10、p50 `14.036秒`、p95/max `14.643秒`、HG-0009承認、100/100初回成功、100回p50 `14.204秒`・p95 `14.430秒`・max `14.692秒`。計111原画像のJPEG寸法・size・SHA-256再検証に合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件だった。
 - PR #163でNikon SDK非同期バッファ寿命とSingleCamera WPD identity-v3経路を修正し、Release buildとfocused contractsを確認後にmainへマージした。GitHub ActionsはBilling制限により未実行であり、CI greenとは扱わない。
@@ -71,7 +82,7 @@
 |---|---|---|
 | M1A one-shot、10/10 | 2026-08-26に完了 | one-shot 1/1、10/10、p95承認、Camera Agent経路100/100を実績として維持 |
 | M1A fault、handoff | software recoveryは合格。物理USB切断とContinuous Live View handoff 10回は未実施 | 実機操作者の明示確認後に残試験を個別実施 |
-| M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF software経路、licensed SDK Debug/Release回帰はsoftware実装・検証済み。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | 実機pair-level preflight、coexistence probe、CaptureRecoveryOnly one-shotを別の明示実機ゲートで受入する。DualCameraはそれまで`HardwarePending` |
+| M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、10回runnerは実装済み。100回runnerは未実装。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | 実機pair-level preflight、coexistence probe、one-shotの受入後に10回を実測する。100回はrunner実装・検証、host lifetimeの適合確認、10回結果・p95承認を満たしてから実施する。DualCameraの実機受入は未完了 |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
 | SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。実WPF 100件とLive View handoffは未完了 | WPF end-to-end one-shot後、UI操作・export・状態表示を含む100件受入 |
 | 配布 | native dependency再配布未承認 | `HG-0005` |
@@ -82,8 +93,9 @@
 
 1. SingleCameraの残作業を、Continuous Live View handoff 10回、実WPF end-to-end、物理異常系へ限定する
 2. DualCameraは実機開始条件を再確認し、CaptureRecoveryOnly one-shotを独立した実機ゲートとして受入する
-3. 実D810二台でone-shot、10組、100組、fault matrixを順に実施する
-4. `HG-0001/0002`承認後にA0合成品質へ進む
+3. one-shot受入後、実装済み10回runnerで実D810二台の10組とp50/p95/maxを記録する
+4. 100回runnerの実装・ソフトウェア検証とhost lifetimeの適合確認を完了し、10回結果・p95の承認後に100組と残るfault matrixを実施する。runner開発自体は実機や本人回答待ちを開始条件にしない
+5. `HG-0001/0002`承認後にA0合成品質へ進む。CaptureRecoveryOnlyの合格を合成品質の合格に代用しない
 
 ## Human gates
 
