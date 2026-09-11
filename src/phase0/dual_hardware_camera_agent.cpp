@@ -43,6 +43,28 @@ struct DualHardwareJsonFailure {
 
 using JsonParser = ::a0::common::protocol_json::BasicJsonParser<DualHardwareJsonFailure>;
 
+// A pair capture reserves 180 seconds for its transaction watchdog. The
+// persistent host must also retain enough time to return an acknowledged
+// response and perform bounded cleanup before admitting camera work.
+constexpr std::uint64_t kDualTransactionWatchdogMilliseconds = 180'000;
+constexpr std::uint64_t kDualReplyAndAcknowledgementMilliseconds = 3'000;
+constexpr std::uint64_t kDualMinimumCleanupReserveMilliseconds = 2'000;
+constexpr std::uint64_t kDualMinimumHostAdmissionMilliseconds =
+    kDualTransactionWatchdogMilliseconds +
+    kDualReplyAndAcknowledgementMilliseconds +
+    kDualMinimumCleanupReserveMilliseconds;
+
+[[nodiscard]] bool HasSufficientHostAdmissionBudget(
+    const std::function<std::uint64_t()>& remaining_host_milliseconds) noexcept {
+    if (!remaining_host_milliseconds) return true;
+    try {
+        return remaining_host_milliseconds() >=
+            kDualMinimumHostAdmissionMilliseconds;
+    } catch (...) {
+        return false;
+    }
+}
+
 [[nodiscard]] inline const JsonValue& RequireField(
     const JsonValue& object, std::string_view name, JsonKind kind) {
     return ::a0::common::protocol_json::RequireFieldWith<DualHardwareJsonFailure>(object, name, kind);
@@ -843,6 +865,12 @@ DualHardwareCameraAgentRequest ParseDualHardwareCameraAgentRequest(
 
 std::string DualHardwareCameraAgentDispatcher::Handle(
     std::string_view request_json) noexcept {
+    return Handle(request_json, {});
+}
+
+std::string DualHardwareCameraAgentDispatcher::Handle(
+    std::string_view request_json,
+    const std::function<std::uint64_t()>& remaining_host_milliseconds) noexcept {
     const std::string extracted_request_id =
         TryExtractSafeRequestId(request_json);
     const std::string_view extracted_response_schema =
@@ -916,6 +944,24 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                 ValidateRigProfile(RequireField(transaction, "rigProfileSnapshot", JsonKind::object), request.started_at_100ns, now, request);
                 ValidateConfirmations(RequireField(transaction, "operatorConfirmations", JsonKind::object));
             }
+            // A prior host-lifetime rejection owns this exact reservation until
+            // the caller closes it. A later request with more apparent time
+            // must never revive preflight or capture in the same host.
+            if (request.transaction_id == terminal_pending_transaction_id_) {
+                if (!capture_recovery_only) {
+                    return StartUnavailableResponse(
+                        request.request_id, request.transaction_id,
+                        response_schema);
+                }
+                const std::string block = FatalPreflightBlockJson({
+                    DualHardwarePairPreflightState::BindingInvalidated,
+                    DualIdentityInvalidationReason::AgentRestart,
+                    true,
+                    true,
+                });
+                return ConfirmedUndispatchedResponse(
+                    request.request_id, request.transaction_id, block);
+            }
             if (pair_store_ == nullptr || capture_backend_ == nullptr) {
                 return StartUnavailableResponse(
                     request.request_id, request.transaction_id, response_schema);
@@ -954,6 +1000,38 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                         request.request_id, request.transaction_id,
                         kHardwarePendingPreflightBlock);
                 }
+                const auto reject_for_host_lifetime = [&]() -> std::string {
+                    if (!capture_recovery_only) {
+                        terminal_pending_transaction_id_ = request.transaction_id;
+                        // The existing v2 tombstone preserves no-dispatch over
+                        // lost responses and process restarts without adding a
+                        // CR-only preflight block to the ordinary wire shape.
+                        (void)pair_store_->CloseReservedBeforeDispatch(request.transaction_id);
+                        return StartUnavailableResponse(
+                            request.request_id, request.transaction_id,
+                            response_schema);
+                    }
+                    const std::string block = FatalPreflightBlockJson({
+                        DualHardwarePairPreflightState::BindingInvalidated,
+                        DualIdentityInvalidationReason::AgentRestart,
+                        true,
+                        true,
+                    });
+                    // Persist before the response so same-ID recovery after
+                    // response loss cannot re-enter preflight or capture.
+                    terminal_pending_transaction_id_ = request.transaction_id;
+                    (void)pair_store_->PersistReservedPreflightBlock(
+                        request.transaction_id, block);
+                    return ConfirmedUndispatchedResponse(
+                        request.request_id, request.transaction_id, block);
+                };
+                // Recheck immediately before backend preflight. The callback
+                // uses the named-pipe host's absolute lifetime, not a rolling
+                // request budget; an exception fails closed before camera I/O.
+                if (!HasSufficientHostAdmissionBudget(
+                        remaining_host_milliseconds)) {
+                    return reject_for_host_lifetime();
+                }
                 DualHardwarePairPreflightOutcome preflight;
                 try {
                     preflight = capture_backend_->PreflightPair(
@@ -990,6 +1068,13 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                         request.request_id, request.transaction_id, block);
                 }
 
+                // Preflight may itself consume the host budget. Do not cross
+                // the durable dispatch boundary unless a full watchdog plus
+                // response/cleanup reserve remains.
+                if (!HasSufficientHostAdmissionBudget(
+                        remaining_host_milliseconds)) {
+                    return reject_for_host_lifetime();
+                }
                 (void)pair_store_->BeginDispatch(request.transaction_id);
                 dispatch_started = true;
                 ++safety_counters_.pair_dispatch_count;
@@ -1091,7 +1176,11 @@ std::string DualHardwareCameraAgentDispatcher::Handle(
                             request.request_id, request.transaction_id,
                             "PairStoreFailure", false);
                     }
-                    if (!record->confirmed_undispatched_preflight_block_json.empty()) {
+                    if (!record->confirmed_undispatched_preflight_block_json.empty() ||
+                        request.transaction_id == terminal_pending_transaction_id_) {
+                        // Ordinary recovery clears a closed tombstone without
+                        // sending another close. End this spent host only after
+                        // the query response's existing ACK/drain contract.
                         should_stop_ = true;
                     }
                     return ResponsePrefix(

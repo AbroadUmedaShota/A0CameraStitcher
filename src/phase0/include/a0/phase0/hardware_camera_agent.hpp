@@ -603,6 +603,9 @@ struct HardwareCameraAgentPipeFailureInjectionForTesting {
     bool fail_response_body_write{};
     bool fail_delivery_ack_wait{};
     bool fail_response_flush{};
+    std::function<std::uint64_t()> lifetime_ticks_for_testing;
+    std::function<void(std::string_view)> before_stage_for_testing;
+    std::function<void(std::string_view, std::uint32_t)> wait_timeout_for_testing;
 };
 
 [[nodiscard]] int RunHardwareCameraAgentNamedPipeServer(

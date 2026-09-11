@@ -5,11 +5,14 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include "m6_child_diagnostics.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -65,6 +68,7 @@ void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); 
 namespace {
 
 void ArmM6PersistentFault() noexcept {
+    m6_diagnostics::Mark(m6_diagnostics::Phase::pre_injection);
     m6_allocation_ordinal = 0;
     m6_failed_allocations = 0;
 #if defined(NDEBUG)
@@ -79,6 +83,7 @@ void ArmM6PersistentFault() noexcept {
 }
 
 void ArmM6ExactOrdinal(std::size_t ordinal) noexcept {
+    m6_diagnostics::Mark(m6_diagnostics::Phase::pre_injection);
     m6_allocation_ordinal = 0;
     m6_failed_allocations = 0;
     m6_fault_ordinal = ordinal;
@@ -178,6 +183,7 @@ std::string CaptureEnvelope(std::string_view transaction_id, bool live_view = fa
 class FakeBackend : public IHardwareCameraAgentBackend {
 public:
     SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
+        m6_diagnostics::BackendEntered();
         ++readiness_calls;
         SingleCameraReadinessResult result;
         result.ready = true;
@@ -383,6 +389,7 @@ public:
 class UnknownExceptionBackend final : public FakeBackend {
 public:
     SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        m6_diagnostics::BackendEntered();
         ++dispatch_calls;
         throw 151;
     }
@@ -400,6 +407,7 @@ public:
 class SecondaryAllocationFailureBackend final : public FakeBackend {
 public:
     SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        m6_diagnostics::BackendEntered();
         ++dispatch_calls;
         ArmM6PersistentFault();
         throw NonAllocatingStandardException{};
@@ -411,6 +419,7 @@ public:
 class SerializationAllocationFailureBackend final : public FakeBackend {
 public:
     SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
+        m6_diagnostics::BackendEntered();
         auto result = FakeBackend::GetSingleReadiness(alias);
         ArmM6PersistentFault();
         return result;
@@ -429,6 +438,7 @@ public:
     }
 
     SingleCameraReadinessResult GetSingleReadiness(std::string_view alias) override {
+        m6_diagnostics::BackendEntered();
         ++readiness_calls;
         if (alias != "CAM-A") throw std::logic_error("unexpected prepared alias");
         return std::move(result_);
@@ -445,6 +455,7 @@ public:
         : exception_(std::move(exception)), arm_fault_(arm_fault) {}
 
     SingleCameraReadinessResult GetSingleReadiness(std::string_view) override {
+        m6_diagnostics::BackendEntered();
         ++dispatch_calls;
         struct ArmWhileUnwinding final {
             bool enabled{};
@@ -2114,6 +2125,8 @@ int RunM6EmptyResponsePipeChild(bool serve_once) {
     const std::wstring full_pipe_name =
         L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
     auto server = std::async(std::launch::async, [&] {
+        m6_diagnostics::observing_handle = true;
+        m6_diagnostics::Mark(m6_diagnostics::Phase::before_server_call);
         return RunHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, serve_once);
     });
 
@@ -2180,6 +2193,24 @@ bool IsCompleteM6FailureEnvelope(std::string_view response) {
         response.ends_with("}}");
 }
 
+// This observes returned bytes after disarm, not a production serializer hook.
+void ObserveM6Response(std::string_view response, bool complete) noexcept {
+    if (response.empty()) m6_diagnostics::Mark(m6_diagnostics::Phase::empty_fallback);
+    else if (complete) {
+        m6_diagnostics::Mark(m6_diagnostics::Phase::response_serialization_validated);
+    }
+}
+
+struct M6OrdinalObservation {
+    std::size_t allocations{};
+    std::size_t failed{};
+    int dispatches{};
+    int response_category{}; // empty, exact baseline, complete failure, invalid
+    std::uint64_t response_hash{};
+    bool operator==(const M6OrdinalObservation&) const = default;
+};
+thread_local M6OrdinalObservation m6_ordinal_observation;
+
 template <typename Exception>
 int RunM6TypedCatchChild(Exception exception, bool faulted) {
     TypedSecondaryAllocationFailureBackend<Exception> backend(
@@ -2188,9 +2219,12 @@ int RunM6TypedCatchChild(Exception exception, bool faulted) {
     const std::string request =
         Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
     if (!faulted) DisarmM6Fault();
+    m6_diagnostics::BeforeHandle();
     const std::string response = dispatcher.Handle(request);
+    m6_diagnostics::HandleReturned();
     const auto failed = m6_failed_allocations;
     DisarmM6Fault();
+    ObserveM6Response(response, IsCompleteM6FailureEnvelope(response));
     if (faulted) {
         return response.empty() && backend.dispatch_calls == 1 && failed > 0 ? 0 : 31;
     }
@@ -2220,8 +2254,11 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
     if (scenario == "unknown") {
         UnknownExceptionBackend backend;
         HardwareCameraAgentDispatcher dispatcher(backend);
+        m6_diagnostics::BeforeHandle();
         const std::string response = dispatcher.Handle(
             Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}"));
+        m6_diagnostics::HandleReturned();
+        ObserveM6Response(response, false);
         return response.empty() && backend.dispatch_calls == 1 ? 0 : 10;
     }
     if (scenario == "preamble-oom") {
@@ -2231,9 +2268,12 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
             Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
         request.replace(request.find("req-1"), 5, std::string(128, 'r'));
         ArmM6PersistentFault();
+        m6_diagnostics::BeforeHandle();
         const std::string response = dispatcher.Handle(request);
+        m6_diagnostics::HandleReturned();
         const auto failed = m6_failed_allocations;
         DisarmM6Fault();
+        ObserveM6Response(response, false);
         return response.empty() && backend.readiness_calls == 0 && failed > 0 ? 0 : 11;
     }
     if (scenario == "handler-oom") {
@@ -2241,9 +2281,12 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
         HardwareCameraAgentDispatcher dispatcher(backend);
         const std::string request =
             Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+        m6_diagnostics::BeforeHandle();
         const std::string response = dispatcher.Handle(request);
+        m6_diagnostics::HandleReturned();
         const auto failed = m6_failed_allocations;
         DisarmM6Fault();
+        ObserveM6Response(response, false);
         return response.empty() && backend.dispatch_calls == 1 && failed > 0 ? 0 : 12;
     }
     if (scenario == "serializer-oom") {
@@ -2251,9 +2294,12 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
         HardwareCameraAgentDispatcher dispatcher(backend);
         const std::string request =
             Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+        m6_diagnostics::BeforeHandle();
         const std::string response = dispatcher.Handle(request);
+        m6_diagnostics::HandleReturned();
         const auto failed = m6_failed_allocations;
         DisarmM6Fault();
+        ObserveM6Response(response, false);
         return response.empty() && backend.readiness_calls == 1 && failed > 0 ? 0 : 13;
     }
     if (scenario == "protocol-catch-oom") {
@@ -2311,7 +2357,9 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
             const auto request = Envelope(
                 "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
             ArmM6ExactOrdinal(ordinal);
+            m6_diagnostics::BeforeHandle();
             response = dispatcher.Handle(request);
+            m6_diagnostics::HandleReturned();
             dispatches = backend.readiness_calls;
         } else {
             PreparedSerializationBackend baseline_backend(false);
@@ -2323,11 +2371,22 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
             const auto request = Envelope(
                 "get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
             ArmM6ExactOrdinal(ordinal);
+            m6_diagnostics::BeforeHandle();
             response = dispatcher.Handle(request);
+            m6_diagnostics::HandleReturned();
             dispatches = backend.readiness_calls;
         }
         const auto failed = m6_failed_allocations;
+        const auto allocations = m6_allocation_ordinal;
         DisarmM6Fault();
+        ObserveM6Response(response, response == baseline || IsCompleteM6FailureEnvelope(response));
+        std::uint64_t response_hash = 14695981039346656037ULL;
+        for (const unsigned char byte : response) {
+            response_hash = (response_hash ^ byte) * 1099511628211ULL;
+        }
+        m6_ordinal_observation = {allocations, failed, dispatches,
+            response.empty() ? 0 : response == baseline ? 1 :
+                IsCompleteM6FailureEnvelope(response) ? 2 : 3, response_hash};
         if (failed == 0) return response == baseline ? 100 : 52;
         const bool safe = response.empty() || response == baseline ||
             IsCompleteM6FailureEnvelope(response);
@@ -2338,31 +2397,305 @@ int RunM6ExceptionBoundaryChild(std::string_view scenario) {
     return 14;
 }
 
+// Fixed, anonymous parent-side output. No paths, handles, camera data or SDK data.
+void EmitM6Diagnostic(std::string_view scenario, const char* setup, DWORD setup_error,
+    const m6_diagnostics::Outcome& outcome, m6_diagnostics::SharedTrace* trace,
+    bool cpu_known = false, unsigned long long cpu_100ns = 0,
+    DWORD cpu_error = 0) {
+    using namespace m6_diagnostics;
+    std::array<char, 2048> line{};
+    const auto separator = scenario.rfind('-');
+    unsigned long long ordinal = 0;
+    if (separator != std::string_view::npos) {
+        const auto parsed = std::from_chars(scenario.data() + separator + 1,
+            scenario.data() + scenario.size(), ordinal);
+        if (parsed.ec != std::errc{} || parsed.ptr != scenario.data() + scenario.size()) ordinal = 0;
+    }
+    const bool trace_valid = Valid(trace);
+    const LONG phase = trace_valid ? Read(trace->last_phase) : 0;
+    const LONG visited = trace_valid ? Read(trace->visited) : 0;
+    const int length = std::snprintf(line.data(), line.size(),
+        "M6_DIAG scenario=%.*s ordinal=%llu setup=%s setupError=%lu "
+        "wait=%s waitValue=%lu waitErrorKnown=%d waitError=%lu "
+        "terminationAttempted=%d terminationSucceeded=%d terminationError=%lu requestedExit=%lu "
+        "drain=%s drainValue=%lu drainErrorKnown=%d drainError=%lu "
+        "exitQueryAttempted=%d exitQuerySucceeded=%d exitQueryError=%lu exitKnown=%d exit=%lu "
+        "cleanupComplete=%d traceValid=%d childPhase=%s visited=%ld normalExitObserved=%d "
+        "cpuKnown=%d cpu100ns=%llu cpuError=%lu\n",
+        static_cast<int>(scenario.size()), scenario.data(), ordinal, setup, setup_error,
+        WaitName(outcome.wait), outcome.wait.value,
+        outcome.wait.attempted && outcome.wait.value == WAIT_FAILED, outcome.wait.error,
+        outcome.termination.attempted, outcome.termination.succeeded,
+        outcome.termination.error, outcome.requested_exit,
+        WaitName(outcome.drain), outcome.drain.value,
+        outcome.drain.attempted && outcome.drain.value == WAIT_FAILED, outcome.drain.error,
+        outcome.exit.query.attempted, outcome.exit.query.succeeded, outcome.exit.query.error,
+        outcome.ExitKnown(), outcome.exit.code, outcome.CleanupComplete(), trace_valid,
+        PhaseName(phase), visited,
+        outcome.CompletedWithoutIntervention() && phase == static_cast<LONG>(Phase::normal_return_selected),
+        cpu_known, cpu_100ns, cpu_error);
+    if (length <= 0 || static_cast<std::size_t>(length) >= line.size()) std::_Exit(127);
+    DWORD written = 0;
+    const BOOL emitted = WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line.data(),
+        static_cast<DWORD>(length), &written, nullptr);
+    if (!emitted || written != static_cast<DWORD>(length)) std::_Exit(127);
+}
+
 DWORD LaunchM6Child(std::string_view scenario) {
+    using namespace m6_diagnostics;
+    const auto setup_failure = [&](const char* stage, DWORD error) {
+        EmitM6Diagnostic(scenario, stage, error, {}, nullptr);
+        return 0xFFFFFFFDU;
+    };
     std::array<wchar_t, 32768> executable{};
     const DWORD length = GetModuleFileNameW(
         nullptr, executable.data(), static_cast<DWORD>(executable.size()));
-    if (length == 0 || length >= executable.size()) return 0xFFFFFFFEU;
+    const DWORD path_error = length == 0 || length >= executable.size() ? GetLastError() : 0;
+    if (length == 0 || length >= executable.size()) return setup_failure("executable", path_error);
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    Handle mapping(CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE,
+        0, sizeof(SharedTrace), nullptr));
+    if (!mapping.value) { const DWORD error = GetLastError(); return setup_failure("mapping", error); }
+    View view{static_cast<SharedTrace*>(MapViewOfFile(mapping.value, FILE_MAP_ALL_ACCESS,
+        0, 0, sizeof(SharedTrace)))};
+    if (!view.value) { const DWORD error = GetLastError(); return setup_failure("view", error); }
+    new (view.value) SharedTrace{};
+
+    SIZE_T attribute_bytes = 0;
+    const BOOL sizing = InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+    const DWORD sizing_error = sizing ? ERROR_SUCCESS : GetLastError();
+    if (sizing || sizing_error != ERROR_INSUFFICIENT_BUFFER || attribute_bytes == 0) {
+        return setup_failure("attribute_size", sizing_error);
+    }
+    AttributeList attributes;
+    attributes.value = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+        HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
+    // HeapAlloc does not set last error.
+    if (!attributes.value) return setup_failure("attribute_memory", ERROR_NOT_ENOUGH_MEMORY);
+    if (!InitializeProcThreadAttributeList(attributes.value, 1, 0, &attribute_bytes)) {
+        const DWORD error = GetLastError(); return setup_failure("attribute_init", error);
+    }
+    attributes.initialized = true;
+    if (!UpdateProcThreadAttribute(attributes.value, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            &mapping.value, sizeof(mapping.value), nullptr, nullptr)) {
+        const DWORD error = GetLastError(); return setup_failure("attribute_handle", error);
+    }
     std::wstring command = L"\"" + std::wstring(executable.data(), length) +
-        L"\" --m6-child " + std::wstring(scenario.begin(), scenario.end());
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
+        L"\" --m6-child " + std::wstring(scenario.begin(), scenario.end()) + L" " +
+        std::to_wstring(reinterpret_cast<std::uintptr_t>(mapping.value));
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = attributes.value;
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(
-            executable.data(), command.data(), nullptr, nullptr, FALSE,
-            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        return 0xFFFFFFFDU;
+            executable.data(), command.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+            &startup.StartupInfo, &process)) {
+        const DWORD error = GetLastError(); return setup_failure("create_process", error);
     }
-    CloseHandle(process.hThread);
-    const DWORD wait = WaitForSingleObject(process.hProcess, 10000U);
-    if (wait != WAIT_OBJECT_0) {
-        TerminateProcess(process.hProcess, 124U);
-        WaitForSingleObject(process.hProcess, 5000U);
+    Handle process_handle(process.hProcess);
+    Handle thread_handle(process.hThread);
+    Win32Api api{process.hProcess};
+    const Outcome outcome = Observe(api);
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    const BOOL cpu_known = GetProcessTimes(process.hProcess, &creation, &exit, &kernel, &user);
+    const DWORD cpu_error = cpu_known ? ERROR_SUCCESS : GetLastError();
+    const auto ticks = [](FILETIME time) {
+        return (static_cast<unsigned long long>(time.dwHighDateTime) << 32U) | time.dwLowDateTime;
+    };
+    EmitM6Diagnostic(scenario, "none", 0, outcome, view.value,
+        cpu_known != FALSE, ticks(kernel) + ticks(user), cpu_error);
+    // Never start another case with a possibly-live child. The fixed diagnostic
+    // is already written; no unbounded drain, stronger kill, or retry follows.
+    if (!outcome.CleanupComplete()) std::_Exit(125);
+    // A natural exit racing a failed wait/terminate is cleanup, not a test PASS.
+    if (!outcome.CompletedWithoutIntervention()) return 0xFFFFFFFCU;
+    // The real shared-memory transport must also have carried the child's trace.
+    if (!Valid(view.value) || (Read(view.value->visited) & (1L << static_cast<LONG>(Phase::started))) == 0 ||
+        Read(view.value->last_phase) != static_cast<LONG>(Phase::normal_return_selected)) return 0xFFFFFFFBU;
+    return outcome.exit.code;
+}
+
+void TestM6DiagnosticSeam() {
+    using namespace m6_diagnostics;
+    struct FakeApi {
+        std::array<WaitResult, 2> waits{{{true, WAIT_OBJECT_0, 0}, {true, WAIT_OBJECT_0, 0}}};
+        BoolResult termination{true, true, 0};
+        ExitResult exit{{true, true, 0}, 0};
+        std::array<DWORD, 4> calls{};
+        std::size_t call_count{};
+        std::size_t wait_count{};
+        DWORD terminate_code{};
+        WaitResult Wait(DWORD milliseconds) {
+            calls.at(call_count++) = milliseconds;
+            return waits.at(wait_count++);
+        }
+        BoolResult Terminate(DWORD code) {
+            calls.at(call_count++) = 2U;
+            terminate_code = code;
+            return termination;
+        }
+        ExitResult QueryExit() {
+            calls.at(call_count++) = 3U;
+            return exit;
+        }
+    };
+    FakeApi normal;
+    const auto normal_result = Observe(normal);
+    Check(normal_result.CompletedWithoutIntervention() && normal_result.CleanupComplete() &&
+        normal_result.ExitKnown() && normal.call_count == 2 &&
+        normal.calls == std::array<DWORD, 4>{10000, 3, 0, 0} &&
+        !normal_result.termination.attempted && !normal_result.drain.attempted,
+        "M6 normal signaled exit must query once without terminate or drain");
+
+    // Controlled OS-boundary results, not a loop retrying real child processes.
+    for (int scenario = 0; scenario < 9; ++scenario) {
+        FakeApi api;
+        api.waits[0] = {true, WAIT_TIMEOUT, 0};
+        api.exit.code = 124U;
+        if (scenario == 1) api.waits[0] = {true, WAIT_FAILED, ERROR_INVALID_HANDLE};
+        if (scenario == 2) api.waits[0] = {true, WAIT_ABANDONED, 0};
+        if (scenario == 3 || scenario == 4) api.termination = {true, false, ERROR_ACCESS_DENIED};
+        if (scenario == 4 || scenario == 5) {
+            api.waits[1] = {true, WAIT_TIMEOUT, 0};
+            api.exit.code = STILL_ACTIVE;
+        }
+        if (scenario == 6) {
+            api.waits[0] = {true, WAIT_FAILED, ERROR_INVALID_HANDLE};
+            api.waits[1] = {true, WAIT_FAILED, ERROR_ACCESS_DENIED};
+        }
+        if (scenario == 7) api.exit.query = {true, false, ERROR_INVALID_PARAMETER};
+        if (scenario == 8) api.exit.code = STILL_ACTIVE;
+        const auto result = Observe(api);
+        const bool cleanup_expected = scenario <= 3;
+        Check(api.call_count == 4 && api.calls == std::array<DWORD, 4>{10000, 2, 5000, 3},
+            "M6 non-signaled wait must terminate once, bounded-drain once, then query once");
+        Check(result.wait.value == api.waits[0].value && result.wait.error == api.waits[0].error &&
+            result.drain.value == api.waits[1].value && result.drain.error == api.waits[1].error,
+            "M6 original wait error must survive different cleanup errors");
+        Check(result.termination.succeeded == api.termination.succeeded &&
+            result.termination.error == api.termination.error &&
+            result.exit.query.succeeded == api.exit.query.succeeded &&
+            result.exit.query.error == api.exit.query.error && result.exit.code == api.exit.code,
+            "M6 termination and exit observations must retain validity and original values");
+        Check(result.requested_exit == (api.waits[0].value == WAIT_TIMEOUT ? 124U :
+                api.waits[0].value == WAIT_FAILED ? 125U : 126U) &&
+            api.terminate_code == result.requested_exit &&
+            result.CleanupComplete() == cleanup_expected && !result.CompletedWithoutIntervention(),
+            "M6 timeout, wait failure and unexpected wait cannot masquerade as natural success");
     }
-    DWORD exit_code = 0xFFFFFFFFU;
-    GetExitCodeProcess(process.hProcess, &exit_code);
-    CloseHandle(process.hProcess);
-    return exit_code;
+    FakeApi query_failed;
+    query_failed.exit.query = {true, false, ERROR_ACCESS_DENIED};
+    Check(!Observe(query_failed).CleanupComplete() && query_failed.call_count == 2,
+        "M6 signaled process with unavailable exit must stop without additional termination");
+    FakeApi still_active;
+    still_active.exit.code = STILL_ACTIVE;
+    Check(!Observe(still_active).ExitKnown(), "M6 STILL_ACTIVE is not an observed terminal exit");
+
+    // Real wrapper error capture, without launching a child or touching hardware.
+    Win32Api invalid{nullptr};
+    SetLastError(ERROR_SUCCESS);
+    const auto invalid_wait = invalid.Wait(0);
+    SetLastError(ERROR_BAD_COMMAND);
+    Check(invalid_wait.value == WAIT_FAILED && invalid_wait.error == ERROR_INVALID_HANDLE,
+        "M6 real Wait wrapper must preserve GetLastError immediately after failure");
+    const auto invalid_terminate = invalid.Terminate(125);
+    SetLastError(ERROR_BAD_COMMAND);
+    Check(!invalid_terminate.succeeded && invalid_terminate.error == ERROR_INVALID_HANDLE,
+        "M6 real Terminate wrapper must preserve its own error");
+    const auto invalid_exit = invalid.QueryExit();
+    SetLastError(ERROR_BAD_COMMAND);
+    Check(!invalid_exit.query.succeeded && invalid_exit.query.error == ERROR_INVALID_HANDLE,
+        "M6 real exit-query wrapper must preserve its own error");
+}
+
+void TestM6PhaseAllocationNeutrality() {
+    using namespace m6_diagnostics;
+    struct RestoreProcessPolicy {
+        UINT error_mode{GetErrorMode()};
+        std::terminate_handler terminate_handler{std::get_terminate()};
+        ~RestoreProcessPolicy() {
+            SetErrorMode(error_mode);
+            std::set_terminate(terminate_handler);
+        }
+    } restore_process_policy;
+    SharedTrace shared;
+    trace = &shared;
+    // Stronger than the Debug persistent-large mode: even the marker sequence
+    // itself must survive fail-all without a single operator new invocation.
+    m6_allocation_ordinal = 0;
+    m6_failed_allocations = 0;
+    m6_fault_mode = M6AllocationFaultMode::persistent_all;
+    Mark(Phase::started);
+    Mark(Phase::pre_injection);
+    BeforeHandle();
+    BackendEntered();
+    HandleReturned();
+    Mark(Phase::response_serialization_validated);
+    Mark(Phase::empty_fallback);
+    Mark(Phase::normal_return_selected);
+    Mark(Phase::before_server_call);
+    const auto allocations = m6_allocation_ordinal;
+    const auto failed = m6_failed_allocations;
+    DisarmM6Fault();
+    trace = nullptr;
+    Check(allocations == 0 && failed == 0 && Valid(&shared) && Read(shared.visited) == 1022 &&
+        Read(shared.last_phase) == static_cast<LONG>(Phase::before_server_call),
+        "M6 all shared phase writes must be allocation-neutral, including fail-all Debug");
+
+    int compared = 0;
+    for (const std::string_view sweep : {"outer-ordinal-", "escape-ordinal-"}) {
+        // Debug's existing total-OOM iterator-proxy characterization is retained;
+        // as in the original OS suite, full fault-ordinal sweep is Release only.
+#if defined(NDEBUG)
+        constexpr std::size_t last = 192;
+#else
+        constexpr std::size_t last = 0;
+#endif
+        for (std::size_t index = 0; index <= last; ++index) {
+            const auto ordinal = index == last ? 999 : index + 1;
+            const std::string scenario = std::string(sweep) + std::to_string(ordinal);
+            trace = nullptr;
+            const int without = RunM6ExceptionBoundaryChild(scenario);
+            const auto without_observation = m6_ordinal_observation;
+            SharedTrace enabled;
+            trace = &enabled;
+            const int with = RunM6ExceptionBoundaryChild(scenario);
+            const auto with_observation = m6_ordinal_observation;
+            trace = nullptr;
+            Check(with == without && with_observation == without_observation,
+                "M6 enabled/disabled phase markers must preserve exit, allocations, fault ordinal, dispatch and response fingerprint");
+            Check(with == 0 || with == 100 || with == 101,
+                "M6 neutrality comparison must retain the original complete-response/empty oracle");
+            const LONG visits = Read(enabled.visited);
+            Check((visits & (1L << static_cast<LONG>(Phase::pre_injection))) != 0 &&
+                (visits & (1L << static_cast<LONG>(Phase::handle_returned))) != 0,
+                "M6 enabled trace must actually cover the injected call");
+            Check(((visits & (1L << static_cast<LONG>(Phase::handler_backend_entered))) != 0) ==
+                (with_observation.dispatches == 1), "M6 backend-entry phase must match actual dispatch");
+            ++compared;
+        }
+    }
+    std::cout << "M6_DIAGNOSTIC_CONTRACT seamCases=12 ordinalComparisons=" << compared
+              << " phaseAllocations=" << allocations << " failures=" << failures << '\n';
+}
+
+int RunM6MappedChild(std::string_view scenario, std::string_view handle_text) {
+    using namespace m6_diagnostics;
+    std::uintptr_t number = 0;
+    const auto parsed = std::from_chars(handle_text.data(), handle_text.data() + handle_text.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != handle_text.data() + handle_text.size() || number == 0) return 70;
+    Handle mapping(reinterpret_cast<HANDLE>(number));
+    View view{static_cast<SharedTrace*>(MapViewOfFile(mapping.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedTrace)))};
+    if (!view.value || !Valid(view.value)) return 71;
+    trace = view.value;
+    Mark(Phase::started);
+    const int result = RunM6ExceptionBoundaryChild(scenario);
+    DisarmM6Fault();
+    Mark(Phase::normal_return_selected);
+    trace = nullptr;
+    // Parent signaled wait + known exit, not this marker, proves actual OS exit.
+    return result;
 }
 
 void TestM6ExceptionBoundaryAndEmptyPipeResponse() {
@@ -4001,11 +4334,75 @@ void TestContinuousLiveViewFrameBudgetIsolation() {
     fs::remove_all(root, cleanup_error);
 }
 
+void TestSingleHostDeadlineAndServeOnceCompatibility() {
+    for (const bool serve_once : {false, true}) {
+        FakeBackend backend;
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string name = "A0CameraStitcher.CameraAgent.Hardware.v1.deadline-" + NewRunId();
+        const std::wstring full = L"\\\\.\\pipe\\" + std::wstring(name.begin(), name.end());
+        std::atomic<std::uint64_t> ticks{0};
+        auto server = std::async(std::launch::async, [&] {
+            return RunHardwareCameraAgentNamedPipeServer(name, dispatcher, serve_once,
+                {.lifetime_ticks_for_testing = [&] { return ticks.load(); },
+                 .before_stage_for_testing = [&](std::string_view stage) {
+                     if (stage == "dispatch") ticks.store(600000);
+                 }});
+        });
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (pipe == INVALID_HANDLE_VALUE && std::chrono::steady_clock::now() < deadline) {
+            pipe = CreateFileW(full.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                OPEN_EXISTING, 0, nullptr);
+            if (pipe == INVALID_HANDLE_VALUE) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        Check(pipe != INVALID_HANDLE_VALUE, "Single deadline client must connect");
+        if (pipe != INVALID_HANDLE_VALUE) {
+            const auto request = Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
+            const auto size = static_cast<std::uint32_t>(request.size());
+            const std::array<unsigned char, 4> header{
+                static_cast<unsigned char>(size), static_cast<unsigned char>(size >> 8),
+                static_cast<unsigned char>(size >> 16), static_cast<unsigned char>(size >> 24)};
+            (void)WriteAll(pipe, header.data(), header.size());
+            (void)WriteAll(pipe, request.data(), request.size());
+            std::array<unsigned char, 4> response_header{};
+            const bool delivered = ReadAll(pipe, response_header.data(), response_header.size());
+            Check(delivered == serve_once,
+                "persistent Single must not dispatch at expiry; serve_once keeps its existing contract");
+            if (delivered) {
+                const auto length = static_cast<std::uint32_t>(response_header[0]) |
+                    (static_cast<std::uint32_t>(response_header[1]) << 8) |
+                    (static_cast<std::uint32_t>(response_header[2]) << 16) |
+                    (static_cast<std::uint32_t>(response_header[3]) << 24);
+                std::string response(length, '\0');
+                Check(ReadAll(pipe, response.data(), response.size()), "Single response must be complete");
+                (void)WriteAll(pipe, &kDeliveryAcknowledgment, 1);
+            }
+            CloseHandle(pipe);
+        }
+        ticks.store(600000);
+        if (server.wait_for(std::chrono::seconds(8)) != std::future_status::ready) {
+            std::cerr << "FAIL: Single deadline host did not stop\n" << std::flush;
+            std::_Exit(1);
+        }
+        Check(server.get() == 0, "Single host must retain its delivered/idle exit contract");
+        Check(backend.readiness_calls == (serve_once ? 1 : 0) && backend.capture_calls == 0,
+            "expiry must skip Single backend access without affecting serve_once dispatch");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--m6-child") {
+        return RunM6MappedChild(argv[2], argv[3]);
+    }
     if (argc == 3 && std::string_view(argv[1]) == "--m6-child") {
         return RunM6ExceptionBoundaryChild(argv[2]);
+    }
+    TestM6DiagnosticSeam();
+    TestM6PhaseAllocationNeutrality();
+    if (argc == 2 && std::string_view(argv[1]) == "--m6-diagnostics-contract") {
+        return failures == 0 ? 0 : 1;
     }
     TestStrictProtocolAndTypedResponses();
     TestServeOnceRejectsPartialFrameWithoutDispatch();
@@ -4028,6 +4425,7 @@ int main(int argc, char** argv) {
     TestContinuousLiveViewFrameBudgetIsolation();
     TestTimeoutEnvironmentOverrides();
     TestRealEnvironmentVariableWrapsWin32Api();
+    TestSingleHostDeadlineAndServeOnceCompatibility();
     if (failures != 0) {
         std::cerr << failures << " hardware Camera Agent test(s) failed\n";
         return 1;

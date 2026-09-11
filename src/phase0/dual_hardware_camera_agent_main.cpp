@@ -1,4 +1,5 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
+#include "a0/phase0/agent_host_lifetime.hpp"
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
@@ -129,6 +130,9 @@ void RequireExistingFixedLocalFile(
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        // One process budget: activating the bound capture pipe must not
+        // replenish the time already consumed by operator binding.
+        AgentHostLifetime host_lifetime;
         std::string pipe_name(kDefaultDualHardwareCameraAgentPipeName);
         bool serve_once = false;
         bool read_only_coexistence_probe = false;
@@ -446,7 +450,8 @@ int wmain(int argc, wchar_t** argv) {
             auto sdk_adapter = std::make_shared<NikonDualBindingSdkAdapter>();
             DualBindingCameraAgentDispatcher binding_dispatcher(sdk_adapter, true);
             const int binding_exit = RunDualBindingCameraAgentNamedPipeServer(
-                *binding_pipe_name, binding_dispatcher, false);
+                *binding_pipe_name, binding_dispatcher, false, {}, std::nullopt,
+                &host_lifetime);
             if (binding_exit != 0) {
                 throw std::runtime_error(
                     "Dual binding host ended before a terminal request was delivered");
@@ -466,10 +471,11 @@ int wmain(int argc, wchar_t** argv) {
                 pair_store, [] { return std::chrono::system_clock::now(); },
                 capture_backend);
             return RunDualHardwareCameraAgentNamedPipeServer(
-                pipe_name, dispatcher, false);
+                pipe_name, dispatcher, false, {}, std::nullopt, &host_lifetime);
         }
         DualHardwareCameraAgentDispatcher dispatcher(pair_store);
-        return RunDualHardwareCameraAgentNamedPipeServer(pipe_name, dispatcher, serve_once);
+        return RunDualHardwareCameraAgentNamedPipeServer(
+            pipe_name, dispatcher, serve_once, {}, std::nullopt, &host_lifetime);
     } catch (const std::exception& error) {
         std::cerr << "Dual Camera Agent failed closed: " << error.what() << '\n';
         PrintUsage();

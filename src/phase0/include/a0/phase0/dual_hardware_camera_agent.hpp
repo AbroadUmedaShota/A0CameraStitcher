@@ -129,6 +129,12 @@ public:
         std::shared_ptr<DualHardwarePairCaptureBackend> capture_backend);
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
+    // The named-pipe host supplies its remaining absolute-lifetime budget for
+    // persistent Dual requests. An empty callback preserves the standalone
+    // protocol contract used by serve_once and existing callers.
+    [[nodiscard]] std::string Handle(
+        std::string_view request_json,
+        const std::function<std::uint64_t()>& remaining_host_milliseconds) noexcept;
 
     [[nodiscard]] DualHardwareCameraAgentSafetyCounters SafetyCounters()
         const noexcept;
@@ -137,7 +143,8 @@ public:
     // a no-op because the Dual protocol has no idle-driven backend state.
     // ShouldStop becomes true only after a response has terminalized an
     // invalid binding, or after the exact reserved transaction blocked by a
-    // fatal preflight has been closed before dispatch. Otherwise the host is
+    // fatal preflight has been closed before dispatch, or its host-budget
+    // no-dispatch tombstone has been queried. Otherwise the host is
     // bounded by RunDualHardwareCameraAgentNamedPipeServer's fixed lifetime.
     void OnIdle() noexcept;
     [[nodiscard]] bool ShouldStop() const noexcept;
@@ -161,8 +168,11 @@ struct DualHardwareCameraAgentPipeFailureInjectionForTesting {
     bool fail_delivery_ack_wait{};
     bool fail_response_flush{};
     // Controls only the absolute host-lifetime clock in contract tests.
-    // Frame/ACK timeouts keep their real monotonic clock. Empty in production.
+    // It bounds the host and I/O timeouts; stage deadlines use this same clock.
+    // Empty in production.
     std::function<std::uint64_t()> lifetime_ticks_for_testing;
+    std::function<void(std::string_view)> before_stage_for_testing;
+    std::function<void(std::string_view, std::uint32_t)> wait_timeout_for_testing;
 };
 
 // Serves the Dual hardware v2 protocol over one dedicated local named pipe,
@@ -191,13 +201,19 @@ struct DualHardwareCameraAgentPipeFailureInjectionForTesting {
 // unique pipe name for each logical session is the launcher's
 // responsibility, not this function's. serve_once mode (used by tests and
 // one-shot invocations) is unaffected: it always terminates after its
-// single connection.
+// single connection. Persistent hosts clamp I/O and capture admission to the
+// same monotonic budget, including the binding-to-capture transition. Safe
+// cancellation drain, synchronous journal/response flush and in-flight SDK
+// cleanup may exceed the deadline; no hard process kill or successful result
+// on an unknown delivery is promised.
+class AgentHostLifetime;
 [[nodiscard]] int RunDualHardwareCameraAgentNamedPipeServer(
     std::string_view pipe_name,
     DualHardwareCameraAgentDispatcher& dispatcher,
     bool serve_once = false,
     DualHardwareCameraAgentPipeFailureInjectionForTesting failure_injection = {},
     std::optional<std::chrono::milliseconds> lifetime_budget_for_testing =
-        std::nullopt);
+        std::nullopt,
+    AgentHostLifetime* shared_lifetime = nullptr);
 
 } // namespace a0::phase0

@@ -346,12 +346,14 @@ struct DualBindingCameraAgentPipeFailureInjectionForTesting {
 // hardware_camera_agent_pipe.cpp). A second copy of that loop is how the two
 // hosts would eventually disagree about what an oversize frame or a missing ACK
 // means, which is precisely the non-regression this protocol has to preserve.
+class AgentHostLifetime;
 [[nodiscard]] int RunDualBindingCameraAgentNamedPipeServer(
     std::string_view pipe_name,
     DualBindingCameraAgentDispatcher& dispatcher,
     bool serve_once = false,
     DualBindingCameraAgentPipeFailureInjectionForTesting failure_injection = {},
     std::optional<std::chrono::milliseconds> lifetime_budget_for_testing =
-        std::nullopt);
+        std::nullopt,
+    AgentHostLifetime* shared_lifetime = nullptr);
 
 } // namespace a0::phase0

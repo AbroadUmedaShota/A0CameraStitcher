@@ -6,6 +6,7 @@
 #include "a0/phase0/hardware_camera_agent.hpp"
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
+#include "a0/phase0/agent_host_lifetime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -128,16 +129,36 @@ bool IsSafePipeName(std::string_view value) noexcept {
     });
 }
 
+struct PipeBudget {
+    AgentHostLifetime& host;
+    bool serve_once;
+    std::function<void(std::string_view)> before_stage;
+    std::function<void(std::string_view, std::uint32_t)> observe_timeout;
+
+    std::uint64_t Remaining() const noexcept {
+        return serve_once ? std::numeric_limits<std::uint64_t>::max()
+                          : host.RemainingMilliseconds();
+    }
+    void Before(std::string_view stage) const {
+        if (before_stage) before_stage(stage);
+    }
+};
+
 bool TransferOverlapped(
     HANDLE pipe,
     void* buffer,
     DWORD bytes,
     bool write,
-    DWORD timeout_ms,
+    const std::function<DWORD()>& remaining_timeout,
     DWORD& transferred) {
+    if (remaining_timeout() == 0) return false;
     OVERLAPPED overlapped{};
     overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (overlapped.hEvent == nullptr) return false;
+    if (remaining_timeout() == 0) {
+        CloseHandle(overlapped.hEvent);
+        return false;
+    }
     const BOOL started = write
         ? WriteFile(pipe, buffer, bytes, &transferred, &overlapped)
         : ReadFile(pipe, buffer, bytes, &transferred, &overlapped);
@@ -147,9 +168,13 @@ bool TransferOverlapped(
             CloseHandle(overlapped.hEvent);
             return false;
         }
-        const DWORD wait = WaitForSingleObject(overlapped.hEvent, timeout_ms);
+        const DWORD timeout_ms = remaining_timeout();
+        const DWORD wait = timeout_ms == 0 ? WAIT_TIMEOUT
+            : WaitForSingleObject(overlapped.hEvent, timeout_ms);
         if (wait != WAIT_OBJECT_0) {
             (void)CancelIoEx(pipe, &overlapped);
+            // OVERLAPPED and its buffer must outlive OS cancellation. This
+            // safety drain can outlast the budget; it is not a hard-kill cap.
             (void)WaitForSingleObject(overlapped.hEvent, INFINITE);
             CloseHandle(overlapped.hEvent);
             return false;
@@ -160,54 +185,44 @@ bool TransferOverlapped(
         }
     }
     CloseHandle(overlapped.hEvent);
-    return transferred > 0;
+    return transferred > 0 && remaining_timeout() != 0;
 }
 
-bool ReadExact(HANDLE pipe, void* destination, std::size_t bytes, DWORD timeout_ms) {
-    auto* output = static_cast<unsigned char*>(destination);
+bool TransferExact(HANDLE pipe, void* buffer, std::size_t bytes, bool write,
+                   DWORD timeout_ms, PipeBudget& budget, std::string_view stage) {
+    budget.Before(stage);
+    if (budget.Remaining() == 0) return false;
+    AgentHostLifetime stage_budget(timeout_ms, budget.host.TickSource());
+    const auto remaining = [&]() -> DWORD {
+        return static_cast<DWORD>(std::min({
+            stage_budget.RemainingMilliseconds(), budget.Remaining(),
+            static_cast<std::uint64_t>(std::numeric_limits<DWORD>::max() - 1)}));
+    };
+    auto* data = static_cast<unsigned char*>(buffer);
     std::size_t offset = 0;
-    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
     while (offset < bytes) {
-        const ULONGLONG now = GetTickCount64();
-        if (now >= deadline) return false;
-        const DWORD remaining_timeout = static_cast<DWORD>(std::min<ULONGLONG>(
-            deadline - now,
-            static_cast<ULONGLONG>(std::numeric_limits<DWORD>::max())));
+        const DWORD remaining_ms = remaining();
+        if (remaining_ms == 0) return false;
+        if (budget.observe_timeout) budget.observe_timeout(stage, remaining_ms);
         const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
             bytes - offset,
             static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
-        DWORD read = 0;
+        DWORD transferred = 0;
         if (!TransferOverlapped(
-                pipe, output + offset, chunk, false, remaining_timeout, read)) return false;
-        offset += read;
+                pipe, data + offset, chunk, write, remaining, transferred)) return false;
+        offset += transferred;
     }
     return true;
 }
 
-bool WriteExact(HANDLE pipe, const void* source, std::size_t bytes, DWORD timeout_ms) {
-    const auto* input = static_cast<const unsigned char*>(source);
-    std::size_t offset = 0;
-    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
-    while (offset < bytes) {
-        const ULONGLONG now = GetTickCount64();
-        if (now >= deadline) return false;
-        const DWORD remaining_timeout = static_cast<DWORD>(std::min<ULONGLONG>(
-            deadline - now,
-            static_cast<ULONGLONG>(std::numeric_limits<DWORD>::max())));
-        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
-            bytes - offset,
-            static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
-        DWORD written = 0;
-        if (!TransferOverlapped(
-                pipe,
-                const_cast<unsigned char*>(input + offset),
-                chunk,
-                true,
-                remaining_timeout,
-                written)) return false;
-        offset += written;
-    }
-    return true;
+bool ReadExact(HANDLE pipe, void* destination, std::size_t bytes, DWORD timeout_ms,
+               PipeBudget& budget, std::string_view stage) {
+    return TransferExact(pipe, destination, bytes, false, timeout_ms, budget, stage);
+}
+
+bool WriteExact(HANDLE pipe, const void* source, std::size_t bytes, DWORD timeout_ms,
+                PipeBudget& budget, std::string_view stage) {
+    return TransferExact(pipe, const_cast<void*>(source), bytes, true, timeout_ms, budget, stage);
 }
 
 // Dispatcher and FailureInjection are duck-typed rather than sharing a base
@@ -220,9 +235,10 @@ template <typename Dispatcher, typename FailureInjection>
 ProcessOneConnectionOutcome ProcessOneConnection(
     HANDLE pipe,
     Dispatcher& dispatcher,
-    const FailureInjection& failure_injection) {
+    const FailureInjection& failure_injection,
+    PipeBudget& budget) {
     std::array<unsigned char, 4> header{};
-    if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs)) {
+    if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs, budget, "header")) {
         return ProcessOneConnectionOutcome::failed_before_dispatch;
     }
     const std::uint32_t length =
@@ -235,14 +251,22 @@ ProcessOneConnectionOutcome ProcessOneConnection(
     }
 
     std::string request(length, '\0');
-    if (!ReadExact(pipe, request.data(), request.size(), kFrameReadTimeoutMs)) {
+    if (!ReadExact(pipe, request.data(), request.size(), kFrameReadTimeoutMs, budget, "body")) {
         return ProcessOneConnectionOutcome::failed_before_dispatch;
     }
 
     // Dispatch is deliberately completed before attempting to write. In
     // serve-once capture mode, a WPF/client disconnect therefore cannot abort
     // the camera transaction or trigger another shutter command.
-    const std::string response = dispatcher.Handle(request);
+    budget.Before("dispatch");
+    if (budget.Remaining() == 0) return ProcessOneConnectionOutcome::failed_before_dispatch;
+    const std::function<std::uint64_t()> remaining_host = [&budget] { return budget.Remaining(); };
+    const std::string response = [&] {
+        if constexpr (requires { dispatcher.Handle(request, remaining_host); }) {
+            if (!budget.serve_once) return dispatcher.Handle(request, remaining_host);
+        }
+        return dispatcher.Handle(request);
+    }();
     if (response.empty() || response.size() > kMaximumPipeFrameBytes) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
@@ -255,11 +279,13 @@ ProcessOneConnectionOutcome ProcessOneConnection(
     };
     if (failure_injection.fail_response_header_write ||
         !WriteExact(
-            pipe, response_header.data(), response_header.size(), kResponseWriteTimeoutMs)) {
+            pipe, response_header.data(), response_header.size(), kResponseWriteTimeoutMs,
+            budget, "response-header")) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
     if (failure_injection.fail_response_body_write ||
-        !WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs)) {
+        !WriteExact(pipe, response.data(), response.size(), kResponseWriteTimeoutMs,
+            budget, "response-body")) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
     // A response is delivered only after the client confirms that it read and
@@ -267,11 +293,17 @@ ProcessOneConnectionOutcome ProcessOneConnection(
     // request framing makes timeout cancellation target this exact operation.
     unsigned char acknowledgment = 0;
     if (failure_injection.fail_delivery_ack_wait ||
-        !ReadExact(pipe, &acknowledgment, 1U, kResponseWriteTimeoutMs) ||
+        !ReadExact(pipe, &acknowledgment, 1U, kResponseWriteTimeoutMs, budget, "ack") ||
         acknowledgment != kDeliveryAcknowledgment) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
-    if (failure_injection.fail_response_flush || !FlushFileBuffers(pipe)) {
+    // A client can send the fixed ACK byte before reading the response. Keep
+    // the existing outbound drain so that early ACK is not delivery proof.
+    // Do not enter it at an expired deadline. Once entered, this synchronous
+    // safety drain can exceed the host budget; it cannot be safely hard-killed.
+    budget.Before("flush");
+    if (failure_injection.fail_response_flush || budget.Remaining() == 0 ||
+        !FlushFileBuffers(pipe)) {
         return ProcessOneConnectionOutcome::dispatched_delivery_failed;
     }
     return ProcessOneConnectionOutcome::complete_delivery;
@@ -280,16 +312,11 @@ ProcessOneConnectionOutcome ProcessOneConnection(
 // Shared named-pipe accept/serve loop. Dispatcher is duck-typed exactly like
 // ProcessOneConnection above (only Handle/OnIdle/ShouldStop are required).
 //
-// lifetime_budget is the process's fixed self-termination bound: computed
-// once from GetTickCount64() at the top of this function and never
-// recomputed, identically for both the Single- and Dual-camera hosts (see
-// the doc comments on the two public entry points below for the specific
-// budget each one uses). This preserves the exact behavior that existed
-// before this loop was generalized for Single, and gives Dual the same
-// documented "absolute lifetime cap from launch" contract instead of an
-// idle-activity-extended one, so an operator/CI cannot keep the process
-// alive indefinitely just by sending it a steady trickle of requests
-// (including rejected ones).
+// The monotonic host budget is initialized once and is never replenished
+// by requests (including rejected ones). Dual binding and capture reuse the
+// same origin through shared_lifetime. Every I/O stage consults this budget;
+// synchronous journal/response drain and safe cancellation/SDK cleanup can still
+// outlast it, so it is not a promise of forced process termination.
 template <typename Dispatcher, typename FailureInjection>
 int RunNamedPipeServerLoop(
     std::string_view pipe_name,
@@ -297,23 +324,30 @@ int RunNamedPipeServerLoop(
     bool serve_once,
     const FailureInjection& failure_injection,
     std::chrono::milliseconds lifetime_budget,
-    const std::function<std::uint64_t()>& lifetime_ticks_for_testing = {}) {
+    const std::function<std::uint64_t()>& lifetime_ticks_for_testing = {},
+    AgentHostLifetime* shared_lifetime = nullptr) {
+    std::optional<AgentHostLifetime> local_lifetime;
+    if (shared_lifetime == nullptr) {
+        local_lifetime.emplace(static_cast<std::uint64_t>(
+            std::max(lifetime_budget, std::chrono::milliseconds(0)).count()),
+            lifetime_ticks_for_testing);
+    }
+    AgentHostLifetime& lifetime = shared_lifetime ? *shared_lifetime : *local_lifetime;
+    PipeBudget budget{lifetime, serve_once, {}, {}};
+    if constexpr (requires { failure_injection.before_stage_for_testing; }) {
+        budget.before_stage = failure_injection.before_stage_for_testing;
+        budget.observe_timeout = failure_injection.wait_timeout_for_testing;
+    }
     if (!IsSafePipeName(pipe_name)) {
         throw std::invalid_argument("hardware Camera Agent pipe name is invalid");
     }
     const std::wstring full_name =
         L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
     CurrentLogonPipeSecurity security;
-    const ULONGLONG lifetime_budget_ms = static_cast<ULONGLONG>(
-        std::max(lifetime_budget, std::chrono::milliseconds(0)).count());
-    const auto lifetime_now = [&]() -> ULONGLONG {
-        return lifetime_ticks_for_testing ? lifetime_ticks_for_testing() : GetTickCount64();
-    };
-    const ULONGLONG server_deadline = lifetime_now() + lifetime_budget_ms;
-
     for (;;) {
+        if (budget.Remaining() == 0) return 0;
         dispatcher.OnIdle();
-        if (dispatcher.ShouldStop() || (!serve_once && lifetime_now() >= server_deadline)) {
+        if (dispatcher.ShouldStop() || budget.Remaining() == 0) {
             return 0;
         }
         const HANDLE pipe = CreateNamedPipeW(
@@ -336,13 +370,24 @@ int RunNamedPipeServerLoop(
             if (serve_once) return kFailedBeforeDispatchExitCode;
             continue;
         }
+        budget.Before("accept");
+        const auto accept_timeout = [&] {
+            return static_cast<DWORD>(std::min<std::uint64_t>(
+                serve_once ? kAcceptTimeoutMs : 5000U, budget.Remaining()));
+        };
+        if (accept_timeout() == 0) {
+            CloseHandle(connect_overlapped.hEvent);
+            CloseHandle(pipe);
+            return 0;
+        }
+        if (budget.observe_timeout) budget.observe_timeout("accept", accept_timeout());
         const BOOL connected = ConnectNamedPipe(pipe, &connect_overlapped);
         const DWORD connect_error = connected ? ERROR_SUCCESS : GetLastError();
         bool connection_ready = connected != FALSE || connect_error == ERROR_PIPE_CONNECTED;
         if (!connection_ready && connect_error == ERROR_IO_PENDING) {
-            const DWORD wait = WaitForSingleObject(
-                connect_overlapped.hEvent,
-                serve_once ? kAcceptTimeoutMs : 5000U);
+            const DWORD timeout_ms = accept_timeout();
+            const DWORD wait = timeout_ms == 0 ? WAIT_TIMEOUT : WaitForSingleObject(
+                connect_overlapped.hEvent, timeout_ms);
             if (wait == WAIT_OBJECT_0) {
                 DWORD ignored = 0;
                 connection_ready =
@@ -360,7 +405,7 @@ int RunNamedPipeServerLoop(
         }
 
         const ProcessOneConnectionOutcome outcome =
-            ProcessOneConnection(pipe, dispatcher, failure_injection);
+            ProcessOneConnection(pipe, dispatcher, failure_injection, budget);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
@@ -393,7 +438,7 @@ int RunHardwareCameraAgentNamedPipeServer(
         dispatcher,
         serve_once,
         failure_injection,
-        std::chrono::minutes(10));
+        std::chrono::minutes(10), failure_injection.lifetime_ticks_for_testing);
 }
 
 int RunDualHardwareCameraAgentNamedPipeServer(
@@ -401,7 +446,8 @@ int RunDualHardwareCameraAgentNamedPipeServer(
     DualHardwareCameraAgentDispatcher& dispatcher,
     bool serve_once,
     DualHardwareCameraAgentPipeFailureInjectionForTesting failure_injection,
-    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing) {
+    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing,
+    AgentHostLifetime* shared_lifetime) {
     // Same fixed-from-launch policy as RunHardwareCameraAgentNamedPipeServer
     // (Orchestrator decision, 2026-08-17): a rolling/idle-extended deadline
     // was considered but rejected as needlessly complex and because it let
@@ -420,7 +466,7 @@ int RunDualHardwareCameraAgentNamedPipeServer(
         serve_once,
         failure_injection,
         lifetime_budget_for_testing.value_or(std::chrono::minutes(10)),
-        failure_injection.lifetime_ticks_for_testing);
+        failure_injection.lifetime_ticks_for_testing, shared_lifetime);
 }
 
 int RunDualBindingCameraAgentNamedPipeServer(
@@ -428,7 +474,8 @@ int RunDualBindingCameraAgentNamedPipeServer(
     DualBindingCameraAgentDispatcher& dispatcher,
     bool serve_once,
     DualBindingCameraAgentPipeFailureInjectionForTesting failure_injection,
-    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing) {
+    std::optional<std::chrono::milliseconds> lifetime_budget_for_testing,
+    AgentHostLifetime* shared_lifetime) {
     // Same fixed-from-launch lifetime as the other two hosts. Binding is if
     // anything the one that most needs it: a session that stays addressable
     // forever is a session an operator can confirm long after they stopped
@@ -438,7 +485,7 @@ int RunDualBindingCameraAgentNamedPipeServer(
         dispatcher,
         serve_once,
         failure_injection,
-        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)));
+        lifetime_budget_for_testing.value_or(std::chrono::minutes(10)), {}, shared_lifetime);
 }
 
 } // namespace a0::phase0
