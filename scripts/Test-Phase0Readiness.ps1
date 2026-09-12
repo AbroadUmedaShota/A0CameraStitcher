@@ -5,11 +5,72 @@ param(
 
     [string]$SdkRoot = (Join-Path $PSScriptRoot '..\.tools\nikon\d810-remote-sdk'),
 
-    [string]$BuildRoot = (Join-Path $PSScriptRoot '..\build')
+    # Retained for old callers only; never used to discover/select an executable.
+    [string]$BuildRoot = (Join-Path $PSScriptRoot '..\build'),
+
+    [string]$Phase0ExecutablePath = '',
+
+    [string]$ExpectedPhase0Sha256 = ''
 )
 
 $ErrorActionPreference = 'Stop'
+# Native exit codes are classified below, independent of the caller's preference.
+# Invocation with & gives this assignment script scope and preserves the caller.
+$PSNativeCommandUseErrorActionPreference = $false
 
+# No Mandatory parameter prompts: even unattended callers with missing inputs
+# must stop before PnP, preflight or either inventory transport is accessed.
+$phase0Lease = $null
+$phase0Sha256 = $null
+$selection = 'MissingExecutablePath'
+try {
+    if ([string]::IsNullOrWhiteSpace($Phase0ExecutablePath)) { throw $selection }
+    $selection = 'MissingExpectedSha256'
+    if ([string]::IsNullOrWhiteSpace($ExpectedPhase0Sha256)) { throw $selection }
+    $selection = 'InvalidExpectedSha256'
+    if ($ExpectedPhase0Sha256 -cnotmatch '\A[0-9a-fA-F]{64}\z') { throw $selection }
+    $selection = 'InvalidExecutablePath'
+    # Drive-absolute local paths only; no PATH lookup, drive-relative path or UNC.
+    if ($Phase0ExecutablePath -notmatch '\A[A-Za-z]:[\\/]' -or
+        [System.IO.Path]::GetExtension($Phase0ExecutablePath) -ine '.exe') { throw $selection }
+    $phase0Exe = [System.IO.Path]::GetFullPath($Phase0ExecutablePath)
+    $selection = 'ExecutableUnavailable'
+    $file = [System.IO.FileInfo]::new($phase0Exe)
+    if (-not $file.Exists) { throw $selection }
+    # A mutable junction/symlink must not redirect the path after it was hashed.
+    $selection = 'ReparsePathRejected'
+    $component = $file
+    while ($null -ne $component) {
+        if (($component.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw $selection }
+        $component = if ($component -is [System.IO.FileInfo]) { $component.Directory } else { $component.Parent }
+    }
+    $selection = 'ExecutableUnreadable'
+    # Retain the verified file handle until all commands finish. This also
+    # denies writes/replacement while Windows launches the selected executable.
+    $phase0Lease = [System.IO.File]::Open($phase0Exe, 'Open', 'Read', 'Read')
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $phase0Sha256 = [BitConverter]::ToString($sha256.ComputeHash($phase0Lease)).Replace('-', '').ToLowerInvariant()
+    } finally { $sha256.Dispose() }
+    $selection = 'Sha256Mismatch'
+    if (-not [string]::Equals($phase0Sha256, $ExpectedPhase0Sha256, [StringComparison]::OrdinalIgnoreCase)) { throw $selection }
+    $selection = 'VerifiedExplicit'
+} catch {
+    if ($null -ne $phase0Lease) { $phase0Lease.Dispose() }
+    [pscustomobject][ordered]@{
+        Stage = $Stage
+        Phase0ExecutableSelection = $selection
+        Phase0ExecutableAlias = 'PHASE0-CLI'
+        Phase0ExecutableSHA256 = $phase0Sha256
+        Phase0SourceCommitVerified = $false
+        ExecutablePathPrinted = $false
+    } | Format-List
+    Write-Output 'Phase0Preflight: BLOCKED'
+    Write-Output 'Executable identity was not verified. No PnP, SDK or WPD operation was performed.'
+    exit 1
+}
+
+try {
 $vsRoot = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
 $vsDevCmd = Join-Path $vsRoot 'Common7\Tools\VsDevCmd.bat'
 $msvcRoot = Join-Path $vsRoot 'VC\Tools\MSVC'
@@ -38,13 +99,7 @@ $cmakeReady = $null -ne $cmakePath
 $resolvedSdkRoot = [System.IO.Path]::GetFullPath($SdkRoot)
 $sdkRootReady = Test-Path -LiteralPath $resolvedSdkRoot -PathType Container
 
-$phase0Candidates = @(
-    (Join-Path $BuildRoot 'Debug\A0CameraStitcher.Phase0.exe'),
-    (Join-Path $BuildRoot 'Release\A0CameraStitcher.Phase0.exe'),
-    (Join-Path $BuildRoot 'A0CameraStitcher.Phase0.exe')
-)
-$phase0Exe = $phase0Candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-$cliPresent = $null -ne $phase0Exe
+$cliPresent = $true # Established by the explicit identity gate above.
 
 $d810Nodes = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object {
     $_.FriendlyName -match '(^|\s)D810($|\s)|Nikon.*D810|D810.*Nikon'
@@ -68,7 +123,8 @@ if ($cliPresent -and $sdkRootReady) {
     $previousSdkRoot = $env:NIKON_D810_SDK_ROOT
     try {
         $env:NIKON_D810_SDK_ROOT = $resolvedSdkRoot
-        & $phase0Exe preflight --stage $Stage.ToLowerInvariant()
+        # Never forward raw native output (which can contain paths/identifiers).
+        $preflightOutput = @(& $phase0Exe preflight --stage $Stage.ToLowerInvariant() 2>&1)
         $cliExit = $LASTEXITCODE
         $cliReady = $cliExit -eq 0
         if ($cliReady) {
@@ -112,9 +168,14 @@ $checks = [ordered]@{
     MsvcX64 = $msvcReady
     MsvcToolset = if ($msvcToolset) { $msvcToolset.Name } else { $null }
     CMake = $cmakeReady
-    CMakePath = $cmakePath
+    CMakePathPrinted = $false
     SdkRootPresent = $sdkRootReady
     Phase0CliPresent = $cliPresent
+    Phase0ExecutableSelection = $selection
+    Phase0ExecutableAlias = 'PHASE0-CLI'
+    Phase0ExecutableSHA256 = $phase0Sha256
+    Phase0SourceCommitVerified = $false
+    ExecutablePathPrinted = $false
     LicensedAdapterPreflight = $cliReady
     LicensedSdkInventory = $sdkInventoryReady
     LicensedSdkCameraCount = $sdkCameraCount
@@ -153,3 +214,15 @@ if ($inventoryReady) {
 Write-Output 'Phase0Preflight: BLOCKED'
 Write-Output 'No camera serial number, instance ID, or SDK content was printed.'
 exit 1
+} catch {
+    # Report a stable category, not exception messages containing local paths or
+    # native diagnostics. The nested finally restores the SDK environment first.
+    Write-Output 'Phase0ExecutableSelection: VerifiedExplicit'
+    Write-Output "Phase0ExecutableSHA256: $phase0Sha256"
+    Write-Output 'Phase0SourceCommitVerified: False'
+    Write-Output 'Phase0Preflight: BLOCKED'
+    Write-Output 'ReadinessCheckFailed. No raw exception or device identifiers were printed.'
+    exit 1
+} finally {
+    $phase0Lease.Dispose()
+}

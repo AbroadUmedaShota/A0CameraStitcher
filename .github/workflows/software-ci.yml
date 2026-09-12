@@ -111,6 +111,13 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      # This invokes only a generated harmless CLI and child-local PnP stubs,
+      # never Test-Phase0Readiness against a real/SDK-less product executable.
+      - name: Phase0 readiness executable identity regression (fake-only)
+        id: readiness-identity
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.checkout.outcome == 'success' && steps.setup-dotnet.outcome == 'success' }}
+        run: ./scripts/Test-Phase0ReadinessScript.ps1
+
       - name: Show toolchain versions
         id: toolchain-info
         if: ${{ steps.scope.outputs.run_full == 'true' }}
@@ -234,6 +241,7 @@ jobs:
           }
 
           $rows = @(
+            @{ Name = 'Phase0 readiness executable identity (fake-only)'; Outcome = '${{ steps.readiness-identity.outcome }}'; Duration = '-' }
             @{ Name = 'SDK-less C++ Debug (CTest -j 1)';         Outcome = '${{ steps.cxx-debug-test.outcome }}';   Duration = Format-Duration $env:DURATION_CXX_DEBUG_BUILD }
             @{ Name = 'SDK-less C++ Release (CTest -j 1)';       Outcome = '${{ steps.cxx-release-test.outcome }}'; Duration = Format-Duration $env:DURATION_CXX_RELEASE_BUILD }
             @{ Name = 'Camera Agent incremental packaging';      Outcome = '${{ steps.camera-agent-packaging.outcome }}'; Duration = Format-Duration $env:DURATION_CAMERA_AGENT_PACKAGING }

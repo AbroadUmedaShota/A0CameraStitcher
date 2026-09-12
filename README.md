@@ -47,7 +47,9 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 ## Phase 0 CLI
 
 ```powershell
-pwsh -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single
+$a0Phase0Exe = 'C:\A0CameraStitcher\candidate\Release\A0CameraStitcher.Phase0.exe'
+$a0ExpectedSha256 = '<信頼できる候補の検証記録にある64桁のSHA-256>'
+pwsh -NoProfile -NonInteractive -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single -Phase0ExecutablePath $a0Phase0Exe -ExpectedPhase0Sha256 $a0ExpectedSha256
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 '-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk'
 cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
@@ -58,6 +60,8 @@ build\Debug\A0CameraStitcher.Phase0.exe wpd-correlation-status --alias CAM-A
 build\Debug\A0CameraStitcher.Phase0.exe live-view --alias CAM-A --duration-seconds 300
 build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 10 --frames 1
 ```
+
+readinessは実機確認用です。上記のパスと期待hashは、使用を承認された候補の記録に置き換え、実機確認の条件が揃っている場合だけ実行してください。未指定・不一致ならPnP/SDK/WPDを呼ぶ前に`BLOCKED`で終了します。Debug/Releaseを自動選択しません。実行ファイルからその場で自己計算したhashだけでは最新版の証明になりません。詳細とfake-only回帰は[readinessの使用方法](docs/PHASE0_READINESS.md#実行ファイルを明示するreadiness)を参照してください。
 
 Phase 0Bの旧identity-v2登録は履歴診断用checkpointとしてのみ保持します。列挙順、USB port、衝突するSDK Name/Interface digest、旧mapを二台のproduction binding根拠にしません。
 
