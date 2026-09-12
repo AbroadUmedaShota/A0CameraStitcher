@@ -47,12 +47,26 @@ internal static partial class HardwareCameraAgentDiagnostic
         var printable = new string(bounded
             .Select(character => char.IsControl(character) ? ' ' : character)
             .ToArray());
-        var sanitized = SensitiveAssignment().Replace(printable, "$1=[redacted]");
-        sanitized = AbsoluteWindowsPath().Replace(sanitized, "[redacted-path]");
+        // Preserve the path prefix until its whole private span has been removed.
+        var sanitized = AbsoluteWindowsPath().Replace(printable, RedactAbsolutePath);
+        sanitized = SensitiveAssignment().Replace(sanitized, "$1=[redacted]");
         sanitized = LongIdentifier().Replace(sanitized, "[redacted-identifier]");
         sanitized = GeneralAlphanumericIdentifier().Replace(sanitized, "[redacted-identifier]");
         sanitized = RepeatedWhitespace().Replace(sanitized, " ").Trim();
         return sanitized[..Math.Min(sanitized.Length, MaximumOutputCharacters)];
+    }
+
+    private static string RedactAbsolutePath(Match match)
+    {
+        if (!match.Groups["ambiguous"].Success)
+        {
+            return "[redacted-path]";
+        }
+
+        // An ambiguous suffix may be a filename or more diagnostic fields. Never
+        // restore its values; retain only already-whitelisted field names.
+        return "[redacted-path]" + string.Concat(SensitiveAssignment().Matches(match.Value)
+            .Select(assignment => $" {assignment.Groups[1].Value}=[redacted]"));
     }
 
     [GeneratedRegex(
@@ -60,7 +74,13 @@ internal static partial class HardwareCameraAgentDiagnostic
         RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveAssignment();
 
-    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/]|\\\\\\\\|//)[^\\s\"']+", RegexOptions.CultureInvariant)]
+    // Only a double quote unambiguously closes a quoted Windows path. Single
+    // quotes, spaces, semicolons and field-looking text can be filename parts.
+    // Remove an ambiguous path through the next double quote, pipe or bounded
+    // end; never release a suffix merely because it resembles a category field.
+    [GeneratedRegex(
+        """(?i)"(?:[a-z]:[\\/]|\\\\|//)[^"]*(?:"|$)|(?<ambiguous>'?(?:[a-z]:[\\/]|\\\\|//)[^"|]*)""",
+        RegexOptions.CultureInvariant)]
     private static partial Regex AbsoluteWindowsPath();
 
     [GeneratedRegex(@"\b(?:[0-9a-fA-F]{16,}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b")]
