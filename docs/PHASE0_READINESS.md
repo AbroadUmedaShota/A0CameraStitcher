@@ -53,9 +53,32 @@ Phase 0は通信専用チャートを使うため、`HG-0001`と`HG-0002`がopen
 - software確認: SDK有効・SDKなしの両Debug buildと全CTestを維持する。empty-spool aggregate、SDK close後/WPD recovery前の異常系operator gate、WPD reopen失敗時の`FailedPartial`、delete/retry 0、匿名fault summaryに加え、direct hardware capture拒否、process-wide named lease、pair/hybrid watchdogを契約化した。既存のstop/close失敗時のWPD未開始、WPD失敗時のresume skip、resume失敗時の原画像保持、preview非保存、匿名error detail、uncertain dispatch候補のquarantine、SDK状態summary、Live View/handoff reportも維持する。M3 simulated Release buildは警告0・エラー0で検証済みである。
 - 現在判定: `PHASE0A-IDENTITY-V2-REVERIFY / DEDICATED-SPOOL-EMPTY-REQUIRED`。Standalone 5分Live View・別プロセス再起動の一台実機結果は保持するが、P0-A1のSDK identity continuityはPartialへ戻した。ADR-0020のsoftware contractと全payload fail-closed preflightは合格したが、接続中cardに90 payload objectがあるためone-shot前で停止中である。P0-A2のone-shotと10/10、A3、A4の10回handoffは未実施で、M1Aは未完了。vendor operation、existing cardのbulk delete/format、retryは実装・実行しない。
 
+## 実行ファイルを明示するreadiness
+
+過去の確認記録は現在のPC・接続状態の合格を意味しません。readinessは実機への読み取り専用確認を含むため、対象PC、台数、実行許可を別途確認した後にだけ使います。実行ファイルの照合に合格しただけでは撮影や実機試験を許可しません。
+
 ```powershell
-pwsh -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single
+# 例のパスとhashは、信頼できる候補の検証記録にある値へ置き換える。
+$a0Phase0Exe = 'C:\A0CameraStitcher\candidate\Release\A0CameraStitcher.Phase0.exe'
+$a0ExpectedSha256 = '<信頼できる候補の検証記録にある64桁のSHA-256>'
+pwsh -NoProfile -NonInteractive -File .\scripts\Test-Phase0Readiness.ps1 -Stage Single -Phase0ExecutablePath $a0Phase0Exe -ExpectedPhase0Sha256 $a0ExpectedSha256
+# 2台の確認が許可された場合は -Stage Dual。SDKの配置が異なる場合は -SdkRoot も明示する。
 ```
+
+- `Phase0ExecutablePath`はローカルのドライブ絶対パスの`.exe`、`ExpectedPhase0Sha256`は64桁の16進数です。入力を省略しても対話プロンプトを出さず、`BLOCKED`/exit1で停止します。
+- `BuildRoot`は旧呼出しの互換用に受け付けるだけで、実行ファイルの探索や選択に使いません。古いDebug版が残っていても、明示したファイル以外は呼びません。UNC・相対パス・reparse point経由も拒否します。
+- 欠落・無効・読み取り不能・hash不一致はPnP/preflight/SDK/WPDより前に停止します。一致したファイルの読み取りハンドルを保持し、確認中の書込み・差替えを拒否します。
+- 出力は`Phase0ExecutableSelection`、匿名alias `PHASE0-CLI`、実測SHA-256を含み、実行ファイルのフルパスとnativeの生出力は表示しません。`Phase0SourceCommitVerified=False`は、この処理だけではsource commitとの対応や最新版であることを証明していない、という意味です。
+- **期待hashの出所が重要です。** source commit、dirty差分、ビルド条件と候補ファイルの対応を確認した検証記録から取得してください。選んだ実行ファイルからその場でhashを自己計算して渡すだけでは、古い実行体の取り違えを発見できません。時刻、Debug/Releaseの名前、呼出者のラベルも最新版の保証にはなりません。
+- 正常候補では従来どおり、PnPの台数、preflight、SDK inventory終了後のWPD inventory、明示的な対応付けを確認します。結果は`READY`/exit0、`READY_FOR_IDENTITY_BINDING`/exit2、`BLOCKED`/exit1です。SDK用の環境変数は終了時に元へ戻します。列挙順でCAM-A/Bを自動割当てしません。
+
+ソフトウェアだけの回帰確認は次の専用テストです。テスト内で作る無害なCLIと子PowerShell内のPnP代替処理のみを使い、実機readinessを直接起動しません。
+
+```powershell
+pwsh -NoProfile -NonInteractive -File .\scripts\Test-Phase0ReadinessScript.ps1
+```
+
+PowerShell 7.4以降と.NET 10 SDKを使用します。生成したfixtureと各子プロセスの出力・結果は、表示された一時フォルダに成功時も失敗時も保持します。timeout時に自動再実行や再帰削除はしません。この回帰の合格は、SDK/WPD接続、撮影、100回耐久、A0品質の合格ではありません。
 
 ## HG-0001: D810 A0品質契約
 
