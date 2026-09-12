@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-09-11
+更新日: 2026-09-12（WI-0017-SW01の内部制御準備を追記）
 
 ## 総合判定
 
@@ -12,10 +12,12 @@
 |---|---|---|
 | 1組の撮影と原画像2枚の回収・保存（CaptureRecoveryOnly） | 実装済み。合成は行わない | 受入未完了 |
 | 同じCAM-A/B割当で10組を順番に実行 | 10回runner実装済み。HardwareDualの他の必須引数と併用し、`--capture-recovery-only --capture-recovery-run-count 10`で明示起動。失敗時停止、自動retryなし | 10組の受入・実測p95承認は未完了 |
-| 同じCAM-A/B割当で100組を順番に実行 | 100回runner未実装 | 耐久受入未完了 |
+| 同じCAM-A/B割当で100組を順番に実行 | 内部制御をWI-0017-SW01で準備。本番CLI/UIの100回開始は未対応で、引き続き拒否する | 耐久受入未完了 |
 | 時間・SHA-256の集計とp95承認記録 | 記録処理は実装済み。100件の記録を扱えることと、100回の撮影を実行できることは別 | 実機実行や承認者の権限をソフトウェア集計だけでは証明しない |
 
-根拠は[10回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。この更新はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たなビルド・テスト・実機操作の結果ではない。
+根拠は[10回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。2026-09-11までの記載はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たな実機操作の結果ではない。
+
+2026-09-12の[WI-0017-SW01](WI0017_HUNDRED_RUN_CORE.md)では、100回試験の内部制御と偽workflowによる検証を実機から分離した。開始前のp95承認照合、各回の記録保存、最初の失敗・未確定・割当失効・時間不足での停止を扱う。本書と要件中の「100回runner未実装」は、本番起動経路と実機での適合確認を含むrunner全体の残件を指す。内部部品の追加だけでこの残件やWI-0017を完了扱いにしない。
 
 第三者向けには[Phase 0 二台カメラ・ショーケース](PHASE0_SHOWCASE.md)を入口とする。二台順次撮影のsoftware contractと安全停止は提示可能だが、実機二台撮影とA0品質の受入完了は主張しない。
 

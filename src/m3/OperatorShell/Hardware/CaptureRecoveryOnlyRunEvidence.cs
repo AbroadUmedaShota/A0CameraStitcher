@@ -23,25 +23,27 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
     private const string OperatorRecordedApproval = "OperatorRecordedApproval";
     private const long MaximumEvidenceFileBytes = 4 * 1024 * 1024;
     private const long MaximumApprovalFileBytes = 64 * 1024;
-    private static readonly Regex RunId = new("^run-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
+    internal static readonly Regex RunId = new("^run-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
     private static readonly Regex ApprovalId = new("^approval-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
-    private static readonly Regex Hash = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
-    private static readonly JsonSerializerOptions IndentedJsonOptions = new(JsonSerializerDefaults.Web)
+    internal static readonly Regex Hash = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
+    internal static readonly JsonSerializerOptions IndentedJsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
     };
     private static readonly JsonSerializerOptions CompactJsonOptions = new(JsonSerializerDefaults.Web);
 
-    private readonly string _root;
+    internal readonly string _root;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly Action<string>? _beforeWrite;
     private readonly Action<string>? _afterPublish;
+    private readonly Action<string>? _beforeClaimFlush;
 
     internal CaptureRecoveryOnlyRunEvidenceWriter(
         string evidenceRoot,
         Func<DateTimeOffset>? utcNow = null,
         Action<string>? beforeWrite = null,
-        Action<string>? afterPublish = null)
+        Action<string>? afterPublish = null,
+        Action<string>? beforeClaimFlush = null)
     {
         if (string.IsNullOrWhiteSpace(evidenceRoot))
             throw new ArgumentException("A fixed evidence root is required.", nameof(evidenceRoot));
@@ -51,6 +53,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _beforeWrite = beforeWrite;
         _afterPublish = afterPublish;
+        _beforeClaimFlush = beforeClaimFlush;
     }
 
     internal CaptureRecoveryOnlyRunEvidenceFiles CreateAndPublish(CaptureRecoveryOnlyRunEvidenceRequest request)
@@ -114,6 +117,17 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
             throw;
         }
     }
+
+    /// <summary>
+    /// Reserves a previously recorded approval before a 100-run dispatcher can start.
+    /// The returned session is deliberately internal: the public command surface must
+    /// continue to reject production 100-run execution until its separate gate exists.
+    /// </summary>
+    internal CaptureRecoveryOnlyHundredRunEvidenceSession BeginHundredRun(
+        string runId,
+        string? approvalId,
+        DateTimeOffset startedAtUtc) =>
+        new(this, runId, approvalId, startedAtUtc);
 
     /// <summary>
     /// Records a separately supplied operator decision. This component validates and
@@ -191,7 +205,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         }
     }
 
-    private CaptureRecoveryOnlyRunEvidenceFiles WriteRun(CaptureRecoveryOnlyRunEvidence evidence)
+    internal CaptureRecoveryOnlyRunEvidenceFiles WriteRun(CaptureRecoveryOnlyRunEvidence evidence)
     {
         var runs = Path.Combine(_root, "runs");
         EnsureWriteDirectory(runs);
@@ -264,19 +278,33 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         return hash;
     }
 
-    private CaptureRecoveryOnlyP95Approval LoadAndValidateApproval(
+    internal CaptureRecoveryOnlyP95Approval LoadAndValidateApproval(
         string? id,
         string hundredId,
         IReadOnlyList<CaptureRecoveryOnlyRunAttemptEvidence> attempts)
     {
+        var approval = LoadAndValidateApproval(id, hundredId, attempts[0].StartedAtUtc);
+        var ten = LoadPublishedTenRun(approval.TenRunId);
+        if (attempts.Any(item => ten.TransactionIds.Contains(item.TransactionId)))
+            throw new InvalidDataException("10-run and 100-run transaction IDs must be disjoint.");
+        return approval;
+    }
+
+    internal CaptureRecoveryOnlyP95Approval LoadAndValidateApproval(
+        string? id,
+        string hundredId,
+        DateTimeOffset startedAtUtc)
+    {
         if (id is null || !ApprovalId.IsMatch(id))
             throw new InvalidDataException("A 100-run requires an approval artifact.");
+        if (startedAtUtc.Offset != TimeSpan.Zero)
+            throw new InvalidDataException("A 100-run start time must be UTC.");
 
         var approval = ReadApproval(ApprovalPath(id));
         if (approval.ApprovalRecordId != id ||
             approval.TargetHundredRunId != hundredId ||
             approval.TenRunId == hundredId ||
-            approval.RecordedAtUtc >= attempts[0].StartedAtUtc)
+            approval.RecordedAtUtc >= startedAtUtc)
         {
             throw new InvalidDataException("Approval identity, target, or time ordering is invalid.");
         }
@@ -290,8 +318,6 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
             throw new InvalidDataException("Approval does not bind the published 10-run evidence.");
         }
 
-        if (attempts.Any(item => ten.TransactionIds.Contains(item.TransactionId)))
-            throw new InvalidDataException("10-run and 100-run transaction IDs must be disjoint.");
         return approval;
     }
 
@@ -462,7 +488,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         }
     }
 
-    private PublishedTenRun LoadPublishedTenRun(string runId)
+    internal PublishedTenRun LoadPublishedTenRun(string runId)
     {
         if (!RunId.IsMatch(runId))
             throw new InvalidDataException("The 10-run ID is invalid.");
@@ -586,9 +612,10 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         }
     }
 
-    private IReadOnlyList<string> ClaimTransactions(
+    internal IReadOnlyList<string> ClaimTransactions(
         string runId,
-        IReadOnlyList<CaptureRecoveryOnlyRunAttemptEvidence> attempts)
+        IReadOnlyList<CaptureRecoveryOnlyRunAttemptEvidence> attempts,
+        bool retainOnFailure = false)
     {
         var directory = Path.Combine(_root, "transactions");
         EnsureWriteDirectory(directory);
@@ -603,27 +630,46 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
                 CreateExclusiveClaim(
                     claim,
                     runId,
-                    "A transaction ID was already used by another evidence run.");
+                    "A transaction ID was already used by another evidence run.",
+                    retainOnFailure);
                 claims.Add(claim);
             }
             return claims;
         }
         catch
         {
-            foreach (var claim in claims)
-                TryDeleteOwnedFile(claim);
+            if (!retainOnFailure)
+            {
+                foreach (var claim in claims)
+                    TryDeleteOwnedFile(claim);
+            }
             throw;
         }
     }
 
-    private string ClaimApproval(string approvalId, string hundredRunId)
+    internal string ClaimApproval(string approvalId, string hundredRunId, bool retainOnFailure = false)
     {
         var claim = Path.Combine(_root, "approvals", approvalId + ".used");
-        CreateExclusiveClaim(claim, hundredRunId, "Approval is already used or in progress.");
+        CreateExclusiveClaim(
+            claim,
+            hundredRunId,
+            "Approval is already used or in progress.",
+            retainOnFailure);
         return claim;
     }
 
-    private void CreateExclusiveClaim(string path, string content, string failureMessage)
+    internal void EnsureApprovalClaimOwned(string approvalId, string hundredRunId)
+    {
+        var bytes = ReadRegularLocalFile(Path.Combine(_root, "approvals", approvalId + ".used"), 256);
+        if (Encoding.UTF8.GetString(bytes) != hundredRunId)
+            throw new InvalidDataException("100-run approval claim is not owned by this run.");
+    }
+
+    private void CreateExclusiveClaim(
+        string path,
+        string content,
+        string failureMessage,
+        bool retainOnFailure = false)
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidDataException("A claim directory is required.");
@@ -643,18 +689,19 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
             writer.Write(content);
             writer.Flush();
+            _beforeClaimFlush?.Invoke(Path.GetFileName(path));
             stream.Flush(true);
             WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            if (created)
+            if (created && !retainOnFailure)
                 TryDeleteOwnedFile(path);
             throw new InvalidDataException(failureMessage, exception);
         }
     }
 
-    private void EnsureRunDestinationAvailable(string runId)
+    internal void EnsureRunDestinationAvailable(string runId)
     {
         var runs = Path.Combine(_root, "runs");
         EnsureWriteDirectory(runs);
@@ -692,7 +739,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         }
     }
 
-    private static void ValidateOutcome(CaptureRecoveryOnlyRunAttempt item)
+    internal static void ValidateOutcome(CaptureRecoveryOnlyRunAttempt item)
     {
         var outcome = item.Outcome
             ?? throw new InvalidDataException("Outcome is missing.");
@@ -762,7 +809,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
         }
     }
 
-    private static CaptureRecoveryOnlyRunAttemptEvidence ToAttempt(
+    internal static CaptureRecoveryOnlyRunAttemptEvidence ToAttempt(
         int number,
         CaptureRecoveryOnlyRunAttempt item) => new(
             number,
@@ -780,28 +827,28 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
                 original.SizeBytes,
                 original.Sha256)).ToArray());
 
-    private static TimeSpan Percentile50(TimeSpan[] values) =>
+    internal static TimeSpan Percentile50(TimeSpan[] values) =>
         values.Length % 2 == 1
             ? values[values.Length / 2]
             : TimeSpan.FromTicks((values[values.Length / 2 - 1].Ticks + values[values.Length / 2].Ticks) / 2);
 
-    private static TimeSpan Percentile95(TimeSpan[] values) =>
+    internal static TimeSpan Percentile95(TimeSpan[] values) =>
         values[(int)Math.Ceiling(values.Length * .95) - 1];
 
-    private static bool ContainsSensitive(string value) =>
+    internal static bool ContainsSensitive(string value) =>
         value.Contains("serial", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("identifier", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("deviceid", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("cameraid", StringComparison.OrdinalIgnoreCase);
 
-    private void EnsureWriteDirectory(string directory)
+    internal void EnsureWriteDirectory(string directory)
     {
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(directory);
         Directory.CreateDirectory(directory);
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(directory);
     }
 
-    private void WriteAtomic(string directory, string name, string content)
+    internal void WriteAtomic(string directory, string name, string content)
     {
         WriteAtomicBytes(directory, name, Encoding.UTF8.GetBytes(content));
     }
@@ -1082,7 +1129,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
                new HashSet<string>(properties, StringComparer.Ordinal).SetEquals(expected);
     }
 
-    private sealed record PublishedTenRun(
+    internal sealed record PublishedTenRun(
         TimeSpan P95,
         DateTimeOffset CompletedAtUtc,
         HashSet<Guid> TransactionIds,

@@ -40,6 +40,21 @@ if (args is ["--formal-wpf-flow"])
     return diagnosticFailures == 0 ? 0 : 1;
 }
 
+if (args is ["--hundred-run-core"])
+{
+    try
+    {
+        await HundredRunCoordinatorTests.RunAsync();
+        Console.WriteLine("PASS CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed: {exception}");
+        return 1;
+    }
+}
+
 if (args is ["--single-handoff-stop-order"])
 {
     try
@@ -1071,7 +1086,18 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly software aggregation persists bound approval evidence without hardware claims: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {90 - failures.Count}/90 passed.");
+try
+{
+    await HundredRunCoordinatorTests.RunAsync();
+    Console.WriteLine("PASS CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed");
+}
+catch (Exception exception)
+{
+    failures.Add("CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed");
+    Console.Error.WriteLine($"FAIL CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed: {exception}");
+}
+
+Console.WriteLine($"Operator shell tests: {91 - failures.Count}/91 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
