@@ -40,6 +40,21 @@ if (args is ["--formal-wpf-flow"])
     return diagnosticFailures == 0 ? 0 : 1;
 }
 
+if (args is ["--single-handoff-stop-order"])
+{
+    try
+    {
+        await HardwareSingleHandoffLateFrameStopOrderRegressionAsync();
+        Console.WriteLine("PASS late Live View frame is not dropped while stop ordering is serialized");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL late Live View frame is not dropped while stop ordering is serialized: {exception}");
+        return 1;
+    }
+}
+
 // Shared with tests that must pre-write a Live View preview (whose canonical
 // path only depends on runId + alias, not transactionId, so it can be
 // written before the transaction ID is known) at a location that will later
@@ -2491,11 +2506,103 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
     }
 }
 
+static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var releaseSeedPersist = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseTargetStartPersist = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    HardwareSingleHandoffEvidenceCollector? collector = null;
+    try
+    {
+        var seedPersistReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var targetStartPersistReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        Directory.CreateDirectory(artifactsRoot);
+        var persistCount = 0;
+        var tick = 0L;
+        var clockBase = new DateTimeOffset(2026, 9, 12, 0, 0, 0, TimeSpan.Zero);
+        DateTimeOffset NextTime() => clockBase.AddMilliseconds(Interlocked.Increment(ref tick));
+        collector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "evidence"),
+            artifactsRoot,
+            new string('a', 40),
+            NextTime,
+            _ =>
+            {
+                switch (Interlocked.Increment(ref persistCount))
+                {
+                    case 2:
+                        seedPersistReached.TrySetResult();
+                        releaseSeedPersist.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                        break;
+                    case 3:
+                        targetStartPersistReached.TrySetResult();
+                        releaseTargetStartPersist.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                        break;
+                }
+            });
+
+        var seedSession = "10000000000000000000000000000001";
+        collector.ObserveLiveViewStarted(ContinuousLiveViewResult(seedSession, "Started", running: true));
+        collector.ObserveLiveViewStopped(ContinuousLiveViewResult(seedSession, "Stopped", running: false));
+        await seedPersistReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var targetSession = "20000000000000000000000000000002";
+        collector.ObserveLiveViewStarted(ContinuousLiveViewResult(targetSession, "Started", running: true));
+        collector.ObserveLiveViewFrame(targetSession, 1);
+        collector.ObserveLiveViewFrame(targetSession, 2);
+        collector.ObserveLiveViewStopRequested(targetSession);
+        collector.ObserveLiveViewStopped(ContinuousLiveViewResult(targetSession, "Stopped", running: false));
+        releaseSeedPersist.TrySetResult();
+        await targetStartPersistReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        releaseTargetStartPersist.TrySetResult();
+        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        using (var beforeLateFrame = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath)))
+        {
+            Check.Equal("InProgress", beforeLateFrame.RootElement.GetProperty("terminalState").GetString()!);
+            Check.True(beforeLateFrame.RootElement.GetProperty("persistenceHealthy").GetBoolean(),
+                "Both gated writes must complete without a timeout or persistence failure.");
+        }
+
+        // The stop has now been applied. Frame 3 is a late frame: it must be queued
+        // because the synchronous stop marker is retained, then make the run Invalid.
+        // If ApplyLiveViewStarted cleared that marker, the third frame is silently
+        // dropped after the first two frames and the run instead looks Incomplete.
+        collector.ObserveLiveViewFrame(targetSession, 3);
+        collector.Seal();
+        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        Check.True(seedPersistReached.Task.IsCompletedSuccessfully, "The seed second persistence boundary must be reached.");
+        Check.True(targetStartPersistReached.Task.IsCompletedSuccessfully, "The target started persistence boundary must be reached.");
+        Check.Equal("Invalid", ReadTerminalState(collector.EvidencePath));
+        using (var afterLateFrame = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath)))
+        {
+            Check.Equal("LateOrForeignFrame", afterLateFrame.RootElement.GetProperty("lastErrorCategory").GetString()!);
+            Check.True(afterLateFrame.RootElement.GetProperty("persistenceHealthy").GetBoolean(),
+                "The late frame, not a persistence timeout, must invalidate the evidence.");
+        }
+    }
+    finally
+    {
+        releaseSeedPersist.TrySetResult();
+        releaseTargetStartPersist.TrySetResult();
+        if (collector is not null)
+        {
+            // A timeout fails the test and retains its directory rather than deleting
+            // beneath an unconfirmed background continuation.
+            await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
 {
     var root = CreateHardwareTestRoot();
     try
     {
+        await HardwareSingleHandoffLateFrameStopOrderRegressionAsync();
         var artifactsRoot = FakeAgentArtifactsRoot(root);
         Directory.CreateDirectory(artifactsRoot);
         var tick = 0L;
