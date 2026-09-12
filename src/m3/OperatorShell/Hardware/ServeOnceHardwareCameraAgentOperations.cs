@@ -47,12 +47,26 @@ internal static partial class HardwareCameraAgentDiagnostic
         var printable = new string(bounded
             .Select(character => char.IsControl(character) ? ' ' : character)
             .ToArray());
-        var sanitized = SensitiveAssignment().Replace(printable, "$1=[redacted]");
-        sanitized = AbsoluteWindowsPath().Replace(sanitized, "[redacted-path]");
+        // Preserve the path prefix until its whole private span has been removed.
+        var sanitized = AbsoluteWindowsPath().Replace(printable, RedactAbsolutePath);
+        sanitized = SensitiveAssignment().Replace(sanitized, "$1=[redacted]");
         sanitized = LongIdentifier().Replace(sanitized, "[redacted-identifier]");
         sanitized = GeneralAlphanumericIdentifier().Replace(sanitized, "[redacted-identifier]");
         sanitized = RepeatedWhitespace().Replace(sanitized, " ").Trim();
         return sanitized[..Math.Min(sanitized.Length, MaximumOutputCharacters)];
+    }
+
+    private static string RedactAbsolutePath(Match match)
+    {
+        if (!match.Groups["unquoted"].Success)
+        {
+            return "[redacted-path]";
+        }
+
+        // An unquoted suffix may be a filename or more diagnostic fields. Never
+        // restore its values; retain only already-whitelisted field names.
+        return "[redacted-path]" + string.Concat(SensitiveAssignment().Matches(match.Value)
+            .Select(assignment => $" {assignment.Groups[1].Value}=[redacted]"));
     }
 
     [GeneratedRegex(
@@ -60,7 +74,14 @@ internal static partial class HardwareCameraAgentDiagnostic
         RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveAssignment();
 
-    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/]|\\\\\\\\|//)[^\\s\"']+", RegexOptions.CultureInvariant)]
+    // Apostrophes inside a single-quoted path are not closing quotes unless
+    // followed by an explicit field delimiter or bounded end, not just space.
+    // Quotes may contain punctuation or be clipped by the input bound. Outside
+    // quotes, a pipe or explicit '; category=' field ends the private span;
+    // otherwise consume the uncertain remainder, including spaces/apostrophes.
+    [GeneratedRegex(
+        """(?i)"(?:[a-z]:[\\/]|\\\\|//)[^"]*(?:"|$)|'(?:[a-z]:[\\/]|\\\\|//)[^"|]*?(?:'(?=\s*(?:;\s+category\s*[:=]|[|"]|$))|(?=[|"]|$))|(?<unquoted>(?:[a-z]:[\\/]|\\\\|//)[^"|]*?)(?=;\s+category\s*[:=]|[|"]|$)""",
+        RegexOptions.CultureInvariant)]
     private static partial Regex AbsoluteWindowsPath();
 
     [GeneratedRegex(@"\b(?:[0-9a-fA-F]{16,}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b")]

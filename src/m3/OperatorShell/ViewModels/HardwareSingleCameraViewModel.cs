@@ -1528,9 +1528,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     private static string SafeMessage(Exception exception)
     {
-        var message = string.Join(
-            ' ',
-            exception.Message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        var message = HardwareCameraAgentDiagnostic.SanitizeStandardError(exception.Message);
         return message.Length <= 400 ? message : message[..400];
     }
 
