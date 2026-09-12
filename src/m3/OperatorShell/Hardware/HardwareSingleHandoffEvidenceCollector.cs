@@ -326,7 +326,9 @@ internal sealed class HardwareSingleHandoffEvidenceCollector :
         {
             _frameAggregates.TryAdd(result.SessionId, new FrameAggregate());
         }
-        _stopRequestedSessions.TryRemove(result.SessionId, out _);
+        // Stop is observed synchronously and may already have arrived while this
+        // start waited in the queue. Session IDs cannot be reused, so preserve the
+        // marker for late-frame detection instead of resetting newer observations.
 
         if (_activeAttempt is not null)
         {

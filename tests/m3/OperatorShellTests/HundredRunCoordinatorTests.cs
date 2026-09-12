@@ -416,26 +416,47 @@ internal static class HundredRunCoordinatorTests
         var workflow = fixture.Workflow(async call =>
         {
             if (call == 1) { entered.SetResult(); await release.Task; }
-            return fixture.Outcome(call, true);
+            // This test exercises exclusion, not another hundred durable writes.
+            // Stop after the released first attempt; full completion is covered separately.
+            return fixture.Outcome(call, false);
         });
         var first = fixture.Coordinator(workflow).RunAsync(fixture.HundredRunId, fixture.ApprovalId, fixture.ReadySnapshot);
+        fixture.PendingWork = first;
         try
         {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            // A second valid approval must be rejected by the workflow gate,
-            // not incidentally by an approval target mismatch or existing claim.
-            var second = await competing.Coordinator(workflow).RunAsync(
-                competing.HundredRunId, competing.ApprovalId, competing.ReadySnapshot,
-                competingCancellation.Token).WaitAsync(TimeSpan.FromSeconds(10));
-            Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Blocked, second.Status);
-            Check.Equal("run_already_active", second.Detail);
-            Check.Equal(0, second.AttemptedCount);
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                // A second valid approval must be rejected by the workflow gate,
+                // not incidentally by an approval target mismatch or existing claim.
+                var secondRun = competing.Coordinator(workflow).RunAsync(
+                    competing.HundredRunId, competing.ApprovalId, competing.ReadySnapshot,
+                    competingCancellation.Token);
+                // Either invocation can access the shared workflow's fixture if exclusion
+                // regresses. Never delete either root while that work is unconfirmed.
+                fixture.PendingWork = competing.PendingWork = Task.WhenAll(first, secondRun);
+                var second = await secondRun.WaitAsync(TimeSpan.FromSeconds(10));
+                Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Blocked, second.Status);
+                Check.Equal("run_already_active", second.Detail);
+                Check.Equal(0, second.AttemptedCount);
+                Check.Equal(1, workflow.CaptureCalls);
+                Check.False(File.Exists(Path.Combine(competing.EvidenceRoot, "approvals", competing.ApprovalId + ".used")), "A competing valid run must be rejected before claiming its approval.");
+            }
+            finally { competingCancellation.Cancel(); release.TrySetResult(); }
+            var completed = await first.WaitAsync(TimeSpan.FromSeconds(30));
+            Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Failed, completed.Status);
+            Check.Equal("first_failure_no_retry", completed.Detail);
+            Check.Equal(1, completed.AttemptedCount);
             Check.Equal(1, workflow.CaptureCalls);
-            Check.False(File.Exists(Path.Combine(competing.EvidenceRoot, "approvals", competing.ApprovalId + ".used")), "A competing valid run must be rejected before claiming its approval.");
+            Check.Equal(0, workflow.RecoverCalls);
         }
-        finally { competingCancellation.Cancel(); release.TrySetResult(); }
-        var completed = await first.WaitAsync(TimeSpan.FromSeconds(30));
-        Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Completed, completed.Status);
+        catch
+        {
+            // Preserve the original timeout/assertion even if all work just finished
+            // and an unrelated cleanup lock would otherwise replace that exception.
+            fixture.KeepForDiagnostics = competing.KeepForDiagnostics = true;
+            throw;
+        }
     }
 
     private sealed class Fixture : IDisposable
@@ -509,7 +530,17 @@ internal static class HundredRunCoordinatorTests
         }
 
         private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-        public void Dispose() { if (Directory.Exists(Root)) Directory.Delete(Root, true); }
+        internal Task? PendingWork { get; set; }
+        internal bool KeepForDiagnostics { get; set; }
+        public void Dispose()
+        {
+            if (KeepForDiagnostics || PendingWork is { IsCompleted: false })
+            {
+                Console.Error.WriteLine($"Retained test fixture for failure diagnostics or incomplete background work: {Root}");
+                return;
+            }
+            if (Directory.Exists(Root)) Directory.Delete(Root, true);
+        }
     }
 
     private sealed class FakeWorkflow : IHardwareDualCaptureRecoveryOnlyWorkflow
