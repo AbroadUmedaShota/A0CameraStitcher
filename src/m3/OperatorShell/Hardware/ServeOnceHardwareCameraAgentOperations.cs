@@ -85,12 +85,32 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
     private readonly string _artifactsRoot;
     private readonly string _captureProfilePath;
     private readonly string _singleIdentityV3Path;
+    private readonly HardwareSingleStoragePaths _storagePaths;
 
     public ServeOnceHardwareCameraAgentOperations(
         string agentExecutablePath,
         string artifactsRoot,
         string? captureProfilePath = null,
         string? singleIdentityV3Path = null)
+        : this(agentExecutablePath, artifactsRoot, captureProfilePath, singleIdentityV3Path,
+            HardwareSingleStoragePaths.ResolveKnownFolder())
+    {
+    }
+
+    internal ServeOnceHardwareCameraAgentOperations(
+        string agentExecutablePath,
+        HardwareSingleStoragePaths storagePaths)
+        : this(agentExecutablePath, storagePaths.AgentArtifactsRoot, storagePaths.CaptureProfilePath,
+            storagePaths.SingleIdentityV3Path, storagePaths)
+    {
+    }
+
+    private ServeOnceHardwareCameraAgentOperations(
+        string agentExecutablePath,
+        string artifactsRoot,
+        string? captureProfilePath,
+        string? singleIdentityV3Path,
+        HardwareSingleStoragePaths storagePaths)
     {
         if (string.IsNullOrWhiteSpace(agentExecutablePath))
         {
@@ -102,6 +122,7 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         }
 
         _agentExecutablePath = Path.GetFullPath(agentExecutablePath);
+        _storagePaths = storagePaths;
         _artifactsRoot = Path.GetFullPath(artifactsRoot);
         _captureProfilePath = string.IsNullOrWhiteSpace(captureProfilePath)
             ? string.Empty
@@ -344,9 +365,7 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
         startInfo.ArgumentList.Add("--serve-once");
         startInfo.ArgumentList.Add("--pipe-name");
         startInfo.ArgumentList.Add(pipeName);
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_artifactsRoot);
-        startInfo.ArgumentList.Add("--artifacts-root");
-        startInfo.ArgumentList.Add(_artifactsRoot);
+        _storagePaths.ConfigureAgentStorage(startInfo, _artifactsRoot);
         if (!string.IsNullOrEmpty(_captureProfilePath))
         {
             WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(

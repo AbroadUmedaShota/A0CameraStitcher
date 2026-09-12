@@ -44,9 +44,43 @@ SDK Source Name/Interface projection is never persisted. Missing, malformed,
 CAM-B, digest mismatch, or SDK/WPD cardinality other than exactly one fails
 before camera open. This identity is not DualCamera binding evidence.
 
-Legacy/test-only optional path arguments are `--camera-map SDK_MAP`, `--wpd-camera-map WPD_MAP`,
-`--artifacts-root PATH`, `--reports-root PATH`, and
-`--transaction-state-root PATH`. If `--camera-map` is supplied without an
+The Single WPF host selects the Windows `LocalApplicationData` Known Folder
+once and shares that storage decision with its persistent Agent. Both the
+persistent and legacy serve-once launchers explicitly pass `--artifacts-root`,
+`--reports-root`, and `--transaction-state-root`. The normal locations remain:
+
+| Data | Path relative to the selected Known Folder |
+| --- | --- |
+| PC originals / Agent artifacts | `A0CameraStitcher/phase0/camera-agent/artifacts` |
+| Agent reports | `A0CameraStitcher/phase0/camera-agent/reports` |
+| Agent transaction journal | `A0CameraStitcher/phase0/camera-agent/transactions` |
+| WPF pending state | `A0CameraStitcher/hardware-single` (unchanged) |
+
+Only the child's `ProcessStartInfo.Environment["LOCALAPPDATA"]` is normalized
+to that decision. This also lets native defaults initialize before parsing
+explicit arguments when the inherited variable is missing or points elsewhere.
+The parent process and persistent user/machine environment are not changed.
+Directory chains are checked again before launch; invalid, non-local, reparse,
+or file-occupied directory paths fail before a child starts. This does not
+guarantee a later write succeeds: subsequent I/O failures retain the existing
+transaction failure/recovery rules.
+
+The public four-argument launchers remain compatible: an explicitly supplied
+artifacts root is honored, while reports and transaction state use the captured
+Known Folder. Identity-v3 and approved-profile arguments remain explicit and
+unchanged. Existing journals, reports, originals, maps and profiles are not
+moved, deleted, rewritten or automatically adopted. A journal historically
+written under a different environment is **not migrated**. If its transaction
+cannot be found, WPF retains pending state and blocks new capture; it does not
+clear the pending transaction or retry the capture.
+
+Fake-only focused regression: after building `OperatorShellTests`, run its
+executable with `--single-agent-storage-roots`. This uses generated fixture
+storage and a synthetic test child, not a native Camera Agent or real camera.
+It is software evidence, not a hardware acceptance result.
+
+Legacy/test-only optional map arguments are `--camera-map SDK_MAP` and
+`--wpd-camera-map WPD_MAP`. If `--camera-map` is supplied without an
 explicit WPD map, `name.ext` derives `name-wpd.ext`. The two strict product maps
 must each contain exactly the `CAM-A` and `CAM-B` keys (a value may be `null`),
 must not duplicate stable identities, and must bind the one current SDK and WPD

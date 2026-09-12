@@ -27,6 +27,26 @@ if (args is ["--sdkless-camera-agent-e2e", var sdklessAgentPath])
 {
     return await RunSdklessPersistentReadinessE2EAsync(sdklessAgentPath);
 }
+if (args is ["--single-agent-storage-roots"])
+{
+    try
+    {
+        await PersistentHardwareCameraAgentOperationsPassesArtifactsRootToChildAsync();
+        Console.WriteLine("PASS Single Agent storage roots and child environment");
+        await HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync();
+        Console.WriteLine("PASS invalid Single storage stops before process/request dispatch");
+        await PersistentHardwareCameraAgentPipeFailuresAsync();
+        Console.WriteLine("PASS fake journal recovery after environment drift in both launch modes");
+        await HardwarePreDispatchAndNotFoundRecoveryBoundariesAsync();
+        Console.WriteLine("PASS legacy missing journal remains pending and blocks recapture");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL Single Agent storage roots and child environment: {exception}");
+        return 1;
+    }
+}
 const string dualChildScenarioVariable = "A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO";
 
 if (args is ["--formal-wpf-flow"])
@@ -1097,12 +1117,23 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed: {exception}");
 }
 
-Console.WriteLine($"Operator shell tests: {91 - failures.Count}/91 passed.");
+try
+{
+    await HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync();
+    Console.WriteLine("PASS invalid Single storage stops before process/request dispatch");
+}
+catch (Exception exception)
+{
+    failures.Add("invalid Single storage stops before process/request dispatch");
+    Console.Error.WriteLine($"FAIL invalid Single storage stops before process/request dispatch: {exception}");
+}
+Console.WriteLine($"Operator shell tests: {92 - failures.Count}/92 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
 {
     VerifyHardwareCameraAgentStderrSanitizer();
+    var inheritedLocalAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
 
     var executablePath = Path.Combine(
         AppContext.BaseDirectory,
@@ -1128,10 +1159,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         {
             Environment.SetEnvironmentVariable(persistentChildScenarioVariable, scenario);
             await using var operations = new PersistentHardwareCameraAgentOperations(
-                executablePath,
-                storagePaths.AgentArtifactsRoot,
-                profilePath,
-                identityPath);
+                executablePath, storagePaths);
             try
             {
                 _ = await operations.GetReadinessAsync("CAM-A");
@@ -1169,12 +1197,20 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         // the response header. The durable synthetic state and canonical
         // original must survive a fresh view-model instance, which may issue
         // only the same transaction-id query.
-        var stateRoot = Path.Combine(root, "capture-eof-state");
+        var stateRoot = storagePaths.StateDirectory;
         var commandLogPath = Path.Combine(root, "capture-eof-commands.jsonl");
         var store = new HardwareSingleAppStateStore(stateRoot);
         Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "capture-eof-recovery");
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", stateRoot);
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", commandLogPath);
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", null);
+
+        var legacyRoot = Path.Combine(root, "historical-wrong-environment");
+        var legacyAgentRoot = Path.Combine(legacyRoot, "A0CameraStitcher", "phase0", "camera-agent");
+        var legacySentinels = new List<(string Path, string Text, long Ticks)>();
+        string journalPath;
+        byte[] journalBytes;
+        long journalTicks;
 
         string transactionId;
         string originalPath;
@@ -1182,10 +1218,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         string originalHash;
         long originalLastWriteUtcTicks;
         await using (var operations = new PersistentHardwareCameraAgentOperations(
-            executablePath,
-            storagePaths.AgentArtifactsRoot,
-            profilePath,
-            identityPath))
+            executablePath, storagePaths))
         {
             var viewModel = new HardwareSingleCameraViewModel(
                 operations,
@@ -1206,8 +1239,31 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
                 durableAfterEof.TransactionId == transactionId,
                 "Real VM capture EOF must retain the durable dispatched pending transaction.");
             Check.False(viewModel.CanCapture, "The same VM must block recapture after ambiguous EOF.");
+            Check.True(Environment.GetEnvironmentVariable("LOCALAPPDATA") is null,
+                "Starting the fake child must not fill in missing parent LOCALAPPDATA.");
+
+            journalPath = Path.Combine(root, "A0CameraStitcher", "phase0", "camera-agent",
+                "transactions", transactionId + ".json");
+            journalBytes = await File.ReadAllBytesAsync(journalPath);
+            journalTicks = File.GetLastWriteTimeUtc(journalPath).Ticks;
+            foreach (var (directory, fileName) in new[]
+            {
+                ("transactions", transactionId + ".json"),
+                ("reports", "historical-report.json"),
+                ("artifacts", "historical-original.bin"),
+            })
+            {
+                var path = Path.Combine(legacyAgentRoot, directory, fileName);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                const string sentinel = "historical fixture must not be read as a transaction or migrated";
+                await File.WriteAllTextAsync(path, sentinel);
+                legacySentinels.Add((path, sentinel, File.GetLastWriteTimeUtc(path).Ticks));
+            }
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", legacyRoot);
             await viewModel.CaptureAsync();
             await viewModel.RecoverTransactionAsync();
+            Check.True(viewModel.CaptureSummary.Contains("FailedPartial", StringComparison.Ordinal),
+                "Recovery must parse and apply the retained terminal result, not merely stay blocked on a protocol error.");
 
             var captureObservation = JsonDocument.Parse(
                 (await File.ReadAllLinesAsync(commandLogPath))[0]);
@@ -1235,10 +1291,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         }
 
         await using (var restartedOperations = new PersistentHardwareCameraAgentOperations(
-            executablePath,
-            storagePaths.AgentArtifactsRoot,
-            profilePath,
-            identityPath))
+            executablePath, HardwareSingleStoragePaths.Resolve(root)))
         {
             var restarted = new HardwareSingleCameraViewModel(
                 restartedOperations,
@@ -1246,14 +1299,29 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
                 new HardwareOriginalExporter(Path.Combine(root, "capture-eof-exports-restarted")));
             await restarted.InitializeAsync();
             Check.False(restarted.CanCapture, "A fresh VM must remain blocked by the same pending transaction.");
+            Check.True(restarted.CaptureSummary.Contains("FailedPartial", StringComparison.Ordinal),
+                "The recreated VM must apply the same valid journal result.");
         }
+
+        // The legacy per-request launcher must read exactly the same fake journal too.
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", null);
+        var pendingForOnce = (await store.LoadPendingAsync())!;
+        var once = new ServeOnceHardwareCameraAgentOperations(executablePath, HardwareSingleStoragePaths.Resolve(root));
+        var onceResult = await once.GetTransactionResultAsync(transactionId, "CAM-A",
+            new HardwareCaptureProfileSnapshot(pendingForOnce.CaptureProfileId,
+                pendingForOnce.CaptureProfileVersion, pendingForOnce.CaptureProfileSha256,
+                pendingForOnce.CaptureProfileExpiresAtUtc), expectedLiveViewHandoffRequested: false);
+        Check.Equal(transactionId, onceResult.Payload.TransactionId);
+        Check.Equal("FailedPartial", onceResult.Payload.TerminalState);
+        Check.True(Environment.GetEnvironmentVariable("LOCALAPPDATA") is null,
+            "ServeOnce must not change parent LOCALAPPDATA.");
 
         var commands = (await File.ReadAllLinesAsync(commandLogPath))
             .Select(line => JsonDocument.Parse(line))
             .ToArray();
         try
         {
-            Check.Equal(3, commands.Length);
+            Check.Equal(4, commands.Length);
             Check.Equal(1, commands.Count(command =>
                 command.RootElement.GetProperty("operation").GetString() == "capture-single"));
             Check.Equal(1, commands.Sum(command =>
@@ -1264,6 +1332,12 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
                 command.RootElement.GetProperty("operation").GetString() == "get-transaction-result" &&
                 command.RootElement.GetProperty("transactionId").GetString() == transactionId),
                 "After EOF, the child must observe only same-ID query commands (no delete command exists on this path).");
+            Check.True(commands.All(command =>
+                command.RootElement.GetProperty("journalPath").GetString() == journalPath &&
+                command.RootElement.GetProperty("localApplicationData").GetString() == root),
+                "Every fake child must use the selected transaction root and normalized child environment.");
+            Check.False(commands[0].RootElement.GetProperty("serveOnce").GetBoolean(), "Capture uses persistent mode.");
+            Check.True(commands[^1].RootElement.GetProperty("serveOnce").GetBoolean(), "The last query uses serve-once.");
         }
         finally
         {
@@ -1274,6 +1348,22 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Check.Equal(originalHash,
             Convert.ToHexString(SHA256.HashData(bytesAfterRecovery)).ToLowerInvariant());
         Check.Equal(originalLastWriteUtcTicks, File.GetLastWriteTimeUtc(originalPath).Ticks);
+        var journalAfterRecovery = await File.ReadAllBytesAsync(journalPath);
+        Check.True(journalBytes.SequenceEqual(journalAfterRecovery),
+            "Recovery must read, not rewrite, the same fake journal.");
+        Check.Equal(journalTicks, File.GetLastWriteTimeUtc(journalPath).Ticks);
+        Check.True(File.Exists(Path.Combine(storagePaths.AgentReportsRoot, "synthetic-report.json")),
+            "The fake report must be written under the explicit reports argument.");
+        foreach (var sentinel in legacySentinels)
+        {
+            Check.Equal(sentinel.Text, await File.ReadAllTextAsync(sentinel.Path));
+            Check.Equal(sentinel.Ticks, File.GetLastWriteTimeUtc(sentinel.Path).Ticks);
+        }
+        Check.Equal(3, Directory.GetFiles(legacyRoot, "*", SearchOption.AllDirectories).Length);
+        Check.False(File.Exists(Path.Combine(storagePaths.AgentReportsRoot, "historical-report.json")),
+            "Historical reports must not be silently adopted.");
+        Check.False(File.Exists(Path.Combine(storagePaths.AgentArtifactsRoot, "historical-original.bin")),
+            "Historical originals must not be silently adopted.");
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", null);
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", null);
 
@@ -1281,10 +1371,7 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "typed-fail-closed");
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", tracePath);
         await using (var operations = new PersistentHardwareCameraAgentOperations(
-            executablePath,
-            storagePaths.AgentArtifactsRoot,
-            profilePath,
-            identityPath))
+            executablePath, storagePaths))
         {
             var reply = await operations.GetReadinessAsync("CAM-A");
             Check.True(reply.Success, "A typed not-ready result is a successful protocol response.");
@@ -1307,9 +1394,13 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Check.True(childArguments.Contains(profilePath, StringComparer.Ordinal), "WPF and the Agent must share the profile path.");
         Check.True(childArguments.Contains(identityPath, StringComparer.Ordinal), "WPF and the Agent must share identity-v3.");
         Check.False(childArguments.Contains("--serve-once", StringComparer.Ordinal), "The formal WPF must use the persistent Agent mode.");
+        Check.Equal(root, traceRoot.GetProperty("localApplicationData").GetString()!);
+        Check.True(childArguments.Contains(storagePaths.AgentReportsRoot) &&
+            childArguments.Contains(storagePaths.AgentTransactionStateRoot), "All durable roots must reach the real fake child argv.");
     }
     finally
     {
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", inheritedLocalAppData);
         Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", null);
         Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", null);
@@ -1354,8 +1445,7 @@ static async Task PersistentLiveViewOwnedSessionReleaseAsync()
             var otherSessionId = HardwareContinuousLiveViewClient.CreateSessionId();
             await using (var operations = new PersistentHardwareCameraAgentOperations(
                 executablePath,
-                storagePaths.CaptureProfilePath,
-                storagePaths.SingleIdentityV3Path))
+                storagePaths))
             {
                 var startReply = await operations.StartLiveViewAsync(stoppedSessionId);
                 Check.True(startReply.Success, "Start must succeed against the fake continuous Live View child.");
@@ -1402,8 +1492,7 @@ static async Task PersistentLiveViewOwnedSessionReleaseAsync()
             var activeSessionId = HardwareContinuousLiveViewClient.CreateSessionId();
             await using (var operations = new PersistentHardwareCameraAgentOperations(
                 executablePath,
-                storagePaths.CaptureProfilePath,
-                storagePaths.SingleIdentityV3Path))
+                storagePaths))
             {
                 var startReply = await operations.StartLiveViewAsync(activeSessionId);
                 Check.True(startReply.Success, "Start must succeed against the fake continuous Live View child.");
@@ -1459,9 +1548,7 @@ static async Task<int> RunSdklessPersistentReadinessE2EAsync(string agentExecuta
         Directory.CreateDirectory(storagePaths.AgentArtifactsRoot);
         await using var operations = new PersistentHardwareCameraAgentOperations(
             agentExecutablePath,
-            storagePaths.AgentArtifactsRoot,
-            profilePath,
-            identityPath);
+            storagePaths);
         var reply = await operations.GetReadinessAsync("CAM-A");
         Check.True(reply.Success, "The real SDK-less Agent must return a typed hardware.v1 response.");
         Check.False(reply.Payload.Ready, "An unconfigured SDK-less Agent must fail closed.");
@@ -1496,6 +1583,7 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
             {
                 executablePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M3.OperatorShellTests.exe")),
                 workingDirectory = Environment.CurrentDirectory,
+                localApplicationData = Environment.GetEnvironmentVariable("LOCALAPPDATA"),
                 arguments,
             }));
     }
@@ -1644,6 +1732,15 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
             return 66;
         }
         var artifactsRoot = arguments[artifactsIndex + 1];
+        var transactionIndex = arguments.ToList().IndexOf("--transaction-state-root");
+        var reportsIndex = arguments.ToList().IndexOf("--reports-root");
+        if (transactionIndex < 0 || transactionIndex + 1 >= arguments.Count ||
+            reportsIndex < 0 || reportsIndex + 1 >= arguments.Count) return 69;
+        var transactionRoot = arguments[transactionIndex + 1];
+        var reportsRoot = arguments[reportsIndex + 1];
+        var syntheticResultPath = Path.Combine(transactionRoot, transactionId + ".json");
+        var childLocalAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        if (string.IsNullOrWhiteSpace(childLocalAppData)) return 70;
         var stateRoot = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT");
         var commandLogPath = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG");
 
@@ -1664,7 +1761,10 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
                 CameraObjectDeleteAttempted = false,
                 CameraObjectDeleteSucceeded = false,
             };
-            var syntheticResultPath = Path.Combine(stateRoot!, "synthetic-transaction-result.json");
+            Directory.CreateDirectory(transactionRoot);
+            Directory.CreateDirectory(reportsRoot);
+            await File.WriteAllTextAsync(Path.Combine(reportsRoot, "synthetic-report.json"),
+                "generated fake report; no hardware operations", cancellationToken);
             await File.WriteAllTextAsync(
                 syntheticResultPath,
                 JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
@@ -1676,6 +1776,9 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
                 {
                     operation,
                     transactionId,
+                    journalPath = syntheticResultPath,
+                    localApplicationData = childLocalAppData,
+                    serveOnce = arguments.Contains("--serve-once"),
                     pendingExists = pending is not null,
                     pendingTransactionMatches = pending?.TransactionId == transactionId,
                     pendingProfileMatches = profileMatches,
@@ -1694,7 +1797,6 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
 
         if (operation == "get-transaction-result")
         {
-            var syntheticResultPath = Path.Combine(stateRoot!, "synthetic-transaction-result.json");
             var result = JsonSerializer.Deserialize<HardwareSingleCaptureResult>(
                 await File.ReadAllTextAsync(syntheticResultPath, cancellationToken),
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))
@@ -1706,6 +1808,9 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
                 {
                     operation,
                     transactionId,
+                    journalPath = syntheticResultPath,
+                    localApplicationData = childLocalAppData,
+                    serveOnce = arguments.Contains("--serve-once"),
                     artifactWriteCount = 0,
                     deleteCommandCount = 0,
                 }) + Environment.NewLine, cancellationToken);
@@ -1716,7 +1821,7 @@ static async Task<int> RunCaptureEofRecoveryChildAsync(
                 simulation = false,
                 marker = HardwareCameraAgentProtocol.Marker,
                 requestId,
-                success = true,
+                success = false,
                 resultCode = result.ErrorCategory,
                 payload = result,
             }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -2005,6 +2110,7 @@ static async Task HardwareArtifactVerifierRequiresExactCanonicalPathAsync()
 static async Task PersistentHardwareCameraAgentOperationsPassesArtifactsRootToChildAsync()
 {
     var root = CreateHardwareTestRoot();
+    var inheritedLocalAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
     try
     {
         var agentExecutablePath = Path.Combine(root, "app", "A0CameraStitcher.CameraAgent.exe");
@@ -2026,9 +2132,160 @@ static async Task PersistentHardwareCameraAgentOperationsPassesArtifactsRootToCh
             "The child process must receive --artifacts-root.");
         Check.Equal(operations.AgentArtifactsRoot, arguments[flagIndex + 1]);
         Check.Equal(Path.GetFullPath(artifactsRoot), operations.AgentArtifactsRoot);
+
+        var knownFolder = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var expectedAgentRoot = Path.Combine(knownFolder, "A0CameraStitcher", "phase0", "camera-agent");
+        var serveOnce = new ServeOnceHardwareCameraAgentOperations(
+            agentExecutablePath, artifactsRoot, profilePath, identityPath);
+        foreach (var inherited in new[] { Path.Combine(root, "wrong-inherited-root"), null })
+        {
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", inherited);
+            await using var recreated = new PersistentHardwareCameraAgentOperations(
+                agentExecutablePath: agentExecutablePath, artifactsRoot: artifactsRoot);
+            var recreatedOnce = new ServeOnceHardwareCameraAgentOperations(
+                agentExecutablePath, artifactsRoot, captureProfilePath: profilePath);
+            var recreatedInfo = recreated.CreateStartInfo("test-recreated-persistent");
+            var recreatedOnceInfo = recreatedOnce.CreateStartInfo("test-recreated-once");
+            Check.Equal(knownFolder, recreatedInfo.Environment["LOCALAPPDATA"]!);
+            Check.Equal(knownFolder, recreatedOnceInfo.Environment["LOCALAPPDATA"]!);
+            Check.False(recreatedInfo.ArgumentList.Contains("--serve-once"), "Persistent mode must stay persistent.");
+            Check.True(recreatedOnceInfo.ArgumentList.Contains("--serve-once"), "ServeOnce flag must remain present.");
+            Check.False(recreatedInfo.ArgumentList.Contains("--approved-capture-profile"), "Optional omitted profile stays omitted.");
+            Check.False(recreatedOnceInfo.ArgumentList.Contains("--single-identity-v3"), "Optional omitted identity stays omitted.");
+            foreach (var info in new[] { operations.CreateStartInfo("test-persistent"), serveOnce.CreateStartInfo("test-once") })
+            {
+                foreach (var (flag, expected) in new[]
+                {
+                    ("--artifacts-root", Path.GetFullPath(artifactsRoot)),
+                    ("--reports-root", Path.Combine(expectedAgentRoot, "reports")),
+                    ("--transaction-state-root", Path.Combine(expectedAgentRoot, "transactions")),
+                    ("--approved-capture-profile", profilePath),
+                    ("--single-identity-v3", identityPath),
+                })
+                {
+                    var index = info.ArgumentList.IndexOf(flag);
+                    Check.True(index >= 0 && index + 1 < info.ArgumentList.Count,
+                        $"The child must explicitly receive {flag} regardless of inherited LOCALAPPDATA.");
+                    Check.Equal(expected, info.ArgumentList[index + 1]);
+                    Check.Equal(1, info.ArgumentList.Count(value => value == flag));
+                }
+                Check.Equal(knownFolder, info.Environment["LOCALAPPDATA"]!);
+                Check.True(info.Environment["PATH"] == Environment.GetEnvironmentVariable("PATH"),
+                    "Normalizing the child storage variable must not alter unrelated environment entries.");
+                Check.True(Environment.GetEnvironmentVariable("LOCALAPPDATA") == inherited,
+                    "Creating child start info must not modify the parent's environment.");
+            }
+        }
     }
     finally
     {
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", inheritedLocalAppData);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var scenarioBefore = Environment.GetEnvironmentVariable(persistentChildScenarioVariable);
+    var traceBefore = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE");
+    var requestBefore = Environment.GetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE");
+    string? fixtureLink = null;
+    try
+    {
+        foreach (var invalid in new[] { "", "relative", @"\\server\share\storage", @"\\?\C:\storage", root + ":stream" })
+        {
+            Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve(invalid));
+        }
+        Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve(Path.Combine(root, "missing")));
+        var occupiedKnownFolder = Path.Combine(root, "known-folder-is-a-file");
+        await File.WriteAllTextAsync(occupiedKnownFolder, "fixture");
+        Check.Throws<InvalidDataException>(() => HardwareSingleStoragePaths.Resolve(occupiedKnownFolder));
+
+        var executable = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M3.OperatorShellTests.exe");
+        var startTrace = Path.Combine(root, "unexpected-child-start.json");
+        var requestTrace = Path.Combine(root, "unexpected-wire-request.json");
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, "typed-fail-closed");
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", startTrace);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", requestTrace);
+        var rejectedCalls = 0;
+        async Task AssertBlockedAsync(IHardwareSingleCameraOperations operations)
+        {
+            // Use the real public launch paths and valid request data. The executable
+            // exists and would write a start marker before opening its fake pipe.
+            foreach (var capture in new[] { false, true })
+            {
+                try
+                {
+                    if (capture)
+                        await operations.CaptureAsync("11111111111111111111111111111111", "CAM-A",
+                            new HardwareCaptureProfileSnapshot("approved-cam-a", 1, new string('a', 64),
+                                DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600)),
+                            liveViewHandoffRequested: false);
+                    else
+                        await operations.GetReadinessAsync("CAM-A");
+                    throw new InvalidOperationException("Invalid storage must prevent child launch.");
+                }
+                catch (HardwareCameraAgentLaunchException exception)
+                {
+                    Check.False(exception.RequestMayHaveBeenDispatched, "Storage failure is definitely pre-dispatch.");
+                    Check.True(exception.InnerException is InvalidDataException or IOException,
+                        "Failure must come from directory validation, not missing EXE or request validation: " +
+                        exception.InnerException?.GetType().Name);
+                    rejectedCalls++;
+                }
+            }
+            Check.False(File.Exists(startTrace), "No fake child process may start for invalid storage.");
+            Check.False(File.Exists(requestTrace), "No wire/device request may reach the fake child.");
+        }
+
+        foreach (var entry in new[] { "artifacts", "reports", "transactions", "ancestor", "missing-known-folder", "reparse" })
+        {
+            var knownFolder = Path.Combine(root, entry);
+            Directory.CreateDirectory(knownFolder);
+            var paths = HardwareSingleStoragePaths.Resolve(knownFolder);
+            var expectedAgentRoot = Path.Combine(knownFolder, "A0CameraStitcher", "phase0", "camera-agent");
+            Check.Equal(Path.Combine(expectedAgentRoot, "artifacts"), paths.AgentArtifactsRoot);
+            Check.Equal(Path.Combine(expectedAgentRoot, "reports"), paths.AgentReportsRoot);
+            Check.Equal(Path.Combine(expectedAgentRoot, "transactions"), paths.AgentTransactionStateRoot);
+            await using var persistent = new PersistentHardwareCameraAgentOperations(executable, paths);
+            var once = new ServeOnceHardwareCameraAgentOperations(executable, paths);
+
+            // Mutate only this generated fixture AFTER resolving/constructing both
+            // launchers, proving that the launch boundary revalidates the snapshot.
+            if (entry == "missing-known-folder")
+            {
+                Directory.Move(knownFolder, Path.Combine(root, "relocated-fixture-known-folder"));
+            }
+            else if (entry == "reparse")
+            {
+                var target = Path.Combine(root, "fixture-link-target");
+                Directory.CreateDirectory(target);
+                var link = Path.Combine(knownFolder, "A0CameraStitcher");
+                Directory.CreateSymbolicLink(link, target);
+                fixtureLink = link;
+            }
+            else
+            {
+                var blocker = entry == "ancestor"
+                    ? Path.Combine(knownFolder, "A0CameraStitcher")
+                    : Path.Combine(expectedAgentRoot, entry);
+                Directory.CreateDirectory(Path.GetDirectoryName(blocker)!);
+                await File.WriteAllTextAsync(blocker, "fixture directory blocker");
+            }
+            await AssertBlockedAsync(persistent);
+            await AssertBlockedAsync(once);
+        }
+        Check.Equal(24, rejectedCalls);
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, scenarioBefore);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", traceBefore);
+        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", requestBefore);
+        // Remove the fixture link itself before recursively cleaning this test's
+        // private root. Never traverse a link or point it at pre-existing user data.
+        if (fixtureLink is not null) Directory.Delete(fixtureLink, recursive: false);
         Directory.Delete(root, recursive: true);
     }
 }
