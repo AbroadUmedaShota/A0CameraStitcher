@@ -24,15 +24,12 @@ public partial class HardwareSingleCameraWindow : Window
         try
         {
             InitializeComponent();
-            var storagePaths = HardwareSingleStoragePaths.Resolve(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            var storagePaths = HardwareSingleStoragePaths.ResolveKnownFolder();
             var preferencesStore = new HardwareSinglePreferencesStore(storagePaths.PreferencesPath);
             var profileStore = new HardwareSingleCaptureProfileStore(storagePaths.CaptureProfilePath);
             _operations = new PersistentHardwareCameraAgentOperations(
                 cameraAgentExecutablePath,
-                storagePaths.AgentArtifactsRoot,
-                storagePaths.CaptureProfilePath,
-                storagePaths.SingleIdentityV3Path);
+                storagePaths);
             _handoffEvidenceCollector = handoffEvidenceSourceSha is null
                 ? null
                 : new HardwareSingleHandoffEvidenceCollector(
