@@ -58,12 +58,12 @@ internal static partial class HardwareCameraAgentDiagnostic
 
     private static string RedactAbsolutePath(Match match)
     {
-        if (!match.Groups["unquoted"].Success)
+        if (!match.Groups["ambiguous"].Success)
         {
             return "[redacted-path]";
         }
 
-        // An unquoted suffix may be a filename or more diagnostic fields. Never
+        // An ambiguous suffix may be a filename or more diagnostic fields. Never
         // restore its values; retain only already-whitelisted field names.
         return "[redacted-path]" + string.Concat(SensitiveAssignment().Matches(match.Value)
             .Select(assignment => $" {assignment.Groups[1].Value}=[redacted]"));
@@ -74,13 +74,12 @@ internal static partial class HardwareCameraAgentDiagnostic
         RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveAssignment();
 
-    // Apostrophes inside a single-quoted path are not closing quotes unless
-    // followed by an explicit field delimiter or bounded end, not just space.
-    // Quotes may contain punctuation or be clipped by the input bound. Outside
-    // quotes, a pipe or explicit '; category=' field ends the private span;
-    // otherwise consume the uncertain remainder, including spaces/apostrophes.
+    // Only a double quote unambiguously closes a quoted Windows path. Single
+    // quotes, spaces, semicolons and field-looking text can be filename parts.
+    // Remove an ambiguous path through the next double quote, pipe or bounded
+    // end; never release a suffix merely because it resembles a category field.
     [GeneratedRegex(
-        """(?i)"(?:[a-z]:[\\/]|\\\\|//)[^"]*(?:"|$)|'(?:[a-z]:[\\/]|\\\\|//)[^"|]*?(?:'(?=\s*(?:;\s+category\s*[:=]|[|"]|$))|(?=[|"]|$))|(?<unquoted>(?:[a-z]:[\\/]|\\\\|//)[^"|]*?)(?=;\s+category\s*[:=]|[|"]|$)""",
+        """(?i)"(?:[a-z]:[\\/]|\\\\|//)[^"]*(?:"|$)|(?<ambiguous>'?(?:[a-z]:[\\/]|\\\\|//)[^"|]*)""",
         RegexOptions.CultureInvariant)]
     private static partial Regex AbsoluteWindowsPath();
 

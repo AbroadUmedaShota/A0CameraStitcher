@@ -4065,10 +4065,46 @@ static async Task HardwareSingleExceptionDiagnosticsPreserveStateAsync()
         "path='C:\\Fixture Space\\O'Brien Folder\\scan.jpg' | " +
         "path='\\\\fixture-host\\Fixture Space\\O'Brien Folder\\scan.jpg' | " +
         "trace=123e4567-e89b-12d3-a456-426614174000\r\n\t\0";
+    var messages = new[] { (Label: "existing", Message: sensitiveMessage) }
+        .Concat(LateDiagnosticBoundaryPaths().Select(item => (Label: item.Label,
+            Message: "synthetic_failure 状態確認に失敗; token=test-secret; identity=TEST-CAMERA; " +
+            item.Path + " | category=E_CAMERA_17; trace=123e4567-e89b-12d3-a456-426614174000\r\n\t\0")));
+    var cases = messages.SelectMany(item => new bool?[] { false, true, null }
+        .Select(dispatched => (Label: $"{item.Label}/{(dispatched is null ? "readiness" : dispatched.Value ? "ambiguous" : "undispatched")}",
+            item.Message, Dispatched: dispatched)))
+        .Append(("long-readiness", "状態確認に失敗 E_CAMERA_17 " + new string('あ', 700), (bool?)null));
+    var failures = new List<Exception>();
+    foreach (var (label, message, dispatched) in cases)
+    {
+        try
+        {
+            await CheckHardwareSingleExceptionMessageAsync(message, dispatched);
+            Console.WriteLine($"CASE PASS public/{label}");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"CASE FAIL public/{label}: {exception.Message}");
+            failures.Add(new InvalidOperationException($"public/{label}", exception));
+        }
+    }
+    if (failures.Count != 0)
+        throw new AggregateException("Public diagnostic cases failed.", failures);
+}
+
+static (string Label, string Path)[] LateDiagnosticBoundaryPaths() =>
+[
+    ("single-quoted-drive", "path='C:\\Fixture Space\\O' ; category=Private Folder\\scan.jpg'"),
+    ("single-quoted-unc", "path='\\\\fixture-host\\Fixture Space\\O' ; category=Private Folder\\scan.jpg'"),
+    ("unquoted-drive", "path=C:\\Fixture Space\\O ; category=Private Folder\\scan.jpg"),
+    ("unquoted-unc", "path=\\\\fixture-host\\Fixture Space\\O ; category=Private Folder\\scan.jpg"),
+];
+
+static async Task CheckHardwareSingleExceptionMessageAsync(string sensitiveMessage, bool? dispatchState)
+{
     var root = CreateHardwareTestRoot();
     try
     {
-        foreach (var dispatched in new[] { false, true })
+        if (dispatchState is bool dispatched)
         {
             var store = new HardwareSingleAppStateStore(Path.Combine(root, dispatched ? "ambiguous" : "undispatched"));
             var exception = new HardwareCameraAgentLaunchException(sensitiveMessage,
@@ -4113,8 +4149,9 @@ static async Task HardwareSingleExceptionDiagnosticsPreserveStateAsync()
                 "No private exception suffix may survive elsewhere in TechnicalDetail.");
         }
 
-        foreach (var message in new[] { sensitiveMessage, "状態確認に失敗 E_CAMERA_17 " + new string('あ', 700) })
+        else
         {
+            var message = sensitiveMessage;
             var store = new HardwareSingleAppStateStore(Path.Combine(root, Guid.NewGuid().ToString("N")));
             var operations = new FakeHardwareSingleCameraOperations
             {
@@ -4133,7 +4170,7 @@ static async Task HardwareSingleExceptionDiagnosticsPreserveStateAsync()
             Check.False(viewModel.CanCapture, "Readiness failure cannot enable capture.");
             Check.True(await store.LoadPendingAsync() is null, "Readiness must not reserve a capture.");
             Check.Equal($"readiness_failed: {viewModel.ReadinessDetail}\nautomatic retry count: 0", viewModel.TechnicalDetail);
-            if (message == sensitiveMessage)
+            if (message.StartsWith("synthetic_failure", StringComparison.Ordinal))
                 CheckSingleDiagnosticFragment(viewModel.ReadinessDetail);
             else
             {
@@ -4163,6 +4200,43 @@ static void CheckSingleDiagnosticFragment(string fragment)
 
 static void VerifyHardwareCameraAgentSpacedPathDiagnostics()
 {
+    var failures = new List<Exception>();
+    foreach (var (label, path) in LateDiagnosticBoundaryPaths())
+    {
+        try
+        {
+            var output = HardwareCameraAgentDiagnostic.SanitizeStandardError(
+                path + " | category=E_CAMERA_17 状態確認に失敗");
+            foreach (var privatePart in new[] { "C:\\", "fixture-host", "Fixture Space", "Private", "Folder", "scan.jpg" })
+                Check.False(output.Contains(privatePart, StringComparison.Ordinal),
+                    "A category-looking component must not release a private path suffix.");
+            Check.True(output.Contains("category=E_CAMERA_17 状態確認に失敗", StringComparison.Ordinal),
+                "A real pipe boundary must preserve benign category and Japanese text.");
+            Console.WriteLine($"CASE PASS direct/{label}");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"CASE FAIL direct/{label}: {exception.Message}");
+            failures.Add(new InvalidOperationException($"direct/{label}", exception));
+        }
+    }
+    if (failures.Count != 0)
+        throw new AggregateException("Direct diagnostic boundary cases failed.", failures);
+
+    var hardBoundaryInputs = LateDiagnosticBoundaryPaths()
+        .Select(item => item.Path + " \" category=E_CAMERA_17 状態確認に失敗")
+        .Append(string.Join(" | ", LateDiagnosticBoundaryPaths().Select(item => item.Path)) +
+            " | category=E_CAMERA_17 状態確認に失敗");
+    foreach (var input in hardBoundaryInputs)
+    {
+        var output = HardwareCameraAgentDiagnostic.SanitizeStandardError(input);
+        foreach (var privatePart in new[] { "C:\\", "fixture-host", "Fixture Space", "Private", "Folder", "scan.jpg" })
+            Check.False(output.Contains(privatePart, StringComparison.Ordinal),
+                "Every path must be redacted through its reliable double-quote/pipe boundary.");
+        Check.True(output.Contains("category=E_CAMERA_17 状態確認に失敗", StringComparison.Ordinal),
+            "Benign text after a hard boundary must remain readable, including after multiple paths.");
+    }
+
     foreach (var path in new[]
     {
         "\"C:\\Fixture Space\\Private Folder\\scan.jpg\"",
@@ -4171,6 +4245,7 @@ static void VerifyHardwareCameraAgentSpacedPathDiagnostics()
         "'//fixture-host/Fixture Space/Private Folder/scan.jpg'",
         "\"C:\\Fixture Space\\Private Folder\\scan; [draft] (one).jpg\"",
         "\"C:\\Fixture Space\\O'Brien Folder\\scan.jpg\"",
+        "\"C:\\Fixture Space\\O' ; category=Private Folder\\scan.jpg\"",
         "'C:\\Fixture Space\\O'Brien Folder\\scan.jpg'",
         "'\\\\fixture-host\\Fixture Space\\O'Brien Folder\\scan.jpg'",
         "'//fixture-host/Fixture Space/O'Brien Folder/scan.jpg'",
@@ -4187,9 +4262,16 @@ static void VerifyHardwareCameraAgentSpacedPathDiagnostics()
             var sanitized = HardwareCameraAgentDiagnostic.SanitizeStandardError(input);
             foreach (var privatePart in new[] { "C:\\", "D:/", "fixture-host", "Fixture Space", "Private", "Folder", "scan", "draft", "one", "O'Brien" })
                 Check.False(sanitized.Contains(privatePart, StringComparison.Ordinal), "The complete private path, including its suffix, must be redacted.");
-            Check.True(sanitized.Contains("診断開始", StringComparison.Ordinal) &&
-                sanitized.Contains("category=E_CAMERA_17 状態確認に失敗", StringComparison.Ordinal),
-                "An explicit path delimiter must preserve benign category and Japanese text.");
+            Check.True(sanitized.Contains("診断開始", StringComparison.Ordinal), "Benign text before a path must remain readable.");
+            // A semicolon is trustworthy here only after a closing double quote.
+            // In a single-quoted/unquoted path it may still be part of a filename.
+            if (path.StartsWith('"') || separator == " | ")
+                Check.True(sanitized.Contains("category=E_CAMERA_17 状態確認に失敗", StringComparison.Ordinal),
+                    "A reliable path delimiter must preserve benign category and Japanese text.");
+            else
+                Check.False(sanitized.Contains("E_CAMERA_17", StringComparison.Ordinal) ||
+                    sanitized.Contains("状態確認に失敗", StringComparison.Ordinal),
+                    "A semicolon-only ambiguous suffix must be removed, not adopted as an external field.");
             Check.Equal(sanitized, HardwareCameraAgentDiagnostic.SanitizeStandardError(input));
         }
     }
