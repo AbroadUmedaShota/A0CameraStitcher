@@ -61,6 +61,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # Keep the required workflow terminal for every PR. Only an all-docs
       # change may skip the expensive suite; any unknown path fails safe to a
