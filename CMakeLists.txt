@@ -235,6 +235,7 @@ if(BUILD_TESTING)
 
     add_executable(a0_hardware_camera_agent_tests tests/hardware_camera_agent_tests.cpp)
     target_link_libraries(a0_hardware_camera_agent_tests PRIVATE a0_phase0_core)
+    target_include_directories(a0_hardware_camera_agent_tests PRIVATE src/phase0)
     if(MSVC)
         target_compile_options(a0_hardware_camera_agent_tests PRIVATE /W4 /permissive- /EHsc)
     else()
