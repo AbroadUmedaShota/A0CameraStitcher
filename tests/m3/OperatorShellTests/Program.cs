@@ -19,6 +19,22 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (args is ["--wpf-command-contracts"])
+{
+    return await WpfCommandLifetimeContracts.RunAsync();
+}
+if (args is ["--wpf-command-stop-probe", var runnerProbe])
+{
+    return await WpfCommandLifetimeContracts.RunStopProbeAsync(runnerProbe);
+}
+if (args is ["--wpf-command-scenarios"])
+{
+    return await WpfCommandTestRunner.RunFocusedAsync(
+    [
+        ("CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow", CaptureRecoveryOnlyWorkflowAndWpfPathAsync),
+        ("撮影+AF converges on every required camera then runs the unchanged existing capture flow", CaptureWithAutoFocusSucceedsThenCapturesAsync),
+    ]);
+}
 if (args is ["--persistent-eof-contracts"])
 {
     return PersistentEofContracts.Run();
@@ -142,6 +158,13 @@ Console.WriteLine(
     $", RenderCapability.Tier={RenderCapability.Tier >> 16}");
 
 var failures = new List<string>();
+if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
+{
+    Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=95 reason=lifetime-contract-failure; exit=1");
+    return 1;
+}
+Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
 try
 {
     await PersistentHardwareCameraAgentPipeFailuresAsync();
@@ -710,16 +733,10 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL HardwareDual binding activation hands off to CaptureRecoveryOnly in one child without ordinary capture or retry: {exception}");
 }
 
-try
-{
-    await CaptureRecoveryOnlyWorkflowAndWpfPathAsync();
-    Console.WriteLine("PASS CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow");
-}
-catch (Exception exception)
-{
-    failures.Add("CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow");
-    Console.Error.WriteLine($"FAIL CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow: {exception}");
-}
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 43) == WpfScenarioOutcome.PendingStop)
+    return 1;
 
 try
 {
@@ -919,16 +936,10 @@ catch (Exception exception)
     Console.Error.WriteLine($"FAIL the focus panel stays disabled with a shown reason under the HardwareDual execution environment: {exception}");
 }
 
-try
-{
-    await CaptureWithAutoFocusSucceedsThenCapturesAsync();
-    Console.WriteLine("PASS 撮影+AF converges on every required camera then runs the unchanged existing capture flow");
-}
-catch (Exception exception)
-{
-    failures.Add("撮影+AF converges on every required camera then runs the unchanged existing capture flow");
-    Console.Error.WriteLine($"FAIL 撮影+AF converges on every required camera then runs the unchanged existing capture flow: {exception}");
-}
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 24) == WpfScenarioOutcome.PendingStop)
+    return 1;
 
 try
 {
@@ -1190,7 +1201,7 @@ catch (Exception exception)
     failures.Add("persistent EOF diagnostic and primary preservation contracts");
     Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
 }
-Console.WriteLine($"Operator shell tests: {95 - failures.Count}/95 passed.");
+Console.WriteLine($"Operator shell tests: {96 - failures.Count}/96 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -2048,13 +2059,7 @@ static string BuildContinuousLiveViewResponse(string requestId, string operation
 
 static void WriteSyntheticSensitiveStderr()
 {
-    // This controlled fixture emits UTF-8 bytes; do not depend on the child
-    // console's legacy code page for the Japanese sanitizer assertion.
-    using var writer = new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false), 1024, leaveOpen: true);
-    writer.WriteLine(
-        "synthetic child failed closed secret=super-secret path=C:\\private\\sdk " +
-        "rawIdentity=RAW-CAMERA-IDENTITY requestId=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " +
-        "| quoted=\"C:\\Fixture Space\\Private Folder\\scan.jpg\" | category=E_CAMERA_17 状態確認に失敗");
+    ControlledStderrFixture.Write(Console.OpenStandardError());
 }
 
 static async Task<string> ReadPersistentTestFrameAsync(Stream stream, CancellationToken cancellationToken)
@@ -7008,7 +7013,8 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
     var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
     Check.True(File.Exists(adapterPath), "CaptureRecoveryOnly focused tests require the bundled deterministic JPEG adapter.");
     var root = CreateHardwareTestRoot();
-    try
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
     {
         var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
         var happyOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
@@ -7228,8 +7234,9 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.True(shell.CanCapture, "Ready binding plus explicit acceptance must enable only CaptureRecoveryOnly.");
         Check.False(shell.CanUseLiveView, "A Ready hardware binding must not enable the simulated main-stage Live View.");
         Check.False(shell.CanOpenMaintenance, "A Ready hardware binding must not enable simulated maintenance pages.");
-        shell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !shell.IsBusy && shell.UiState == OperatorUiState.Review,
+        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/one-shot",
+            () => WpfCommandState.Create(shell, wpfOperations));
+        Check.True(!shell.IsBusy && shell.UiState == OperatorUiState.Review,
             "CaptureRecoveryOnly WPF path did not reach review.");
         Check.Equal(1, bindingTransport.ActivateCaptureCalls);
         Check.True(shell.DualBinding.IsCaptureHostActivated, "The Ready binding must be handed off before CaptureRecoveryOnly dispatch.");
@@ -7278,11 +7285,10 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.False(tenRunShell.CanCapture, "A Ready binding must not bypass the dedicated 10-run confirmation.");
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated 10-run confirmation must explicitly unlock the selected mode.");
-        tenRunShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(
-            () => !tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
-            "The explicit WPF 10-run did not reach review after ten successful pairs.",
-            TimeSpan.FromSeconds(20));
+        await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/ten-run",
+            () => WpfCommandState.Create(tenRunShell, tenRunOperations));
+        Check.True(!tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
+            "The explicit WPF 10-run did not reach review after ten successful pairs.");
         Check.Equal(1, tenRunBindingTransport.ActivateCaptureCalls);
         Check.Equal(10, tenRunOperations.ReserveCalls);
         Check.Equal(10, tenRunOperations.CaptureRecoveryOnlyStartCalls);
@@ -7311,8 +7317,9 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         initialRecoveryShell.AcceptSafetyCommand.Execute(null);
         initialRecoveryShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(initialRecoveryShell.DualBinding);
-        initialRecoveryShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
+        await ownedCommands.ExecuteAsync(initialRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/response-unknown",
+            () => WpfCommandState.Create(initialRecoveryShell, wpfRecoveryOperations));
+        Check.True(!initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
             "The initial WPF response-unknown run did not leave a same-ID recovery snapshot.");
         Check.Equal(1, initialRecoveryTransport.ActivateCaptureCalls);
 
@@ -7332,8 +7339,9 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         await CompleteDualBindingAsync(restartedRecoveryShell.DualBinding);
         Check.True(restartedRecoveryShell.CanCapture,
             "The pending same-ID recovery may resume only after the fresh binding is Ready.");
-        restartedRecoveryShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !restartedRecoveryShell.IsBusy && restartedRecoveryShell.UiState == OperatorUiState.Review,
+        await ownedCommands.ExecuteAsync(restartedRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/restarted-recovery",
+            () => WpfCommandState.Create(restartedRecoveryShell, wpfRecoveryOperations));
+        Check.True(!restartedRecoveryShell.IsBusy && restartedRecoveryShell.UiState == OperatorUiState.Review,
             "The re-bound WPF same-ID recovery did not reach review.");
         Check.Equal(1, restartedRecoveryTransport.ActivateCaptureCalls);
         Check.Equal(1, wpfRecoveryOperations.ReserveCalls);
@@ -7355,18 +7363,15 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         refusalShell.AcceptSafetyCommand.Execute(null);
         refusalShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(refusalShell.DualBinding);
-        refusalShell.CaptureCommand.Execute(null);
-        await WaitUntilAsync(() => !refusalShell.IsBusy && refusalShell.StatusMessage.Contains("引き継げなかった", StringComparison.Ordinal),
+        await ownedCommands.ExecuteAsync(refusalShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/activation-refusal",
+            () => WpfCommandState.Create(refusalShell, refusedOperations));
+        Check.True(!refusalShell.IsBusy && refusalShell.StatusMessage.Contains("引き継げなかった", StringComparison.Ordinal),
             "A refused CaptureRecoveryOnly activation was not shown to the operator.");
         Check.True(refusalShell.NoticeText.Contains("引き継げなかった", StringComparison.Ordinal),
             "A refused activation must also be shown in the immediate warning notice.");
         Check.Equal(0, refusedOperations.ReserveCalls);
         Check.Equal(0, refusedOperations.CaptureRecoveryOnlyStartCalls);
-    }
-    finally
-    {
-        await DeleteHardwareTestRootAsync(root);
-    }
+    });
 }
 
 static async Task CaptureRecoveryOnlySoftwareRunEvidenceContractAsync()
@@ -9822,7 +9827,12 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
         "A0CameraStitcher-M3-CaptureWithAutoFocusSuccessTests",
         Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
-    try
+    var ownedCommands = new OwnedWpfCommandScope(root, path =>
+    {
+        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        return Task.CompletedTask;
+    });
+    await ownedCommands.RunAsync(async () =>
     {
         var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
         await viewModel.InitializeAsync(CancellationToken.None);
@@ -9835,8 +9845,9 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
         Check.False(viewModel.IsActionZoneProcessing, "The action zone must not show the progress strip before capture starts.");
         Check.False(viewModel.IsActionZoneReview, "The action zone must not show the result panel before capture starts.");
 
-        viewModel.CaptureWithAutoFocusCommand.Execute(null);
-        await WaitUntilAsync(() => viewModel.TransactionStartCount == 1 && !viewModel.IsBusy, "撮影+AF did not finish its capture.");
+        await ownedCommands.ExecuteAsync(viewModel.CaptureWithAutoFocusCommand, TimeSpan.FromSeconds(5), "simulated/af-capture",
+            () => WpfCommandState.Create(viewModel));
+        Check.True(viewModel.TransactionStartCount == 1 && !viewModel.IsBusy, "撮影+AF did not finish its capture.");
 
         Check.Equal(OperatorUiState.Review, viewModel.UiState);
         Check.True(viewModel.IsActionZoneReview, "The action zone must show state 3 (result panel) once Review is reached.");
@@ -9848,14 +9859,7 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
         Check.True(viewModel.LastPreCaptureAutoFocusResult!.Success, "The last recorded pre-capture AF outcome (CAM-B, the second required camera) must be 合焦OK.");
         Check.Equal("CAM-B", viewModel.LastPreCaptureAutoFocusResult!.CameraAlias);
         Check.Equal("CAM-B: 固定済", viewModel.CameraBFocusStatusText);
-    }
-    finally
-    {
-        if (Directory.Exists(root))
-        {
-            Directory.Delete(root, recursive: true);
-        }
-    }
+    });
 }
 
 static async Task CaptureWithAutoFocusStopsBeforeShutterOnNgAsync()
@@ -10477,6 +10481,22 @@ static void RunOnStaRenderThread(Func<Task> body)
     captured?.Throw();
 }
 
+static class ControlledStderrFixture
+{
+    private const string Payload =
+        "synthetic child failed closed secret=super-secret path=C:\\private\\sdk " +
+        "rawIdentity=RAW-CAMERA-IDENTITY requestId=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " +
+        "| quoted=\"C:\\Fixture Space\\Private Folder\\scan.jpg\" | category=E_CAMERA_17 状態確認に失敗";
+
+    public static void Write(Stream stream)
+    {
+        // This self-describing UTF-8 producer is test-only. It does not establish
+        // an encoding contract for arbitrary native Agent stderr.
+        using var writer = new StreamWriter(stream, new UTF8Encoding(true), 1024, leaveOpen: true);
+        writer.WriteLine(Payload);
+    }
+}
+
 sealed class FakeSimulatedLiveViewFramePump : ISimulatedLiveViewFramePump
 {
     public List<(string CameraAlias, SimulatedFramePattern Pattern)> StartCalls { get; } = [];
@@ -10530,6 +10550,683 @@ sealed class FakeSimulatedLiveViewFrameSource : ISimulatedLiveViewFrameSource
         var bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
         bitmap.Freeze();
         return bitmap;
+    }
+}
+
+static class WpfCommandState
+{
+    public static object Create(OperatorShellViewModel viewModel, CaptureRecoveryOnlyFakeOperations? operations = null)
+    {
+    // Only expose the category token, never the raw detail/path/message.
+    var detail = viewModel.TechnicalDetail;
+    if (detail.Length > 512) detail = detail[..512];
+    var category = System.Text.RegularExpressions.Regex.Match(detail,
+        @"(?:error code: |failure=|failureCode=)([A-Za-z][A-Za-z0-9_-]{0,63})");
+    return new
+    {
+        UiState = viewModel.UiState.ToString(), viewModel.IsBusy, viewModel.TransactionStartCount,
+        ErrorCategory = category.Success ? category.Groups[1].Value : "NoneOrUnspecified",
+        ReserveCalls = operations?.ReserveCalls,
+        StartCalls = operations?.CaptureRecoveryOnlyStartCalls,
+        QueryCalls = operations?.QueryRecoveryOnlyCalls,
+        OrdinaryStartCalls = operations?.OrdinaryStartCalls,
+    };
+    }
+}
+
+// Test-local ownership: never use a WaitAsync wrapper as the owned operation.
+// Completion was not observed within the ceiling; the Task can complete later.
+sealed class PendingWpfCommandTimeoutException(string message) : TimeoutException(message);
+
+static class UnresolvedWpfCommandFailures
+{
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Exception, object> Failures = new();
+    public static void Mark(Exception exception) => Failures.GetValue(exception, _ => new object());
+    public static bool Contains(Exception exception) =>
+        exception is PendingWpfCommandTimeoutException || Failures.TryGetValue(exception, out _);
+}
+
+sealed class OwnedWpfCommandScope(string root, Func<string, Task> cleanup, Action<string>? record = null)
+{
+    private readonly List<Task> _commands = [];
+    private bool _pendingTimeout;
+    private bool _retainRoot;
+    private string _phase = "setup";
+    private Func<object>? _snapshot;
+    private Stopwatch _elapsed = Stopwatch.StartNew();
+
+    public bool HasPendingTimeout => _pendingTimeout;
+
+    public async Task ObserveAsync(Task command, Task deadline, string phase,
+        Exception timeoutFailure, Func<object>? snapshot = null, Stopwatch? elapsed = null, TimeSpan? timeout = null)
+    {
+        _commands.Add(command);
+        _phase = phase.Length <= 128 ? phase : phase[..128];
+        _snapshot = snapshot;
+        _elapsed = elapsed ?? Stopwatch.StartNew();
+        try
+        {
+            // A synchronous command prefix can consume the whole ceiling before
+            // WhenAny is registered. A completed deadline takes precedence even
+            // if the command is also complete; never infer an in-budget order.
+            var winner = deadline.IsCompleted ? deadline : await Task.WhenAny(command, deadline);
+            if (winner != command || deadline.IsCompleted || (timeout is not null && _elapsed.Elapsed >= timeout.Value))
+            {
+                _pendingTimeout = true;
+                ExceptionDispatchInfo.Capture(timeoutFailure).Throw();
+            }
+            await command;
+            Emit("command-terminal", null);
+        }
+        catch (Exception exception)
+        {
+            Emit("command-failed", exception);
+            throw;
+        }
+    }
+
+    public Task ExecuteAsync(System.Windows.Input.ICommand command, TimeSpan timeout,
+        string phase, Func<object> snapshot)
+    {
+        Check.True(command.CanExecute(null), $"{phase}: command must be enabled.");
+        var elapsed = Stopwatch.StartNew();
+        var deadline = Task.Delay(timeout);
+        return ObserveAsync(((AsyncRelayCommand)command).ExecuteAsync(null), deadline, phase,
+            new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within {timeout.TotalSeconds}s."), snapshot, elapsed, timeout);
+    }
+
+    public async Task RunAsync(Func<Task> body)
+    {
+        ExceptionDispatchInfo? primary = null;
+        try { await body(); }
+        catch (Exception exception)
+        {
+            primary = ExceptionDispatchInfo.Capture(exception);
+            Emit("primary-failed", exception);
+        }
+        // Sticky at the timeout boundary: a late completion cannot authorize
+        // teardown or another scenario in this failed run.
+        if (_retainRoot || _pendingTimeout || _commands.Any(command => !command.IsCompleted))
+        {
+            _retainRoot = true;
+            var unresolved = primary?.SourceException ??
+                new PendingWpfCommandTimeoutException("Owned WPF command remains unresolved; root retained.");
+            UnresolvedWpfCommandFailures.Mark(unresolved);
+            Emit("cleanup-not-attempted-root-retained", unresolved);
+            primary?.Throw();
+            throw unresolved;
+        }
+        try { await DeleteValidatedAsync(root, cleanup); }
+        catch (Exception exception)
+        {
+            Emit(primary is null ? "cleanup-failed" : "cleanup-secondary", exception);
+            if (primary is null) throw;
+        }
+        primary?.Throw();
+    }
+
+    private void Emit(string outcome, Exception? exception)
+    {
+        try
+        {
+            string? state = null;
+            string? diagnosticFailure = null;
+            try
+            {
+                state = JsonSerializer.Serialize(_snapshot?.Invoke());
+                if (state.Length > 1024) state = "<oversized synthetic state omitted>";
+            }
+            catch (Exception diagnosticException) { diagnosticFailure = diagnosticException.GetType().Name; }
+            var json = JsonSerializer.Serialize(new
+            {
+                phase = _phase, outcome, elapsedMs = _elapsed.ElapsedMilliseconds,
+                taskStates = _commands.Take(6).Select(task => task.Status.ToString()).ToArray(),
+                pendingTimeout = _pendingTimeout, category = exception?.GetType().Name,
+                state, diagnosticFailure,
+            });
+            if (json.Length > 4000)
+                json = JsonSerializer.Serialize(new { outcome = "diagnostic-oversize", pendingTimeout = _pendingTimeout });
+            (record ?? Console.WriteLine)("WPF-COMMAND " + json);
+        }
+        catch (Exception diagnosticException)
+        {
+            // Even a diagnostic getter/serializer/sink must not replace the
+            // primary command or assertion exception.
+            try { Console.Error.WriteLine($"WPF-DIAGNOSTIC-SECONDARY {diagnosticException.GetType().Name}"); }
+            catch (Exception) { /* Preserve the primary even if the diagnostic stream is unavailable. */ }
+        }
+    }
+
+    public static async Task DeleteValidatedAsync(string root, Func<string, Task> delete,
+        Func<string, FileAttributes?>? attributes = null,
+        Func<string, IEnumerable<string>>? entries = null)
+    {
+        var full = ValidateRoot(root, attributes, entries);
+        await delete(full);
+    }
+
+    public static string ValidateRoot(string root,
+        Func<string, FileAttributes?>? attributes = null,
+        Func<string, IEnumerable<string>>? entries = null)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root) ||
+            root.Split(['\\', '/']).Any(part => part is "." or ".."))
+            throw new InvalidOperationException("Owned WPF cleanup requires an absolute non-traversing root.");
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+        var relative = Path.GetRelativePath(temp, full).Split(['\\', '/']);
+        if (relative.Length != 2 ||
+            relative[0] is not ("A0CameraStitcher-M3-HardwareOperatorTests" or "A0CameraStitcher-M3-CaptureWithAutoFocusSuccessTests") ||
+            relative[1].Length != 32 || !relative[1].All(char.IsAsciiHexDigit))
+            throw new InvalidOperationException("Owned WPF cleanup rejected a non-owned temp/GUID layout.");
+
+        attributes ??= path =>
+        {
+            try { return File.GetAttributes(path); }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+        };
+        entries ??= path => Directory.EnumerateFileSystemEntries(path);
+        void RejectReparse(string path, FileAttributes? value)
+        {
+            if (value?.HasFlag(FileAttributes.ReparsePoint) == true)
+                throw new InvalidOperationException("Owned WPF cleanup rejected a reparse point.");
+        }
+        var ancestors = new Stack<string>();
+        for (string? ancestor = full; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
+            ancestors.Push(ancestor);
+        // Check parents before asking the filesystem about a path below them.
+        while (ancestors.TryPop(out var ancestor))
+        {
+            var value = attributes(ancestor);
+            RejectReparse(ancestor, value);
+            if (value is not null && !value.Value.HasFlag(FileAttributes.Directory))
+                throw new InvalidOperationException("Owned WPF cleanup root/ancestor must be a directory.");
+        }
+        var pending = new Stack<string>();
+        if (attributes(full) is not null) pending.Push(full);
+        while (pending.TryPop(out var directory))
+        {
+            foreach (var child in entries(directory))
+            {
+                var relativeChild = Path.GetRelativePath(full, Path.GetFullPath(child));
+                if (Path.IsPathRooted(relativeChild) || relativeChild.Split(['\\', '/']).Any(part => part == ".."))
+                    throw new InvalidOperationException("Owned WPF cleanup rejected an outside descendant.");
+                var value = attributes(child);
+                RejectReparse(child, value);
+                if (value?.HasFlag(FileAttributes.Directory) == true) pending.Push(child);
+            }
+        }
+        return full;
+    }
+}
+
+enum WpfScenarioOutcome { Passed, Failed, PendingStop }
+
+static class WpfCommandTestRunner
+{
+    public static async Task<WpfScenarioOutcome> RunScenarioAsync(string name, Func<Task> test,
+        List<string> failures, string runner, int remaining)
+    {
+        try
+        {
+            await test();
+            Console.WriteLine($"PASS {name}");
+            return WpfScenarioOutcome.Passed;
+        }
+        catch (Exception exception)
+        {
+            failures.Add(name);
+            Console.Error.WriteLine($"FAIL {name}: {exception}");
+            if (UnresolvedWpfCommandFailures.Contains(exception))
+            {
+                Console.Error.WriteLine($"UNRUN runner={runner} remaining={remaining} reason=unresolved-owned-command; exit=1");
+                return WpfScenarioOutcome.PendingStop;
+            }
+            return WpfScenarioOutcome.Failed;
+        }
+    }
+
+    public static async Task<int> RunFocusedAsync((string Name, Func<Task> Test)[] scenarios)
+    {
+        var failures = new List<string>();
+        for (var index = 0; index < scenarios.Length; index++)
+        {
+            var (name, test) = scenarios[index];
+            var remaining = scenarios.Length - index - 1;
+            var outcome = await RunScenarioAsync(name, test, failures, "focused", remaining);
+            if (outcome != WpfScenarioOutcome.Passed)
+            {
+                if (outcome != WpfScenarioOutcome.PendingStop)
+                    Console.Error.WriteLine($"UNRUN runner=focused remaining={remaining} reason=scenario-failure; exit=1");
+                return 1;
+            }
+        }
+        return 0;
+    }
+}
+
+// Queues the observer continuation so deadline -> completion -> observation is
+// an explicit ordering, not a guessed sleep or a thread-pool timing assumption.
+sealed class HeldWpfContinuationContext : SynchronizationContext
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(SendOrPostCallback, object?)> _queue = new();
+    public TaskCompletionSource Posted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public override void Post(SendOrPostCallback callback, object? state)
+    {
+        _queue.Enqueue((callback, state));
+        Posted.TrySetResult();
+    }
+    public void Drain()
+    {
+        var previous = Current;
+        SetSynchronizationContext(this);
+        try { while (_queue.TryDequeue(out var item)) item.Item1(item.Item2); }
+        finally { SetSynchronizationContext(previous); }
+    }
+}
+
+static class WpfCommandLifetimeContracts
+{
+    public static async Task<int> RunAsync(bool reportCases = true)
+    {
+        var failures = 0;
+        foreach (var (name, test) in new (string, Func<Task>)[]
+        {
+            ("pending operation retains root without cleanup", () => PendingAsync(false)),
+            ("pending primary survives cleanup failure", () => PendingAsync(true)),
+            ("deadline winner stays failed after late completion", LateCompletionAsync),
+            ("precompleted deadline wins even when both tasks completed", PrecompletedDeadlineAsync),
+            ("terminal primary and secondary exception matrix", CompletedMatrixAsync),
+            ("strict owned root and reparse guards", RootGuardsAsync),
+            ("focused and normal stop boundary child exit codes", RunnerStopsAsync),
+        })
+        {
+            try { await test(); Console.WriteLine($"{(reportCases ? "PASS" : "CONTROLLED-PASS")} WPF lifetime {name}"); }
+            catch (Exception exception) { failures++; Console.Error.WriteLine($"FAIL WPF lifetime {name}: {exception}"); }
+        }
+        return failures == 0 ? 0 : 1;
+    }
+
+    private static string NewRoot(string parent = "A0CameraStitcher-M3-HardwareOperatorTests")
+    {
+        var root = Path.Combine(Path.GetTempPath(), parent, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    private static Task RemoveRootAsync(string root) =>
+        OwnedWpfCommandScope.DeleteValidatedAsync(root, path =>
+        {
+            Directory.Delete(path, recursive: true);
+            return Task.CompletedTask;
+        });
+
+    private static async Task LateCompletionAsync()
+    {
+        var root = NewRoot();
+        var operation = new TaskCompletionSource();
+        var deadline = new TaskCompletionSource();
+        var primary = new PendingWpfCommandTimeoutException("controlled late-completion primary");
+        var cleanupCalls = 0;
+        var scope = new OwnedWpfCommandScope(root, _ => { cleanupCalls++; return Task.CompletedTask; });
+        var context = new HeldWpfContinuationContext();
+        var previous = SynchronizationContext.Current;
+        Task run;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try { run = scope.RunAsync(() => scope.ObserveAsync(operation.Task, deadline.Task, "late", primary)); }
+        finally { SynchronizationContext.SetSynchronizationContext(previous); }
+        try
+        {
+            deadline.SetResult();
+            await context.Posted.Task;
+            Check.False(run.IsCompleted, "The observer must be held after the timeout wins.");
+            operation.SetResult();
+            context.Drain();
+            Exception? observed = null;
+            try { await run; } catch (Exception exception) { observed = exception; }
+            Check.True(ReferenceEquals(primary, observed), "Late completion must preserve the same timeout.");
+            Check.True(scope.HasPendingTimeout, "The deadline winner must remain sticky.");
+            Check.Equal(0, cleanupCalls);
+            Check.True(Directory.Exists(root), "Late completion must not authorize cleanup.");
+        }
+        finally
+        {
+            operation.TrySetResult();
+            context.Drain();
+            await operation.Task;
+            await RemoveRootAsync(root);
+        }
+    }
+
+    private static Exception PrimaryAtContractBoundary()
+    {
+        try { throw new InvalidOperationException("controlled post-completion assertion primary"); }
+        catch (Exception exception) { return exception; }
+    }
+
+    private static async Task PrecompletedDeadlineAsync()
+    {
+        foreach (var commandAlreadyComplete in new[] { false, true })
+        {
+            var root = NewRoot();
+            var operation = new TaskCompletionSource();
+            var deadline = new TaskCompletionSource();
+            deadline.SetResult();
+            if (commandAlreadyComplete) operation.SetResult();
+            var cleanupCalls = 0;
+            var primary = new PendingWpfCommandTimeoutException("controlled pre-registration deadline");
+            var scope = new OwnedWpfCommandScope(root, _ => { cleanupCalls++; return Task.CompletedTask; });
+            try
+            {
+                Exception? observed = null;
+                try { await scope.RunAsync(() => scope.ObserveAsync(operation.Task, deadline.Task, "pre-registration", primary)); }
+                catch (Exception exception) { observed = exception; }
+                Check.True(ReferenceEquals(primary, observed), "The already-completed deadline must win conservatively.");
+                Check.True(scope.HasPendingTimeout, "Missing an in-budget observation must remain a failure.");
+                Check.Equal(0, cleanupCalls);
+                Check.True(Directory.Exists(root), "Pre-registration expiry retains the root even when the command is already complete.");
+                Console.WriteLine($"CONTROLLED pre-registration commandAlreadyComplete={commandAlreadyComplete} cleanup=0 primarySame=True");
+            }
+            finally
+            {
+                operation.TrySetResult();
+                await operation.Task;
+                await RemoveRootAsync(root);
+            }
+        }
+    }
+
+    private static async Task CompletedMatrixAsync()
+    {
+        foreach (var mode in new[] { "success", "handled-command", "primary-and-cleanup", "cleanup-only", "diagnostic-getter", "diagnostic-sink", "oversized-diagnostic", "guard-secondary" })
+        {
+            var root = NewRoot();
+            var primary = PrimaryAtContractBoundary();
+            var originalStack = primary.StackTrace!;
+            var secondary = new IOException("controlled terminal cleanup secondary");
+            var cleanupCalls = 0;
+            var diagnostics = new List<string>();
+            Exception? handled = null;
+            var command = new AsyncRelayCommand(
+                () => mode == "handled-command" ? Task.FromException(new IOException("controlled internal command error")) : Task.CompletedTask,
+                onException: error => handled = error);
+            var scopeRoot = mode == "guard-secondary" ? Path.Combine(root, "unowned-child") : root;
+            var scope = new OwnedWpfCommandScope(scopeRoot, _ =>
+            {
+                cleanupCalls++;
+                return mode is "primary-and-cleanup" or "cleanup-only" ? Task.FromException(secondary) : Task.CompletedTask;
+            }, value =>
+            {
+                diagnostics.Add(value);
+                if (mode == "diagnostic-sink") throw new IOException("controlled diagnostic sink");
+            });
+            try
+            {
+                Exception? observed = null;
+                try
+                {
+                    await scope.RunAsync(async () =>
+                    {
+                        var operation = command.ExecuteAsync(null);
+                        await scope.ObserveAsync(operation, new TaskCompletionSource().Task, mode,
+                            new PendingWpfCommandTimeoutException("must not time out"),
+                            () => mode == "diagnostic-getter" ? throw new IOException("controlled getter") :
+                                new { UiState = handled is null ? "Review" : "FailedPartial", IsBusy = false,
+                                    detail = mode == "oversized-diagnostic" ? new string('x', 10000) : "synthetic" });
+                        Check.True(operation.IsCompletedSuccessfully, "VM-handled failure may complete its command Task successfully.");
+                        Check.True(command.CanExecute(null), "The real command completion includes busy reset.");
+                        if (mode == "handled-command")
+                        {
+                            Check.True(handled is IOException, "The command must report its error through the existing handler.");
+                            try { Check.True(handled is null, "The controlled failed UI state must not pass on Task completion alone."); }
+                            catch (Exception assertion)
+                            {
+                                primary = assertion;
+                                originalStack = assertion.StackTrace!;
+                                throw;
+                            }
+                        }
+                        if (mode is not ("success" or "cleanup-only" or "oversized-diagnostic"))
+                            ExceptionDispatchInfo.Capture(primary).Throw();
+                    });
+                }
+                catch (Exception exception) { observed = exception; }
+                var expected = mode == "cleanup-only" ? secondary :
+                    mode is "success" or "oversized-diagnostic" ? null : primary;
+                Check.True(ReferenceEquals(expected, observed), $"{mode}: primary exception identity must be preserved.");
+                if (ReferenceEquals(primary, observed))
+                {
+                    Check.Equal(typeof(InvalidOperationException), observed!.GetType());
+                    Check.Equal(mode == "handled-command" ?
+                        "The controlled failed UI state must not pass on Task completion alone." :
+                        "controlled post-completion assertion primary", observed.Message);
+                    Check.True(observed.StackTrace!.Contains(originalStack, StringComparison.Ordinal), "The original throw stack must survive cleanup.");
+                }
+                Check.Equal(mode == "guard-secondary" ? 0 : 1, cleanupCalls);
+                Check.True(diagnostics.All(line => line.Length <= 4096), "Diagnostic output must remain bounded.");
+                if (mode == "primary-and-cleanup")
+                    Check.True(diagnostics.Any(line => line.Contains("cleanup-secondary", StringComparison.Ordinal) &&
+                        line.Contains("IOException", StringComparison.Ordinal)), "Cleanup failure must be visible separately.");
+                if (mode == "cleanup-only")
+                    Check.True(diagnostics.Any(line => line.Contains("cleanup-failed", StringComparison.Ordinal)), "Cleanup alone must fail.");
+                if (mode == "guard-secondary")
+                    Check.True(diagnostics.Any(line => line.Contains("cleanup-secondary", StringComparison.Ordinal) &&
+                        line.Contains("InvalidOperationException", StringComparison.Ordinal)), "A guard failure must not mask the primary.");
+                Console.WriteLine($"CONTROLLED terminal mode={mode} cleanupCalls={cleanupCalls} primarySame={ReferenceEquals(primary, observed)}");
+            }
+            finally { await RemoveRootAsync(root); }
+        }
+    }
+
+    private static async Task RootGuardsAsync()
+    {
+        var temp = Path.GetFullPath(Path.GetTempPath());
+        var leaf = Guid.NewGuid().ToString("N");
+        var parent = Path.Combine(temp, "A0CameraStitcher-M3-HardwareOperatorTests");
+        var valid = Path.Combine(parent, leaf);
+        var rejected = new[]
+        {
+            "", "relative", Path.GetPathRoot(temp)!, temp, parent,
+            Path.Combine(temp, "unowned", leaf),
+            Path.Combine(temp, "A0CameraStitcher-M3-HardwareOperatorTests-other", leaf),
+            Path.Combine(parent, "bad-leaf"),
+            Path.Combine(parent, new string('z', 32)),
+            Path.Combine(parent, leaf, "child"),
+            Path.Combine(parent, "..", "A0CameraStitcher-M3-HardwareOperatorTests", leaf),
+            Path.Combine(parent, ".", leaf),
+        };
+        foreach (var root in rejected)
+        {
+            var deletes = 0;
+            await Check.ThrowsAsync<InvalidOperationException>(() =>
+                OwnedWpfCommandScope.DeleteValidatedAsync(root, _ => { deletes++; return Task.CompletedTask; }));
+            Check.Equal(0, deletes);
+        }
+        foreach (var position in new[] { "ancestor", "target", "descendant-directory", "descendant-file" })
+        {
+            var link = position == "ancestor" ? parent :
+                position == "target" ? valid : Path.Combine(valid, "link");
+            var deletes = 0;
+            var enumerations = 0;
+            FileAttributes? Attributes(string path) =>
+                string.Equals(path, link, StringComparison.OrdinalIgnoreCase) ?
+                    FileAttributes.ReparsePoint | (position == "descendant-file" ? 0 : FileAttributes.Directory) :
+                    FileAttributes.Directory;
+            IEnumerable<string> Entries(string path)
+            {
+                enumerations++;
+                Check.Equal(valid, path);
+                return [link];
+            }
+            await Check.ThrowsAsync<InvalidOperationException>(() =>
+                OwnedWpfCommandScope.DeleteValidatedAsync(valid, _ => { deletes++; return Task.CompletedTask; }, Attributes, Entries));
+            Check.Equal(0, deletes);
+            Check.Equal(position is "ancestor" or "target" ? 0 : 1, enumerations);
+        }
+        foreach (var ownedParent in new[] { "A0CameraStitcher-M3-HardwareOperatorTests", "A0CameraStitcher-M3-CaptureWithAutoFocusSuccessTests" })
+        {
+            var root = NewRoot(ownedParent);
+            Check.Equal(Path.GetFullPath(root), OwnedWpfCommandScope.ValidateRoot(root));
+            await RemoveRootAsync(root);
+        }
+        Console.WriteLine($"CONTROLLED root guards invalidLayouts={rejected.Length} reparseCases=4 validLayouts=2 deleteSpyOnNegative=0");
+    }
+
+    public static async Task<int> RunStopProbeAsync(string runner)
+    {
+        if (runner is not ("focused" or "normal-recovery" or "normal-af" or "normal-assertion")) return 2;
+        var root = NewRoot();
+        var operation = new TaskCompletionSource();
+        var deadline = new TaskCompletionSource();
+        Exception primary = runner == "normal-assertion" ? PrimaryAtContractBoundary() :
+            new PendingWpfCommandTimeoutException("controlled runner pending");
+        Exception? observed = null;
+        Task? observation = null;
+        var cleanupCalls = 0;
+        var subsequent = 0;
+        var scope = new OwnedWpfCommandScope(root, _ => { cleanupCalls++; return Task.CompletedTask; });
+        async Task PendingScenario()
+        {
+            var run = scope.RunAsync(async () =>
+            {
+                observation = scope.ObserveAsync(operation.Task, deadline.Task, "runner",
+                    new PendingWpfCommandTimeoutException("controlled observer timeout"));
+                if (runner == "normal-assertion") ExceptionDispatchInfo.Capture(primary).Throw();
+                await observation;
+            });
+            if (runner != "normal-assertion") deadline.SetResult();
+            try { await run; }
+            catch (Exception exception)
+            {
+                observed = exception;
+                throw;
+            }
+        }
+        Task Subsequent() { subsequent++; return Task.CompletedTask; }
+        try
+        {
+            int result;
+            if (runner == "focused")
+                result = await WpfCommandTestRunner.RunFocusedAsync([("controlled pending", PendingScenario), ("must remain unrun", Subsequent)]);
+            else
+            {
+                var failures = new List<string>();
+                var outcome = await WpfCommandTestRunner.RunScenarioAsync("controlled pending", PendingScenario,
+                    failures, runner, runner == "normal-af" ? 24 : 43);
+                if (outcome == WpfScenarioOutcome.PendingStop) result = 1;
+                else { await Subsequent(); result = failures.Count == 0 ? 0 : 1; }
+            }
+            Check.Equal(0, subsequent);
+            Check.Equal(0, cleanupCalls);
+            Check.True(Directory.Exists(root), "The runner must retain the unresolved root.");
+            if (runner == "normal-assertion")
+            {
+                Check.True(ReferenceEquals(primary, observed), "Marking unresolved ownership must not wrap or replace a primary assertion.");
+                Check.True(observed!.StackTrace!.Contains(nameof(PrimaryAtContractBoundary), StringComparison.Ordinal), "The assertion's first stack must remain intact.");
+            }
+            Console.WriteLine($"RUNNER-PROBE runner={runner} result={result} subsequent={subsequent} cleanup={cleanupCalls} rootRetained=True");
+            return result;
+        }
+        finally
+        {
+            operation.TrySetResult();
+            await operation.Task;
+            if (runner == "normal-assertion" && observation is not null) await observation;
+            await RemoveRootAsync(root);
+        }
+    }
+
+    private static void RequireRemainingLine(string stderr, string runner, int remaining)
+    {
+        var expected = $"UNRUN runner={runner} remaining={remaining} reason=unresolved-owned-command; exit=1";
+        Check.True(stderr.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Contains(expected, StringComparer.Ordinal), "Stop probe must report the exact remaining count.");
+    }
+
+    private static async Task RunnerStopsAsync()
+    {
+        foreach (var (runner, remaining) in new[] { ("focused", 1), ("normal-recovery", 43), ("normal-af", 24), ("normal-assertion", 43) })
+        {
+            var expected = $"UNRUN runner={runner} remaining={remaining} reason=unresolved-owned-command; exit=1";
+            RequireRemainingLine(expected, runner, remaining);
+            foreach (var malformed in new[]
+            {
+                expected.Replace($"remaining={remaining}", $"remaining={remaining + 1}", StringComparison.Ordinal),
+                expected.Replace($"remaining={remaining}", $"remaining={remaining}0", StringComparison.Ordinal),
+                expected.Replace($"runner={runner}", "runner=other", StringComparison.Ordinal),
+                "FAIL controlled pending",
+            })
+                Check.Throws<InvalidOperationException>(() => RequireRemainingLine(malformed, runner, remaining));
+            var start = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            start.ArgumentList.Add("--wpf-command-stop-probe");
+            start.ArgumentList.Add(runner);
+            start.Environment.Remove("A0_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+            start.Environment.Remove("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO");
+            using var process = Process.Start(start) ?? throw new InvalidOperationException("The software test apphost probe did not start.");
+            var output = process.StandardOutput.ReadToEndAsync();
+            var errors = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            var stdout = await output;
+            var stderr = await errors;
+            Console.WriteLine("CONTROLLED-CHILD " + JsonSerializer.Serialize(new { runner, exitCode = process.ExitCode, stdout, stderr }));
+            Check.Equal(1, process.ExitCode);
+            Check.True(stderr.Contains("FAIL controlled pending", StringComparison.Ordinal) &&
+                stderr.Contains($"UNRUN runner={runner}", StringComparison.Ordinal), "Each runner must report FAIL and UNRUN.");
+            RequireRemainingLine(stderr, runner, remaining);
+            Check.True(stdout.Contains("subsequent=0 cleanup=0 rootRetained=True", StringComparison.Ordinal), "No later scenario or pending cleanup is allowed.");
+            Console.WriteLine($"CONTROLLED child runner={runner} exit={process.ExitCode} subsequent=0 cleanup=0 rootRetained=True");
+        }
+    }
+
+    private static async Task PendingAsync(bool secondary)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "A0CameraStitcher-M3-HardwareOperatorTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var operation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var primary = new PendingWpfCommandTimeoutException("controlled pending primary");
+        var cleanupFailure = new IOException("controlled cleanup secondary");
+        var cleanupCalls = 0;
+        var scope = new OwnedWpfCommandScope(root, _ =>
+        {
+            cleanupCalls++;
+            return secondary ? Task.FromException(cleanupFailure) : Task.CompletedTask;
+        });
+        try
+        {
+            Exception? observed = null;
+            var run = scope.RunAsync(() => scope.ObserveAsync(operation.Task, signal.Task, "controlled", primary));
+            Check.False(run.IsCompleted, "The test must independently hold the operation and timeout signal open.");
+            signal.SetResult();
+            try { await run; } catch (Exception exception) { observed = exception; }
+            Console.WriteLine($"CONTROLLED pending cleanupCalls={cleanupCalls} primarySame={ReferenceEquals(primary, observed)} rootRetained={Directory.Exists(root)}");
+            Check.True(ReferenceEquals(primary, observed), "Cleanup must not mask the same primary timeout instance.");
+            Check.Equal(0, cleanupCalls);
+            Check.True(Directory.Exists(root), "An incomplete command must retain its synthetic root.");
+            Check.False(operation.Task.IsCompleted, "No cancellation or implicit completion is permitted.");
+            operation.SetResult();
+            await operation.Task;
+            Check.True(scope.HasPendingTimeout, "Late completion cannot turn this run into PASS.");
+            Check.Equal(0, cleanupCalls);
+        }
+        finally
+        {
+            operation.TrySetResult();
+            await operation.Task;
+            var terminalCleanup = 0;
+            await OwnedWpfCommandScope.DeleteValidatedAsync(root, path =>
+            {
+                terminalCleanup++;
+                Directory.Delete(path, recursive: true);
+                return Task.CompletedTask;
+            });
+            Check.Equal(1, terminalCleanup);
+        }
     }
 }
 
@@ -10796,6 +11493,7 @@ static class PersistentEofContracts
             ("exact root effect guards", GuardMatrix),
             ("primary and restoration ordering", FailureMatrix),
             ("body captured before await-using disposal", DisposalBoundary),
+            ("controlled stderr UTF-8 BOM encoding", ControlledStderrEncoding),
         })
         {
             try { test(); Console.WriteLine("EOF-CONTRACT PASS " + name); }
@@ -10807,6 +11505,50 @@ static class PersistentEofContracts
     private static string Root => Path.Combine(Path.GetTempPath(), "a0-persistent-agent-0123456789abcdef0123456789abcdef");
     private static FileAttributes? Absent(string _) => null;
     private const string Row = "{\"operation\":\"capture-single\",\"transactionId\":\"synthetic-id\",\"pendingExists\":true,\"pendingTransactionMatches\":true,\"pendingProfileMatches\":false,\"dispatchAttempted\":true,\"originalPath\":\"C:\\\\private\\\\never-open.jpg\"}\n";
+
+    private static void ControlledStderrEncoding()
+    {
+        var expected =
+            "synthetic child failed closed secret=super-secret path=C:\\private\\sdk " +
+            "rawIdentity=RAW-CAMERA-IDENTITY requestId=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " +
+            "| quoted=\"C:\\Fixture Space\\Private Folder\\scan.jpg\" | category=E_CAMERA_17 状態確認に失敗" + Environment.NewLine;
+        var expectedBytes = new UTF8Encoding(false).GetBytes(expected);
+        var cp932 = CodePagesEncodingProvider.Instance.GetEncoding(932)
+            ?? throw new InvalidOperationException("The controlled encoding contract requires CP932.");
+
+        using var withBom = new MemoryStream();
+        ControlledStderrFixture.Write(withBom);
+        Check.True(withBom.CanRead && withBom.CanWrite, "Disposing the fixture writer must leave its owned MemoryStream open.");
+        var bytes = withBom.ToArray();
+        ReadOnlySpan<byte> bom = [0xef, 0xbb, 0xbf];
+        Check.True(bytes.AsSpan().StartsWith(bom), "Controlled stderr must begin with exactly one UTF-8 BOM.");
+        var bomCount = 0;
+        for (var index = 0; index <= bytes.Length - 3; index++)
+            if (bytes[index] == 0xef && bytes[index + 1] == 0xbb && bytes[index + 2] == 0xbf) bomCount++;
+        Check.Equal(1, bomCount);
+        Check.True(bytes.AsSpan(3).SequenceEqual(expectedBytes), "Controlled stderr bytes after the BOM must equal the complete UTF-8 payload and newline.");
+
+        using var positiveBytes = new MemoryStream(bytes);
+        using (var positive = new StreamReader(positiveBytes, cp932, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true))
+        {
+            Check.Equal(932, positive.CurrentEncoding.CodePage);
+            var positiveText = positive.ReadToEnd();
+            Check.Equal(65001, positive.CurrentEncoding.CodePage);
+            Check.Equal(expected, positiveText);
+            Check.False(positiveText.StartsWith('\ufeff'), "BOM detection must not expose U+FEFF in the decoded payload.");
+        }
+        Check.True(positiveBytes.CanRead, "The positive StreamReader must leave its owned MemoryStream open.");
+
+        using var withoutBom = new MemoryStream(expectedBytes);
+        using (var negative = new StreamReader(withoutBom, cp932, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true))
+        {
+            Check.Equal(932, negative.CurrentEncoding.CodePage);
+            var negativeText = negative.ReadToEnd();
+            Check.Equal(932, negative.CurrentEncoding.CodePage);
+            Check.True(!string.Equals(expected, negativeText, StringComparison.Ordinal), "The same BOM-less UTF-8 payload must not match when decoded as CP932.");
+        }
+        Check.True(withoutBom.CanRead, "The negative StreamReader must leave its owned MemoryStream open.");
+    }
 
     private static void PendingMatrix()
     {
