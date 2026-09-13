@@ -19,6 +19,24 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (args is ["--persistent-eof-contracts"])
+{
+    return PersistentEofContracts.Run();
+}
+if (args is ["--persistent-eof-scenario"])
+{
+    try
+    {
+        await PersistentHardwareCameraAgentPipeFailuresAsync();
+        Console.WriteLine("PASS persistent hardware Camera Agent classifies pipe exits and typed readiness");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL persistent hardware Camera Agent classifies pipe exits and typed readiness: {exception}");
+        return 1;
+    }
+}
 if (Environment.GetEnvironmentVariable(persistentChildScenarioVariable) is { Length: > 0 } childScenario)
 {
     return await RunPersistentCameraAgentTestChildAsync(childScenario, args);
@@ -1162,7 +1180,17 @@ catch (Exception exception)
     failures.Add("bounded diagnostic paths include private whitespace suffixes");
     Console.Error.WriteLine($"FAIL bounded diagnostic paths include private whitespace suffixes: {exception}");
 }
-Console.WriteLine($"Operator shell tests: {94 - failures.Count}/94 passed.");
+try
+{
+    Check.Equal(0, PersistentEofContracts.Run());
+    Console.WriteLine("PASS persistent EOF diagnostic and primary preservation contracts");
+}
+catch (Exception exception)
+{
+    failures.Add("persistent EOF diagnostic and primary preservation contracts");
+    Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
+}
+Console.WriteLine($"Operator shell tests: {95 - failures.Count}/95 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -1176,7 +1204,8 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
     Check.True(File.Exists(executablePath), "The persistent test child apphost must exist.");
 
     var root = Path.Combine(Path.GetTempPath(), $"a0-persistent-agent-{Guid.NewGuid():N}");
-    Directory.CreateDirectory(root);
+    PersistentEofRoot.Create(root);
+    var eofFailure = new PersistentEofFailure();
     try
     {
         var storagePaths = HardwareSingleStoragePaths.Resolve(root);
@@ -1260,6 +1289,9 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         await using (var operations = new PersistentHardwareCameraAgentOperations(
             executablePath, storagePaths))
         {
+            var observationEmitted = false;
+            try
+            {
             var viewModel = new HardwareSingleCameraViewModel(
                 operations,
                 store,
@@ -1269,11 +1301,21 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
             await viewModel.CheckReadinessAsync();
             viewModel.DedicatedSpoolScopeConfirmed = true;
             viewModel.ExactObjectDeleteConfirmed = true;
+            var canCaptureBefore = viewModel.CanCapture;
             Check.True(viewModel.CanCapture, "Real VM prerequisites must enable the one capture attempt.");
 
+            var captureClock = Stopwatch.StartNew();
             await viewModel.CaptureAsync();
             transactionId = viewModel.LastTransactionId;
             var durableAfterEof = await store.LoadPendingAsync();
+            PersistentEofDiagnostic.Emit(
+                () => PersistentEofDiagnostic.Pending(durableAfterEof is not null,
+                    durableAfterEof?.CaptureRequestDispatchAttempted, durableAfterEof?.TransactionId, transactionId)
+                    with { IsBusy = viewModel.IsBusy, CanCaptureBefore = canCaptureBefore,
+                        CanCaptureAfter = viewModel.CanCapture, ElapsedMs = captureClock.ElapsedMilliseconds },
+                () => viewModel.TechnicalDetail,
+                () => PersistentEofDiagnostic.ObserveLog(root, commandLogPath, transactionId));
+            observationEmitted = true;
             Check.True(
                 durableAfterEof is { CaptureRequestDispatchAttempted: true } &&
                 durableAfterEof.TransactionId == transactionId,
@@ -1327,6 +1369,16 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
                 Check.Equal(originalBytes.Length, observed.GetProperty("originalSize").GetInt32());
                 Check.Equal(originalHash,
                     Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant());
+            }
+            }
+            catch (Exception exception)
+            {
+                // Save the body assertion before the unchanged await-using disposal can throw.
+                eofFailure.Capture(exception, "eof-body");
+                if (!observationEmitted)
+                    PersistentEofDiagnostic.Emit(() => new(), () => null,
+                        () => new("PendingBoundaryNotReached"), boundaryReached: false);
+                throw;
             }
         }
 
@@ -1438,15 +1490,18 @@ static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
         Check.True(childArguments.Contains(storagePaths.AgentReportsRoot) &&
             childArguments.Contains(storagePaths.AgentTransactionStateRoot), "All durable roots must reach the real fake child argv.");
     }
+    catch (Exception exception) { eofFailure.Capture(exception, "outer-body-or-dispose"); }
     finally
     {
-        Environment.SetEnvironmentVariable("LOCALAPPDATA", inheritedLocalAppData);
-        Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null);
-        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", null);
-        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", null);
-        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", null);
-        Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", null);
-        Directory.Delete(root, recursive: true);
+        eofFailure.Finish(
+        [
+            () => Environment.SetEnvironmentVariable("LOCALAPPDATA", inheritedLocalAppData),
+            () => Environment.SetEnvironmentVariable(persistentChildScenarioVariable, null),
+            () => Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_TRACE", null),
+            () => Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_REQUEST_TRACE", null),
+            () => Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_STATE_ROOT", null),
+            () => Environment.SetEnvironmentVariable("A0_CAMERA_AGENT_TEST_CHILD_COMMAND_LOG", null),
+        ], () => PersistentEofRoot.Delete(root));
     }
 }
 
@@ -10475,6 +10530,550 @@ sealed class FakeSimulatedLiveViewFrameSource : ISimulatedLiveViewFrameSource
         var bitmap = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr24, null, pixels, stride: 3);
         bitmap.Freeze();
         return bitmap;
+    }
+}
+
+// Test-only observations: no identifiers, paths, images or transport provenance leave these records.
+sealed record PersistentEofPending(bool? PendingPresent = null, bool? DispatchAttempted = null,
+    bool? DurableIdMatches = null, bool? LastIdPresent = null, bool? IsBusy = null,
+    bool? CanCaptureBefore = null, bool? CanCaptureAfter = null, long? ElapsedMs = null);
+sealed record PersistentEofReceiptRow(string Operation, bool? TransactionMatches, bool PendingExists,
+    bool PendingTransactionMatches, bool PendingProfileMatches, bool DispatchAttempted);
+sealed record PersistentEofReceipt(string Status, int? CaptureCount = null,
+    PersistentEofReceiptRow[]? Rows = null, string? Secondary = null);
+
+static class PersistentEofDiagnostic
+{
+    public const int ByteLimit = 64 * 1024;
+    public const int RowLimit = 32;
+
+    public static PersistentEofPending Pending(bool? present, bool? dispatched, string? durableId, string? lastId) =>
+        new(present, present == true ? dispatched : null,
+            present == true && lastId is not null ? string.Equals(durableId, lastId, StringComparison.Ordinal) : null,
+            lastId is null ? null : lastId.Length > 0);
+
+    public static void Emit(Func<PersistentEofPending> pending, Func<string?> detail,
+        Func<PersistentEofReceipt> receipt, Action<string>? sink = null,
+        Func<string?, string>? sanitizer = null, bool boundaryReached = true)
+    {
+        try
+        {
+            PersistentEofPending facts;
+            var unavailable = new List<string>();
+            try { facts = pending(); } catch { facts = new(); unavailable.Add("pending-getter-unavailable"); }
+            string[] breadcrumbs = [];
+            try
+            {
+                var input = detail();
+                if (input?.Length > 4096) input = input[..4096];
+                var sanitized = (sanitizer ?? HardwareCameraAgentDiagnostic.SanitizeStandardError)(input);
+                if (sanitized.Length > 512) sanitized = sanitized[..512];
+                // A copied allowlisted text match, not a newly inferred exception or transport send.
+                breadcrumbs = new[] { "app_state_reservation_failed", "pre_dispatch_state_failed", "capture_response_unconfirmed" }
+                    .Where(value => sanitized.Contains(value, StringComparison.Ordinal)).ToArray();
+            }
+            catch { unavailable.Add("vm-detail-unavailable"); }
+            PersistentEofReceipt child;
+            try { child = receipt(); } catch { child = new("ObservationUnavailable"); }
+            var json = JsonSerializer.Serialize(new
+            {
+                stage = boundaryReached ? "post-capture-pending-observation" : "failed-before-pending-observation", pending = facts, breadcrumbs,
+                child, unavailable, typedExceptionProvenance = "unavailable",
+            });
+            if (json.Length > 8000)
+                json = JsonSerializer.Serialize(new { stage = boundaryReached ? "post-capture-pending-observation" : "failed-before-pending-observation", pending = facts,
+                    breadcrumbs, child = new PersistentEofReceipt("OutputLimit"), unavailable,
+                    typedExceptionProvenance = "unavailable" });
+            (sink ?? Console.WriteLine)("EOF-DIAGNOSTIC " + json);
+        }
+        catch { Secondary("diagnostic-output"); }
+    }
+
+    public static void Secondary(string stage)
+    {
+        // Only callsite constants are permitted; exception messages are deliberately excluded.
+        var category = stage is "diagnostic-output" or "eof-body" or "outer-body-or-dispose" or
+            "restore" or "guard-or-delete" ? stage : "secondary";
+        try { Console.Error.WriteLine("EOF-SECONDARY " + category); } catch { }
+    }
+
+    public static PersistentEofReceipt ObserveLog(string root, string logPath, string? lastId,
+        Func<string, FileMode, FileAccess, FileShare, Stream>? open = null,
+        Func<string, FileAttributes?>? attributes = null)
+    {
+        try { PersistentEofRoot.ValidateRead(root, logPath, attributes); }
+        catch { return new("GuardRejected"); }
+        Stream? stream = null;
+        var buffer = new byte[ByteLimit + 1];
+        var used = 0;
+        var changed = false;
+        string? failure = null;
+        string? secondary = null;
+        try
+        {
+            stream = (open ?? ((path, mode, access, share) => new FileStream(path, mode, access, share)))(
+                logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var before = stream.CanSeek ? (long?)stream.Length : null;
+            while (used < buffer.Length)
+            {
+                var read = stream.Read(buffer, used, buffer.Length - used);
+                if (read == 0) break;
+                used += read;
+            }
+            var after = stream.CanSeek ? (long?)stream.Length : null;
+            changed = before != after || (after is not null && used <= ByteLimit && after != used);
+        }
+        catch (FileNotFoundException) { failure = "Missing"; }
+        catch (DirectoryNotFoundException) { failure = "Missing"; }
+        catch { failure = "ReadUnavailable"; }
+        finally
+        {
+            try { stream?.Dispose(); }
+            catch
+            {
+                if (failure is null) failure = "CloseUnavailable";
+                else secondary = "CloseUnavailable";
+            }
+        }
+        // The stream is closed before parsing, returning copied values or reaching any assertion.
+        if (failure is not null) return new(failure, Secondary: secondary);
+        if (used > ByteLimit) return new("Oversized");
+        if (changed) return new("ChangedDuringRead");
+        if (used == 0) return new("EmptyUnavailable");
+        string text;
+        try { text = new UTF8Encoding(false, true).GetString(buffer, 0, used); }
+        catch { return new("MalformedEncoding"); }
+        if (!text.EndsWith('\n')) return new("Truncated");
+        var lines = text.Split('\n');
+        if (lines.Length - 1 > RowLimit) return new("TooManyRows");
+        var rows = new List<PersistentEofReceiptRow>();
+        try
+        {
+            foreach (var line in lines.Take(lines.Length - 1))
+            {
+                using var document = JsonDocument.Parse(line, new JsonDocumentOptions { MaxDepth = 16 });
+                var value = document.RootElement;
+                if (value.ValueKind != JsonValueKind.Object ||
+                    value.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != value.EnumerateObject().Count())
+                    return new("InvalidSchema");
+                if (!value.TryGetProperty("operation", out var op) || op.ValueKind != JsonValueKind.String)
+                    return new("InvalidSchema");
+                var operation = op.GetString();
+                if (operation is not ("capture-single" or "get-transaction-result")) return new("UnknownOperation");
+                if (!value.TryGetProperty("transactionId", out var id) || id.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(id.GetString()))
+                    return new("InvalidSchema");
+                if (operation == "get-transaction-result") continue;
+                bool Flag(string name) => value.GetProperty(name).GetBoolean();
+                rows.Add(new("capture-single", lastId is null ? null : string.Equals(id.GetString(), lastId, StringComparison.Ordinal),
+                    Flag("pendingExists"), Flag("pendingTransactionMatches"), Flag("pendingProfileMatches"), Flag("dispatchAttempted")));
+            }
+        }
+        catch (JsonException) { return new("MalformedJson"); }
+        catch { return new("InvalidSchema"); }
+        return new("Observed", rows.Count, rows.ToArray());
+    }
+}
+
+// This fixture owns one exact temp direct child. No search or cleanup of previous roots is allowed.
+static class PersistentEofRoot
+{
+    public static FileAttributes? Attributes(string path)
+    {
+        try { return File.GetAttributes(path); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+    }
+
+    public static string Validate(string root, bool descendants = false,
+        Func<string, FileAttributes?>? attributes = null, Func<string, IEnumerable<string>>? entries = null)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root) || root.Split(['\\', '/']).Any(part => part is "." or ".."))
+            throw new InvalidOperationException("EOF fixture requires an absolute non-traversing root.");
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var relative = Path.GetRelativePath(Path.GetFullPath(Path.GetTempPath()), full);
+        if (!System.Text.RegularExpressions.Regex.IsMatch(relative, @"\Aa0-persistent-agent-[0-9a-f]{32}\z"))
+            throw new InvalidOperationException("EOF fixture rejected a non-owned direct-child root.");
+        attributes ??= Attributes;
+        var ancestors = new Stack<string>();
+        for (string? path = full; path is not null; path = Path.GetDirectoryName(path)) ancestors.Push(path);
+        while (ancestors.TryPop(out var path))
+        {
+            var value = attributes(path);
+            if (value?.HasFlag(FileAttributes.ReparsePoint) == true ||
+                (value is not null && !value.Value.HasFlag(FileAttributes.Directory)))
+                throw new InvalidOperationException("EOF fixture rejected a reparse or non-directory ancestor/root.");
+        }
+        if (descendants && attributes(full) is not null)
+        {
+            entries ??= path => Directory.EnumerateFileSystemEntries(path);
+            var pending = new Stack<string>();
+            pending.Push(full);
+            while (pending.TryPop(out var directory))
+            {
+                foreach (var child in entries(directory))
+                {
+                    var inside = Path.GetRelativePath(full, Path.GetFullPath(child));
+                    if (Path.IsPathRooted(inside) || inside.Split(['\\', '/']).Any(part => part == ".."))
+                        throw new InvalidOperationException("EOF fixture rejected an outside descendant.");
+                    var value = attributes(child);
+                    if (value?.HasFlag(FileAttributes.ReparsePoint) == true)
+                        throw new InvalidOperationException("EOF fixture rejected a reparse descendant.");
+                    if (value?.HasFlag(FileAttributes.Directory) == true) pending.Push(child);
+                }
+            }
+        }
+        return full;
+    }
+
+    public static void Create(string root, Action<string>? create = null, Func<string, FileAttributes?>? attributes = null)
+    {
+        var full = Validate(root, attributes: attributes);
+        if ((attributes ?? Attributes)(full) is not null)
+            throw new InvalidOperationException("EOF fixture will not adopt an existing root.");
+        (create ?? (path => Directory.CreateDirectory(path)))(full);
+    }
+
+    public static void ValidateRead(string root, string path, Func<string, FileAttributes?>? attributes = null)
+    {
+        var full = Validate(root, attributes: attributes);
+        if (!Path.IsPathFullyQualified(path) || path.Split(['\\', '/']).Any(part => part is "." or "..") ||
+            !string.Equals(Path.GetFullPath(path), Path.Combine(full, "capture-eof-commands.jsonl"), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("EOF diagnostic may read only its exact command log.");
+        var value = (attributes ?? Attributes)(path);
+        if (value?.HasFlag(FileAttributes.ReparsePoint) == true || value?.HasFlag(FileAttributes.Directory) == true)
+            throw new InvalidOperationException("EOF diagnostic rejected a reparse/directory command log.");
+    }
+
+    public static void Delete(string root, Action<string>? delete = null,
+        Func<string, FileAttributes?>? attributes = null, Func<string, IEnumerable<string>>? entries = null)
+    {
+        var full = Validate(root, descendants: true, attributes, entries);
+        (delete ?? (path => Directory.Delete(path, recursive: true)))(full);
+    }
+}
+
+sealed class PersistentEofFailure
+{
+    private ExceptionDispatchInfo? _first;
+    public void Capture(Exception exception, string stage)
+    {
+        var first = _first is null;
+        if (_first is null) _first = ExceptionDispatchInfo.Capture(exception);
+        else if (ReferenceEquals(_first.SourceException, exception)) return;
+        try
+        {
+            Console.Error.WriteLine("EOF-FAILURE " + JsonSerializer.Serialize(new
+            {
+                role = first ? "primary" : "secondary",
+                stage = stage is "eof-body" or "outer-body-or-dispose" or "restore" or "guard-or-delete" ? stage : "other",
+                category = exception is IOException ? "IOException" : exception is InvalidOperationException ? "InvalidOperationException" : "OtherException",
+            }));
+        }
+        catch { PersistentEofDiagnostic.Secondary("diagnostic-output"); }
+    }
+
+    public void Finish(IEnumerable<Action> restores, Action cleanup)
+    {
+        foreach (var restore in restores)
+        {
+            try { restore(); } catch (Exception exception) { Capture(exception, "restore"); }
+        }
+        try { cleanup(); } catch (Exception exception) { Capture(exception, "guard-or-delete"); }
+        _first?.Throw();
+    }
+}
+
+static class PersistentEofContracts
+{
+    public static int Run()
+    {
+        var failures = 0;
+        foreach (var (name, test) in new (string, Action)[]
+        {
+            ("nullable operands", PendingMatrix),
+            ("bounded copied command receipt", ReceiptMatrix),
+            ("diagnostic failure independence", DiagnosticMatrix),
+            ("exact root effect guards", GuardMatrix),
+            ("primary and restoration ordering", FailureMatrix),
+            ("body captured before await-using disposal", DisposalBoundary),
+        })
+        {
+            try { test(); Console.WriteLine("EOF-CONTRACT PASS " + name); }
+            catch (Exception exception) { failures++; Console.Error.WriteLine($"EOF-CONTRACT FAIL {name}: {exception}"); }
+        }
+        return failures == 0 ? 0 : 1;
+    }
+
+    private static string Root => Path.Combine(Path.GetTempPath(), "a0-persistent-agent-0123456789abcdef0123456789abcdef");
+    private static FileAttributes? Absent(string _) => null;
+    private const string Row = "{\"operation\":\"capture-single\",\"transactionId\":\"synthetic-id\",\"pendingExists\":true,\"pendingTransactionMatches\":true,\"pendingProfileMatches\":false,\"dispatchAttempted\":true,\"originalPath\":\"C:\\\\private\\\\never-open.jpg\"}\n";
+
+    private static void PendingMatrix()
+    {
+        foreach (var (present, dispatch, id, last, expectedDispatch, expectedMatch, expectedLast) in new
+            (bool?, bool?, string?, string?, bool?, bool?, bool?)[]
+        {
+            (false, true, "unused", "id", null, null, true),
+            (true, false, "id", "id", false, true, true),
+            (true, true, "id", "id", true, true, true),
+            (true, true, "different", "id", true, false, true),
+            (null, null, null, null, null, null, null),
+            (true, true, "id", "", true, false, false),
+        })
+        {
+            var observed = PersistentEofDiagnostic.Pending(present, dispatch, id, last);
+            Check.True(observed.PendingPresent == present && observed.DispatchAttempted == expectedDispatch &&
+                observed.DurableIdMatches == expectedMatch && observed.LastIdPresent == expectedLast,
+                "EOF operands must preserve absent/false/mismatch/unavailable distinctions.");
+        }
+    }
+
+    private static PersistentEofReceipt Observe(Stream stream) => PersistentEofDiagnostic.ObserveLog(Root,
+        Path.Combine(Root, "capture-eof-commands.jsonl"), "synthetic-id", (path, mode, access, share) =>
+        {
+            Check.Equal(Path.Combine(Root, "capture-eof-commands.jsonl"), path);
+            Check.Equal(FileMode.Open, mode); Check.Equal(FileAccess.Read, access);
+            Check.Equal(FileShare.ReadWrite | FileShare.Delete, share);
+            return stream;
+        }, Absent);
+
+    private static void ReceiptMatrix()
+    {
+        foreach (var (text, expected) in new[]
+        {
+            (Row, "Observed"), ("", "EmptyUnavailable"), ("{broken}\n", "MalformedJson"),
+            (Row.TrimEnd('\n'), "Truncated"),
+            (Row.Replace("capture-single", "unknown-operation"), "UnknownOperation"),
+            (Row.Replace("\"dispatchAttempted\":true", "\"dispatchAttempted\":null"), "InvalidSchema"),
+            (string.Concat(Enumerable.Repeat(Row, 32)), "Observed"),
+            (string.Concat(Enumerable.Repeat(Row, 33)), "TooManyRows"),
+        })
+        {
+            var stream = new PersistentEofProbeStream(Encoding.UTF8.GetBytes(text));
+            var observed = Observe(stream);
+            Check.Equal(expected, observed.Status);
+            Check.True(stream.Closed && stream.CloseCalls == 1, "Read handle must close exactly once before caller assertions.");
+            if (expected != "Observed") Check.True(observed.CaptureCount is null && observed.Rows is null, "Invalid/unavailable is not zero.");
+            else
+            {
+                Check.True(observed.CaptureCount is 1 or 32, "Copy every bounded capture row.");
+                Check.True(observed.Rows![0] is { Operation: "capture-single", TransactionMatches: true,
+                    PendingExists: true, PendingTransactionMatches: true, PendingProfileMatches: false, DispatchAttempted: true }, "Safe projection must preserve independent flag values.");
+            }
+        }
+        // Complete valid JSON at exactly each byte boundary, not character count or a guessed length.
+        foreach (var size in new[] { PersistentEofDiagnostic.ByteLimit - 1, PersistentEofDiagnostic.ByteLimit, PersistentEofDiagnostic.ByteLimit + 1 })
+        {
+            var padded = Row.TrimEnd('\n') + new string(' ', size - Encoding.UTF8.GetByteCount(Row)) + "\n";
+            var stream = new PersistentEofProbeStream(Encoding.UTF8.GetBytes(padded));
+            var result = Observe(stream);
+            Check.Equal(size > PersistentEofDiagnostic.ByteLimit ? "Oversized" : "Observed", result.Status);
+            Check.True(stream.BytesRead == size && stream.MaxRequested <= PersistentEofDiagnostic.ByteLimit + 1 && stream.Closed,
+                "The observer reads at most the byte limit plus one sentinel and closes.");
+        }
+        var huge = new PersistentEofProbeStream(new byte[PersistentEofDiagnostic.ByteLimit * 2]);
+        Check.Equal("Oversized", Observe(huge).Status);
+        Check.Equal(PersistentEofDiagnostic.ByteLimit + 1, huge.BytesRead);
+        Check.Equal("MalformedEncoding", Observe(new PersistentEofProbeStream([0xff, 0x0a])).Status);
+        Check.Equal("ChangedDuringRead", Observe(new PersistentEofProbeStream(Encoding.UTF8.GetBytes(Row)) { ChangeLength = true }).Status);
+        foreach (var (readFault, closeFault, status) in new[] { (true, false, "ReadUnavailable"), (false, true, "CloseUnavailable"), (true, true, "ReadUnavailable") })
+        {
+            var stream = new PersistentEofProbeStream(Encoding.UTF8.GetBytes(Row)) { ReadFault = readFault, CloseFault = closeFault };
+            var result = Observe(stream);
+            Check.Equal(status, result.Status);
+            Check.True(stream.Closed && stream.CloseCalls == 1, "Read/close failure must not leak the handle.");
+            Check.True(result.CaptureCount is null, "Read/close failure must not fabricate zero captures.");
+            if (readFault && closeFault) Check.Equal("CloseUnavailable", result.Secondary!);
+        }
+        var missing = PersistentEofDiagnostic.ObserveLog(Root, Path.Combine(Root, "capture-eof-commands.jsonl"), null,
+            (_, _, _, _) => throw new FileNotFoundException(), Absent);
+        Check.Equal("Missing", missing.Status); Check.True(missing.CaptureCount is null, "Missing receipt is unavailable.");
+    }
+
+    private static Exception Primary()
+    {
+        try { throw new InvalidOperationException("original EOF pending assertion"); }
+        catch (Exception exception) { return exception; }
+    }
+
+    private static void DiagnosticMatrix()
+    {
+        foreach (var fault in new[] { "none", "getter", "sanitizer", "receipt", "json", "read", "close", "sink" })
+        {
+            var primary = Primary(); var originalStack = primary.StackTrace!;
+            var lines = new List<string>();
+            var owner = new PersistentEofFailure();
+            Exception? observed = null;
+            try
+            {
+                PersistentEofDiagnostic.Emit(
+                    () => fault == "getter" ? throw new IOException("synthetic getter") : PersistentEofDiagnostic.Pending(true, false, "synthetic-id", "synthetic-id"),
+                    () => "app_state_reservation_failed pre_dispatch_state_failed capture_response_unconfirmed token=super-secret path=\"C:\\Private Folder\\scan.jpg\" " + new string('x', 6000),
+                    () => fault == "receipt" ? throw new IOException("synthetic receipt") : Observe(
+                        new PersistentEofProbeStream(Encoding.UTF8.GetBytes(fault == "json" ? "{broken}\n" : Row))
+                        { ReadFault = fault == "read", CloseFault = fault == "close" }),
+                    line => { lines.Add(line); if (fault == "sink") throw new IOException("synthetic sink"); },
+                    fault == "sanitizer" ? _ => throw new IOException("synthetic sanitizer") : null);
+                // The original assertion remains independent of diagnostic success/failure.
+                owner.Capture(primary, "eof-body");
+                owner.Finish([], () => { });
+            }
+            catch (Exception exception) { observed = exception; }
+            Check.True(ReferenceEquals(primary, observed) && observed!.GetType() == typeof(InvalidOperationException) &&
+                observed.Message == "original EOF pending assertion" && observed.StackTrace!.Contains(originalStack, StringComparison.Ordinal),
+                "Diagnostics must preserve the original assertion object/type/message/stack.");
+            Check.True(lines.Count == 1 && lines[0].Length <= 8192, "Each observation must remain bounded.");
+            Check.False(lines[0].Contains("super-secret") || lines[0].Contains("Private Folder") || lines[0].Contains("synthetic-id") ||
+                lines[0].Contains("never-open.jpg"), "No token, path, identifier or JSON image path may escape projection.");
+            if (fault != "sanitizer") foreach (var breadcrumb in new[] { "app_state_reservation_failed", "pre_dispatch_state_failed", "capture_response_unconfirmed" })
+                Check.True(lines[0].Contains(breadcrumb, StringComparison.Ordinal), "All three product breadcrumbs must survive safe classification.");
+        }
+    }
+
+    private static void GuardMatrix()
+    {
+        var temp = Path.GetFullPath(Path.GetTempPath());
+        var invalid = new[] { "", "relative", Path.GetPathRoot(temp)!, temp,
+            Path.Combine(temp, "a0-persistent-agent-other"), Root + "-other", Root + "\\child",
+            Path.Combine(temp, "..", Path.GetFileName(Root)),
+            Path.Combine(temp, ".", Path.GetFileName(Root)), Root.ToUpperInvariant(),
+            Path.Combine(Path.GetPathRoot(temp)!, Path.GetFileName(Root)) };
+        foreach (var root in invalid)
+        {
+            var created = 0; var deleted = 0; var opened = 0;
+            try { PersistentEofRoot.Create(root, _ => created++, Absent); throw new Exception("Creation guard unexpectedly accepted."); }
+            catch (InvalidOperationException) { }
+            try { PersistentEofRoot.Delete(root, _ => deleted++, Absent); throw new Exception("Deletion guard unexpectedly accepted."); }
+            catch (InvalidOperationException) { }
+            var receipt = PersistentEofDiagnostic.ObserveLog(root, Path.Combine(Root, "capture-eof-commands.jsonl"), null,
+                (_, _, _, _) => { opened++; return new MemoryStream(); }, Absent);
+            Check.Equal("GuardRejected", receipt.Status); Check.Equal(0, created + deleted + opened);
+        }
+        foreach (var position in new[] { "ancestor", "target", "descendant-directory", "descendant-file", "log" })
+        {
+            var target = position == "ancestor" ? Path.GetDirectoryName(Root)! : position == "target" ? Root :
+                Path.Combine(Root, position == "log" ? "capture-eof-commands.jsonl" : "linked");
+            FileAttributes? Attributes(string path) => string.Equals(path, target, StringComparison.OrdinalIgnoreCase)
+                ? FileAttributes.ReparsePoint | (position is "descendant-file" or "log" ? 0 : FileAttributes.Directory)
+                : FileAttributes.Directory;
+            IEnumerable<string> Entries(string path) => path == Root ? [target] : [];
+            var deletes = 0;
+            try { PersistentEofRoot.Delete(Root, _ => deletes++, Attributes, Entries); throw new Exception("Reparse delete accepted."); }
+            catch (InvalidOperationException) { }
+            Check.Equal(0, deletes);
+            if (position is "ancestor" or "target" or "log")
+            {
+                var opens = 0;
+                Check.Equal("GuardRejected", PersistentEofDiagnostic.ObserveLog(Root, Path.Combine(Root, "capture-eof-commands.jsonl"), null,
+                    (_, _, _, _) => { opens++; return new MemoryStream(); }, Attributes).Status);
+                Check.Equal(0, opens);
+            }
+            if (position is "ancestor" or "target")
+            {
+                var creates = 0;
+                try { PersistentEofRoot.Create(Root, _ => creates++, Attributes); throw new Exception("Reparse create accepted."); }
+                catch (InvalidOperationException) { }
+                Check.Equal(0, creates);
+            }
+        }
+        foreach (var path in new[] { Path.Combine(Root, "other.jsonl"), Path.Combine(Root, "child", "capture-eof-commands.jsonl"), Path.Combine(Root, "..", "capture-eof-commands.jsonl") })
+        {
+            var opens = 0;
+            Check.Equal("GuardRejected", PersistentEofDiagnostic.ObserveLog(Root, path, null,
+                (_, _, _, _) => { opens++; return new MemoryStream(); }, Absent).Status);
+            Check.Equal(0, opens);
+        }
+        var createsValid = 0; var deletesValid = 0;
+        PersistentEofRoot.Create(Root, _ => createsValid++, Absent);
+        PersistentEofRoot.Delete(Root, _ => deletesValid++, Absent);
+        Check.Equal(1, createsValid); Check.Equal(1, deletesValid);
+    }
+
+    private static void FailureMatrix()
+    {
+        foreach (var bodyFails in new[] { false, true })
+        foreach (var secondary in new[] { "none", "restore", "guard", "delete", "dispose" })
+        {
+            var owner = new PersistentEofFailure(); var primary = Primary();
+            var other = new IOException("controlled secondary");
+            var order = new List<int>(); var deleteCalls = 0;
+            if (bodyFails) owner.Capture(primary, "eof-body");
+            if (secondary == "dispose") owner.Capture(other, "outer-body-or-dispose");
+            Exception? observed = null;
+            try
+            {
+                owner.Finish(Enumerable.Range(0, 6).Select<int, Action>(index => () =>
+                {
+                    order.Add(index); if (secondary == "restore") throw other;
+                }), () =>
+                {
+                    Check.True(order.SequenceEqual(Enumerable.Range(0, 6)), "All six restorations must be attempted before guard/delete.");
+                    if (secondary == "guard") PersistentEofRoot.Delete(Path.GetTempPath(), _ => deleteCalls++, Absent);
+                    else PersistentEofRoot.Delete(Root, _ => { deleteCalls++; if (secondary == "delete") throw other; }, Absent);
+                });
+            }
+            catch (Exception exception) { observed = exception; }
+            Check.Equal(secondary == "guard" ? 0 : 1, deleteCalls);
+            Check.True(order.SequenceEqual(Enumerable.Range(0, 6)), "No restoration attempt may be omitted.");
+            if (bodyFails) Check.True(ReferenceEquals(primary, observed) && observed!.StackTrace!.Contains(nameof(Primary), StringComparison.Ordinal), "First body failure survives secondary disposal/restore/guard/delete.");
+            else if (secondary == "none") Check.True(observed is null, "Successful body/cleanup stays successful.");
+            else Check.True(observed is not null, "Cleanup/disposal-only failure must fail.");
+        }
+    }
+
+    private static void DisposalBoundary()
+    {
+        var primary = Primary(); var originalStack = primary.StackTrace!;
+        var owner = new PersistentEofFailure(); var order = new List<string>();
+        async Task Boundary()
+        {
+            try
+            {
+                await using (var operation = new PersistentEofDisposeProbe(() =>
+                    { order.Add("dispose"); throw new IOException("controlled disposal"); }))
+                {
+                    try { ExceptionDispatchInfo.Capture(primary).Throw(); }
+                    catch (Exception exception) { order.Add("body"); owner.Capture(exception, "eof-body"); throw; }
+                }
+            }
+            catch (Exception exception) { owner.Capture(exception, "outer-body-or-dispose"); }
+            finally { owner.Finish([() => order.Add("restore")], () => order.Add("cleanup")); }
+        }
+        Exception? observed = null;
+        try { Boundary().GetAwaiter().GetResult(); } catch (Exception exception) { observed = exception; }
+        Check.True(ReferenceEquals(primary, observed) && observed!.GetType() == typeof(InvalidOperationException) &&
+            observed.Message == "original EOF pending assertion" && observed.StackTrace!.Contains(originalStack, StringComparison.Ordinal),
+            "The first body must survive the actual C# await-using disposal boundary.");
+        Check.True(order.SequenceEqual(new[] { "body", "dispose", "restore", "cleanup" }), "Primary capture precedes disposal; restoration precedes cleanup.");
+    }
+}
+
+sealed class PersistentEofDisposeProbe(Action dispose) : IAsyncDisposable
+{
+    public ValueTask DisposeAsync() { dispose(); return ValueTask.CompletedTask; }
+}
+
+sealed class PersistentEofProbeStream(byte[] bytes) : MemoryStream(bytes)
+{
+    public bool ReadFault { get; init; }
+    public bool CloseFault { get; init; }
+    public bool ChangeLength { get; init; }
+    public bool Closed { get; private set; }
+    public int CloseCalls { get; private set; }
+    public int BytesRead { get; private set; }
+    public int MaxRequested { get; private set; }
+    private int _lengthReads;
+    public override long Length => base.Length + (ChangeLength && _lengthReads++ > 0 ? 1 : 0);
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        MaxRequested = Math.Max(MaxRequested, count);
+        if (ReadFault) throw new IOException("controlled read");
+        var result = base.Read(buffer, offset, count); BytesRead += result; return result;
+    }
+    protected override void Dispose(bool disposing)
+    {
+        Closed = true; CloseCalls++; base.Dispose(disposing);
+        if (CloseFault) throw new IOException("controlled close");
     }
 }
 
