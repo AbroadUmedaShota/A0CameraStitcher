@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 #include "m6_child_diagnostics.hpp"
+#include "hardware_camera_agent_profile_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -648,6 +649,363 @@ public:
     int closes{};
     int captures{};
 };
+
+struct ProfileSettingCase {
+    std::string_view name;
+    SdkCameraStatus::SettingCapability SdkCameraStatus::* member;
+};
+
+constexpr std::array<ProfileSettingCase, 9> kProfileSettingCases{{
+    {"fileType", &SdkCameraStatus::file_type},
+    {"compressionLevel", &SdkCameraStatus::compression_level},
+    {"imageSize", &SdkCameraStatus::image_size},
+    {"exposureMode", &SdkCameraStatus::exposure_mode},
+    {"shutterSpeed", &SdkCameraStatus::shutter_speed},
+    {"aperture", &SdkCameraStatus::aperture},
+    {"sensitivity", &SdkCameraStatus::sensitivity},
+    {"whiteBalanceMode", &SdkCameraStatus::wb_mode},
+    {"focusMode", &SdkCameraStatus::focus_mode},
+}};
+constexpr std::array<std::string_view, 7> kProfileAttributes{
+    "available", "capType", "probeState", "valueType",
+    "currentValue", "currentIndex", "currentLabel",
+};
+constexpr std::string_view kProfileMismatchDetail =
+    "settings changed immediately before shutter in the open capture session";
+constexpr std::string_view kProfileInitialExpiryDetail =
+    "approved Single profile expired immediately before shutter; capture was blocked";
+constexpr std::string_view kProfileFinalExpiryDetail =
+    "approved Single profile expired during final shutter-session validation; capture was blocked";
+
+std::string SelectedSettingsProfileJson(std::string_view settings) {
+    return R"({"schemaVersion":"a0.camera-agent.capture-profile.v1",)"
+        R"("profileId":"selected-settings-test","profileVersion":1,)"
+        R"("selectedAlias":"CAM-A","cameraMode":"SingleCamera","approved":true,)"
+        R"("approvedBy":"test-operator","approvalReference":"synthetic-contract",)"
+        R"("approvedAtUtc":"2020-01-01T00:00:00Z","expiresAtUtc":"2099-12-31T23:59:59Z",)"
+        R"("expectedSettings":{)" + std::string(settings) + "}}";
+}
+
+// Literal expectations are independent of observed status and the comparator.
+// The C# writer omits null current* fields and all but available for fileType.
+// Explicit nulls below are a separate parser-coverage fixture.
+std::string WriterShapedSettingsProfileJson() {
+    return SelectedSettingsProfileJson(
+        R"("fileType":{"available":false},)"
+        R"("compressionLevel":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"JPEG Fine"},)"
+        R"json("imageSize":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"L(7360*4912)"},)json"
+        R"("exposureMode":{"available":true,"capType":"enum","probeState":"available","valueType":"unsigned","currentValue":3,"currentIndex":3},)"
+        R"("shutterSpeed":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"1/6"},)"
+        R"("aperture":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"8"},)"
+        R"("sensitivity":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"64"},)"
+        R"("whiteBalanceMode":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"Preset 1"},)"
+        R"("focusMode":{"available":true,"capType":"generic","probeState":"available","valueType":"unsigned","currentValue":1})");
+}
+
+std::string AllAttributesSettingsProfileJson() {
+    return SelectedSettingsProfileJson(
+        R"("fileType":{"available":false,"capType":"unsupported","probeState":"not-advertised","valueType":"unsupported","currentValue":null,"currentIndex":null,"currentLabel":null},)"
+        R"("compressionLevel":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"JPEG Fine"},)"
+        R"json("imageSize":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"L(7360*4912)"},)json"
+        R"("exposureMode":{"available":true,"capType":"enum","probeState":"available","valueType":"unsigned","currentValue":3,"currentIndex":3,"currentLabel":null},)"
+        R"("shutterSpeed":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"1/6"},)"
+        R"("aperture":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"8"},)"
+        R"("sensitivity":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"64"},)"
+        R"("whiteBalanceMode":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"Preset 1"},)"
+        R"("focusMode":{"available":true,"capType":"generic","probeState":"available","valueType":"unsigned","currentValue":1,"currentIndex":null,"currentLabel":null})");
+}
+
+SdkCameraStatus MatchingSelectedSettingsStatus() {
+    auto status = ConfirmedLiveViewOffStatus();
+    status.file_type = {false, "unsupported", "not-advertised", "unsupported",
+        std::nullopt, std::nullopt, std::nullopt, {}, {}};
+    status.compression_level = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "JPEG Fine", {}, {}};
+    status.image_size = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "L(7360*4912)", {}, {}};
+    status.exposure_mode = {true, "enum", "available", "unsigned",
+        3U, 3U, std::nullopt, {}, {}};
+    status.shutter_speed = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "1/6", {}, {}};
+    status.aperture = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "8", {}, {}};
+    status.sensitivity = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "64", {}, {}};
+    status.wb_mode = {true, "enum", "observed", "label",
+        std::nullopt, 0U, "Preset 1", {}, {}};
+    status.focus_mode = {true, "generic", "available", "unsigned",
+        1U, std::nullopt, std::nullopt, {}, {}};
+    return status;
+}
+
+void MutateSelectedSetting(SdkCameraStatus::SettingCapability& setting, std::size_t attribute) {
+    switch (attribute) {
+    case 0: setting.available = !setting.available; break;
+    case 1: setting.cap_type += "-changed"; break;
+    case 2: setting.probe_state += "-changed"; break;
+    case 3: setting.value_type += "-changed"; break;
+    case 4: setting.current_value = setting.current_value.value_or(0U) + 1U; break;
+    case 5: setting.current_index = setting.current_index.value_or(0U) + 1U; break;
+    case 6: setting.current_label = setting.current_label.value_or("null") + "-changed"; break;
+    default: throw std::runtime_error("unknown profile attribute mutation");
+    }
+}
+
+void TestSelectedProfileComparisonDirectContracts() {
+    int matrix_cases = 0;
+    int control_cases = 0;
+    const int failures_before = failures;
+    try {
+        const auto all_attributes =
+            detail::ParseApprovedCaptureProfile(AllAttributesSettingsProfileJson());
+        const auto writer = detail::ParseApprovedCaptureProfile(WriterShapedSettingsProfileJson());
+        const auto subset = detail::ParseApprovedCaptureProfile(
+            SelectedSettingsProfileJson(R"("fileType":{"available":false})"));
+        Check(all_attributes.expected_settings.size() == 9 &&
+              writer.expected_settings.size() == 9 && subset.expected_settings.size() == 1,
+            "profile fixtures must preserve all-nine and selected-subset shapes");
+        Check(writer.sha256 == Sha256OfText(WriterShapedSettingsProfileJson()),
+            "shared parser must retain the exact writer-shaped JSON digest");
+        const auto& writer_file = writer.expected_settings.at("fileType");
+        Check(writer_file.available.has_value() && !*writer_file.available &&
+              !writer_file.cap_type && !writer_file.probe_state && !writer_file.value_type &&
+              !writer_file.current_value_specified && !writer_file.current_index_specified &&
+              !writer_file.current_label_specified,
+            "writer-shaped fileType must select explicit false and omit all other attributes");
+        const auto run = [&](std::string_view name,
+                             const detail::ApprovedCaptureProfile& profile,
+                             const SdkCameraStatus& status,
+                             bool expect_mismatch,
+                             bool matrix = false) {
+            matrix ? ++matrix_cases : ++control_cases;
+            int evidence_calls = 0;
+            std::string category;
+            std::string detail_text;
+            try {
+                detail::ValidateApprovedCaptureProfileForShutterSession(
+                    profile, status, [&] { ++evidence_calls; });
+            } catch (const TransportError& error) {
+                category = error.Category();
+                detail_text = error.what();
+            } catch (const std::exception& error) {
+                category = "unexpected_exception";
+                detail_text = error.what();
+            }
+            const bool passed = expect_mismatch
+                ? category == "capture_settings_mismatch" &&
+                    detail_text == kProfileMismatchDetail && evidence_calls == 0
+                : category.empty() && evidence_calls == 1;
+            Check(passed, "shared direct profile validation must match its expected outcome");
+            std::cout << "M2_PROFILE_CASE kind=" << (matrix ? "direct-mutation" : "direct-control")
+                      << " name=" << name << " evidence=" << evidence_calls
+                      << " verdict=" << (passed ? "PASS" : "FAIL") << '\n';
+        };
+        const auto baseline = MatchingSelectedSettingsStatus();
+        run("writer-shaped-match", writer, baseline, false);
+        run("all-attributes-explicit-null-match", all_attributes, baseline, false);
+        for (const auto& setting : kProfileSettingCases) {
+            for (std::size_t attribute = 0; attribute < kProfileAttributes.size(); ++attribute) {
+                auto changed = baseline;
+                MutateSelectedSetting(changed.*setting.member, attribute);
+                run(std::string(setting.name) + "." + std::string(kProfileAttributes[attribute]),
+                    all_attributes, changed, true, true);
+            }
+        }
+        auto changed = baseline;
+        changed.file_type.available = true;
+        run("writer-explicit-false-is-enforced", writer, changed, true);
+        run("selected-subset-match", subset, baseline, false);
+        for (std::size_t setting = 1; setting < kProfileSettingCases.size(); ++setting) {
+            for (std::size_t attribute = 0; attribute < kProfileAttributes.size(); ++attribute) {
+                MutateSelectedSetting(changed.*kProfileSettingCases[setting].member, attribute);
+            }
+        }
+        changed.file_type.available = false;
+        run("non-selected-settings-are-neutral", subset, changed, false);
+        for (std::size_t attribute = 1; attribute < kProfileAttributes.size(); ++attribute) {
+            MutateSelectedSetting(changed.file_type, attribute);
+        }
+        run("omitted-attributes-are-neutral", subset, changed, false);
+        for (std::size_t attribute = 4; attribute < kProfileAttributes.size(); ++attribute) {
+            const auto explicit_null = detail::ParseApprovedCaptureProfile(
+                SelectedSettingsProfileJson(R"("fileType":{")" +
+                    std::string(kProfileAttributes[attribute]) + R"(":null})"));
+            run(std::string(kProfileAttributes[attribute]) + "-explicit-null-match",
+                explicit_null, baseline, false);
+            changed = baseline;
+            MutateSelectedSetting(changed.file_type, attribute);
+            run(std::string(kProfileAttributes[attribute]) + "-explicit-null-rejects-value",
+                explicit_null, changed, true);
+            run(std::string(kProfileAttributes[attribute]) + "-omitted-allows-value",
+                subset, changed, false);
+        }
+        const auto no_available = detail::ParseApprovedCaptureProfile(
+            SelectedSettingsProfileJson(R"("fileType":{"currentValue":null})"));
+        changed = baseline;
+        changed.file_type.available = true;
+        run("omitted-available-is-neutral", no_available, changed, false);
+        changed = baseline;
+        changed.exposure_mode.current_value.reset();
+        run("selected-currentValue-rejects-null", writer, changed, true);
+        changed = baseline;
+        changed.exposure_mode.current_index.reset();
+        run("selected-currentIndex-rejects-null", writer, changed, true);
+        changed = baseline;
+        changed.compression_level.current_label.reset();
+        run("selected-currentLabel-rejects-null", writer, changed, true);
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: selected profile direct contracts threw: " << error.what() << '\n';
+    }
+    Check(matrix_cases == 63, "direct matrix must execute all nine settings by seven attributes");
+    std::cout << "M2_PROFILE_DIRECT mutations=" << matrix_cases << " controls=" << control_cases
+              << " failures=" << failures - failures_before << '\n';
+}
+
+void TestSelectedProfileComparisonInShutterSession() {
+    const fs::path root = fs::temp_directory_path() / ("a0-profile-shutter-test-" + NewRunId());
+    int cases = 0;
+    const int failures_before = failures;
+    try {
+        IdentityMap sdk_map(root / "sdk-map.json");
+        IdentityMap wpd_map(root / "wpd-map.json");
+        sdk_map.Bind("CAM-A", "sdk-one");
+        wpd_map.Bind("CAM-A", "wpd-one");
+        const std::vector<CameraInfo> sdk_cameras{{"Nikon D810", "fw", "M", "sdk-one"}};
+        const std::vector<CameraInfo> wpd_cameras{{"Nikon D810", "fw", "M", "wpd-one"}};
+        HardwareCameraAgentRequest request;
+        request.operation = HardwareCameraAgentOperation::capture_single;
+        request.transaction_id = "fedcba9876543210fedcba9876543210";
+        request.camera_alias = "CAM-A";
+        request.exclusive_camera_control_confirmed = true;
+        request.dedicated_spool_scope_confirmed = true;
+        request.exact_object_delete_confirmed = true;
+        const auto run = [&](std::string_view name,
+                             const detail::ApprovedCaptureProfile& profile,
+                             const SdkCameraStatus& status,
+                             std::string_view expected_category = {},
+                             int expected_evidence_calls = 1,
+                             const std::function<void()>& after_evidence = {}) {
+            ++cases;
+            const int case_failures_before = failures;
+            HybridWpdFake wpd;
+            HybridSdkFake sdk;
+            EvidenceWriter evidence(
+                root / "artifacts", "run-profile-shutter-" + std::to_string(cases), "fake-combined");
+            int status_calls = 0;
+            int validator_calls = 0;
+            int evidence_calls = 0;
+            const auto result = ExecuteBoundSingleCapture(
+                request, sdk_cameras, wpd_cameras, sdk_map, wpd_map,
+                wpd, wpd, sdk, sdk, evidence, ConfirmedLiveViewOffStatus(),
+                [&] {
+                    ++status_calls;
+                    Check(sdk.open && sdk.captures == 0,
+                        "profile status probe must run in the open pre-shutter session");
+                    return status;
+                }, Timeouts{}, std::nullopt, {},
+                [&](const SdkCameraStatus& shutter_status) {
+                    ++validator_calls;
+                    Check(sdk.open && sdk.captures == 0,
+                        "actual profile validator must run inside the open pre-shutter session");
+                    detail::ValidateApprovedCaptureProfileForShutterSession(
+                        profile, shutter_status, [&] {
+                            ++evidence_calls;
+                            Check(sdk.open && sdk.captures == 0,
+                                "profile evidence must precede the synthetic shutter");
+                            if (after_evidence) after_evidence();
+                        });
+                });
+            Check(status_calls == 1 && validator_calls == 1 &&
+                  evidence_calls == expected_evidence_calls,
+                "same-session profile probe, validator, and evidence must have exact call counts");
+            Check(sdk.opens == 1 && sdk.closes == 1 && !sdk.open && !wpd.open &&
+                  HybridWpdFake::active_sessions == 0 && result.automatic_retry_count == 0,
+                "profile validation must close the SDK once without overlap or retry");
+            if (expected_category.empty()) {
+                Check(result.succeeded && result.terminal_state == "Complete" &&
+                      result.error_category.empty() && sdk.captures == 1 &&
+                      wpd.delete_attempts == 1 && wpd.empty_after_checks == 1 &&
+                      result.retained_original && fs::is_regular_file(result.retained_original->path),
+                    "matching profile must retain the synthetic original after one shutter and exact-object cleanup");
+            } else {
+                Check(!result.succeeded && result.terminal_state == "FailedPartial" &&
+                      result.error_category == expected_category && sdk.captures == 0 &&
+                      wpd.delete_attempts == 0 && wpd.empty_after_checks == 0,
+                    "profile failure must stop before shutter and must never delete an object");
+                const auto expected_detail = expected_category == "capture_settings_mismatch"
+                    ? kProfileMismatchDetail
+                    : expected_category == "capture_profile_expired"
+                        ? (expected_evidence_calls == 0 ? kProfileInitialExpiryDetail : kProfileFinalExpiryDetail)
+                        : std::string_view("synthetic profile evidence failure");
+                Check(result.error_detail == expected_detail,
+                    "shared validator must preserve the original exception detail");
+            }
+            std::cout << "M2_PROFILE_CASE kind=integrated name=" << name
+                      << " sdkCaptures=" << sdk.captures << " sdkCloses=" << sdk.closes
+                      << " wpdDeletes=" << wpd.delete_attempts << " evidence=" << evidence_calls
+                      << " verdict=" << (failures == case_failures_before ? "PASS" : "FAIL") << '\n';
+        };
+        const auto baseline = MatchingSelectedSettingsStatus();
+        const auto all_attributes =
+            detail::ParseApprovedCaptureProfile(AllAttributesSettingsProfileJson());
+        const auto writer = detail::ParseApprovedCaptureProfile(WriterShapedSettingsProfileJson());
+        run("writer-shaped-match", writer, baseline);
+        run("all-attributes-match", all_attributes, baseline);
+        // Nine integrated mismatches cover each setting and all seven attributes,
+        // separately from the 63 direct allocation-light mutation cases.
+        for (std::size_t setting = 0; setting < kProfileSettingCases.size(); ++setting) {
+            const auto attribute = setting % kProfileAttributes.size();
+            auto changed = baseline;
+            MutateSelectedSetting(changed.*kProfileSettingCases[setting].member, attribute);
+            run(std::string(kProfileSettingCases[setting].name) + "." +
+                    std::string(kProfileAttributes[attribute]),
+                all_attributes, changed, "capture_settings_mismatch", 0);
+        }
+        auto changed = baseline;
+        changed.file_type.available = true;
+        run("writer-explicit-false-is-enforced", writer, changed, "capture_settings_mismatch", 0);
+        const auto subset = detail::ParseApprovedCaptureProfile(
+            SelectedSettingsProfileJson(R"("fileType":{"available":false})"));
+        changed = baseline;
+        changed.wb_mode.available = false;
+        run("non-selected-setting-is-neutral", subset, changed);
+        for (std::size_t attribute = 4; attribute < kProfileAttributes.size(); ++attribute) {
+            const auto explicit_null = detail::ParseApprovedCaptureProfile(
+                SelectedSettingsProfileJson(R"("fileType":{")" +
+                    std::string(kProfileAttributes[attribute]) + R"(":null})"));
+            changed = baseline;
+            MutateSelectedSetting(changed.file_type, attribute);
+            run(std::string(kProfileAttributes[attribute]) + "-explicit-null-rejects-value",
+                explicit_null, changed, "capture_settings_mismatch", 0);
+            run(std::string(kProfileAttributes[attribute]) + "-omitted-allows-value", subset, changed);
+        }
+        // Only these internal order fixtures diverge from their parsed UTC
+        // text. They own the non-const object for the entire synchronous call;
+        // no clock injection, const_cast, sleeps, or profile-file edits.
+        auto expired = detail::ParseApprovedCaptureProfile(WriterShapedSettingsProfileJson());
+        expired.expires_at = FILETIME{};
+        run("expired-before-comparison", expired, baseline, "capture_profile_expired", 0);
+        changed = baseline;
+        changed.file_type.available = true;
+        run("expiry-precedes-mismatch", expired, changed, "capture_profile_expired", 0);
+        auto expires_during_evidence =
+            detail::ParseApprovedCaptureProfile(WriterShapedSettingsProfileJson());
+        run("expires-during-evidence", expires_during_evidence, baseline, "capture_profile_expired", 1,
+            [&] { expires_during_evidence.expires_at = FILETIME{}; });
+        run("evidence-exception-blocks-shutter", writer, baseline, "synthetic_evidence_failed", 1, [] {
+            throw TransportError("synthetic_evidence_failed", "synthetic profile evidence failure");
+        });
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: selected profile shutter-session contracts threw: " << error.what() << '\n';
+    }
+    Check(cases == 23, "all integrated profile controls must execute");
+    std::cout << "M2_PROFILE_INTEGRATED controls=" << cases
+              << " failures=" << failures - failures_before << '\n';
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
 
 void TestStrictProtocolAndTypedResponses() {
     FakeBackend backend;
@@ -4412,6 +4770,8 @@ int main(int argc, char** argv) {
     TestDurableJournalRecoveryContracts();
     TestExactlyOneBindingAndHybridExecutorReuse();
     TestProfileSnapshotAndStrictIdentityMapGates();
+    TestSelectedProfileComparisonDirectContracts();
+    TestSelectedProfileComparisonInShutterSession();
     TestFixedLocalPathPolicy();
     TestDualIdentityProofContractIsStrictAndFailClosed();
     TestDualIdentityDirectNegativeMatrix();

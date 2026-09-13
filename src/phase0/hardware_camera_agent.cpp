@@ -1,4 +1,5 @@
 #include "a0/phase0/hardware_camera_agent.hpp"
+#include "hardware_camera_agent_profile_internal.hpp"
 
 #include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
@@ -463,28 +464,8 @@ void AppendObservedSettingsJson(
     output << '}';
 }
 
-struct SettingExpectation {
-    std::optional<bool> available;
-    std::optional<std::string> cap_type;
-    std::optional<std::string> probe_state;
-    std::optional<std::string> value_type;
-    bool current_value_specified{};
-    std::optional<std::uint32_t> current_value;
-    bool current_index_specified{};
-    std::optional<std::uint32_t> current_index;
-    bool current_label_specified{};
-    std::optional<std::string> current_label;
-};
-
-struct ApprovedCaptureProfile {
-    std::string profile_id;
-    std::uint32_t profile_version{};
-    std::string selected_alias;
-    std::string sha256;
-    std::string expires_at_utc;
-    FILETIME expires_at{};
-    std::map<std::string, SettingExpectation> expected_settings;
-};
+using detail::SettingExpectation;
+using detail::ApprovedCaptureProfile;
 
 FILETIME ParseProfileUtc(std::string_view value);
 
@@ -674,7 +655,7 @@ void SetLiveViewPreflightFailure(
     }
 }
 
-ApprovedCaptureProfile ParseApprovedCaptureProfile(std::string_view json) {
+ApprovedCaptureProfile ParseApprovedCaptureProfileImpl(std::string_view json) {
     const JsonValue root = JsonParser(json).Parse();
     RequireExactFields(root, {
         "schemaVersion", "profileId", "profileVersion", "selectedAlias", "cameraMode", "approved", "approvedBy",
@@ -1536,7 +1517,7 @@ ApprovedCaptureProfile LoadStrictApprovedCaptureProfile(const fs::path& path) {
             throw std::runtime_error(
                 "approved capture profile cannot be read completely");
         }
-        return ParseApprovedCaptureProfile(body);
+        return detail::ParseApprovedCaptureProfile(body);
     } catch (const std::exception&) {
         throw std::invalid_argument(
             "approved capture profile is malformed or outside its trusted local scope");
@@ -2192,6 +2173,42 @@ bool IsLiveViewResultStructurallyValid(
 }
 
 } // namespace
+
+namespace detail {
+
+ApprovedCaptureProfile ParseApprovedCaptureProfile(std::string_view json) {
+    return ParseApprovedCaptureProfileImpl(json);
+}
+
+void ValidateApprovedCaptureProfileForShutterSession(
+    const ApprovedCaptureProfile& profile,
+    const SdkCameraStatus& shutter_status,
+    const std::function<void()>& record_evidence) {
+    if (!ProfileIsCurrentlyValid(profile)) {
+        throw TransportError(
+            "capture_profile_expired",
+            "approved Single profile expired immediately before shutter; capture was blocked");
+    }
+    if (!MatchesApprovedProfile(ToObservedSettings(shutter_status), profile)) {
+        throw TransportError(
+            "capture_settings_mismatch",
+            "settings changed immediately before shutter in the open capture session");
+    }
+    record_evidence();
+    // This is deliberately the last side-effect-free
+    // gate before ExecuteHybridCaptureOnce issues the
+    // shutter command. The earlier check prevents a
+    // known-expired profile from starting the probe;
+    // this second check closes expiry during a slow
+    // read-only SDK settings probe/evidence write.
+    if (!ProfileIsCurrentlyValid(profile)) {
+        throw TransportError(
+            "capture_profile_expired",
+            "approved Single profile expired during final shutter-session validation; capture was blocked");
+    }
+}
+
+} // namespace detail
 
 std::string ComputeDualIdentityBindingProofPayloadSha256(
     const DualIdentityBindingProof& proof) {
@@ -3896,35 +3913,16 @@ public:
                                     config_.transaction_state_root, request.transaction_id);
                             },
                             [&](const SdkCameraStatus& shutter_status) {
-                                if (!ProfileIsCurrentlyValid(*approved_profile_)) {
-                                    throw TransportError(
-                                        "capture_profile_expired",
-                                        "approved Single profile expired immediately before shutter; capture was blocked");
-                                }
-                                if (!MatchesApprovedProfile(
-                                        ToObservedSettings(shutter_status), *approved_profile_)) {
-                                    throw TransportError(
-                                        "capture_settings_mismatch",
-                                        "settings changed immediately before shutter in the open capture session");
-                                }
-                                evidence.RecordState(
-                                    "preflight",
-                                    "HardwareAgentCaptureProfileRevalidatedInShutterSession",
-                                    request.camera_alias,
-                                    approved_profile_->profile_id + ":v" +
-                                        std::to_string(approved_profile_->profile_version) + ":" +
-                                        approved_profile_->sha256);
-                                // This is deliberately the last side-effect-free
-                                // gate before ExecuteHybridCaptureOnce issues the
-                                // shutter command. The earlier check prevents a
-                                // known-expired profile from starting the probe;
-                                // this second check closes expiry during a slow
-                                // read-only SDK settings probe/evidence write.
-                                if (!ProfileIsCurrentlyValid(*approved_profile_)) {
-                                    throw TransportError(
-                                        "capture_profile_expired",
-                                        "approved Single profile expired during final shutter-session validation; capture was blocked");
-                                }
+                                detail::ValidateApprovedCaptureProfileForShutterSession(
+                                    *approved_profile_, shutter_status, [&] {
+                                        evidence.RecordState(
+                                            "preflight",
+                                            "HardwareAgentCaptureProfileRevalidatedInShutterSession",
+                                            request.camera_alias,
+                                            approved_profile_->profile_id + ":v" +
+                                                std::to_string(approved_profile_->profile_version) + ":" +
+                                                approved_profile_->sha256);
+                                    });
                             });
                         if (result.succeeded && request.live_view_handoff_requested) {
                             live_view_resume_attempted = true;
