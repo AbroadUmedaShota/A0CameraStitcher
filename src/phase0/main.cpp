@@ -1,12 +1,15 @@
 #include "a0/phase0/fake_camera_transport.hpp"
 #include "a0/phase0/cli_safety.hpp"
+#include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 #include "a0/phase0/hardware_camera_agent.hpp"
 #include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/pc_direct_capture.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 
 #include <cstdlib>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +51,7 @@ struct Options {
     bool dual_dedicated_spools_confirmed{false};
     bool exact_object_delete_confirmed{false};
     bool single_camera_connected_confirmed{false};
+    bool pc_direct_save_confirmed{false};
     std::string transport;
     bool transport_explicit{false};
     WpdCommandTargetPolicy wpd_command_target{WpdCommandTargetPolicy::functional};
@@ -59,6 +63,7 @@ struct Options {
     fs::path reports{"docs/evidence/phase0"};
     fs::path camera_map{DefaultIdentityMapPath()};
     bool camera_map_explicit{false};
+    std::optional<fs::path> wpd_camera_map;
     fs::path single_identity_v3{DefaultSingleIdentityV3Path()};
     bool single_identity_v3_explicit{false};
     std::optional<fs::path> dual_identity_provider;
@@ -99,6 +104,51 @@ std::optional<std::string> EnvironmentValue(const char* name) {
     std::string value(buffer);
     std::free(buffer);
     return value;
+}
+
+fs::path RequireExistingFixedLocalFile(
+    std::string_view argument_name,
+    const fs::path& path) {
+    fs::path normalized;
+    try {
+        normalized = ValidateDualHardwareFixedLocalPath(
+            path, argument_name);
+    } catch (const std::exception& error) {
+        throw std::invalid_argument(error.what());
+    }
+    std::error_code status_error;
+    const bool is_regular_file =
+        fs::is_regular_file(normalized, status_error);
+    if (status_error || !is_regular_file) {
+        throw std::invalid_argument(
+            std::string(argument_name) +
+            " must name an existing local file");
+    }
+    return normalized;
+}
+
+fs::path ResolveFixedLocalOutputPath(
+    std::string_view argument_name,
+    const fs::path& path) {
+    std::error_code absolute_error;
+    auto candidate = path.is_absolute()
+        ? path
+        : fs::absolute(path, absolute_error);
+    if (absolute_error) {
+        throw std::invalid_argument(
+            std::string(argument_name) +
+            " could not be resolved to an absolute local path");
+    }
+    candidate = candidate.lexically_normal();
+    return ValidateDualHardwareFixedLocalPath(candidate, argument_name);
+}
+
+std::string ErrorCategory(const std::exception& error) {
+    if (const auto* transport =
+            dynamic_cast<const TransportError*>(&error)) {
+        return transport->Category();
+    }
+    return "pc_direct_preflight_failed";
 }
 
 std::string EscapeCliValue(std::string_view value) {
@@ -162,6 +212,9 @@ void Usage() {
         << "  hybrid-interrupt-pair --operator-gate <safe-name> --exclusive-camera-control-confirmed\n"
         << "    --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed\n"
         << "    (terminate this process after CAM-A completion; CAM-B can never resume from the gate)\n"
+        << "  pc-direct-capture-single --alias CAM-A|CAM-B --count 1 --camera-map PATH --wpd-camera-map PATH\n"
+        << "    --single-camera-connected-confirmed --exclusive-camera-control-confirmed --pc-direct-save-confirmed\n"
+        << "    (experimental one-shot: read-only card fingerprints around SDK PC-direct save; no card delete/fallback/retry)\n"
         << "  capture-single --alias CAM-A --count 10 --transport fake (contract harness only; real hardware is rejected)\n"
         << "  capture-pair --count 10 --transport fake (contract harness only; real hardware is rejected)\n"
         << "  stability --count 100 --transport fake (contract harness only; real hardware is rejected)\n"
@@ -193,6 +246,7 @@ Options Parse(int argc, char** argv) {
         else if (arg == "--dual-dedicated-spools-confirmed") options.dual_dedicated_spools_confirmed = true;
         else if (arg == "--exact-object-delete-confirmed") options.exact_object_delete_confirmed = true;
         else if (arg == "--single-camera-connected-confirmed") options.single_camera_connected_confirmed = true;
+        else if (arg == "--pc-direct-save-confirmed") options.pc_direct_save_confirmed = true;
         else if (arg == "--scenario") options.scenario = require_value();
         else if (arg == "--run-id") options.run_id = require_value();
         else if (arg == "--transport") { options.transport = require_value(); options.transport_explicit = true; }
@@ -214,6 +268,12 @@ Options Parse(int argc, char** argv) {
         else if (arg == "--artifacts") options.artifacts = require_value();
         else if (arg == "--reports") options.reports = require_value();
         else if (arg == "--camera-map") { options.camera_map = require_value(); options.camera_map_explicit = true; }
+        else if (arg == "--wpd-camera-map") {
+            if (options.wpd_camera_map) {
+                throw std::runtime_error("wpd-camera-map may be specified only once");
+            }
+            options.wpd_camera_map = require_value();
+        }
         else if (arg == "--single-identity-v3") {
             options.single_identity_v3 = require_value();
             options.single_identity_v3_explicit = true;
@@ -255,7 +315,8 @@ Options Parse(int argc, char** argv) {
                 options.command == "sdk-status" || options.command == "hybrid-capture-single" ||
                 options.command == "hybrid-capture-pair" ||
                 options.command == "hybrid-fault-single" || options.command == "hybrid-fault-pair" ||
-                options.command == "hybrid-interrupt-pair"
+                options.command == "hybrid-interrupt-pair" ||
+                options.command == "pc-direct-capture-single"
             ? "sdk"
             : "wpd";
     }
@@ -291,6 +352,23 @@ Options Parse(int argc, char** argv) {
             options.single_camera_connected_confirmed,
             options.transport_explicit)) {
         throw std::runtime_error(*binding_error);
+    }
+    if (const auto pc_direct_error = ValidatePcDirectCaptureArguments(
+            options.command,
+            options.transport,
+            options.transport_explicit,
+            options.count,
+            options.alias_explicit,
+            options.single_camera_connected_confirmed,
+            options.exclusive_camera_control_confirmed,
+            options.pc_direct_save_confirmed,
+            options.camera_map_explicit,
+            options.wpd_camera_map.has_value(),
+            options.dedicated_spool_scope_confirmed ||
+                options.dual_dedicated_spools_confirmed ||
+                options.exact_object_delete_confirmed,
+            options.operator_gate.has_value() || !options.scenario.empty())) {
+        throw std::runtime_error(*pc_direct_error);
     }
     if (const auto direct_capture_error = ValidateDirectCaptureSafety(
             options.command, options.transport, options.operator_gate.has_value())) {
@@ -669,6 +747,245 @@ std::pair<CameraInfo, CameraInfo> ResolveProductSingleCameras(
         ResolveSingleCameraWpdIdentityCamera(
             identity, options.alias, wpd_cameras),
     };
+}
+
+fs::path PersistPcDirectCaptureSummary(
+    const EvidenceWriter& evidence,
+    const PcDirectCaptureResult& result,
+    std::string_view camera_alias,
+    const std::optional<WpdPayloadFingerprint>& before,
+    const std::optional<WpdPayloadFingerprint>& after) {
+    const auto path = evidence.RunRoot() / "pc-direct-summary.json";
+    const auto partial = fs::path(path.string() + ".partial");
+    if (fs::exists(path) || fs::exists(partial)) {
+        throw std::runtime_error(
+            "refusing to overwrite PC-direct summary evidence");
+    }
+    const bool card_unchanged = before && after && *before == *after;
+    const FrameEvidence* frame = result.transaction.frames.empty()
+        ? nullptr
+        : &result.transaction.frames.front();
+    const auto redacted_relative_path = frame
+        ? PcDirectReportRelativePath(evidence.RunRoot(), frame->path)
+        : std::nullopt;
+    std::ofstream output(partial, std::ios::binary | std::ios::out);
+    if (!output) {
+        throw std::runtime_error(
+            "cannot create PC-direct summary evidence");
+    }
+    output
+        << "{\n"
+        << "  \"schemaVersion\": \"phase0.pc-direct-summary.v1\",\n"
+        << "  \"runId\": \"" << EscapeCliValue(evidence.RunId()) << "\",\n"
+        << "  \"transactionId\": \""
+        << EscapeCliValue(result.transaction.transaction_id) << "\",\n"
+        << "  \"cameraAlias\": \""
+        << EscapeCliValue(camera_alias) << "\",\n"
+        << "  \"terminalState\": \""
+        << EscapeCliValue(result.transaction.terminal_state) << "\",\n"
+        << "  \"errorCategory\": \""
+        << EscapeCliValue(result.transaction.error_category) << "\",\n"
+        << "  \"durationMs\": "
+        << result.transaction.duration.count() << ",\n"
+        << "  \"captureAttempted\": "
+        << (result.capture_attempted ? "true" : "false") << ",\n"
+        << "  \"candidateCount\": " << result.candidate_count << ",\n"
+        << "  \"downloadedJpegFullyDecoded\": "
+        << (result.downloaded_jpeg_fully_decoded ? "true" : "false")
+        << ",\n"
+        << "  \"persistedJpegFullyDecoded\": "
+        << (result.persisted_jpeg_fully_decoded ? "true" : "false")
+        << ",\n"
+        << "  \"saveMediaRestoreAttempted\": "
+        << (result.save_media_restore_attempted ? "true" : "false")
+        << ",\n"
+        << "  \"saveMediaRestoreConfirmed\": "
+        << (result.save_media_restore_confirmed ? "true" : "false")
+        << ",\n"
+        << "  \"cardFallbackAttempted\": false,\n"
+        << "  \"cameraDeleteAttempted\": false,\n"
+        << "  \"automaticRetryCount\": 0,\n"
+        << "  \"cardFingerprintBeforeAvailable\": "
+        << (before ? "true" : "false") << ",\n"
+        << "  \"cardFingerprintAfterAvailable\": "
+        << (after ? "true" : "false") << ",\n"
+        << "  \"cardUnchanged\": "
+        << (card_unchanged ? "true" : "false");
+    if (before) {
+        output << ",\n  \"cardBefore\": {\"objectCount\": "
+               << before->object_count << ", \"totalBytes\": "
+               << before->total_bytes << ", \"aggregateSha256\": \""
+               << before->aggregate_sha256 << "\"}";
+    }
+    if (after) {
+        output << ",\n  \"cardAfter\": {\"objectCount\": "
+               << after->object_count << ", \"totalBytes\": "
+               << after->total_bytes << ", \"aggregateSha256\": \""
+               << after->aggregate_sha256 << "\"}";
+    }
+    if (frame) {
+        output << ",\n  \"original\": {\"success\": "
+               << (frame->success ? "true" : "false")
+               << ", \"relativePath\": \""
+               << (redacted_relative_path
+                       ? EscapeCliValue(*redacted_relative_path)
+                       : std::string{})
+               << "\", \"bytes\": " << frame->bytes
+               << ", \"sha256\": \"" << frame->sha256 << "\"}";
+    }
+    output << "\n}\n";
+    output.flush();
+    if (!output) {
+        throw std::runtime_error(
+            "cannot flush PC-direct summary evidence");
+    }
+    output.close();
+    std::error_code rename_error;
+    fs::rename(partial, path, rename_error);
+    if (rename_error) {
+        throw std::runtime_error(
+            "cannot atomically publish PC-direct summary evidence");
+    }
+    return path;
+}
+
+int RunPcDirectCaptureSingle(const Options& options) {
+    if (!options.wpd_camera_map) {
+        throw std::invalid_argument(
+            "pc-direct-capture-single requires --wpd-camera-map");
+    }
+    const auto sdk_camera_map = RequireExistingFixedLocalFile(
+        "--camera-map", options.camera_map);
+    const auto wpd_camera_map = RequireExistingFixedLocalFile(
+        "--wpd-camera-map", *options.wpd_camera_map);
+    const auto artifacts = ResolveFixedLocalOutputPath(
+        "--artifacts", options.artifacts);
+    const auto reports = ResolveFixedLocalOutputPath(
+        "--reports", options.reports);
+
+    const std::string run_id = NewRunId();
+    EvidenceWriter evidence(
+        artifacts, run_id, "nikon-sdk-pc-direct-experimental");
+    PcDirectCaptureResult result;
+    result.transaction.run_id = run_id;
+    result.transaction.transaction_id = "pc-direct-1";
+    std::optional<WpdPayloadFingerprint> before;
+    std::optional<WpdPayloadFingerprint> after;
+    bool capture_executor_entered = false;
+
+    try {
+        std::string expected_wpd_identity;
+        {
+            WpdTransport wpd;
+            wpd.RequireExactlyOneD810ForProductAgent();
+            const auto cameras = wpd.Enumerate();
+            if (cameras.size() != 1) {
+                throw TransportError(
+                    "wpd_camera_count_mismatch",
+                    "PC-direct capture requires exactly one WPD D810");
+            }
+            const auto camera = ResolveCamera(
+                cameras, wpd_camera_map, options.alias);
+            expected_wpd_identity = camera.stable_identity;
+            before = wpd.InspectPayloadFingerprint(
+                expected_wpd_identity, std::chrono::seconds(30));
+        }
+
+        NikonSdkTransport sdk;
+        sdk.RequireExactlyOneD810ForProductAgent();
+        const auto cameras = sdk.Enumerate();
+        if (cameras.size() != 1) {
+            throw TransportError(
+                "sdk_camera_count_mismatch",
+                "PC-direct capture requires exactly one SDK D810");
+        }
+        const auto camera = ResolveCamera(
+            cameras, sdk_camera_map, options.alias);
+        evidence.RecordCamera(options.alias, camera.firmware);
+
+        PcDirectCaptureRequest request;
+        request.transaction_id = result.transaction.transaction_id;
+        request.camera_alias = options.alias;
+        request.stable_identity = camera.stable_identity;
+        capture_executor_entered = true;
+        result = ExecutePcDirectCaptureOnce(
+            sdk,
+            evidence,
+            request,
+            [&] {
+                WpdTransport wpd;
+                wpd.RequireExactlyOneD810ForProductAgent();
+                const auto current = wpd.Enumerate();
+                if (current.size() != 1) {
+                    throw TransportError(
+                        "wpd_camera_count_mismatch",
+                        "post-capture WPD inspection requires exactly one D810");
+                }
+                const auto camera_after = ResolveCamera(
+                    current, wpd_camera_map, options.alias);
+                if (camera_after.stable_identity != expected_wpd_identity) {
+                    throw TransportError(
+                        "wpd_camera_changed",
+                        "post-capture WPD camera differs from the pre-capture target");
+                }
+                after = wpd.InspectPayloadFingerprint(
+                    expected_wpd_identity, std::chrono::seconds(30));
+                if (!before || *before != *after) {
+                    throw TransportError(
+                        "camera_payload_changed",
+                        "camera payload fingerprint changed during PC-direct capture");
+                }
+            });
+    } catch (const std::exception& error) {
+        if (!capture_executor_entered) {
+            result.transaction.terminal_state = "FailedPartial";
+            result.transaction.error_category = ErrorCategory(error);
+            evidence.RecordState(
+                result.transaction.transaction_id,
+                "PcDirectPreflightFailed",
+                options.alias,
+                result.transaction.error_category);
+            evidence.RecordResult(result.transaction);
+        } else {
+            result.transaction.terminal_state = "FailedPartial";
+            if (result.transaction.error_category.empty()) {
+                result.transaction.error_category = ErrorCategory(error);
+            }
+        }
+    }
+
+    const auto summary = PersistPcDirectCaptureSummary(
+        evidence, result, options.alias, before, after);
+    evidence.GenerateRedactedReport(reports);
+    const bool complete =
+        result.transaction.terminal_state == "Complete" &&
+        before && after && *before == *after &&
+        result.save_media_restore_confirmed &&
+        !result.card_fallback_attempted &&
+        result.automatic_retry_count == 0;
+    std::cout
+        << "RunId: " << run_id
+        << "\nCameraAlias: " << options.alias
+        << "\nTerminalState: " << result.transaction.terminal_state
+        << "\nFailureCategory: " << result.transaction.error_category
+        << "\nCaptureAttempted: "
+        << (result.capture_attempted ? "true" : "false")
+        << "\nSaveMediaRestoreConfirmed: "
+        << (result.save_media_restore_confirmed ? "true" : "false")
+        << "\nCardUnchanged: "
+        << (before && after && *before == *after ? "true" : "false")
+        << "\nCameraDeleteAttempted: false"
+        << "\nCardFallbackAttempted: false"
+        << "\nAutomaticRetryCount: 0"
+        << "\nRealIdentifiersPrinted: false"
+        << "\nSummaryPath: " << summary.string() << '\n';
+    if (!result.transaction.frames.empty()) {
+        const auto& frame = result.transaction.frames.front();
+        std::cout << "OriginalPath: " << frame.path.string()
+                  << "\nOriginalBytes: " << frame.bytes
+                  << "\nOriginalSha256: " << frame.sha256 << '\n';
+    }
+    return complete ? 0 : 5;
 }
 
 int RunSdkStatus(const Options& options) {
@@ -1571,6 +1888,7 @@ int main(int argc, char** argv) {
         if (options.command == "hybrid-fault-single") return RunHybridFaultSingle(options);
         if (options.command == "hybrid-fault-pair") return RunHybridFaultPair(options);
         if (options.command == "hybrid-interrupt-pair") return RunHybridInterruptPair(options);
+        if (options.command == "pc-direct-capture-single") return RunPcDirectCaptureSingle(options);
         if (options.command == "capture-single" || options.command == "capture-pair" || options.command == "stability") return RunCapture(options);
         if (options.command == "fault-test") {
             if (options.transport != "fake") throw std::runtime_error("fault-test requires --transport fake");

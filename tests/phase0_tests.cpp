@@ -1062,6 +1062,64 @@ void TestWpdSpoolCountsEveryPayloadType() {
         "JPEG, NEF-like image objects, video, and generic sidecar files must all make the spool non-empty");
 }
 
+void TestWpdPayloadFingerprintIsOrderIndependentAndRetainsDuplicates() {
+    const WpdPayloadDigest first{
+        3, std::string(64, 'a')};
+    const WpdPayloadDigest second{
+        5, std::string(64, 'B')};
+    const auto ordered = BuildWpdPayloadFingerprint({first, second});
+    const auto reversed = BuildWpdPayloadFingerprint({second, first});
+    const auto duplicate = BuildWpdPayloadFingerprint(
+        {first, second, first});
+    Check(ordered == reversed && ordered.object_count == 2 &&
+              ordered.total_bytes == 8,
+        "WPD payload fingerprint must be order-independent and aggregate sizes");
+    Check(duplicate.object_count == 3 && duplicate.total_bytes == 11 &&
+              duplicate.aggregate_sha256 != ordered.aggregate_sha256,
+        "WPD payload fingerprint must retain duplicate payload entries");
+    bool malformed_rejected = false;
+    try {
+        (void)BuildWpdPayloadFingerprint({{1, "not-a-sha256"}});
+    } catch (const std::invalid_argument&) {
+        malformed_rejected = true;
+    }
+    Check(malformed_rejected,
+        "WPD payload fingerprint must reject malformed digest inputs");
+}
+
+void TestWpdPayloadFingerprintRequiresFreshExactIdentity() {
+    const CameraInfo expected{
+        "Nikon D810", "fixture", "S", "fixture-wpd-a"};
+    const CameraInfo other{
+        "Nikon D810", "fixture", "S", "fixture-wpd-b"};
+    ValidateWpdExactOneCurrentIdentity({expected}, "fixture-wpd-a");
+
+    for (const auto& inventory : std::vector<std::vector<CameraInfo>>{
+             {}, {expected, other}}) {
+        bool count_rejected = false;
+        try {
+            ValidateWpdExactOneCurrentIdentity(
+                inventory, "fixture-wpd-a");
+        } catch (const TransportError& error) {
+            count_rejected =
+                error.Category() == "camera_count_mismatch";
+        }
+        Check(count_rejected,
+            "a refreshed zero- or two-camera WPD topology must block before open");
+    }
+
+    bool replacement_rejected = false;
+    try {
+        ValidateWpdExactOneCurrentIdentity(
+            {other}, "fixture-wpd-a");
+    } catch (const TransportError& error) {
+        replacement_rejected =
+            error.Category() == "identity_mismatch";
+    }
+    Check(replacement_rejected,
+        "a refreshed one-camera topology with a replacement identity must block before open");
+}
+
 void TestWpdSpoolStatusSummaryIsAnonymousAndReportable() {
     const auto root = NewTestRoot("wpd-spool-status-summary");
     WpdSpoolStatusSummary status;
@@ -3046,6 +3104,8 @@ int main() {
         TestSuccessfulLiveViewHandoff();
         TestWpdCommandTargetPolicyIsReported();
         TestWpdSpoolCountsEveryPayloadType();
+        TestWpdPayloadFingerprintIsOrderIndependentAndRetainsDuplicates();
+        TestWpdPayloadFingerprintRequiresFreshExactIdentity();
         TestWpdSpoolStatusSummaryIsAnonymousAndReportable();
         TestOperatorGateReadyThenContinue();
         TestOperatorGateTimeoutRefusesOverwrite();

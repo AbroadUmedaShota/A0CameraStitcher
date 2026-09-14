@@ -54,6 +54,8 @@ void TestHardwareCommandClassification() {
         "hybrid pair fault injection needs the process lease");
     Check(RequiresHardwareProcessLease("hybrid-interrupt-pair", "sdk"),
         "hybrid pair boundary interruption needs the process lease");
+    Check(RequiresHardwareProcessLease("pc-direct-capture-single", "sdk"),
+        "PC-direct capture needs the process lease across SDK and WPD phases");
     Check(RequiresHardwareProcessLease("bind-identity", "sdk"),
         "SDK identity binding needs the process lease");
     Check(RequiresHardwareProcessLease("bind-identity", "wpd"),
@@ -73,6 +75,56 @@ void TestHardwareCommandClassification() {
     Check(RequiresHardwareProcessLease("report", "fake"),
         "an explicit fake transport must not bypass report evidence serialization");
     Check(!RequiresHardwareProcessLease("unknown", "wpd"), "unknown commands must not acquire hardware lease");
+}
+
+void TestPcDirectCaptureArguments() {
+    const auto validate = [](
+        bool transport_explicit = false,
+        int count = 1,
+        bool alias_explicit = true,
+        bool single_confirmed = true,
+        bool exclusive_confirmed = true,
+        bool pc_direct_confirmed = true,
+        bool sdk_map = true,
+        bool wpd_map = true,
+        bool legacy_authority = false,
+        bool operator_gate = false) {
+        return ValidatePcDirectCaptureArguments(
+            "pc-direct-capture-single", "sdk", transport_explicit,
+            count, alias_explicit, single_confirmed,
+            exclusive_confirmed, pc_direct_confirmed,
+            sdk_map, wpd_map, legacy_authority, operator_gate);
+    };
+    Check(!validate(),
+        "fully confirmed one-shot PC-direct arguments must pass");
+    Check(validate(true).has_value(),
+        "PC-direct command must reject an explicit transport");
+    Check(validate(false, 2).has_value(),
+        "PC-direct command must reject more than one capture");
+    Check(validate(false, 1, false).has_value(),
+        "PC-direct command must require an explicit alias");
+    Check(validate(false, 1, true, false).has_value(),
+        "PC-direct command must require exact-one-camera confirmation");
+    Check(validate(false, 1, true, true, false).has_value(),
+        "PC-direct command must require exclusive camera control");
+    Check(validate(false, 1, true, true, true, false).has_value(),
+        "PC-direct command must require explicit SaveMedia authority");
+    Check(validate(false, 1, true, true, true, true, false).has_value(),
+        "PC-direct command must require an SDK camera map");
+    Check(validate(false, 1, true, true, true, true, true, false).has_value(),
+        "PC-direct command must require a WPD camera map");
+    Check(validate(false, 1, true, true, true, true, true, true, true).has_value(),
+        "PC-direct command must reject legacy card/delete authority");
+    Check(validate(false, 1, true, true, true, true, true, true, false, true).has_value(),
+        "PC-direct command must reject an operator gate or scenario");
+    Check(ValidatePcDirectCaptureArguments(
+              "inventory", "wpd", false, 1, false, false, false,
+              false, false, false, false, false) == std::nullopt,
+        "unrelated commands without PC-direct flags must be unaffected");
+    Check(ValidatePcDirectCaptureArguments(
+              "inventory", "wpd", false, 1, false, false, false,
+              true, false, false, false, false).has_value(),
+        "PC-direct confirmation must not be accepted by another command");
 }
 
 void TestSdkStatusCliRouting() {
@@ -272,6 +324,7 @@ int main(int argc, char** argv) {
     TestHardwareCommandClassification();
     TestSdkStatusCliRouting();
     TestIdentityBindingArguments();
+    TestPcDirectCaptureArguments();
     TestProcessLeaseRejectsConcurrentOwner();
     TestProcessLeaseRejectsSeparateProcess();
     if (failures != 0) {

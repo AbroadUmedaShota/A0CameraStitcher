@@ -28,6 +28,7 @@ bool IsRealHardwareCommand(std::string_view command) noexcept {
         std::string_view{"hybrid-fault-single"},
         std::string_view{"hybrid-fault-pair"},
         std::string_view{"hybrid-interrupt-pair"},
+        std::string_view{"pc-direct-capture-single"},
     };
     for (const auto candidate : commands) {
         if (candidate == command) return true;
@@ -78,6 +79,7 @@ std::optional<std::string> ValidateIdentityBindingArguments(
     const bool single_transport = command == "bind-identity";
     const bool cross_transport = command == "bind-cross-transport-identity";
     const bool single_v3 = command == "bind-single-identity-v3";
+    if (command == "pc-direct-capture-single") return std::nullopt;
     if (!single_transport && !cross_transport && !single_v3) {
         if (single_camera_connected_confirmed) {
             return "single-camera-connected-confirmed is valid only for identity binding commands";
@@ -101,6 +103,58 @@ std::optional<std::string> ValidateIdentityBindingArguments(
     }
     if (!single_camera_connected_confirmed) {
         return "bind-identity requires --single-camera-connected-confirmed after all other D810 bodies are disconnected";
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> ValidatePcDirectCaptureArguments(
+    std::string_view command,
+    std::string_view transport,
+    bool transport_explicit,
+    int count,
+    bool alias_explicit,
+    bool single_camera_connected_confirmed,
+    bool exclusive_camera_control_confirmed,
+    bool pc_direct_save_confirmed,
+    bool sdk_camera_map_explicit,
+    bool wpd_camera_map_explicit,
+    bool legacy_card_authority_requested,
+    bool operator_gate_requested) {
+    if (command != "pc-direct-capture-single") {
+        if (pc_direct_save_confirmed || wpd_camera_map_explicit) {
+            return "PC-direct flags are valid only for pc-direct-capture-single";
+        }
+        return std::nullopt;
+    }
+    if (transport_explicit) {
+        return "pc-direct-capture-single selects SDK and read-only WPD internally and does not accept --transport";
+    }
+    if (transport != "sdk") {
+        return "pc-direct-capture-single must route capture through the Nikon SDK";
+    }
+    if (count != 1) {
+        return "pc-direct-capture-single permits exactly one capture attempt";
+    }
+    if (!alias_explicit) {
+        return "pc-direct-capture-single requires explicit --alias CAM-A or CAM-B";
+    }
+    if (!single_camera_connected_confirmed) {
+        return "pc-direct-capture-single requires --single-camera-connected-confirmed after the other D810 is disconnected";
+    }
+    if (!exclusive_camera_control_confirmed) {
+        return "pc-direct-capture-single requires --exclusive-camera-control-confirmed";
+    }
+    if (!pc_direct_save_confirmed) {
+        return "pc-direct-capture-single requires --pc-direct-save-confirmed";
+    }
+    if (!sdk_camera_map_explicit || !wpd_camera_map_explicit) {
+        return "pc-direct-capture-single requires explicit --camera-map and --wpd-camera-map files";
+    }
+    if (legacy_card_authority_requested) {
+        return "pc-direct-capture-single does not accept card-spool or delete authority flags";
+    }
+    if (operator_gate_requested) {
+        return "pc-direct-capture-single does not accept an operator gate or fault scenario";
     }
     return std::nullopt;
 }

@@ -217,6 +217,34 @@ struct DualWpdReadOnlyProbeResult {
 [[nodiscard]] std::string SerializeDualWpdReadOnlyProbeResult(
     const DualWpdReadOnlyProbeResult& result);
 
+// Anonymous, read-only fingerprint of every non-structural payload object on
+// one camera. Individual object identifiers, names and hashes are not exposed;
+// the aggregate digest is order-independent and retains duplicate entries.
+struct WpdPayloadFingerprint {
+    std::size_t object_count{};
+    std::uint64_t total_bytes{};
+    std::string aggregate_sha256;
+
+    [[nodiscard]] bool operator==(
+        const WpdPayloadFingerprint&) const noexcept = default;
+};
+
+struct WpdPayloadDigest {
+    std::uint64_t bytes{};
+    std::string sha256;
+};
+
+// Builds the anonymous, order-independent aggregate while retaining duplicate
+// payloads. This pure boundary is shared by the real WPD reader and tests.
+[[nodiscard]] WpdPayloadFingerprint BuildWpdPayloadFingerprint(
+    const std::vector<WpdPayloadDigest>& payloads);
+
+// Fail-closed topology boundary for the product SingleCamera WPD session.
+// Callers must pass a freshly enumerated inventory immediately before open.
+void ValidateWpdExactOneCurrentIdentity(
+    const std::vector<CameraInfo>& current_inventory,
+    std::string_view expected_stable_identity);
+
 class WpdTransport final : public ICameraTransport,
                            public IPostCardObservationTransport,
                            public ICorrelationObservationTransport,
@@ -245,6 +273,9 @@ public:
     // Opens one read-only WPD session, counts every non-structural payload
     // object, closes the session, and returns only the anonymous count.
     [[nodiscard]] std::size_t InspectSpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout);
+    [[nodiscard]] WpdPayloadFingerprint InspectPayloadFingerprint(
         std::string_view stable_identity,
         std::chrono::seconds timeout);
     [[nodiscard]] std::size_t InspectDualReadOnlySpoolPayloadCount(

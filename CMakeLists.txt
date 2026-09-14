@@ -58,12 +58,13 @@ add_library(a0_phase0_core
     src/phase0/hardware_process_lease.cpp
     src/phase0/nikon_sdk_runtime_path.cpp
     src/phase0/nikon_sdk_transport.cpp
+    src/phase0/pc_direct_capture.cpp
     src/phase0/wpd_alias_proof.cpp
     src/phase0/wpd_transport.cpp
 )
 target_include_directories(a0_phase0_core PUBLIC src/phase0/include src/common/include)
 target_compile_definitions(a0_phase0_core PRIVATE UNICODE _UNICODE NOMINMAX)
-target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 PortableDeviceGuids)
+target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 PortableDeviceGuids windowscodecs)
 
 if(A0_NIKON_SDK_AVAILABLE)
     target_include_directories(a0_phase0_core PRIVATE "${A0_NIKON_INCLUDE_DIR}")
@@ -286,6 +287,20 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME nikon_dual_session_adapter_contracts
         COMMAND a0_nikon_dual_session_adapter_tests)
+
+    add_executable(a0_pc_direct_capture_tests
+        tests/pc_direct_capture_tests.cpp)
+    target_link_libraries(a0_pc_direct_capture_tests PRIVATE
+        a0_phase0_core ole32 windowscodecs)
+    if(MSVC)
+        target_compile_options(a0_pc_direct_capture_tests PRIVATE
+            /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_pc_direct_capture_tests PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME pc_direct_capture_contracts
+        COMMAND a0_pc_direct_capture_tests)
 
     add_executable(a0_wpd_dual_read_only_probe_tests
         tests/wpd_dual_read_only_probe_tests.cpp)

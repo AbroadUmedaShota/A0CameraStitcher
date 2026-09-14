@@ -980,8 +980,9 @@ const std::string& EvidenceWriter::RunId() const noexcept { return run_id_; }
 const fs::path& EvidenceWriter::RunRoot() const noexcept { return run_root_; }
 
 void EvidenceWriter::GenerateRedactedReport(const fs::path& report_root) const {
-    const std::array<std::pair<fs::path, fs::path>, 15> candidates{{
+    const std::array<std::pair<fs::path, fs::path>, 16> candidates{{
         {run_root_ / "summary.json", "summary.json"},
+        {run_root_ / "pc-direct-summary.json", "pc-direct-summary.json"},
         {run_root_ / "sdk-status-summary.json", "sdk-status-summary.json"},
         {run_root_ / "wpd-status-summary.json", "wpd-status-summary.json"},
         {run_root_ / "wpd-spool-status-summary.json", "wpd-spool-status-summary.json"},
