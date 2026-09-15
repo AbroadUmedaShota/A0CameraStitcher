@@ -41,4 +41,21 @@ enum class SdkStatusIdentityRoute {
     bool single_camera_connected_confirmed,
     bool transport_explicit = true);
 
+// The experimental PC-direct route deliberately owns both transports in
+// sequence: read-only WPD fingerprint, one SDK capture, SDK close/restore,
+// then read-only WPD fingerprint. It accepts no legacy card-spool authority.
+[[nodiscard]] std::optional<std::string> ValidatePcDirectCaptureArguments(
+    std::string_view command,
+    std::string_view transport,
+    bool transport_explicit,
+    int count,
+    bool alias_explicit,
+    bool single_camera_connected_confirmed,
+    bool exclusive_camera_control_confirmed,
+    bool pc_direct_save_confirmed,
+    bool sdk_camera_map_explicit,
+    bool wpd_camera_map_explicit,
+    bool legacy_card_authority_requested,
+    bool operator_gate_requested);
+
 } // namespace a0::phase0

@@ -288,6 +288,9 @@ public:
     DualIdentityInvalidationReason invalidation{DualIdentityInvalidationReason::None};
     bool fail_close{};
     bool fail_capture{};
+    bool fail_pc_direct_original_read{};
+    bool fail_pc_direct_select_readback{};
+    bool fail_pc_direct_restore{};
     bool fail_read_only_start{};
     bool fail_read_only_with_non_transport_exception{};
     bool read_only_close_unconfirmed{};
@@ -302,12 +305,18 @@ public:
     bool source_open{};
     bool live_view_active{};
     bool capture_source{};
+    bool pc_direct_source{};
     std::size_t begin_count{};
     std::size_t read_only_begin_count{};
     std::size_t source_open_count{};
     std::size_t source_close_count{};
     std::size_t end_count{};
     std::size_t capture_count{};
+    std::size_t pc_direct_open_count{};
+    std::size_t pc_direct_baseline_count{};
+    std::size_t pc_direct_download_count{};
+    std::size_t pc_direct_restore_attempt_count{};
+    bool pc_direct_restore_confirmed{};
     std::size_t status_probe_count{};
     std::size_t invalidation_poll_count{};
     std::size_t concurrent_source_violation_count{};
@@ -375,6 +384,21 @@ public:
         Open(token, true);
     }
 
+    void OpenDualBoundPcDirectCapture(
+        std::string_view token, std::chrono::seconds) override {
+        if (fail_pc_direct_original_read) {
+            throw TransportError(
+                "save_media_mismatch", "injected original SaveMedia read failure");
+        }
+        Open(token, true);
+        pc_direct_source = true;
+        ++pc_direct_open_count;
+        if (fail_pc_direct_select_readback) {
+            throw TransportError(
+                "save_media_mismatch", "injected SDRAM read-back failure");
+        }
+    }
+
     void StartLiveView(std::chrono::seconds) override {
         if (!source_open || capture_source) throw std::runtime_error("wrong source mode");
         live_view_active = true;
@@ -409,15 +433,51 @@ public:
 
     void CaptureToCard(std::chrono::seconds, std::chrono::seconds) override {
         if (!source_open || !capture_source) throw std::runtime_error("capture source is not open");
+        if (pc_direct_source) throw std::runtime_error("PC-direct source reached card capture");
         if (fail_capture) throw std::runtime_error("injected capture failure");
         ++capture_count;
+    }
+
+    std::string BeginPcDirectBaseline(std::chrono::seconds) override {
+        if (!source_open || !capture_source || !pc_direct_source) {
+            throw std::runtime_error("PC-direct source is not open");
+        }
+        ++pc_direct_baseline_count;
+        return "pc-direct-baseline";
+    }
+
+    std::vector<ImageCandidate> CaptureAndDownloadToPc(
+        std::string_view baseline,
+        std::chrono::seconds,
+        std::chrono::seconds,
+        std::chrono::seconds) override {
+        if (!source_open || !capture_source || !pc_direct_source ||
+            baseline != "pc-direct-baseline") {
+            throw std::runtime_error("PC-direct baseline is invalid");
+        }
+        if (fail_capture) throw std::runtime_error("injected capture failure");
+        ++pc_direct_download_count;
+        return {{"sdk-direct.jpg", {0xFF, 0xD8, 0xFF, 0xD9}, true, {}}};
     }
 
     void CloseDualSourceKeepingModule(std::chrono::seconds) override {
         if (fail_close) throw std::runtime_error("injected source close failure");
         if (!source_open || live_view_active) throw std::runtime_error("unsafe source close");
+        if (pc_direct_source) {
+            ++pc_direct_restore_attempt_count;
+            if (fail_pc_direct_restore) {
+                source_open = false;
+                capture_source = false;
+                pc_direct_source = false;
+                throw TransportError(
+                    "save_media_restore_failed",
+                    "injected SaveMedia restoration failure");
+            }
+            pc_direct_restore_confirmed = true;
+        }
         source_open = false;
         capture_source = false;
+        pc_direct_source = false;
         ++source_close_count;
     }
 
@@ -435,6 +495,7 @@ public:
         source_open = false;
         live_view_active = false;
         capture_source = false;
+        pc_direct_source = false;
         module_active = false;
         process_claimed = false;
         if (fail_end_after_cleanup) {
@@ -581,6 +642,405 @@ void TestSequentialBindingAndBoundCaptureReuseOneModule() {
     adapter.EndSession(5s);
     Check(!transport->module_active && transport->end_count == 1,
         "explicit session end must close the retained manager module");
+}
+
+void TestPcDirectCaptureUsesExplicitBoundPathAndRestoresStorage() {
+    auto transport = std::make_shared<RecordingDualSessionTransport>();
+    NikonDualBindingSdkAdapter adapter(transport);
+    const auto tokens = adapter.EnumerateCandidates();
+
+    adapter.OpenBoundPcDirectCapture(tokens[0], 5s);
+    const auto baseline = adapter.BeginPcDirectBaseline(5s);
+    const auto candidates = adapter.CaptureAndDownloadToPc(
+        baseline, 5s, 10s, 20s);
+    adapter.CloseBoundCapture(5s);
+
+    Check(transport->begin_count == 1 &&
+              transport->pc_direct_open_count == 1 &&
+              transport->pc_direct_baseline_count == 1 &&
+              transport->pc_direct_download_count == 1 &&
+              transport->capture_count == 0,
+        "explicit PC-direct capture must reuse the bound source without invoking the card path");
+    Check(candidates.size() == 1 && candidates.front().attributable &&
+              transport->pc_direct_restore_attempt_count == 1 &&
+              transport->pc_direct_restore_confirmed &&
+              !transport->source_open && transport->module_active,
+        "PC-direct capture must return exactly one attributable candidate and confirm one restoration");
+
+    adapter.EndSession(5s);
+    Check(transport->end_count == 1 && !transport->module_active,
+        "PC-direct session must end the retained manager exactly once");
+}
+
+void TestPcDirectStorageFailuresStopWithoutCaptureOrRetry() {
+    for (const int failure_stage : {0, 1, 2}) {
+        auto transport = std::make_shared<RecordingDualSessionTransport>();
+        NikonDualBindingSdkAdapter adapter(transport);
+        const auto tokens = adapter.EnumerateCandidates();
+        transport->fail_pc_direct_original_read = failure_stage == 0;
+        transport->fail_pc_direct_select_readback = failure_stage == 1;
+        transport->fail_pc_direct_restore = failure_stage == 2;
+
+        bool failed = false;
+        try {
+            adapter.OpenBoundPcDirectCapture(tokens[0], 5s);
+            const auto baseline = adapter.BeginPcDirectBaseline(5s);
+            (void)adapter.CaptureAndDownloadToPc(
+                baseline, 5s, 10s, 20s);
+            adapter.CloseBoundCapture(5s);
+        } catch (...) {
+            failed = true;
+        }
+
+        Check(failed && transport->begin_count == 1 &&
+                  transport->capture_count == 0 &&
+                  transport->end_count == 1 &&
+                  !transport->module_active,
+            "every PC-direct SaveMedia failure must terminate without card capture, retry, or re-enumeration");
+        Check(adapter.PollInvalidation() ==
+                  DualIdentityInvalidationReason::SdkError,
+            "every PC-direct SaveMedia failure must invalidate the binding");
+        if (failure_stage == 0) {
+            Check(transport->pc_direct_open_count == 0 &&
+                      transport->pc_direct_download_count == 0,
+                "unknown original SaveMedia must stop before source mutation and shutter");
+        }
+        if (failure_stage == 1) {
+            Check(transport->pc_direct_open_count == 1 &&
+                      transport->pc_direct_download_count == 0,
+                "failed SDRAM read-back must stop before shutter");
+        }
+        if (failure_stage == 2) {
+            Check(transport->pc_direct_download_count == 1 &&
+                      transport->pc_direct_restore_attempt_count == 1 &&
+                      !transport->pc_direct_restore_confirmed,
+                "restoration failure must retain the completed transfer as failed and never retry restoration");
+        }
+    }
+}
+
+void TestPcDirectSaveMediaSelectionAndRestoreOrdering() {
+    {
+        std::uint32_t state = 1;
+        std::vector<std::string> operations;
+        const auto selection = SelectNikonSaveMediaForPcDirect(
+            2,
+            [&] {
+                operations.emplace_back("get");
+                return state;
+            },
+            [&](std::uint32_t value) {
+                operations.emplace_back("set:" + std::to_string(value));
+                state = value;
+            });
+        Check(selection.original_value == 1 &&
+                  selection.selected_value == 2 && state == 2 &&
+                  operations == std::vector<std::string>{
+                      "get", "set:2", "get"},
+            "PC-direct selection must read the original before one Set and verify the selected value");
+
+        RestoreNikonSaveMediaOnce(
+            selection.original_value,
+            [&] {
+                operations.emplace_back("get");
+                return state;
+            },
+            [&](std::uint32_t value) {
+                operations.emplace_back("set:" + std::to_string(value));
+                state = value;
+            });
+        Check(state == 1 && operations == std::vector<std::string>{
+                  "get", "set:2", "get", "set:1", "get"},
+            "successful PC-direct selection must restore once and verify the original value");
+    }
+
+    {
+        std::size_t set_count = 0;
+        bool failed = false;
+        try {
+            (void)SelectNikonSaveMediaForPcDirect(
+                2,
+                []() -> std::uint32_t {
+                    throw TransportError(
+                        "save_media_mismatch", "injected original Get failure");
+                },
+                [&](std::uint32_t) { ++set_count; });
+        } catch (const TransportError& error) {
+            failed = error.Category() == "save_media_mismatch";
+        }
+        Check(failed && set_count == 0,
+            "unknown original SaveMedia must stop before Set or speculative restore");
+    }
+
+    {
+        std::uint32_t state = 1;
+        std::size_t set_count = 0;
+        std::vector<std::string> operations;
+        bool failed = false;
+        try {
+            (void)SelectNikonSaveMediaForPcDirect(
+                2,
+                [&] {
+                    operations.emplace_back("get");
+                    return state;
+                },
+                [&](std::uint32_t value) {
+                    ++set_count;
+                    operations.emplace_back("set:" + std::to_string(value));
+                    state = value;
+                    if (set_count == 1) {
+                        throw TransportError(
+                            "save_media_mismatch", "injected selection Set failure");
+                    }
+                });
+        } catch (const TransportError& error) {
+            failed = error.Category() == "save_media_mismatch";
+        }
+        Check(failed && state == 1 && set_count == 2 &&
+                  operations == std::vector<std::string>{
+                      "get", "set:2", "set:1", "get"},
+            "selection Set failure must perform exactly one checked restore and retain the selection error");
+    }
+
+    {
+        std::uint32_t state = 1;
+        std::size_t get_count = 0;
+        std::size_t set_count = 0;
+        bool failed = false;
+        try {
+            (void)SelectNikonSaveMediaForPcDirect(
+                2,
+                [&] {
+                    ++get_count;
+                    if (get_count == 2) return std::uint32_t{3};
+                    return state;
+                },
+                [&](std::uint32_t value) {
+                    ++set_count;
+                    state = value;
+                });
+        } catch (const TransportError& error) {
+            failed = error.Category() == "save_media_mismatch";
+        }
+        Check(failed && state == 1 && get_count == 3 && set_count == 2,
+            "selection read-back mismatch must perform one verified restore without retry");
+    }
+
+    {
+        std::uint32_t state = 1;
+        std::size_t set_count = 0;
+        bool failed = false;
+        try {
+            (void)SelectNikonSaveMediaForPcDirect(
+                2,
+                [&] { return state; },
+                [&](std::uint32_t value) {
+                    ++set_count;
+                    state = value;
+                    throw TransportError(
+                        set_count == 1
+                            ? "save_media_mismatch"
+                            : "save_media_restore_failed",
+                        "injected Set failure");
+                });
+        } catch (const TransportError& error) {
+            failed = error.Category() == "save_media_restore_failed";
+        }
+        Check(failed && set_count == 2,
+            "failed selection restoration must supersede the selection error and must not retry");
+    }
+
+    {
+        std::size_t restore_set_count = 0;
+        bool failed = false;
+        try {
+            RestoreNikonSaveMediaOnce(
+                1,
+                [] { return std::uint32_t{2}; },
+                [&](std::uint32_t) {
+                    ++restore_set_count;
+                    throw std::runtime_error("injected restore failure");
+                });
+        } catch (const TransportError& error) {
+            failed = error.Category() == "save_media_restore_failed";
+        }
+        Check(failed && restore_set_count == 1,
+            "explicit restore failure must be typed and attempted exactly once");
+    }
+}
+
+void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
+    const auto start_window = [] {
+        NikonPcDirectEventWindow window;
+        window.ResetForSession();
+        window.CallbackRegistered();
+        window.BeginBaseline();
+        return window;
+    };
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(),
+            "clean PC-direct event window must permit one dispatch");
+        window.ObserveCandidate(101, true);
+        window.CaptureCommandAccepted();
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        Check(window.CanAttributeExactlyOne(),
+            "one notified candidate, one matching delta, and one completion must be attributable");
+        const std::vector<PcDirectObservation> expected_order{
+            PcDirectObservation::CallbackRegistered,
+            PcDirectObservation::BaselineReady,
+            PcDirectObservation::CaptureCommandStarted,
+            PcDirectObservation::AddChildNotification,
+            PcDirectObservation::CaptureCommandAccepted,
+            PcDirectObservation::CaptureComplete,
+            PcDirectObservation::EnumeratedCandidate,
+            PcDirectObservation::ForcedEnumerationSucceeded};
+        Check(window.Snapshot().observation_order == expected_order &&
+                window.Snapshot().callback_active_before_capture,
+            "PC-direct diagnostics must preserve bounded first-occurrence order and callback readiness");
+        window.SessionClosed();
+        Check(window.Snapshot().session_closed &&
+                window.Snapshot().observation_order.back() ==
+                    PcDirectObservation::SessionClosed,
+            "callback lifetime evidence must end with the checked source close");
+    }
+    {
+        auto window = start_window();
+        window.ObserveCandidate(90, false);
+        Check(!window.BeginCaptureCommand() &&
+                  window.Snapshot().pre_dispatch_candidate_count == 1,
+            "a delayed item discovered before dispatch must block the shutter");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(202, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne(),
+            "an additional foreign candidate must make attribution ambiguous");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(101, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne() &&
+                  window.Snapshot().duplicate_candidate_notification_count == 1,
+            "a duplicate AddChild notification must fail closed");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne(),
+            "multiple CaptureComplete events must fail closed");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne() &&
+                  window.Snapshot().distinct_enumerated_candidate_count == 0,
+            "an AddChild callback without a matching Children delta must fail closed");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(202, false);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne(),
+            "a callback and Children delta for different items must fail closed");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "test window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, false);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        Check(!window.CanAttributeExactlyOne(),
+            "a Children-only item without AddChild notification must fail closed");
+    }
+
+    {
+        NikonPcDirectEventWindow window;
+        Check(!window.Snapshot().measurement_started,
+            "a new event window must report diagnostics as unmeasured");
+        window.ResetForSession();
+        window.CallbackRegistered();
+        window.BeginBaseline();
+        Check(window.BeginCaptureCommand(), "completion-only window must start");
+        window.CaptureCommandAccepted();
+        window.RecordForcedEnumeration(true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        window.RecordTerminalSubreason(
+            PcDirectTerminalSubreason::SdramItemMissing);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.measurement_started &&
+                snapshot.capture_complete_count == 1 &&
+                snapshot.distinct_notified_candidate_count == 0 &&
+                snapshot.distinct_enumerated_candidate_count == 0 &&
+                snapshot.forced_enumeration_attempt_count == 1 &&
+                snapshot.forced_enumeration_success_count == 1 &&
+                snapshot.forced_enumeration_failure_count == 0 &&
+                snapshot.terminal_subreason ==
+                    PcDirectTerminalSubreason::SdramItemMissing &&
+                !window.CanAttributeExactlyOne(),
+            "completion without an SDK Item must remain a measured fail-closed state");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "item-only window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.RecordForcedEnumeration(false);
+        window.ObserveCandidate(101, false);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.capture_complete_count == 0 &&
+                snapshot.candidate_notification_count == 1 &&
+                snapshot.distinct_enumerated_candidate_count == 1 &&
+                snapshot.forced_enumeration_attempt_count == 1 &&
+                snapshot.forced_enumeration_success_count == 0 &&
+                snapshot.forced_enumeration_failure_count == 1 &&
+                !window.CanAttributeExactlyOne(),
+            "Item without CaptureComplete and an enumeration failure must remain distinguishable");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "empty observation window must start");
+        window.CaptureCommandAccepted();
+        window.RecordForcedEnumeration(true);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.capture_complete_count == 0 &&
+                snapshot.candidate_notification_count == 0 &&
+                snapshot.distinct_enumerated_candidate_count == 0 &&
+                !window.CanAttributeExactlyOne(),
+            "neither completion nor Item must be recorded as observed zero, not unmeasured");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "foreign-session window must start");
+        window.CaptureCommandAccepted();
+        window.SessionClosed();
+        window.ObserveCandidate(999, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.session_closed && snapshot.ignored_event_count == 2 &&
+                !window.CanAttributeExactlyOne(),
+            "events after session close must remain ignored and fail closed");
+    }
 }
 
 void TestSecondLiveViewCannotOverlapFirst() {
@@ -1122,6 +1582,10 @@ int main() {
         TestInventoryUnknownCloseCompletionStopsWithoutRetry();
         TestInventoryWalkRemainsSequentialWhenEveryCloseIsConfirmed();
         TestSequentialBindingAndBoundCaptureReuseOneModule();
+        TestPcDirectCaptureUsesExplicitBoundPathAndRestoresStorage();
+        TestPcDirectStorageFailuresStopWithoutCaptureOrRetry();
+        TestPcDirectSaveMediaSelectionAndRestoreOrdering();
+        TestPcDirectEventWindowRejectsUncorrelatedSdkItems();
         TestSecondLiveViewCannotOverlapFirst();
         TestInvalidationRevokesEveryCandidateWithoutRetry();
         TestCloseFailureEndsManagerAndInvalidatesSession();

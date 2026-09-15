@@ -159,6 +159,60 @@ std::string DeriveNikonSdkStableIdentity(
     return Sha256Hex(material);
 }
 
+void RestoreNikonSaveMediaOnce(
+    std::uint32_t original_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value) {
+    if (!get_current || !set_value) {
+        throw std::invalid_argument(
+            "SaveMedia get/set operations are required");
+    }
+    try {
+        set_value(original_value);
+        if (get_current() != original_value) {
+            throw TransportError(
+                "save_media_restore_failed",
+                "original SaveMedia value was not restored");
+        }
+    } catch (const TransportError& error) {
+        if (error.Category() == "save_media_restore_failed") throw;
+        throw TransportError(
+            "save_media_restore_failed",
+            "original SaveMedia restoration failed");
+    } catch (...) {
+        throw TransportError(
+            "save_media_restore_failed",
+            "original SaveMedia restoration failed");
+    }
+}
+
+NikonSaveMediaSelection SelectNikonSaveMediaForPcDirect(
+    std::uint32_t desired_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value) {
+    if (!get_current || !set_value) {
+        throw std::invalid_argument(
+            "SaveMedia get/set operations are required");
+    }
+    // This read intentionally occurs before the try block. If the original
+    // is unknown, no mutation and therefore no speculative restore occurs.
+    const auto original_value = get_current();
+    try {
+        set_value(desired_value);
+        if (get_current() != desired_value) {
+            throw TransportError(
+                "save_media_mismatch",
+                "PC-direct capture destination did not persist");
+        }
+    } catch (...) {
+        const auto selection_error = std::current_exception();
+        RestoreNikonSaveMediaOnce(
+            original_value, get_current, set_value);
+        std::rethrow_exception(selection_error);
+    }
+    return {original_value, desired_value};
+}
+
 void NikonCardCaptureEventWindow::ResetForSession() noexcept {
     snapshot_ = {};
 }
@@ -226,6 +280,181 @@ NikonCardCaptureEventSnapshot NikonCardCaptureEventWindow::Snapshot() const noex
     return snapshot_;
 }
 
+void NikonPcDirectEventWindow::ResetForSession() noexcept {
+    snapshot_ = {};
+    pre_dispatch_candidate_ids_.clear();
+    notified_candidate_ids_.clear();
+    enumerated_candidate_ids_.clear();
+    removed_candidate_ids_.clear();
+}
+
+void NikonPcDirectEventWindow::RecordObservation(
+    PcDirectObservation observation) noexcept {
+    if (std::find(
+            snapshot_.observation_order.begin(),
+            snapshot_.observation_order.end(), observation) ==
+        snapshot_.observation_order.end()) {
+        try {
+            snapshot_.observation_order.push_back(observation);
+        } catch (...) {
+            // Diagnostic ordering must not affect the transport state machine.
+        }
+    }
+}
+
+void NikonPcDirectEventWindow::CallbackRegistered() noexcept {
+    if (!snapshot_.session_closed) {
+        snapshot_.callback_registered = true;
+        RecordObservation(PcDirectObservation::CallbackRegistered);
+    }
+}
+
+void NikonPcDirectEventWindow::BeginBaseline() noexcept {
+    if (snapshot_.session_closed) return;
+    const bool callback_registered = snapshot_.callback_registered;
+    snapshot_ = {};
+    snapshot_.measurement_started = true;
+    snapshot_.callback_registered = callback_registered;
+    snapshot_.baseline_ready = true;
+    if (callback_registered) {
+        RecordObservation(PcDirectObservation::CallbackRegistered);
+    }
+    RecordObservation(PcDirectObservation::BaselineReady);
+    pre_dispatch_candidate_ids_.clear();
+    notified_candidate_ids_.clear();
+    enumerated_candidate_ids_.clear();
+    removed_candidate_ids_.clear();
+}
+
+bool NikonPcDirectEventWindow::BeginCaptureCommand() noexcept {
+    if (!snapshot_.callback_registered || !snapshot_.baseline_ready ||
+        snapshot_.session_closed || snapshot_.capture_command_started ||
+        snapshot_.pre_dispatch_candidate_count != 0 ||
+        snapshot_.ignored_event_count != 0) {
+        return false;
+    }
+    snapshot_.capture_command_started = true;
+    snapshot_.callback_active_before_capture =
+        snapshot_.callback_registered && !snapshot_.session_closed;
+    RecordObservation(PcDirectObservation::CaptureCommandStarted);
+    return true;
+}
+
+void NikonPcDirectEventWindow::CaptureCommandAccepted() noexcept {
+    if (snapshot_.capture_command_started && !snapshot_.session_closed) {
+        snapshot_.capture_command_accepted = true;
+        RecordObservation(PcDirectObservation::CaptureCommandAccepted);
+    }
+}
+
+void NikonPcDirectEventWindow::ObserveCandidate(
+    std::uint32_t candidate_id,
+    bool callback_notification) noexcept {
+    if (!snapshot_.callback_registered || !snapshot_.baseline_ready ||
+        snapshot_.session_closed) {
+        ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
+        return;
+    }
+    if (!snapshot_.capture_command_started) {
+        if (pre_dispatch_candidate_ids_.insert(candidate_id).second) {
+            ++snapshot_.pre_dispatch_candidate_count;
+        }
+        RecordObservation(callback_notification
+                ? PcDirectObservation::AddChildNotification
+                : PcDirectObservation::EnumeratedCandidate);
+        return;
+    }
+    if (callback_notification) {
+        ++snapshot_.candidate_notification_count;
+        RecordObservation(PcDirectObservation::AddChildNotification);
+        if (!notified_candidate_ids_.insert(candidate_id).second) {
+            ++snapshot_.duplicate_candidate_notification_count;
+            RecordObservation(
+                PcDirectObservation::DuplicateAddChildNotification);
+        }
+    } else {
+        enumerated_candidate_ids_.insert(candidate_id);
+        RecordObservation(PcDirectObservation::EnumeratedCandidate);
+    }
+    snapshot_.distinct_notified_candidate_count =
+        notified_candidate_ids_.size();
+    snapshot_.distinct_enumerated_candidate_count =
+        enumerated_candidate_ids_.size();
+}
+
+void NikonPcDirectEventWindow::ObserveRemovedCandidate(
+    std::uint32_t candidate_id) noexcept {
+    if (!snapshot_.capture_command_started || snapshot_.session_closed) {
+        ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
+        return;
+    }
+    removed_candidate_ids_.insert(candidate_id);
+    snapshot_.removed_candidate_count = removed_candidate_ids_.size();
+    RecordObservation(PcDirectObservation::CandidateRemoved);
+}
+
+void NikonPcDirectEventWindow::Observe(NikonPcDirectEvent event) noexcept {
+    if (!snapshot_.capture_command_started || snapshot_.session_closed) {
+        ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
+        return;
+    }
+    if (event == NikonPcDirectEvent::capture_complete) {
+        ++snapshot_.capture_complete_count;
+        RecordObservation(PcDirectObservation::CaptureComplete);
+    } else if (event == NikonPcDirectEvent::add_child_in_card) {
+        ++snapshot_.add_child_in_card_count;
+        RecordObservation(PcDirectObservation::AddChildInCard);
+    }
+}
+
+void NikonPcDirectEventWindow::RecordForcedEnumeration(
+    bool succeeded) noexcept {
+    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    ++snapshot_.forced_enumeration_attempt_count;
+    if (succeeded) {
+        ++snapshot_.forced_enumeration_success_count;
+        RecordObservation(PcDirectObservation::ForcedEnumerationSucceeded);
+    } else {
+        ++snapshot_.forced_enumeration_failure_count;
+        RecordObservation(PcDirectObservation::ForcedEnumerationFailed);
+    }
+}
+
+void NikonPcDirectEventWindow::RecordTerminalSubreason(
+    PcDirectTerminalSubreason subreason) noexcept {
+    if (snapshot_.measurement_started) {
+        snapshot_.terminal_subreason = subreason;
+    }
+}
+
+void NikonPcDirectEventWindow::SessionClosed() noexcept {
+    snapshot_.session_closed = true;
+    RecordObservation(PcDirectObservation::SessionClosed);
+}
+
+bool NikonPcDirectEventWindow::CanAttributeExactlyOne() const noexcept {
+    return snapshot_.callback_registered && snapshot_.baseline_ready &&
+        snapshot_.capture_command_started &&
+        snapshot_.capture_command_accepted && !snapshot_.session_closed &&
+        snapshot_.pre_dispatch_candidate_count == 0 &&
+        snapshot_.candidate_notification_count == 1 &&
+        snapshot_.distinct_notified_candidate_count == 1 &&
+        snapshot_.distinct_enumerated_candidate_count == 1 &&
+        snapshot_.duplicate_candidate_notification_count == 0 &&
+        snapshot_.capture_complete_count == 1 &&
+        snapshot_.removed_candidate_count == 0 &&
+        snapshot_.add_child_in_card_count == 0 &&
+        snapshot_.ignored_event_count == 0 &&
+        notified_candidate_ids_ == enumerated_candidate_ids_;
+}
+
+NikonPcDirectEventSnapshot NikonPcDirectEventWindow::Snapshot() const {
+    return snapshot_;
+}
+
 #if defined(A0_NIKON_SDK_AVAILABLE) && defined(_WIN32)
 namespace {
 
@@ -252,6 +481,13 @@ constexpr std::size_t kMaximumSessionMaidObjects = 1024;
 // Hybrid capture writes to the camera card; WPD observes the resulting object
 // only after this SDK session has fully closed.
 constexpr ULONG kDesiredSaveMedia = kNkMAIDSaveMedia_Card;
+
+enum class CaptureStorageMode {
+    none,
+    configure_card,
+    require_existing_card,
+    pc_direct_sdram,
+};
 
 std::mutex g_session_mutex;
 bool g_session_active = false;
@@ -366,6 +602,41 @@ public:
         return sdk_version_.empty() ? "D810-Remote-SDK-local" : sdk_version_;
     }
 
+    PcDirectTransportDiagnostics InspectPcDirectDiagnostics() const {
+        const auto snapshot = pc_direct_events_.Snapshot();
+        PcDirectTransportDiagnostics diagnostics;
+        diagnostics.measurement_started = snapshot.measurement_started;
+        if (!snapshot.measurement_started) return diagnostics;
+        diagnostics.callback_registered = snapshot.callback_registered;
+        diagnostics.callback_active_before_capture =
+            snapshot.callback_active_before_capture;
+        diagnostics.session_closed = snapshot.session_closed;
+        diagnostics.capture_complete_count =
+            snapshot.capture_complete_count;
+        diagnostics.add_child_notification_count =
+            snapshot.candidate_notification_count;
+        diagnostics.forced_enumeration_attempt_count =
+            snapshot.forced_enumeration_attempt_count;
+        diagnostics.forced_enumeration_success_count =
+            snapshot.forced_enumeration_success_count;
+        diagnostics.forced_enumeration_failure_count =
+            snapshot.forced_enumeration_failure_count;
+        diagnostics.distinct_notified_candidate_count =
+            snapshot.distinct_notified_candidate_count;
+        diagnostics.distinct_enumerated_candidate_count =
+            snapshot.distinct_enumerated_candidate_count;
+        diagnostics.duplicate_candidate_notification_count =
+            snapshot.duplicate_candidate_notification_count;
+        diagnostics.removed_candidate_count =
+            snapshot.removed_candidate_count;
+        diagnostics.add_child_in_card_count =
+            snapshot.add_child_in_card_count;
+        diagnostics.ignored_event_count = snapshot.ignored_event_count;
+        diagnostics.terminal_subreason = snapshot.terminal_subreason;
+        diagnostics.observation_order = snapshot.observation_order;
+        return diagnostics;
+    }
+
     std::vector<CameraInfo> Enumerate() {
         ClaimSession();
         try {
@@ -380,15 +651,29 @@ public:
     }
 
     void Open(std::string_view stable_identity, std::chrono::seconds timeout) {
-        OpenSource(stable_identity, timeout, true);
+        OpenSource(
+            stable_identity, timeout, true,
+            CaptureStorageMode::configure_card);
+    }
+
+    void OpenPcDirect(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) {
+        OpenSource(
+            stable_identity, timeout, true,
+            CaptureStorageMode::pc_direct_sdram);
     }
 
     void OpenLiveView(std::string_view stable_identity, std::chrono::seconds timeout) {
-        OpenSource(stable_identity, timeout, false);
+        OpenSource(
+            stable_identity, timeout, false,
+            CaptureStorageMode::none);
     }
 
     SdkCameraStatus ProbeSdkStatus(std::string_view stable_identity, std::chrono::seconds timeout) {
-        OpenSource(stable_identity, timeout, false);
+        OpenSource(
+            stable_identity, timeout, false,
+            CaptureStorageMode::none);
         try {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             SdkCameraStatus status;
@@ -434,7 +719,11 @@ public:
         }
     }
 
-    void OpenSource(std::string_view stable_identity, std::chrono::seconds timeout, bool capture_session) {
+    void OpenSource(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout,
+        bool capture_session,
+        CaptureStorageMode storage_mode) {
         if (stable_identity.empty()) throw TransportError("open_failed", "camera identity is empty");
         ClaimSession();
         // sdk_session_poisoned_ reflects a previous session's abandoned
@@ -504,7 +793,11 @@ public:
             // MAID object storage must remain at a stable address for the whole
             // session; identify with temporary objects, then open into the
             // long-lived member used by every later command and callback.
-            OpenSelectedSource(*selected_id, capture_session, deadline, true);
+            OpenSelectedSource(
+                *selected_id,
+                capture_session,
+                deadline,
+                storage_mode);
         } catch (...) {
             CleanupNoThrow();
             throw;
@@ -566,13 +859,24 @@ public:
     void OpenDualCandidateLiveView(
         std::string_view candidate_token,
         std::chrono::seconds timeout) {
-        OpenDualSource(candidate_token, false, timeout);
+        OpenDualSource(
+            candidate_token, false, CaptureStorageMode::none, timeout);
     }
 
     void OpenDualBoundCapture(
         std::string_view candidate_token,
         std::chrono::seconds timeout) {
-        OpenDualSource(candidate_token, true, timeout);
+        OpenDualSource(
+            candidate_token, true,
+            CaptureStorageMode::require_existing_card, timeout);
+    }
+
+    void OpenDualBoundPcDirectCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) {
+        OpenDualSource(
+            candidate_token, true,
+            CaptureStorageMode::pc_direct_sdram, timeout);
     }
 
     void CloseDualSourceKeepingModule(std::chrono::seconds timeout) {
@@ -657,6 +961,7 @@ public:
         removed_items_.clear();
         capture_complete_ = false;
         add_child_in_card_ = false;
+        pc_direct_events_.BeginBaseline();
         baseline_token_ = "baseline-" + std::to_string(++baseline_sequence_);
         return baseline_token_;
     }
@@ -676,7 +981,44 @@ public:
         const auto event_deadline = std::min(
             std::chrono::steady_clock::now() + image_event_timeout,
             overall_deadline);
-        StartProcess(source_, kNkMAIDCapability_Capture, event_deadline, "capture_command_failed");
+        // Drain callback and Children publication before dispatch. Any new
+        // source Item in this quiet window belongs to an earlier/foreign
+        // operation and blocks the shutter rather than being adopted.
+        const auto pre_dispatch_deadline = std::min(
+            std::chrono::steady_clock::now() + kCandidateSettle,
+            event_deadline);
+        while (std::chrono::steady_clock::now() < pre_dispatch_deadline) {
+            Pump(source_, "image_event_failed");
+            ReconcileChildren(pre_dispatch_deadline);
+            if (pc_direct_events_.Snapshot().pre_dispatch_candidate_count != 0) {
+                baseline_token_.clear();
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::PreDispatchCandidate);
+                throw TransportError(
+                    "pre_dispatch_candidate",
+                    "an uncorrelated SDK Item arrived before PC-direct dispatch");
+            }
+            std::this_thread::sleep_for(kAsyncInterval);
+        }
+        if (!pc_direct_events_.BeginCaptureCommand()) {
+            baseline_token_.clear();
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CallbackWindowInvalid);
+            throw TransportError(
+                "pc_direct_event_window_invalid",
+                "PC-direct callback window was not ready before dispatch");
+        }
+        try {
+            StartProcess(
+                source_, kNkMAIDCapability_Capture,
+                event_deadline, "capture_command_failed");
+            pc_direct_events_.CaptureCommandAccepted();
+        } catch (...) {
+            baseline_token_.clear();
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CaptureCommandFailed);
+            throw;
+        }
 
         std::optional<std::chrono::steady_clock::time_point> candidates_stable_since;
         std::size_t observed_candidate_count = 0;
@@ -699,13 +1041,21 @@ public:
 
         ReconcileChildren(event_deadline);
         if (std::chrono::steady_clock::now() >= overall_deadline) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::TransactionWatchdogExpired);
             throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
         }
         if (!capture_complete_) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CaptureCompleteMissing);
             throw TransportError("image_event_timeout", "card CaptureComplete was not observed");
         }
         const auto ids = CandidateIds();
         if (ids.empty()) {
+            pc_direct_events_.RecordTerminalSubreason(
+                add_child_in_card_
+                    ? PcDirectTerminalSubreason::CardItemOnly
+                    : PcDirectTerminalSubreason::SdramItemMissing);
             throw TransportError(
                 add_child_in_card_ ? "image_on_card_only" : "image_event_timeout",
                 add_child_in_card_
@@ -713,7 +1063,16 @@ public:
                     : "no post-baseline image item arrived");
         }
         if (std::any_of(ids.begin(), ids.end(), [this](ULONG id) { return removed_items_.contains(id); })) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CandidateRemoved);
             throw TransportError("ambiguous_image_event", "a post-baseline image item disappeared before attribution");
+        }
+        if (!pc_direct_events_.CanAttributeExactlyOne()) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::AttributionFailed);
+            throw TransportError(
+                "ambiguous_image_event",
+                "PC-direct capture did not produce exactly one correlated AddChild and CaptureComplete event");
         }
 
         std::vector<ImageCandidate> candidates;
@@ -723,12 +1082,25 @@ public:
             overall_deadline);
         for (const ULONG id : ids) {
             if (std::chrono::steady_clock::now() >= overall_deadline) {
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::TransactionWatchdogExpired);
                 throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
             }
-            auto candidate = AcquireCandidate(id, download_deadline);
-            candidate.attributable = added_items_.contains(id) && !late_items_.contains(id);
+            ImageCandidate candidate;
+            try {
+                candidate = AcquireCandidate(id, download_deadline);
+            } catch (...) {
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::ImageDownloadFailed);
+                throw;
+            }
+            candidate.attributable = added_items_.contains(id) &&
+                !late_items_.contains(id) &&
+                pc_direct_events_.CanAttributeExactlyOne();
             candidates.push_back(std::move(candidate));
         }
+        pc_direct_events_.RecordTerminalSubreason(
+            PcDirectTerminalSubreason::ReceivedExactlyOneItem);
         baseline_token_.clear();
         return candidates;
     }
@@ -889,11 +1261,19 @@ public:
         }
         if (source_.opened && original_save_media_) {
             try {
-                SetUnsigned(source_, kNkMAIDCapability_SaveMedia, *original_save_media_, deadline, "save_media_restore_failed");
-                const ULONG restored = GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline, "save_media_restore_failed");
-                if (restored != *original_save_media_) {
-                    throw TransportError("save_media_restore_failed", "original SaveMedia value was not restored");
-                }
+                RestoreNikonSaveMediaOnce(
+                    *original_save_media_,
+                    [this, deadline] {
+                        return static_cast<std::uint32_t>(GetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            deadline, "save_media_restore_failed"));
+                    },
+                    [this, deadline](std::uint32_t value) {
+                        SetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            static_cast<ULONG>(value), deadline,
+                            "save_media_restore_failed");
+                    });
             } catch (const TransportError& error) {
                 pending_error.emplace(error.Category(), error.what());
             }
@@ -915,6 +1295,7 @@ private:
     void OpenDualSource(
         std::string_view candidate_token,
         bool capture_session,
+        CaptureStorageMode storage_mode,
         std::chrono::seconds timeout) {
         if (!dual_manager_active_ || !module_.opened || source_.opened) {
             throw TransportError(
@@ -941,7 +1322,7 @@ private:
                 candidate->second,
                 capture_session,
                 std::chrono::steady_clock::now() + timeout,
-                false);
+                storage_mode);
         } catch (...) {
             dual_topology_changed_ = true;
             throw;
@@ -952,7 +1333,7 @@ private:
         ULONG selected_id,
         bool capture_session,
         std::chrono::steady_clock::time_point deadline,
-        bool configure_save_media) {
+        CaptureStorageMode storage_mode) {
         if (!module_.opened || source_.opened) {
             throw TransportError(
                 "open_failed", "SDK source open preconditions are not satisfied");
@@ -960,6 +1341,7 @@ private:
         source_.capabilities.clear();
         sdk_session_poisoned_ = false;
         card_capture_events_.ResetForSession();
+        pc_direct_events_.ResetForSession();
         capture_complete_ = false;
         add_child_in_card_ = false;
         baseline_.clear();
@@ -978,28 +1360,90 @@ private:
         const bool source_event_callback_supported =
             Supports(source_, kNkMAIDCapability_EventProc, kNkMAIDCapOperation_Set);
         SetEventCallback(source_, deadline, "open_failed");
-        if (source_event_callback_supported) card_capture_events_.CallbackRegistered();
+        if (source_event_callback_supported) {
+            card_capture_events_.CallbackRegistered();
+            pc_direct_events_.CallbackRegistered();
+        }
         RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0,
             kNkMAIDDataType_Null, 0, deadline, "open_failed");
         if (capture_session) {
-            const ULONG current_save_media = GetUnsigned(
-                source_, kNkMAIDCapability_SaveMedia, deadline,
-                "save_media_mismatch");
-            if (!configure_save_media && current_save_media != kDesiredSaveMedia) {
+            if (storage_mode == CaptureStorageMode::none) {
                 throw TransportError(
-                    "save_media_profile_mismatch",
-                    "DualCamera requires card SaveMedia before the session and will not change it");
+                    "save_media_mode_missing",
+                    "capture source requires an explicit storage mode");
             }
-            if (configure_save_media) {
-                original_save_media_ = current_save_media;
-                SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
-                    kDesiredSaveMedia, deadline, "save_media_mismatch");
-            }
-            if (GetUnsigned(source_, kNkMAIDCapability_SaveMedia, deadline,
-                    "save_media_mismatch") != kDesiredSaveMedia) {
-                throw TransportError(
-                    "save_media_mismatch",
-                    "card capture destination did not persist");
+            if (storage_mode == CaptureStorageMode::pc_direct_sdram) {
+                const auto selection = SelectNikonSaveMediaForPcDirect(
+                    kNkMAIDSaveMedia_SDRAM,
+                    [this, deadline] {
+                        return static_cast<std::uint32_t>(GetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            deadline, "save_media_mismatch"));
+                    },
+                    [this, deadline](std::uint32_t value) {
+                        SetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            static_cast<ULONG>(value), deadline,
+                            "save_media_mismatch");
+                    });
+                original_save_media_ =
+                    static_cast<ULONG>(selection.original_value);
+            } else {
+                const ULONG current_save_media = GetUnsigned(
+                    source_, kNkMAIDCapability_SaveMedia, deadline,
+                    "save_media_mismatch");
+                if (storage_mode ==
+                        CaptureStorageMode::require_existing_card &&
+                    current_save_media != kDesiredSaveMedia) {
+                    throw TransportError(
+                        "save_media_profile_mismatch",
+                        "DualCamera requires card SaveMedia before the session and will not change it");
+                }
+                if (storage_mode == CaptureStorageMode::configure_card) {
+                    original_save_media_ = current_save_media;
+                    try {
+                        SetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            kDesiredSaveMedia, deadline,
+                            "save_media_mismatch");
+                        if (GetUnsigned(
+                                source_, kNkMAIDCapability_SaveMedia,
+                                deadline, "save_media_mismatch") !=
+                            kDesiredSaveMedia) {
+                            throw TransportError(
+                                "save_media_mismatch",
+                                "card capture destination did not persist");
+                        }
+                    } catch (...) {
+                        const auto selection_error =
+                            std::current_exception();
+                        try {
+                            RestoreNikonSaveMediaOnce(
+                                current_save_media,
+                                [this, deadline] {
+                                    return static_cast<std::uint32_t>(
+                                        GetUnsigned(
+                                            source_,
+                                            kNkMAIDCapability_SaveMedia,
+                                            deadline,
+                                            "save_media_restore_failed"));
+                                },
+                                [this, deadline](std::uint32_t value) {
+                                    SetUnsigned(
+                                        source_,
+                                        kNkMAIDCapability_SaveMedia,
+                                        static_cast<ULONG>(value),
+                                        deadline,
+                                        "save_media_restore_failed");
+                                });
+                        } catch (...) {
+                            original_save_media_.reset();
+                            throw;
+                        }
+                        original_save_media_.reset();
+                        std::rethrow_exception(selection_error);
+                    }
+                }
             }
         }
         session_open_ = true;
@@ -1031,16 +1475,19 @@ private:
         }
         if (source_.opened && original_save_media_) {
             try {
-                SetUnsigned(source_, kNkMAIDCapability_SaveMedia,
-                    *original_save_media_, deadline,
-                    "save_media_restore_failed");
-                if (GetUnsigned(source_, kNkMAIDCapability_SaveMedia,
-                        deadline, "save_media_restore_failed") !=
-                    *original_save_media_) {
-                    throw TransportError(
-                        "save_media_restore_failed",
-                        "original SaveMedia value was not restored");
-                }
+                RestoreNikonSaveMediaOnce(
+                    *original_save_media_,
+                    [this, deadline] {
+                        return static_cast<std::uint32_t>(GetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            deadline, "save_media_restore_failed"));
+                    },
+                    [this, deadline](std::uint32_t value) {
+                        SetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            static_cast<ULONG>(value), deadline,
+                            "save_media_restore_failed");
+                    });
             } catch (const TransportError& error) {
                 if (!pending_error) {
                     pending_error.emplace(error.Category(), error.what());
@@ -1054,6 +1501,7 @@ private:
                 kNkMAIDDataType_Null, 0);
             source_.opened = false;
             card_capture_events_.SessionClosed();
+            pc_direct_events_.SessionClosed();
             if (result != kNkMAIDResult_NoError &&
                 result != kNkMAIDResult_ZombieObject && !pending_error) {
                 pending_error.emplace(
@@ -2025,8 +2473,10 @@ private:
             for (const ULONG id : Children(source_, deadline, "image_event_failed")) {
                 ObserveCandidate(id);
             }
+            pc_direct_events_.RecordForcedEnumeration(true);
         } catch (const TransportError&) {
             // Capture completion may temporarily make Children busy; callback events remain authoritative.
+            pc_direct_events_.RecordForcedEnumeration(false);
         }
     }
 
@@ -2038,8 +2488,12 @@ private:
         return ids;
     }
 
-    void ObserveCandidate(ULONG id) {
-        if (baseline_.contains(id) || added_items_.contains(id) || late_items_.contains(id)) return;
+    void ObserveCandidate(
+        ULONG id,
+        bool callback_notification = false) {
+        if (baseline_.contains(id)) return;
+        pc_direct_events_.ObserveCandidate(id, callback_notification);
+        if (added_items_.contains(id) || late_items_.contains(id)) return;
         // D810 can publish the SDRAM Item after CaptureComplete.  An item is
         // attributable while the current baseline token and event window are
         // active; only items observed outside that window are late.
@@ -2103,6 +2557,7 @@ private:
             const NKERROR result = Call(&source_.value, kNkMAIDCommand_Close, 0, kNkMAIDDataType_Null, 0);
             source_.opened = false;
             card_capture_events_.SessionClosed();
+            pc_direct_events_.SessionClosed();
             if (result != kNkMAIDResult_NoError && result != kNkMAIDResult_ZombieObject) {
                 throw TransportError("close_failed", "SDK source close failed: " + ResultText(result));
             }
@@ -2172,9 +2627,21 @@ private:
         }
         if (source_.opened && original_save_media_) {
             try {
-                SetUnsigned(source_, kNkMAIDCapability_SaveMedia, *original_save_media_,
-                    std::chrono::steady_clock::now() + std::chrono::seconds(2),
-                    "save_media_restore_failed");
+                const auto deadline =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                RestoreNikonSaveMediaOnce(
+                    *original_save_media_,
+                    [this, deadline] {
+                        return static_cast<std::uint32_t>(GetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            deadline, "save_media_restore_failed"));
+                    },
+                    [this, deadline](std::uint32_t value) {
+                        SetUnsigned(
+                            source_, kNkMAIDCapability_SaveMedia,
+                            static_cast<ULONG>(value), deadline,
+                            "save_media_restore_failed");
+                    });
             } catch (...) {
                 // Emergency cleanup cannot surface an error (destructor/open rollback).
             }
@@ -2182,6 +2649,7 @@ private:
         }
         CloseObjectNoThrow(source_);
         card_capture_events_.SessionClosed();
+        pc_direct_events_.SessionClosed();
         CloseObjectNoThrow(module_);
         UnloadModule();
         session_open_ = false;
@@ -2228,20 +2696,25 @@ private:
         const ULONG id = static_cast<ULONG>(data);
         switch (event) {
         case kNkMAIDEvent_AddChild:
-            self->ObserveCandidate(id);
+            self->ObserveCandidate(id, true);
             break;
         case kNkMAIDEvent_RemoveChild:
             self->removed_items_.insert(id);
+            self->pc_direct_events_.ObserveRemovedCandidate(id);
             break;
         case kNkMAIDEvent_CaptureComplete:
             // The D810 SDK sample treats the event itself as completion and
             // does not assign a contract to its data parameter.
             self->capture_complete_ = true;
             self->card_capture_events_.Observe(NikonCardCaptureEvent::capture_complete);
+            self->pc_direct_events_.Observe(
+                NikonPcDirectEvent::capture_complete);
             break;
         case kNkMAIDEvent_AddChildInCard:
             self->add_child_in_card_ = true;
             self->card_capture_events_.Observe(NikonCardCaptureEvent::add_child_in_card);
+            self->pc_direct_events_.Observe(
+                NikonPcDirectEvent::add_child_in_card);
             break;
         default:
             break;
@@ -2284,6 +2757,7 @@ private:
     bool capture_complete_{false};
     bool add_child_in_card_{false};
     NikonCardCaptureEventWindow card_capture_events_;
+    NikonPcDirectEventWindow pc_direct_events_;
     std::optional<ULONG> original_save_media_;
     std::set<ULONG> baseline_;
     std::set<ULONG> module_sources_;
@@ -2338,6 +2812,11 @@ void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {
 void NikonSdkTransport::Open(std::string_view stable_identity, std::chrono::seconds timeout) {
     impl_->Open(stable_identity, timeout);
 }
+void NikonSdkTransport::OpenPcDirect(
+    std::string_view stable_identity,
+    std::chrono::seconds timeout) {
+    impl_->OpenPcDirect(stable_identity, timeout);
+}
 void NikonSdkTransport::OpenLiveView(std::string_view stable_identity, std::chrono::seconds timeout) {
     impl_->OpenLiveView(stable_identity, timeout);
 }
@@ -2359,6 +2838,13 @@ void NikonSdkTransport::CaptureToCard(std::chrono::seconds image_event_timeout,
     impl_->CaptureToCard(image_event_timeout, transaction_timeout);
 }
 void NikonSdkTransport::Close(std::chrono::seconds timeout) { impl_->Close(timeout); }
+void NikonSdkTransport::ClosePcDirect(std::chrono::seconds timeout) {
+    impl_->Close(timeout);
+}
+PcDirectTransportDiagnostics
+NikonSdkTransport::InspectPcDirectDiagnostics() const {
+    return impl_->InspectPcDirectDiagnostics();
+}
 std::size_t NikonSdkTransport::BeginDualReadOnlyProbe(
     std::chrono::seconds timeout) {
     return impl_->BeginDualReadOnlyProbe(timeout);
@@ -2376,6 +2862,23 @@ void NikonSdkTransport::OpenDualBoundCapture(
     std::string_view candidate_token,
     std::chrono::seconds timeout) {
     impl_->OpenDualBoundCapture(candidate_token, timeout);
+}
+void NikonSdkTransport::OpenDualBoundPcDirectCapture(
+    std::string_view candidate_token,
+    std::chrono::seconds timeout) {
+    impl_->OpenDualBoundPcDirectCapture(candidate_token, timeout);
+}
+std::string NikonSdkTransport::BeginPcDirectBaseline(
+    std::chrono::seconds timeout) {
+    return impl_->Baseline(timeout);
+}
+std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownloadToPc(
+    std::string_view baseline,
+    std::chrono::seconds image_event_timeout,
+    std::chrono::seconds download_timeout,
+    std::chrono::seconds transaction_timeout) {
+    return impl_->CaptureAndDownload(
+        baseline, image_event_timeout, download_timeout, transaction_timeout);
 }
 void NikonSdkTransport::CloseDualSourceKeepingModule(
     std::chrono::seconds timeout) {
@@ -2418,6 +2921,7 @@ SdkCameraStatus NikonSdkTransport::ProbeSdkStatus(std::string_view, std::chrono:
 SdkCameraStatus NikonSdkTransport::ProbeOpenCaptureSessionStatus(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {}
 void NikonSdkTransport::Open(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenPcDirect(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }
 std::vector<unsigned char> NikonSdkTransport::ReadLiveViewFrame(std::chrono::seconds) { ThrowGated(); }
@@ -2427,10 +2931,20 @@ std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
     std::string_view, std::chrono::seconds, std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::CaptureToCard(std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::Close(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::ClosePcDirect(std::chrono::seconds) { ThrowGated(); }
+PcDirectTransportDiagnostics
+NikonSdkTransport::InspectPcDirectDiagnostics() const {
+    return {};
+}
 std::size_t NikonSdkTransport::BeginDualReadOnlyProbe(std::chrono::seconds) { ThrowGated(); }
 std::vector<std::string> NikonSdkTransport::BeginDualSession(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenDualCandidateLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenDualBoundCapture(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenDualBoundPcDirectCapture(std::string_view, std::chrono::seconds) { ThrowGated(); }
+std::string NikonSdkTransport::BeginPcDirectBaseline(std::chrono::seconds) { ThrowGated(); }
+std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownloadToPc(
+    std::string_view, std::chrono::seconds, std::chrono::seconds,
+    std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::CloseDualSourceKeepingModule(std::chrono::seconds) { ThrowGated(); }
 DualIdentityInvalidationReason NikonSdkTransport::PollDualInvalidation() { ThrowGated(); }
 void NikonSdkTransport::EndDualSession(std::chrono::seconds) { ThrowGated(); }
@@ -2589,6 +3103,24 @@ void NikonDualBindingSdkAdapter::OpenBoundCapture(
     }
 }
 
+void NikonDualBindingSdkAdapter::OpenBoundPcDirectCapture(
+    std::string_view candidate_token,
+    std::chrono::seconds timeout) {
+    if (candidate_tokens_.empty() ||
+        std::find(candidate_tokens_.begin(), candidate_tokens_.end(),
+            candidate_token) == candidate_tokens_.end()) {
+        throw TransportError(
+            "candidate_unavailable",
+            "bound candidate token is not part of the active Dual session");
+    }
+    try {
+        transport_->OpenDualBoundPcDirectCapture(candidate_token, timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
 SdkCameraStatus NikonDualBindingSdkAdapter::ProbeOpenCaptureSessionStatus(
     std::chrono::seconds timeout) {
     try {
@@ -2604,6 +3136,32 @@ void NikonDualBindingSdkAdapter::CaptureToCard(
     std::chrono::seconds transaction_timeout) {
     try {
         transport_->CaptureToCard(image_event_timeout, transaction_timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+std::string NikonDualBindingSdkAdapter::BeginPcDirectBaseline(
+    std::chrono::seconds timeout) {
+    try {
+        return transport_->BeginPcDirectBaseline(timeout);
+    } catch (...) {
+        FailAndInvalidate();
+        throw;
+    }
+}
+
+std::vector<ImageCandidate>
+NikonDualBindingSdkAdapter::CaptureAndDownloadToPc(
+    std::string_view baseline,
+    std::chrono::seconds image_event_timeout,
+    std::chrono::seconds download_timeout,
+    std::chrono::seconds transaction_timeout) {
+    try {
+        return transport_->CaptureAndDownloadToPc(
+            baseline, image_event_timeout, download_timeout,
+            transaction_timeout);
     } catch (...) {
         FailAndInvalidate();
         throw;

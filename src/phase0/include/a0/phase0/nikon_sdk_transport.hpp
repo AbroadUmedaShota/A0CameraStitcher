@@ -1,11 +1,13 @@
 #pragma once
 
 #include "a0/phase0/dual_binding_camera_agent.hpp"
+#include "a0/phase0/pc_direct_capture.hpp"
 #include "a0/phase0/phase0.hpp"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace a0::phase0 {
@@ -47,6 +49,13 @@ public:
     virtual void OpenDualBoundCapture(
         std::string_view candidate_token,
         std::chrono::seconds timeout) = 0;
+    // Explicit experimental PC-direct path. This remains separate from the
+    // accepted card-spool path so existing empty-card behavior cannot change
+    // implicitly. The concrete transport snapshots SaveMedia, selects SDRAM,
+    // verifies it, and restores the original value on checked source close.
+    virtual void OpenDualBoundPcDirectCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) = 0;
     [[nodiscard]] virtual SdkCameraStatus ProbeOpenCaptureSessionStatus(
         std::chrono::seconds timeout) = 0;
     virtual void StartLiveView(std::chrono::seconds timeout) = 0;
@@ -55,6 +64,13 @@ public:
     virtual void StopLiveView(std::chrono::seconds timeout) = 0;
     virtual void CaptureToCard(
         std::chrono::seconds image_event_timeout,
+        std::chrono::seconds transaction_timeout) = 0;
+    [[nodiscard]] virtual std::string BeginPcDirectBaseline(
+        std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual std::vector<ImageCandidate> CaptureAndDownloadToPc(
+        std::string_view baseline,
+        std::chrono::seconds image_event_timeout,
+        std::chrono::seconds download_timeout,
         std::chrono::seconds transaction_timeout) = 0;
     virtual void CloseDualSourceKeepingModule(
         std::chrono::seconds timeout) = 0;
@@ -100,6 +116,24 @@ struct NikonDualRetainedModuleState {
     std::string_view source_name,
     std::string_view source_interface);
 
+struct NikonSaveMediaSelection {
+    std::uint32_t original_value{};
+    std::uint32_t selected_value{};
+};
+
+// Testable command-order seam used by the concrete SDK transport. Unknown
+// original state stops before Set; selection failure performs one checked
+// restore; callers use RestoreNikonSaveMediaOnce once more only after a
+// successful selection/session.
+[[nodiscard]] NikonSaveMediaSelection SelectNikonSaveMediaForPcDirect(
+    std::uint32_t desired_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value);
+void RestoreNikonSaveMediaOnce(
+    std::uint32_t original_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value);
+
 // Small SDK-independent model of the source callback window used by a
 // SaveMedia=Card capture. It keeps callback/pump/session ordering testable
 // without loading licensed Nikon binaries or issuing a camera command.
@@ -139,9 +173,72 @@ private:
     NikonCardCaptureEventSnapshot snapshot_{};
 };
 
+enum class NikonPcDirectEvent {
+    capture_complete,
+    add_child_in_card,
+    other,
+};
+
+struct NikonPcDirectEventSnapshot {
+    bool measurement_started{};
+    bool callback_registered{};
+    bool callback_active_before_capture{};
+    bool baseline_ready{};
+    bool capture_command_started{};
+    bool capture_command_accepted{};
+    bool session_closed{};
+    std::size_t pre_dispatch_candidate_count{};
+    std::size_t candidate_notification_count{};
+    std::size_t distinct_notified_candidate_count{};
+    std::size_t distinct_enumerated_candidate_count{};
+    std::size_t duplicate_candidate_notification_count{};
+    std::size_t capture_complete_count{};
+    std::size_t removed_candidate_count{};
+    std::size_t add_child_in_card_count{};
+    std::size_t ignored_event_count{};
+    std::size_t forced_enumeration_attempt_count{};
+    std::size_t forced_enumeration_success_count{};
+    std::size_t forced_enumeration_failure_count{};
+    std::optional<PcDirectTerminalSubreason> terminal_subreason;
+    std::vector<PcDirectObservation> observation_order;
+};
+
+// SDK-independent PC-direct callback/reconciliation window. A candidate is
+// attributable only when one post-dispatch AddChild notification, one
+// CaptureComplete event and one matching Children delta are observed. Any
+// pre-dispatch, duplicate, removed, card, or additional candidate fails closed.
+class NikonPcDirectEventWindow final {
+public:
+    void ResetForSession() noexcept;
+    void CallbackRegistered() noexcept;
+    void BeginBaseline() noexcept;
+    [[nodiscard]] bool BeginCaptureCommand() noexcept;
+    void CaptureCommandAccepted() noexcept;
+    void ObserveCandidate(
+        std::uint32_t candidate_id,
+        bool callback_notification) noexcept;
+    void ObserveRemovedCandidate(std::uint32_t candidate_id) noexcept;
+    void Observe(NikonPcDirectEvent event) noexcept;
+    void RecordForcedEnumeration(bool succeeded) noexcept;
+    void RecordTerminalSubreason(
+        PcDirectTerminalSubreason subreason) noexcept;
+    void SessionClosed() noexcept;
+    [[nodiscard]] bool CanAttributeExactlyOne() const noexcept;
+    [[nodiscard]] NikonPcDirectEventSnapshot Snapshot() const;
+
+private:
+    NikonPcDirectEventSnapshot snapshot_{};
+    std::set<std::uint32_t> pre_dispatch_candidate_ids_;
+    std::set<std::uint32_t> notified_candidate_ids_;
+    std::set<std::uint32_t> enumerated_candidate_ids_;
+    std::set<std::uint32_t> removed_candidate_ids_;
+    void RecordObservation(PcDirectObservation observation) noexcept;
+};
+
 class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport,
-                                public ICardCaptureTransport,
-                                public INikonDualSessionTransport {
+                                 public ICardCaptureTransport,
+                                 public INikonDualSessionTransport,
+                                 public IPcDirectCaptureTransport {
 public:
     NikonSdkTransport();
     ~NikonSdkTransport() override;
@@ -162,6 +259,13 @@ public:
     // experiments leave this disabled.
     void RequireExactlyOneD810ForProductAgent();
     void Open(std::string_view stable_identity, std::chrono::seconds timeout) override;
+    // Experimental, explicit one-shot route. Unlike Open(), this requests
+    // SaveMedia=SDRAM so the documented SDK Item/Data callback path can return
+    // the JPEG directly to the PC. The original SaveMedia value is restored
+    // and reread by Close(); callers must treat a close failure as terminal.
+    void OpenPcDirect(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) override;
     [[nodiscard]] std::string Baseline(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownload(
         std::string_view baseline,
@@ -175,6 +279,9 @@ public:
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;
     void Close(std::chrono::seconds timeout) override;
+    void ClosePcDirect(std::chrono::seconds timeout) override;
+    [[nodiscard]] PcDirectTransportDiagnostics
+        InspectPcDirectDiagnostics() const override;
 
     // ADR-0025 DualCamera session boundary. The module object stays open for
     // the lifetime of one operator binding, while at most one candidate source
@@ -190,6 +297,16 @@ public:
     void OpenDualBoundCapture(
         std::string_view candidate_token,
         std::chrono::seconds timeout) override;
+    void OpenDualBoundPcDirectCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout) override;
+    [[nodiscard]] std::string BeginPcDirectBaseline(
+        std::chrono::seconds timeout) override;
+    [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownloadToPc(
+        std::string_view baseline,
+        std::chrono::seconds image_event_timeout,
+        std::chrono::seconds download_timeout,
+        std::chrono::seconds transaction_timeout) override;
     void CloseDualSourceKeepingModule(std::chrono::seconds timeout) override;
     [[nodiscard]] DualIdentityInvalidationReason PollDualInvalidation() override;
     void EndDualSession(std::chrono::seconds timeout) override;
@@ -232,10 +349,20 @@ public:
     void OpenBoundCapture(
         std::string_view candidate_token,
         std::chrono::seconds timeout);
+    void OpenBoundPcDirectCapture(
+        std::string_view candidate_token,
+        std::chrono::seconds timeout);
     [[nodiscard]] SdkCameraStatus ProbeOpenCaptureSessionStatus(
         std::chrono::seconds timeout);
     void CaptureToCard(
         std::chrono::seconds image_event_timeout,
+        std::chrono::seconds transaction_timeout);
+    [[nodiscard]] std::string BeginPcDirectBaseline(
+        std::chrono::seconds timeout);
+    [[nodiscard]] std::vector<ImageCandidate> CaptureAndDownloadToPc(
+        std::string_view baseline,
+        std::chrono::seconds image_event_timeout,
+        std::chrono::seconds download_timeout,
         std::chrono::seconds transaction_timeout);
     void CloseBoundCapture(std::chrono::seconds timeout);
     void EndSession(std::chrono::seconds timeout);

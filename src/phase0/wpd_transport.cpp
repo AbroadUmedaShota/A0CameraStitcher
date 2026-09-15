@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cwctype>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -42,6 +43,63 @@ std::string DeriveWpdStableIdentity(std::string_view device_serial_utf8) {
     material.push_back(static_cast<unsigned char>(length & 0xFFU));
     material.insert(material.end(), device_serial_utf8.begin(), device_serial_utf8.end());
     return Sha256Hex(material);
+}
+
+WpdPayloadFingerprint BuildWpdPayloadFingerprint(
+    const std::vector<WpdPayloadDigest>& payloads) {
+    std::vector<std::string> entries;
+    entries.reserve(payloads.size());
+    std::uint64_t total_bytes = 0;
+    for (const auto& payload : payloads) {
+        if (payload.sha256.size() != 64 ||
+            !std::all_of(
+                payload.sha256.begin(), payload.sha256.end(),
+                [](unsigned char character) {
+                    return std::isxdigit(character) != 0;
+                })) {
+            throw std::invalid_argument(
+                "WPD payload digest must be a SHA-256 hex value");
+        }
+        if (payload.bytes >
+            std::numeric_limits<std::uint64_t>::max() - total_bytes) {
+            throw std::overflow_error(
+                "WPD payload byte total overflowed");
+        }
+        total_bytes += payload.bytes;
+        std::string normalized_hash = payload.sha256;
+        std::transform(
+            normalized_hash.begin(), normalized_hash.end(),
+            normalized_hash.begin(), [](unsigned char character) {
+                return static_cast<char>(std::tolower(character));
+            });
+        entries.push_back(
+            std::to_string(payload.bytes) + ":" + normalized_hash);
+    }
+    std::sort(entries.begin(), entries.end());
+    std::vector<unsigned char> aggregate_material;
+    for (const auto& entry : entries) {
+        aggregate_material.insert(
+            aggregate_material.end(), entry.begin(), entry.end());
+        aggregate_material.push_back('\n');
+    }
+    return {
+        payloads.size(), total_bytes, Sha256Hex(aggregate_material)};
+}
+
+void ValidateWpdExactOneCurrentIdentity(
+    const std::vector<CameraInfo>& current_inventory,
+    std::string_view expected_stable_identity) {
+    if (current_inventory.size() != 1) {
+        throw TransportError(
+            "camera_count_mismatch",
+            "product SingleCamera WPD open requires exactly one currently connected D810");
+    }
+    if (current_inventory.front().stable_identity !=
+        expected_stable_identity) {
+        throw TransportError(
+            "identity_mismatch",
+            "product SingleCamera WPD open resolved a different camera");
+    }
 }
 
 namespace {
@@ -739,6 +797,68 @@ public:
         }
     }
 
+    WpdPayloadFingerprint InspectPayloadFingerprint(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) {
+        if (device_) {
+            throw TransportError(
+                "session_busy", "WPD session is already open");
+        }
+        if (timeout <= std::chrono::seconds::zero()) {
+            throw TransportError(
+                "payload_fingerprint_timeout",
+                "WPD payload fingerprint timeout must be positive");
+        }
+        if (require_exactly_one_d810_) {
+            ValidateWpdExactOneCurrentIdentity(
+                Enumerate(), stable_identity);
+        } else if (devices_.empty()) {
+            Enumerate();
+        }
+        const auto found = devices_.find(std::string(stable_identity));
+        if (found == devices_.end()) {
+            throw TransportError(
+                "payload_fingerprint_open_failed",
+                "requested WPD D810 is unavailable");
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        device_ = OpenDevice(
+            found->second.pnp_id,
+            "payload_fingerprint_open_failed",
+            GENERIC_READ);
+        try {
+            Check(device_->Content(&content_),
+                "payload_fingerprint_open_failed", "open WPD content");
+            Check(content_->Properties(&properties_),
+                "payload_fingerprint_open_failed", "open WPD properties");
+            Check(content_->Transfer(&resources_),
+                "payload_fingerprint_open_failed", "open WPD resources");
+            active_identity_ = std::string(stable_identity);
+
+            const auto objects = SpoolObjects("payload_fingerprint_read_failed");
+            std::vector<WpdPayloadDigest> payloads;
+            payloads.reserve(objects.size());
+            for (const auto& object : objects) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    throw TransportError(
+                        "payload_fingerprint_timeout",
+                        "WPD payload fingerprint timed out");
+                }
+                const auto bytes = Download(object.object_id, deadline);
+                payloads.push_back({
+                    static_cast<std::uint64_t>(bytes.size()),
+                    Sha256Hex(bytes)});
+            }
+            const auto result = BuildWpdPayloadFingerprint(payloads);
+            Close();
+            return result;
+        } catch (...) {
+            if (device_) Close();
+            throw;
+        }
+    }
+
     WpdCorrelationSample ReadCorrelationSample() {
         if (!device_ || !content_ || !properties_) {
             throw TransportError("session_not_open", "WPD read-only observation session is not open");
@@ -1426,6 +1546,11 @@ std::size_t WpdTransport::InspectSpoolPayloadCount(
     std::string_view stable_identity,
     std::chrono::seconds) {
     return impl_->InspectSpoolPayloadCount(stable_identity);
+}
+WpdPayloadFingerprint WpdTransport::InspectPayloadFingerprint(
+    std::string_view stable_identity,
+    std::chrono::seconds timeout) {
+    return impl_->InspectPayloadFingerprint(stable_identity, timeout);
 }
 std::size_t WpdTransport::InspectDualReadOnlySpoolPayloadCount(
     std::string_view stable_identity,
