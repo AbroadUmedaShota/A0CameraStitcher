@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -149,6 +150,121 @@ std::string ErrorCategory(const std::exception& error) {
 }
 
 } // namespace
+
+std::string_view ToString(PcDirectObservation observation) noexcept {
+    switch (observation) {
+    case PcDirectObservation::CallbackRegistered: return "callback-registered";
+    case PcDirectObservation::BaselineReady: return "baseline-ready";
+    case PcDirectObservation::CaptureCommandStarted: return "capture-command-started";
+    case PcDirectObservation::CaptureCommandAccepted: return "capture-command-accepted";
+    case PcDirectObservation::ForcedEnumerationSucceeded: return "forced-enumeration-succeeded";
+    case PcDirectObservation::ForcedEnumerationFailed: return "forced-enumeration-failed";
+    case PcDirectObservation::AddChildNotification: return "add-child-notification";
+    case PcDirectObservation::EnumeratedCandidate: return "enumerated-candidate";
+    case PcDirectObservation::DuplicateAddChildNotification: return "duplicate-add-child-notification";
+    case PcDirectObservation::CaptureComplete: return "capture-complete";
+    case PcDirectObservation::AddChildInCard: return "add-child-in-card";
+    case PcDirectObservation::CandidateRemoved: return "candidate-removed";
+    case PcDirectObservation::IgnoredForeignEvent: return "ignored-foreign-event";
+    case PcDirectObservation::SessionClosed: return "session-closed";
+    }
+    return "unknown";
+}
+
+std::string_view ToString(PcDirectTerminalSubreason subreason) noexcept {
+    switch (subreason) {
+    case PcDirectTerminalSubreason::PreDispatchCandidate: return "pre-dispatch-candidate";
+    case PcDirectTerminalSubreason::CallbackWindowInvalid: return "callback-window-invalid";
+    case PcDirectTerminalSubreason::CaptureCommandFailed: return "capture-command-failed";
+    case PcDirectTerminalSubreason::TransactionWatchdogExpired: return "transaction-watchdog-expired";
+    case PcDirectTerminalSubreason::CaptureCompleteMissing: return "capture-complete-missing";
+    case PcDirectTerminalSubreason::SdramItemMissing: return "sdram-item-missing";
+    case PcDirectTerminalSubreason::CardItemOnly: return "card-item-only";
+    case PcDirectTerminalSubreason::CandidateRemoved: return "candidate-removed";
+    case PcDirectTerminalSubreason::AttributionFailed: return "attribution-failed";
+    case PcDirectTerminalSubreason::ImageDownloadFailed: return "image-download-failed";
+    case PcDirectTerminalSubreason::ReceivedExactlyOneItem: return "received-exactly-one-item";
+    }
+    return "unknown";
+}
+
+std::string SerializePcDirectTransportDiagnostics(
+    const PcDirectTransportDiagnostics& diagnostics) {
+    std::ostringstream output;
+    const auto optional_bool = [&output](std::string_view name,
+                                         const std::optional<bool>& value) {
+        output << "\"" << name << "\":";
+        if (value) output << (*value ? "true" : "false");
+        else output << "null";
+    };
+    const auto optional_count = [&output](
+        std::string_view name,
+        const std::optional<std::size_t>& value) {
+        output << "\"" << name << "\":";
+        if (value) output << *value;
+        else output << "null";
+    };
+
+    output << "{\"measurementStarted\":"
+           << (diagnostics.measurement_started ? "true" : "false") << ',';
+    optional_bool("callbackRegistered", diagnostics.callback_registered);
+    output << ',';
+    optional_bool(
+        "callbackActiveBeforeCapture",
+        diagnostics.callback_active_before_capture);
+    output << ',';
+    optional_bool("sessionClosed", diagnostics.session_closed);
+    output << ',';
+    optional_count("captureCompleteCount", diagnostics.capture_complete_count);
+    output << ',';
+    optional_count(
+        "addChildNotificationCount",
+        diagnostics.add_child_notification_count);
+    output << ',';
+    optional_count(
+        "forcedEnumerationAttemptCount",
+        diagnostics.forced_enumeration_attempt_count);
+    output << ',';
+    optional_count(
+        "forcedEnumerationSuccessCount",
+        diagnostics.forced_enumeration_success_count);
+    output << ',';
+    optional_count(
+        "forcedEnumerationFailureCount",
+        diagnostics.forced_enumeration_failure_count);
+    output << ',';
+    optional_count(
+        "distinctNotifiedCandidateCount",
+        diagnostics.distinct_notified_candidate_count);
+    output << ',';
+    optional_count(
+        "distinctEnumeratedCandidateCount",
+        diagnostics.distinct_enumerated_candidate_count);
+    output << ',';
+    optional_count(
+        "duplicateCandidateNotificationCount",
+        diagnostics.duplicate_candidate_notification_count);
+    output << ',';
+    optional_count("removedCandidateCount", diagnostics.removed_candidate_count);
+    output << ',';
+    optional_count("addChildInCardCount", diagnostics.add_child_in_card_count);
+    output << ',';
+    optional_count("ignoredEventCount", diagnostics.ignored_event_count);
+    output << ",\"terminalSubreason\":";
+    if (diagnostics.terminal_subreason) {
+        output << "\"" << ToString(*diagnostics.terminal_subreason) << "\"";
+    } else {
+        output << "null";
+    }
+    output << ",\"observationOrder\":[";
+    for (std::size_t index = 0;
+         index < diagnostics.observation_order.size(); ++index) {
+        if (index != 0) output << ',';
+        output << "\"" << ToString(diagnostics.observation_order[index]) << "\"";
+    }
+    output << "]}";
+    return output.str();
+}
 
 std::optional<std::string> PcDirectReportRelativePath(
     const fs::path& run_root,
@@ -399,6 +515,14 @@ PcDirectCaptureResult ExecutePcDirectCaptureOnce(
     result.transaction.duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
+    try {
+        result.transport_diagnostics =
+            transport.InspectPcDirectDiagnostics();
+    } catch (...) {
+        // Diagnostics must never change the capture result. A default snapshot
+        // is explicitly serialized as unmeasured rather than as observed zero.
+        result.transport_diagnostics = {};
+    }
     evidence.RecordState(
         request.transaction_id,
         result.transaction.terminal_state == "Complete"

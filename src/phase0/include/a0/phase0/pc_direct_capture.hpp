@@ -12,6 +12,62 @@
 
 namespace a0::phase0 {
 
+enum class PcDirectObservation {
+    CallbackRegistered,
+    BaselineReady,
+    CaptureCommandStarted,
+    CaptureCommandAccepted,
+    ForcedEnumerationSucceeded,
+    ForcedEnumerationFailed,
+    AddChildNotification,
+    EnumeratedCandidate,
+    DuplicateAddChildNotification,
+    CaptureComplete,
+    AddChildInCard,
+    CandidateRemoved,
+    IgnoredForeignEvent,
+    SessionClosed,
+};
+
+enum class PcDirectTerminalSubreason {
+    PreDispatchCandidate,
+    CallbackWindowInvalid,
+    CaptureCommandFailed,
+    TransactionWatchdogExpired,
+    CaptureCompleteMissing,
+    SdramItemMissing,
+    CardItemOnly,
+    CandidateRemoved,
+    AttributionFailed,
+    ImageDownloadFailed,
+    ReceivedExactlyOneItem,
+};
+
+struct PcDirectTransportDiagnostics {
+    bool measurement_started{};
+    std::optional<bool> callback_registered;
+    std::optional<bool> callback_active_before_capture;
+    std::optional<bool> session_closed;
+    std::optional<std::size_t> capture_complete_count;
+    std::optional<std::size_t> add_child_notification_count;
+    std::optional<std::size_t> forced_enumeration_attempt_count;
+    std::optional<std::size_t> forced_enumeration_success_count;
+    std::optional<std::size_t> forced_enumeration_failure_count;
+    std::optional<std::size_t> distinct_notified_candidate_count;
+    std::optional<std::size_t> distinct_enumerated_candidate_count;
+    std::optional<std::size_t> duplicate_candidate_notification_count;
+    std::optional<std::size_t> removed_candidate_count;
+    std::optional<std::size_t> add_child_in_card_count;
+    std::optional<std::size_t> ignored_event_count;
+    std::optional<PcDirectTerminalSubreason> terminal_subreason;
+    std::vector<PcDirectObservation> observation_order;
+};
+
+[[nodiscard]] std::string_view ToString(PcDirectObservation observation) noexcept;
+[[nodiscard]] std::string_view ToString(PcDirectTerminalSubreason subreason) noexcept;
+[[nodiscard]] std::string SerializePcDirectTransportDiagnostics(
+    const PcDirectTransportDiagnostics& diagnostics);
+
 class IPcDirectCaptureTransport {
 public:
     virtual ~IPcDirectCaptureTransport() = default;
@@ -28,6 +84,8 @@ public:
         std::chrono::seconds download_timeout,
         std::chrono::seconds transaction_timeout) = 0;
     virtual void ClosePcDirect(std::chrono::seconds timeout) = 0;
+    [[nodiscard]] virtual PcDirectTransportDiagnostics
+        InspectPcDirectDiagnostics() const = 0;
 };
 
 struct DecodedJpegInfo {
@@ -61,6 +119,7 @@ struct PcDirectCaptureResult {
     bool save_media_restore_confirmed{};
     bool card_fallback_attempted{};
     int automatic_retry_count{};
+    PcDirectTransportDiagnostics transport_diagnostics;
 };
 
 // Returns only a report-safe path below the run root. Absolute or escaping

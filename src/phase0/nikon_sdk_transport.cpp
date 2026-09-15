@@ -288,16 +288,38 @@ void NikonPcDirectEventWindow::ResetForSession() noexcept {
     removed_candidate_ids_.clear();
 }
 
+void NikonPcDirectEventWindow::RecordObservation(
+    PcDirectObservation observation) noexcept {
+    if (std::find(
+            snapshot_.observation_order.begin(),
+            snapshot_.observation_order.end(), observation) ==
+        snapshot_.observation_order.end()) {
+        try {
+            snapshot_.observation_order.push_back(observation);
+        } catch (...) {
+            // Diagnostic ordering must not affect the transport state machine.
+        }
+    }
+}
+
 void NikonPcDirectEventWindow::CallbackRegistered() noexcept {
-    if (!snapshot_.session_closed) snapshot_.callback_registered = true;
+    if (!snapshot_.session_closed) {
+        snapshot_.callback_registered = true;
+        RecordObservation(PcDirectObservation::CallbackRegistered);
+    }
 }
 
 void NikonPcDirectEventWindow::BeginBaseline() noexcept {
     if (snapshot_.session_closed) return;
     const bool callback_registered = snapshot_.callback_registered;
     snapshot_ = {};
+    snapshot_.measurement_started = true;
     snapshot_.callback_registered = callback_registered;
     snapshot_.baseline_ready = true;
+    if (callback_registered) {
+        RecordObservation(PcDirectObservation::CallbackRegistered);
+    }
+    RecordObservation(PcDirectObservation::BaselineReady);
     pre_dispatch_candidate_ids_.clear();
     notified_candidate_ids_.clear();
     enumerated_candidate_ids_.clear();
@@ -312,12 +334,16 @@ bool NikonPcDirectEventWindow::BeginCaptureCommand() noexcept {
         return false;
     }
     snapshot_.capture_command_started = true;
+    snapshot_.callback_active_before_capture =
+        snapshot_.callback_registered && !snapshot_.session_closed;
+    RecordObservation(PcDirectObservation::CaptureCommandStarted);
     return true;
 }
 
 void NikonPcDirectEventWindow::CaptureCommandAccepted() noexcept {
     if (snapshot_.capture_command_started && !snapshot_.session_closed) {
         snapshot_.capture_command_accepted = true;
+        RecordObservation(PcDirectObservation::CaptureCommandAccepted);
     }
 }
 
@@ -327,21 +353,29 @@ void NikonPcDirectEventWindow::ObserveCandidate(
     if (!snapshot_.callback_registered || !snapshot_.baseline_ready ||
         snapshot_.session_closed) {
         ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
         return;
     }
     if (!snapshot_.capture_command_started) {
         if (pre_dispatch_candidate_ids_.insert(candidate_id).second) {
             ++snapshot_.pre_dispatch_candidate_count;
         }
+        RecordObservation(callback_notification
+                ? PcDirectObservation::AddChildNotification
+                : PcDirectObservation::EnumeratedCandidate);
         return;
     }
     if (callback_notification) {
         ++snapshot_.candidate_notification_count;
+        RecordObservation(PcDirectObservation::AddChildNotification);
         if (!notified_candidate_ids_.insert(candidate_id).second) {
             ++snapshot_.duplicate_candidate_notification_count;
+            RecordObservation(
+                PcDirectObservation::DuplicateAddChildNotification);
         }
     } else {
         enumerated_candidate_ids_.insert(candidate_id);
+        RecordObservation(PcDirectObservation::EnumeratedCandidate);
     }
     snapshot_.distinct_notified_candidate_count =
         notified_candidate_ids_.size();
@@ -353,26 +387,52 @@ void NikonPcDirectEventWindow::ObserveRemovedCandidate(
     std::uint32_t candidate_id) noexcept {
     if (!snapshot_.capture_command_started || snapshot_.session_closed) {
         ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
         return;
     }
     removed_candidate_ids_.insert(candidate_id);
     snapshot_.removed_candidate_count = removed_candidate_ids_.size();
+    RecordObservation(PcDirectObservation::CandidateRemoved);
 }
 
 void NikonPcDirectEventWindow::Observe(NikonPcDirectEvent event) noexcept {
     if (!snapshot_.capture_command_started || snapshot_.session_closed) {
         ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
         return;
     }
     if (event == NikonPcDirectEvent::capture_complete) {
         ++snapshot_.capture_complete_count;
+        RecordObservation(PcDirectObservation::CaptureComplete);
     } else if (event == NikonPcDirectEvent::add_child_in_card) {
         ++snapshot_.add_child_in_card_count;
+        RecordObservation(PcDirectObservation::AddChildInCard);
+    }
+}
+
+void NikonPcDirectEventWindow::RecordForcedEnumeration(
+    bool succeeded) noexcept {
+    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    ++snapshot_.forced_enumeration_attempt_count;
+    if (succeeded) {
+        ++snapshot_.forced_enumeration_success_count;
+        RecordObservation(PcDirectObservation::ForcedEnumerationSucceeded);
+    } else {
+        ++snapshot_.forced_enumeration_failure_count;
+        RecordObservation(PcDirectObservation::ForcedEnumerationFailed);
+    }
+}
+
+void NikonPcDirectEventWindow::RecordTerminalSubreason(
+    PcDirectTerminalSubreason subreason) noexcept {
+    if (snapshot_.measurement_started) {
+        snapshot_.terminal_subreason = subreason;
     }
 }
 
 void NikonPcDirectEventWindow::SessionClosed() noexcept {
     snapshot_.session_closed = true;
+    RecordObservation(PcDirectObservation::SessionClosed);
 }
 
 bool NikonPcDirectEventWindow::CanAttributeExactlyOne() const noexcept {
@@ -391,7 +451,7 @@ bool NikonPcDirectEventWindow::CanAttributeExactlyOne() const noexcept {
         notified_candidate_ids_ == enumerated_candidate_ids_;
 }
 
-NikonPcDirectEventSnapshot NikonPcDirectEventWindow::Snapshot() const noexcept {
+NikonPcDirectEventSnapshot NikonPcDirectEventWindow::Snapshot() const {
     return snapshot_;
 }
 
@@ -540,6 +600,41 @@ public:
 
     std::string SdkVersion() const {
         return sdk_version_.empty() ? "D810-Remote-SDK-local" : sdk_version_;
+    }
+
+    PcDirectTransportDiagnostics InspectPcDirectDiagnostics() const {
+        const auto snapshot = pc_direct_events_.Snapshot();
+        PcDirectTransportDiagnostics diagnostics;
+        diagnostics.measurement_started = snapshot.measurement_started;
+        if (!snapshot.measurement_started) return diagnostics;
+        diagnostics.callback_registered = snapshot.callback_registered;
+        diagnostics.callback_active_before_capture =
+            snapshot.callback_active_before_capture;
+        diagnostics.session_closed = snapshot.session_closed;
+        diagnostics.capture_complete_count =
+            snapshot.capture_complete_count;
+        diagnostics.add_child_notification_count =
+            snapshot.candidate_notification_count;
+        diagnostics.forced_enumeration_attempt_count =
+            snapshot.forced_enumeration_attempt_count;
+        diagnostics.forced_enumeration_success_count =
+            snapshot.forced_enumeration_success_count;
+        diagnostics.forced_enumeration_failure_count =
+            snapshot.forced_enumeration_failure_count;
+        diagnostics.distinct_notified_candidate_count =
+            snapshot.distinct_notified_candidate_count;
+        diagnostics.distinct_enumerated_candidate_count =
+            snapshot.distinct_enumerated_candidate_count;
+        diagnostics.duplicate_candidate_notification_count =
+            snapshot.duplicate_candidate_notification_count;
+        diagnostics.removed_candidate_count =
+            snapshot.removed_candidate_count;
+        diagnostics.add_child_in_card_count =
+            snapshot.add_child_in_card_count;
+        diagnostics.ignored_event_count = snapshot.ignored_event_count;
+        diagnostics.terminal_subreason = snapshot.terminal_subreason;
+        diagnostics.observation_order = snapshot.observation_order;
+        return diagnostics;
     }
 
     std::vector<CameraInfo> Enumerate() {
@@ -897,6 +992,8 @@ public:
             ReconcileChildren(pre_dispatch_deadline);
             if (pc_direct_events_.Snapshot().pre_dispatch_candidate_count != 0) {
                 baseline_token_.clear();
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::PreDispatchCandidate);
                 throw TransportError(
                     "pre_dispatch_candidate",
                     "an uncorrelated SDK Item arrived before PC-direct dispatch");
@@ -905,6 +1002,8 @@ public:
         }
         if (!pc_direct_events_.BeginCaptureCommand()) {
             baseline_token_.clear();
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CallbackWindowInvalid);
             throw TransportError(
                 "pc_direct_event_window_invalid",
                 "PC-direct callback window was not ready before dispatch");
@@ -916,6 +1015,8 @@ public:
             pc_direct_events_.CaptureCommandAccepted();
         } catch (...) {
             baseline_token_.clear();
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CaptureCommandFailed);
             throw;
         }
 
@@ -940,13 +1041,21 @@ public:
 
         ReconcileChildren(event_deadline);
         if (std::chrono::steady_clock::now() >= overall_deadline) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::TransactionWatchdogExpired);
             throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
         }
         if (!capture_complete_) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CaptureCompleteMissing);
             throw TransportError("image_event_timeout", "card CaptureComplete was not observed");
         }
         const auto ids = CandidateIds();
         if (ids.empty()) {
+            pc_direct_events_.RecordTerminalSubreason(
+                add_child_in_card_
+                    ? PcDirectTerminalSubreason::CardItemOnly
+                    : PcDirectTerminalSubreason::SdramItemMissing);
             throw TransportError(
                 add_child_in_card_ ? "image_on_card_only" : "image_event_timeout",
                 add_child_in_card_
@@ -954,9 +1063,13 @@ public:
                     : "no post-baseline image item arrived");
         }
         if (std::any_of(ids.begin(), ids.end(), [this](ULONG id) { return removed_items_.contains(id); })) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::CandidateRemoved);
             throw TransportError("ambiguous_image_event", "a post-baseline image item disappeared before attribution");
         }
         if (!pc_direct_events_.CanAttributeExactlyOne()) {
+            pc_direct_events_.RecordTerminalSubreason(
+                PcDirectTerminalSubreason::AttributionFailed);
             throw TransportError(
                 "ambiguous_image_event",
                 "PC-direct capture did not produce exactly one correlated AddChild and CaptureComplete event");
@@ -969,14 +1082,25 @@ public:
             overall_deadline);
         for (const ULONG id : ids) {
             if (std::chrono::steady_clock::now() >= overall_deadline) {
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::TransactionWatchdogExpired);
                 throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
             }
-            auto candidate = AcquireCandidate(id, download_deadline);
+            ImageCandidate candidate;
+            try {
+                candidate = AcquireCandidate(id, download_deadline);
+            } catch (...) {
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::ImageDownloadFailed);
+                throw;
+            }
             candidate.attributable = added_items_.contains(id) &&
                 !late_items_.contains(id) &&
                 pc_direct_events_.CanAttributeExactlyOne();
             candidates.push_back(std::move(candidate));
         }
+        pc_direct_events_.RecordTerminalSubreason(
+            PcDirectTerminalSubreason::ReceivedExactlyOneItem);
         baseline_token_.clear();
         return candidates;
     }
@@ -2349,8 +2473,10 @@ private:
             for (const ULONG id : Children(source_, deadline, "image_event_failed")) {
                 ObserveCandidate(id);
             }
+            pc_direct_events_.RecordForcedEnumeration(true);
         } catch (const TransportError&) {
             // Capture completion may temporarily make Children busy; callback events remain authoritative.
+            pc_direct_events_.RecordForcedEnumeration(false);
         }
     }
 
@@ -2715,6 +2841,10 @@ void NikonSdkTransport::Close(std::chrono::seconds timeout) { impl_->Close(timeo
 void NikonSdkTransport::ClosePcDirect(std::chrono::seconds timeout) {
     impl_->Close(timeout);
 }
+PcDirectTransportDiagnostics
+NikonSdkTransport::InspectPcDirectDiagnostics() const {
+    return impl_->InspectPcDirectDiagnostics();
+}
 std::size_t NikonSdkTransport::BeginDualReadOnlyProbe(
     std::chrono::seconds timeout) {
     return impl_->BeginDualReadOnlyProbe(timeout);
@@ -2802,6 +2932,10 @@ std::vector<ImageCandidate> NikonSdkTransport::CaptureAndDownload(
 void NikonSdkTransport::CaptureToCard(std::chrono::seconds, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::Close(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::ClosePcDirect(std::chrono::seconds) { ThrowGated(); }
+PcDirectTransportDiagnostics
+NikonSdkTransport::InspectPcDirectDiagnostics() const {
+    return {};
+}
 std::size_t NikonSdkTransport::BeginDualReadOnlyProbe(std::chrono::seconds) { ThrowGated(); }
 std::vector<std::string> NikonSdkTransport::BeginDualSession(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenDualCandidateLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }

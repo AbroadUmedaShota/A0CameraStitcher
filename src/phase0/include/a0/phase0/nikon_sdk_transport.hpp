@@ -180,7 +180,9 @@ enum class NikonPcDirectEvent {
 };
 
 struct NikonPcDirectEventSnapshot {
+    bool measurement_started{};
     bool callback_registered{};
+    bool callback_active_before_capture{};
     bool baseline_ready{};
     bool capture_command_started{};
     bool capture_command_accepted{};
@@ -194,6 +196,11 @@ struct NikonPcDirectEventSnapshot {
     std::size_t removed_candidate_count{};
     std::size_t add_child_in_card_count{};
     std::size_t ignored_event_count{};
+    std::size_t forced_enumeration_attempt_count{};
+    std::size_t forced_enumeration_success_count{};
+    std::size_t forced_enumeration_failure_count{};
+    std::optional<PcDirectTerminalSubreason> terminal_subreason;
+    std::vector<PcDirectObservation> observation_order;
 };
 
 // SDK-independent PC-direct callback/reconciliation window. A candidate is
@@ -212,9 +219,12 @@ public:
         bool callback_notification) noexcept;
     void ObserveRemovedCandidate(std::uint32_t candidate_id) noexcept;
     void Observe(NikonPcDirectEvent event) noexcept;
+    void RecordForcedEnumeration(bool succeeded) noexcept;
+    void RecordTerminalSubreason(
+        PcDirectTerminalSubreason subreason) noexcept;
     void SessionClosed() noexcept;
     [[nodiscard]] bool CanAttributeExactlyOne() const noexcept;
-    [[nodiscard]] NikonPcDirectEventSnapshot Snapshot() const noexcept;
+    [[nodiscard]] NikonPcDirectEventSnapshot Snapshot() const;
 
 private:
     NikonPcDirectEventSnapshot snapshot_{};
@@ -222,6 +232,7 @@ private:
     std::set<std::uint32_t> notified_candidate_ids_;
     std::set<std::uint32_t> enumerated_candidate_ids_;
     std::set<std::uint32_t> removed_candidate_ids_;
+    void RecordObservation(PcDirectObservation observation) noexcept;
 };
 
 class NikonSdkTransport final : public ICameraTransport, public ILiveViewTransport,
@@ -269,6 +280,8 @@ public:
     void StopLiveView(std::chrono::seconds timeout) override;
     void Close(std::chrono::seconds timeout) override;
     void ClosePcDirect(std::chrono::seconds timeout) override;
+    [[nodiscard]] PcDirectTransportDiagnostics
+        InspectPcDirectDiagnostics() const override;
 
     // ADR-0025 DualCamera session boundary. The module object stays open for
     // the lifetime of one operator binding, while at most one candidate source

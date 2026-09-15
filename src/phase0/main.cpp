@@ -775,7 +775,7 @@ fs::path PersistPcDirectCaptureSummary(
     }
     output
         << "{\n"
-        << "  \"schemaVersion\": \"phase0.pc-direct-summary.v1\",\n"
+        << "  \"schemaVersion\": \"phase0.pc-direct-summary.v2\",\n"
         << "  \"runId\": \"" << EscapeCliValue(evidence.RunId()) << "\",\n"
         << "  \"transactionId\": \""
         << EscapeCliValue(result.transaction.transaction_id) << "\",\n"
@@ -790,6 +790,10 @@ fs::path PersistPcDirectCaptureSummary(
         << "  \"captureAttempted\": "
         << (result.capture_attempted ? "true" : "false") << ",\n"
         << "  \"candidateCount\": " << result.candidate_count << ",\n"
+        << "  \"transportDiagnostics\": "
+        << SerializePcDirectTransportDiagnostics(
+               result.transport_diagnostics)
+        << ",\n"
         << "  \"downloadedJpegFullyDecoded\": "
         << (result.downloaded_jpeg_fully_decoded ? "true" : "false")
         << ",\n"

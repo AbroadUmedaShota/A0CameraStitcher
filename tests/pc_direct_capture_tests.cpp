@@ -159,18 +159,74 @@ public:
         if (restore_failure) throw *restore_failure;
     }
 
+    PcDirectTransportDiagnostics InspectPcDirectDiagnostics() const override {
+        return diagnostics;
+    }
+
     std::string expected_identity{"session-camera"};
     SdkCameraStatus status{GoodStatus()};
     std::vector<ImageCandidate> candidates;
     std::optional<TransportError> open_failure;
     std::optional<TransportError> capture_failure;
     std::optional<TransportError> restore_failure;
+    PcDirectTransportDiagnostics diagnostics;
     int open_count{};
     int baseline_count{};
     int capture_count{};
     int close_count{};
     bool open{};
 };
+
+PcDirectCaptureRequest Request();
+PcDirectCaptureResult Run(
+    const fs::path& root,
+    RecordingPcDirectTransport& transport,
+    const PcDirectCaptureRequest& request = Request());
+
+void TestDiagnosticsDistinguishUnmeasuredFromObservedZero() {
+    const auto root = NewRoot("diagnostics-measurement-state");
+    {
+        RecordingPcDirectTransport transport;
+        const auto result = Run(root / "unmeasured", transport);
+        const auto json = SerializePcDirectTransportDiagnostics(
+            result.transport_diagnostics);
+        Check(json.find("\"measurementStarted\":false") != std::string::npos &&
+                json.find("\"captureCompleteCount\":null") != std::string::npos &&
+                json.find("\"forcedEnumerationAttemptCount\":null") != std::string::npos,
+            "unmeasured diagnostics must serialize as null rather than observed zero");
+    }
+    {
+        RecordingPcDirectTransport transport;
+        transport.diagnostics.measurement_started = true;
+        transport.diagnostics.callback_registered = true;
+        transport.diagnostics.session_closed = true;
+        transport.diagnostics.capture_complete_count = 0;
+        transport.diagnostics.add_child_notification_count = 0;
+        transport.diagnostics.forced_enumeration_attempt_count = 1;
+        transport.diagnostics.forced_enumeration_success_count = 1;
+        transport.diagnostics.forced_enumeration_failure_count = 0;
+        transport.diagnostics.distinct_notified_candidate_count = 0;
+        transport.diagnostics.distinct_enumerated_candidate_count = 0;
+        transport.diagnostics.removed_candidate_count = 0;
+        transport.diagnostics.terminal_subreason =
+            PcDirectTerminalSubreason::CaptureCompleteMissing;
+        transport.diagnostics.observation_order = {
+            PcDirectObservation::CallbackRegistered,
+            PcDirectObservation::BaselineReady,
+            PcDirectObservation::CaptureCommandStarted,
+            PcDirectObservation::ForcedEnumerationSucceeded};
+        const auto result = Run(root / "observed-zero", transport);
+        const auto json = SerializePcDirectTransportDiagnostics(
+            result.transport_diagnostics);
+        Check(json.find("\"measurementStarted\":true") != std::string::npos &&
+                json.find("\"captureCompleteCount\":0") != std::string::npos &&
+                json.find("\"forcedEnumerationAttemptCount\":1") != std::string::npos &&
+                json.find("\"terminalSubreason\":\"capture-complete-missing\"") != std::string::npos &&
+                json.find("\"observationOrder\":[\"callback-registered\",\"baseline-ready\",\"capture-command-started\",\"forced-enumeration-succeeded\"]") != std::string::npos,
+            "observed zero and bounded milestone order must remain explicit in redacted diagnostics");
+    }
+    fs::remove_all(root);
+}
 
 PcDirectCaptureRequest Request() {
     PcDirectCaptureRequest request;
@@ -185,7 +241,7 @@ PcDirectCaptureRequest Request() {
 PcDirectCaptureResult Run(
     const fs::path& root,
     RecordingPcDirectTransport& transport,
-    const PcDirectCaptureRequest& request = Request()) {
+    const PcDirectCaptureRequest& request) {
     EvidenceWriter evidence(root / "artifacts", "run-fixed", "test");
     return ExecutePcDirectCaptureOnce(transport, evidence, request);
 }
@@ -495,6 +551,7 @@ int main() {
     }
     try {
         TestNormalCaptureFullyDecodesPersistsAndRestores();
+        TestDiagnosticsDistinguishUnmeasuredFromObservedZero();
         TestRedactedReportPathCannotExposeAbsoluteLocation();
         TestApprovedD810ProfileAndNegativeVariantsStopBeforeCapture();
         TestNoNotificationFailsWithoutRetry();

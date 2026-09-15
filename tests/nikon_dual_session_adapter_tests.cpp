@@ -885,8 +885,26 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
         window.CaptureCommandAccepted();
         window.Observe(NikonPcDirectEvent::capture_complete);
         window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
         Check(window.CanAttributeExactlyOne(),
             "one notified candidate, one matching delta, and one completion must be attributable");
+        const std::vector<PcDirectObservation> expected_order{
+            PcDirectObservation::CallbackRegistered,
+            PcDirectObservation::BaselineReady,
+            PcDirectObservation::CaptureCommandStarted,
+            PcDirectObservation::AddChildNotification,
+            PcDirectObservation::CaptureCommandAccepted,
+            PcDirectObservation::CaptureComplete,
+            PcDirectObservation::EnumeratedCandidate,
+            PcDirectObservation::ForcedEnumerationSucceeded};
+        Check(window.Snapshot().observation_order == expected_order &&
+                window.Snapshot().callback_active_before_capture,
+            "PC-direct diagnostics must preserve bounded first-occurrence order and callback readiness");
+        window.SessionClosed();
+        Check(window.Snapshot().session_closed &&
+                window.Snapshot().observation_order.back() ==
+                    PcDirectObservation::SessionClosed,
+            "callback lifetime evidence must end with the checked source close");
     }
     {
         auto window = start_window();
@@ -954,6 +972,74 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
         window.Observe(NikonPcDirectEvent::capture_complete);
         Check(!window.CanAttributeExactlyOne(),
             "a Children-only item without AddChild notification must fail closed");
+    }
+
+    {
+        NikonPcDirectEventWindow window;
+        Check(!window.Snapshot().measurement_started,
+            "a new event window must report diagnostics as unmeasured");
+        window.ResetForSession();
+        window.CallbackRegistered();
+        window.BeginBaseline();
+        Check(window.BeginCaptureCommand(), "completion-only window must start");
+        window.CaptureCommandAccepted();
+        window.RecordForcedEnumeration(true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        window.RecordTerminalSubreason(
+            PcDirectTerminalSubreason::SdramItemMissing);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.measurement_started &&
+                snapshot.capture_complete_count == 1 &&
+                snapshot.distinct_notified_candidate_count == 0 &&
+                snapshot.distinct_enumerated_candidate_count == 0 &&
+                snapshot.forced_enumeration_attempt_count == 1 &&
+                snapshot.forced_enumeration_success_count == 1 &&
+                snapshot.forced_enumeration_failure_count == 0 &&
+                snapshot.terminal_subreason ==
+                    PcDirectTerminalSubreason::SdramItemMissing &&
+                !window.CanAttributeExactlyOne(),
+            "completion without an SDK Item must remain a measured fail-closed state");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "item-only window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.RecordForcedEnumeration(false);
+        window.ObserveCandidate(101, false);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.capture_complete_count == 0 &&
+                snapshot.candidate_notification_count == 1 &&
+                snapshot.distinct_enumerated_candidate_count == 1 &&
+                snapshot.forced_enumeration_attempt_count == 1 &&
+                snapshot.forced_enumeration_success_count == 0 &&
+                snapshot.forced_enumeration_failure_count == 1 &&
+                !window.CanAttributeExactlyOne(),
+            "Item without CaptureComplete and an enumeration failure must remain distinguishable");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "empty observation window must start");
+        window.CaptureCommandAccepted();
+        window.RecordForcedEnumeration(true);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.capture_complete_count == 0 &&
+                snapshot.candidate_notification_count == 0 &&
+                snapshot.distinct_enumerated_candidate_count == 0 &&
+                !window.CanAttributeExactlyOne(),
+            "neither completion nor Item must be recorded as observed zero, not unmeasured");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "foreign-session window must start");
+        window.CaptureCommandAccepted();
+        window.SessionClosed();
+        window.ObserveCandidate(999, true);
+        window.Observe(NikonPcDirectEvent::capture_complete);
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.session_closed && snapshot.ignored_event_count == 2 &&
+                !window.CanAttributeExactlyOne(),
+            "events after session close must remain ignored and fail closed");
     }
 }
 
