@@ -2137,6 +2137,16 @@ std::optional<std::string> ValidateHybridCaptureArguments(
     bool dedicated_spool_scope_confirmed,
     bool exact_object_delete_confirmed,
     bool dual_dedicated_spools_confirmed) noexcept {
+    if (command == "pc-direct-capture-single") {
+        // PC-direct capture shares only the exclusive-control confirmation.
+        // Its one-shot, identity-map, SaveMedia, and no-card-authority rules
+        // are enforced by ValidatePcDirectCaptureArguments later in parsing.
+        if (dedicated_spool_scope_confirmed || exact_object_delete_confirmed ||
+            dual_dedicated_spools_confirmed) {
+            return "hybrid card confirmations are not valid for PC-direct capture";
+        }
+        return std::nullopt;
+    }
     const bool hybrid_command = command == "hybrid-capture-single" || command == "hybrid-capture-pair" ||
         command == "live-view-handoff" || command == "hybrid-fault-single" ||
         command == "hybrid-fault-pair" || command == "hybrid-interrupt-pair";

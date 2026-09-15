@@ -97,6 +97,9 @@ void TestPcDirectCaptureArguments() {
     };
     Check(!validate(),
         "fully confirmed one-shot PC-direct arguments must pass");
+    Check(!ValidateHybridCaptureArguments(
+              "pc-direct-capture-single", 1, true, false, false, false),
+        "PC-direct exclusive-control confirmation must pass the shared hybrid safety gate");
     Check(validate(true).has_value(),
         "PC-direct command must reject an explicit transport");
     Check(validate(false, 2).has_value(),
