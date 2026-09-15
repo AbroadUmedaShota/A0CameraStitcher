@@ -1861,8 +1861,107 @@ int GenerateReport(const Options& options) {
     return 0;
 }
 
+#ifdef A0_PC_DIRECT_SUMMARY_V2_E2E_FIXTURE
+int RunPcDirectSummaryV2E2eFixture(int argc, char** argv) {
+    std::string scenario;
+    fs::path artifacts;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument = argv[index];
+        const auto require_value = [&]() -> std::string {
+            if (++index >= argc) {
+                throw std::invalid_argument(
+                    "missing fixture value for " + argument);
+            }
+            return argv[index];
+        };
+        if (argument == "pc-direct-summary-fixture") {
+            continue;
+        }
+        if (argument == "--scenario") {
+            scenario = require_value();
+        } else if (argument == "--artifacts") {
+            artifacts = require_value();
+        } else {
+            throw std::invalid_argument(
+                "unsupported PC-direct summary fixture argument");
+        }
+    }
+    if ((scenario != "unmeasured" && scenario != "observed-zero") ||
+        artifacts.empty()) {
+        throw std::invalid_argument(
+            "fixture requires --scenario unmeasured|observed-zero and --artifacts");
+    }
+
+    const std::string run_id = "pc-direct-summary-v2-" + scenario;
+    EvidenceWriter evidence(artifacts, run_id, "summary-v2-e2e-fixture");
+    PcDirectCaptureResult result;
+    result.transaction.run_id = run_id;
+    result.transaction.transaction_id = "pc-direct-fixture-1";
+    result.transaction.terminal_state = "FailedPartial";
+    result.transaction.error_category = "fixture_failure";
+    result.transaction.error_detail =
+        "fixture-sensitive-detail fixture-private-identity";
+
+    if (scenario == "observed-zero") {
+        result.capture_attempted = true;
+        result.save_media_restore_attempted = true;
+        result.save_media_restore_confirmed = true;
+        auto& diagnostics = result.transport_diagnostics;
+        diagnostics.measurement_started = true;
+        diagnostics.callback_registered = true;
+        diagnostics.callback_active_before_capture = true;
+        diagnostics.session_closed = true;
+        diagnostics.capture_complete_count = 0;
+        diagnostics.add_child_notification_count = 0;
+        diagnostics.forced_enumeration_attempt_count = 1;
+        diagnostics.forced_enumeration_success_count = 1;
+        diagnostics.forced_enumeration_failure_count = 0;
+        diagnostics.distinct_notified_candidate_count = 0;
+        diagnostics.distinct_enumerated_candidate_count = 0;
+        diagnostics.duplicate_candidate_notification_count = 0;
+        diagnostics.removed_candidate_count = 0;
+        diagnostics.add_child_in_card_count = 0;
+        diagnostics.ignored_event_count = 0;
+        diagnostics.terminal_subreason =
+            PcDirectTerminalSubreason::CaptureCompleteMissing;
+        diagnostics.observation_order = {
+            PcDirectObservation::CallbackRegistered,
+            PcDirectObservation::BaselineReady,
+            PcDirectObservation::CaptureCommandStarted,
+            PcDirectObservation::ForcedEnumerationSucceeded,
+            PcDirectObservation::SessionClosed,
+        };
+    }
+
+    const WpdPayloadFingerprint card_fingerprint{
+        0,
+        0,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    };
+    const auto summary = PersistPcDirectCaptureSummary(
+        evidence,
+        result,
+        "CAM-A",
+        card_fingerprint,
+        card_fingerprint);
+    std::cout << "SummaryPath: " << summary.string() << '\n';
+    return 0;
+}
+#endif
+
 } // namespace
 
+#ifdef A0_PC_DIRECT_SUMMARY_V2_E2E_FIXTURE
+int main(int argc, char** argv) {
+    try {
+        return RunPcDirectSummaryV2E2eFixture(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "PC-direct summary fixture error: "
+                  << error.what() << '\n';
+        return 3;
+    }
+}
+#else
 int main(int argc, char** argv) {
     try {
         const Options options = Parse(argc, argv);
@@ -1911,3 +2010,4 @@ int main(int argc, char** argv) {
         return 3;
     }
 }
+#endif
