@@ -410,6 +410,24 @@ if(BUILD_TESTING)
     add_test(NAME m2_offline_stitcher_contracts COMMAND m2_offline_stitcher_contracts)
 
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_executable(a0_pc_direct_summary_v2_fixture
+        src/phase0/main.cpp)
+    target_link_libraries(a0_pc_direct_summary_v2_fixture PRIVATE
+        a0_phase0_core)
+    target_compile_definitions(a0_pc_direct_summary_v2_fixture PRIVATE
+        A0_PC_DIRECT_SUMMARY_V2_E2E_FIXTURE=1)
+    if(MSVC)
+        target_compile_options(a0_pc_direct_summary_v2_fixture PRIVATE
+            /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_pc_direct_summary_v2_fixture PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(
+        NAME pc_direct_summary_v2_e2e
+        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File
+            "${CMAKE_SOURCE_DIR}/scripts/Test-PcDirectSummaryV2E2e.ps1"
+            -FixtureExe $<TARGET_FILE:a0_pc_direct_summary_v2_fixture>)
     add_test(
         NAME m2_pregate_assets
         COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-M2PreGateAssets.ps1")
