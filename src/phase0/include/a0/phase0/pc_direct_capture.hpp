@@ -30,6 +30,7 @@ enum class PcDirectObservation {
 };
 
 enum class PcDirectTerminalSubreason {
+    SdramNotEmpty,
     PreDispatchCandidate,
     CallbackWindowInvalid,
     CaptureCommandFailed,
@@ -43,11 +44,39 @@ enum class PcDirectTerminalSubreason {
     ReceivedExactlyOneItem,
 };
 
+enum class PcDirectSaveMediaValue {
+    Card,
+    Sdram,
+    CardAndSdram,
+    Unknown,
+};
+
+enum class PcDirectCommandResult {
+    NoError,
+    Pending,
+    Error,
+};
+
 struct PcDirectTransportDiagnostics {
     bool measurement_started{};
     std::optional<bool> callback_registered;
     std::optional<bool> callback_active_before_capture;
     std::optional<bool> session_closed;
+    std::optional<std::size_t> baseline_children_count;
+    std::optional<std::size_t> raw_add_child_count;
+    std::optional<std::size_t> raw_remove_child_count;
+    std::optional<std::size_t> raw_capture_complete_count;
+    std::optional<std::size_t> baseline_hit_count;
+    std::vector<std::size_t> children_count_sequence;
+    std::optional<std::size_t> children_count_transition_count;
+    std::optional<bool> children_count_sequence_truncated;
+    std::optional<PcDirectSaveMediaValue> save_media_original;
+    std::optional<PcDirectSaveMediaValue> save_media_selected;
+    std::optional<PcDirectSaveMediaValue> save_media_readback;
+    std::optional<std::size_t> save_media_selection_set_count;
+    std::optional<PcDirectCommandResult> capture_cap_start_immediate_result;
+    std::optional<PcDirectCommandResult> capture_cap_start_completion_result;
+    std::optional<std::int64_t> capture_cap_start_duration_ms;
     std::optional<std::size_t> capture_complete_count;
     std::optional<std::size_t> add_child_notification_count;
     std::optional<std::size_t> forced_enumeration_attempt_count;
@@ -65,6 +94,8 @@ struct PcDirectTransportDiagnostics {
 
 [[nodiscard]] std::string_view ToString(PcDirectObservation observation) noexcept;
 [[nodiscard]] std::string_view ToString(PcDirectTerminalSubreason subreason) noexcept;
+[[nodiscard]] std::string_view ToString(PcDirectSaveMediaValue value) noexcept;
+[[nodiscard]] std::string_view ToString(PcDirectCommandResult result) noexcept;
 [[nodiscard]] std::string SerializePcDirectTransportDiagnostics(
     const PcDirectTransportDiagnostics& diagnostics);
 
