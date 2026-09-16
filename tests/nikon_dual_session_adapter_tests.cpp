@@ -881,8 +881,8 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
         auto window = start_window();
         Check(window.BeginCaptureCommand(),
             "clean PC-direct event window must permit one dispatch");
-        window.ObserveCandidate(101, true);
         window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
         window.Observe(NikonPcDirectEvent::capture_complete);
         window.ObserveCandidate(101, false);
         window.RecordForcedEnumeration(true);
@@ -892,8 +892,8 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
             PcDirectObservation::CallbackRegistered,
             PcDirectObservation::BaselineReady,
             PcDirectObservation::CaptureCommandStarted,
-            PcDirectObservation::AddChildNotification,
             PcDirectObservation::CaptureCommandAccepted,
+            PcDirectObservation::AddChildNotification,
             PcDirectObservation::CaptureComplete,
             PcDirectObservation::EnumeratedCandidate,
             PcDirectObservation::ForcedEnumerationSucceeded};
@@ -925,24 +925,60 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
     }
     {
         auto window = start_window();
-        Check(window.BeginCaptureCommand(), "test window must start");
+        Check(window.BeginCaptureCommand(), "same-item duplicate window must start");
         window.CaptureCommandAccepted();
         window.ObserveCandidate(101, true);
         window.ObserveCandidate(101, true);
-        window.Observe(NikonPcDirectEvent::capture_complete);
-        Check(!window.CanAttributeExactlyOne() &&
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        Check(window.CanAttributeExactlyOne() &&
                   window.Snapshot().duplicate_candidate_notification_count == 1,
-            "a duplicate AddChild notification must fail closed");
+            "repeated AddChild notifications for one reconciled item must remain attributable without CaptureComplete");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "pre-accept window must start");
+        window.ObserveCandidate(101, true);
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        Check(!window.CanAttributeExactlyOne() &&
+                  window.Snapshot().ignored_event_count == 1,
+            "an Item observed before command acceptance must fail closed");
     }
     {
         auto window = start_window();
         Check(window.BeginCaptureCommand(), "test window must start");
         window.CaptureCommandAccepted();
         window.ObserveCandidate(101, true);
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
         window.Observe(NikonPcDirectEvent::capture_complete);
         window.Observe(NikonPcDirectEvent::capture_complete);
         Check(!window.CanAttributeExactlyOne(),
             "multiple CaptureComplete events must fail closed");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "removed-item window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        window.ObserveRemovedCandidate(101);
+        Check(!window.CanAttributeExactlyOne(),
+            "a removed candidate must fail closed even when the ID otherwise reconciles");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "card-item window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        window.Observe(NikonPcDirectEvent::add_child_in_card);
+        Check(!window.CanAttributeExactlyOne(),
+            "a card item event must fail closed even when the SDRAM ID reconciles");
     }
     {
         auto window = start_window();
@@ -999,6 +1035,30 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
                     PcDirectTerminalSubreason::SdramItemMissing &&
                 !window.CanAttributeExactlyOne(),
             "completion without an SDK Item must remain a measured fail-closed state");
+    }
+    {
+        auto window = start_window();
+        Check(window.BeginCaptureCommand(), "item-only window must start");
+        window.CaptureCommandAccepted();
+        window.ObserveCandidate(101, true);
+        window.ObserveCandidate(101, false);
+        window.RecordForcedEnumeration(true);
+        const auto snapshot = window.Snapshot();
+        const auto epoch = std::chrono::steady_clock::time_point{};
+        const auto deadline = epoch + 1000ms;
+        Check(snapshot.capture_complete_count == 0 &&
+                snapshot.distinct_notified_candidate_count == 1 &&
+                snapshot.distinct_enumerated_candidate_count == 1 &&
+                snapshot.forced_enumeration_success_count == 1 &&
+                snapshot.forced_enumeration_failure_count == 0 &&
+                window.CanAttributeExactlyOne() &&
+                window.CanTerminateWithStableCandidate(
+                    epoch + 900ms, epoch + 400ms, deadline, 500ms) &&
+                !window.CanTerminateWithStableCandidate(
+                    epoch + 899ms, epoch + 400ms, deadline, 500ms) &&
+                !window.CanTerminateWithStableCandidate(
+                    deadline, epoch + 400ms, deadline, 500ms),
+            "one matching notified and enumerated Item may terminate without CaptureComplete");
     }
     {
         auto window = start_window();
