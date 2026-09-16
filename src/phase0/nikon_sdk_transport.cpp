@@ -365,6 +365,11 @@ void NikonPcDirectEventWindow::ObserveCandidate(
                 : PcDirectObservation::EnumeratedCandidate);
         return;
     }
+    if (!snapshot_.capture_command_accepted) {
+        ++snapshot_.ignored_event_count;
+        RecordObservation(PcDirectObservation::IgnoredForeignEvent);
+        return;
+    }
     if (callback_notification) {
         ++snapshot_.candidate_notification_count;
         RecordObservation(PcDirectObservation::AddChildNotification);
@@ -385,7 +390,8 @@ void NikonPcDirectEventWindow::ObserveCandidate(
 
 void NikonPcDirectEventWindow::ObserveRemovedCandidate(
     std::uint32_t candidate_id) noexcept {
-    if (!snapshot_.capture_command_started || snapshot_.session_closed) {
+    if (!snapshot_.capture_command_started ||
+        !snapshot_.capture_command_accepted || snapshot_.session_closed) {
         ++snapshot_.ignored_event_count;
         RecordObservation(PcDirectObservation::IgnoredForeignEvent);
         return;
@@ -396,7 +402,8 @@ void NikonPcDirectEventWindow::ObserveRemovedCandidate(
 }
 
 void NikonPcDirectEventWindow::Observe(NikonPcDirectEvent event) noexcept {
-    if (!snapshot_.capture_command_started || snapshot_.session_closed) {
+    if (!snapshot_.capture_command_started ||
+        !snapshot_.capture_command_accepted || snapshot_.session_closed) {
         ++snapshot_.ignored_event_count;
         RecordObservation(PcDirectObservation::IgnoredForeignEvent);
         return;
@@ -412,7 +419,8 @@ void NikonPcDirectEventWindow::Observe(NikonPcDirectEvent event) noexcept {
 
 void NikonPcDirectEventWindow::RecordForcedEnumeration(
     bool succeeded) noexcept {
-    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    if (!snapshot_.measurement_started ||
+        !snapshot_.capture_command_accepted || snapshot_.session_closed) return;
     ++snapshot_.forced_enumeration_attempt_count;
     if (succeeded) {
         ++snapshot_.forced_enumeration_success_count;
@@ -440,15 +448,24 @@ bool NikonPcDirectEventWindow::CanAttributeExactlyOne() const noexcept {
         snapshot_.capture_command_started &&
         snapshot_.capture_command_accepted && !snapshot_.session_closed &&
         snapshot_.pre_dispatch_candidate_count == 0 &&
-        snapshot_.candidate_notification_count == 1 &&
         snapshot_.distinct_notified_candidate_count == 1 &&
         snapshot_.distinct_enumerated_candidate_count == 1 &&
-        snapshot_.duplicate_candidate_notification_count == 0 &&
-        snapshot_.capture_complete_count == 1 &&
+        snapshot_.capture_complete_count <= 1 &&
         snapshot_.removed_candidate_count == 0 &&
         snapshot_.add_child_in_card_count == 0 &&
         snapshot_.ignored_event_count == 0 &&
+        snapshot_.forced_enumeration_success_count >= 1 &&
+        snapshot_.forced_enumeration_failure_count == 0 &&
         notified_candidate_ids_ == enumerated_candidate_ids_;
+}
+
+bool NikonPcDirectEventWindow::CanTerminateWithStableCandidate(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point stable_since,
+    std::chrono::steady_clock::time_point event_deadline,
+    std::chrono::milliseconds settle_duration) const noexcept {
+    return now < event_deadline && stable_since <= now &&
+        now - stable_since >= settle_duration && CanAttributeExactlyOne();
 }
 
 NikonPcDirectEventSnapshot NikonPcDirectEventWindow::Snapshot() const {
@@ -1022,6 +1039,7 @@ public:
 
         std::optional<std::chrono::steady_clock::time_point> candidates_stable_since;
         std::size_t observed_candidate_count = 0;
+        bool attributable_candidate_settled = false;
         while (std::chrono::steady_clock::now() < event_deadline) {
             Pump(source_, "image_event_failed");
             ReconcileChildren(event_deadline);
@@ -1032,23 +1050,19 @@ public:
                     ? std::nullopt
                     : std::optional{std::chrono::steady_clock::now()};
             }
-            if (capture_complete_ && candidates_stable_since &&
-                std::chrono::steady_clock::now() - *candidates_stable_since >= kCandidateSettle) {
+            const auto now = std::chrono::steady_clock::now();
+            if (candidates_stable_since &&
+                pc_direct_events_.CanTerminateWithStableCandidate(
+                    now, *candidates_stable_since, event_deadline, kCandidateSettle)) {
+                attributable_candidate_settled = true;
                 break;
             }
             std::this_thread::sleep_for(kAsyncInterval);
         }
-
-        ReconcileChildren(event_deadline);
         if (std::chrono::steady_clock::now() >= overall_deadline) {
             pc_direct_events_.RecordTerminalSubreason(
                 PcDirectTerminalSubreason::TransactionWatchdogExpired);
             throw TransportError("transaction_watchdog", "capture transaction watchdog expired");
-        }
-        if (!capture_complete_) {
-            pc_direct_events_.RecordTerminalSubreason(
-                PcDirectTerminalSubreason::CaptureCompleteMissing);
-            throw TransportError("image_event_timeout", "card CaptureComplete was not observed");
         }
         const auto ids = CandidateIds();
         if (ids.empty()) {
@@ -1067,12 +1081,13 @@ public:
                 PcDirectTerminalSubreason::CandidateRemoved);
             throw TransportError("ambiguous_image_event", "a post-baseline image item disappeared before attribution");
         }
-        if (!pc_direct_events_.CanAttributeExactlyOne()) {
+        if (!attributable_candidate_settled ||
+            !pc_direct_events_.CanAttributeExactlyOne()) {
             pc_direct_events_.RecordTerminalSubreason(
                 PcDirectTerminalSubreason::AttributionFailed);
             throw TransportError(
                 "ambiguous_image_event",
-                "PC-direct capture did not produce exactly one correlated AddChild and CaptureComplete event");
+                "PC-direct capture did not produce one stable, reconciled SDRAM Item before the event deadline");
         }
 
         std::vector<ImageCandidate> candidates;

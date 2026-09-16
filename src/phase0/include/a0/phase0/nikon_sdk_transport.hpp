@@ -204,9 +204,11 @@ struct NikonPcDirectEventSnapshot {
 };
 
 // SDK-independent PC-direct callback/reconciliation window. A candidate is
-// attributable only when one post-dispatch AddChild notification, one
-// CaptureComplete event and one matching Children delta are observed. Any
-// pre-dispatch, duplicate, removed, card, or additional candidate fails closed.
+// attributable only after command acceptance when the distinct AddChild and
+// Children sets contain the same single Item and at least one post-acceptance
+// forced enumeration succeeded. Repeated AddChild for that same Item is kept
+// as diagnostics. Pre-dispatch/pre-acceptance, different/removed/card items,
+// enumeration failure, or multiple CaptureComplete events fail closed.
 class NikonPcDirectEventWindow final {
 public:
     void ResetForSession() noexcept;
@@ -224,6 +226,11 @@ public:
         PcDirectTerminalSubreason subreason) noexcept;
     void SessionClosed() noexcept;
     [[nodiscard]] bool CanAttributeExactlyOne() const noexcept;
+    [[nodiscard]] bool CanTerminateWithStableCandidate(
+        std::chrono::steady_clock::time_point now,
+        std::chrono::steady_clock::time_point stable_since,
+        std::chrono::steady_clock::time_point event_deadline,
+        std::chrono::milliseconds settle_duration) const noexcept;
     [[nodiscard]] NikonPcDirectEventSnapshot Snapshot() const;
 
 private:
