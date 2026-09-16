@@ -32,7 +32,7 @@ MVPは「Windowsアプリ」「単一カメラ制御エージェント」「画�
 
 `pc-direct-capture-single`は、D810一台をSDKで撮影してSDK ItemからPC原本を確定できるかを評価する実験laneである。WPDは撮影前後のcard fingerprint／payload read-only確認に限り、card fallback、camera delete、format、自動retryは行わない。SDKとWPD sessionは重複させず、SaveMediaの一時変更は終了時に元値へ戻してreadbackする。PC側は完全JPEG decode・寸法・SHA-256を確認し、`.partial`からatomic renameした`original.jpg`を再読込できた場合だけ原本成功とする。
 
-2026-09-16の2回の実機評価ではこの安全境界は守られたが、SDK Itemの確定または生成を完了できず、PC原本0件である。2回目のpost-baseline候補0はraw callback 0を意味しない。現在のbaseline filterは既存IDを診断前に除外するため、SDRAM残存やID再利用の有無を確定できない。SDRAM baseline非空時の撮影前停止とfilter前の匿名計測はPR #202で提案中で、未mergeの間はarchitecture上の予定変更としてのみ扱う。
+2026-09-16の2回の実機評価ではこの安全境界は守られたが、SDK Itemの確定または生成を完了できず、PC原本0件である。2回目のpost-baseline候補0はraw callback 0を意味しない。旧実装のbaseline filterは既存IDを診断前に除外していたため、SDRAM残存やID再利用の有無を確定できなかった。PR #202で、SDRAM baseline非空時の撮影前停止とfilter前の匿名計測を2026-09-17に`main`へ統合した。実機でPC原本を確定するまでは、このlaneを受入済みarchitectureとして扱わない。
 
 `A0CameraStitcher.Phase0.exe` は次の境界を持つ。
 

@@ -4,9 +4,9 @@
 
 ## 現在の段階
 
-2026-09-16時点の`main`はPR #201までを含む`7bb042c4693acc40fceb59b4ffb4d76123ad9b52`です。従来のdedicated single-slot spool経路ではSingleCameraの実機撮影・回収・耐久が合格済みですが、別評価中のSDK PC直接保存は2回とも`FailedPartial / image_event_timeout`で、PC原本を保存できていません。したがってPC直接保存は未受入であり、従来経路の合格やMVP完成へ読み替えません。現在の匿名証拠と次工程は[現在の開発状況](docs/CURRENT_STATUS.md#2026-09-16-pc直接保存の実機評価)を参照してください。
+2026-09-17時点の`main`はPR #202までを含む`2efa30e7259c3c76e7f98bdba26127d4aa47207f`です。従来のdedicated single-slot spool経路ではSingleCameraの実機撮影・回収・耐久が合格済みですが、別評価中のSDK PC直接保存は2回とも`FailedPartial / image_event_timeout`で、PC原本を保存できていません。したがってPC直接保存は未受入であり、従来経路の合格やMVP完成へ読み替えません。現在の匿名証拠と次工程は[現在の開発状況](docs/CURRENT_STATUS.md#2026-09-16-pc直接保存の実機評価)を参照してください。
 
-PR #202のSDRAM事前確認・匿名診断追加は2026-09-16時点でsoftware-only CI合格、レビュー／統合判断待ちです。未mergeのため、このREADMEでは`main`実装済みとは扱いません。
+PR #202のSDRAM事前確認・匿名診断追加はsoftware-only CIと独立レビューに合格し、2026-09-17に`main`へ統合しました。これは追加実機撮影やPC原本保存の合格を意味しません。
 
 総合状態は`in-progress`です。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、Product Ownerによるp95 `14.643秒`承認、100/100耐久を完了しました。111件の原画像再検証も合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件です。ただし、実WPF画面からの100回操作、撮影を挟むContinuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体の判定は`Partial`です。詳細は[SingleCamera実機結果](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照してください。DualCameraは二台前提を維持し、実capture backendと同一Agent内CAM-A/B割当は実装済みですが、実機one-shot／10回／承認後100回が未完了のため`HardwarePending`のままです。
 

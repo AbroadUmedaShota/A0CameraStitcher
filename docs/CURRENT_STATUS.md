@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-09-16（PC直接保存の実機評価と未受入境界を反映）
+更新日: 2026-09-17（PR #202のsoftware-only統合と未受入境界を反映）
 
 ## 総合判定
 
@@ -17,7 +17,7 @@
 
 2回とも自動retry、card fallback、camera delete、formatは0で、実画像・実識別子・SDK配布物はrepositoryへ保存していない。2回目の`candidateCount=0`はpost-baseline採用候補が0だったことを示し、生のSDK通知が0だったとは断定しない。`cardUnchanged=false`は事後fingerprintが取得不能だったためであり、カード変更の証拠ではない。独立した事後WPD確認ではpayload 0だった。
 
-旧失敗で残ったSDRAM ItemまたはItem ID再利用がbaselineで除外された可能性は仮説であり、現証拠では確定していない。PR #202（head `f42f4c110961806958f6319ac6762220fed1c16b`）は、SDRAM baseline非空時の撮影前停止と匿名診断追加を提案し、2026-09-16にsoftware-only CIへ合格したが、open／未mergeのため`main`実装済みとは扱わない。次工程はPR #202のreview・統合判断であり、追加実機撮影には別の明示承認を要する。
+旧失敗で残ったSDRAM ItemまたはItem ID再利用がbaselineで除外された可能性は仮説であり、現証拠では確定していない。PR #202（head `f42f4c110961806958f6319ac6762220fed1c16b`、merge `2efa30e7259c3c76e7f98bdba26127d4aa47207f`）で、SDRAM baseline非空時の撮影前停止と匿名診断追加をsoftware-only CI・独立レビュー後に`main`へ統合した。次工程は固定artifactと安全条件を再提示した上での実機評価であり、追加実機撮影には別の明示承認を要する。
 
 ### 二台撮影で、できていること・残っていること
 
