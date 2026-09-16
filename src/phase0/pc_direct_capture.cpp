@@ -173,6 +173,7 @@ std::string_view ToString(PcDirectObservation observation) noexcept {
 
 std::string_view ToString(PcDirectTerminalSubreason subreason) noexcept {
     switch (subreason) {
+    case PcDirectTerminalSubreason::SdramNotEmpty: return "sdram-not-empty";
     case PcDirectTerminalSubreason::PreDispatchCandidate: return "pre-dispatch-candidate";
     case PcDirectTerminalSubreason::CallbackWindowInvalid: return "callback-window-invalid";
     case PcDirectTerminalSubreason::CaptureCommandFailed: return "capture-command-failed";
@@ -186,6 +187,25 @@ std::string_view ToString(PcDirectTerminalSubreason subreason) noexcept {
     case PcDirectTerminalSubreason::ReceivedExactlyOneItem: return "received-exactly-one-item";
     }
     return "unknown";
+}
+
+std::string_view ToString(PcDirectSaveMediaValue value) noexcept {
+    switch (value) {
+    case PcDirectSaveMediaValue::Card: return "card";
+    case PcDirectSaveMediaValue::Sdram: return "sdram";
+    case PcDirectSaveMediaValue::CardAndSdram: return "card-and-sdram";
+    case PcDirectSaveMediaValue::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+std::string_view ToString(PcDirectCommandResult result) noexcept {
+    switch (result) {
+    case PcDirectCommandResult::NoError: return "no-error";
+    case PcDirectCommandResult::Pending: return "pending";
+    case PcDirectCommandResult::Error: return "error";
+    }
+    return "error";
 }
 
 std::string SerializePcDirectTransportDiagnostics(
@@ -204,6 +224,27 @@ std::string SerializePcDirectTransportDiagnostics(
         if (value) output << *value;
         else output << "null";
     };
+    const auto optional_int64 = [&output](
+        std::string_view name,
+        const std::optional<std::int64_t>& value) {
+        output << "\"" << name << "\":";
+        if (value) output << *value;
+        else output << "null";
+    };
+    const auto optional_save_media = [&output](
+        std::string_view name,
+        const std::optional<PcDirectSaveMediaValue>& value) {
+        output << "\"" << name << "\":";
+        if (value) output << "\"" << ToString(*value) << "\"";
+        else output << "null";
+    };
+    const auto optional_command_result = [&output](
+        std::string_view name,
+        const std::optional<PcDirectCommandResult>& value) {
+        output << "\"" << name << "\":";
+        if (value) output << "\"" << ToString(*value) << "\"";
+        else output << "null";
+    };
 
     output << "{\"measurementStarted\":"
            << (diagnostics.measurement_started ? "true" : "false") << ',';
@@ -214,6 +255,56 @@ std::string SerializePcDirectTransportDiagnostics(
         diagnostics.callback_active_before_capture);
     output << ',';
     optional_bool("sessionClosed", diagnostics.session_closed);
+    output << ',';
+    optional_count(
+        "baselineChildrenCount",
+        diagnostics.baseline_children_count);
+    output << ',';
+    optional_count("rawAddChildCount", diagnostics.raw_add_child_count);
+    output << ',';
+    optional_count("rawRemoveChildCount", diagnostics.raw_remove_child_count);
+    output << ',';
+    optional_count(
+        "rawCaptureCompleteCount",
+        diagnostics.raw_capture_complete_count);
+    output << ',';
+    optional_count("baselineHitCount", diagnostics.baseline_hit_count);
+    output << ",\"childrenCountSequence\":[";
+    for (std::size_t index = 0;
+         index < diagnostics.children_count_sequence.size(); ++index) {
+        if (index != 0) output << ',';
+        output << diagnostics.children_count_sequence[index];
+    }
+    output << "],";
+    optional_count(
+        "childrenCountTransitionCount",
+        diagnostics.children_count_transition_count);
+    output << ',';
+    optional_bool(
+        "childrenCountSequenceTruncated",
+        diagnostics.children_count_sequence_truncated);
+    output << ',';
+    optional_save_media("saveMediaOriginal", diagnostics.save_media_original);
+    output << ',';
+    optional_save_media("saveMediaSelected", diagnostics.save_media_selected);
+    output << ',';
+    optional_save_media("saveMediaReadback", diagnostics.save_media_readback);
+    output << ',';
+    optional_count(
+        "saveMediaSelectionSetCount",
+        diagnostics.save_media_selection_set_count);
+    output << ',';
+    optional_command_result(
+        "captureCapStartImmediateResult",
+        diagnostics.capture_cap_start_immediate_result);
+    output << ',';
+    optional_command_result(
+        "captureCapStartCompletionResult",
+        diagnostics.capture_cap_start_completion_result);
+    output << ',';
+    optional_int64(
+        "captureCapStartDurationMs",
+        diagnostics.capture_cap_start_duration_ms);
     output << ',';
     optional_count("captureCompleteCount", diagnostics.capture_complete_count);
     output << ',';

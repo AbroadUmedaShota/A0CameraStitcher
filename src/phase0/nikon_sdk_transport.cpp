@@ -213,6 +213,20 @@ NikonSaveMediaSelection SelectNikonSaveMediaForPcDirect(
     return {original_value, desired_value};
 }
 
+NikonSaveMediaSelection PrepareNikonPcDirectStorageForEmptyBaseline(
+    std::size_t baseline_children_count,
+    std::uint32_t desired_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value) {
+    if (baseline_children_count != 0) {
+        throw TransportError(
+            "pc_direct_sdram_not_empty",
+            "PC-direct SDRAM contains an item before capture dispatch");
+    }
+    return SelectNikonSaveMediaForPcDirect(
+        desired_value, get_current, set_value);
+}
+
 void NikonCardCaptureEventWindow::ResetForSession() noexcept {
     snapshot_ = {};
 }
@@ -309,13 +323,15 @@ void NikonPcDirectEventWindow::CallbackRegistered() noexcept {
     }
 }
 
-void NikonPcDirectEventWindow::BeginBaseline() noexcept {
+void NikonPcDirectEventWindow::BeginBaseline(
+    std::size_t children_count) noexcept {
     if (snapshot_.session_closed) return;
     const bool callback_registered = snapshot_.callback_registered;
     snapshot_ = {};
     snapshot_.measurement_started = true;
     snapshot_.callback_registered = callback_registered;
     snapshot_.baseline_ready = true;
+    snapshot_.baseline_children_count = children_count;
     if (callback_registered) {
         RecordObservation(PcDirectObservation::CallbackRegistered);
     }
@@ -324,11 +340,83 @@ void NikonPcDirectEventWindow::BeginBaseline() noexcept {
     notified_candidate_ids_.clear();
     enumerated_candidate_ids_.clear();
     removed_candidate_ids_.clear();
+    RecordChildrenCount(children_count);
+}
+
+void NikonPcDirectEventWindow::RecordRawAddChild() noexcept {
+    if (snapshot_.measurement_started && !snapshot_.session_closed) {
+        ++snapshot_.raw_add_child_count;
+    }
+}
+
+void NikonPcDirectEventWindow::RecordRawRemoveChild() noexcept {
+    if (snapshot_.measurement_started && !snapshot_.session_closed) {
+        ++snapshot_.raw_remove_child_count;
+    }
+}
+
+void NikonPcDirectEventWindow::RecordRawCaptureComplete() noexcept {
+    if (snapshot_.measurement_started && !snapshot_.session_closed) {
+        ++snapshot_.raw_capture_complete_count;
+    }
+}
+
+void NikonPcDirectEventWindow::RecordBaselineHit() noexcept {
+    if (snapshot_.measurement_started && !snapshot_.session_closed) {
+        ++snapshot_.baseline_hit_count;
+    }
+}
+
+void NikonPcDirectEventWindow::RecordChildrenCount(
+    std::size_t children_count) noexcept {
+    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    if (!snapshot_.children_count_sequence.empty() &&
+        snapshot_.children_count_sequence.back() == children_count) {
+        return;
+    }
+    if (!snapshot_.children_count_sequence.empty()) {
+        ++snapshot_.children_count_transition_count;
+    }
+    constexpr std::size_t kMaximumRecordedTransitions = 32;
+    if (snapshot_.children_count_sequence.size() <
+        kMaximumRecordedTransitions) {
+        try {
+            snapshot_.children_count_sequence.push_back(children_count);
+        } catch (...) {
+            snapshot_.children_count_sequence_truncated = true;
+        }
+    } else {
+        snapshot_.children_count_sequence_truncated = true;
+        snapshot_.children_count_sequence.back() = children_count;
+    }
+}
+
+void NikonPcDirectEventWindow::RecordSaveMediaSelection(
+    std::optional<PcDirectSaveMediaValue> original,
+    std::optional<PcDirectSaveMediaValue> selected,
+    std::optional<PcDirectSaveMediaValue> readback,
+    std::size_t set_count) noexcept {
+    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    snapshot_.save_media_original = original;
+    snapshot_.save_media_selected = selected;
+    snapshot_.save_media_readback = readback;
+    snapshot_.save_media_selection_set_count = set_count;
+}
+
+void NikonPcDirectEventWindow::RecordCaptureCapStart(
+    std::optional<PcDirectCommandResult> immediate,
+    std::optional<PcDirectCommandResult> completion,
+    std::chrono::milliseconds duration) noexcept {
+    if (!snapshot_.measurement_started || snapshot_.session_closed) return;
+    snapshot_.capture_cap_start_immediate_result = immediate;
+    snapshot_.capture_cap_start_completion_result = completion;
+    snapshot_.capture_cap_start_duration_ms = duration.count();
 }
 
 bool NikonPcDirectEventWindow::BeginCaptureCommand() noexcept {
     if (!snapshot_.callback_registered || !snapshot_.baseline_ready ||
         snapshot_.session_closed || snapshot_.capture_command_started ||
+        snapshot_.baseline_children_count != 0 ||
         snapshot_.pre_dispatch_candidate_count != 0 ||
         snapshot_.ignored_event_count != 0) {
         return false;
@@ -447,6 +535,7 @@ bool NikonPcDirectEventWindow::CanAttributeExactlyOne() const noexcept {
     return snapshot_.callback_registered && snapshot_.baseline_ready &&
         snapshot_.capture_command_started &&
         snapshot_.capture_command_accepted && !snapshot_.session_closed &&
+        snapshot_.baseline_children_count == 0 &&
         snapshot_.pre_dispatch_candidate_count == 0 &&
         snapshot_.distinct_notified_candidate_count == 1 &&
         snapshot_.distinct_enumerated_candidate_count == 1 &&
@@ -526,6 +615,32 @@ struct CompletionState {
     std::atomic<bool> done{false};
     NKERROR result{kNkMAIDResult_UnexpectedError};
 };
+
+struct SdkCommandOutcome {
+    std::optional<NKERROR> immediate;
+    std::optional<NKERROR> completion;
+    std::chrono::milliseconds duration{};
+};
+
+PcDirectCommandResult PcDirectResult(NKERROR result) noexcept {
+    if (result == kNkMAIDResult_NoError) {
+        return PcDirectCommandResult::NoError;
+    }
+    if (result == kNkMAIDResult_Pending) {
+        return PcDirectCommandResult::Pending;
+    }
+    return PcDirectCommandResult::Error;
+}
+
+PcDirectSaveMediaValue PcDirectSaveMedia(ULONG value) noexcept {
+    switch (value) {
+    case kNkMAIDSaveMedia_Card: return PcDirectSaveMediaValue::Card;
+    case kNkMAIDSaveMedia_SDRAM: return PcDirectSaveMediaValue::Sdram;
+    case kNkMAIDSaveMedia_Card_SDRAM:
+        return PcDirectSaveMediaValue::CardAndSdram;
+    default: return PcDirectSaveMediaValue::Unknown;
+    }
+}
 
 struct DownloadState {
     std::vector<unsigned char> bytes;
@@ -628,6 +743,30 @@ public:
         diagnostics.callback_active_before_capture =
             snapshot.callback_active_before_capture;
         diagnostics.session_closed = snapshot.session_closed;
+        diagnostics.baseline_children_count =
+            snapshot.baseline_children_count;
+        diagnostics.raw_add_child_count = snapshot.raw_add_child_count;
+        diagnostics.raw_remove_child_count = snapshot.raw_remove_child_count;
+        diagnostics.raw_capture_complete_count =
+            snapshot.raw_capture_complete_count;
+        diagnostics.baseline_hit_count = snapshot.baseline_hit_count;
+        diagnostics.children_count_sequence =
+            snapshot.children_count_sequence;
+        diagnostics.children_count_transition_count =
+            snapshot.children_count_transition_count;
+        diagnostics.children_count_sequence_truncated =
+            snapshot.children_count_sequence_truncated;
+        diagnostics.save_media_original = snapshot.save_media_original;
+        diagnostics.save_media_selected = snapshot.save_media_selected;
+        diagnostics.save_media_readback = snapshot.save_media_readback;
+        diagnostics.save_media_selection_set_count =
+            snapshot.save_media_selection_set_count;
+        diagnostics.capture_cap_start_immediate_result =
+            snapshot.capture_cap_start_immediate_result;
+        diagnostics.capture_cap_start_completion_result =
+            snapshot.capture_cap_start_completion_result;
+        diagnostics.capture_cap_start_duration_ms =
+            snapshot.capture_cap_start_duration_ms;
         diagnostics.capture_complete_count =
             snapshot.capture_complete_count;
         diagnostics.add_child_notification_count =
@@ -970,6 +1109,8 @@ public:
         RequireCaptureSession();
         RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
+        RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0,
+            kNkMAIDDataType_Null, 0, deadline, "baseline_failed");
         const auto children = Children(source_, deadline, "baseline_failed");
         baseline_.clear();
         baseline_.insert(children.begin(), children.end());
@@ -978,7 +1119,61 @@ public:
         removed_items_.clear();
         capture_complete_ = false;
         add_child_in_card_ = false;
-        pc_direct_events_.BeginBaseline();
+        pc_direct_events_.BeginBaseline(children.size());
+        if (pc_direct_save_media_pending_) {
+            if (!children.empty()) {
+                pc_direct_events_.RecordSaveMediaSelection(
+                    std::nullopt, std::nullopt, std::nullopt, 0);
+                pc_direct_events_.RecordTerminalSubreason(
+                    PcDirectTerminalSubreason::SdramNotEmpty);
+                baseline_token_.clear();
+                throw TransportError(
+                    "pc_direct_sdram_not_empty",
+                    "PC-direct SDRAM is not empty before capture dispatch");
+            }
+            std::size_t selection_set_count = 0;
+            std::optional<std::uint32_t> last_readback;
+            try {
+                const auto selection =
+                    PrepareNikonPcDirectStorageForEmptyBaseline(
+                        children.size(), kNkMAIDSaveMedia_SDRAM,
+                        [this, deadline, &last_readback] {
+                            const auto value =
+                                static_cast<std::uint32_t>(GetUnsigned(
+                                    source_, kNkMAIDCapability_SaveMedia,
+                                    deadline, "save_media_mismatch"));
+                            last_readback = value;
+                            return value;
+                        },
+                        [this, deadline, &selection_set_count](
+                            std::uint32_t value) {
+                            ++selection_set_count;
+                            SetUnsigned(
+                                source_, kNkMAIDCapability_SaveMedia,
+                                static_cast<ULONG>(value), deadline,
+                                "save_media_mismatch");
+                        });
+                original_save_media_ =
+                    static_cast<ULONG>(selection.original_value);
+                pc_direct_events_.RecordSaveMediaSelection(
+                    PcDirectSaveMedia(selection.original_value),
+                    PcDirectSaveMedia(selection.selected_value),
+                    last_readback
+                        ? std::optional{PcDirectSaveMedia(*last_readback)}
+                        : std::nullopt,
+                    selection_set_count);
+                pc_direct_save_media_pending_ = false;
+            } catch (...) {
+                pc_direct_events_.RecordSaveMediaSelection(
+                    std::nullopt,
+                    PcDirectSaveMediaValue::Sdram,
+                    last_readback
+                        ? std::optional{PcDirectSaveMedia(*last_readback)}
+                        : std::nullopt,
+                    selection_set_count);
+                throw;
+            }
+        }
         baseline_token_ = "baseline-" + std::to_string(++baseline_sequence_);
         return baseline_token_;
     }
@@ -1025,12 +1220,32 @@ public:
                 "pc_direct_event_window_invalid",
                 "PC-direct callback window was not ready before dispatch");
         }
+        SdkCommandOutcome capture_command_outcome;
+        const auto record_capture_command_outcome = [&]() noexcept {
+            if (!capture_command_outcome.immediate &&
+                !capture_command_outcome.completion) {
+                return;
+            }
+            pc_direct_events_.RecordCaptureCapStart(
+                capture_command_outcome.immediate
+                    ? std::optional{PcDirectResult(
+                          *capture_command_outcome.immediate)}
+                    : std::nullopt,
+                capture_command_outcome.completion
+                    ? std::optional{PcDirectResult(
+                          *capture_command_outcome.completion)}
+                    : std::nullopt,
+                capture_command_outcome.duration);
+        };
         try {
             StartProcess(
                 source_, kNkMAIDCapability_Capture,
-                event_deadline, "capture_command_failed");
+                event_deadline, "capture_command_failed",
+                &capture_command_outcome);
+            record_capture_command_outcome();
             pc_direct_events_.CaptureCommandAccepted();
         } catch (...) {
+            record_capture_command_outcome();
             baseline_token_.clear();
             pc_direct_events_.RecordTerminalSubreason(
                 PcDirectTerminalSubreason::CaptureCommandFailed);
@@ -1295,6 +1510,7 @@ public:
             // Restoration is attempted exactly once during an explicit close.
             original_save_media_.reset();
         }
+        pc_direct_save_media_pending_ = false;
         try {
             CleanupObjects(deadline);
         } catch (const TransportError& error) {
@@ -1367,6 +1583,7 @@ private:
         live_view_started_ = false;
         live_view_stop_attempted_ = false;
         original_save_media_.reset();
+        pc_direct_save_media_pending_ = false;
 
         OpenChild(module_, source_, selected_id, "open_failed");
         source_id_ = selected_id;
@@ -1388,21 +1605,10 @@ private:
                     "capture source requires an explicit storage mode");
             }
             if (storage_mode == CaptureStorageMode::pc_direct_sdram) {
-                const auto selection = SelectNikonSaveMediaForPcDirect(
-                    kNkMAIDSaveMedia_SDRAM,
-                    [this, deadline] {
-                        return static_cast<std::uint32_t>(GetUnsigned(
-                            source_, kNkMAIDCapability_SaveMedia,
-                            deadline, "save_media_mismatch"));
-                    },
-                    [this, deadline](std::uint32_t value) {
-                        SetUnsigned(
-                            source_, kNkMAIDCapability_SaveMedia,
-                            static_cast<ULONG>(value), deadline,
-                            "save_media_mismatch");
-                    });
-                original_save_media_ =
-                    static_cast<ULONG>(selection.original_value);
+                // PC-direct storage selection is deliberately deferred to
+                // Baseline(). The source Children inventory must be proven
+                // empty before the first SaveMedia write or shutter command.
+                pc_direct_save_media_pending_ = true;
             } else {
                 const ULONG current_save_media = GetUnsigned(
                     source_, kNkMAIDCapability_SaveMedia, deadline,
@@ -1744,7 +1950,8 @@ private:
                           NKPARAM data, std::chrono::steady_clock::time_point deadline,
                           std::string_view category,
                           SdkBufferArena::CommandLease* payload = nullptr,
-                          SdkBufferArena::CommandLease* secondary_payload = nullptr) {
+                          SdkBufferArena::CommandLease* secondary_payload = nullptr,
+                          SdkCommandOutcome* command_outcome = nullptr) {
 #ifndef NDEBUG
         const auto current_thread = std::this_thread::get_id();
         if (run_completed_thread_ == std::thread::id{}) run_completed_thread_ = current_thread;
@@ -1759,9 +1966,23 @@ private:
         auto completion = std::make_unique<CompletionState>();
         CompletionState* state = completion.get();
         completions_.push_back(std::move(completion));
+        const auto command_started = std::chrono::steady_clock::now();
+        const auto update_outcome = [&]() noexcept {
+            if (command_outcome == nullptr) return;
+            command_outcome->duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - command_started);
+            if (state->done.load(std::memory_order_acquire)) {
+                command_outcome->completion = state->result;
+            }
+        };
         const NKERROR immediate = Call(&object.value, command, parameter, data_type, data,
             reinterpret_cast<LPNKFUNC>(&CompletionProc), reinterpret_cast<NKREF>(state));
+        if (command_outcome != nullptr) {
+            command_outcome->immediate = immediate;
+        }
         if (immediate == kNkMAIDResult_BufferSize) {
+            update_outcome();
             confirm_payloads();
             return immediate;
         }
@@ -1772,6 +1993,7 @@ private:
             // derive quarantine from missing completion evidence that was
             // never going to arrive (see AbandonPending).
             AbandonPending(object, state, category, /*async_started=*/false);
+            update_outcome();
             confirm_payloads();
             throw TransportError(std::string(category), "SDK command failed: " + ResultText(immediate));
         }
@@ -1780,6 +2002,7 @@ private:
                 if (AbandonPending(object, state, category, /*async_started=*/true) == AbandonOutcome::completed) {
                     confirm_payloads();
                 }
+                update_outcome();
                 throw TransportError(std::string(category), "SDK command timed out");
             }
             try {
@@ -1794,10 +2017,12 @@ private:
                 if (AbandonPending(object, state, category, /*async_started=*/true) == AbandonOutcome::completed) {
                     confirm_payloads();
                 }
+                update_outcome();
                 throw;
             }
             std::this_thread::sleep_for(kAsyncInterval);
         }
+        update_outcome();
         confirm_payloads();
         if (state->result != kNkMAIDResult_NoError) {
             throw TransportError(std::string(category), "SDK completion failed: " + ResultText(state->result));
@@ -2297,14 +2522,16 @@ private:
     }
 
     void StartProcess(MaidObject& object, ULONG capability,
-                      std::chrono::steady_clock::time_point deadline, std::string_view category) {
+                      std::chrono::steady_clock::time_point deadline,
+                      std::string_view category,
+                      SdkCommandOutcome* command_outcome = nullptr) {
         const auto* cap = Capability(object, capability);
         if (cap == nullptr || cap->ulType != kNkMAIDCapType_Process ||
             !Supports(object, capability, kNkMAIDCapOperation_Start)) {
             throw TransportError(std::string(category), "required SDK process capability is unavailable");
         }
         RunCompleted(object, kNkMAIDCommand_CapStart, capability, kNkMAIDDataType_Null,
-            0, deadline, category);
+            0, deadline, category, nullptr, nullptr, command_outcome);
     }
 
     void OpenModule(std::chrono::steady_clock::time_point deadline) {
@@ -2485,7 +2712,10 @@ private:
             // and the Children capability.
             RunCompleted(source_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
                 0, deadline, "image_event_failed");
-            for (const ULONG id : Children(source_, deadline, "image_event_failed")) {
+            const auto children =
+                Children(source_, deadline, "image_event_failed");
+            pc_direct_events_.RecordChildrenCount(children.size());
+            for (const ULONG id : children) {
                 ObserveCandidate(id);
             }
             pc_direct_events_.RecordForcedEnumeration(true);
@@ -2506,7 +2736,10 @@ private:
     void ObserveCandidate(
         ULONG id,
         bool callback_notification = false) {
-        if (baseline_.contains(id)) return;
+        if (baseline_.contains(id)) {
+            pc_direct_events_.RecordBaselineHit();
+            return;
+        }
         pc_direct_events_.ObserveCandidate(id, callback_notification);
         if (added_items_.contains(id) || late_items_.contains(id)) return;
         // D810 can publish the SDRAM Item after CaptureComplete.  An item is
@@ -2673,6 +2906,7 @@ private:
         live_view_started_ = false;
         live_view_stop_attempted_ = false;
         original_save_media_.reset();
+        pc_direct_save_media_pending_ = false;
         module_sources_.clear();
         dual_candidates_.clear();
         dual_expected_module_source_ids_.clear();
@@ -2711,15 +2945,21 @@ private:
         const ULONG id = static_cast<ULONG>(data);
         switch (event) {
         case kNkMAIDEvent_AddChild:
+            self->pc_direct_events_.RecordRawAddChild();
             self->ObserveCandidate(id, true);
             break;
         case kNkMAIDEvent_RemoveChild:
+            self->pc_direct_events_.RecordRawRemoveChild();
+            if (self->baseline_.contains(id)) {
+                self->pc_direct_events_.RecordBaselineHit();
+            }
             self->removed_items_.insert(id);
             self->pc_direct_events_.ObserveRemovedCandidate(id);
             break;
         case kNkMAIDEvent_CaptureComplete:
             // The D810 SDK sample treats the event itself as completion and
             // does not assign a contract to its data parameter.
+            self->pc_direct_events_.RecordRawCaptureComplete();
             self->capture_complete_ = true;
             self->card_capture_events_.Observe(NikonCardCaptureEvent::capture_complete);
             self->pc_direct_events_.Observe(
@@ -2774,6 +3014,7 @@ private:
     NikonCardCaptureEventWindow card_capture_events_;
     NikonPcDirectEventWindow pc_direct_events_;
     std::optional<ULONG> original_save_media_;
+    bool pc_direct_save_media_pending_{};
     std::set<ULONG> baseline_;
     std::set<ULONG> module_sources_;
     std::vector<std::pair<std::string, ULONG>> dual_candidates_;

@@ -721,9 +721,31 @@ void TestPcDirectStorageFailuresStopWithoutCaptureOrRetry() {
 
 void TestPcDirectSaveMediaSelectionAndRestoreOrdering() {
     {
+        std::size_t get_count = 0;
+        std::size_t set_count = 0;
+        bool failed = false;
+        try {
+            (void)PrepareNikonPcDirectStorageForEmptyBaseline(
+                1,
+                2,
+                [&] {
+                    ++get_count;
+                    return std::uint32_t{1};
+                },
+                [&](std::uint32_t) { ++set_count; });
+        } catch (const TransportError& error) {
+            failed = error.Category() ==
+                "pc_direct_sdram_not_empty";
+        }
+        Check(failed && get_count == 0 && set_count == 0,
+            "non-empty SDRAM baseline must stop before every SaveMedia read/write and shutter path");
+    }
+
+    {
         std::uint32_t state = 1;
         std::vector<std::string> operations;
-        const auto selection = SelectNikonSaveMediaForPcDirect(
+        const auto selection = PrepareNikonPcDirectStorageForEmptyBaseline(
+            0,
             2,
             [&] {
                 operations.emplace_back("get");
@@ -882,7 +904,13 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
         Check(window.BeginCaptureCommand(),
             "clean PC-direct event window must permit one dispatch");
         window.CaptureCommandAccepted();
+        window.RecordCaptureCapStart(
+            PcDirectCommandResult::Pending,
+            PcDirectCommandResult::NoError,
+            12ms);
+        window.RecordRawAddChild();
         window.ObserveCandidate(101, true);
+        window.RecordRawCaptureComplete();
         window.Observe(NikonPcDirectEvent::capture_complete);
         window.ObserveCandidate(101, false);
         window.RecordForcedEnumeration(true);
@@ -898,6 +926,13 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
             PcDirectObservation::EnumeratedCandidate,
             PcDirectObservation::ForcedEnumerationSucceeded};
         Check(window.Snapshot().observation_order == expected_order &&
+                window.Snapshot().raw_add_child_count == 1 &&
+                window.Snapshot().raw_capture_complete_count == 1 &&
+                window.Snapshot().capture_cap_start_immediate_result ==
+                    PcDirectCommandResult::Pending &&
+                window.Snapshot().capture_cap_start_completion_result ==
+                    PcDirectCommandResult::NoError &&
+                window.Snapshot().capture_cap_start_duration_ms == 12 &&
                 window.Snapshot().callback_active_before_capture,
             "PC-direct diagnostics must preserve bounded first-occurrence order and callback readiness");
         window.SessionClosed();
@@ -905,6 +940,37 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
                 window.Snapshot().observation_order.back() ==
                     PcDirectObservation::SessionClosed,
             "callback lifetime evidence must end with the checked source close");
+    }
+    {
+        NikonPcDirectEventWindow window;
+        window.ResetForSession();
+        window.CallbackRegistered();
+        window.BeginBaseline(1);
+        window.RecordSaveMediaSelection(
+            std::nullopt, std::nullopt, std::nullopt, 0);
+        window.RecordTerminalSubreason(
+            PcDirectTerminalSubreason::SdramNotEmpty);
+        const auto snapshot = window.Snapshot();
+        Check(!window.BeginCaptureCommand() &&
+                  snapshot.baseline_children_count == 1 &&
+                  snapshot.save_media_selection_set_count == 0 &&
+                  snapshot.terminal_subreason ==
+                      PcDirectTerminalSubreason::SdramNotEmpty,
+            "non-empty baseline must remain measurable while blocking dispatch and SaveMedia writes");
+    }
+    {
+        NikonPcDirectEventWindow window;
+        window.ResetForSession();
+        window.CallbackRegistered();
+        window.BeginBaseline(1);
+        window.RecordRawAddChild();
+        window.RecordBaselineHit();
+        const auto snapshot = window.Snapshot();
+        Check(snapshot.raw_add_child_count == 1 &&
+                  snapshot.baseline_hit_count == 1 &&
+                  snapshot.candidate_notification_count == 0 &&
+                  snapshot.distinct_notified_candidate_count == 0,
+            "a baseline same-ID callback must be visible as raw/baseline-hit without becoming a new candidate");
     }
     {
         auto window = start_window();
@@ -927,11 +993,17 @@ void TestPcDirectEventWindowRejectsUncorrelatedSdkItems() {
         auto window = start_window();
         Check(window.BeginCaptureCommand(), "same-item duplicate window must start");
         window.CaptureCommandAccepted();
+        window.RecordRawAddChild();
         window.ObserveCandidate(101, true);
+        window.RecordRawAddChild();
         window.ObserveCandidate(101, true);
+        window.RecordChildrenCount(1);
         window.ObserveCandidate(101, false);
         window.RecordForcedEnumeration(true);
         Check(window.CanAttributeExactlyOne() &&
+                  window.Snapshot().raw_add_child_count == 2 &&
+                  window.Snapshot().children_count_sequence ==
+                      std::vector<std::size_t>{0, 1} &&
                   window.Snapshot().duplicate_candidate_notification_count == 1,
             "repeated AddChild notifications for one reconciled item must remain attributable without CaptureComplete");
     }

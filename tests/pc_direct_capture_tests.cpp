@@ -136,6 +136,7 @@ public:
         std::chrono::seconds) override {
         if (!open) throw TransportError("session_not_open", "not open");
         ++baseline_count;
+        if (baseline_failure) throw *baseline_failure;
         return "fixed-session-baseline";
     }
 
@@ -168,6 +169,7 @@ public:
     std::vector<ImageCandidate> candidates;
     std::optional<TransportError> open_failure;
     std::optional<TransportError> capture_failure;
+    std::optional<TransportError> baseline_failure;
     std::optional<TransportError> restore_failure;
     PcDirectTransportDiagnostics diagnostics;
     int open_count{};
@@ -182,6 +184,9 @@ PcDirectCaptureResult Run(
     const fs::path& root,
     RecordingPcDirectTransport& transport,
     const PcDirectCaptureRequest& request = Request());
+void CheckSingleAttemptSafety(
+    const RecordingPcDirectTransport& transport,
+    const PcDirectCaptureResult& result);
 
 void TestDiagnosticsDistinguishUnmeasuredFromObservedZero() {
     const auto root = NewRoot("diagnostics-measurement-state");
@@ -200,6 +205,26 @@ void TestDiagnosticsDistinguishUnmeasuredFromObservedZero() {
         transport.diagnostics.measurement_started = true;
         transport.diagnostics.callback_registered = true;
         transport.diagnostics.session_closed = true;
+        transport.diagnostics.baseline_children_count = 0;
+        transport.diagnostics.raw_add_child_count = 2;
+        transport.diagnostics.raw_remove_child_count = 0;
+        transport.diagnostics.raw_capture_complete_count = 0;
+        transport.diagnostics.baseline_hit_count = 0;
+        transport.diagnostics.children_count_sequence = {0, 1};
+        transport.diagnostics.children_count_transition_count = 1;
+        transport.diagnostics.children_count_sequence_truncated = false;
+        transport.diagnostics.save_media_original =
+            PcDirectSaveMediaValue::Card;
+        transport.diagnostics.save_media_selected =
+            PcDirectSaveMediaValue::Sdram;
+        transport.diagnostics.save_media_readback =
+            PcDirectSaveMediaValue::Sdram;
+        transport.diagnostics.save_media_selection_set_count = 1;
+        transport.diagnostics.capture_cap_start_immediate_result =
+            PcDirectCommandResult::Pending;
+        transport.diagnostics.capture_cap_start_completion_result =
+            PcDirectCommandResult::NoError;
+        transport.diagnostics.capture_cap_start_duration_ms = 12;
         transport.diagnostics.capture_complete_count = 0;
         transport.diagnostics.add_child_notification_count = 0;
         transport.diagnostics.forced_enumeration_attempt_count = 1;
@@ -221,10 +246,71 @@ void TestDiagnosticsDistinguishUnmeasuredFromObservedZero() {
         Check(json.find("\"measurementStarted\":true") != std::string::npos &&
                 json.find("\"captureCompleteCount\":0") != std::string::npos &&
                 json.find("\"forcedEnumerationAttemptCount\":1") != std::string::npos &&
+                json.find("\"baselineChildrenCount\":0") != std::string::npos &&
+                json.find("\"rawAddChildCount\":2") != std::string::npos &&
+                json.find("\"childrenCountSequence\":[0,1]") != std::string::npos &&
+                json.find("\"saveMediaOriginal\":\"card\"") != std::string::npos &&
+                json.find("\"saveMediaSelected\":\"sdram\"") != std::string::npos &&
+                json.find("\"saveMediaReadback\":\"sdram\"") != std::string::npos &&
+                json.find("\"saveMediaSelectionSetCount\":1") != std::string::npos &&
+                json.find("\"captureCapStartImmediateResult\":\"pending\"") != std::string::npos &&
+                json.find("\"captureCapStartCompletionResult\":\"no-error\"") != std::string::npos &&
+                json.find("\"captureCapStartDurationMs\":12") != std::string::npos &&
                 json.find("\"terminalSubreason\":\"capture-complete-missing\"") != std::string::npos &&
                 json.find("\"observationOrder\":[\"callback-registered\",\"baseline-ready\",\"capture-command-started\",\"forced-enumeration-succeeded\"]") != std::string::npos,
             "observed zero and bounded milestone order must remain explicit in redacted diagnostics");
+
+        const auto evidence_path = root / "diagnostics-v2.json";
+        std::ofstream(evidence_path, std::ios::binary) << json;
+        std::ifstream reread_input(evidence_path, std::ios::binary);
+        const std::string reread{
+            std::istreambuf_iterator<char>(reread_input),
+            std::istreambuf_iterator<char>()};
+        Check(reread == json &&
+                  reread.find("session-camera") == std::string::npos &&
+                  reread.find("sdk-item") == std::string::npos,
+            "additive v2 diagnostics must round-trip without a camera identifier or SDK Item name");
     }
+    fs::remove_all(root);
+}
+
+void TestNonEmptySdramBaselineStopsBeforeCaptureAndSettingChange() {
+    const auto root = NewRoot("sdram-baseline-gate");
+    RecordingPcDirectTransport transport;
+    transport.baseline_failure.emplace(
+        "pc_direct_sdram_not_empty",
+        "anonymous SDRAM baseline is not empty");
+    transport.diagnostics.measurement_started = true;
+    transport.diagnostics.callback_registered = true;
+    transport.diagnostics.session_closed = true;
+    transport.diagnostics.baseline_children_count = 1;
+    transport.diagnostics.children_count_sequence = {1};
+    transport.diagnostics.children_count_transition_count = 0;
+    transport.diagnostics.children_count_sequence_truncated = false;
+    transport.diagnostics.raw_add_child_count = 0;
+    transport.diagnostics.raw_remove_child_count = 0;
+    transport.diagnostics.raw_capture_complete_count = 0;
+    transport.diagnostics.baseline_hit_count = 0;
+    transport.diagnostics.save_media_selection_set_count = 0;
+    transport.diagnostics.terminal_subreason =
+        PcDirectTerminalSubreason::SdramNotEmpty;
+
+    const auto result = Run(root, transport);
+    const auto json = SerializePcDirectTransportDiagnostics(
+        result.transport_diagnostics);
+    Check(result.transaction.terminal_state == "FailedPartial" &&
+              result.transaction.error_category ==
+                  "pc_direct_sdram_not_empty" &&
+              !result.capture_attempted &&
+              transport.capture_count == 0 &&
+              json.find("\"baselineChildrenCount\":1") !=
+                  std::string::npos &&
+              json.find("\"saveMediaSelectionSetCount\":0") !=
+                  std::string::npos &&
+              json.find("\"captureCapStartImmediateResult\":null") !=
+                  std::string::npos,
+        "non-empty SDRAM must prove dispatch zero and SaveMedia selection writes zero");
+    CheckSingleAttemptSafety(transport, result);
     fs::remove_all(root);
 }
 
@@ -552,6 +638,7 @@ int main() {
     try {
         TestNormalCaptureFullyDecodesPersistsAndRestores();
         TestDiagnosticsDistinguishUnmeasuredFromObservedZero();
+        TestNonEmptySdramBaselineStopsBeforeCaptureAndSettingChange();
         TestRedactedReportPathCannotExposeAbsoluteLocation();
         TestApprovedD810ProfileAndNegativeVariantsStopBeforeCapture();
         TestNoNotificationFailsWithoutRetry();

@@ -129,6 +129,12 @@ struct NikonSaveMediaSelection {
     std::uint32_t desired_value,
     const std::function<std::uint32_t()>& get_current,
     const std::function<void(std::uint32_t)>& set_value);
+[[nodiscard]] NikonSaveMediaSelection
+PrepareNikonPcDirectStorageForEmptyBaseline(
+    std::size_t baseline_children_count,
+    std::uint32_t desired_value,
+    const std::function<std::uint32_t()>& get_current,
+    const std::function<void(std::uint32_t)>& set_value);
 void RestoreNikonSaveMediaOnce(
     std::uint32_t original_value,
     const std::function<std::uint32_t()>& get_current,
@@ -199,6 +205,21 @@ struct NikonPcDirectEventSnapshot {
     std::size_t forced_enumeration_attempt_count{};
     std::size_t forced_enumeration_success_count{};
     std::size_t forced_enumeration_failure_count{};
+    std::size_t baseline_children_count{};
+    std::size_t raw_add_child_count{};
+    std::size_t raw_remove_child_count{};
+    std::size_t raw_capture_complete_count{};
+    std::size_t baseline_hit_count{};
+    std::vector<std::size_t> children_count_sequence;
+    std::size_t children_count_transition_count{};
+    bool children_count_sequence_truncated{};
+    std::optional<PcDirectSaveMediaValue> save_media_original;
+    std::optional<PcDirectSaveMediaValue> save_media_selected;
+    std::optional<PcDirectSaveMediaValue> save_media_readback;
+    std::size_t save_media_selection_set_count{};
+    std::optional<PcDirectCommandResult> capture_cap_start_immediate_result;
+    std::optional<PcDirectCommandResult> capture_cap_start_completion_result;
+    std::optional<std::int64_t> capture_cap_start_duration_ms;
     std::optional<PcDirectTerminalSubreason> terminal_subreason;
     std::vector<PcDirectObservation> observation_order;
 };
@@ -213,7 +234,21 @@ class NikonPcDirectEventWindow final {
 public:
     void ResetForSession() noexcept;
     void CallbackRegistered() noexcept;
-    void BeginBaseline() noexcept;
+    void BeginBaseline(std::size_t children_count = 0) noexcept;
+    void RecordRawAddChild() noexcept;
+    void RecordRawRemoveChild() noexcept;
+    void RecordRawCaptureComplete() noexcept;
+    void RecordBaselineHit() noexcept;
+    void RecordChildrenCount(std::size_t children_count) noexcept;
+    void RecordSaveMediaSelection(
+        std::optional<PcDirectSaveMediaValue> original,
+        std::optional<PcDirectSaveMediaValue> selected,
+        std::optional<PcDirectSaveMediaValue> readback,
+        std::size_t set_count) noexcept;
+    void RecordCaptureCapStart(
+        std::optional<PcDirectCommandResult> immediate,
+        std::optional<PcDirectCommandResult> completion,
+        std::chrono::milliseconds duration) noexcept;
     [[nodiscard]] bool BeginCaptureCommand() noexcept;
     void CaptureCommandAccepted() noexcept;
     void ObserveCandidate(
