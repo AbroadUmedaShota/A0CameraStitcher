@@ -1,10 +1,23 @@
 # 現在の開発状況
 
-更新日: 2026-09-13（旧identityの履歴と決定済みbinding方針を区別）
+更新日: 2026-09-16（PC直接保存の実機評価と未受入境界を反映）
 
 ## 総合判定
 
 `in-progress / Dual hardware HardwarePending`。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、p95 `14.643秒`のProduct Owner承認、100/100耐久を完了した。原画像111件の再検証と安全指標も合格した。ただし、実WPF画面からの100回操作、Continuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体は`Partial`である。DualCameraは、production backendとWPF `CaptureRecoveryOnly`（撮影・原画像回収のみ）、ADR-0028のModule保持境界、pair-level preflight、read-only coexistence probe、および同一bindingの10回runnerをsoftware実装済みである。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化して再bindingを要求する。一方、同一bindingの100回runnerは未実装であり、Dualの実機coexistence probe、one-shot、10回／100回の受入証拠は未完了である。既定600秒のserver/request稼働時間予算は実装済みだが、processの強制終了時刻の保証ではなく、安全な終了処理が予算を超える可能性がある。連続試験との適合を示す実機証拠はない。実装済みを実機Passへ読み替えず、DualCameraは`HardwarePending`、合成は`Pending`、A0品質は`Unapproved`を維持する。
+
+2026-09-16に評価したSDK PC直接保存は、`main`のPR #199〜#201で安全入口・匿名診断・完了判定を実装したが、実機2回ともPC原本を保存できず未受入である。これは、上記dedicated single-slot spool経路の合格を取り消すものではなく、spool経路の合格をPC直接保存の合格へ読み替えるものでもない。
+
+### 2026-09-16 PC直接保存の実機評価
+
+| 対象 | source | 結果 | 観測された事実 |
+|---|---|---|---|
+| [run-1789528249365-1](evidence/phase0/run-1789528249365-1/report.md) | PR #199/#200統合後 `f2a24b83e2dff066b32d5681cfeb18a8c738fa85` | `FailedPartial / image_event_timeout` | capture 1回。post-baselineの同一Item IDを通知・列挙で1件観測したが`CaptureComplete`は0。PC `original.jpg`／`.partial`は0。SaveMedia復元、SDK close、事後spool 0を確認 |
+| [run-1789540578257-1](evidence/phase0/run-1789540578257-1/report.md) | PR #201統合後 `7bb042c4693acc40fceb59b4ffb4d76123ad9b52` | `FailedPartial / image_event_timeout` | capture 1回。post-baseline採用候補0、forced enumeration 727/727成功、`CaptureComplete` 0。PC `original.jpg`／`.partial`は0。SaveMedia復元、SDK close、事後spool 0を確認 |
+
+2回とも自動retry、card fallback、camera delete、formatは0で、実画像・実識別子・SDK配布物はrepositoryへ保存していない。2回目の`candidateCount=0`はpost-baseline採用候補が0だったことを示し、生のSDK通知が0だったとは断定しない。`cardUnchanged=false`は事後fingerprintが取得不能だったためであり、カード変更の証拠ではない。独立した事後WPD確認ではpayload 0だった。
+
+旧失敗で残ったSDRAM ItemまたはItem ID再利用がbaselineで除外された可能性は仮説であり、現証拠では確定していない。PR #202（head `f42f4c110961806958f6319ac6762220fed1c16b`）は、SDRAM baseline非空時の撮影前停止と匿名診断追加を提案し、2026-09-16にsoftware-only CIへ合格したが、open／未mergeのため`main`実装済みとは扱わない。次工程はPR #202のreview・統合判断であり、追加実機撮影には別の明示承認を要する。
 
 ### 二台撮影で、できていること・残っていること
 
