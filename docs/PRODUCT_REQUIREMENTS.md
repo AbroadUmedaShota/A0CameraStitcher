@@ -40,9 +40,9 @@
 
 #### PC直接保存の評価境界（2026-09-16）
 
-SDKのPC直接保存は、dedicated single-slot spoolを置き換える候補経路として評価中であり、現行MVPの受入済み経路ではない。PR #199〜#201を含む`main`で安全入口・匿名診断・Item完了判定を実装したが、実機2回はいずれも`FailedPartial / image_event_timeout`でPC原本0件だった。従来spool経路のSingleCamera合格と、PC直接保存の未受入を分けて扱う。
+SDKのPC直接保存は、dedicated single-slot spoolを置き換える候補経路として評価中であり、現行MVPの受入済み経路ではない。PR #199〜#202を含む`main`で安全入口、SDRAM事前gate、匿名診断、Item完了判定を実装したが、PR #202統合前の実機2回はいずれも`FailedPartial / image_event_timeout`でPC原本0件だった。従来spool経路のSingleCamera合格と、PC直接保存の未受入を分けて扱う。
 
-PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-baseline SDK Item、完全JPEG download、`original.jpg.partial`からatomic `original.jpg`への確定と再読込検証、SaveMedia復元、SDK close、事後card payload 0、retry／fallback／delete／format 0を同一transactionで証明する。PR #202のSDRAM事前gateと追加診断は未mergeであり、本項の受入完了を意味しない。
+PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-baseline SDK Item、完全JPEG download、`original.jpg.partial`からatomic `original.jpg`への確定と再読込検証、SaveMedia復元、SDK close、事後card payload 0、retry／fallback／delete／format 0を同一transactionで証明する。PR #202のSDRAM事前gateと追加診断は2026-09-17に`main`へ統合したが、それだけでは本項の実機受入完了を意味しない。
 
 ### キャリブレーションと合成
 

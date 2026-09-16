@@ -4,7 +4,7 @@
 
 MVP全体は`in-progress`である。2026-08-26に`SingleCamera`のCamera Agent実機経路でone-shot、10回characterization、p95承認、100回耐久を完了した。残るSingleCamera作業は実WPF end-to-end、Continuous Live View handoff 10回、物理異常系である。2026-09-11に`main`の`56f3cb36182812969126a34cd12137105bf3840c`を照合し、Dualはsession-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、同一bindingの10回runnerが実装済みと確認した。次の主工程は実機one-shot・10組の受入と、未実装の100回runnerの開発である。Dual実機受入は未完了であり、撮影・原画像保存のみの実装を、合成・A0品質の合格とは扱わない。
 
-2026-09-16時点では、別候補のSDK PC直接保存も実機評価中である。PR #199〜#201は`main`へ統合済みだが、2回のone-shotはいずれもPC原本0件の`FailedPartial`で、採用判定は未完了である。PR #202はSDRAM事前gateと匿名診断の追加を提案中で、openの間は実装済み工程へ数えない。
+SDK PC直接保存は別候補として実機評価中である。PR #199〜#202は`main`へ統合済みだが、2026-09-16の2回のone-shotはいずれもPC原本0件の`FailedPartial`で、採用判定は未完了である。PR #202のSDRAM事前gateと匿名診断はsoftware-only工程の完了として数えるが、実機受入には数えない。
 
 | 実行レーン | 現在 | 次の完了条件 |
 |---|---|---|
@@ -21,7 +21,7 @@ MVP全体は`in-progress`である。2026-08-26に`SingleCamera`のCamera Agent�
 
 ## 現在の実行順
 
-0. PC直接保存の評価は、PR #202のsoftware-only検証・review・統合判断を先に完了する。実機再試行は固定artifactと安全条件を再提示し、別の一回承認を得た後だけ行う。PC原本保存に成功するまで、従来spool経路の合格と分離して`Unaccepted`を維持する。
+0. PC直接保存はPR #202のsoftware-only検証・review・統合まで完了した。次の実機再試行は固定artifactと安全条件を再提示し、別の一回承認を得た後だけ行う。PC原本保存に成功するまで、従来spool経路の合格と分離して`Unaccepted`を維持する。
 
 継続Live View v2のprotocol、agent session、WPF開始／frame／停止／capture handoffはQA revise済みsoftware checkpointとして完了している。次工程は以下である。
 
