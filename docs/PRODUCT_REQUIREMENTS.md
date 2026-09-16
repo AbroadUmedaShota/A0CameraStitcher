@@ -38,6 +38,12 @@
 
 [正規化要件](../.autodev/requirements/normalized.json)と[計画](../.autodev/plan.json)には、2026-08-31生成時点の「one-shot前まで・10/100 runner未実装・固定600秒との両立未解決」という説明が残る。現在の実装状況とは不一致であり、一貫した再正規化と再計画は別の未完了作業とする。将来の受入条件であるmode別p95承認、100/100初回成功、既存のhuman／transport gateは縮小・完了扱いにしない。
 
+#### PC直接保存の評価境界（2026-09-16）
+
+SDKのPC直接保存は、dedicated single-slot spoolを置き換える候補経路として評価中であり、現行MVPの受入済み経路ではない。PR #199〜#201を含む`main`で安全入口・匿名診断・Item完了判定を実装したが、実機2回はいずれも`FailedPartial / image_event_timeout`でPC原本0件だった。従来spool経路のSingleCamera合格と、PC直接保存の未受入を分けて扱う。
+
+PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-baseline SDK Item、完全JPEG download、`original.jpg.partial`からatomic `original.jpg`への確定と再読込検証、SaveMedia復元、SDK close、事後card payload 0、retry／fallback／delete／format 0を同一transactionで証明する。PR #202のSDRAM事前gateと追加診断は未mergeであり、本項の受入完了を意味しない。
+
 ### キャリブレーションと合成
 
 - `FR-STI-001`: active modeで必要な各cameraのレンズ歪み補正値を保存できる。
