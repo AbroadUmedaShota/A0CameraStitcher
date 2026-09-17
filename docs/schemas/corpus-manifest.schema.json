@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/corpus-manifest.schema.json",
+  "title": "A0 anonymous corpus manifest v1",
+  "description": "Anonymous software-only inventory for calibration, development, locked holdout, and release corpus partitions. Image blobs and camera identities are excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "corpusId", "approvalState", "qualityDecision", "assetStoragePolicy", "rightsRecordId", "oracleId", "splitPolicies", "entries"],
+  "properties": {
+    "schemaVersion": { "const": "a0.corpus-manifest.v1" },
+    "corpusId": { "$ref": "#/$defs/token" },
+    "approvalState": { "const": "contract-example" },
+    "qualityDecision": { "const": "not-evaluated" },
+    "assetStoragePolicy": { "const": "no-image-blobs-anonymous-references-only" },
+    "rightsRecordId": { "$ref": "#/$defs/token" },
+    "oracleId": { "$ref": "#/$defs/token" },
+    "splitPolicies": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/splitPolicy" }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "splitName": { "enum": ["calibration", "development", "locked-holdout", "release"] },
+    "splitPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["split", "purpose", "accessRule", "mutable", "mayTuneProduct"],
+      "properties": {
+        "split": { "$ref": "#/$defs/splitName" },
+        "purpose": { "enum": ["profile-calibration", "implementation-development", "blind-acceptance-evaluation", "release-confirmation"] },
+        "accessRule": { "enum": ["engineering-visible", "blind-until-evaluation", "release-only"] },
+        "mutable": { "type": "boolean" },
+        "mayTuneProduct": { "type": "boolean" }
+      }
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["originalMasterGroupId", "captureSessionGroupId", "rigStateGroupId", "derivationFamilyId"],
+      "properties": {
+        "originalMasterGroupId": { "$ref": "#/$defs/token" },
+        "captureSessionGroupId": { "$ref": "#/$defs/token" },
+        "rigStateGroupId": { "$ref": "#/$defs/token" },
+        "derivationFamilyId": { "$ref": "#/$defs/token" }
+      }
+    },
+    "captureCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rigProfileId", "rigProfileSha256", "cameraConfigurationId", "cameraConfigurationSha256", "lightingProfileId", "lightingProfileSha256", "capturedAtUtc"],
+      "properties": {
+        "rigProfileId": { "$ref": "#/$defs/token" },
+        "rigProfileSha256": { "$ref": "#/$defs/sha256" },
+        "cameraConfigurationId": { "$ref": "#/$defs/token" },
+        "cameraConfigurationSha256": { "$ref": "#/$defs/sha256" },
+        "lightingProfileId": { "$ref": "#/$defs/token" },
+        "lightingProfileSha256": { "$ref": "#/$defs/sha256" },
+        "capturedAtUtc": { "type": "string", "format": "date-time" }
+      }
+    },
+    "expectedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "failureCode"],
+      "properties": {
+        "outcome": { "enum": ["Accept", "Reject"] },
+        "failureCode": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "outcome": { "const": "Accept" } }, "required": ["outcome"] }, "then": { "properties": { "failureCode": { "const": null } } } },
+        { "if": { "properties": { "outcome": { "const": "Reject" } }, "required": ["outcome"] }, "then": { "properties": { "failureCode": { "type": "string" } } } }
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtureId", "split", "assetId", "assetKind", "artifactPath", "externalObjectId", "contentSha256", "rightsRecordId", "oracleId", "groups", "captureCondition", "expectedOutcome", "imageBlobCommitted", "hardwareEvidence", "qualityDecision"],
+      "properties": {
+        "fixtureId": { "$ref": "#/$defs/token" },
+        "split": { "$ref": "#/$defs/splitName" },
+        "assetId": { "$ref": "#/$defs/token" },
+        "assetKind": { "enum": ["SelfAuthoredVectorSpec", "ExternalD810Pair"] },
+        "artifactPath": { "type": ["string", "null"], "pattern": "^samples/public/corpus-contracts/vector-specs/[a-z0-9-]+\\.json$" },
+        "externalObjectId": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "rightsRecordId": { "$ref": "#/$defs/token" },
+        "oracleId": { "$ref": "#/$defs/token" },
+        "groups": { "$ref": "#/$defs/groups" },
+        "captureCondition": { "oneOf": [{ "$ref": "#/$defs/captureCondition" }, { "type": "null" }] },
+        "expectedOutcome": { "$ref": "#/$defs/expectedOutcome" },
+        "imageBlobCommitted": { "const": false },
+        "hardwareEvidence": { "type": "boolean" },
+        "qualityDecision": { "const": "not-evaluated" }
+      },
+      "allOf": [
+        { "if": { "properties": { "assetKind": { "const": "SelfAuthoredVectorSpec" } }, "required": ["assetKind"] }, "then": { "properties": { "artifactPath": { "type": "string" }, "externalObjectId": { "const": null }, "captureCondition": { "const": null }, "hardwareEvidence": { "const": false } } } },
+        { "if": { "properties": { "assetKind": { "const": "ExternalD810Pair" } }, "required": ["assetKind"] }, "then": { "properties": { "artifactPath": { "const": null }, "externalObjectId": { "$ref": "#/$defs/token" }, "captureCondition": { "$ref": "#/$defs/captureCondition" }, "hardwareEvidence": { "const": true } } } }
+      ]
+    }
+  }
+}

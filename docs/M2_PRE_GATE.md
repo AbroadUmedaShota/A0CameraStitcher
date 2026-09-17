@@ -46,8 +46,12 @@ build\Debug\A0CameraStitcher.OpticalPlanner.exe `
 - `samples/public/m2-fixtures/`: 左右pixel pair、luma offset破損、source shift破損と、raw overlapの決定論的metric oracle。すべて`test-only` / `not-evaluated`である。
 - `docs/schemas/rig-profile.schema.json`: draft/approvedを分離し、shapeと型を検査するDraft 2020-12 schema。schema単独で表現できないcross-field順序と評価時点での期限切れはruntime contractで検査する。
 - `samples/public/rig-profile.draft.example.json`: 未承認値を`null`のまま保持する例。実識別子は保存できない。
+- `samples/public/corpus-contracts/`: 自社作成vector spec、権利記録、4分割匿名manifest、独立contract oracleの例。実画像、実識別子、SDK配布物を含まない。
+- `docs/CORPUS_CONTRACTS.md`: Issue #44のsoftware-only corpus契約と、実D810 corpus取得前に残るhuman decision／物理証拠を分離する。
 
 `scripts/Test-M2PreGateAssets.ps1`はPowerShell組込みの`Test-Json`でschemaを正負例へ実適用し、draft/approved round-trip、version拒否、bounds拒否、draft非null／approved null拒否を検査する。production profile validator相当のruntime contractでは、provenance、`validUntil > measuredAt`、`measuredAt <= assessedAt < validUntil`、`targetMax <= autoCorrectionMax`も検査する。さらに、左右pairと二つの破損variantからoverlap、mean absolute error、max absolute errorを独立再計算し、manifestの期待値と照合する。検証前後のSHA-256比較によりfixture原本が変更されないことも確認する。
+
+`scripts/Test-M2CorpusContracts.ps1`はrights/oracle/manifest schemaを実適用し、公開vector specのSHA-256、権利cross-reference、split policy、四つの汚染防止group、oracle独立性、damaged fixtureの失敗感度を検証する。未知field、serial field、uncleared rights、hash不一致、cross-split派生、holdout tuning、production依存oracleはfail closedである。
 
 ## 自動検証
 
@@ -68,4 +72,4 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-`m2_optical_contracts`が150/180/200 DPI、横／縦配置、crop、shortfall、invalid/overflow境界を、`m2_pregate_assets`が公開資産のguardを、`m2_setup_assessment_contracts`が三段階判定、上限境界、fail-closed入力、決定性、入力不変を検証する。これらの合格はM2 pre-gateソフトウェアの合格だけを意味する。
+`m2_optical_contracts`が150/180/200 DPI、横／縦配置、crop、shortfall、invalid/overflow境界を、`m2_pregate_assets`が公開資産のguardを、`m2_corpus_contracts`が権利・split・oracle・privacy guardを、`m2_setup_assessment_contracts`が三段階判定、上限境界、fail-closed入力、決定性、入力不変を検証する。これらの合格はM2 pre-gateソフトウェアの合格だけを意味する。

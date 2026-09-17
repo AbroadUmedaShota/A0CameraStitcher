@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "a0.self-authored-vector-spec.v1",
+  "fixtureId": "vector-locked-holdout-edge",
+  "marker": "Synthetic",
+  "authoringSource": "in-house-original-work",
+  "qualityDecision": "not-evaluated",
+  "containsCustomerContent": false,
+  "containsCameraIdentity": false,
+  "containsLicensedSdkMaterial": false,
+  "features": ["slanted-edges", "concentric-circles", "corner-detail", "margin-markers"],
+  "injectedDamage": null
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/corpus-rights-record.schema.json",
+  "title": "A0 corpus rights record v1",
+  "description": "Rights and provenance metadata for self-authored software-only corpus assets. It never carries customer content, camera identities, or licensed SDK material.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordId", "status", "rightsBasis", "rightsHolderRole", "reviewedAtUtc", "reviewerRole", "approvedUses", "prohibitedContent", "assets"],
+  "properties": {
+    "schemaVersion": { "const": "a0.corpus-rights-record.v1" },
+    "recordId": { "$ref": "#/$defs/token" },
+    "status": { "const": "cleared" },
+    "rightsBasis": { "enum": ["in-house-original-work", "documented-capture-rights"] },
+    "rightsHolderRole": { "$ref": "#/$defs/token" },
+    "reviewedAtUtc": { "type": "string", "format": "date-time" },
+    "reviewerRole": { "$ref": "#/$defs/token" },
+    "approvedUses": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "enum": ["calibration-design", "development-validation", "locked-holdout-evaluation", "release-confirmation"] }
+    },
+    "prohibitedContent": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "enum": ["customer-original", "production-capture", "camera-serial-or-identity", "licensed-sdk-material"] }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/asset" }
+    }
+  },
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetId", "assetKind", "repositoryPath", "externalObjectId", "contentSha256", "source", "containsCustomerContent", "containsCameraIdentity", "containsLicensedSdkMaterial"],
+      "properties": {
+        "assetId": { "$ref": "#/$defs/token" },
+        "assetKind": { "enum": ["SelfAuthoredVectorSpec", "ExternalD810Pair"] },
+        "repositoryPath": { "type": ["string", "null"], "pattern": "^samples/public/corpus-contracts/vector-specs/[a-z0-9-]+\\.json$" },
+        "externalObjectId": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "source": { "enum": ["created-in-house", "approved-external-corpus-store"] },
+        "containsCustomerContent": { "const": false },
+        "containsCameraIdentity": { "const": false },
+        "containsLicensedSdkMaterial": { "const": false }
+      },
+      "allOf": [
+        { "if": { "properties": { "assetKind": { "const": "SelfAuthoredVectorSpec" } }, "required": ["assetKind"] }, "then": { "properties": { "repositoryPath": { "type": "string" }, "externalObjectId": { "const": null }, "source": { "const": "created-in-house" } } } },
+        { "if": { "properties": { "assetKind": { "const": "ExternalD810Pair" } }, "required": ["assetKind"] }, "then": { "properties": { "repositoryPath": { "const": null }, "externalObjectId": { "$ref": "#/$defs/token" }, "source": { "const": "approved-external-corpus-store" } } } }
+      ]
+    }
+  }
+}

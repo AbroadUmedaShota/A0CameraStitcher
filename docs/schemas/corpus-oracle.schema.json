@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/corpus-oracle.schema.json",
+  "title": "A0 independent corpus oracle definition v1",
+  "description": "A software-only failure-sensitivity oracle. It defines expected contract outcomes without reusing production output, metrics, training features, or unapproved A0 thresholds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "oracleId", "oracleVersion", "approvalState", "qualityDecision", "scope", "method", "independence", "expectedOutcomes"],
+  "properties": {
+    "schemaVersion": { "const": "a0.corpus-oracle.v1" },
+    "oracleId": { "$ref": "#/$defs/token" },
+    "oracleVersion": { "const": 1 },
+    "approvalState": { "const": "contract-example" },
+    "qualityDecision": { "const": "not-evaluated" },
+    "scope": { "const": "synthetic-vector-contract-sensitivity-only" },
+    "method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "specificationId", "specificationSha256", "decisionSource"],
+      "properties": {
+        "kind": { "const": "independent-reference-annotation" },
+        "specificationId": { "$ref": "#/$defs/token" },
+        "specificationSha256": { "$ref": "#/$defs/sha256" },
+        "decisionSource": { "const": "predeclared-fixture-intent" }
+      }
+    },
+    "independence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oracleOwnerRole", "productionPipelineOwnerRole", "usesProductionImplementation", "usesProductionMetricOutput", "usesTrainingFeatures", "derivesExpectedFromProductOutput", "independentReviewStatus", "independentReviewerRole"],
+      "properties": {
+        "oracleOwnerRole": { "$ref": "#/$defs/token" },
+        "productionPipelineOwnerRole": { "$ref": "#/$defs/token" },
+        "usesProductionImplementation": { "const": false },
+        "usesProductionMetricOutput": { "const": false },
+        "usesTrainingFeatures": { "const": false },
+        "derivesExpectedFromProductOutput": { "const": false },
+        "independentReviewStatus": { "const": "reviewed" },
+        "independentReviewerRole": { "$ref": "#/$defs/token" }
+      }
+    },
+    "expectedOutcomes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/expectedOutcome" }
+    }
+  },
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "expectedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtureId", "outcome", "failureCode"],
+      "properties": {
+        "fixtureId": { "$ref": "#/$defs/token" },
+        "outcome": { "enum": ["Accept", "Reject"] },
+        "failureCode": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "outcome": { "const": "Accept" } }, "required": ["outcome"] }, "then": { "properties": { "failureCode": { "const": null } } } },
+        { "if": { "properties": { "outcome": { "const": "Reject" } }, "required": ["outcome"] }, "then": { "properties": { "failureCode": { "type": "string" } } } }
+      ]
+    }
+  }
+}

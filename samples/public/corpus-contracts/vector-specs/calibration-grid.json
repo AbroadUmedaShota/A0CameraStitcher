@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "a0.self-authored-vector-spec.v1",
+  "fixtureId": "vector-calibration-grid",
+  "marker": "Synthetic",
+  "authoringSource": "in-house-original-work",
+  "qualityDecision": "not-evaluated",
+  "containsCustomerContent": false,
+  "containsCameraIdentity": false,
+  "containsLicensedSdkMaterial": false,
+  "features": ["orthogonal-grid", "corner-fiducials", "center-cross", "neutral-patches"],
+  "injectedDamage": null
+}
