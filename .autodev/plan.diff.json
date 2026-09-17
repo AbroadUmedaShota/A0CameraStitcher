@@ -1,9 +1,9 @@
 {
   "schema_version": "autodev.plan-diff.v1",
-  "plan_version": "2.16.0",
-  "base_plan_version": "2.15.0",
-  "generated_at": "2026-09-12",
-  "summary": "Synchronize post-PR186 requirements and M1B planning: separate required behavior from observed implementation and hardware acceptance. The same-binding 10-pair runner is implemented; the mandatory 100-pair runner is not. The 600-second server/request budget is not a hard-kill guarantee. Preserve the one-shot -> 10 -> measured-p95 approval -> 100 acceptance chain, all IDs/dependencies/human decisions, and the complete previous diff.",
+  "plan_version": "2.17.0",
+  "base_plan_version": "2.16.0",
+  "generated_at": "2026-09-17",
+  "summary": "Reconcile main 712ba9d and issue state into a minimal next-action package. The 100-pair coordinator and fake-only tests are merged, but production UI/CLI wiring and host-lifetime compatibility remain mandatory before hardware 100/100. Preserve the one-shot -> 10 -> measured-p95 approval -> 100 chain and keep A0 quality, rig, corpus, packaging, and Post-MVP work separate.",
   "added_milestones": [],
   "changed_milestones": [
     "M1B"
@@ -11,9 +11,6 @@
   "removed_milestones": [],
   "added_work_items": [],
   "changed_work_items": [
-    "WI-0015",
-    "WI-0016",
-    "WI-0016A",
     "WI-0017"
   ],
   "removed_work_items": [],
@@ -26,11 +23,11 @@
     "CaptureRecoveryOnly evidence does not prove approved-rig behavior, stitching, A0 output quality, packaging, release, or shutter synchronization",
     "CI and local software validation do not establish hardware acceptance. Any billing/quota block encountered must be recorded as environment-blocked, not Pass.",
     "no camera serial, SDK archive or licensed binary, credential, customer original, captured image, or non-redacted hardware identity may be committed",
-    "The implemented 10-pair runner has no established Dual hardware acceptance; the unimplemented 100-pair runner remains a future mandatory requirement.",
+    "The implemented 10-pair runner has no established Dual hardware acceptance; the merged internal 100-pair coordinator remains deliberately unwired and is not a production runner.",
     "The 600-second default is a server/request lifetime budget, not a guaranteed process-exit deadline; cleanup may exceed it and hardware-run compatibility is not established.",
     "This synchronization does not run hardware, close human decisions, promote completion, reprioritize work, or authorize release. PRODUCT_REQUIREMENTS.md:35-39 remains a pinned pre-synchronization note outside this six-file scope."
   ],
-  "source_commit": "0b446acc5d2062cca7c7c140e505c6020ee7bcd3",
+  "source_commit": "712ba9d298ef01ad413f825b83c3e4abfaef1f16",
   "history": [
     {
       "schema_version": "autodev.plan-diff.v1",
