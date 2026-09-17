@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "a0.self-authored-vector-spec.v1",
+  "fixtureId": "vector-release-layout",
+  "marker": "Synthetic",
+  "authoringSource": "in-house-original-work",
+  "qualityDecision": "not-evaluated",
+  "containsCustomerContent": false,
+  "containsCameraIdentity": false,
+  "containsLicensedSdkMaterial": false,
+  "features": ["page-outline", "center-cross", "corner-fiducials", "dummy-glyph-blocks"],
+  "injectedDamage": null
+}

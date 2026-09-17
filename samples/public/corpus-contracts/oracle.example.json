@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "a0.corpus-oracle.v1",
+  "oracleId": "oracle-vector-contract-v1",
+  "oracleVersion": 1,
+  "approvalState": "contract-example",
+  "qualityDecision": "not-evaluated",
+  "scope": "synthetic-vector-contract-sensitivity-only",
+  "method": {
+    "kind": "independent-reference-annotation",
+    "specificationId": "vector-contract-intent-v1",
+    "specificationSha256": "b7d6c0975d79f9b888dc3a45da754d98d74fb45f3b82a047657f4e4520bc77a2",
+    "decisionSource": "predeclared-fixture-intent"
+  },
+  "independence": {
+    "oracleOwnerRole": "quality-contract-owner",
+    "productionPipelineOwnerRole": "stitch-pipeline-owner",
+    "usesProductionImplementation": false,
+    "usesProductionMetricOutput": false,
+    "usesTrainingFeatures": false,
+    "derivesExpectedFromProductOutput": false,
+    "independentReviewStatus": "reviewed",
+    "independentReviewerRole": "independent-quality-reviewer"
+  },
+  "expectedOutcomes": [
+    { "fixtureId": "vector-calibration-grid", "outcome": "Accept", "failureCode": null },
+    { "fixtureId": "vector-development-seam", "outcome": "Accept", "failureCode": null },
+    { "fixtureId": "vector-development-seam-damaged", "outcome": "Reject", "failureCode": "declared-damage-detected" },
+    { "fixtureId": "vector-locked-holdout-edge", "outcome": "Accept", "failureCode": null },
+    { "fixtureId": "vector-release-layout", "outcome": "Accept", "failureCode": null }
+  ]
+}
