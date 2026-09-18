@@ -2479,11 +2479,12 @@ void TestHybridPairSharedWatchdogStopsBeforeCamB() {
     HybridSdkFake sdk;
     EvidenceWriter evidence(root / "artifacts", "run-hybrid-pair-shared-watchdog", sdk.SdkVersion());
     Timeouts timeouts;
-    timeouts.transaction_watchdog = std::chrono::seconds(2);
+    timeouts.transaction_watchdog = std::chrono::hours(24);
+    auto current_time = std::chrono::steady_clock::now();
     const auto pair = ExecuteHybridCapturePair(
-        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", timeouts, [] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-        });
+        wpd, wpd, sdk, sdk, evidence, "wpd-a", "sdk-a", "wpd-b", "sdk-b", timeouts,
+        [&] { current_time += timeouts.transaction_watchdog; }, {}, {},
+        [&] { return current_time; });
 
     Check(pair.cam_a.terminal_state == "Complete" && pair.terminal_state == "FailedPartial" &&
               pair.error_category == "transaction_watchdog" && !pair.cam_b_started,

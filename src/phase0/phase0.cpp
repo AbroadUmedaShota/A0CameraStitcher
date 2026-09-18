@@ -1571,15 +1571,19 @@ HybridPairResult ExecuteHybridCapturePair(
     Timeouts timeouts,
     const std::function<void()>& before_cam_b,
     const std::function<void()>& before_cam_a_wpd_recovery,
-    const std::function<void()>& before_cam_b_wpd_recovery) {
+    const std::function<void()>& before_cam_b_wpd_recovery,
+    const std::function<std::chrono::steady_clock::time_point()>& steady_now) {
     HybridPairResult pair;
     pair.run_id = evidence.RunId();
     pair.pair_id = "hybrid-pair-" + NewRunId().substr(4);
-    const auto started = std::chrono::steady_clock::now();
+    const auto now = [&] {
+        return steady_now ? steady_now() : std::chrono::steady_clock::now();
+    };
+    const auto started = now();
     const auto deadline = started + timeouts.transaction_watchdog;
     const auto finish = [&] {
         pair.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started);
+            now() - started);
     };
     const auto fail = [&](std::string category, std::string detail, std::string_view alias) {
         pair.terminal_state = "FailedPartial";
@@ -1607,7 +1611,7 @@ HybridPairResult ExecuteHybridCapturePair(
         finish();
         return pair;
     }
-    if (std::chrono::steady_clock::now() >= deadline) {
+    if (now() >= deadline) {
         fail("transaction_watchdog", "pair transaction watchdog expired before CAM-B", "CAM-B");
         finish();
         return pair;
