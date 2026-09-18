@@ -217,6 +217,19 @@ std::string ProtocolRejection(
     return output.str();
 }
 
+std::string InvalidatedProtocolRejection(
+    std::string_view request_id,
+    std::string_view code,
+    std::string_view message,
+    std::string_view session_id) {
+    std::ostringstream output;
+    output << ResponsePrefix(request_id, false, code) << "{\"sessionId\":\""
+           << ::a0::common::protocol_json::JsonEscape(session_id)
+           << "\",\"state\":\"Invalid\",\"invalidationReason\":\"SdkError\",\"detail\":\""
+           << ::a0::common::protocol_json::JsonEscape(message) << "\"}}";
+    return output.str();
+}
+
 } // namespace
 
 DualBindingCameraAgentProtocolError::DualBindingCameraAgentProtocolError(
@@ -676,16 +689,16 @@ std::string DualBindingCameraAgentDispatcher::HandleStartCandidateLiveView(
         const std::size_t previous_ordinal = *active_live_view_ordinal_;
         if (!adapter_->StopLiveView(previous_ordinal)) {
             InvalidateSession(DualIdentityInvalidationReason::SdkError);
-            return ProtocolRejection(
+            return InvalidatedProtocolRejection(
                 request.request_id, "LiveViewStopFailed",
-                "the previously running Live View could not be stopped");
+                "the previously running Live View could not be stopped", session_id_);
         }
         active_live_view_ordinal_.reset();
         if (!adapter_->CloseCandidateSession(previous_ordinal)) {
             InvalidateSession(DualIdentityInvalidationReason::SdkError);
-            return ProtocolRejection(
+            return InvalidatedProtocolRejection(
                 request.request_id, "SdkSessionCloseFailed",
-                "the previously viewed candidate SDK session could not be closed");
+                "the previously viewed candidate SDK session could not be closed", session_id_);
         }
         if (std::find(quiesced_ordinals_.begin(), quiesced_ordinals_.end(),
                       previous_ordinal) == quiesced_ordinals_.end()) {
