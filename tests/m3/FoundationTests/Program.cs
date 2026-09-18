@@ -42,6 +42,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("dual binding cancellation ends SDK state once and clears client state", DualBindingCancellationAsync),
     ("dual binding refuses duplicate candidate and alias assignments", DualBindingRefusesDuplicateAssignmentsAsync),
     ("dual binding shows one candidate Live View at a time", DualBindingShowsOneLiveViewAtATimeAsync),
+    ("dual binding Live View refusals mirror Agent state", DualBindingLiveViewRefusalsMirrorAgentStateAsync),
     ("dual binding never reaches Ready with an unquiesced body", DualBindingQuiesceFailureNeverReachesReadyAsync),
     ("dual binding invalidation forces a re-binding with its reason", DualBindingTypedInvalidationForcesRebindAsync),
     ("dual binding refuses a session issued before an Agent restart", DualBindingRestartRefusesTheOldSessionAsync),
@@ -3089,6 +3090,47 @@ static async Task DualBindingShowsOneLiveViewAtATimeAsync()
     Check.False(reopened.Succeeded, "An assigned candidate's Live View must not reopen.");
     Check.Equal("CandidateAlreadyAssigned", reopened.Refusal!.ResultCode);
     Check.Equal(0, agent.ActiveLiveViewCount);
+}
+
+static async Task DualBindingLiveViewRefusalsMirrorAgentStateAsync()
+{
+    var client = BindingClient(null, out var agent);
+    await client.BeginBindingAsync();
+    await client.StartCandidateLiveViewAsync(1);
+    await client.GetCandidateLiveViewFrameAsync(1);
+    await client.ConfirmAliasAsync(1, DualBindingCameraAgentProtocol.CameraAliasA);
+    await client.StartCandidateLiveViewAsync(0);
+
+    var assigned = await client.StartCandidateLiveViewAsync(1);
+    Check.Equal("CandidateAlreadyAssigned", assigned.Refusal!.ResultCode);
+    Check.Equal(0, client.ActiveLiveViewOrdinal);
+    Check.Equal(1, agent.ActiveLiveViewCount);
+
+    foreach (var options in new[]
+    {
+        new SimulatedDualBindingOptions { FailStopLiveView = true },
+        new SimulatedDualBindingOptions { FailCloseCandidateSessionOnLiveViewSwitch = true },
+    })
+    {
+        var invalidated = BindingClient(options, out _);
+        await invalidated.BeginBindingAsync();
+        await invalidated.StartCandidateLiveViewAsync(0);
+
+        var refused = await invalidated.StartCandidateLiveViewAsync(1);
+        Check.False(refused.Succeeded, "A failed switch must be refused.");
+        Check.Equal(DualBindingSessionState.Invalid, invalidated.State);
+        Check.Equal(DualBindingInvalidationReason.SdkError, invalidated.InvalidationReason);
+        Check.Equal(null, invalidated.ActiveLiveViewOrdinal);
+        Check.True(invalidated.RequiresRebinding, "An invalid Agent state must require re-binding.");
+    }
+
+    var startFailed = BindingClient(
+        new SimulatedDualBindingOptions { FailStartLiveView = true }, out _);
+    await startFailed.BeginBindingAsync();
+    var refusedStart = await startFailed.StartCandidateLiveViewAsync(0);
+    Check.Equal("LiveViewStartFailed", refusedStart.Refusal!.ResultCode);
+    Check.Equal(null, startFailed.ActiveLiveViewOrdinal);
+    Check.False(startFailed.RequiresRebinding, "A start refusal without invalidation remains retryable.");
 }
 
 static async Task DualBindingQuiesceFailureNeverReachesReadyAsync()

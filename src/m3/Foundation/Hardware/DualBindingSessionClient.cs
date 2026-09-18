@@ -148,7 +148,15 @@ public sealed class DualBindingSessionClient
         }
         else
         {
-            ActiveLiveViewOrdinal = null;
+            if (reply.Refusal!.ResultCode is not "BindingNotCollecting" and
+                not "UnknownCandidateOrdinal" and
+                not "CandidateAlreadyAssigned")
+            {
+                // Every other start refusal can follow a successful stop of the previous body.
+                // Without an explicit Agent guarantee that it stayed active, fail closed locally.
+                ActiveLiveViewOrdinal = null;
+            }
+
             ApplyRefusal(reply.Refusal!);
         }
 
@@ -590,10 +598,21 @@ public sealed class DualBindingSessionClient
 
             default:
                 // Everything else -- an unknown ordinal, a duplicate alias, a Live View that would
-                // not start -- leaves the session usable. The operator retries the step.
+                // not start -- normally leaves the session usable. The Agent state remains the
+                // authority: an SDK stop/close failure or a future refusal may invalidate it.
                 if (refusal.State != DualBindingSessionState.None)
                 {
                     State = refusal.State;
+                }
+
+                if (State == DualBindingSessionState.Invalid)
+                {
+                    if (InvalidationReason == DualBindingInvalidationReason.None)
+                    {
+                        InvalidationReason = refusal.InvalidationReason;
+                    }
+
+                    DiscardSessionArtifacts();
                 }
 
                 break;

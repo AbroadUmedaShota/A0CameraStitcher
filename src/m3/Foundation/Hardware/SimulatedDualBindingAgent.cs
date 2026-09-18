@@ -298,11 +298,21 @@ public sealed class SimulatedDualBindingAgent
                 return Rejection(
                     requestId,
                     "LiveViewStopFailed",
-                    "The previously running Live View could not be stopped.");
+                    "The previously running Live View could not be stopped.",
+                    WriteInvalidState);
             }
 
             FindCandidate(active)!.LiveViewActive = false;
             _activeLiveViewOrdinal = null;
+            if (_options.FailCloseCandidateSessionOnLiveViewSwitch)
+            {
+                Invalidate(DualBindingInvalidationReason.SdkError);
+                return Rejection(
+                    requestId,
+                    "SdkSessionCloseFailed",
+                    "The previously viewed candidate SDK session could not be closed.",
+                    WriteInvalidState);
+            }
         }
 
         if (_activeLiveViewOrdinal is null)
@@ -626,10 +636,15 @@ public sealed class SimulatedDualBindingAgent
     private string InvalidatedRejection(string requestId) =>
         Rejection(requestId, "BindingInvalidated", "The binding session is no longer trustworthy.", writer =>
         {
-            writer.WriteString("sessionId", _sessionId);
-            writer.WriteString("state", DualBindingSessionState.Invalid.ToString());
-            writer.WriteString("invalidationReason", _invalidationReason.ToString());
+            WriteInvalidState(writer);
         });
+
+    private void WriteInvalidState(Utf8JsonWriter writer)
+    {
+        writer.WriteString("sessionId", _sessionId);
+        writer.WriteString("state", DualBindingSessionState.Invalid.ToString());
+        writer.WriteString("invalidationReason", _invalidationReason.ToString());
+    }
 
     private static string Success(string requestId, string resultCode, Action<Utf8JsonWriter> writePayload) =>
         Envelope(requestId, true, resultCode, writePayload);
@@ -700,6 +715,7 @@ public sealed record SimulatedDualBindingOptions
         SimulatedSourceObjectTokenStyle.Distinct;
     public bool FailStartLiveView { get; init; }
     public bool FailStopLiveView { get; init; }
+    public bool FailCloseCandidateSessionOnLiveViewSwitch { get; init; }
     public bool FailCloseCandidateSession { get; init; }
     public bool FailEndBindingSession { get; init; }
     public int LiveViewFrameBytes { get; init; } = 4096;

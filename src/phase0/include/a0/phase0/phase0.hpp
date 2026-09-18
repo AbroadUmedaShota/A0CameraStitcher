@@ -812,7 +812,8 @@ private:
     Timeouts timeouts = {},
     const std::function<void()>& before_cam_b = {},
     const std::function<void()>& before_cam_a_wpd_recovery = {},
-    const std::function<void()>& before_cam_b_wpd_recovery = {});
+    const std::function<void()>& before_cam_b_wpd_recovery = {},
+    const std::function<std::chrono::steady_clock::time_point()>& steady_now = {});
 [[nodiscard]] HybridPairRunSummary ExecuteHybridPairRun(
     int requested_pairs,
     const std::function<HybridPairResult()>& capture_pair_once);

@@ -655,6 +655,10 @@ void AFailedStopPreventsASecondLiveView() {
         !Succeeded(refused) && ResultCode(refused) == "LiveViewStopFailed",
         "a Live View that will not stop blocks the next one from starting");
     Check(
+        refused.find("\"state\":\"Invalid\"") != std::string::npos &&
+            refused.find("\"invalidationReason\":\"SdkError\"") != std::string::npos,
+        "the first stop failure response must tell the client the binding is invalid");
+    Check(
         harness.adapter->ActiveLiveViewCount() == 1,
         "the refused switch left the original Live View running and no second one");
     Check(
@@ -673,6 +677,10 @@ void AFailedSourceClosePreventsASecondLiveView() {
     Check(
         !Succeeded(refused) && ResultCode(refused) == "SdkSessionCloseFailed",
         "a candidate Source that will not close blocks the next Live View");
+    Check(
+        refused.find("\"state\":\"Invalid\"") != std::string::npos &&
+            refused.find("\"invalidationReason\":\"SdkError\"") != std::string::npos,
+        "the first close failure response must tell the client the binding is invalid");
     Check(
         harness.adapter->ActiveLiveViewCount() == 0,
         "the failed Source close does not start a second Live View");
