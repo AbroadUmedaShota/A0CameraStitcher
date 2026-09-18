@@ -688,20 +688,13 @@ CameraInfo ResolveCamera(
     const fs::path& camera_map,
     std::string_view alias) {
     IdentityMap identity_map(camera_map);
-    std::optional<CameraInfo> selected;
-    for (const auto& camera : cameras) {
-        const auto existing_alias = identity_map.FindAlias(camera.stable_identity);
-        if (!existing_alias) {
-            throw std::runtime_error(
-                "enumerated D810 is not explicitly bound; connect one body at a time and run bind-cross-transport-identity");
-        }
-        if (*existing_alias == alias) {
-            if (selected) throw std::runtime_error("multiple cameras resolved to the requested alias");
-            selected = camera;
-        }
-    }
-    if (!selected) throw std::runtime_error("requested camera alias is not available");
-    return *selected;
+    return ResolveMappedCamera(
+        cameras,
+        identity_map,
+        alias,
+        "camera_identity_unbound",
+        "camera_alias_unavailable",
+        "camera_alias_ambiguous");
 }
 
 CameraInfo ResolveCamera(
@@ -1205,17 +1198,14 @@ int RunSpoolStatus(const Options& options) {
     WpdTransport transport(options.wpd_command_target);
     WpdSpoolStatusSummary status;
     try {
-        const auto camera = ResolveProductSingleWpdCamera(options, transport);
-        status.payload_object_count = transport.InspectSpoolPayloadCount(
-            camera.stable_identity, std::chrono::seconds(10));
-        status.wpd_sessions_closed = 1;
-        status.terminal_state = "Complete";
-    } catch (const TransportError& error) {
-        status.terminal_state = "Failed";
-        status.failed_stage = error.Category();
+        const IdentityMap identity_map(WpdIdentityMapPath(options));
+        status = InspectWpdSpoolStatusReadOnly(
+            transport, identity_map, options.alias, std::chrono::seconds(10));
     } catch (const std::exception&) {
         status.terminal_state = "Failed";
-        status.failed_stage = "resolve_or_inspect";
+        status.failure_category = "wpd_identity_map_unavailable";
+        status.failure_detail = "the local WPD identity map could not be read";
+        status.failed_stage = status.failure_category;
     }
     const auto summary = PersistWpdSpoolStatusSummary(
         options.artifacts, run_id, options.alias, status);
@@ -1224,6 +1214,12 @@ int RunSpoolStatus(const Options& options) {
     std::cout << "RunId: " << run_id
               << "\nCameraAlias: " << options.alias
               << "\nPayloadObjectCount: " << status.payload_object_count
+              << "\nEnumeratedD810Count: " << status.enumerated_d810_count
+              << "\nStillImageCompatibleCount: " << status.still_image_compatible_count
+              << "\nInventorySessionsOpened: " << status.inventory_sessions_opened
+              << "\nInventorySessionsClosed: " << status.inventory_sessions_closed
+              << "\nInventoryCloseConfirmed: "
+              << (status.inventory_close_confirmed ? "true" : "false")
               << "\nSpoolState: "
               << (status.terminal_state == "Complete"
                       ? (status.payload_object_count == 0 ? "EMPTY" : "NON_EMPTY")
@@ -1235,6 +1231,8 @@ int RunSpoolStatus(const Options& options) {
               << "\nWpdSessionsClosed: " << status.wpd_sessions_closed
               << "\nTerminalState: " << status.terminal_state
               << "\nFailedStage: " << status.failed_stage
+              << "\nFailureCategory: " << status.failure_category
+              << "\nFailureDetail: " << status.failure_detail
               << "\nRealIdentifiersPrinted: false"
               << "\nSummaryPath: " << summary.string() << '\n';
     return status.terminal_state == "Complete" ? 0 : 5;

@@ -355,6 +355,47 @@ public:
     std::string sequence;
 };
 
+class WpdSpoolStatusFake final : public IWpdSpoolStatusTransport {
+public:
+    [[nodiscard]] std::vector<CameraInfo> EnumerateForSpoolStatus(
+        WpdSpoolInventoryObservation& output) override {
+        ++enumerations;
+        output = observation;
+        if (!enumeration_failure_category.empty()) {
+            throw TransportError(
+                enumeration_failure_category,
+                "configured anonymous WPD inventory failure");
+        }
+        return cameras;
+    }
+
+    [[nodiscard]] std::size_t InspectSpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds) override {
+        ++inspections;
+        inspected_identity = std::string(stable_identity);
+        if (!inspection_failure_category.empty()) {
+            throw TransportError(
+                inspection_failure_category,
+                "configured anonymous WPD spool inspection failure");
+        }
+        return payload_object_count;
+    }
+
+    WpdSpoolInventoryObservation observation;
+    std::vector<CameraInfo> cameras;
+    std::string enumeration_failure_category;
+    std::string inspection_failure_category;
+    std::string inspected_identity;
+    std::size_t payload_object_count{};
+    int enumerations{};
+    int inspections{};
+};
+
+static_assert(!ExposesCaptureToCard<IWpdSpoolStatusTransport>);
+static_assert(!ExposesRecoveredObjectDelete<IWpdSpoolStatusTransport>);
+static_assert(!ExposesLiveViewOpen<IWpdSpoolStatusTransport>);
+
 void Check(bool condition, const std::string& message) {
     if (!condition) {
         ++failures;
@@ -1120,26 +1161,181 @@ void TestWpdPayloadFingerprintRequiresFreshExactIdentity() {
         "a refreshed one-camera topology with a replacement identity must block before open");
 }
 
+void TestWpdSpoolStatusDistinguishesCapabilityAndIdentityFailures() {
+    IdentityMap identity_map(
+        {}, std::optional<std::string>{"bound-cam-a"}, std::nullopt);
+
+    WpdSpoolStatusFake incompatible;
+    incompatible.observation = {1, 0, 1, 1};
+    const auto unavailable = InspectWpdSpoolStatusReadOnly(
+        incompatible, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        unavailable.terminal_state == "Failed" &&
+            unavailable.failure_category == "wpd_alias_unavailable" &&
+            unavailable.enumerated_d810_count == 1 &&
+            unavailable.still_image_compatible_count == 0 &&
+            unavailable.inventory_close_confirmed &&
+            incompatible.inspections == 0,
+        "a D810 filtered by WPD capability must be distinguishable without opening its spool");
+
+    WpdSpoolStatusFake unbound;
+    unbound.observation = {1, 1, 1, 1};
+    unbound.cameras = {{"Nikon D810", "test", "S", "private-unbound-identity"}};
+    const auto identity_failure = InspectWpdSpoolStatusReadOnly(
+        unbound, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        identity_failure.terminal_state == "Failed" &&
+            identity_failure.failure_category == "wpd_identity_unbound" &&
+            identity_failure.enumerated_d810_count == 1 &&
+            identity_failure.still_image_compatible_count == 1 &&
+            identity_failure.inventory_close_confirmed &&
+            unbound.inspections == 0,
+        "an unbound compatible D810 must be distinguishable without opening its spool");
+    Check(
+        identity_failure.failure_detail.find("private-unbound-identity") == std::string::npos,
+        "typed WPD identity failures must not retain the camera identity");
+}
+
+void TestWpdSpoolStatusRequiresClosedInventoryAndSupportsReadOnlySuccess() {
+    IdentityMap identity_map(
+        {}, std::optional<std::string>{"bound-cam-a"}, std::nullopt);
+
+    WpdSpoolStatusFake unclosed;
+    unclosed.observation = {1, 1, 1, 0};
+    unclosed.cameras = {{"Nikon D810", "test", "S", "bound-cam-a"}};
+    const auto close_failure = InspectWpdSpoolStatusReadOnly(
+        unclosed, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        close_failure.failure_category == "wpd_inventory_close_unconfirmed" &&
+            !close_failure.inventory_close_confirmed &&
+            unclosed.inspections == 0,
+        "an unconfirmed inventory close must stop before spool inspection");
+
+    WpdSpoolStatusFake ambiguous;
+    ambiguous.observation = {2, 2, 2, 2};
+    ambiguous.cameras = {
+        {"Nikon D810", "test", "S", "bound-cam-a"},
+        {"Nikon D810", "test", "S", "bound-cam-a"},
+    };
+    const auto ambiguous_failure = InspectWpdSpoolStatusReadOnly(
+        ambiguous, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        ambiguous_failure.failure_category == "wpd_alias_ambiguous" &&
+            ambiguous.inspections == 0,
+        "multiple WPD candidates for one alias must fail before spool inspection");
+
+    WpdSpoolStatusFake successful;
+    successful.observation = {1, 1, 1, 1};
+    successful.cameras = {{"Nikon D810", "test", "S", "bound-cam-a"}};
+    successful.payload_object_count = 0;
+    const auto complete = InspectWpdSpoolStatusReadOnly(
+        successful, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        complete.terminal_state == "Complete" &&
+            complete.failure_category.empty() &&
+            complete.payload_object_count == 0 &&
+            complete.wpd_sessions_closed == 1 &&
+            complete.inventory_close_confirmed &&
+            successful.enumerations == 1 && successful.inspections == 1 &&
+            successful.inspected_identity == "bound-cam-a",
+        "a bound compatible D810 must perform one read-only spool inspection and close it");
+    Check(
+        !complete.capture_command_sent && !complete.camera_object_delete_attempted &&
+            !complete.camera_settings_changed && !complete.vendor_operation_executed,
+        "read-only spool success must retain every non-mutating safety marker");
+}
+
+void TestWpdSpoolStatusPreservesTransportFailureCategories() {
+    IdentityMap identity_map(
+        {}, std::optional<std::string>{"bound-cam-a"}, std::nullopt);
+
+    WpdSpoolStatusFake enumeration_failure;
+    enumeration_failure.observation = {1, 0, 1, 1};
+    enumeration_failure.enumeration_failure_category = "inventory_capability_failed";
+    const auto inventory_result = InspectWpdSpoolStatusReadOnly(
+        enumeration_failure, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        inventory_result.terminal_state == "Failed" &&
+            inventory_result.failure_category == "inventory_capability_failed" &&
+            inventory_result.enumerated_d810_count == 1 &&
+            inventory_result.inventory_close_confirmed &&
+            enumeration_failure.inspections == 0,
+        "a typed WPD inventory failure must retain its category and anonymous counts");
+
+    WpdSpoolStatusFake inspection_failure;
+    inspection_failure.observation = {1, 1, 1, 1};
+    inspection_failure.cameras = {
+        {"Nikon D810", "test", "S", "bound-cam-a"},
+    };
+    inspection_failure.inspection_failure_category = "read_payloads_failed";
+    const auto spool_result = InspectWpdSpoolStatusReadOnly(
+        inspection_failure, identity_map, "CAM-A", std::chrono::seconds(10));
+    Check(
+        spool_result.terminal_state == "Failed" &&
+            spool_result.failure_category == "read_payloads_failed" &&
+            spool_result.wpd_sessions_closed == 0 &&
+            spool_result.inventory_close_confirmed &&
+            inspection_failure.inspections == 1,
+        "a typed WPD spool inspection failure must retain its category without claiming close completion");
+    Check(
+        !spool_result.capture_command_sent &&
+            !spool_result.camera_object_delete_attempted &&
+            !spool_result.camera_settings_changed &&
+            !spool_result.vendor_operation_executed,
+        "typed WPD failures must retain every non-mutating safety marker");
+}
+
 void TestWpdSpoolStatusSummaryIsAnonymousAndReportable() {
     const auto root = NewTestRoot("wpd-spool-status-summary");
     WpdSpoolStatusSummary status;
     status.payload_object_count = 90;
+    status.enumerated_d810_count = 1;
+    status.still_image_compatible_count = 1;
+    status.inventory_sessions_opened = 1;
+    status.inventory_sessions_closed = 1;
+    status.inventory_close_confirmed = true;
     status.wpd_sessions_closed = 1;
     status.terminal_state = "Complete";
     const auto path = PersistWpdSpoolStatusSummary(
         root / "artifacts", "run-wpd-spool-status", "CAM-A", status);
     const auto body = ReadAll(path);
-    Check(body.find("\"payloadObjectCount\": 90") != std::string::npos &&
+    Check(body.find("\"schemaVersion\": \"phase0.wpd-spool-status-summary.v2\"") != std::string::npos &&
+              body.find("\"payloadObjectCount\": 90") != std::string::npos &&
+              body.find("\"enumeratedD810Count\": 1") != std::string::npos &&
+              body.find("\"stillImageCompatibleCount\": 1") != std::string::npos &&
+              body.find("\"inventorySessionsOpened\": 1") != std::string::npos &&
+              body.find("\"inventorySessionsClosed\": 1") != std::string::npos &&
+              body.find("\"inventoryCloseConfirmed\": true") != std::string::npos &&
               body.find("\"spoolState\": \"NON_EMPTY\"") != std::string::npos &&
               body.find("\"readOnlyObservation\": true") != std::string::npos &&
               body.find("\"captureCommandSent\": false") != std::string::npos &&
               body.find("\"cameraObjectDeleteAttempted\": false") != std::string::npos &&
               body.find("\"vendorOperationExecuted\": false") != std::string::npos &&
+              body.find("\"failureCategory\": \"\"") != std::string::npos &&
               body.find("\"objectIdentifiersIncluded\": false") != std::string::npos &&
               body.find("\"objectNamesIncluded\": false") != std::string::npos,
         "spool status summary must retain only aggregate non-mutating evidence");
     Check(body.find("private-camera") == std::string::npos && body.find("object-id") == std::string::npos,
         "spool status summary must not expose object or camera identities");
+
+    WpdSpoolStatusSummary failed;
+    failed.enumerated_d810_count = 1;
+    failed.inventory_sessions_opened = 1;
+    failed.inventory_sessions_closed = 1;
+    failed.inventory_close_confirmed = true;
+    failed.terminal_state = "Failed";
+    failed.failed_stage = "wpd_alias_unavailable";
+    failed.failure_category = "wpd_alias_unavailable";
+    failed.failure_detail = "the requested camera alias is unavailable";
+    const auto failed_path = PersistWpdSpoolStatusSummary(
+        root / "artifacts", "run-wpd-spool-failed", "CAM-A", failed);
+    const auto failed_body = ReadAll(failed_path);
+    Check(
+        failed_body.find("\"failureCategory\": \"wpd_alias_unavailable\"") != std::string::npos &&
+            failed_body.find("\"failureDetail\": \"the requested camera alias is unavailable\"") != std::string::npos &&
+            failed_body.find("\"spoolState\": \"UNKNOWN\"") != std::string::npos,
+        "failed spool status must persist its bounded anonymous category and detail");
+
     EvidenceWriter evidence(root / "artifacts", "run-wpd-spool-status", "test");
     evidence.GenerateRedactedReport(root / "reports");
     Check(fs::exists(root / "reports" / "run-wpd-spool-status" / "wpd-spool-status-summary.json"),
@@ -3107,6 +3303,9 @@ int main() {
         TestWpdSpoolCountsEveryPayloadType();
         TestWpdPayloadFingerprintIsOrderIndependentAndRetainsDuplicates();
         TestWpdPayloadFingerprintRequiresFreshExactIdentity();
+        TestWpdSpoolStatusDistinguishesCapabilityAndIdentityFailures();
+        TestWpdSpoolStatusRequiresClosedInventoryAndSupportsReadOnlySuccess();
+        TestWpdSpoolStatusPreservesTransportFailureCategories();
         TestWpdSpoolStatusSummaryIsAnonymousAndReportable();
         TestOperatorGateReadyThenContinue();
         TestOperatorGateTimeoutRefusesOverwrite();

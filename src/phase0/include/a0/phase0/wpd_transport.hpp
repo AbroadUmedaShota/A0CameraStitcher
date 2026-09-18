@@ -248,7 +248,8 @@ void ValidateWpdExactOneCurrentIdentity(
 class WpdTransport final : public ICameraTransport,
                            public IPostCardObservationTransport,
                            public ICorrelationObservationTransport,
-                           public IWpdDualReadOnlyProbeTransport {
+                           public IWpdDualReadOnlyProbeTransport,
+                           public IWpdSpoolStatusTransport {
 public:
     using BeforeCommandCallback = std::function<void()>;
 
@@ -260,6 +261,8 @@ public:
     WpdTransport& operator=(const WpdTransport&) = delete;
     [[nodiscard]] std::string SdkVersion() const override;
     [[nodiscard]] std::vector<CameraInfo> Enumerate() override;
+    [[nodiscard]] std::vector<CameraInfo> EnumerateForSpoolStatus(
+        WpdSpoolInventoryObservation& observation) override;
     [[nodiscard]] std::vector<CameraInfo>
         EnumerateForDualReadOnlyProbe() override;
     // Product Camera Agent only: refreshes at each open boundary and rejects
@@ -274,7 +277,7 @@ public:
     // object, closes the session, and returns only the anonymous count.
     [[nodiscard]] std::size_t InspectSpoolPayloadCount(
         std::string_view stable_identity,
-        std::chrono::seconds timeout);
+        std::chrono::seconds timeout) override;
     [[nodiscard]] WpdPayloadFingerprint InspectPayloadFingerprint(
         std::string_view stable_identity,
         std::chrono::seconds timeout);
