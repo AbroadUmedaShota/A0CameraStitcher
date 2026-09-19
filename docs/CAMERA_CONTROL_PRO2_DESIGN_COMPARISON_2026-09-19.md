@@ -115,3 +115,12 @@ PR #210統合前base `6132f12c...`（PC-direct既存実装の固定参照）:
 - CCP2の内部設計、D810固有のcallback順序、atomic保存・hash検証の有無は不明。
 - digiCamControlとlibgphoto2の現在のlicense適用・依存導入条件は、コード利用を検討する時点で別途確認する。今回はURLと設計比較のみ。
 - WPD failureのA/B分類は統合済みPR #210のsoftware testで確認済みだが、実機確認は未実施。
+
+## 現在の失敗に対する最小改善判断
+
+- 純正アプリの追加解析: 不要。既存の失敗はA0内で、read-only card内容確認に不要な`WPD_COMMAND_STILL_IMAGE_CAPTURE`広告をcamera選択条件にしていた経路と整合する。PR #210統合後の実機再実行前なので実機root cause確定とは扱わないが、CCP2内部実装の未知点を解消しなくても、このsoftware上の不要な依存を除去して検証できるため、追加解析を着手条件にしない。
+- 残す確認: D810検出、local identity mapによるalias照合、inventory sessionのclose確認、read-only content open、全payload object数、session close。これらは別個体操作、未close session、非empty spoolの誤認を直接防ぐ。
+- 統合する確認: 一回のD810 inventoryで個体照合に必要なidentityと、参考情報である撮影command広告を取得する。同じ個体情報の再取得やSDK/WPD往復は追加しない。
+- 削減候補: 撮影command広告をspool読取り可否の必須条件にしない。広告値は匿名診断として残すが、0であることだけを理由に`UNKNOWN`へ落とさない。identity、content open、payload列挙、closeのいずれかが失敗した場合は従来どおり`UNKNOWN`でfail-closedとする。
+- 成功条件: 登録済みの一台のD810について、inventoryを完全closeした後、同じidentityのread-only spool sessionでpayload数を取得してcloseできること。EMPTY判定はpayload数0のときだけであり、UNKNOWNをEMPTYへ丸めない。
+- 変更しない境界: capture、設定write、vendor operation、delete、format、retry、transport fallbackは追加しない。PC直接保存や空card要件の廃止は行わず、その変更が必要になった場合は代替証拠と残余riskを添えて別の設計判断とする。

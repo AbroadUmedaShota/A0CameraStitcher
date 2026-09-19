@@ -687,7 +687,11 @@ public:
             bool close_attempted = false;
             try {
                 compatible = GetSupportedWpdCommands(device.Get()).still_image_capture;
-                if (compatible) {
+                // Spool status only needs read-only content access. Keep the
+                // capture-command advertisement as diagnostic information,
+                // but do not use it to hide a D810 from identity resolution.
+                // Other callers still require the capture capability.
+                if (compatible || observation != nullptr) {
                     firmware = DeviceFirmware(device.Get());
                     identity = DeviceStableIdentity(device.Get());
                 }
@@ -713,10 +717,10 @@ public:
                 }
                 throw;
             }
-            if (!compatible) continue;
-            if (observation != nullptr) {
+            if (compatible && observation != nullptr) {
                 ++observation->still_image_compatible_count;
             }
+            if (!compatible && observation == nullptr) continue;
             DeviceRecord record{id, identity, WideToUtf8(friendly)};
             if (!devices_.emplace(record.stable_identity, record).second) {
                 throw TransportError("identity_collision", "multiple D810 devices reported the same WPD serial identity");
