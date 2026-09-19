@@ -1161,22 +1161,23 @@ void TestWpdPayloadFingerprintRequiresFreshExactIdentity() {
         "a refreshed one-camera topology with a replacement identity must block before open");
 }
 
-void TestWpdSpoolStatusDistinguishesCapabilityAndIdentityFailures() {
+void TestWpdSpoolStatusSeparatesCaptureCapabilityFromReadOnlyInspection() {
     IdentityMap identity_map(
         {}, std::optional<std::string>{"bound-cam-a"}, std::nullopt);
 
     WpdSpoolStatusFake incompatible;
     incompatible.observation = {1, 0, 1, 1};
-    const auto unavailable = InspectWpdSpoolStatusReadOnly(
+    incompatible.cameras = {{"Nikon D810", "test", "S", "bound-cam-a"}};
+    const auto readable = InspectWpdSpoolStatusReadOnly(
         incompatible, identity_map, "CAM-A", std::chrono::seconds(10));
     Check(
-        unavailable.terminal_state == "Failed" &&
-            unavailable.failure_category == "wpd_alias_unavailable" &&
-            unavailable.enumerated_d810_count == 1 &&
-            unavailable.still_image_compatible_count == 0 &&
-            unavailable.inventory_close_confirmed &&
-            incompatible.inspections == 0,
-        "a D810 filtered by WPD capability must be distinguishable without opening its spool");
+        readable.terminal_state == "Complete" &&
+            readable.failure_category.empty() &&
+            readable.enumerated_d810_count == 1 &&
+            readable.still_image_compatible_count == 0 &&
+            readable.inventory_close_confirmed &&
+            incompatible.inspections == 1,
+        "a bound D810 must remain readable when the unrelated WPD capture command is not advertised");
 
     WpdSpoolStatusFake unbound;
     unbound.observation = {1, 1, 1, 1};
@@ -3303,7 +3304,7 @@ int main() {
         TestWpdSpoolCountsEveryPayloadType();
         TestWpdPayloadFingerprintIsOrderIndependentAndRetainsDuplicates();
         TestWpdPayloadFingerprintRequiresFreshExactIdentity();
-        TestWpdSpoolStatusDistinguishesCapabilityAndIdentityFailures();
+        TestWpdSpoolStatusSeparatesCaptureCapabilityFromReadOnlyInspection();
         TestWpdSpoolStatusRequiresClosedInventoryAndSupportsReadOnlySuccess();
         TestWpdSpoolStatusPreservesTransportFailureCategories();
         TestWpdSpoolStatusSummaryIsAnonymousAndReportable();

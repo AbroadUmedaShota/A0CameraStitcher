@@ -1,6 +1,16 @@
 # 現在の開発状況
 
-更新日: 2026-09-17（PR #202のsoftware-only統合と未受入境界を反映）
+更新日: 2026-09-20（PR #212候補と全案件共通のAI駆動開発ルールを反映）
+
+## 利用版・起動・現在地
+
+- 採用版: `main`のPR #211統合commit `e256b2300484c9953db1e274909720a7dc7c77d8`。Camera Control Pro 2公開仕様との比較資料まで統合済み。
+- 改善候補: PR #212（実装commit `46d97b66cc85f3350130ee9182b2a37c67b53849`）。read-only `spool-status`のD810個体照合を、WPD撮影command広告の有無から分離した。実装commitは独立review PASS・GitHub software-only CI SUCCESS済み。後続は進行記録だけの更新で、current headのCI再確認中。未merge・未配布・実機未受入。
+- 起動方法: 承認済み候補artifactと期待SHA-256をreadinessで照合した後、Phase 0 CLIの`spool-status --alias CAM-A`を使用する。READMEのDebug例は開発用であり、実機候補を自動選択しない。実機実行にはその時点で適用可能な対象・artifact SHA・回数・no-retry条件の承認照合が必要。
+- 対応済み範囲: D810検出、local identity mapによるalias照合、inventory全session close、同一identityのread-only content open、全payload件数取得、checked close。撮影command広告は匿名診断に残すが、spool読取り成功条件には使わない。
+- 未対応・未確認: PR #212のmain統合、非広告D810を使う具体WPD COM分岐の実機確認、PC直接保存transaction、DualCamera実機受入、配布・実利用受入。`UNKNOWN`を`EMPTY`または成功へ丸めない。
+- 次行動: PR #212を統合司令の承認範囲でmainへ統合した後、固定artifactを作成する。実機は別途適用可能な承認を照合し、CAM-A単体のread-only `spool-status`から開始する。結果がidentity/content/payload/close以外の未知点を示す場合にだけ追加解析を判断する。
+- 人の判断が必要な事項: 実機操作・候補artifact差替え、未承認のtransport変更、配布、`HG-0001/0002/0005`。通常の可逆なsoftware修正・検証・PR更新はPM判断で継続する。
 
 ## 総合判定
 

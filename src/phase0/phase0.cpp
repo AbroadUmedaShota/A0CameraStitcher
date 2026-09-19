@@ -1990,8 +1990,8 @@ WpdSpoolStatusSummary InspectWpdSpoolStatusReadOnly(
     WpdSpoolInventoryObservation inventory;
     try {
         const auto cameras = transport.EnumerateForSpoolStatus(inventory);
-        if (inventory.still_image_compatible_count != cameras.size() ||
-            inventory.still_image_compatible_count > inventory.enumerated_d810_count ||
+        if (cameras.size() != inventory.enumerated_d810_count ||
+            inventory.still_image_compatible_count > cameras.size() ||
             inventory.inventory_sessions_closed > inventory.inventory_sessions_opened) {
             throw TransportError(
                 "wpd_inventory_diagnostic_mismatch",
