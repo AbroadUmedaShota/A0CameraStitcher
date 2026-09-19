@@ -5,7 +5,7 @@
 ## 利用版・起動・現在地
 
 - 採用版: `main`のPR #211統合commit `e256b2300484c9953db1e274909720a7dc7c77d8`。Camera Control Pro 2公開仕様との比較資料まで統合済み。
-- 改善候補: PR #212 head `46d97b66cc85f3350130ee9182b2a37c67b53849`。read-only `spool-status`のD810個体照合を、WPD撮影command広告の有無から分離した。2026-09-20時点ではPR提出・独立review PASS・GitHub software-only CI SUCCESSまでで、未merge・未配布・実機未受入。
+- 改善候補: PR #212（実装commit `46d97b66cc85f3350130ee9182b2a37c67b53849`）。read-only `spool-status`のD810個体照合を、WPD撮影command広告の有無から分離した。実装commitは独立review PASS・GitHub software-only CI SUCCESS済み。後続は進行記録だけの更新で、current headのCI再確認中。未merge・未配布・実機未受入。
 - 起動方法: 承認済み候補artifactと期待SHA-256をreadinessで照合した後、Phase 0 CLIの`spool-status --alias CAM-A`を使用する。READMEのDebug例は開発用であり、実機候補を自動選択しない。実機実行にはその時点で適用可能な対象・artifact SHA・回数・no-retry条件の承認照合が必要。
 - 対応済み範囲: D810検出、local identity mapによるalias照合、inventory全session close、同一identityのread-only content open、全payload件数取得、checked close。撮影command広告は匿名診断に残すが、spool読取り成功条件には使わない。
 - 未対応・未確認: PR #212のmain統合、非広告D810を使う具体WPD COM分岐の実機確認、PC直接保存transaction、DualCamera実機受入、配布・実利用受入。`UNKNOWN`を`EMPTY`または成功へ丸めない。
