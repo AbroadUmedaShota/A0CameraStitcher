@@ -636,7 +636,11 @@ public:
             CommandTargetPolicyName(command_target_policy_);
     }
 
-    std::vector<CameraInfo> Enumerate() {
+    std::vector<CameraInfo> Enumerate(
+        WpdSpoolInventoryObservation* observation = nullptr) {
+        if (observation != nullptr) {
+            *observation = {};
+        }
         devices_.clear();
         ComPtr<IPortableDeviceManager> manager;
         Check(CoCreateInstance(CLSID_PortableDeviceManager, nullptr, CLSCTX_INPROC_SERVER,
@@ -667,10 +671,16 @@ public:
             std::wstring id = ids.CopyAndRelease(index);
             const std::wstring friendly = DeviceFriendlyName(manager.Get(), id.c_str());
             if (!ContainsD810(friendly)) continue;
+            if (observation != nullptr) {
+                ++observation->enumerated_d810_count;
+            }
             // Inventory only reads capabilities, firmware, and the standard
             // device serial property. Capture opens a separate read/write
             // session later, after target validation.
             auto device = OpenDevice(id, "inventory_failed", GENERIC_READ);
+            if (observation != nullptr) {
+                ++observation->inventory_sessions_opened;
+            }
             std::string firmware;
             std::string identity;
             bool compatible = false;
@@ -684,6 +694,9 @@ public:
                 close_attempted = true;
                 Check(device->Close(), "inventory_close_failed",
                     "close WPD inventory device");
+                if (observation != nullptr) {
+                    ++observation->inventory_sessions_closed;
+                }
             } catch (...) {
                 // A close HRESULT failure is already the single checked close
                 // attempt for this session. Other inventory failures get one
@@ -694,10 +707,16 @@ public:
                     close_attempted = true;
                     Check(device->Close(), "inventory_close_failed",
                         "close WPD inventory device after error");
+                    if (observation != nullptr) {
+                        ++observation->inventory_sessions_closed;
+                    }
                 }
                 throw;
             }
             if (!compatible) continue;
+            if (observation != nullptr) {
+                ++observation->still_image_compatible_count;
+            }
             DeviceRecord record{id, identity, WideToUtf8(friendly)};
             if (!devices_.emplace(record.stable_identity, record).second) {
                 throw TransportError("identity_collision", "multiple D810 devices reported the same WPD serial identity");
@@ -1528,6 +1547,10 @@ std::string WpdTransport::SdkVersion() const {
     return impl_->SdkVersion();
 }
 std::vector<CameraInfo> WpdTransport::Enumerate() { return impl_->Enumerate(); }
+std::vector<CameraInfo> WpdTransport::EnumerateForSpoolStatus(
+    WpdSpoolInventoryObservation& observation) {
+    return impl_->Enumerate(&observation);
+}
 std::vector<CameraInfo> WpdTransport::EnumerateForDualReadOnlyProbe() {
     return impl_->Enumerate();
 }

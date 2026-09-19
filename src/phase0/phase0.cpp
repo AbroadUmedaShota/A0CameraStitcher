@@ -1949,6 +1949,93 @@ fs::path PersistWpdStatusSummary(
     return summary;
 }
 
+CameraInfo ResolveMappedCamera(
+    const std::vector<CameraInfo>& cameras,
+    const IdentityMap& identity_map,
+    std::string_view camera_alias,
+    std::string_view identity_unbound_category,
+    std::string_view alias_unavailable_category,
+    std::string_view alias_ambiguous_category) {
+    std::optional<CameraInfo> selected;
+    for (const auto& camera : cameras) {
+        const auto existing_alias = identity_map.FindAlias(camera.stable_identity);
+        if (!existing_alias) {
+            throw TransportError(
+                std::string(identity_unbound_category),
+                "an enumerated camera is not registered to a camera alias");
+        }
+        if (*existing_alias == camera_alias) {
+            if (selected) {
+                throw TransportError(
+                    std::string(alias_ambiguous_category),
+                    "multiple camera candidates resolved to the requested alias");
+            }
+            selected = camera;
+        }
+    }
+    if (!selected) {
+        throw TransportError(
+            std::string(alias_unavailable_category),
+            "the requested camera alias is unavailable");
+    }
+    return *selected;
+}
+
+WpdSpoolStatusSummary InspectWpdSpoolStatusReadOnly(
+    IWpdSpoolStatusTransport& transport,
+    const IdentityMap& identity_map,
+    std::string_view camera_alias,
+    std::chrono::seconds timeout) {
+    WpdSpoolStatusSummary status;
+    WpdSpoolInventoryObservation inventory;
+    try {
+        const auto cameras = transport.EnumerateForSpoolStatus(inventory);
+        if (inventory.still_image_compatible_count != cameras.size() ||
+            inventory.still_image_compatible_count > inventory.enumerated_d810_count ||
+            inventory.inventory_sessions_closed > inventory.inventory_sessions_opened) {
+            throw TransportError(
+                "wpd_inventory_diagnostic_mismatch",
+                "WPD inventory diagnostics were internally inconsistent");
+        }
+        if (inventory.inventory_sessions_opened != inventory.inventory_sessions_closed) {
+            throw TransportError(
+                "wpd_inventory_close_unconfirmed",
+                "not every WPD inventory session reported a confirmed close");
+        }
+
+        const auto selected = ResolveMappedCamera(
+            cameras,
+            identity_map,
+            camera_alias,
+            "wpd_identity_unbound",
+            "wpd_alias_unavailable",
+            "wpd_alias_ambiguous");
+
+        status.payload_object_count = transport.InspectSpoolPayloadCount(
+            selected.stable_identity, timeout);
+        status.wpd_sessions_closed = 1;
+        status.terminal_state = "Complete";
+    } catch (const TransportError& error) {
+        status.terminal_state = "Failed";
+        status.failure_category = error.Category();
+        status.failure_detail = ControlledErrorDetail(error.what());
+        status.failed_stage = status.failure_category;
+    } catch (const std::exception&) {
+        status.terminal_state = "Failed";
+        status.failure_category = "wpd_spool_status_failed";
+        status.failure_detail = "read-only WPD spool status failed before completion";
+        status.failed_stage = status.failure_category;
+    }
+
+    status.enumerated_d810_count = inventory.enumerated_d810_count;
+    status.still_image_compatible_count = inventory.still_image_compatible_count;
+    status.inventory_sessions_opened = inventory.inventory_sessions_opened;
+    status.inventory_sessions_closed = inventory.inventory_sessions_closed;
+    status.inventory_close_confirmed =
+        inventory.inventory_sessions_opened == inventory.inventory_sessions_closed;
+    return status;
+}
+
 fs::path PersistWpdSpoolStatusSummary(
     const fs::path& artifacts_root,
     std::string_view run_id,
@@ -1964,11 +2051,17 @@ fs::path PersistWpdSpoolStatusSummary(
     std::ofstream output(partial, std::ios::binary | std::ios::trunc);
     if (!output) throw std::runtime_error("cannot create WPD spool status summary");
     output << "{\n"
-           << "  \"schemaVersion\": \"phase0.wpd-spool-status-summary.v1\",\n"
+           << "  \"schemaVersion\": \"phase0.wpd-spool-status-summary.v2\",\n"
            << "  \"timestamp\": \"" << NowIso8601() << "\",\n"
            << "  \"runId\": \"" << JsonEscape(run_id) << "\",\n"
            << "  \"cameraAlias\": \"" << JsonEscape(camera_alias) << "\",\n"
            << "  \"payloadObjectCount\": " << status.payload_object_count << ",\n"
+           << "  \"enumeratedD810Count\": " << status.enumerated_d810_count << ",\n"
+           << "  \"stillImageCompatibleCount\": " << status.still_image_compatible_count << ",\n"
+           << "  \"inventorySessionsOpened\": " << status.inventory_sessions_opened << ",\n"
+           << "  \"inventorySessionsClosed\": " << status.inventory_sessions_closed << ",\n"
+           << "  \"inventoryCloseConfirmed\": "
+           << (status.inventory_close_confirmed ? "true" : "false") << ",\n"
            << "  \"spoolState\": \""
            << (status.terminal_state == "Complete"
                    ? (status.payload_object_count == 0 ? "EMPTY" : "NON_EMPTY")
@@ -1982,6 +2075,8 @@ fs::path PersistWpdSpoolStatusSummary(
            << "  \"wpdSessionsClosed\": " << status.wpd_sessions_closed << ",\n"
            << "  \"terminalState\": \"" << JsonEscape(status.terminal_state) << "\",\n"
            << "  \"failedStage\": \"" << JsonEscape(status.failed_stage) << "\",\n"
+           << "  \"failureCategory\": \"" << JsonEscape(status.failure_category) << "\",\n"
+           << "  \"failureDetail\": \"" << JsonEscape(status.failure_detail) << "\",\n"
            << "  \"objectIdentifiersIncluded\": false,\n"
            << "  \"objectNamesIncluded\": false,\n"
            << "  \"realIdentifiersPrinted\": false\n"

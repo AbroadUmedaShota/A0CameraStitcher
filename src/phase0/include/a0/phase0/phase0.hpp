@@ -205,11 +205,36 @@ public:
         std::chrono::seconds timeout) = 0;
 };
 
+// Anonymous inventory evidence for the read-only WPD spool gate. Camera
+// identities remain in the separately returned inventory; only these counts
+// and close confirmation may be persisted.
+struct WpdSpoolInventoryObservation {
+    std::size_t enumerated_d810_count{};
+    std::size_t still_image_compatible_count{};
+    std::size_t inventory_sessions_opened{};
+    std::size_t inventory_sessions_closed{};
+};
+
+class IWpdSpoolStatusTransport {
+public:
+    virtual ~IWpdSpoolStatusTransport() = default;
+    [[nodiscard]] virtual std::vector<CameraInfo> EnumerateForSpoolStatus(
+        WpdSpoolInventoryObservation& observation) = 0;
+    [[nodiscard]] virtual std::size_t InspectSpoolPayloadCount(
+        std::string_view stable_identity,
+        std::chrono::seconds timeout) = 0;
+};
+
 // Anonymous aggregate for a read-only inspection of the dedicated camera
 // spool. Object IDs, names, extensions, dates, and device identifiers must
 // never cross this boundary.
 struct WpdSpoolStatusSummary {
     std::size_t payload_object_count{};
+    std::size_t enumerated_d810_count{};
+    std::size_t still_image_compatible_count{};
+    std::size_t inventory_sessions_opened{};
+    std::size_t inventory_sessions_closed{};
+    bool inventory_close_confirmed{};
     bool read_only_observation{true};
     bool capture_command_sent{false};
     bool vendor_operation_executed{false};
@@ -218,6 +243,8 @@ struct WpdSpoolStatusSummary {
     int wpd_sessions_closed{};
     std::string terminal_state{"InProgress"};
     std::string failed_stage;
+    std::string failure_category;
+    std::string failure_detail;
 };
 
 struct WpdStatusSummary {
@@ -666,6 +693,18 @@ struct HybridPairFaultRunSummary {
     std::string_view run_id,
     std::string_view camera_alias,
     const WpdSpoolStatusSummary& status);
+[[nodiscard]] WpdSpoolStatusSummary InspectWpdSpoolStatusReadOnly(
+    IWpdSpoolStatusTransport& transport,
+    const IdentityMap& identity_map,
+    std::string_view camera_alias,
+    std::chrono::seconds timeout);
+[[nodiscard]] CameraInfo ResolveMappedCamera(
+    const std::vector<CameraInfo>& cameras,
+    const IdentityMap& identity_map,
+    std::string_view camera_alias,
+    std::string_view identity_unbound_category,
+    std::string_view alias_unavailable_category,
+    std::string_view alias_ambiguous_category);
 [[nodiscard]] std::filesystem::path PersistWpdCorrelationSummary(
     const std::filesystem::path& artifacts_root,
     std::string_view run_id,
