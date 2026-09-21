@@ -17,7 +17,7 @@
 - active transaction中は操作者も物理シャッターを操作せず、active modeがその段階で処理するcameraをPhase 0ツールが排他的に使用する。
 - JPEG Fine Lを使用する。
 - ハードウェア同期装置は使用しない。
-- Nikon Camera Remote SDKのセッションは同時に1台だけ開く。
+- 現行のNikon Camera Remote SDK経路ではsessionを同時に1台だけ開く。二台同時Live Viewは、ADR-0031のSDK capability・安全性gateを満たすまで有効化しない。
 
 ## 3. 機能要件
 
@@ -33,6 +33,7 @@
 - `FR-CAP-007`: 製品責任者がDual実機の撮影・回収方式を評価する目的で明示承認した場合に限り、承認済みrig profileなしで`CaptureRecoveryOnly`を開始できる。この経路もcurrent-sessionの`DualIdentitySessionBinding=Ready`、承認済みread-only capture profile、全Live View停止・SDK source/capture session close、ADR-0028のModule保持共存probe合格、pair-level exact-two/alias 1:1/両card empty/全WPD close preflight、CAM-A→CAM-B、canonical PC原本検証、exact-object cleanup、180秒watchdog、no retryを必須とする。WPD cleanup未確認時はSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を上位へ返して再bindingを必須とする。production adapterのpair-level preflight、read-only coexistence probe、CaptureRecoveryOnly backend・WPF経路を検証した後、対象と候補を照合して実機試験を行う。ADR-0030により最初のone-shotを含む一つの系列を最大5組とし、最初の失敗・未確定・割当失効で停止する。初回成功を確認して残りの組へ進み、6組目・補充撮影・自動retryを行わない。5標本の全時間値・最大値を記録し、p95は小標本の記述統計に限る。100組への昇格工程は要求しない。software合格を実機受入や性能承認へ読み替えない。rig profileを入力・偽装せず、合成・再合成・製品exportを開始せず、結果を`StitchOutcome=Pending`かつA0品質未承認として記録する。通常の`start-reserved-pair`はv2 payload/result shapeを維持し、ADR-0028例外の対象外であるproduction binding hostでは既存shapeの`PairDispatcherUnavailable`を返す。CaptureRecoveryOnlyの開始・同一ID照会・終了は別schema `a0.camera-agent.hardware-dual-capture-recovery-only.v1`を使う。
 - `FR-LV-001`: `SingleCamera`の`CAM-A`または`DualCamera`で選択した一台について、Nikon SDK経由の対話的Live View開始、継続frame取得、停止を実行できる。Dual session bindingでは二候補を一台ずつ表示し、candidate ordinalはそのsession内だけで使用する。有限probeを継続Live Viewの合格証拠にせず、プレビュー画像は原画像・合成入力・撮影transactionの候補または保存証拠に使用しない。
 - `FR-LV-002`: 承認済みspool transaction前に選択中Live Viewの停止とSDK source/capture session closeを確認する。SDK one capture、WPD recovery、PC `original.jpg`の再読込検証までの確定、single-object delete、empty-after確認が成功した後だけ、操作者が選択していた一台のSDK Live Viewを再開できる。ADR-0028のModule保持中もWPD open中のLive View再開は認めない。
+- `FR-LV-003`: 将来の`DualCamera`は、SDK vendor documentationと実機PoCで二つの独立したsource/capture sessionによるLive View同時取得が安全に確認された場合に限り、CAM-AとCAM-Bを左右に並べた横長の確認画面を提供できる。各paneにはalias、`Live`/`映像停止`、最終frame受信時刻を表示し、片側停止を両側のLive表示または成功として偽装しない。厳密なframe同期、リアルタイム合成、previewの原画像・合成入力への採用は保証しない。実装・有効化の前に、二台開始/停止/例外/USB切断/撮影handoffで全sessionを停止・closeできること、WPD open中のSDK operation 0、binding再確認、capture transactionとの排他、および最大5回の明示承認済み実機検証を満たす。
 
 #### 実装状況と生成記録の区分（2026-09-12）
 
@@ -62,7 +63,7 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - `FR-EXP-001`: `DualCamera`では合成JPEGを指定フォルダへ保存できる。`SingleCamera`では検証済み`7360×4912` canonical `original.jpg`をbyte-identicalな単一撮影出力として、操作者が選択したfixed-local folderへ明示保存できる。network、UNC、device path、ADS、removable、reparse chainを拒否し、合成済みとは表示しない。
 - `FR-UI-001`: 一画面の撮影ダッシュボードで、明示選択したmode、起動セッションの排他同意、modeが要求するcameraの接続・identity・設定・card・Live View状態、profile ID・版・期限、設置と自動補正可否、mode別処理進捗、撮影・合成・保存を分離した結果、赤Blocker・黄Caution・青Infoを表示できる。`SingleCamera`で非required cameraの不在をBlockerにしない。
 - `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。設置・校正、read-onlyカメラ設定、結果確認後の明示保存、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。
-- `FR-UI-003`: 一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。previewを原画像・合成入力として扱わない。
+- `FR-UI-003`: 現行の一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。ADR-0031 gateが未達の間、二台同時Live Viewは操作可能に見せない。gate達成後の二台表示では、左右各paneのalias・Live/停止・最終frame時刻を表示する。previewを原画像・合成入力として扱わない。
 
 ## 4. 非機能要件
 
@@ -85,7 +86,6 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 
 - NEF/RAW現像
 - 16-bit TIFF/BigTIFF出力
-- Live Viewの二台同時表示
 - Live Viewプレビュー画像の原画像・合成入力への使用
 - GPU必須処理
 - 遠景・球面・円筒パノラマ

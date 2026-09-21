@@ -23,7 +23,8 @@ attempted hybridはWPD baseline timeoutとdatetime相関不成立によりReject
 | 露出・WB・画質等の取得 | 一台でPartial | `run-1786040075194-1`でJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1を取得。focusはopaque値1、FileTypeはnot-advertised。設定writeなし、session close |
 | 露出・WB・画質等の変更 | 未実装 | Phase 0では人が固定する。書込実装・実機試験は別途承認して一項目ずつ行う |
 | 一台選択式Live View | Standalone合格、handoffはPartial | SDKで5分04秒・2,424 frame、停止・close・preview非保存と別プロセス再起動を確認。撮影を含む連続handoffは未合格 |
-| 二台同時Live View、動画、RAW | 対象外 | MVPでは使用しない |
+| 二台同時Live View | 将来目標・技術gate待ち | ADR-0031のSDK capabilityと安全性証拠まで有効化しない |
+| 動画、RAW | 対象外 | MVPでは使用しない |
 
 ## PCから扱える候補
 
@@ -38,7 +39,7 @@ attempted hybridはWPD baseline timeoutとdatetime相関不成立によりReject
 | JPEG仕上げ | ピクチャーコントロール、ピクチャーコントロールデータ、彩度、明るさ、Active D-Lighting、ノイズ低減 | コントラスト等を含む。実機の書込可否と値域を追加検証する |
 | フォーカス | フォーカスモード、AFエリアモード、優先フォーカスポイント、AF実行 | 固定リグではMF固定または撮影前AF後に固定する方針を検討 |
 | 状態確認 | バッテリー、レンズ情報、焦点距離、カメラ時刻、露出状態 | preflight/report候補。固有識別子は匿名化する |
-| ライブビュー | 開始・終了、画像取得、コントラストAF、表示サイズ等 | 一台選択式をMVP対象とする。二台同時表示とpreviewの原画像・合成利用は対象外 |
+| ライブビュー | 開始・終了、画像取得、コントラストAF、表示サイズ等 | 一台選択式が現行対象。二台同時左右paneはADR-0031のSDK capability・安全性gate待ち。previewの原画像・合成利用は対象外 |
 
 ## コントラスト・明暗を扱う方針
 

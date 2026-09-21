@@ -245,3 +245,13 @@
 - 実機結果: 2026-09-16の2回は、どちらも`FailedPartial / image_event_timeout`、PC原本0件だった。1回目はpost-baselineの同一Item IDを1件観測したが`CaptureComplete` 0、2回目はpost-baseline採用候補0だった。2回目の採用候補0からraw callback 0を断定しない。`cardUnchanged=false`はafter fingerprint取得不能であり、card mutationの証拠ではない。
 - 仮説境界: 旧失敗のSDRAM Item残存またはItem ID再利用によるbaseline除外は有力仮説だが未確定である。仮説を決定事実として記録しない。
 - 次gate: SDRAM baseline非空をcapture dispatch前に拒否し、filter前raw event／baseline-hit／Children遷移／SaveMedia readback／Capture開始結果を匿名診断するsoftware changeは、PR #202として2026-09-17に`main`へ統合した。次は固定artifactによる実機評価であり、このsoftware統合だけでは実機再開・採用を意味しない。追加撮影は毎回、対象artifact・回数・復元条件を限定した明示承認を要する。
+
+## ADR-0031: DualCameraの最終Live View目標を左右二画面へ更新し、SDK capability gateまで現行一台表示を維持する
+
+- 状態: Accepted product direction; implementation blocked on SDK capability and hardware safety evidence
+- 決定日: 2026-09-21
+- 決定: `DualCamera`の最終operator experienceは、CAM-Aを左、CAM-Bを右に表示する横長の二pane Live Viewとする。各paneはalias、Live/映像停止、最終frame受信時刻を表示する。二paneをframe同期済み・合成済み・原画像と表示せず、previewを撮影・合成入力・永続証拠へ用いない。
+- 現行との差分: 現行`a0.camera-agent.hardware-dual-binding.v1`、`NikonDualBindingSdkAdapter`、fake adapterはいずれも同時に一つのLive Viewだけを許可し、切替時に前candidateをstopしてSDK source/capture sessionをcloseする。このfail-closed制約を、SDK vendor documentationと実機証拠なしに解除しない。従って本ADRは、現行UIへ偽の二画面表示や二重session APIを追加する許可ではない。
+- 実装前gate: (1) ライセンス下のSDK documentationで二つの独立session/sourceによる同時Live Viewを許可すること、(2) 二台start、継続frame、片側停止、例外、USB切断で全sessionを決定的にstop/closeできること、(3) binding aliasの取り違え防止と再binding条件、(4) capture開始前に両Live Viewと全SDK source/capture sessionをcloseしWPD open中SDK operation 0を維持すること、(5) transaction排他・no retry・原本保持を維持すること、をsoftware contractと明示承認済み最大5回の実機検証で確認する。
+- 失敗時: 片側のframe取得停止、session close未確認、SDK error、USB topology変化、candidate count変化は両paneをLive成功と見せず、bindingをinvalidにして`HardwarePending`へ戻す。capture transaction開始は拒否する。
+- 範囲外: リアルタイム合成、自由homography、previewからのA0品質判断、hardware shutter synchronizationの保証。実機PoCはこのdecisionだけでは開始せず、対象・回数・操作を明記した別承認を要する。
