@@ -168,18 +168,18 @@ public sealed record ApplicationLaunchOptions(
                     break;
                 case "--capture-recovery-run-count":
                     if (configuredCaptureRecoveryRunCount is not null || ++index >= arguments.Count ||
-                        !int.TryParse(arguments[index], out var runCount) || runCount != 10)
+                        !int.TryParse(arguments[index], out var runCount) || runCount != 5)
                     {
-                        throw new ArgumentException("--capture-recovery-run-count は明示値 10 を一度だけ指定してください。");
+                        throw new ArgumentException("--capture-recovery-run-count は明示値 5 を一度だけ指定してください。");
                     }
 
                     configuredCaptureRecoveryRunCount = runCount;
                     break;
                 case "--single-handoff-acceptance-count":
                     if (configuredSingleHandoffCount is not null || ++index >= arguments.Count ||
-                        !int.TryParse(arguments[index], out var handoffCount) || handoffCount != 10)
+                        !int.TryParse(arguments[index], out var handoffCount) || handoffCount != 5)
                     {
-                        throw new ArgumentException("--single-handoff-acceptance-count は明示値 10 を一度だけ指定してください。");
+                        throw new ArgumentException("--single-handoff-acceptance-count は明示値 5 を一度だけ指定してください。");
                     }
 
                     configuredSingleHandoffCount = handoffCount;
@@ -247,7 +247,7 @@ public sealed record ApplicationLaunchOptions(
         }
         if (configuredCaptureRecoveryRunCount is not null && !captureRecoveryOnly)
         {
-            throw new ArgumentException("--capture-recovery-run-count 10 には --capture-recovery-only が必要です。");
+            throw new ArgumentException("--capture-recovery-run-count 5 には --capture-recovery-only が必要です。");
         }
         if ((configuredSingleHandoffCount is not null || configuredSingleHandoffSourceSha is not null) &&
             mode != ApplicationLaunchMode.HardwareSingle)
@@ -256,7 +256,7 @@ public sealed record ApplicationLaunchOptions(
         }
         if ((configuredSingleHandoffCount is null) != (configuredSingleHandoffSourceSha is null))
         {
-            throw new ArgumentException("--single-handoff-acceptance-count 10 と --source-sha は両方必要です。");
+            throw new ArgumentException("--single-handoff-acceptance-count 5 と --source-sha は両方必要です。");
         }
 
         var normalizedBase = Path.GetFullPath(baseDirectory);

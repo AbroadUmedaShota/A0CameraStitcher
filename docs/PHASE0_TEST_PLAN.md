@@ -1,5 +1,11 @@
 # Phase 0 実機成立性検証計画
 
+## 2026-09-21以降の反復上限
+
+本人指示とADR-0030により、今回のSingleCamera/DualCamera受入は最初のone-shotを含めて各系列最大5回とする。以下の旧10回/100回試験記述は履歴であり、新規実行数を指示しない。1回の成功後に追加5回を行わず、累計5回以内で停止する。Dualの1回はCAM-A→CAM-Bの1組である。失敗時の補充・retryは禁止し、失敗を保持する。WPFの5回一括モードは別のone-shotを追加せず、同一系列の第1組から最大第5組までを実行する。
+
+新規CLIの実機反復は `--count 1..5`、WPFの専用反復モードは `--capture-recovery-run-count 5`、Single handoff証跡は `--single-handoff-acceptance-count 5 --source-sha <候補SHA>`。旧10/100指定は入口で拒否する。撮影権限・現在のempty spool・identity・session close確認は別途必要である。
+
 ## 目的
 
 完成アプリの前に、Windows 11 x64とNikon D810をUSB接続し、PC原本を安全に確定できる経路を判定する。attempted hybridのdatetime cutoffはRejectedである。`HG-0008`は2026-08-06に承認済みであり、single-slot spool経路を実装・実機評価する。
@@ -147,7 +153,7 @@ Dual専用schema `a0.camera-agent.hardware-dual.v2`は、capabilities、予約�
 
 #### 10件性能計測
 
-> **10回runner実装済み／実機NotRun**: [同一bindingの10回runner](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)と[匿名集計・p95承認記録](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)は実装済みである。実機one-shotの合格と前提gateを確認してから以下を実施する。記録処理やcoexistence probe、one-shotの合格を、10/10の実機合格や実測p95の承認へ読み替えない。
+> **現行は最大5回runner／実機NotRun**: [同一binding最大5回runner](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs)と[匿名集計](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)を使用する。以下は旧10回計画の履歴であり実行指示ではない。現行の5組一括モードは第1組をone-shot相当として含め、初回失敗で停止し、別枠のone-shotを追加しない。ソフトウェア集計を実機合格や実測性能承認へ読み替えない。
 
 - 一回撮影合格後、同じ条件・同じcurrent bindingでCAM-A→CAM-Bを10pair実行する。SDK候補を再列挙しない。
 - 各pairの開始・完了時刻、結果、CAM-A/Bのfile sizeとSHA-256、error、retry countを保存する。p50、nearest-rank p95、maxを計算する。

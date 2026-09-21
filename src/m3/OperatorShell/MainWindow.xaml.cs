@@ -65,11 +65,11 @@ public partial class MainWindow : Window
                 "CaptureRecoveryOnly requires explicit approved capture-profile and dual-identity-proof files.",
                 nameof(approvedCaptureProfilePath));
         }
-        if (captureRecoveryRunCount is not (1 or CaptureRecoveryOnlyTenRunCoordinator.RequestedCount) ||
-            (captureRecoveryRunCount == CaptureRecoveryOnlyTenRunCoordinator.RequestedCount && !captureRecoveryOnly))
+        if (captureRecoveryRunCount is not (1 or CaptureRecoveryOnlyFiveRunCoordinator.RequestedCount) ||
+            (captureRecoveryRunCount == CaptureRecoveryOnlyFiveRunCoordinator.RequestedCount && !captureRecoveryOnly))
         {
             throw new ArgumentException(
-                "CaptureRecoveryOnly run count must be the default 1 or the explicit value 10.",
+                "CaptureRecoveryOnly run count must be the default 1 or the explicit value 5.",
                 nameof(captureRecoveryRunCount));
         }
 
@@ -93,7 +93,7 @@ public partial class MainWindow : Window
                     ? "dual-camera-hardware-products"
                     : "dual-camera-test-synthetic-products");
             IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null;
-            CaptureRecoveryOnlyTenRunCoordinator? captureRecoveryOnlyTenRunCoordinator = null;
+            CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null;
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
             {
                 var resolvedCaptureProfilePath = captureRecoveryOnly
@@ -123,11 +123,11 @@ public partial class MainWindow : Window
                         _dualAgentLifecycle,
                         _dualAgentLifecycle,
                         captureProfile);
-                    if (captureRecoveryRunCount == CaptureRecoveryOnlyTenRunCoordinator.RequestedCount)
+                    if (captureRecoveryRunCount == CaptureRecoveryOnlyFiveRunCoordinator.RequestedCount)
                     {
                         var evidenceWriter = new CaptureRecoveryOnlyRunEvidenceWriter(
                             Path.Combine(dualProductRoot, "capture-recovery-only-evidence"));
-                        captureRecoveryOnlyTenRunCoordinator = new CaptureRecoveryOnlyTenRunCoordinator(
+                        captureRecoveryOnlyFiveRunCoordinator = new CaptureRecoveryOnlyFiveRunCoordinator(
                             captureRecoveryOnlyWorkflow,
                             evidenceWriter);
                     }
@@ -147,7 +147,7 @@ public partial class MainWindow : Window
                     : _liveViewFrameSource,
                 dualBindingTransport: _dualAgentLifecycle,
                 captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow,
-                captureRecoveryOnlyTenRunCoordinator: captureRecoveryOnlyTenRunCoordinator);
+                captureRecoveryOnlyFiveRunCoordinator: captureRecoveryOnlyFiveRunCoordinator);
             DataContext = _viewModel;
             if (_dualAgentLifecycle is not null)
             {

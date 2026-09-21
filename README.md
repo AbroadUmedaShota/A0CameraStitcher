@@ -150,10 +150,10 @@ dotnet run --project .\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.cs
 
 SDK対応AgentはローカルSDKの絶対パスをバイナリへ埋め込みません。実行時は、Agentを起動する同じprocess環境の`NIKON_D810_SDK_MODULE_PATH`で、信頼できる固定ローカルドライブ上の正規x64 moduleを明示します。remote path、reparse point、未設定、不足、誤った配置はfail-closedです。SDKは取得元を確認したローカル隔離配置だけを指定してください。
 
-実機SingleのContinuous Live View handoff 10回を受入証跡付きで実施する場合だけ、上記へ
-`--single-handoff-acceptance-count 10 --source-sha <実際にbuildした40文字lower-hex SHA>`を追加します。
-通常起動ではcollectorを有効にしません。10回は10 frameではなく、撮影・回収・exact cleanup・
-Live View再開と最終stopを伴う10 transactionです。collectorが`Complete`を出すには10/10の
+実機SingleのContinuous Live View handoffを最大5回の受入証跡付きで実施する場合だけ、上記へ
+`--single-handoff-acceptance-count 5 --source-sha <実際にbuildした40文字lower-hex SHA>`を追加します。
+通常起動ではcollectorを有効にしません。5回は5 frameではなく、撮影・回収・exact cleanup・
+Live View再開と最終stopを伴う5 transactionです。初回を含む最大5回で、失敗・未確定では追加撮影せず停止します。collectorが`Complete`を出すには5/5の
 匿名時系列証跡が必要で、欠落・破損・途中終了はPassになりません。
 
 Camera Agentは`%LOCALAPPDATA%\A0CameraStitcher\camera-agent\approved-single-capture-profile.json`が存在し、CAM-A、期限、read-only observed settingsが一致する場合だけ`Ready`にします。WPFの「観測値を30日プロファイルとして承認」は現在の観測値をlocal profileへ保存しますが、camera settingは変更しません。identity-v3は`%LOCALAPPDATA%\A0CameraStitcher\phase0\single-identity-v3.json`です。これらはsoftware boundaryであり、製品撮影合格の主張ではありません。wire、journal、profile schemaの詳細は[Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)を参照してください。

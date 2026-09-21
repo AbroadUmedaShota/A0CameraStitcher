@@ -1,6 +1,12 @@
 # MVPロードマップ
 
-## 現在の進め方
+## 2026-09-21 本人指示による更新
+
+今回の範囲はSTEP1ソフトウェア安定化、STEP2一台WPF受入、STEP3二台撮影受入、STEP4実写A0合成まで。ADR-0030により今後の反復は初回one-shotを含む各受入系列最大5回へ変更する。以下の旧10回/100回工程は過去計画として保持し、今回の必須工程にはしない。100回内部runnerの製品接続は不要となった。
+
+現在の作業branchは `codex/step4-five-run-acceptance-20260921`、baseは `3e9ae406272027274fb454b8f9b4d9d63ac2569f`。本人指示によりAOPC-22-NOTEは使用しない。現在PC（AOPC-11-NOTE）のOS検出はD810一台で、二台受入の現物条件は未充足。5回の起動・実行・証跡を整合させた候補を検証し、実機は対象・操作条件の確認後、合成はHG-0001/0002・実写corpusが揃ってから受入する。最大5回成功を100回耐久相当とは表示しない。M4の配布・releaseは今回の範囲外。
+
+## 従来計画の履歴（回数・次工程は冒頭の改定を優先）
 
 MVP全体は`in-progress`である。2026-08-26に`SingleCamera`のCamera Agent実機経路でone-shot、10回characterization、p95承認、100回耐久を完了した。残るSingleCamera作業は実WPF end-to-end、Continuous Live View handoff 10回、物理異常系である。2026-09-11に`main`の`56f3cb36182812969126a34cd12137105bf3840c`を照合し、Dualはsession-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、同一bindingの10回runnerが実装済みと確認した。次の主工程は実機one-shot・10組の受入と、未実装の100回runnerの開発である。Dual実機受入は未完了であり、撮影・原画像保存のみの実装を、合成・A0品質の合格とは扱わない。
 
@@ -92,7 +98,7 @@ requirements 2.7.0のSingle-first追加後は、fresh SDK-less／licensed-SDK-en
 
 旧方式の履歴: D810 PnP/SDK/WPD各2台、read-only inventory、`hybrid-capture-pair` software contractを確認した。CAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証、100組集計、p50/p95/max匿名時間統計、CAM-A後の途中停止recovery診断はSDK有無各CTest 5/5で合格した。旧SDK source-ID mapを無効化してMAID Source `Name`/`Interface` identity-v2へ変更しても二台で衝突し、本体固有propertyや安全なSDK/WPD相関は確認できなかった。旧CAM-B checkpointは恒久的なDual identity証明ではない。
 
-現在: ADR-0025のsession-local operator bindingとADR-0028のModule保持境界を使うCaptureRecoveryOnly backend・WPF経路、および[10回runner](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)は実装済みである。[集計・p95承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)は10件・100件の記録を扱うが、実機実行を証明せず、100回runnerの代わりにはならない。Dualのone-shot・10組・100組・異常系の実機受入は未完了で`HardwarePending`を維持する。合成は`Pending`、A0品質は`Unapproved`であり、実シャッター同期も保証しない。物理power-cycleと実power-off復旧のN/A判断は維持するが、Agent再起動・USB再接続時の安全停止と再binding確認は残る。
+現在: ADR-0025のsession-local operator bindingとADR-0028のModule保持境界を使うCaptureRecoveryOnly backend・WPF経路、および[現行5回runner](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs)は実装済みである。[集計・p95承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)は10件・100件の記録を扱うが、実機実行を証明せず、100回runnerの代わりにはならない。Dualのone-shot・10組・100組・異常系の実機受入は未完了で`HardwarePending`を維持する。合成は`Pending`、A0品質は`Unapproved`であり、実シャッター同期も保証しない。物理power-cycleと実power-off復旧のN/A判断は維持するが、Agent再起動・USB再接続時の安全停止と再binding確認は残る。
 
 ## M2: 実リグ・オフライン合成PoC
 

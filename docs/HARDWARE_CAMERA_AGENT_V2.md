@@ -53,13 +53,13 @@ Only a verified terminal `CaptureComplete` causes a new v2 session to start.
 Failed, partial, reserved, in-progress, disconnected, or invalid capture results
 remain stopped and are never retried automatically.
 
-## Opt-in ten-handoff acceptance evidence
+## Opt-in five-handoff acceptance evidence
 
 The hardware Single window enables the observation-only collector only when it
-is started with both `--single-handoff-acceptance-count 10` and
+is started with both `--single-handoff-acceptance-count 5` and
 `--source-sha <40-lower-hex>`. Ordinary launcher and hardware operation do not
 create an acceptance run. The collector writes
-`a0.hardware-single-handoff-acceptance.v1` under the fixed-local
+`a0.hardware-single-handoff-acceptance.v2` under the fixed-local
 `%LOCALAPPDATA%\A0CameraStitcher\hardware-single\handoff-evidence` root.
 
 One accepted handoff requires at least two ordered verified frames before the
@@ -68,10 +68,13 @@ the time-ordered Agent trace from WPD baseline through SDK capture, canonical
 original verification, exact delete, empty-after and WPD recovery close, then
 at least two ordered frames from a new v2 session and its explicit final stop.
 The run becomes `Complete` only when it is sealed after exactly
-requested/attempted/completed 10, failures 0, and the tenth restarted session
+requested/attempted/completed 5, failures 0, and the fifth restarted session
 is stopped. Early close is
 `Incomplete`; missing, corrupt, duplicate, foreign-session, late or out-of-order
 observations are `Invalid`; a typed operation failure is `FailedPartial`.
+The acceptance window allows at most five initial attempts, including the first
+capture. Failure or an uncertain result stops further capture; preparing a new
+transaction does not replenish the budget. Historical v1 evidence is unchanged.
 
 Observation is queued off the UI/camera path. Persistence or parsing failure
 cannot dispatch, retry, delete, change a timeout, or alter the existing stop and

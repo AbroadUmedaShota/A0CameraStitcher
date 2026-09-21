@@ -2256,11 +2256,9 @@ std::optional<std::string> ValidateHybridCaptureArguments(
         }
         return std::nullopt;
     }
-    if (command == "hybrid-capture-single" && count != 1 && count != 10) {
-        return "hybrid-capture-single count must be 1 or 10";
-    }
-    if (command == "hybrid-capture-pair" && count != 1 && count != 10 && count != 100) {
-        return "hybrid-capture-pair count must be 1, 10, or 100";
+    if ((command == "hybrid-capture-single" || command == "hybrid-capture-pair" ||
+         command == "live-view-handoff") && (count < 1 || count > 5)) {
+        return "hardware acceptance count must be between 1 and 5";
     }
     if ((command == "hybrid-capture-pair" || command == "hybrid-fault-pair" ||
          command == "hybrid-interrupt-pair") &&
@@ -2281,9 +2279,6 @@ std::optional<std::string> ValidateHybridCaptureArguments(
     }
     if (command == "hybrid-interrupt-pair" && count != 1) {
         return "hybrid-interrupt-pair count must be 1";
-    }
-    if (command == "live-view-handoff" && count != 10) {
-        return "live-view-handoff requires --count 10";
     }
     if (!exclusive_camera_control_confirmed) {
         return "hybrid operation requires --exclusive-camera-control-confirmed";

@@ -19,6 +19,14 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (args is ["--five-run-acceptance"])
+{
+    HardwareLaunchOptionsAreExplicit();
+    await HardwareSingleHandoffEvidenceCollectorContractAsync();
+    await CaptureRecoveryOnlySoftwareRunEvidenceContractAsync();
+    Console.WriteLine("PASS five-run launch, handoff, stop-on-failure and anonymous evidence contracts");
+    return 0;
+}
 if (args is ["--wpf-command-contracts"])
 {
     return await WpfCommandLifetimeContracts.RunAsync();
@@ -466,12 +474,12 @@ catch (Exception exception)
 try
 {
     await HardwareSingleHandoffEvidenceCollectorContractAsync();
-    Console.WriteLine("PASS hardware Single handoff evidence requires exact anonymous ordered 10/10");
+    Console.WriteLine("PASS hardware Single handoff evidence requires exact anonymous ordered 5/5");
 }
 catch (Exception exception)
 {
-    failures.Add("hardware Single handoff evidence requires exact anonymous ordered 10/10");
-    Console.Error.WriteLine($"FAIL hardware Single handoff evidence requires exact anonymous ordered 10/10: {exception}");
+    failures.Add("hardware Single handoff evidence requires exact anonymous ordered 5/5");
+    Console.Error.WriteLine($"FAIL hardware Single handoff evidence requires exact anonymous ordered 5/5: {exception}");
 }
 
 try
@@ -2988,6 +2996,7 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
 
 static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
 {
+    await HardwareSingleFiveAttemptLimitAsync();
     var root = CreateHardwareTestRoot();
     try
     {
@@ -3003,7 +3012,7 @@ static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
             new string('a', 40),
             NextTime);
 
-        for (var index = 1; index <= 10; index++)
+        for (var index = 1; index <= 5; index++)
         {
             var initialSessionId = index.ToString("x32");
             collector.ObserveLiveViewStarted(ContinuousLiveViewResult(initialSessionId, "Started", running: true));
@@ -3034,7 +3043,7 @@ static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
         await collector.FlushAsync();
         Check.True(
             ReadTerminalState(collector.EvidencePath) == "InProgress",
-            "Exact 10/10 must not become Complete until the run is durably sealed.");
+            "Exact 5/5 must not become Complete until the run is durably sealed.");
         collector.Seal();
         await collector.FlushAsync();
 
@@ -3043,14 +3052,14 @@ static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
         {
             var summary = document.RootElement;
             Check.Equal(HardwareSingleHandoffEvidenceCollector.SchemaVersion, summary.GetProperty("schemaVersion").GetString()!);
-            Check.Equal(10, summary.GetProperty("requestedHandoffs").GetInt32());
-            Check.Equal(10, summary.GetProperty("attemptedHandoffs").GetInt32());
-            Check.Equal(10, summary.GetProperty("completedHandoffs").GetInt32());
+            Check.Equal(5, summary.GetProperty("requestedHandoffs").GetInt32());
+            Check.Equal(5, summary.GetProperty("attemptedHandoffs").GetInt32());
+            Check.Equal(5, summary.GetProperty("completedHandoffs").GetInt32());
             Check.Equal(0, summary.GetProperty("failures").GetInt32());
             Check.Equal("Complete", summary.GetProperty("terminalState").GetString()!);
             Check.Equal(0, summary.GetProperty("automaticRetryCount").GetInt32());
             Check.False(summary.GetProperty("realIdentifiersIncluded").GetBoolean(), "Anonymous evidence must explicitly exclude real identifiers.");
-            Check.Equal(10, summary.GetProperty("attempts").GetArrayLength());
+            Check.Equal(5, summary.GetProperty("attempts").GetArrayLength());
             var topLevelNames = summary.EnumerateObject().Select(item => item.Name).Order().ToArray();
             var expectedTopLevelNames = new[]
             {
@@ -3365,6 +3374,56 @@ static async Task HardwareSingleHandoffEvidenceCollectorContractAsync()
         string agentArtifactsRoot,
         Func<DateTimeOffset> utcNow) =>
         new(Path.Combine(root, name), agentArtifactsRoot, new string('a', 40), utcNow);
+}
+
+static async Task HardwareSingleFiveAttemptLimitAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        var collector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "evidence"), artifactsRoot, new string('a', 40));
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (id, alias) => CompleteCapture(artifactsRoot, id, alias).Result,
+        };
+        using var viewModel = new HardwareSingleCameraViewModel(
+            operations, new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            preferencesStore: null, profileStore: null,
+            handoffEvidenceCollector: collector);
+        await viewModel.InitializeAsync();
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            viewModel.ExclusiveCameraControlConfirmed = true;
+            await viewModel.CheckReadinessAsync();
+            viewModel.DedicatedSpoolScopeConfirmed = true;
+            viewModel.ExactObjectDeleteConfirmed = true;
+            Check.True(viewModel.CanCapture, "Each of the five permitted attempts must remain available.");
+            await viewModel.CaptureAsync();
+            Check.Equal(attempt, operations.CaptureCallCount);
+            await viewModel.PrepareNewCaptureAsync();
+        }
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+        Check.False(viewModel.CanCapture, "Preparing another transaction must not replenish the five-attempt budget.");
+        await viewModel.CaptureAsync();
+        Check.Equal(5, operations.CaptureCallCount);
+        Check.True(viewModel.BlockerText.Contains("上限5回", StringComparison.Ordinal),
+            "The operator must be told why a sixth capture is blocked.");
+        await viewModel.ShutdownAsync();
+        collector.Seal();
+        await collector.FlushAsync();
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void BeginCollectorAttempt(HardwareSingleHandoffEvidenceCollector collector, string sessionId)
@@ -3809,7 +3868,7 @@ static void HardwareLaunchOptionsAreExplicit()
         var singleHandoffAcceptance = ApplicationLaunchOptions.Parse(
             [
                 "--hardware-single", "--camera-agent", explicitAgent,
-                "--single-handoff-acceptance-count", "10",
+                "--single-handoff-acceptance-count", "5",
                 "--source-sha", new string('a', 40),
             ],
             baseDirectory);
@@ -3836,15 +3895,25 @@ static void HardwareLaunchOptionsAreExplicit()
         Check.Equal(1, captureRecoveryOnly.CaptureRecoveryRunCount);
         Check.Equal(Path.GetFullPath(approvedCaptureProfile), captureRecoveryOnly.ApprovedCaptureProfilePath!);
         Check.Equal(Path.GetFullPath(dualIdentityProof), captureRecoveryOnly.DualIdentityProofPath!);
-        var captureRecoveryOnlyTenRun = ApplicationLaunchOptions.Parse(
+        var captureRecoveryOnlyFiveRun = ApplicationLaunchOptions.Parse(
             [
                 "--hardware-dual", "--wpd-camera-map", wpdCameraMap,
-                "--capture-recovery-only", "--capture-recovery-run-count", "10",
+                "--capture-recovery-only", "--capture-recovery-run-count", "5",
                 "--approved-capture-profile", approvedCaptureProfile,
                 "--dual-identity-proof", dualIdentityProof,
             ],
             baseDirectory);
-        Check.Equal(10, captureRecoveryOnlyTenRun.CaptureRecoveryRunCount);
+        Check.Equal(5, captureRecoveryOnlyFiveRun.CaptureRecoveryRunCount);
+        foreach (var rejectedCount in new[] { "0", "6", "10", "100" })
+        {
+            Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+                ["--hardware-dual", "--wpd-camera-map", wpdCameraMap, "--capture-recovery-only",
+                    "--capture-recovery-run-count", rejectedCount, "--approved-capture-profile", approvedCaptureProfile,
+                    "--dual-identity-proof", dualIdentityProof], baseDirectory));
+            Check.Throws<ArgumentException>(() => ApplicationLaunchOptions.Parse(
+                ["--hardware-single", "--single-handoff-acceptance-count", rejectedCount,
+                    "--source-sha", new string('a', 40)], baseDirectory));
+        }
         var simulated = ApplicationLaunchOptions.Parse(["--simulated"], baseDirectory);
         Check.Equal(ApplicationLaunchMode.Simulated, simulated.Mode);
         File.Delete(singleAgent);
@@ -7195,7 +7264,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal("実機状態は未判定（機体照合で確認）", shell.CameraBStatus);
         Check.Equal("撮影・回収のみ / 合成保留 / A0品質未承認", shell.ProfileText);
         Check.True(shell.IsCaptureRecoveryOnlyMode, "The focused WPF path must expose its dedicated mode.");
-        Check.False(shell.IsCaptureRecoveryOnlyTenRunMode, "CaptureRecoveryOnly must remain one-shot by default.");
+        Check.False(shell.IsCaptureRecoveryOnlyFiveRunMode, "CaptureRecoveryOnly must remain one-shot by default.");
         Check.True(shell.CaptureRecoveryOnlyConfirmationText.Contains("1回", StringComparison.Ordinal),
             "The default confirmation must remain explicitly one-shot.");
         Check.True(shell.CaptureButtonAutomationName.Contains("1組", StringComparison.Ordinal) &&
@@ -7257,16 +7326,16 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
 
         var tenRunOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var tenRunWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
-            Path.Combine(root, "wpf-ten-run-products"), tenRunOperations, tenRunOperations,
+            Path.Combine(root, "wpf-five-run-products"), tenRunOperations, tenRunOperations,
             ApprovedCaptureRecoveryOnlyProfile());
-        var tenRunEvidenceRoot = Path.Combine(root, "wpf-ten-run-evidence");
+        var tenRunEvidenceRoot = Path.Combine(root, "wpf-five-run-evidence");
         var tenRunBindingTransport = new CountingBindingTransport(DecodableBindingAgent());
         var tenRunShell = new OperatorShellViewModel(
-            new SimulationFoundationService(Path.Combine(root, "wpf-ten-run-journals")),
+            new SimulationFoundationService(Path.Combine(root, "wpf-five-run-journals")),
             ordinaryFlow,
             dualBindingTransport: tenRunBindingTransport,
             captureRecoveryOnlyWorkflow: tenRunWorkflow,
-            captureRecoveryOnlyTenRunCoordinator: new CaptureRecoveryOnlyTenRunCoordinator(
+            captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
                 tenRunWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(tenRunEvidenceRoot)));
         await tenRunShell.InitializeAsync(CancellationToken.None);
@@ -7274,33 +7343,33 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         tenRunShell.IsExclusiveUseAckAccepted = true;
         tenRunShell.AcceptSafetyCommand.Execute(null);
         await CompleteDualBindingAsync(tenRunShell.DualBinding);
-        Check.True(tenRunShell.IsCaptureRecoveryOnlyTenRunMode, "Only the explicit coordinator must select 10-run mode.");
-        Check.True(tenRunShell.CaptureRecoveryOnlyConfirmationText.Contains("10回", StringComparison.Ordinal) &&
-                   tenRunShell.CaptureRecoveryOnlyConfirmationText.Contains("20回", StringComparison.Ordinal),
-            "The 10-run confirmation must disclose ten pairs and twenty shutter activations.");
-        Check.True(tenRunShell.CaptureButtonAutomationName.Contains("最大10組", StringComparison.Ordinal) &&
-                   tenRunShell.CaptureButtonAutomationName.Contains("最大20回", StringComparison.Ordinal) &&
+        Check.True(tenRunShell.IsCaptureRecoveryOnlyFiveRunMode, "Only the explicit coordinator must select five-run mode.");
+        Check.True(tenRunShell.CaptureRecoveryOnlyConfirmationText.Contains("5回", StringComparison.Ordinal) &&
+                   tenRunShell.CaptureRecoveryOnlyConfirmationText.Contains("10回", StringComparison.Ordinal),
+            "The five-run confirmation must disclose five pairs and ten shutter activations.");
+        Check.True(tenRunShell.CaptureButtonAutomationName.Contains("最大5組", StringComparison.Ordinal) &&
+                   tenRunShell.CaptureButtonAutomationName.Contains("最大10回", StringComparison.Ordinal) &&
                    tenRunShell.CaptureButtonAutomationName.Contains("専用確認済み", StringComparison.Ordinal),
-            "The 10-run primary button accessibility name must disclose the gate and maximum physical side effects.");
-        Check.False(tenRunShell.CanCapture, "A Ready binding must not bypass the dedicated 10-run confirmation.");
+            "The five-run primary button accessibility name must disclose the gate and maximum physical side effects.");
+        Check.False(tenRunShell.CanCapture, "A Ready binding must not bypass the dedicated five-run confirmation.");
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
-        Check.True(tenRunShell.CanCapture, "The dedicated 10-run confirmation must explicitly unlock the selected mode.");
-        await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/ten-run",
+        Check.True(tenRunShell.CanCapture, "The dedicated five-run confirmation must explicitly unlock the selected mode.");
+        await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run",
             () => WpfCommandState.Create(tenRunShell, tenRunOperations));
         Check.True(!tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
-            "The explicit WPF 10-run did not reach review after ten successful pairs.");
+            "The explicit WPF five-run did not reach review after five successful pairs.");
         Check.Equal(1, tenRunBindingTransport.ActivateCaptureCalls);
-        Check.Equal(10, tenRunOperations.ReserveCalls);
-        Check.Equal(10, tenRunOperations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(5, tenRunOperations.ReserveCalls);
+        Check.Equal(5, tenRunOperations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(0, tenRunOperations.OrdinaryStartCalls);
-        Check.Equal(10, tenRunShell.TransactionStartCount);
+        Check.Equal(5, tenRunShell.TransactionStartCount);
         Check.True(tenRunShell.ExportResult.Contains("SoftwareAggregatePartial", StringComparison.Ordinal),
-            "The successful WPF 10-run must publish only the software aggregate partial verdict.");
+            "The successful WPF five-run must publish only the software aggregate partial verdict.");
         var tenRunDirectories = Directory.GetDirectories(Path.Combine(tenRunEvidenceRoot, "runs"));
         Check.Equal(1, tenRunDirectories.Length);
         Check.True(new[] { "report.md", "summary.json", "transaction-events.jsonl" }
                 .All(name => File.Exists(Path.Combine(tenRunDirectories[0], name))),
-            "The WPF 10-run must atomically expose all three anonymous aggregate files.");
+            "The WPF five-run must atomically expose all three anonymous aggregate files.");
 
         var wpfRecoveryRoot = Path.Combine(root, "wpf-same-id-recovery");
         var wpfRecoveryOperations = new CaptureRecoveryOnlyFakeOperations(
@@ -7414,74 +7483,81 @@ static async Task CaptureRecoveryOnlySoftwareRunEvidenceContractAsync()
         }
 
         var tenSuccessWorkflow = new QueuedCaptureRecoveryOnlyWorkflow(
-            Enumerable.Range(1, 10).Select(number => CoordinatorOutcome(number)));
-        var tenSuccessCoordinator = new CaptureRecoveryOnlyTenRunCoordinator(
+            Enumerable.Range(1, 6).Select(number => CoordinatorOutcome(number)));
+        var tenSuccessCoordinator = new CaptureRecoveryOnlyFiveRunCoordinator(
             tenSuccessWorkflow,
             new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "coordinator-success"), NextCoordinatorTime),
             NextCoordinatorTime);
         var tenSuccess = await tenSuccessCoordinator.RunAsync(
             "run-10101010101010101010101010101010",
             DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
-        Check.Equal(CaptureRecoveryOnlyTenRunStatus.Completed, tenSuccess.Status);
-        Check.Equal(10, tenSuccess.AttemptedCount);
-        Check.Equal(10, tenSuccessWorkflow.CaptureCalls);
-        Check.True(tenSuccess.EvidenceFiles is not null, "A complete 10-run must publish aggregate evidence.");
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.Completed, tenSuccess.Status);
+        Check.Equal(5, tenSuccess.AttemptedCount);
+        Check.Equal(5, tenSuccessWorkflow.CaptureCalls);
+        Check.True(tenSuccess.EvidenceFiles is not null, "A complete five-run must publish aggregate evidence without dispatching the sixth queued pair.");
+        var repeatedSeries = await tenSuccessCoordinator.RunAsync(
+            "run-12121212121212121212121212121212",
+            DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.Blocked, repeatedSeries.Status);
+        Check.Equal(0, repeatedSeries.AttemptedCount);
+        Check.Equal(5, tenSuccessWorkflow.CaptureCalls);
         using (var coordinatorSummary = JsonDocument.Parse(File.ReadAllText(tenSuccess.EvidenceFiles!.SummaryPath)))
         {
+            Check.Equal(5, coordinatorSummary.RootElement.GetProperty("requestedCount").GetInt32());
             Check.Equal("SoftwareAggregatePartial", coordinatorSummary.RootElement.GetProperty("verdict").GetString()!);
             Check.Equal("Unapproved", coordinatorSummary.RootElement.GetProperty("p95ApprovalStatus").GetString()!);
         }
 
         var thirdFailureWorkflow = new QueuedCaptureRecoveryOnlyWorkflow(
             [CoordinatorOutcome(1), CoordinatorOutcome(2), CoordinatorOutcome(3, succeeded: false), CoordinatorOutcome(4)]);
-        var thirdFailure = await new CaptureRecoveryOnlyTenRunCoordinator(
+        var thirdFailure = await new CaptureRecoveryOnlyFiveRunCoordinator(
                 thirdFailureWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "coordinator-failure")),
                 NextCoordinatorTime)
             .RunAsync(
                 "run-30303030303030303030303030303030",
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
-        Check.Equal(CaptureRecoveryOnlyTenRunStatus.Failed, thirdFailure.Status);
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.Failed, thirdFailure.Status);
         Check.Equal(3, thirdFailure.AttemptedCount);
         Check.Equal(3, thirdFailureWorkflow.CaptureCalls);
         Check.True(thirdFailure.EvidenceFiles is not null, "A terminal failure must publish only through the first failure.");
 
         var pendingWorkflow = new QueuedCaptureRecoveryOnlyWorkflow(
             [CoordinatorOutcome(1, recoveryPending: true), CoordinatorOutcome(2)]);
-        var pending = await new CaptureRecoveryOnlyTenRunCoordinator(
+        var pending = await new CaptureRecoveryOnlyFiveRunCoordinator(
                 pendingWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "coordinator-pending")),
                 NextCoordinatorTime)
             .RunAsync(
                 "run-40404040404040404040404040404040",
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
-        Check.Equal(CaptureRecoveryOnlyTenRunStatus.HardwarePending, pending.Status);
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, pending.Status);
         Check.Equal(1, pending.AttemptedCount);
         Check.Equal(1, pendingWorkflow.CaptureCalls);
         Check.True(pending.EvidenceFiles is null, "A recovery-pending outcome must not become aggregate evidence.");
 
         var invalidBindingWorkflow = new QueuedCaptureRecoveryOnlyWorkflow(
             [CoordinatorOutcome(1, invalidationReason: DualBindingInvalidationReason.TopologyChanged), CoordinatorOutcome(2)]);
-        var invalidBinding = await new CaptureRecoveryOnlyTenRunCoordinator(
+        var invalidBinding = await new CaptureRecoveryOnlyFiveRunCoordinator(
                 invalidBindingWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "coordinator-binding-invalid")),
                 NextCoordinatorTime)
             .RunAsync(
                 "run-50505050505050505050505050505050",
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
-        Check.Equal(CaptureRecoveryOnlyTenRunStatus.HardwarePending, invalidBinding.Status);
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, invalidBinding.Status);
         Check.Equal(1, invalidBindingWorkflow.CaptureCalls);
         Check.True(invalidBinding.EvidenceFiles is null, "A binding invalidation must stop without evidence or rebinding.");
 
         var blockedWorkflow = new QueuedCaptureRecoveryOnlyWorkflow([], canStartNewCapture: false);
-        var blockedRun = await new CaptureRecoveryOnlyTenRunCoordinator(
+        var blockedRun = await new CaptureRecoveryOnlyFiveRunCoordinator(
                 blockedWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "coordinator-blocked")),
                 NextCoordinatorTime)
             .RunAsync(
                 "run-60606060606060606060606060606060",
                 DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
-        Check.Equal(CaptureRecoveryOnlyTenRunStatus.Blocked, blockedRun.Status);
+        Check.Equal(CaptureRecoveryOnlyFiveRunStatus.Blocked, blockedRun.Status);
         Check.Equal(0, blockedRun.AttemptedCount);
         Check.Equal(0, blockedWorkflow.CaptureCalls);
 

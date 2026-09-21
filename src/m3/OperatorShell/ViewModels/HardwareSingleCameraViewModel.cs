@@ -27,6 +27,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private bool _dedicatedSpoolScopeConfirmed;
     private bool _exactObjectDeleteConfirmed;
     private bool _liveViewHandoffRequested;
+    private int _handoffAcceptanceAttempts;
+    private bool _handoffAcceptanceStopped;
     private bool _isContinuousLiveViewActive;
     private string? _continuousLiveViewSessionId;
     private CancellationTokenSource? _continuousLiveViewLoopCancellation;
@@ -346,6 +348,18 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 return "未確定transactionがあります。新しい撮影ではなく「結果を確認」を実行してください。";
             }
 
+            if (_handoffEvidenceCollector is not null &&
+                _handoffAcceptanceStopped)
+            {
+                return "受入試験は失敗または未確定で停止しました。追加撮影せず証跡を確認してください。";
+            }
+
+            if (_handoffEvidenceCollector is not null &&
+                _handoffAcceptanceAttempts >= HardwareSingleHandoffEvidenceCollector.RequestedHandoffs)
+            {
+                return "受入試験の上限5回に達しました。証跡を確認して終了してください。";
+            }
+
             if (!_operations.AgentExecutableAvailable)
             {
                 return "Camera Agent実行ファイルがありません。実機操作は開始されません。";
@@ -405,6 +419,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     public bool CanCapture =>
         _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        (_handoffEvidenceCollector is null ||
+         (!_handoffAcceptanceStopped &&
+          _handoffAcceptanceAttempts < HardwareSingleHandoffEvidenceCollector.RequestedHandoffs)) &&
         _pendingTransaction is null && _captureResult is null &&
         _readiness?.Ready == true && ExclusiveCameraControlConfirmed &&
         _hasOperatorSelectedExportDirectory &&
@@ -934,6 +951,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         var restartContinuousLiveView = IsContinuousLiveViewActive;
         if (_handoffEvidenceCollector is not null)
         {
+            // Count attempts, including failed stops, before any hardware work.
+            // Preparing a new transaction does not replenish this acceptance budget.
+            _handoffAcceptanceAttempts++;
+            _handoffAcceptanceStopped = true;
             _handoffEvidenceCollector.BeginHandoff(
                 restartContinuousLiveView ? _continuousLiveViewSessionId ?? string.Empty : string.Empty);
         }
@@ -1027,6 +1048,12 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 {
                     ActivityText = "撮影は完了しましたが、継続Live Viewの再開に失敗しました。自動再試行しません。";
                 }
+            }
+            if (_handoffEvidenceCollector is not null && reply.Success &&
+                reply.Payload.TerminalState == "Complete" && _verifiedOriginal is not null &&
+                (!restartContinuousLiveView || IsContinuousLiveViewActive))
+            {
+                _handoffAcceptanceStopped = false;
             }
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)

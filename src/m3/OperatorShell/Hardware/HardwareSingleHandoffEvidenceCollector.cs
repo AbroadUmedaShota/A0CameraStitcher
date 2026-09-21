@@ -26,7 +26,7 @@ internal interface IHardwareSingleHandoffEvidenceCollector
 }
 
 /// <summary>
-/// Opt-in, observation-only collector for the ten SingleCamera product handoffs.
+/// Opt-in, observation-only collector for the five SingleCamera product handoffs.
 /// Camera calls never await this component: observations are serialized on a
 /// background continuation chain and an evidence failure can only invalidate the
 /// acceptance file. It cannot dispatch, retry, stop, capture, or delete anything.
@@ -34,8 +34,8 @@ internal interface IHardwareSingleHandoffEvidenceCollector
 internal sealed class HardwareSingleHandoffEvidenceCollector :
     IHardwareSingleHandoffEvidenceCollector
 {
-    internal const string SchemaVersion = "a0.hardware-single-handoff-acceptance.v1";
-    internal const int RequestedHandoffs = 10;
+    internal const string SchemaVersion = "a0.hardware-single-handoff-acceptance.v2";
+    internal const int RequestedHandoffs = 5;
     private const string EvidenceScope = "HardwareSingleProductHandoffObservation";
     private const long MaximumAgentEventsBytes = 4 * 1024 * 1024;
     private static readonly string[] RequiredSuccessfulAgentStates =

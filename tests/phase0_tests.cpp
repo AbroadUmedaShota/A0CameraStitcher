@@ -3038,20 +3038,23 @@ void TestHybridInvalidCandidatesAndMissingTokenNeverDelete() {
 
 void TestHybridCaptureArgumentConfirmations() {
     Check(ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, true, true) == std::nullopt &&
-              ValidateHybridCaptureArguments("hybrid-capture-single", 10, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-single", 5, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("hybrid-capture-pair", 1, true, true, true, true) == std::nullopt &&
-              ValidateHybridCaptureArguments("hybrid-capture-pair", 10, true, true, true, true) == std::nullopt &&
-              ValidateHybridCaptureArguments("hybrid-capture-pair", 100, true, true, true, true) == std::nullopt &&
-              ValidateHybridCaptureArguments("live-view-handoff", 10, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 4, true, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 5, true, true, true, true) == std::nullopt &&
+              ValidateHybridCaptureArguments("live-view-handoff", 5, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("hybrid-fault-single", 1, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("hybrid-fault-pair", 1, true, true, true, true) == std::nullopt &&
               ValidateHybridCaptureArguments("hybrid-interrupt-pair", 1, true, true, true, true) == std::nullopt,
         "approved hybrid commands must accept their permitted counts and all three confirmations");
-    Check(ValidateHybridCaptureArguments("hybrid-capture-single", 2, true, true, true).has_value() &&
-              ValidateHybridCaptureArguments("hybrid-capture-pair", 2, true, true, true, true).has_value() &&
+    Check(ValidateHybridCaptureArguments("hybrid-capture-single", 6, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 6, true, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-single", 0, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 10, true, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("hybrid-capture-pair", 100, true, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-capture-pair", 1, true, true, true, false).has_value() &&
               ValidateHybridCaptureArguments("hybrid-capture-single", 1, true, true, true, true).has_value() &&
-              ValidateHybridCaptureArguments("live-view-handoff", 1, true, true, true).has_value() &&
+              ValidateHybridCaptureArguments("live-view-handoff", 10, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-fault-single", 2, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-fault-pair", 2, true, true, true, true).has_value() &&
               ValidateHybridCaptureArguments("hybrid-fault-pair", 1, true, true, true, false).has_value() &&
