@@ -18,6 +18,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("live view stop failure is durable before capture", LiveViewStopFailureIsDurableAsync),
     ("partial failure preserves CAM-A and does not retry", PartialFailureAndNoRetryAsync),
     ("crash restart closes journal without recapture", CrashRestartRecoveryAsync),
+    ("legacy acknowledgement journal compatibility remains fail-closed", LegacyAcknowledgementJournalAsync),
     ("WPF-facing service boundary stays simulated", WorkflowServiceBoundaryAsync),
     ("cross-coordinator ownership prevents duplicate capture", CrossCoordinatorOwnershipAsync),
     ("partial artifact restart terminates without capture", PartialArtifactRecoveryAsync),
@@ -52,6 +53,11 @@ var tests = new (string Name, Func<Task> Run)[]
 };
 
 var failures = new List<string>();
+if (args.SequenceEqual(new[] { "--journal-compatibility" }))
+{
+    tests = tests.Where(test => test.Run == LegacyAcknowledgementJournalAsync ||
+        test.Run == LegacyJournalMigratesAsDualAsync || test.Run == CrashRestartRecoveryAsync).ToArray();
+}
 foreach (var test in tests)
 {
     try
@@ -2701,6 +2707,55 @@ static async Task PartialFailureAndNoRetryAsync()
         await Check.ThrowsAsync<InvalidOperationException>(() => coordinator.ExecuteAsync(transactionId));
         Check.Equal(1, source.GetCaptureCount("CAM-A"));
         Check.Equal(1, source.GetCaptureCount("CAM-B"));
+    });
+}
+
+static async Task LegacyAcknowledgementJournalAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var transactionId = Guid.NewGuid();
+        var first = new DurableSimulatedCaptureCoordinator(root, new DeterministicSimulatedCaptureSource());
+        await first.InitializeAsync();
+        await Check.ThrowsAsync<SimulatedProcessCrashException>(() =>
+            first.ExecuteAsync(transactionId, SimulatedCrashPoint.AfterPersistA));
+        var journalPath = Path.Combine(root, transactionId.ToString("N"), "transaction.json");
+        var originalPath = first.GetOriginalPath(transactionId, "CAM-A");
+        var originalBytes = await File.ReadAllBytesAsync(originalPath);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(journalPath))!.AsObject();
+        node.Remove("operatingMode");
+        node.Remove("requiredCameraAliases");
+        var acknowledged = DateTimeOffset.Parse("2026-08-08T01:57:51.1843917+09:00");
+        node["attentionAcknowledgedAtUtc"] = acknowledged.ToString("O");
+        await File.WriteAllTextAsync(journalPath, node.ToJsonString());
+
+        var source = new DeterministicSimulatedCaptureSource();
+        var restarted = new DurableSimulatedCaptureCoordinator(root, source);
+        var recovered = await restarted.InitializeAsync();
+        Check.Equal(1, recovered.Count);
+        Check.Equal(SimulatedTransactionState.FailedPartial, recovered[0].State);
+        Check.Equal<DateTimeOffset?>(acknowledged, recovered[0].AttentionAcknowledgedAtUtc);
+        Check.Equal<DateTimeOffset?>(acknowledged, (await restarted.LoadAsync(transactionId)).AttentionAcknowledgedAtUtc);
+        Check.SequenceEqual(originalBytes, await File.ReadAllBytesAsync(originalPath));
+        var terminalBytes = await File.ReadAllBytesAsync(journalPath);
+        Check.Equal(1, (await restarted.InitializeAsync()).Count);
+        Check.SequenceEqual(terminalBytes, await File.ReadAllBytesAsync(journalPath));
+        await Check.ThrowsAsync<InvalidOperationException>(() => restarted.ExecuteAsync(transactionId));
+
+        node = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(journalPath))!.AsObject();
+        node["attentionAcknowledgedAtUtc"] = null;
+        await File.WriteAllTextAsync(journalPath, node.ToJsonString());
+        Check.Equal<DateTimeOffset?>(null, (await restarted.LoadAsync(transactionId)).AttentionAcknowledgedAtUtc);
+        node["attentionAcknowledgedAtUtc"] = "invalid-date";
+        await File.WriteAllTextAsync(journalPath, node.ToJsonString());
+        await Check.ThrowsAsync<JsonException>(() => restarted.InitializeAsync());
+        node.Remove("attentionAcknowledgedAtUtc");
+        node["unrecognizedSafetyOverride"] = true;
+        await File.WriteAllTextAsync(journalPath, node.ToJsonString());
+        await Check.ThrowsAsync<JsonException>(() => restarted.InitializeAsync());
+        Check.Equal(0, source.GetCaptureCount("CAM-A"));
+        Check.Equal(0, source.GetCaptureCount("CAM-B"));
+        Check.SequenceEqual(originalBytes, await File.ReadAllBytesAsync(originalPath));
     });
 }
 

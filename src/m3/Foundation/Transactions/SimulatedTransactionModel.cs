@@ -175,6 +175,10 @@ public sealed record SimulatedTransactionJournal
     public required string? TerminalReason { get; set; }
 
     public required DateTimeOffset UpdatedAtUtc { get; set; }
+
+    // Historical operator acknowledgement metadata only; never authorizes replay or changes failure state.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? AttentionAcknowledgedAtUtc { get; init; }
 }
 
 public sealed class SimulatedProcessCrashException : Exception

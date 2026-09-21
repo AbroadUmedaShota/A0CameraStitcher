@@ -10,8 +10,9 @@
 - ソフトウェア検証: 新候補のRelease CTest 24/24 PASS（261.47秒）、`Test-M3Simulated.ps1 -Configuration Release` PASS、`--five-run-acceptance` PASS、M2 pre-gate/corpus検証・更新JSON parse・`git diff --check` PASS。M3 buildは警告0/エラー0。C++ buildには既存C4819警告が残る。実機操作は含まない。
 - AFの残留リスク: 直前baseの全体試験では撮影+AFが5秒timeoutし、focused経路は430msで合格した。今回の全体試験は合格したが、timeout値は変更せず、原因特定・修正済みとは主張しない。
 - 独立read-onlyレビュー: 通常経路で5回超のdispatchは見つからず。HardwarePending時の集約証跡不在をADR-0030へ明記し、旧coordinator参照・README起動例を更新した。ローカル全体ログは`build/step4-m3-validation.log`、CTestログは`build/wpf-m2-adapter/Testing/Temporary/LastTest.log`（ignored）に保持する。
-- STEP2/3: 本人指示によりAOPC-22-NOTEは使用しない。現在PC（AOPC-11-NOTE）のOS上ではD810一台を検出。SDK/WPD readiness・spoolは未確認で、新規実機操作0。二台受入の現物条件は未充足。新しい固定候補と対象を照合してから再開する。
-- 本人回答: 現在のPCで二台と固定原稿の環境を用意できる。準備完了・二台接続はまだ確認していない。この回答を撮影済み・カード整理承認とは扱わない。
+- STEP2/3: 本人指示によりAOPC-22-NOTEは使用しない。現在PC（AOPC-11-NOTE）で二台を検出し、各spoolのpayload 0件・read-only coexistence probe PASSを確認。ローカル証跡は `%LOCALAPPDATA%/A0CameraStitcher/acceptance/scene-pair-first-check`。これは撮影受入PASSではない。
+- 本人承認: 机上の風景を各一枚・計一組だけ撮影し、失敗時は再試行しない。固定平面原稿ではないためA0合成品質の受入には使わない。画面で本人が割当した後、旧simulation journalの `attentionAcknowledgedAtUtc` が未対応で起動時検査に失敗し、撮影dispatch前に停止した。本人がアプリを閉じ、関連プロセスの終了を確認済み。
+- 互換性修正: 上記日時だけをnullableな履歴項目として読み込み・再保存する。未知項目の拒否、FailedPartial、同一ID再実行禁止は維持し、実在の保存記録は変更しない。`FoundationTests --journal-compatibility` 3/3 PASS、OperatorShell Release build警告0/エラー0。今回の修正検証はsoftware-onlyで、修正版の実機起動・撮影は未実施。再開前に候補artifactを再固定し、二台のsession-local割当をやり直す。
 - STEP4: 固定warp/feather/crop/原本保持は実装済み。承認済み実rig・品質基準、権利処理済み実写D810 pairが不足している。現存corpus exampleはvector契約5件、実写pair 0件。下段の旧10/100回ロードマップは履歴であり、今回のrun数には適用しない。
 
 ## 旧採用版の履歴（今回の候補・実行条件は冒頭を優先）
