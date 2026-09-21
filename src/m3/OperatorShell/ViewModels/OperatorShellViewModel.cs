@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
@@ -85,6 +86,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
     private readonly IHardwareDualCaptureRecoveryOnlyWorkflow? _captureRecoveryOnlyWorkflow;
     private readonly CaptureRecoveryOnlyFiveRunCoordinator? _captureRecoveryOnlyFiveRunCoordinator;
+    private readonly IOperatorReviewStore? _operatorReviewStore;
     private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
     private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
@@ -92,6 +94,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly AsyncRelayCommand _captureWithAutoFocusCommand;
     private readonly AsyncRelayCommand _diagnosticCommand;
     private readonly AsyncRelayCommand _prepareNewCaptureCommand;
+    private readonly AsyncRelayCommand _acceptReviewCommand;
     private readonly RelayCommand _acceptSafetyCommand;
     private readonly RelayCommand _declineSafetyCommand;
     private readonly RelayCommand _toggleLiveViewCommand;
@@ -152,6 +155,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private double _targetX = 0.5;
     private double _targetY = 0.5;
     private string _selectedLoupeZoom = LoupeZoom100;
+    private string _selectedReviewImage = "合成結果";
     private int _currentLiveViewFrameGeneration;
     /// <summary>Timestamps of canonical captured originals (persisted by a completed
     /// capture). Consulted by <see cref="StageCompositeFreshnessText"/> alongside
@@ -162,6 +166,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// have different real-world meaning even though both can drive the same freshness badge.</summary>
     private readonly Dictionary<string, DateTimeOffset> _lastLiveFrameTimestamps = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SimulatedLiveViewFrame> _lastLiveFrames = new(StringComparer.Ordinal);
+    // Review uses only canonical files produced by the capture/stitch pipeline. Live View
+    // frames are intentionally not placed here: a preview must never be presented as an original.
+    private readonly Dictionary<string, string> _reviewImagePaths = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _reviewOriginalHashes = new(StringComparer.Ordinal);
     /// <summary>Blur radius of the last live-ticked frame per alias (issue #31), read by AF
     /// execution to decide 合焦OK/NG. Populated alongside <see cref="_lastLiveFrames"/> in
     /// <see cref="ApplySimulatedFrameTick"/>; never populated for a non-live/frozen alias.</summary>
@@ -216,6 +224,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     private CaptureOutcome? _captureOutcome;
     private StitchOutcome? _stitchOutcome;
     private ExportOutcome? _exportOutcome;
+    private OperatorReviewRecord? _currentReviewRecord;
+    // A failed Accepted save is externally ambiguous: FileOperatorReviewStore may have
+    // published it before reporting an I/O failure. Keep the exact first candidate so a
+    // later explicit operator retry is an idempotent replay, never a second acceptance.
+    private OperatorReviewRecord? _acceptedReviewCandidate;
+    private IReadOnlyList<OperatorReviewRecord> _recoveredPendingReviews = [];
+    private string _reviewStatusText = "確認対象はありません";
     private ReadinessSnapshot _readiness = null!;
     private OperatorActionAvailability _availability = null!;
 
@@ -232,13 +247,15 @@ public sealed class OperatorShellViewModel : ObservableObject
         ISimulatedLiveViewFrameSource? liveViewFrameSource = null,
         IHardwareCameraAgentTransport? dualBindingTransport = null,
         IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null,
-        CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null)
+        CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null,
+        IOperatorReviewStore? operatorReviewStore = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
         _captureRecoveryOnlyWorkflow = captureRecoveryOnlyWorkflow;
         _captureRecoveryOnlyFiveRunCoordinator = captureRecoveryOnlyFiveRunCoordinator;
+        _operatorReviewStore = operatorReviewStore;
         if (captureRecoveryOnlyFiveRunCoordinator is not null && captureRecoveryOnlyWorkflow is null)
             throw new ArgumentException("The five-run coordinator requires CaptureRecoveryOnly mode.", nameof(captureRecoveryOnlyFiveRunCoordinator));
         var isHardwareDual = IsHardwareDualEnvironment;
@@ -302,6 +319,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureWithAutoFocusCommand = new AsyncRelayCommand(() => RunCaptureWithAutoFocusAsync("正常完了"), () => CanCaptureWithAutoFocus, ShowUnexpectedFailure);
         _diagnosticCommand = new AsyncRelayCommand(() => RunCaptureAsync(SelectedDiagnosticScenario), () => CanCapture, ShowUnexpectedFailure);
         _prepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, ShowUnexpectedFailure);
+        _acceptReviewCommand = new AsyncRelayCommand(AcceptReviewAsync, () => CanAcceptReview, ShowUnexpectedFailure);
         _toggleLiveViewCommand = new RelayCommand(ToggleLiveView, () => CanUseLiveView);
         _exportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, ShowUnexpectedFailure);
         _restitchCommand = new AsyncRelayCommand(RestitchAsync, () => CanRestitch, ShowUnexpectedFailure);
@@ -401,6 +419,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public ICommand CaptureWithAutoFocusCommand => _captureWithAutoFocusCommand;
     public ICommand DiagnosticCommand => _diagnosticCommand;
     public ICommand PrepareNewCaptureCommand => _prepareNewCaptureCommand;
+    public ICommand AcceptReviewCommand => _acceptReviewCommand;
     public ICommand ToggleLiveViewCommand => _toggleLiveViewCommand;
     public ICommand ExportCommand => _exportCommand;
     public ICommand RestitchCommand => _restitchCommand;
@@ -2107,9 +2126,50 @@ public sealed class OperatorShellViewModel : ObservableObject
     // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
     // ラッチ（issue #142/PR #152 レビュー指摘・要修正2）。
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
+    /// <summary>人による採用は、今回の成功済み結果を Pending として耐久記録できた後だけ許可する。
+    /// 起動時に見つけた未確認記録は、画像を再検証していないためここから採用できない。</summary>
+    public bool CanAcceptReview => !IsBusy && UiState == OperatorUiState.Review &&
+        _currentReviewRecord is { State: "Pending" } current &&
+        string.Equals(current.ResultId, CurrentReviewResultId, StringComparison.Ordinal) &&
+        string.Equals(current.TransactionId, LastTransactionId, StringComparison.Ordinal) &&
+        ReviewImageAvailable && IsCurrentResultReviewable();
+    public string ReviewStatusText => _reviewStatusText;
+    public IReadOnlyList<string> ReviewImageOptions =>
+        [.. new[] { ("合成結果", "stitched"), ("左原画像", "CAM-A"), ("右原画像", "CAM-B") }
+            .Where(item => _reviewImagePaths.TryGetValue(item.Item2, out var path) && File.Exists(path))
+            .Select(item => item.Item1)];
+    public string SelectedReviewImage
+    {
+        get => _selectedReviewImage;
+        set
+        {
+            if (ReviewImageOptions.Contains(value, StringComparer.Ordinal) && SetProperty(ref _selectedReviewImage, value))
+            {
+                OnPropertyChanged(nameof(ReviewImagePath));
+                OnPropertyChanged(nameof(ReviewImageAvailable));
+                OnPropertyChanged(nameof(IsReviewImageUnavailable));
+                OnPropertyChanged(nameof(CanAcceptReview));
+            }
+        }
+    }
+    public string? ReviewImagePath => _reviewImagePaths.TryGetValue(ReviewImageKey, out var path) && File.Exists(path) ? path : null;
+    public bool ReviewImageAvailable => ReviewImagePath is not null;
+    public bool IsReviewImageUnavailable => !ReviewImageAvailable;
+    public string ReviewPrimaryActionText => IsCaptureRecoveryOnlyMode || IsSingleCameraMode
+        ? "原画像を確認して次へ"
+        : "採用して次へ";
+    public string PrepareNewCaptureText => "撮り直しの準備へ";
     public bool CanOpenMaintenance => !IsCaptureRecoveryOnlyMode && _availability.OpenMaintenance.Allowed;
 
     private CapturePlan CurrentCapturePlan => IsSingleCameraMode ? CapturePlan.Single(SelectedCamera) : CapturePlan.Dual();
+    private string ReviewImageKey => SelectedReviewImage switch
+    {
+        "左原画像" => "CAM-A",
+        "右原画像" => "CAM-B",
+        _ => "stitched",
+    };
+    private string CurrentReviewResultId => _stitchOutcome?.Succeeded == true && LastStitchJobId != "未実行"
+        ? LastStitchJobId : LastTransactionId;
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -2120,6 +2180,18 @@ public sealed class OperatorShellViewModel : ObservableObject
         try
         {
             var recovered = await _transactionService.InitializeAsync(cancellationToken).ConfigureAwait(true);
+            if (_operatorReviewStore is not null)
+            {
+                var reviews = await _operatorReviewStore.LoadAsync(cancellationToken).ConfigureAwait(true);
+                _recoveredPendingReviews = reviews.Where(review => review.State == "Pending").ToArray();
+                var acceptedCount = reviews.Count(review => review.State == "Accepted");
+                _reviewStatusText = _recoveredPendingReviews.Count == 0
+                    ? $"過去の採用済み結果 {acceptedCount}件を確認（未確認なし）"
+                    : $"未確認の結果 {_recoveredPendingReviews.Count}件、採用済み {acceptedCount}件を検出: " +
+                      string.Join(", ", _recoveredPendingReviews.Select(review => review.ResultId)) +
+                      "（過去結果の再表示・再採用は未対応）";
+                OnPropertyChanged(nameof(ReviewStatusText));
+            }
             if (recovered.Count > 0)
             {
                 ApplyCaptureResult(recovered[^1]);
@@ -2237,6 +2309,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureOutcome = null;
         _stitchOutcome = null;
         _exportOutcome = null;
+        _currentReviewRecord = null;
+        _acceptedReviewCandidate = null;
+        _reviewImagePaths.Clear();
+        _reviewOriginalHashes.Clear();
+        RaiseReviewImageProperties();
         ResetProgress(capturePlan);
         UiState = OperatorUiState.Capturing;
         StatusMessage = $"{scenario}: 操作を受け付けず、表示中のライブ表示を停止します。";
@@ -2371,6 +2448,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         finally
         {
+            if (UiState == OperatorUiState.Review)
+            {
+                await RecordCurrentReviewPendingAsync().ConfigureAwait(true);
+            }
             IsBusy = false;
             RebuildReadiness(preserveOutcomeState: true);
         }
@@ -2395,6 +2476,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureOutcome = null;
         _stitchOutcome = null;
         _exportOutcome = null;
+        _currentReviewRecord = null;
+        _acceptedReviewCandidate = null;
+        _reviewImagePaths.Clear();
+        _reviewOriginalHashes.Clear();
+        RaiseReviewImageProperties();
         ResetProgress(CapturePlan.Dual());
         SetStep("liveview", "completed");
         SetStep("capture-a", "current");
@@ -2473,6 +2559,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         finally
         {
+            if (UiState == OperatorUiState.Review)
+            {
+                await RecordCurrentReviewPendingAsync().ConfigureAwait(true);
+            }
             IsBusy = false;
             RebuildReadiness(preserveOutcomeState: true);
         }
@@ -2498,6 +2588,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         foreach (var original in originals)
         {
             _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
+            _reviewImagePaths[original.Alias] = original.Path;
+            _reviewOriginalHashes[original.Alias] = original.Sha256;
             RecordSavedFile(original.Path);
             SetStep(original.Alias == "CAM-A" ? "capture-a" : "capture-b", "completed");
             SetStep(original.Alias == "CAM-A" ? "persist-a" : "persist-b", "completed");
@@ -2560,6 +2652,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode} / " +
             $"bindingInvalidationReason={outcome.BindingInvalidationReason}";
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseReviewImageProperties();
         RaiseLoupeProperties();
         RecalculateAvailability();
     }
@@ -2581,6 +2674,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureOutcome = null;
         _stitchOutcome = null;
         _exportOutcome = null;
+        _currentReviewRecord = null;
+        _acceptedReviewCandidate = null;
+        _reviewImagePaths.Clear();
+        _reviewOriginalHashes.Clear();
+        RaiseReviewImageProperties();
         ResetProgress(CapturePlan.Dual());
         SetStep("liveview", scenario == "Live View停止失敗" ? "current" : "completed");
         UiState = OperatorUiState.Capturing;
@@ -2625,6 +2723,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         finally
         {
+            if (UiState == OperatorUiState.Review)
+            {
+                await RecordCurrentReviewPendingAsync().ConfigureAwait(true);
+            }
             IsBusy = false;
             RebuildReadiness(preserveOutcomeState: true);
         }
@@ -2782,8 +2884,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         foreach (var original in originals)
         {
             _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
+            _reviewImagePaths[original.Alias] = original.Path;
+            _reviewOriginalHashes[original.Alias] = original.Sha256;
         }
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
+        RaiseReviewImageProperties();
         RaiseLoupeProperties();
         if (state.Capture is not null)
         {
@@ -2810,6 +2915,16 @@ public sealed class OperatorShellViewModel : ObservableObject
                 StitchResult,
                 _readiness.Setup.PlannedCorrections,
                 state.Stitch.Succeeded ? null : state.Stitch.FailureCode.ToString());
+            if (state.Stitch.Succeeded)
+            {
+                _reviewImagePaths["stitched"] = state.Stitch.OutputPath;
+                _reviewOriginalHashes["stitched"] = HashFile(state.Stitch.OutputPath);
+                // A newly completed product opens on its stitched result; subsequent manual
+                // selection remains untouched until a new result replaces this set.
+                _selectedReviewImage = "合成結果";
+                OnPropertyChanged(nameof(SelectedReviewImage));
+            }
+            RaiseReviewImageProperties();
         }
 
         if (state.Export is not null)
@@ -2865,6 +2980,141 @@ public sealed class OperatorShellViewModel : ObservableObject
         RecalculateAvailability();
     }
 
+    private bool IsCurrentResultReviewable()
+    {
+        var outcome = _captureOutcome;
+        if (_cameraInspectionRequired || outcome is null || outcome.State != SimulatedTransactionState.Complete || outcome.TransactionId == Guid.Empty ||
+            !outcome.CapturePlan.RequiredCameraAliases.All(alias => outcome.RetainedOriginalAliases.Contains(alias, StringComparer.Ordinal)))
+        {
+            return false;
+        }
+
+        if (!outcome.CapturePlan.RequiredCameraAliases.All(alias =>
+                _reviewImagePaths.TryGetValue(alias, out var path) && File.Exists(path)))
+        {
+            return false;
+        }
+
+        // CaptureRecoveryOnly and one-camera flows deliberately have no stitched product. They
+        // can only record that verified originals were reviewed, never an A0-quality acceptance.
+        return IsCaptureRecoveryOnlyMode || outcome.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera ||
+            (_stitchOutcome?.Succeeded == true && _reviewImagePaths.TryGetValue("stitched", out var stitched) && File.Exists(stitched));
+    }
+
+    private OperatorReviewRecord? CreatePendingReviewRecord()
+    {
+        if (!IsCurrentResultReviewable() || _captureOutcome is null)
+        {
+            return null;
+        }
+
+        var kind = IsCaptureRecoveryOnlyMode || _captureOutcome.CapturePlan.OperatingMode == CameraOperatingMode.SingleCamera
+            ? "OriginalsOnly"
+            : _dualCameraFlow?.ExecutionEnvironment == DualCameraExecutionEnvironment.HardwareDual ? "Product" : "Simulated";
+        var resultId = CurrentReviewResultId;
+        return new OperatorReviewRecord
+        {
+            ResultId = resultId,
+            TransactionId = LastTransactionId,
+            ReviewKind = kind,
+            State = "Pending",
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+        };
+    }
+
+    private async Task RecordCurrentReviewPendingAsync()
+    {
+        var pending = CreatePendingReviewRecord();
+        if (pending is null || _operatorReviewStore is null)
+        {
+            _currentReviewRecord = null;
+            _reviewStatusText = pending is null
+                ? "この結果は採用できません（原画像または合成の検証が未完了です）"
+                : "確認記録の保存先が未接続のため、採用できません";
+            RaiseReviewProperties();
+            return;
+        }
+
+        try
+        {
+            await _operatorReviewStore.SaveAsync(pending, _lifetimeToken).ConfigureAwait(true);
+            _currentReviewRecord = pending;
+            _reviewStatusText = "人による確認待ち（原画像と結果を確認してください）";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            _currentReviewRecord = null;
+            _reviewStatusText = $"確認記録を保存できないため、採用できません: {exception.GetType().Name}";
+        }
+        RaiseReviewProperties();
+    }
+
+    private async Task AcceptReviewAsync()
+    {
+        if (!CanAcceptReview || _currentReviewRecord is null || _operatorReviewStore is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            if (!ReviewFilesRemainVerified())
+            {
+                _reviewStatusText = "画像ファイルが撮影時の検証状態と一致しないため、採用できません。結果を保持して確認してください。";
+                RaiseReviewProperties();
+                return;
+            }
+            var accepted = _acceptedReviewCandidate ??= _currentReviewRecord with
+            {
+                State = "Accepted",
+                UpdatedAtUtc = DateTimeOffset.UtcNow,
+            };
+            await _operatorReviewStore.SaveAsync(accepted, _lifetimeToken).ConfigureAwait(true);
+            _currentReviewRecord = accepted;
+            _acceptedReviewCandidate = null;
+            _reviewStatusText = "採用を記録しました。次の原稿の準備へ進みます。";
+            RaiseReviewProperties();
+            await PrepareNewCaptureAsync().ConfigureAwait(true);
+            _reviewStatusText = "採用済みです。次の原稿を準備してから、撮影するを押してください。";
+            RaiseReviewProperties();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            _reviewStatusText = $"採用の保存結果を確認できません。自動では再送せず、同じ採用操作で確認してください: {exception.GetType().Name}";
+            RaiseReviewProperties();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool ReviewFilesRemainVerified()
+    {
+        try
+        {
+            foreach (var (alias, expectedHash) in _reviewOriginalHashes)
+            {
+                if (!_reviewImagePaths.TryGetValue(alias, out var path) || !File.Exists(path)) return false;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var actualHash = Convert.ToHexString(SHA256.HashData(stream));
+                if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+
+            return ReviewImagePath is not null &&
+                   (IsCaptureRecoveryOnlyMode || IsSingleCameraMode || _reviewOriginalHashes.ContainsKey("stitched"));
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
     private Task PrepareNewCaptureAsync()
     {
         UiState = OperatorUiState.CheckingReadiness;
@@ -2877,6 +3127,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _stitchOutcome = null;
         _exportOutcome = null;
         _captureOutcome = null;
+        _currentReviewRecord = null;
+        _acceptedReviewCandidate = null;
+        _reviewImagePaths.Clear();
+        _reviewOriginalHashes.Clear();
+        _reviewStatusText = "撮り直しの準備中。前回の原画像は保持しています。";
         _lastCapturedOriginalTimestamps.Clear();
         _lastLiveFrameTimestamps.Clear();
         _lastLiveFrames.Clear();
@@ -2901,6 +3156,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CameraAFocusStatusText));
         OnPropertyChanged(nameof(CameraBFocusStatusText));
         OnPropertyChanged(nameof(LastPreCaptureAutoFocusResult));
+        RaiseReviewProperties();
+        RaiseReviewImageProperties();
         RebuildReadiness();
         return Task.CompletedTask;
     }
@@ -2930,6 +3187,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 var state = await _dualCameraFlow.RestitchAsync(_lifetimeToken).ConfigureAwait(true);
                 ApplyFormalDualCameraState(state);
+                if (UiState == OperatorUiState.Review)
+                {
+                    await RecordCurrentReviewPendingAsync().ConfigureAwait(true);
+                }
             }
             finally
             {
@@ -2944,6 +3205,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         StitchResult = $"別jobで再合成成功 ({jobId:N})";
         _stitchOutcome = new StitchOutcome(jobId, true, StitchResult, _readiness.Setup.PlannedCorrections, null);
         UiState = OperatorUiState.Review;
+        await RecordCurrentReviewPendingAsync().ConfigureAwait(true);
         StatusMessage = "保持済みの左右原画像から、新しいstitch jobとして再合成しました。撮影transactionは変更していません。";
         RebuildReadiness(preserveOutcomeState: true);
         await Task.CompletedTask;
@@ -3191,10 +3453,34 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanRestitch));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
+        OnPropertyChanged(nameof(CanAcceptReview));
         OnPropertyChanged(nameof(CanOpenMaintenance));
         OnPropertyChanged(nameof(CanChangeOperatingMode));
         OnPropertyChanged(nameof(CanSelectCamera));
         NotifyAllCommands();
+    }
+
+    private void RaiseReviewProperties()
+    {
+        OnPropertyChanged(nameof(ReviewStatusText));
+        OnPropertyChanged(nameof(ReviewPrimaryActionText));
+        OnPropertyChanged(nameof(PrepareNewCaptureText));
+        OnPropertyChanged(nameof(CanAcceptReview));
+        _acceptReviewCommand.NotifyCanExecuteChanged();
+    }
+
+    private void RaiseReviewImageProperties()
+    {
+        OnPropertyChanged(nameof(ReviewImageOptions));
+        if (!ReviewImageOptions.Contains(SelectedReviewImage, StringComparer.Ordinal))
+        {
+            _selectedReviewImage = ReviewImageOptions.FirstOrDefault() ?? "合成結果";
+            OnPropertyChanged(nameof(SelectedReviewImage));
+        }
+        OnPropertyChanged(nameof(ReviewImagePath));
+        OnPropertyChanged(nameof(ReviewImageAvailable));
+        OnPropertyChanged(nameof(IsReviewImageUnavailable));
+        OnPropertyChanged(nameof(CanAcceptReview));
     }
 
     private void RaiseReadinessProperties()
@@ -3315,6 +3601,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _captureWithAutoFocusCommand.NotifyCanExecuteChanged();
         _diagnosticCommand.NotifyCanExecuteChanged();
         _prepareNewCaptureCommand.NotifyCanExecuteChanged();
+        _acceptReviewCommand.NotifyCanExecuteChanged();
         _toggleLiveViewCommand.NotifyCanExecuteChanged();
         _exportCommand.NotifyCanExecuteChanged();
         _restitchCommand.NotifyCanExecuteChanged();

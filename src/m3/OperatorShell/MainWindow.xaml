@@ -389,7 +389,8 @@
                                         <ColumnDefinition Width="8" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0" Background="{StaticResource CardBrush}"
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <Border Grid.Row="0" Grid.Column="0" Background="{StaticResource CardBrush}"
                                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                                             Padding="10,6">
                                         <DockPanel>
@@ -401,7 +402,7 @@
                                                        AutomationProperties.Name="CAM-A 状態表示" />
                                         </DockPanel>
                                     </Border>
-                                    <Border Grid.Column="2" Background="{StaticResource CardBrush}"
+                                    <Border Grid.Row="0" Grid.Column="2" Background="{StaticResource CardBrush}"
                                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                                             Padding="10,6">
                                         <DockPanel>
@@ -413,6 +414,9 @@
                                                        AutomationProperties.Name="CAM-B 状態表示" />
                                         </DockPanel>
                                     </Border>
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="3" Text="{Binding ReviewStatusText}" Margin="0,8,0,0"
+                                               FontSize="{StaticResource FontSizeCompact}" Style="{StaticResource MutedTextStyle}"
+                                               AutomationProperties.Name="撮影レビューの復元状態 未確認件数と採用済み件数" />
                                 </Grid>
 
                                 <!-- ==================== ステージ ==================== -->
@@ -427,20 +431,28 @@
                                              ここに同じ文言を置くと、半透明のオーバーレイ越しに二重像になる。 -->
 
                                         <!-- Review: 合成結果ビューア -->
-                                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24"
+                                        <Grid Margin="24"
                                                     Visibility="{Binding IsStageReviewMode, Converter={StaticResource BoolToVisibilityConverter}}">
-                                            <Border Background="{StaticResource AccentBrush}" Padding="14,6" HorizontalAlignment="Center">
-                                                <TextBlock Text="{Binding StageReviewBadgeText}" FontWeight="Bold"
-                                                           FontSize="{StaticResource FontSizeSection}"
-                                                           Foreground="{StaticResource AccentOnStrongBrush}"
-                                                           AutomationProperties.Name="ステージ表示 合成結果バッジ" />
+                                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                            <Border Grid.Row="0" Background="{StaticResource AccentBrush}" Padding="14,6" HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding StageReviewBadgeText}" FontWeight="Bold" FontSize="{StaticResource FontSizeSection}"
+                                                           Foreground="{StaticResource AccentOnStrongBrush}" AutomationProperties.Name="ステージ表示 結果確認バッジ" />
                                             </Border>
-                                            <TextBlock Text="{Binding ProcessingResultLabel}" Margin="0,12,0,0" TextAlignment="Center"
-                                                       FontWeight="Medium" Style="{StaticResource MutedTextStyle}" />
-                                            <TextBlock Text="{Binding StitchResult}" TextAlignment="Center" Margin="0,4,0,0" />
-                                            <TextBlock Text="{Binding CaptureResult}" TextAlignment="Center" Margin="0,4,0,0"
-                                                       Style="{StaticResource MutedTextStyle}" />
-                                        </StackPanel>
+                                            <Image Grid.Row="1" Source="{Binding ReviewImagePath}" Stretch="Uniform" Margin="8"
+                                                   Visibility="{Binding ReviewImageAvailable, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                   AutomationProperties.Name="結果確認 検証済みの合成または原画像" />
+                                            <TextBlock Grid.Row="1" Text="検証済みの画像ファイルを表示できません。採用はできません。" TextAlignment="Center"
+                                                       VerticalAlignment="Center" Style="{StaticResource MutedTextStyle}"
+                                                       Visibility="{Binding IsReviewImageUnavailable, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                            <StackPanel Grid.Row="2" HorizontalAlignment="Center">
+                                                <ComboBox ItemsSource="{Binding ReviewImageOptions}" SelectedItem="{Binding SelectedReviewImage}"
+                                                          Margin="0,8,0,0" AutomationProperties.Name="結果確認 表示画像 合成結果 左原画像 右原画像" />
+                                                <Button Content="拡大して確認" Click="OnOpenReviewImage" IsEnabled="{Binding ReviewImageAvailable}"
+                                                        Margin="0,6,0,0" Padding="12,4"
+                                                        AutomationProperties.Name="結果確認 選択した検証済み画像を全体 100パーセント つなぎ目目安で開く" />
+                                                <TextBlock Text="{Binding ReviewStatusText}" TextAlignment="Center" Margin="0,6,0,0" Style="{StaticResource MutedTextStyle}" />
+                                            </StackPanel>
+                                        </Grid>
 
                                         <!-- CAM-A live / CAM-B live: 当該カメラのフルフレーム表示 -->
                                         <Grid Visibility="{Binding IsStageSingleLiveMode, Converter={StaticResource BoolToVisibilityConverter}}">
@@ -1262,10 +1274,13 @@
                                                     <Button Grid.Column="0" Content="撮影済み画像で再合成" Command="{Binding RestitchCommand}"
                                                             IsEnabled="{Binding CanRestitch}"
                                                             FontSize="{StaticResource FontSizeBody}" />
-                                                    <Button Grid.Column="2" Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}"
+                                                    <Button Grid.Column="0" Content="{Binding PrepareNewCaptureText}" Command="{Binding PrepareNewCaptureCommand}"
                                                             IsEnabled="{Binding CanPrepareNewCapture}"
                                                             FontSize="{StaticResource FontSizeBody}"
-                                                            AutomationProperties.Name="read-only readiness再検査" />
+                                                            AutomationProperties.Name="撮り直しの準備へ 旧原画像を保持し撮影を開始しない" />
+                                                    <Button Grid.Column="2" Content="{Binding ReviewPrimaryActionText}" Command="{Binding AcceptReviewCommand}"
+                                                            IsEnabled="{Binding CanAcceptReview}" FontSize="{StaticResource FontSizeBody}"
+                                                            AutomationProperties.Name="結果を採用して次へ 人の確認を記録後のみ撮影準備へ進む" />
                                                 </Grid>
                                             </StackPanel>
 

@@ -4,6 +4,12 @@
 
 ## 今回の対応範囲と候補
 
+- 最新の実機証拠: 本人承認により一台ずつ接続し、CAM-B `run-1789977134868-1`、CAM-A `run-1789977425037-1` が各1/1 Complete。原画像の保存・再検証・今回objectだけのcleanup・empty-afterまで成功、retryなし。ローカル証跡は `%LOCALAPPDATA%/A0CameraStitcher/acceptance/scene-cli-b-single` と `scene-cli-a-single`。机上風景でありDual同時接続撮影・合成・A0品質の受入ではない。
+- 最新UX実装: `MainWindow` に保存済み原画像/合成結果の表示切替、全体/100%拡大用read-only viewer、Pending/Accepted永続化、採用保存後の次原稿準備を実装。現在結果ID・画像hashを採用前に照合し、保存失敗では結果画面を保持。撮り直し準備で撮影・旧画像削除を行わない。Foundation `--review-store` 2/2 PASS、Release build警告0/エラー0、UI `--review-ux` 3/3 PASS（採用保存後の応答失敗・明示再操作、画像改変拒否、旧原画像保持、再起動時記録、既存Dual成功/出力失敗経路）。テストselectorの変数名重複によるbuild失敗は修正後に再buildし、アプリ/テスト側DLLのSHA-256一致も確認。独立read-onlyレビューのP1/P2（合成hash、原画像のみmodeの初期選択、publish後cancel、partial記録）は修正・再確認済み。今回の実機操作なし。
+- UX残件: 専用SingleCamera画面への展開、過去の未確認結果の再表示・再検証・再採用、実seam位置への移動、外部AI用の正式CLI/IPC、実画面/実機受入。二台同時ライブビューはFR-LV-003 / ADR-0031の技術gateを維持し、偽の二画面Liveは追加しない。
+- 二台同時ライブの調査結果: 正規SDK `Module/ReadMe_Eng.txt` Limitationsは一moduleによる二台以上の制御を非対応と明記。現行module内で二つのSourceを同時openする案は採用しない。別process案も保証・排他安全性は未確認で、資料調査だけでは有効化しない（ADR-0031追記）。
+- これより下の起動前・撮影前の記述は経緯。現時点の実機状況は上記の単体撮影証拠を優先する。
+
 - 本人指示: STEP1〜4を完了させ、反復試験は最大5回程度にする。ADR-0030により新規10/100回工程を最大5回へ置換する。過去の試験実績は変更しない。
 - base: `3e9ae406272027274fb454b8f9b4d9d63ac2569f`（PR #214統合済み）。作業branch: `codex/step4-five-run-acceptance-20260921`。
 - 候補変更: Phase 0実機反復CLIは1〜5回、WPF専用反復は5組、Single handoff証跡はv2/5回。5回は初回を含み、同じ系列の追加起動・失敗補充をしない。

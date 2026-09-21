@@ -1,0 +1,26 @@
+<Window x:Class="A0CameraStitcher.M3.OperatorShell.ReviewImageWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="画像の詳細確認" Width="1100" Height="760" MinWidth="640" MinHeight="420"
+        WindowStartupLocation="CenterOwner" Background="#202426" Foreground="#F4F4F4"
+        AutomationProperties.Name="保存済み画像の詳細確認 撮影操作なし">
+    <DockPanel Margin="12">
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Content="全体" Click="OnFit" Padding="16,6" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="ReviewImageFit" />
+            <Button Content="100%" Click="OnActualPixels" Padding="16,6" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="ReviewImageActualPixels" />
+            <Button x:Name="SeamButton" Content="中央を拡大" Click="OnCenter" Padding="16,6" Margin="0,0,8,0"
+                    ToolTip="中央を100%表示します。実際のつなぎ目位置を自動検出する機能ではありません。"
+                    AutomationProperties.AutomationId="ReviewImageCenter" />
+            <TextBlock x:Name="ZoomLabel" VerticalAlignment="Center" Margin="8,0,0,0" />
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Bottom" Text="表示のみ：スクロールで細部を確認できます。原画像は変更しません。"
+                   Margin="0,10,0,0" TextWrapping="Wrap" />
+        <ScrollViewer x:Name="ImageScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                      SizeChanged="OnViewportChanged" Background="#111416" CanContentScroll="False">
+            <Image x:Name="ReviewImage" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"
+                   RenderOptions.BitmapScalingMode="HighQuality" AutomationProperties.Name="保存済み画像 詳細表示" />
+        </ScrollViewer>
+    </DockPanel>
+</Window>

@@ -147,7 +147,8 @@ public partial class MainWindow : Window
                     : _liveViewFrameSource,
                 dualBindingTransport: _dualAgentLifecycle,
                 captureRecoveryOnlyWorkflow: captureRecoveryOnlyWorkflow,
-                captureRecoveryOnlyFiveRunCoordinator: captureRecoveryOnlyFiveRunCoordinator);
+                captureRecoveryOnlyFiveRunCoordinator: captureRecoveryOnlyFiveRunCoordinator,
+                operatorReviewStore: new FileOperatorReviewStore(Path.Combine(dualProductRoot, "operator-review")));
             DataContext = _viewModel;
             if (_dualAgentLifecycle is not null)
             {
@@ -183,6 +184,25 @@ public partial class MainWindow : Window
             // HardwareSingleCameraWindow.OnLoaded と同様、ウィンドウを閉じたことによる
             // 起動時クエリのキャンセルは無視する（issue #142 症状3）。それ以外の失敗は
             // OperatorShellViewModel.InitializeAsync 側で fail-closed に捕捉済み。
+        }
+    }
+
+    private void OnOpenReviewImage(object sender, RoutedEventArgs eventArgs)
+    {
+        var path = _viewModel.ReviewImagePath;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            MessageBox.Show(this, "検証済みの画像ファイルを開けません。採用はできません。", "結果確認", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            new ReviewImageWindow(path, _viewModel.SelectedReviewImage == "合成結果") { Owner = this }.ShowDialog();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+        {
+            MessageBox.Show(this, $"画像を開けませんでした: {exception.GetType().Name}", "結果確認", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 

@@ -252,6 +252,7 @@
 - 決定日: 2026-09-21
 - 決定: `DualCamera`の最終operator experienceは、CAM-Aを左、CAM-Bを右に表示する横長の二pane Live Viewとする。各paneはalias、Live/映像停止、最終frame受信時刻を表示する。二paneをframe同期済み・合成済み・原画像と表示せず、previewを撮影・合成入力・永続証拠へ用いない。
 - 現行との差分: 現行`a0.camera-agent.hardware-dual-binding.v1`、`NikonDualBindingSdkAdapter`、fake adapterはいずれも同時に一つのLive Viewだけを許可し、切替時に前candidateをstopしてSDK source/capture sessionをcloseする。このfail-closed制約を、SDK vendor documentationと実機証拠なしに解除しない。従って本ADRは、現行UIへ偽の二画面表示や二重session APIを追加する許可ではない。
+- 2026-09-21追加調査: 正規配布SDKの `Module/ReadMe_Eng.txt` Limitations（77行）は一つのmoduleで二台以上の制御を許可しない。`Module/Documents/English/Usage of Type0014 Module(E).pdf` p.6 §8と `MAID3Type0014(E).pdf` p.171 §6.15も複数Sourceの同時openを制限する。したがって現行一module内で二本のLive Viewを開く案は非対応であり、単なる未実装ではない。別process/moduleの構成は資料で保証されておらず、既存排他契約との整合も未確認。代替構成の設計と別承認実機PoCまでは現行制限を維持する。資料・SDK binaryはrepositoryへ転載・同梱しない。
 - 実装前gate: (1) ライセンス下のSDK documentationで二つの独立session/sourceによる同時Live Viewを許可すること、(2) 二台start、継続frame、片側停止、例外、USB切断で全sessionを決定的にstop/closeできること、(3) binding aliasの取り違え防止と再binding条件、(4) capture開始前に両Live Viewと全SDK source/capture sessionをcloseしWPD open中SDK operation 0を維持すること、(5) transaction排他・no retry・原本保持を維持すること、をsoftware contractと明示承認済み最大5回の実機検証で確認する。
 - 失敗時: 片側のframe取得停止、session close未確認、SDK error、USB topology変化、candidate count変化は両paneをLive成功と見せず、bindingをinvalidにして`HardwarePending`へ戻す。capture transaction開始は拒否する。
 - 範囲外: リアルタイム合成、自由homography、previewからのA0品質判断、hardware shutter synchronizationの保証。実機PoCはこのdecisionだけでは開始せず、対象・回数・操作を明記した別承認を要する。

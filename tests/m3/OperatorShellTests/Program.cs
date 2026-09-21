@@ -31,6 +31,21 @@ if (args is ["--wpf-command-contracts"])
 {
     return await WpfCommandLifetimeContracts.RunAsync();
 }
+if (args is ["--review-ux"])
+{
+    var reviewFailures = 0;
+    foreach (var (name, test) in new (string Name, Func<Task> Run)[]
+    {
+        ("review UX preserves originals, records acceptance, and rejects changed files", ReviewUxPersistsAcceptanceAndRejectsChangedFilesAsync),
+        ("formal dual WPF workflow remains intact", FormalDualCameraWpfFlowAsync),
+        ("formal dual export failure progress remains intact", FormalDualCameraExportFailureProgressAsync),
+    })
+    {
+        try { await test(); Console.WriteLine($"PASS {name}"); }
+        catch (Exception exception) { reviewFailures++; Console.Error.WriteLine($"FAIL {name}: {exception}"); }
+    }
+    return reviewFailures == 0 ? 0 : 1;
+}
 if (args is ["--wpf-command-stop-probe", var runnerProbe])
 {
     return await WpfCommandLifetimeContracts.RunStopProbeAsync(runnerProbe);
@@ -4688,6 +4703,95 @@ static async Task DualIdentityExpiryBlocksWpfCaptureAsync()
         viewModel.CaptureCommand.Execute(null);
         Check.Equal(0, viewModel.TransactionStartCount);
         Check.Equal(0, bridge.CaptureCalls);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task ReviewUxPersistsAcceptanceAndRejectsChangedFilesAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "A0CameraStitcher-M3-ReviewUxTests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var reviews = new FileOperatorReviewStore(Path.Combine(root, "operator-review"));
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            DualCameraProductComposition.Create(Path.Combine(root, "products")),
+            operatorReviewStore: reviews);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.CanCapture, "A test-synthetic dual flow must reach the explicit capture gate.");
+
+        await ExecuteNativeCommandAsync(viewModel.CaptureCommand);
+        await WaitUntilAsync(() => !viewModel.IsBusy && viewModel.UiState == OperatorUiState.Review,
+            "The first reviewable product result did not finish.");
+        Check.True(viewModel.ReviewImageAvailable, "Only a verified capture artifact may be offered to the review image control.");
+        Check.True(viewModel.CanAcceptReview, "Pending review metadata must be durable before acceptance is enabled.");
+        var firstImage = viewModel.ReviewImagePath!;
+        var captureCount = viewModel.TransactionStartCount;
+
+        await ExecuteNativeCommandAsync(viewModel.AcceptReviewCommand);
+        await WaitUntilAsync(() => !viewModel.IsBusy && viewModel.UiState is OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection,
+            "A successful acceptance did not return to preparation.");
+        Check.True(captureCount == viewModel.TransactionStartCount, "Acceptance must not start a capture.");
+        Check.True(File.Exists(firstImage), "Acceptance must retain the original result artifact.");
+        Check.True((await reviews.LoadAsync()).Any(record => record.State == "Accepted"), "Acceptance must be recorded durably.");
+
+        await ExecuteNativeCommandAsync(viewModel.CaptureCommand);
+        await WaitUntilAsync(() => !viewModel.IsBusy && viewModel.UiState == OperatorUiState.Review,
+            "The second reviewable product result did not finish.");
+        var secondImage = viewModel.ReviewImagePath!;
+        using (var changed = new FileStream(secondImage, FileMode.Append, FileAccess.Write, FileShare.None))
+        {
+            changed.WriteByte(0x00);
+        }
+        var afterSecondCapture = viewModel.TransactionStartCount;
+        await ExecuteNativeCommandAsync(viewModel.AcceptReviewCommand);
+        await WaitUntilAsync(() => !viewModel.IsBusy, "Changed-file acceptance command did not finish.");
+        Check.True(OperatorUiState.Review == viewModel.UiState, "Changed review files must hold the result screen.");
+        Check.True(afterSecondCapture == viewModel.TransactionStartCount, "A rejected acceptance must not capture again.");
+        Check.True(viewModel.ReviewStatusText.Contains("一致しない", StringComparison.Ordinal), "Changed files must be named as an acceptance blocker.");
+
+        await ExecuteNativeCommandAsync(viewModel.PrepareNewCaptureCommand);
+        await WaitUntilAsync(() => !viewModel.IsBusy, "Retake preparation did not finish.");
+        Check.True(afterSecondCapture == viewModel.TransactionStartCount, "Retake preparation must not trigger capture.");
+        Check.True(File.Exists(secondImage), "Retake preparation must retain the previous artifact.");
+
+        var restarted = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "restarted-journals")),
+            DualCameraProductComposition.Create(Path.Combine(root, "restarted-products")),
+            operatorReviewStore: reviews);
+        await restarted.InitializeAsync(CancellationToken.None);
+        Check.True(restarted.ReviewStatusText.Contains("未確認の結果", StringComparison.Ordinal) &&
+                   restarted.ReviewStatusText.Contains("採用済み", StringComparison.Ordinal),
+            "Restart must distinguish durable pending and accepted review records without reopening an old image.");
+        Check.False(restarted.CanAcceptReview, "A recovered review record without revalidated artifacts must not be adoptable.");
+
+        var ambiguousRoot = Path.Combine(root, "accepted-save-ambiguous");
+        var innerStore = new FileOperatorReviewStore(Path.Combine(ambiguousRoot, "operator-review"));
+        var ambiguousViewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(ambiguousRoot, "journals")),
+            DualCameraProductComposition.Create(Path.Combine(ambiguousRoot, "products")),
+            operatorReviewStore: new ThrowAfterFirstAcceptedSaveStore(innerStore));
+        await ambiguousViewModel.InitializeAsync(CancellationToken.None);
+        ambiguousViewModel.AcceptSafetyCommand.Execute(null);
+        await ExecuteNativeCommandAsync(ambiguousViewModel.CaptureCommand);
+        await WaitUntilAsync(() => !ambiguousViewModel.IsBusy && ambiguousViewModel.CanAcceptReview,
+            "The ambiguous-save test result did not become reviewable.");
+        var ambiguousCaptureCount = ambiguousViewModel.TransactionStartCount;
+        await ExecuteNativeCommandAsync(ambiguousViewModel.AcceptReviewCommand);
+        await WaitUntilAsync(() => !ambiguousViewModel.IsBusy, "The first ambiguous acceptance did not return.");
+        Check.True(ambiguousViewModel.UiState == OperatorUiState.Review &&
+                   ambiguousViewModel.ReviewStatusText.Contains("自動では再送せず", StringComparison.Ordinal),
+            "An ambiguous accepted save must retain review instead of moving on.");
+        await ExecuteNativeCommandAsync(ambiguousViewModel.AcceptReviewCommand);
+        await WaitUntilAsync(() => !ambiguousViewModel.IsBusy && ambiguousViewModel.UiState is OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection,
+            "An explicit same-record acceptance replay did not proceed to preparation.");
+        Check.True(ambiguousViewModel.TransactionStartCount == ambiguousCaptureCount,
+            "Accepted-save retry must replay metadata only, not capture.");
     }
     finally
     {
@@ -12331,6 +12435,24 @@ sealed class MutableDualIdentitySource(DualCameraIdentitySnapshot initial) : IDu
         Current = snapshot;
         SnapshotChanged?.Invoke(this, snapshot);
     }
+}
+
+sealed class ThrowAfterFirstAcceptedSaveStore(IOperatorReviewStore inner) : IOperatorReviewStore
+{
+    private bool _throwOnce = true;
+
+    public async Task SaveAsync(OperatorReviewRecord record, CancellationToken cancellationToken = default)
+    {
+        await inner.SaveAsync(record, cancellationToken);
+        if (_throwOnce && record.State == "Accepted")
+        {
+            _throwOnce = false;
+            throw new IOException("Test: accepted record published but response was interrupted.");
+        }
+    }
+
+    public Task<IReadOnlyList<OperatorReviewRecord>> LoadAsync(CancellationToken cancellationToken = default) =>
+        inner.LoadAsync(cancellationToken);
 }
 
 sealed class NeverCaptureDualBridge : ITestSyntheticCamera, IOfflineStitcherAdapter

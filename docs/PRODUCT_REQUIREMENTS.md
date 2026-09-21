@@ -62,7 +62,7 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - `FR-DATA-002`: 撮影トランザクション、カメラ別時刻、状態、ファイルサイズ、SHA-256、結果、エラーを記録する。
 - `FR-EXP-001`: `DualCamera`では合成JPEGを指定フォルダへ保存できる。`SingleCamera`では検証済み`7360×4912` canonical `original.jpg`をbyte-identicalな単一撮影出力として、操作者が選択したfixed-local folderへ明示保存できる。network、UNC、device path、ADS、removable、reparse chainを拒否し、合成済みとは表示しない。
 - `FR-UI-001`: 一画面の撮影ダッシュボードで、明示選択したmode、起動セッションの排他同意、modeが要求するcameraの接続・identity・設定・card・Live View状態、profile ID・版・期限、設置と自動補正可否、mode別処理進捗、撮影・合成・保存を分離した結果、赤Blocker・黄Caution・青Infoを表示できる。`SingleCamera`で非required cameraの不在をBlockerにしない。
-- `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。設置・校正、read-onlyカメラ設定、結果確認後の明示保存、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。
+- `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。標準導線は「位置合わせ → 撮影 → 詳細確認 → 採用 → 次の原稿」とし、撮影後は結果確認へ移動して明示操作まで留まる。原画像は採用前に自動保存し、保存済み・合成完了・人の採用済みを分離する。採用記録の成功後だけ次の準備へ進み、撮り直しは旧画像を保持した新しい撮影IDで行う。CaptureRecoveryOnlyでは原画像の確認であり、合成・A0品質の採用とは扱わない。設置・校正、read-onlyカメラ設定、結果確認後の明示書き出し、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。画面配置・状態契約は[操作者画面仕様](OPERATOR_UI_SPEC.md#2026-09-21-改訂設計撮影ごとの詳細確認)に従う。本改訂は設計合意であり実装完了ではない。
 - `FR-UI-003`: 現行の一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。ADR-0031 gateが未達の間、二台同時Live Viewは操作可能に見せない。gate達成後の二台表示では、左右各paneのalias・Live/停止・最終frame時刻を表示する。previewを原画像・合成入力として扱わない。
 
 ## 4. 非機能要件

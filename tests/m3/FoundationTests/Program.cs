@@ -12,6 +12,8 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("protocol serialization and rejection", ProtocolSerializationAndRejectionAsync),
+    ("operator review persists pending and accepted across restart", OperatorReviewPersistenceAsync),
+    ("operator review rejects corrupt or conflicting records", OperatorReviewRejectionsAsync),
     ("named pipe fake agent roundtrip", NamedPipeRoundtripAsync),
     ("durable sequential success", DurableSequentialSuccessAsync),
     ("durable sequential pair stability completes 100 of 100", DurableSequentialPairStabilityAsync),
@@ -53,6 +55,11 @@ var tests = new (string Name, Func<Task> Run)[]
 };
 
 var failures = new List<string>();
+if (args.SequenceEqual(new[] { "--review-store" }))
+{
+    tests = tests.Where(test => test.Run == OperatorReviewPersistenceAsync ||
+        test.Run == OperatorReviewRejectionsAsync).ToArray();
+}
 if (args.SequenceEqual(new[] { "--journal-compatibility" }))
 {
     tests = tests.Where(test => test.Run == LegacyAcknowledgementJournalAsync ||
@@ -74,6 +81,58 @@ foreach (var test in tests)
 
 Console.WriteLine($"Foundation tests: {tests.Length - failures.Count}/{tests.Length} passed.");
 return failures.Count == 0 ? 0 : 1;
+
+static OperatorReviewRecord PendingReview() => new()
+{
+    ResultId = "result-1", TransactionId = "transaction-1", ReviewKind = "OriginalsOnly",
+    State = "Pending", UpdatedAtUtc = new DateTimeOffset(2026, 9, 21, 0, 0, 0, TimeSpan.Zero),
+};
+
+static async Task OperatorReviewPersistenceAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        var pending = PendingReview();
+        var store = new FileOperatorReviewStore(root);
+        var originalPath = Path.Combine(root, "original.jpg");
+        var originalBytes = new byte[] { 1, 2, 3, 4 }; // Sentinel only, not a product JPEG.
+        await File.WriteAllBytesAsync(originalPath, originalBytes);
+        await store.SaveAsync(pending);
+        Check.Equal(pending, (await new FileOperatorReviewStore(root).LoadAsync()).Single());
+        var accepted = pending with { State = "Accepted", UpdatedAtUtc = pending.UpdatedAtUtc.AddMinutes(1) };
+        await store.SaveAsync(accepted);
+        await store.SaveAsync(accepted); // Exact idempotent replay never creates a new acceptance.
+        Check.Equal(accepted, (await new FileOperatorReviewStore(root).LoadAsync()).Single());
+        await Check.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(pending));
+        await store.SaveAsync(pending with { ResultId = "result-2", TransactionId = "transaction-2" });
+        Check.Equal(2, (await store.LoadAsync()).Count);
+        Check.SequenceEqual(originalBytes, await File.ReadAllBytesAsync(originalPath));
+    });
+}
+
+static async Task OperatorReviewRejectionsAsync()
+{
+    await WithTemporaryRootAsync(async root =>
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "unpublished.partial"), "{}");
+        await Check.ThrowsAsync<InvalidDataException>(() => new FileOperatorReviewStore(root).LoadAsync());
+        Check.True(File.Exists(Path.Combine(root, "unpublished.partial")), "Incomplete metadata must remain available for diagnosis.");
+    });
+    await WithTemporaryRootAsync(async root =>
+    {
+        var store = new FileOperatorReviewStore(root);
+        var pending = PendingReview();
+        await Check.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(pending with { State = "Accepted" }));
+        await store.SaveAsync(pending);
+        await Check.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(pending with { TransactionId = "wrong" }));
+        await Check.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(pending with { ReviewKind = "Product" }));
+        using (var competing = new FileStream(Path.Combine(root, ".review.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            await Check.ThrowsAsync<IOException>(() => store.SaveAsync(pending with { State = "Accepted" }));
+        Check.Equal(pending, (await store.LoadAsync()).Single());
+        await File.WriteAllTextAsync(Directory.GetFiles(root, "*.json").Single(), "{broken");
+        await Check.ThrowsAsync<JsonException>(() => store.LoadAsync());
+    });
+}
 
 static async Task DualHardwareAgentV2RoundTripAsync()
 {
