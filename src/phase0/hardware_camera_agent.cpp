@@ -3335,10 +3335,9 @@ std::chrono::seconds ParseTimeoutOverrideMilliseconds(
     }
     unsigned long long milliseconds = 0;
     try {
-        const std::string digits(raw.begin(), raw.end());
         std::size_t consumed = 0;
-        milliseconds = std::stoull(digits, &consumed);
-        if (consumed != digits.size()) {
+        milliseconds = std::stoull(raw, &consumed);
+        if (consumed != raw.size()) {
             throw std::out_of_range("trailing characters after the number");
         }
     } catch (const std::exception&) {
