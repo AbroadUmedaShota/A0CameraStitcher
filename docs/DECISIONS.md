@@ -225,6 +225,17 @@
 - 実機再開前の技術gate: pair-level read-only preflightでWPD D810 exact-two、CAM-A/B map exact-one、両card payload 0、全WPD session closeを一括確認する。さらにproduction adapterのread-only coexistence probeで、WPD open前のSDK source/capture session close、Module retained、WPD session close、WPD open中SDK operation 0を確認する。focused/full回帰と独立reviewの`PASS`後だけoperator-resume済みone-shotへ進む。
 - 受入境界: このADRはCaptureRecoveryOnlyのtransport検証だけを対象とし、合成、A0品質、実シャッター同期、releaseを承認しない。one-shot、10 pair、実測p95の製品責任者承認、100 pair、異常系の証跡は引き続き別gateである。
 
+## ADR-0030: STEP4までの受入反復を最大5回へ変更する
+
+- 決定日: 2026-09-21
+- 根拠: 本人指示「STEP4までの対応を完了せてください。100回テストは多すぎるので多くても5回程度に収めてください。」
+- 決定: 今回の完成範囲はソフトウェア安定化、一台実WPF受入、二台撮影受入、実写A0合成受入まで。新規の実機・実写反復試験は一つの計画された受入系列につき最大5回とし、最初のone-shotもこの5回に含める。Singleは最大5撮影、Dualは最大5組（各body最大5撮影、全体最大10シャッター）とする。成功までの補充、同じ系列を分割して回数を増やすこと、自動retryは禁止する。
+- 置換範囲: ADR-0024/0025/0027/0028と旧計画の10回characterization・100回耐久・10回handoffを今回の最大5回へ置換する。既存100回内部coordinatorは過去契約の検証用として保持するが、製品UI/CLIには接続しない。過去の実機1/10/100成功記録やソフトウェアfixtureは改変しない。
+- 判定: 五つの初回結果、実行回数、失敗数、全時間値・最大時間を記録する。p95を併記する場合も5標本の記述統計であり、長期信頼性や100回耐久と同等とは主張しない。最初の失敗・未確定・割当失効・時間不足で停止し、未実行は未実行と記録する。既存の性能承認は該当mode・条件だけに適用する。
+- 不変条件: 原本保持、SDK/WPD非重複、CAM-A→CAM-B、exact-object cleanup、180秒watchdog、明示割当、no fallback、no retryを維持する。5回への変更はカメラ設定・カード整理・品質閾値・最終リグの承認ではない。
+- 未確定時の記録: DualのHardwarePending・割当失効では成功系列の集約証跡を作らない。既存transaction/recovery記録を正本とし、5回の結果が揃ったとは扱わない。
+- 実施条件: 対象PC・body・候補SHA/hash・操作・上限を対応付けた実機計画と現在の状態を確認する。本人指示によりAOPC-22-NOTEは使用しない。現在PC（AOPC-11-NOTE）のOS検出はD810一台であり、SDK/WPD readiness・撮影は未実施。実写corpusとHG-0001/0002は未充足。STEP4完了は実写品質の証拠が揃ってから判定する。配布・release（M4）は今回の範囲外。
+
 ## ADR-0029: SDK PC直接保存を受入済み経路と分離して評価する
 
 - 状態: Experimental / hardware acceptance failed

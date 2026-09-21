@@ -1,31 +1,31 @@
 {
   "schema_version": "autodev.completion-report.v1",
-  "snapshot_status": "current-as-of-2026-09-17-main-712ba9d",
-  "current_status_document": "docs/MVP_NEXT_ACTIONS_2026-09-17.md",
-  "evaluated_at": "2026-09-17T00:00:00+09:00",
+  "snapshot_status": "2026-09-21-five-run-working-candidate",
+  "current_status_document": "docs/CURRENT_STATUS.md",
+  "evaluated_at": "2026-09-21T00:00:00+09:00",
   "completion_state": "in-progress",
   "current_reconciliation": {
-    "source_commit": "712ba9d298ef01ad413f825b83c3e4abfaef1f16",
-    "source_tree": "518d955ea780f2c292241363cc4f87b638d91b75",
-    "software_candidate": "SoftwareOnlyReady / HardwareNotRun / ApprovalRequired",
-    "sdkless_release_ctest": "23/23 passed from saved evidence; not rerun",
-    "licensed_focused_ctest": "6/6 passed from saved evidence; not rerun",
-    "next_single_step": "freshly approved CAM-A pc-direct one-shot with pre/post read-only spool checks",
-    "dual_state": "CaptureRecoveryOnly backend, WPF path, ten-run runner, and internal hundred-run coordinator exist; real 1/10/100 and production hundred-run host-lifetime compatibility remain unverified",
+    "base_source_commit": "3e9ae406272027274fb454b8f9b4d9d63ac2569f",
+    "branch": "codex/step4-five-run-acceptance-20260921",
+    "software_candidate": "Five-run focused contract and full M3 simulated Release PASS / HardwareNotRun",
+    "sdkless_release_ctest": "24/24 PASS, 261.47 seconds; prior AF timeout did not reproduce in current full M3 run, root cause not established",
+    "licensed_focused_ctest": "current candidate not run; previous evidence does not certify changed code",
+    "next_single_step": "fix candidate and verify current local host, alias, operation and at-most-five budget before hardware execution; AOPC-22-NOTE excluded by user",
+    "dual_state": "Five-pair production coordinator implemented; current AOPC-11-NOTE OS inventory finds only one D810; dual hardware acceptance remains incomplete",
     "stitch_state": "software fixed-warp prototype; HG-0001, HG-0002, and rights-cleared corpus block product quality completion",
     "hardware_operations_in_this_reconciliation": 0
   },
   "automatable_gaps": [
-    "No independent product-code change is safe to promote from this reconciliation: the internal Dual hundred-run coordinator is deliberately unwired until measured p95 and host-lifetime evidence exist, and M2 product algorithms depend on HG-0001, HG-0002, and the rights-cleared corpus",
-    "Prepare the rights/manifest/oracle design for Issue #44 without embedding unapproved product thresholds or committing real images"
+    "Local software verification passed; submit five-run CLI, WPF, evidence and requirements changes for review without merging or hardware-acceptance claims",
+    "M2 real quality completion requires actual rig and rights-cleared input; pre-gate and corpus contracts pass but do not prove image quality"
   ],
   "blocking_gaps": [
-    "the saved main-712ba9d PC-direct candidate has not run on AOPC-22; pre-spool, at-most-one CAM-A capture, post-spool, SaveMedia restore, and terminal process-zero evidence require fresh one-run approval",
-    "SingleCamera Camera Agent one-shot, 10-run p95, and 100-run durability are evidenced, but real WPF 100-run acceptance, ten continuous Live View handoffs, USB disconnect, and storage-failure acceptance remain incomplete",
-    "Dual session-local operator binding and CaptureRecoveryOnly software paths are implemented, but real one-shot, 10-pair p95, production-wired 100-pair host compatibility, 100/100, and fault acceptance remain incomplete",
+    "AOPC-22-NOTE is excluded; AOPC-11-NOTE has one OS-visible D810, no SDK/WPD readiness or current candidate hardware execution",
+    "SingleCamera historical Camera Agent 1/10/100 evidence is preserved; current real WPF and continuous Live View acceptance remains incomplete, now maximum five initial attempts under ADR-0030",
+    "Dual real capture and fault acceptance remain incomplete; one-shot is included in the maximum five pairs, with no replacement or automatic retry; new 100-run acceptance is not required",
     "HG-0001 and HG-0002 block final DualCamera M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
-    "HG-0009 blocks approval of the SingleCamera p95 target after ten real characterization runs; byte-identical 7360x4912 output, no DPI/crop/lens claims, and 100-run durability are already decided",
-    "real Camera Agent/D810 execution, acceptance, redistribution, and release remain open"
+    "Historical SingleCamera p95 approval remains scoped to its recorded conditions, not current WPF or Dual acceptance",
+    "Redistribution and release remain open but are outside this STEP1-4 request"
   ],
   "degraded_gaps": [
     "standard WPD capture returned MTP 0x2002 without a new JPEG",

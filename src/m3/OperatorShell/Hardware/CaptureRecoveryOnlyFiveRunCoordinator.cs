@@ -3,7 +3,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 
 namespace A0CameraStitcher.M3.OperatorShell.Hardware;
 
-internal enum CaptureRecoveryOnlyTenRunStatus
+internal enum CaptureRecoveryOnlyFiveRunStatus
 {
     Completed,
     Failed,
@@ -11,27 +11,29 @@ internal enum CaptureRecoveryOnlyTenRunStatus
     Blocked,
 }
 
-internal sealed record CaptureRecoveryOnlyTenRunResult(
-    CaptureRecoveryOnlyTenRunStatus Status,
+internal sealed record CaptureRecoveryOnlyFiveRunResult(
+    CaptureRecoveryOnlyFiveRunStatus Status,
     int AttemptedCount,
     HardwareDualCaptureRecoveryOnlyExecution? LastOutcome,
     CaptureRecoveryOnlyRunEvidenceFiles? EvidenceFiles,
     string Detail);
 
 /// <summary>
-/// Runs the explicitly selected 10-pair CaptureRecoveryOnly acceptance slice.
+/// Runs the explicitly selected five-pair CaptureRecoveryOnly acceptance slice.
 /// It keeps one caller-supplied binding snapshot, never retries, and never turns
 /// an incomplete hardware result into software aggregate evidence.
 /// </summary>
-public sealed class CaptureRecoveryOnlyTenRunCoordinator
+public sealed class CaptureRecoveryOnlyFiveRunCoordinator
 {
-    internal const int RequestedCount = 10;
+    internal const int RequestedCount = 5;
 
     private readonly IHardwareDualCaptureRecoveryOnlyWorkflow _workflow;
     private readonly CaptureRecoveryOnlyRunEvidenceWriter _evidenceWriter;
     private readonly Func<DateTimeOffset> _utcNow;
+    private int _started;
+    internal bool HasStarted => Volatile.Read(ref _started) != 0;
 
-    internal CaptureRecoveryOnlyTenRunCoordinator(
+    internal CaptureRecoveryOnlyFiveRunCoordinator(
         IHardwareDualCaptureRecoveryOnlyWorkflow workflow,
         CaptureRecoveryOnlyRunEvidenceWriter evidenceWriter,
         Func<DateTimeOffset>? utcNow = null)
@@ -41,7 +43,7 @@ public sealed class CaptureRecoveryOnlyTenRunCoordinator
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
-    internal async Task<CaptureRecoveryOnlyTenRunResult> RunAsync(
+    internal async Task<CaptureRecoveryOnlyFiveRunResult> RunAsync(
         string runId,
         DualCameraIdentitySnapshot identitySnapshot,
         CancellationToken cancellationToken = default)
@@ -49,6 +51,11 @@ public sealed class CaptureRecoveryOnlyTenRunCoordinator
         if (string.IsNullOrWhiteSpace(runId))
             throw new ArgumentException("A run ID is required.", nameof(runId));
         ArgumentNullException.ThrowIfNull(identitySnapshot);
+        if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
+        {
+            return new(CaptureRecoveryOnlyFiveRunStatus.Blocked, 0, null, null,
+                "This five-pair acceptance series has already started. No replacement or additional capture was dispatched.");
+        }
 
         var attempts = new List<CaptureRecoveryOnlyRunAttempt>(RequestedCount);
         for (var index = 0; index < RequestedCount; index++)
@@ -63,7 +70,7 @@ public sealed class CaptureRecoveryOnlyTenRunCoordinator
             if (!_workflow.CanStartNewCapture)
             {
                 return new(
-                    CaptureRecoveryOnlyTenRunStatus.Blocked,
+                    CaptureRecoveryOnlyFiveRunStatus.Blocked,
                     attempts.Count,
                     attempts.LastOrDefault()?.Outcome,
                     null,
@@ -89,7 +96,7 @@ public sealed class CaptureRecoveryOnlyTenRunCoordinator
                 var evidence = _evidenceWriter.CreateAndPublish(
                     new CaptureRecoveryOnlyRunEvidenceRequest(runId, RequestedCount, attempts));
                 return new(
-                    CaptureRecoveryOnlyTenRunStatus.Failed,
+                    CaptureRecoveryOnlyFiveRunStatus.Failed,
                     attempts.Count,
                     outcome,
                     evidence,
@@ -100,18 +107,18 @@ public sealed class CaptureRecoveryOnlyTenRunCoordinator
         var files = _evidenceWriter.CreateAndPublish(
             new CaptureRecoveryOnlyRunEvidenceRequest(runId, RequestedCount, attempts));
         return new(
-            CaptureRecoveryOnlyTenRunStatus.Completed,
+            CaptureRecoveryOnlyFiveRunStatus.Completed,
             attempts.Count,
             attempts[^1].Outcome,
             files,
-            "All 10 CAM-A to CAM-B capture/recovery pairs completed; A0 quality remains Unapproved.");
+            "All 5 CAM-A to CAM-B capture/recovery pairs completed; A0 quality remains Unapproved.");
     }
 
-    private static CaptureRecoveryOnlyTenRunResult Pending(
+    private static CaptureRecoveryOnlyFiveRunResult Pending(
         IReadOnlyList<CaptureRecoveryOnlyRunAttempt> attempts,
         string detail) =>
         new(
-            CaptureRecoveryOnlyTenRunStatus.HardwarePending,
+            CaptureRecoveryOnlyFiveRunStatus.HardwarePending,
             attempts.Count,
             attempts.LastOrDefault()?.Outcome,
             null,

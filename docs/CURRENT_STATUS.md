@@ -1,8 +1,20 @@
 # 現在の開発状況
 
-更新日: 2026-09-20（PR #212候補と全案件共通のAI駆動開発ルールを反映）
+更新日: 2026-09-21（STEP4までの対応依頼と最大5回の受入条件を反映）
 
-## 利用版・起動・現在地
+## 今回の対応範囲と候補
+
+- 本人指示: STEP1〜4を完了させ、反復試験は最大5回程度にする。ADR-0030により新規10/100回工程を最大5回へ置換する。過去の試験実績は変更しない。
+- base: `3e9ae406272027274fb454b8f9b4d9d63ac2569f`（PR #214統合済み）。作業branch: `codex/step4-five-run-acceptance-20260921`。
+- 候補変更: Phase 0実機反復CLIは1〜5回、WPF専用反復は5組、Single handoff証跡はv2/5回。5回は初回を含み、同じ系列の追加起動・失敗補充をしない。
+- ソフトウェア検証: 新候補のRelease CTest 24/24 PASS（261.47秒）、`Test-M3Simulated.ps1 -Configuration Release` PASS、`--five-run-acceptance` PASS、M2 pre-gate/corpus検証・更新JSON parse・`git diff --check` PASS。M3 buildは警告0/エラー0。C++ buildには既存C4819警告が残る。実機操作は含まない。
+- AFの残留リスク: 直前baseの全体試験では撮影+AFが5秒timeoutし、focused経路は430msで合格した。今回の全体試験は合格したが、timeout値は変更せず、原因特定・修正済みとは主張しない。
+- 独立read-onlyレビュー: 通常経路で5回超のdispatchは見つからず。HardwarePending時の集約証跡不在をADR-0030へ明記し、旧coordinator参照・README起動例を更新した。ローカル全体ログは`build/step4-m3-validation.log`、CTestログは`build/wpf-m2-adapter/Testing/Temporary/LastTest.log`（ignored）に保持する。
+- STEP2/3: 本人指示によりAOPC-22-NOTEは使用しない。現在PC（AOPC-11-NOTE）のOS上ではD810一台を検出。SDK/WPD readiness・spoolは未確認で、新規実機操作0。二台受入の現物条件は未充足。新しい固定候補と対象を照合してから再開する。
+- 本人回答: 現在のPCで二台と固定原稿の環境を用意できる。準備完了・二台接続はまだ確認していない。この回答を撮影済み・カード整理承認とは扱わない。
+- STEP4: 固定warp/feather/crop/原本保持は実装済み。承認済み実rig・品質基準、権利処理済み実写D810 pairが不足している。現存corpus exampleはvector契約5件、実写pair 0件。下段の旧10/100回ロードマップは履歴であり、今回のrun数には適用しない。
+
+## 旧採用版の履歴（今回の候補・実行条件は冒頭を優先）
 
 - 採用版: `main`のPR #212統合commit `f66e18269e44df19c06f24a182eb99fc608f359f`。Camera Control Pro 2公開仕様との比較資料と、read-only `spool-status`のD810個体照合をWPD撮影command広告から分離する改善を統合済み。
 - 統合証拠: PR #212 head `af7454cec77c9129154edd539b54cc360ff9235f`は独立review PASS、GitHub software-only CI SUCCESS後に通常mergeした。実装commitは`46d97b66cc85f3350130ee9182b2a37c67b53849`。これはsoftware統合済みを示すが、未配布・実機未受入。
@@ -38,7 +50,7 @@
 | 同じCAM-A/B割当で100組を順番に実行 | 内部制御をWI-0017-SW01で準備。本番CLI/UIの100回開始は未対応で、引き続き拒否する | 耐久受入未完了 |
 | 時間・SHA-256の集計とp95承認記録 | 記録処理は実装済み。100件の記録を扱えることと、100回の撮影を実行できることは別 | 実機実行や承認者の権限をソフトウェア集計だけでは証明しない |
 
-根拠は[10回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。2026-09-11までの記載はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たな実機操作の結果ではない。
+根拠は[現行5回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。2026-09-11までの記載はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たな実機操作の結果ではない。
 
 2026-09-12の[WI-0017-SW01](WI0017_HUNDRED_RUN_CORE.md)では、100回試験の内部制御と偽workflowによる検証を実機から分離した。開始前のp95承認照合、各回の記録保存、最初の失敗・未確定・割当失効・時間不足での停止を扱う。本書と要件中の「100回runner未実装」は、本番起動経路と実機での適合確認を含むrunner全体の残件を指す。内部部品の追加だけでこの残件やWI-0017を完了扱いにしない。
 

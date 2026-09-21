@@ -84,7 +84,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly IDualCameraProductFlow? _dualCameraFlow;
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
     private readonly IHardwareDualCaptureRecoveryOnlyWorkflow? _captureRecoveryOnlyWorkflow;
-    private readonly CaptureRecoveryOnlyTenRunCoordinator? _captureRecoveryOnlyTenRunCoordinator;
+    private readonly CaptureRecoveryOnlyFiveRunCoordinator? _captureRecoveryOnlyFiveRunCoordinator;
     private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
     private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
     private readonly SynchronizationContext? _synchronizationContext = SynchronizationContext.Current;
@@ -232,15 +232,15 @@ public sealed class OperatorShellViewModel : ObservableObject
         ISimulatedLiveViewFrameSource? liveViewFrameSource = null,
         IHardwareCameraAgentTransport? dualBindingTransport = null,
         IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null,
-        CaptureRecoveryOnlyTenRunCoordinator? captureRecoveryOnlyTenRunCoordinator = null)
+        CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
         _hardwareDualRequestProvider = hardwareDualRequestProvider;
         _captureRecoveryOnlyWorkflow = captureRecoveryOnlyWorkflow;
-        _captureRecoveryOnlyTenRunCoordinator = captureRecoveryOnlyTenRunCoordinator;
-        if (captureRecoveryOnlyTenRunCoordinator is not null && captureRecoveryOnlyWorkflow is null)
-            throw new ArgumentException("The 10-run coordinator requires CaptureRecoveryOnly mode.", nameof(captureRecoveryOnlyTenRunCoordinator));
+        _captureRecoveryOnlyFiveRunCoordinator = captureRecoveryOnlyFiveRunCoordinator;
+        if (captureRecoveryOnlyFiveRunCoordinator is not null && captureRecoveryOnlyWorkflow is null)
+            throw new ArgumentException("The five-run coordinator requires CaptureRecoveryOnly mode.", nameof(captureRecoveryOnlyFiveRunCoordinator));
         var isHardwareDual = IsHardwareDualEnvironment;
         _liveViewFramePump = isHardwareDual ? null : liveViewFramePump;
         _liveViewFrameSource = isHardwareDual ? null : liveViewFrameSource;
@@ -498,15 +498,15 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// ordinary rig/stitch behavior is deliberately not selected by this flag.
     /// </summary>
     public bool IsCaptureRecoveryOnlyMode => _captureRecoveryOnlyWorkflow is not null;
-    public bool IsCaptureRecoveryOnlyTenRunMode => _captureRecoveryOnlyTenRunCoordinator is not null;
-    public string CaptureRecoveryOnlyConfirmationText => IsCaptureRecoveryOnlyTenRunMode
-        ? "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を10回（実シャッター合計20回）実行します。"
+    public bool IsCaptureRecoveryOnlyFiveRunMode => _captureRecoveryOnlyFiveRunCoordinator is not null;
+    public string CaptureRecoveryOnlyConfirmationText => IsCaptureRecoveryOnlyFiveRunMode
+        ? "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を5回（実シャッター合計10回）実行します。"
         : "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。";
-    public string CaptureRecoveryOnlyConfirmationAutomationName => IsCaptureRecoveryOnlyTenRunMode
-        ? "専用カード2枚が空で撮影回収のみを10回 実シャッター合計20回実行することを承認"
+    public string CaptureRecoveryOnlyConfirmationAutomationName => IsCaptureRecoveryOnlyFiveRunMode
+        ? "専用カード2枚が空で撮影回収のみを5回 実シャッター合計10回実行することを承認"
         : "専用カード2枚が空で撮影回収のみを1回実行することを承認";
-    public string CaptureRecoveryOnlyInstructionText => IsCaptureRecoveryOnlyTenRunMode
-        ? "A→Bの順で最大10組を撮影・回収します。最初の失敗で停止し、自動再試行はしません。合成はPending、A0品質はUnapprovedのままです。"
+    public string CaptureRecoveryOnlyInstructionText => IsCaptureRecoveryOnlyFiveRunMode
+        ? "A→Bの順で最大5組を撮影・回収します。最初の失敗で停止し、自動再試行はしません。合成はPending、A0品質はUnapprovedのままです。"
         : "A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。";
 
     /// <summary>
@@ -540,19 +540,19 @@ public sealed class OperatorShellViewModel : ObservableObject
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
     public bool CanChangeExportDirectory => !IsCaptureRecoveryOnlyMode && !IsBusy;
     public string OperatingModeDescription => IsCaptureRecoveryOnlyMode
-        ? IsCaptureRecoveryOnlyTenRunMode
-            ? "同じ機体割当でCAM-A→CAM-Bを最大10組撮影し、検証済み原画像を固定ローカルへ保持します。合成とA0品質判定は行いません。"
+        ? IsCaptureRecoveryOnlyFiveRunMode
+            ? "同じ機体割当でCAM-A→CAM-Bを最大5組撮影し、検証済み原画像を固定ローカルへ保持します。合成とA0品質判定は行いません。"
             : "CAM-A→CAM-Bを順次撮影し、検証済み原画像2枚だけを固定ローカルへ保持します。合成とA0品質判定は行いません。"
         : IsSingleCameraMode
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
     public string CaptureButtonText => IsCaptureRecoveryOnlyMode
-        ? IsCaptureRecoveryOnlyTenRunMode
-            ? "2台を順次撮影・回収する（最大10回）"
+        ? IsCaptureRecoveryOnlyFiveRunMode
+            ? "2台を順次撮影・回収する（最大5回）"
             : "2台を順次撮影・回収する（1回）"
         : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
-    public string CaptureButtonAutomationName => IsCaptureRecoveryOnlyTenRunMode
-        ? "主ボタン 専用確認済みでCAM-AからCAM-Bを最大10組 実シャッター最大20回 撮影回収する 自動再試行なし"
+    public string CaptureButtonAutomationName => IsCaptureRecoveryOnlyFiveRunMode
+        ? "主ボタン 専用確認済みでCAM-AからCAM-Bを最大5組 実シャッター最大10回 撮影回収する 自動再試行なし"
         : IsCaptureRecoveryOnlyMode
             ? "主ボタン 専用確認済みでCAM-AからCAM-Bを1組 実シャッター2回 撮影回収する 自動再試行なし"
             : "主ボタン 確認なしで明示構成の新しい撮影を一回開始 現在のフォーカス位置のまま撮影";
@@ -2043,6 +2043,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _availability.Capture.Allowed &&
         (IsCaptureRecoveryOnlyMode
             ? !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
+              _captureRecoveryOnlyFiveRunCoordinator?.HasStarted != true &&
               _captureRecoveryOnlyWorkflow!.CanStartNewCapture
             : IsSingleCameraMode || _dualCameraFlow is null ||
             (_dualCameraFlow.IdentitySnapshot.IsReady &&
@@ -2062,6 +2063,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? _availability.Capture.DisabledReason
         : IsCaptureRecoveryOnlyMode && !IsCaptureRecoveryOnlyOperatorApproved
             ? "専用カード2枚が空であることと『撮影・回収のみ』の実行承認を確認してください — 撮影禁止"
+        : _captureRecoveryOnlyFiveRunCoordinator?.HasStarted == true
+            ? "最大5組の受入系列は開始済みです。追加撮影せず証跡を確認して終了してください。"
         : IsCaptureRecoveryOnlyMode && !_captureRecoveryOnlyWorkflow!.CanStartNewCapture
             ? $"CaptureRecoveryOnly開始条件を満たしていません: {_captureRecoveryOnlyWorkflow.NewCaptureBlocker} — 撮影禁止"
         : !IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
@@ -2378,14 +2381,14 @@ public sealed class OperatorShellViewModel : ObservableObject
         var workflow = _captureRecoveryOnlyWorkflow ??
             throw new InvalidOperationException("CaptureRecoveryOnly workflow is unavailable.");
         IsBusy = true;
-        if (!recoverPending && !IsCaptureRecoveryOnlyTenRunMode)
+        if (!recoverPending && !IsCaptureRecoveryOnlyFiveRunMode)
         {
             TransactionStartCount++;
         }
         CaptureResult = recoverPending
             ? "同じ撮影IDの結果確認中"
-            : IsCaptureRecoveryOnlyTenRunMode
-                ? "CAM-A→CAM-B 最大10組を撮影・回収中"
+            : IsCaptureRecoveryOnlyFiveRunMode
+                ? "CAM-A→CAM-B 最大5組を撮影・回収中"
                 : "CAM-A→CAM-B 撮影・回収中";
         StitchResult = "保留（CaptureRecoveryOnly）";
         ExportResult = "原画像の固定ローカル保存を確認中";
@@ -2398,8 +2401,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         UiState = OperatorUiState.Capturing;
         StatusMessage = recoverPending
             ? "新しい撮影は行わず、同じtransaction IDの終端結果だけを確認します。"
-            : IsCaptureRecoveryOnlyTenRunMode
-                ? "同じAgentの割当を使い、CAM-A→CAM-Bを最大10組撮影・回収します。最初の失敗で停止し、自動再試行はしません。"
+            : IsCaptureRecoveryOnlyFiveRunMode
+                ? "同じAgentの割当を使い、CAM-A→CAM-Bを最大5組撮影・回収します。最初の失敗で停止し、自動再試行はしません。"
                 : "同じAgentの割当を使い、CAM-A→CAM-Bを各1回だけ撮影・回収します。";
 
         try
@@ -2417,10 +2420,10 @@ public sealed class OperatorShellViewModel : ObservableObject
                     "same_agent_operator_binding",
                     observedAtUtc,
                     observedAtUtc.AddMinutes(5));
-                if (_captureRecoveryOnlyTenRunCoordinator is not null)
+                if (_captureRecoveryOnlyFiveRunCoordinator is not null)
                 {
                     var runId = "run-" + Guid.NewGuid().ToString("N");
-                    var run = await _captureRecoveryOnlyTenRunCoordinator
+                    var run = await _captureRecoveryOnlyFiveRunCoordinator
                         .RunAsync(runId, identity, _lifetimeToken)
                         .ConfigureAwait(true);
                     TransactionStartCount += run.AttemptedCount;
@@ -2438,8 +2441,8 @@ public sealed class OperatorShellViewModel : ObservableObject
                     if (run.EvidenceFiles is not null)
                     {
                         LastExportPath = run.EvidenceFiles.ReportPath;
-                        ExportResult = run.Status == CaptureRecoveryOnlyTenRunStatus.Completed
-                            ? "10回集約証跡を保存（SoftwareAggregatePartial）"
+                        ExportResult = run.Status == CaptureRecoveryOnlyFiveRunStatus.Completed
+                            ? "5回集約証跡を保存（SoftwareAggregatePartial）"
                             : "失敗までの集約証跡を保存（SoftwareAggregateFail）";
                     }
                     else
@@ -2449,7 +2452,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
                     StatusMessage = run.Detail;
                     TechnicalDetail =
-                        $"runId={runId} / requested=10 / attempted={run.AttemptedCount} / " +
+                        $"runId={runId} / requested=5 / attempted={run.AttemptedCount} / " +
                         $"status={run.Status} / capturePurpose=CaptureRecoveryOnly / " +
                         "stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0";
                     return;

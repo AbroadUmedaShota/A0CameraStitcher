@@ -83,7 +83,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
             }
             else if (request.ApprovalRecordId is not null)
             {
-                throw new InvalidDataException("A 10-run cannot carry a prior approval.");
+                throw new InvalidDataException("A characterization run cannot carry a prior approval.");
             }
 
             transactionClaims = ClaimTransactions(request.RunId, attempts);
@@ -100,7 +100,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
                     : request.RequestedCount == 100
                         ? CaptureRecoveryOnlyRunVerdict.SoftwareAggregatePass
                         : CaptureRecoveryOnlyRunVerdict.SoftwareAggregatePartial,
-                request.RequestedCount == 10 ? "Unapproved" : "OperatorRecorded",
+                request.RequestedCount == 100 ? "OperatorRecorded" : "Unapproved",
                 approval);
             return WriteRun(evidence);
         }
@@ -714,7 +714,7 @@ internal sealed class CaptureRecoveryOnlyRunEvidenceWriter
     private static void ValidateRequest(CaptureRecoveryOnlyRunEvidenceRequest request)
     {
         if (!RunId.IsMatch(request.RunId) ||
-            request.RequestedCount is not (10 or 100) ||
+            request.RequestedCount is not (5 or 10 or 100) ||
             request.Attempts is null ||
             request.Attempts.Count is 0 or > 100 ||
             request.Attempts.Count > request.RequestedCount)
