@@ -198,7 +198,10 @@ public partial class MainWindow : Window
 
         try
         {
-            new ReviewImageWindow(path, _viewModel.SelectedReviewImage == "合成結果") { Owner = this }.ShowDialog();
+            var seamPoint = _viewModel.SelectedReviewImage == "合成結果"
+                ? StitchSeamNavigationManifestReader.TryReadForStitchedOutput(path)
+                : null;
+            new ReviewImageWindow(path, seamPoint) { Owner = this }.ShowDialog();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         {

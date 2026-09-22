@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,7 +44,11 @@ namespace a0::m2 {
 
 inline constexpr std::string_view kStitchJobManifestSchemaVersion =
     "a0.stitch-job-manifest.v1";
+inline constexpr std::string_view kStitchJobManifestSchemaVersionWithSeamNavigation =
+    "a0.stitch-job-manifest.v2";
 inline constexpr std::string_view kStitchJobManifestFileName = "stitch-job.manifest.json";
+inline constexpr std::string_view kStitchJobSeamNavigationCoordinateSystem =
+    "StitchedOutputPixelCenter.v1";
 
 // A hex SHA-256, lowercase, as it appears in the manifest.
 using StitchJobSha256Hex = std::string;
@@ -86,6 +91,15 @@ struct StitchJobOutputRecord {
     std::uint64_t encoded_size_bytes{};
 };
 
+// A review-only location derived from pixels where both source images
+// contributed to the rendered output. Coordinates are zero-based pixel centers
+// after the approved crop, never a guessed image midpoint.
+struct StitchJobSeamNavigationRecord {
+    bool available{};
+    std::uint32_t x_pixels{};
+    std::uint32_t y_pixels{};
+};
+
 // Everything a terminal StitchJob records. There is no "failed" manifest: a job
 // that did not succeed leaves none, which is what makes "manifest present and
 // verified" mean exactly "the job succeeded".
@@ -96,6 +110,9 @@ struct StitchJobManifest {
     StitchJobProfileRecord rig_profile;
     StitchJobEngineRecord engine;
     StitchJobOutputRecord output;
+    // v1 manifests predate this optional review aid. A populated value causes
+    // v2 serialization; v1 remains readable but offers no seam navigation.
+    std::optional<StitchJobSeamNavigationRecord> seam_navigation;
     std::string completed_at_utc;
 };
 

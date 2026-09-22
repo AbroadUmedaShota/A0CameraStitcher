@@ -10,9 +10,9 @@
                     AutomationProperties.AutomationId="ReviewImageFit" />
             <Button Content="100%" Click="OnActualPixels" Padding="16,6" Margin="0,0,8,0"
                     AutomationProperties.AutomationId="ReviewImageActualPixels" />
-            <Button x:Name="SeamButton" Content="中央を拡大" Click="OnCenter" Padding="16,6" Margin="0,0,8,0"
-                    ToolTip="中央を100%表示します。実際のつなぎ目位置を自動検出する機能ではありません。"
-                    AutomationProperties.AutomationId="ReviewImageCenter" />
+            <Button x:Name="SeamButton" Content="つなぎ目へ移動" Click="OnSeam" Padding="16,6" Margin="0,0,8,0"
+                    ToolTip="合成時に記録された実つなぎ目位置へ100%表示で移動します。"
+                    AutomationProperties.AutomationId="ReviewImageSeam" />
             <TextBlock x:Name="ZoomLabel" VerticalAlignment="Center" Margin="8,0,0,0" />
         </StackPanel>
         <TextBlock DockPanel.Dock="Bottom" Text="表示のみ：スクロールで細部を確認できます。原画像は変更しません。"

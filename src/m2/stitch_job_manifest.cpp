@@ -308,6 +308,15 @@ void ValidateManifestValues(const StitchJobManifest& manifest) {
         ManifestFailure(
             "InvalidManifestField", "the StitchJob completion time is not a UTC timestamp");
     }
+    if (manifest.seam_navigation.has_value()) {
+        const auto& seam = *manifest.seam_navigation;
+        if (seam.available &&
+            (seam.x_pixels >= manifest.output.width_pixels || seam.y_pixels >= manifest.output.height_pixels)) {
+            ManifestFailure(
+                "InvalidManifestField",
+                "the StitchJob seam navigation point is outside the stitched output");
+        }
+    }
 }
 
 std::string Escape(std::string_view value) {
@@ -325,7 +334,10 @@ std::string SerializeStitchJobManifest(const StitchJobManifest& manifest) {
     ValidateManifestValues(manifest);
 
     std::ostringstream output;
-    output << "{\"schemaVersion\":\"" << kStitchJobManifestSchemaVersion
+    const auto schema_version = manifest.seam_navigation.has_value()
+        ? kStitchJobManifestSchemaVersionWithSeamNavigation
+        : kStitchJobManifestSchemaVersion;
+    output << "{\"schemaVersion\":\"" << schema_version
            << "\",\"stitchJobId\":\"" << Escape(manifest.stitch_job_id)
            << "\",\"captureTransactionId\":\"" << Escape(manifest.capture_transaction_id)
            << "\",\"inputs\":[";
@@ -346,7 +358,18 @@ std::string SerializeStitchJobManifest(const StitchJobManifest& manifest) {
            << "\",\"widthPixels\":" << manifest.output.width_pixels
            << ",\"heightPixels\":" << manifest.output.height_pixels
            << ",\"encodedSizeBytes\":" << manifest.output.encoded_size_bytes
-           << "},\"terminalResultState\":\"Succeeded\",\"completedAtUtc\":\""
+           << '}';
+    if (manifest.seam_navigation.has_value()) {
+        const auto& seam = *manifest.seam_navigation;
+        output << ",\"seamNavigation\":{\"coordinateSystem\":\""
+               << kStitchJobSeamNavigationCoordinateSystem << "\",\"available\":"
+               << (seam.available ? "true" : "false");
+        if (seam.available) {
+            output << ",\"xPixels\":" << seam.x_pixels << ",\"yPixels\":" << seam.y_pixels;
+        }
+        output << '}';
+    }
+    output << ",\"terminalResultState\":\"Succeeded\",\"completedAtUtc\":\""
            << Escape(manifest.completed_at_utc) << "\",\"automaticRetryCount\":0}";
     return output.str();
 }
@@ -354,26 +377,26 @@ std::string SerializeStitchJobManifest(const StitchJobManifest& manifest) {
 StitchJobManifest ParseStitchJobManifest(std::string_view json) {
     const JsonValue root = ManifestParser(json).Parse();
 
-    // The schema version is checked before the field set, and the order matters
-    // for the reason reported rather than for whether it is refused. A future
-    // v2 manifest will legitimately carry a different set of fields; telling its
-    // reader "unexpected field" would send them looking for a typo instead of
-    // for the version mismatch that is actually in front of them.
-    //
-    // Not a best-effort read either way. A manifest from a version this build
-    // does not know is exactly the case where guessing turns a failed job into a
-    // successful-looking one, and pre-v1 artifacts have no manifest at all.
-    if (RequireField(root, "schemaVersion", JsonKind::string).string !=
-        kStitchJobManifestSchemaVersion) {
+    const auto& schema_version = RequireField(root, "schemaVersion", JsonKind::string).string;
+    const bool has_seam_navigation = schema_version == kStitchJobManifestSchemaVersionWithSeamNavigation;
+    if (schema_version != kStitchJobManifestSchemaVersion && !has_seam_navigation) {
         ManifestFailure(
             "UnsupportedManifestSchema",
-            "the StitchJob manifest schema version is not a0.stitch-job-manifest.v1");
+            "the StitchJob manifest schema version is not a supported version");
     }
 
-    RequireExactFields(root, {
-        "schemaVersion", "stitchJobId", "captureTransactionId", "inputs", "rigProfile",
-        "engine", "output", "terminalResultState", "completedAtUtc", "automaticRetryCount",
-    });
+    if (has_seam_navigation) {
+        RequireExactFields(root, {
+            "schemaVersion", "stitchJobId", "captureTransactionId", "inputs", "rigProfile",
+            "engine", "output", "seamNavigation", "terminalResultState", "completedAtUtc",
+            "automaticRetryCount",
+        });
+    } else {
+        RequireExactFields(root, {
+            "schemaVersion", "stitchJobId", "captureTransactionId", "inputs", "rigProfile",
+            "engine", "output", "terminalResultState", "completedAtUtc", "automaticRetryCount",
+        });
+    }
     if (RequireField(root, "terminalResultState", JsonKind::string).string != "Succeeded") {
         ManifestFailure(
             "UnsupportedTerminalState",
@@ -433,6 +456,31 @@ StitchJobManifest ParseStitchJobManifest(std::string_view json) {
     manifest.output.height_pixels = static_cast<std::uint32_t>(height);
     manifest.output.encoded_size_bytes = ParseUnsigned(
         RequireField(artifact, "encodedSizeBytes", JsonKind::number), "encodedSizeBytes");
+
+    if (has_seam_navigation) {
+        const auto& seam = RequireField(root, "seamNavigation", JsonKind::object);
+        const auto& available = RequireField(seam, "available", JsonKind::boolean);
+        if (RequireField(seam, "coordinateSystem", JsonKind::string).string !=
+            kStitchJobSeamNavigationCoordinateSystem) {
+            ManifestFailure("InvalidManifestField", "the StitchJob seam navigation coordinate system is invalid");
+        }
+        StitchJobSeamNavigationRecord record;
+        record.available = available.boolean;
+        if (record.available) {
+            RequireExactFields(seam, {"coordinateSystem", "available", "xPixels", "yPixels"});
+            const auto x = ParseUnsigned(RequireField(seam, "xPixels", JsonKind::number), "xPixels");
+            const auto y = ParseUnsigned(RequireField(seam, "yPixels", JsonKind::number), "yPixels");
+            if (x > (std::numeric_limits<std::uint32_t>::max)() ||
+                y > (std::numeric_limits<std::uint32_t>::max)()) {
+                ManifestFailure("InvalidManifestField", "the StitchJob seam navigation point is outside the supported range");
+            }
+            record.x_pixels = static_cast<std::uint32_t>(x);
+            record.y_pixels = static_cast<std::uint32_t>(y);
+        } else {
+            RequireExactFields(seam, {"coordinateSystem", "available"});
+        }
+        manifest.seam_navigation = record;
+    }
 
     manifest.completed_at_utc = RequireStringField(root, "completedAtUtc", 32);
 

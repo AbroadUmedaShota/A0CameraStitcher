@@ -479,6 +479,22 @@ void TestStitchRecomposeAndExport(const std::filesystem::path& root) {
             && recovered_first.output.width_pixels == first.width
             && recovered_first.output.height_pixels == first.height,
         "reused publish-time SHA-256 recorded in the manifest must match the published artifact");
+    Check(
+        recovered_first.seam_navigation.has_value() && recovered_first.seam_navigation->available &&
+            recovered_first.seam_navigation->x_pixels == 13 && recovered_first.seam_navigation->y_pixels == 2,
+        "the seam navigation point must be the crop-relative rendered 50 percent feather point, not the image center");
+
+    auto asymmetric_profile = ApprovedProfile();
+    asymmetric_profile.crop.left = 5;
+    const auto asymmetric = a0::m2::StitchCanonicalPair(WithRecordedIdentity(
+        {camera_a, camera_b, root / "stitch-job-seam-asymmetric", asymmetric_profile}));
+    const auto asymmetric_manifest = a0::m2::VerifyPublishedStitchJob(
+        asymmetric.stitched_jpeg.parent_path(), asymmetric.stitch_job_id);
+    Check(asymmetric.width == 22 && asymmetric_manifest.seam_navigation.has_value() &&
+          asymmetric_manifest.seam_navigation->available &&
+          asymmetric_manifest.seam_navigation->x_pixels == 9 &&
+          asymmetric_manifest.seam_navigation->x_pixels != asymmetric.width / 2,
+          "asymmetric crop must move the recorded seam independently of the output center");
 
     const auto second = a0::m2::StitchCanonicalPair(WithRecordedIdentity({camera_a, camera_b, root / "stitch-job-002", ApprovedProfile()}));
     Check(second.stitched_jpeg != first.stitched_jpeg && std::filesystem::is_regular_file(second.stitched_jpeg),

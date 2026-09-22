@@ -286,12 +286,34 @@ void PreV1AndUnknownSchemasAreRefusedRatherThanMigrated() {
     fs::remove(root / fs::path(kStitchJobManifestFileName));
     WriteBytes(
         root / fs::path(kStitchJobManifestFileName),
-        R"({"schemaVersion":"a0.stitch-job-manifest.v2","stitchJobId":"x"})");
+        R"({"schemaVersion":"a0.stitch-job-manifest.v3","stitchJobId":"x"})");
     CheckRejected(
         "UnsupportedManifestSchema",
         [&] { (void)VerifyPublishedStitchJob(root, kJobId); },
         "a future schema version is refused rather than partially read");
 
+    fs::remove_all(root);
+}
+
+void SeamNavigationV2RoundTripsAndRejectsOutOfBoundsPoint() {
+    const auto root = MakeTempRoot();
+    auto manifest = ManifestFor(root);
+    manifest.seam_navigation = StitchJobSeamNavigationRecord{true, 12, 24};
+    const auto document = SerializeStitchJobManifest(manifest);
+    Check(
+        document.find("\"schemaVersion\":\"a0.stitch-job-manifest.v2\"") != std::string::npos,
+        "a manifest with a rendered seam point uses the v2 schema");
+    const auto parsed = ParseStitchJobManifest(document);
+    Check(
+        parsed.seam_navigation.has_value() && parsed.seam_navigation->available &&
+            parsed.seam_navigation->x_pixels == 12 && parsed.seam_navigation->y_pixels == 24,
+        "the v2 seam navigation point round-trips exactly");
+
+    manifest.seam_navigation = StitchJobSeamNavigationRecord{true, manifest.output.width_pixels, 0};
+    CheckRejected(
+        "InvalidManifestField",
+        [&] { (void)SerializeStitchJobManifest(manifest); },
+        "a seam navigation point outside the cropped output is refused");
     fs::remove_all(root);
 }
 
@@ -461,6 +483,7 @@ int main() {
     AMismatchedHashIsNotSuccess();
     ADifferentJobIsNotThisJob();
     PreV1AndUnknownSchemasAreRefusedRatherThanMigrated();
+    SeamNavigationV2RoundTripsAndRejectsOutOfBoundsPoint();
     EveryFieldIsRequiredAndNoExtraIsTolerated();
     ValuesOutsideTheContractAreRefused();
     ARecordedRetryIsRefused();

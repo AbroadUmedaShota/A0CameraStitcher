@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 
 namespace A0CameraStitcher.M3.OperatorShell;
 
@@ -10,9 +11,10 @@ namespace A0CameraStitcher.M3.OperatorShell;
 public partial class ReviewImageWindow : Window
 {
     private readonly BitmapSource _bitmap;
+    private readonly StitchSeamNavigationPoint? _seamPoint;
     private bool _actualPixels;
 
-    public ReviewImageWindow(string imagePath, bool showSeam)
+    internal ReviewImageWindow(string imagePath, StitchSeamNavigationPoint? seamPoint)
     {
         // OnLoad detaches the view from the original: no file lock or write remains.
         using (var stream = new FileStream(imagePath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -24,7 +26,15 @@ public partial class ReviewImageWindow : Window
         }
         InitializeComponent();
         ReviewImage.Source = _bitmap;
-        SeamButton.Visibility = showSeam ? Visibility.Visible : Visibility.Collapsed;
+        _seamPoint = seamPoint is { XPixels: >= 0, YPixels: >= 0 } point &&
+            point.OutputWidth == _bitmap.PixelWidth && point.OutputHeight == _bitmap.PixelHeight &&
+            point.XPixels < _bitmap.PixelWidth && point.YPixels < _bitmap.PixelHeight
+            ? point
+            : null;
+        SeamButton.IsEnabled = _seamPoint is not null;
+        SeamButton.ToolTip = _seamPoint is null
+            ? "実つなぎ目の記録がないか、確認できません。画像中央の代用はしません。"
+            : "合成時に記録された実つなぎ目位置へ100%表示で移動します。";
         Loaded += (_, _) => UpdateScale();
         DpiChanged += (_, _) => UpdateScale();
     }
@@ -41,14 +51,24 @@ public partial class ReviewImageWindow : Window
         UpdateScale();
     }
 
-    private void OnCenter(object sender, RoutedEventArgs e)
+    private void OnSeam(object sender, RoutedEventArgs e)
     {
+        if (_seamPoint is null) return;
         _actualPixels = true;
         UpdateScale();
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
-            ImageScroll.ScrollToHorizontalOffset(ImageScroll.ScrollableWidth / 2);
-            ImageScroll.ScrollToVerticalOffset(ImageScroll.ScrollableHeight / 2);
+            var dpi = VisualTreeHelper.GetDpi(this);
+            var xInDeviceIndependentPixels = _seamPoint.XPixels / dpi.DpiScaleX;
+            var yInDeviceIndependentPixels = _seamPoint.YPixels / dpi.DpiScaleY;
+            ImageScroll.ScrollToHorizontalOffset(Math.Clamp(
+                xInDeviceIndependentPixels - ImageScroll.ViewportWidth / 2,
+                0,
+                ImageScroll.ScrollableWidth));
+            ImageScroll.ScrollToVerticalOffset(Math.Clamp(
+                yInDeviceIndependentPixels - ImageScroll.ViewportHeight / 2,
+                0,
+                ImageScroll.ScrollableHeight));
         }));
     }
 

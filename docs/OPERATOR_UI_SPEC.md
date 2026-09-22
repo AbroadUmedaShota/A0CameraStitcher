@@ -1,5 +1,19 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 実つなぎ目への移動
+
+合成時の実レンダリングで、両原画像が寄与する領域（0 < feather weight < 1）から50% blendに最も近い代表点を選び、crop後の出力pixel座標をmanifest v2へ記録する。画面の「つなぎ目へ移動」はその点を100%表示で中央付近へスクロールする。画像全体の中央を代用しない。viewport端ではscroll可能範囲に収めるが、記録座標を別点に変更しない。
+
+v1/記録なし/重複JSONキー/型不正/範囲外/出力size・SHA-256不一致/実bitmap寸法不一致ではボタンを無効にする。v1 manifestはnative側の既存結果読込を維持し、つなぎ目情報のみ「なし」とする。原画像とrig profileを変更せず、品質合格や人の採用を自動判定しない。
+
+親による統合確認（今回実機0回）:
+
+- `dotnet build src/m3/OperatorShell/A0CameraStitcher.M3.OperatorShell.csproj --no-restore -c Release -p:M2AdapterBuildDirectory=.../build/seam-navigation-wpf` はexit 0、warning 0/error 0、18.08秒。画面を実際に開いた受入ではない。
+- 非対称cropの回帰試験を追加し、出力幅22に対してseam X=9（画像中央X=11ではない）を確認。`ctest --test-dir build/seam-navigation-native -C Release -R '^m2_offline_stitcher_contracts$' --output-on-failure` は1/1 PASS、3.73秒、exit 0。合成・v2保存・再読込・元画像保持の実nativeコードを合成fixtureで検証した。
+- FoundationTestsをRelease再ビルドして同worktreeのDLLに `--seam-navigation` を指定し、1/1 PASS、exit 0。型不正・重複座標・旧schema・範囲外・同サイズ別内容の画像を拒否する。実機画像や実WPF scroll/DPIの操作確認は未実施。
+
+先行並行担当のWPF build 2本は終了コードを回収できず合格扱いしない。親がOSで両プロセスの非残存を確認してから上記1回を実行・回収した。native buildで一度誤ったtarget名を指定しMSB1009になったが、CMake記載の `m2_offline_stitcher_contracts` へ訂正してbuild exit 0を確認してから試験した。新機能の合格根拠は上記の最終統合結果とし、これらの失敗/結果不明をPASSへ読み替えない。
+
 ## 2026-09-22 統合確認
 
 `d500cac` の統合先で既存依存をlocked restoreし、`dotnet build tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj --no-restore -c Release` はexit 0（既存native文字コード警告26件、error 0）。生成した同worktreeのDLLを `--hardware-single-history` で1回実行し、`PASS hardware single historical review is read-only and fail-closed`、exit 0を回収した。ページ送り・未採用で閉じる・撮影ID不一致拒否を含むfake operationsの試験で、実機GUI/SDK/WPD受入ではない。

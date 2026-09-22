@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 namespace a0::m2::detail {
@@ -689,6 +690,53 @@ double FeatherWeight(
     return std::clamp((coordinate - start) / (end - start), 0.0, 1.0);
 }
 
+// The review navigation point is deliberately accumulated from the same
+// has_a/has_b and feather weight values that render the JPEG. A transform's
+// bounding box or the output midpoint is not enough: either can name a pixel
+// outside the real overlap after projective sampling and the approved crop.
+struct SeamNavigationCandidate {
+    bool available{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    double feather_midpoint_distance{std::numeric_limits<double>::infinity()};
+    double perpendicular_center_distance{std::numeric_limits<double>::infinity()};
+    double primary_center_distance{std::numeric_limits<double>::infinity()};
+
+    void Observe(
+        const StitchLayout layout,
+        const std::uint32_t output_x,
+        const std::uint32_t output_y,
+        const std::uint32_t output_width,
+        const std::uint32_t output_height,
+        const bool has_a,
+        const bool has_b,
+        const double b_weight) {
+        // A shared sample at a 0/1 endpoint has no contribution from one body,
+        // so it is not a useful seam point. There is intentionally no fallback
+        // to an image center when the rendered result has no feathered overlap.
+        if (!has_a || !has_b || b_weight <= 0.0 || b_weight >= 1.0) return;
+
+        const double feather_distance = std::abs(b_weight - 0.5);
+        const double perpendicular = layout == StitchLayout::camera_a_left_camera_b_right
+            ? std::abs(static_cast<double>(output_y) - (static_cast<double>(output_height) - 1.0) / 2.0)
+            : std::abs(static_cast<double>(output_x) - (static_cast<double>(output_width) - 1.0) / 2.0);
+        const double primary = layout == StitchLayout::camera_a_left_camera_b_right
+            ? std::abs(static_cast<double>(output_x) - (static_cast<double>(output_width) - 1.0) / 2.0)
+            : std::abs(static_cast<double>(output_y) - (static_cast<double>(output_height) - 1.0) / 2.0);
+        const auto score = std::tuple{feather_distance, perpendicular, primary, output_y, output_x};
+        const auto current = std::tuple{
+            feather_midpoint_distance, perpendicular_center_distance, primary_center_distance, y, x};
+        if (!available || score < current) {
+            available = true;
+            x = output_x;
+            y = output_y;
+            feather_midpoint_distance = feather_distance;
+            perpendicular_center_distance = perpendicular;
+            primary_center_distance = primary;
+        }
+    }
+};
+
 std::string ToLowerHex(const std::array<std::uint8_t, 32>& digest) {
     static constexpr std::string_view digits = "0123456789abcdef";
     std::string hex;
@@ -1060,6 +1108,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         {},
     };
     output.bgr.resize(static_cast<std::size_t>(PixelCount(output.width, output.height) * 3));
+    SeamNavigationCandidate seam_navigation;
     for (std::uint32_t output_y = 0; output_y < output.height; ++output_y) {
         const double global_y = minimum_y + request.profile.crop.top + output_y;
         const bool row_may_hit_camera_b = global_y >= b_skip_minimum_y && global_y <= b_skip_maximum_y;
@@ -1080,6 +1129,15 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
             const double b_weight = has_a && has_b
                 ? FeatherWeight(request.profile.layout, global_x, global_y, a_bounds, b_bounds)
                 : (has_b ? 1.0 : 0.0);
+            seam_navigation.Observe(
+                request.profile.layout,
+                output_x,
+                output_y,
+                output.width,
+                output.height,
+                has_a,
+                has_b,
+                b_weight);
             const auto offset = (static_cast<std::size_t>(output_y) * output.width + output_x) * 3;
             for (std::size_t channel = 0; channel < 3; ++channel) {
                 const double value = (1.0 - b_weight) * pixel_a[channel] + b_weight * pixel_b[channel];
@@ -1186,6 +1244,11 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         output.width,
         output.height,
         published.encoded_size_bytes,
+    };
+    manifest.seam_navigation = StitchJobSeamNavigationRecord{
+        seam_navigation.available,
+        seam_navigation.x,
+        seam_navigation.y,
     };
     manifest.completed_at_utc = request.completed_at_utc;
     PublishAndVerifyStitchJobManifest(job_path, manifest);

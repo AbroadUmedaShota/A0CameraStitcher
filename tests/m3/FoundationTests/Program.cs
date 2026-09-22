@@ -12,6 +12,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("protocol serialization and rejection", ProtocolSerializationAndRejectionAsync),
+    ("stitched seam navigation reads only an exact v2 manifest", StitchSeamNavigationManifestReaderAsync),
     ("operator review persists pending and accepted across restart", OperatorReviewPersistenceAsync),
     ("operator review rejects corrupt or conflicting records", OperatorReviewRejectionsAsync),
     ("named pipe fake agent roundtrip", NamedPipeRoundtripAsync),
@@ -65,6 +66,10 @@ if (args.SequenceEqual(new[] { "--journal-compatibility" }))
     tests = tests.Where(test => test.Run == LegacyAcknowledgementJournalAsync ||
         test.Run == LegacyJournalMigratesAsDualAsync || test.Run == CrashRestartRecoveryAsync).ToArray();
 }
+if (args.SequenceEqual(new[] { "--seam-navigation" }))
+{
+    tests = tests.Where(test => test.Run == StitchSeamNavigationManifestReaderAsync).ToArray();
+}
 foreach (var test in tests)
 {
     try
@@ -87,6 +92,50 @@ static OperatorReviewRecord PendingReview() => new()
     ResultId = "result-1", TransactionId = "transaction-1", ReviewKind = "OriginalsOnly",
     State = "Pending", UpdatedAtUtc = new DateTimeOffset(2026, 9, 21, 0, 0, 0, TimeSpan.Zero),
 };
+
+static async Task StitchSeamNavigationManifestReaderAsync()
+{
+    await WithTemporaryRootAsync(root =>
+    {
+        var stitched = Path.Combine(root, "stitched.jpg");
+        var manifest = Path.Combine(root, "stitch-job.manifest.json");
+        File.WriteAllBytes(stitched, [1, 2, 3]);
+        File.WriteAllText(manifest, StitchSeamManifest("13", "2"));
+        var point = StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched);
+        Check.True(
+            point is { XPixels: 13, YPixels: 2, OutputWidth: 26, OutputHeight: 6 },
+            "The reader must expose the recorded crop-relative seam point and its exact output dimensions.");
+
+        File.WriteAllText(manifest, StitchSeamManifest("\"13\"", "2"));
+        Check.True(
+            StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched) is null,
+            "A non-numeric seam coordinate must disable navigation without throwing.");
+
+        File.WriteAllText(manifest, StitchSeamManifest("13", "2", duplicateX: true));
+        Check.True(
+            StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched) is null,
+            "A duplicate seam coordinate must not be accepted as metadata.");
+
+        File.WriteAllText(manifest, StitchSeamManifest("13", "2", schemaVersion: "a0.stitch-job-manifest.v1"));
+        Check.True(
+            StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched) is null,
+            "A v1 manifest has no seam navigation contract and must not use a midpoint fallback.");
+        File.WriteAllText(manifest, StitchSeamManifest("26", "2"));
+        Check.True(StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched) is null,
+            "Out-of-bounds coordinates disable navigation.");
+        File.WriteAllText(manifest, StitchSeamManifest("13", "2"));
+        File.WriteAllBytes(stitched, [3, 2, 1]);
+        Check.True(StitchSeamNavigationManifestReader.TryReadForStitchedOutput(stitched) is null,
+            "Same-size output replacement is rejected by hash, not accepted by dimensions alone.");
+        return Task.CompletedTask;
+    });
+}
+
+static string StitchSeamManifest(string x, string y, bool duplicateX = false, string schemaVersion = "a0.stitch-job-manifest.v2")
+{
+    var duplicate = duplicateX ? ",\"xPixels\":14" : string.Empty;
+    return $$"""{"schemaVersion":"{{schemaVersion}}","stitchJobId":"0123456789abcdef0123456789abcdef","captureTransactionId":"fedcba9876543210fedcba9876543210","inputs":[],"rigProfile":{},"engine":{},"output":{"relativePath":"stitched.jpg","sha256":"039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","widthPixels":26,"heightPixels":6,"encodedSizeBytes":3},"seamNavigation":{"coordinateSystem":"StitchedOutputPixelCenter.v1","available":true,"xPixels":{{x}}{{duplicate}},"yPixels":{{y}}},"terminalResultState":"Succeeded","completedAtUtc":"2026-09-22T00:00:00Z","automaticRetryCount":0}""";
+}
 
 static async Task OperatorReviewPersistenceAsync()
 {
