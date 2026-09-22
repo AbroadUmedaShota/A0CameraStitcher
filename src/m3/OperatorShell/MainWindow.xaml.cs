@@ -18,6 +18,8 @@ public partial class MainWindow : Window
 {
     private readonly CancellationTokenSource _lifetime = new();
     private readonly OperatorShellViewModel _viewModel;
+    private readonly string _dualProductRoot;
+    private readonly string _historicalReviewKind;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
     private readonly DispatcherTimer? _dualBindingHostLifetimeMonitor;
@@ -136,6 +138,8 @@ public partial class MainWindow : Window
             // The product identity source remains unconfigured (HardwarePending):
             // wiring the operator's one-process binding transport does not make the
             // product capture identity Ready or permit a capture by itself.
+            _dualProductRoot = dualProductRoot;
+            _historicalReviewKind = environment == DualCameraExecutionEnvironment.HardwareDual ? "Product" : "Simulated";
             _viewModel = new OperatorShellViewModel(
                 new SimulationFoundationService(simulatedRoot),
                 DualCameraProductComposition.Create(dualProductRoot, environment, _dualAgentLifecycle),
@@ -185,6 +189,21 @@ public partial class MainWindow : Window
             // 起動時クエリのキャンセルは無視する（issue #142 症状3）。それ以外の失敗は
             // OperatorShellViewModel.InitializeAsync 側で fail-closed に捕捉済み。
         }
+    }
+
+    private void OnOpenHistoricalReview(object sender, RoutedEventArgs eventArgs)
+    {
+        if (_shutdownStarted || !_viewModel.TryBeginHistoricalReview()) return;
+        try
+        {
+            var adapter = DualCameraProductComposition.CreateHistoricalReviewAdapter();
+            new HistoricalReviewWindow(_dualProductRoot, adapter, _historicalReviewKind) { Owner = this }.ShowDialog();
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            MessageBox.Show(this, "履歴を開けませんでした。保存済みの記録・画像は変更していません。", "未採用の履歴", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { _viewModel.EndHistoricalReview(); }
     }
 
     private void OnOpenReviewImage(object sender, RoutedEventArgs eventArgs)

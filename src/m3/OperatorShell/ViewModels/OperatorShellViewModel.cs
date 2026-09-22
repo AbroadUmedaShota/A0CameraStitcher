@@ -1649,6 +1649,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             if (SetProperty(ref _isAutoFocusRunning, value))
             {
+                OnPropertyChanged(nameof(CanOpenHistoricalReview));
                 RaiseFocusPanelProperties();
             }
         }
@@ -1914,6 +1915,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// <see cref="IsBusy"/>'s own setter refreshes the equivalent set of dependent bindings.</summary>
     private void RaisePreCaptureAutoFocusGateProperties()
     {
+        OnPropertyChanged(nameof(CanOpenHistoricalReview));
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
         OnPropertyChanged(nameof(CaptureDisabledReason));
@@ -2053,7 +2055,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     // ordinary HardwareDual の同一撮影ID読み直しは既存host契約どおりbinding gate対象外。
     // CaptureRecoveryOnlyは再起動後の新しいAgentがbinding pipeから始まるため、同一ID照会だけでも
     // CAM-A/Bを再割当してcapture hostへactivationしなければならない（新規撮影は送らない）。
-    public bool CanCapture => !_isPreCaptureAutoFocusRunning &&
+    public bool CanCapture => !_historicalReviewOpen && !_isPreCaptureAutoFocusRunning &&
         (HasRecoverableHardwareDualTransaction ||
         (HasRecoverableCaptureRecoveryOnlyTransaction &&
          (!DualBinding.IsRequired || DualBinding.IsReady) &&
@@ -2125,6 +2127,34 @@ public sealed class OperatorShellViewModel : ObservableObject
     // _initializationFailed が立っている間は PrepareNewCapture 自体をブロックする。
     // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
     // ラッチ（issue #142/PR #152 レビュー指摘・要修正2）。
+    private bool _historyInitializationComplete;
+    private bool _historicalReviewOpen;
+
+    // Binding Ready can still own a native preview session. Until closure is
+    // independently represented, history is available only before binding begins.
+    public bool CanOpenHistoricalReview => _historyInitializationComplete && !_initializationFailed &&
+        !_historicalReviewOpen && !IsBusy && !IsLiveViewActive && !IsAutoFocusRunning &&
+        !_isPreCaptureAutoFocusRunning && !_cameraInspectionRequired && !IsCaptureRecoveryOnlyMode &&
+        !DualBinding.IsBusy && !DualBinding.IsShutdownBlocked && !DualBinding.IsCaptureHostActivated &&
+        DualBinding.Phase == DualBindingPhase.NotStarted &&
+        UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.NotReady or
+            OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection or OperatorUiState.Review;
+
+    internal bool TryBeginHistoricalReview()
+    {
+        if (!CanOpenHistoricalReview) return false;
+        _historicalReviewOpen = true;
+        IsBusy = true;
+        return true;
+    }
+
+    internal void EndHistoricalReview()
+    {
+        if (!_historicalReviewOpen) return;
+        _historicalReviewOpen = false;
+        IsBusy = false;
+    }
+
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
     /// <summary>人による採用は、今回の成功済み結果を Pending として耐久記録できた後だけ許可する。
     /// 起動時に見つけた未確認記録は、画像を再検証していないためここから採用できない。</summary>
@@ -2189,7 +2219,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                     ? $"過去の採用済み結果 {acceptedCount}件を確認（未確認なし）"
                     : $"未確認の結果 {_recoveredPendingReviews.Count}件、採用済み {acceptedCount}件を検出: " +
                       string.Join(", ", _recoveredPendingReviews.Select(review => review.ResultId)) +
-                      "（過去結果の再表示・再採用は未対応）";
+                      "（ファイル → 未採用の履歴から合成結果を閲覧できます。履歴の採用は未対応）";
                 OnPropertyChanged(nameof(ReviewStatusText));
             }
             if (recovered.Count > 0)
@@ -2224,6 +2254,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         finally
         {
+            _historyInitializationComplete = !cancellationToken.IsCancellationRequested && !_initializationFailed;
             IsBusy = false;
             RebuildReadiness(preserveOutcomeState: recoveredStateShouldRemain());
         }
@@ -2749,6 +2780,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         if (args.PropertyName is not (nameof(DualBindingViewModel.IsReady)
             or nameof(DualBindingViewModel.IsRequired)
             or nameof(DualBindingViewModel.IsCaptureHostActivated)
+            or nameof(DualBindingViewModel.IsBusy)
+            or nameof(DualBindingViewModel.IsShutdownBlocked)
             or nameof(DualBindingViewModel.Phase)))
         {
             return;
@@ -2765,6 +2798,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void NotifyBindingGateChanged()
     {
+        OnPropertyChanged(nameof(CanOpenHistoricalReview));
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(DualCameraIdentityStatusText));
@@ -3453,6 +3487,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanRestitch));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
+        OnPropertyChanged(nameof(CanOpenHistoricalReview));
         OnPropertyChanged(nameof(CanAcceptReview));
         OnPropertyChanged(nameof(CanOpenMaintenance));
         OnPropertyChanged(nameof(CanChangeOperatingMode));

@@ -6,6 +6,15 @@ namespace A0CameraStitcher.M3.OperatorShell;
 
 internal static class DualCameraProductComposition
 {
+    internal static M2OfflineStitcherProcessAdapter CreateHistoricalReviewAdapter()
+    {
+        var configuredPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
+        var candidatePath = string.IsNullOrWhiteSpace(configuredPath)
+            ? Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe")
+            : configuredPath;
+        return new M2OfflineStitcherProcessAdapter(CameraAgentExecutablePolicy.ResolveLocalExecutable(candidatePath));
+    }
+
     public static IDualCameraProductFlow Create(
         string artifactRoot,
         DualCameraExecutionEnvironment environment = DualCameraExecutionEnvironment.TestSynthetic,

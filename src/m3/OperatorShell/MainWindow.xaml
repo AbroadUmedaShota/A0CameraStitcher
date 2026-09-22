@@ -131,6 +131,10 @@
                         <Menu DockPanel.Dock="Left" Margin="8,0,0,0"
                               AutomationProperties.Name="{Binding MenuBarAutomationName}">
                             <MenuItem Header="ファイル(_F)" AutomationProperties.Name="ファイルメニュー">
+                                <MenuItem Header="未採用の履歴（閲覧のみ）(_H)..." Click="OnOpenHistoricalReview"
+                                          IsEnabled="{Binding CanOpenHistoricalReview}"
+                                          AutomationProperties.AutomationId="OpenHistoricalReview"
+                                          AutomationProperties.Name="未採用の履歴 閲覧のみ ライブ表示と機体照合の開始前に利用" />
                                 <MenuItem Header="保存先を指定(_L)..." Click="ChooseExportDirectory_Click"
                                           IsEnabled="{Binding CanChangeExportDirectory}"
                                           Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"

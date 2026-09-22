@@ -1,5 +1,15 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 過去Pendingの本体閲覧導線
+
+本体の「ファイル → 未採用の履歴（閲覧のみ）」から、同じproduct rootの確認記録を25件単位で読み取る。ページ内のPendingかつ運用種別一致（Product/Simulated）のみを開く対象にし、採用済みだけのページでも次ページへ進める。OriginalsOnlyはこの画面の対象外。明示選択した合成/CAM-A/CAM-Bの1枚を、保存済みmanifest・左右原画像・合成画像の再検証後に詳細表示する。画像を開く際にも同じread-lock付きstreamでSHA-256照合とdecodeを行う。SIMULATED表示は実機受入へ読み替えない。
+
+起動確認前・起動失敗・撮影/復旧/AF/Live View中・カメラ状態不明時は入場不可。binding ReadyにもSDK所有が残り得るため、この版はbinding開始前のみ許可する。履歴modal中は本体をbusyにし、復旧経路を含む撮影も明示的に禁止する。閉じると元の結果確認状態を維持し、確認記録の採用・再撮影・再合成・設定変更・SDK/WPD操作を実行しない。再検証timeoutは表示を中止し自動再試行しない。
+
+この導線は閲覧のみ。履歴からの明示採用、正規外部AI操作、実GUIの操作受入は別の残件であり、roadmap stage 5を完了扱いにしない。
+
+統合検証: `dotnet build tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj -c Release --no-restore -v quiet` はexit 0（既存native文字コード警告18件、error 0）。追加した初期化失敗テストのconstructor引数不足で最初の`dotnet run ... -- --historical-review-window`はcompile失敗となった。引数を修正した2回目はbuildを含めexit 0、`PASS historical review window gates, paging and same-stream image verification; hardwareOperations=0`。この新規系列は2/5回（試験実行は1回）で、実機preview枠は2/5のまま。実ファイルの27件ページング、初期化前/失敗後・Live View/終了不明時の入場拒否、履歴中の操作禁止、同一streamでの画像hash照合・変更拒否をソフト試験で確認した。Windowを人が操作した受入ではない。独立コードレビューの指摘（復旧経路ゲート・重複例外処理）を修正しPASSを取得した。
+
 ## 2026-09-22 実つなぎ目への移動
 
 合成時の実レンダリングで、両原画像が寄与する領域（0 < feather weight < 1）から50% blendに最も近い代表点を選び、crop後の出力pixel座標をmanifest v2へ記録する。画面の「つなぎ目へ移動」はその点を100%表示で中央付近へスクロールする。画像全体の中央を代用しない。viewport端ではscroll可能範囲に収めるが、記録座標を別点に変更しない。

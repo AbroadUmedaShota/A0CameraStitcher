@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -14,11 +15,20 @@ public partial class ReviewImageWindow : Window
     private readonly StitchSeamNavigationPoint? _seamPoint;
     private bool _actualPixels;
 
-    internal ReviewImageWindow(string imagePath, StitchSeamNavigationPoint? seamPoint)
+    internal ReviewImageWindow(string imagePath, StitchSeamNavigationPoint? seamPoint, string? expectedSha256 = null)
     {
         // OnLoad detaches the view from the original: no file lock or write remains.
         using (var stream = new FileStream(imagePath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
+            // Historical verification releases its locks before this window opens.
+            // Hash and decode the same read-locked stream, not two path lookups.
+            if (expectedSha256 is not null)
+            {
+                var actual = Convert.ToHexString(SHA256.HashData(stream));
+                if (!string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Review image changed after verification.");
+                stream.Position = 0;
+            }
             var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat,
                 BitmapCacheOption.OnLoad);
             _bitmap = decoder.Frames[0];

@@ -19,6 +19,20 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (args is ["--historical-review-window"])
+{
+    try
+    {
+        RunOnStaRenderThread(HistoricalReviewWindowContracts.RunAsync);
+        Console.WriteLine("PASS historical review window gates, paging and same-stream image verification; hardwareOperations=0");
+        return 0;
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL historical review window: {error}");
+        return 1;
+    }
+}
 if (args is ["--five-run-acceptance"])
 {
     HardwareLaunchOptionsAreExplicit();
