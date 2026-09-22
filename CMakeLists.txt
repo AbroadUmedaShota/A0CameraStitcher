@@ -351,13 +351,14 @@ if(BUILD_TESTING)
         COMMAND a0_dual_binding_camera_agent_pipe_tests)
 
     add_executable(a0_dual_live_worker_poc_tests tests/dual_live_worker_poc_tests.cpp)
-    target_link_libraries(a0_dual_live_worker_poc_tests PRIVATE a0_phase0_core)
+    target_include_directories(a0_dual_live_worker_poc_tests PRIVATE src/phase0/include)
     if(MSVC)
         target_compile_options(a0_dual_live_worker_poc_tests PRIVATE /W4 /permissive- /EHsc)
     else()
         target_compile_options(a0_dual_live_worker_poc_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME dual_live_worker_poc_contracts COMMAND a0_dual_live_worker_poc_tests)
+    set_tests_properties(dual_live_worker_poc_contracts PROPERTIES TIMEOUT 10)
 
     add_executable(a0_dual_hardware_camera_agent_pipe_tests
         tests/dual_hardware_camera_agent_pipe_tests.cpp)

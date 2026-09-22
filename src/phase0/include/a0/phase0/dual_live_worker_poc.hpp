@@ -45,14 +45,20 @@ struct DualLiveWorkerPocFrame {
 // or WPD handoff is authorized by this experiment.
 class DualLiveWorkerPocCoordinator final {
 public:
-    explicit DualLiveWorkerPocCoordinator(std::string generation, std::string token)
-        : generation_(std::move(generation)), token_(std::move(token)) {}
+    explicit DualLiveWorkerPocCoordinator(
+        std::string generation, std::string a_token, std::string b_token)
+        : generation_(std::move(generation)), a_token_(std::move(a_token)),
+          b_token_(std::move(b_token)) {
+        terminal_ = generation_.empty() || a_token_.empty() || b_token_.empty() || a_token_ == b_token_;
+    }
 
     [[nodiscard]] bool AcceptFrame(
         std::string_view worker, std::string_view generation, std::string_view token,
         std::uint64_t sequence, std::vector<std::uint8_t> bytes) {
-        if (terminal_ || generation != generation_ || token != token_ ||
-            (worker != "CAM-A" && worker != "CAM-B") || bytes.empty() ||
+        const auto expected_token = worker == "CAM-A" ? a_token_
+            : worker == "CAM-B" ? b_token_ : std::string{};
+        if (terminal_ || sequence == 0 || generation != generation_ || token != expected_token ||
+            expected_token.empty() || bytes.empty() ||
             bytes.size() > kDualLiveWorkerPocMaximumFrameBytes) return false;
         auto& slot = worker == "CAM-A" ? a_ : b_;
         if (slot && sequence <= slot->sequence) return false;
@@ -71,7 +77,8 @@ public:
 
 private:
     std::string generation_;
-    std::string token_;
+    std::string a_token_;
+    std::string b_token_;
     bool terminal_{};
     std::optional<DualLiveWorkerPocFrame> a_;
     std::optional<DualLiveWorkerPocFrame> b_;
