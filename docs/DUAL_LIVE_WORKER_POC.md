@@ -107,6 +107,8 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - SDKなし構成のRelease build成功。`single_worker_preview_contracts` は1/1 PASS（0.13秒）。raw Source 0/2/重複でOpen 0、唯一SourceのOpen一回、3frame成功、Open/Start/topology/frame/Stop/Close失敗時no-retry、開始拒否時Stop 0、終了不明時quarantine、期限切れで開始禁止を確認。
 - SDK有効構成のRelease build成功。新規lifecycleと既存dual-session adapterのsoftware-only回帰試験は2/2 PASS（0.48秒）。本変更のCTest実行は2回、前工程の5回IPC suiteは再実行なし。`describe` のSDK指標は環境設定にも依存するため `sdkBuilt` という初稿の名前を `sdkAvailable` に訂正。coreに既存の文字コード警告C4819があるがbuild errorはない。実機結果は実行後に追記する。
 - 前段software-only Goalの完了記録を、本実機接続や二台動作の完成証明へ読み替えない。
+- 実機候補は `e8986dc`、Release exe SHA-256 `EB5C29A2E87D99AE35527011EC11F2506A53190BF7716965DD46CEC6E6C7ADF7`。実行processへのmodule設定後の `describe` は `sdkAvailable=true, dualEnabled=false, bindingProof=false`。
+- 実機1回目の事前チェックで中断。本人の一台準備後にはOSでD810一台を観測したが、実行直前は0台となったため、SDK/カメラOpenより前に拒否。実SDK起動・Live View開始・撮影・設定変更はいずれも0回、hardware-run-01.logも未作成。読取りで0台を再確認し、本人へAの電源/USB確認を依頼した。接続回復待ちであり、実機PASSではない。試験枠は0/5消費、再送なし。
 
 ## 既存経路のOpen前フィルターに関する制約
 
