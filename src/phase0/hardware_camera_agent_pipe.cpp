@@ -7,6 +7,8 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 #include "a0/phase0/agent_host_lifetime.hpp"
+#include "a0/phase0/worker_preview_dispatcher.hpp"
+#include "a0/phase0/nikon_sdk_transport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -237,6 +239,13 @@ ProcessOneConnectionOutcome ProcessOneConnection(
     Dispatcher& dispatcher,
     const FailureInjection& failure_injection,
     PipeBudget& budget) {
+    if constexpr (requires { dispatcher.PeerAllowed(std::uint32_t{}); }) {
+        ULONG peer{};
+        if (!GetNamedPipeClientProcessId(pipe, &peer) || !dispatcher.PeerAllowed(peer)) {
+            dispatcher.TransportFailed();
+            return ProcessOneConnectionOutcome::failed_before_dispatch;
+        }
+    }
     std::array<unsigned char, 4> header{};
     if (!ReadExact(pipe, header.data(), header.size(), kFrameReadTimeoutMs, budget, "header")) {
         return ProcessOneConnectionOutcome::failed_before_dispatch;
@@ -408,6 +417,12 @@ int RunNamedPipeServerLoop(
             ProcessOneConnection(pipe, dispatcher, failure_injection, budget);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
+        if constexpr (requires { dispatcher.TransportFailed(); }) {
+            if (outcome != ProcessOneConnectionOutcome::complete_delivery) {
+                dispatcher.TransportFailed();
+                return kDispatchedDeliveryFailureExitCode;
+            }
+        }
         if (outcome == ProcessOneConnectionOutcome::dispatched_delivery_failed) {
             return kDispatchedDeliveryFailureExitCode;
         }
@@ -425,6 +440,31 @@ int RunNamedPipeServerLoop(
 }
 
 } // namespace
+
+experimental::WorkerPreviewHostResult experimental::RunWorkerPreviewNamedPipeServer(
+    std::string_view pipe_name, NikonSdkTransport& transport, std::string epoch,
+    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime) {
+    const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);
+    const auto pid = GetProcessId(parent);
+    if (!pid || pid == GetCurrentProcessId() || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT ||
+        lifetime <= std::chrono::milliseconds(0) || lifetime > std::chrono::minutes(10))
+        throw TransportError("worker_authority_missing", "live inherited controller and bounded lifetime required");
+    const auto deadline = std::chrono::steady_clock::now() + lifetime;
+    WorkerPreviewDispatcher dispatcher(transport, std::move(epoch), std::move(capability), pid, GetCurrentProcessId(),
+        [parent, deadline] { return WaitForSingleObject(parent, 0) == WAIT_TIMEOUT &&
+            std::chrono::steady_clock::now() < deadline; });
+    int code = kDispatchedDeliveryFailureExitCode;
+    try {
+        code = RunNamedPipeServerLoop(pipe_name, dispatcher, false,
+            HardwareCameraAgentPipeFailureInjectionForTesting{}, lifetime);
+    } catch (...) {
+        dispatcher.CloseForShutdown();
+        return {code, dispatcher.SafeToExit()};
+    }
+    dispatcher.CloseForShutdown();
+    return {!dispatcher.Completed() ? kDispatchedDeliveryFailureExitCode : code,
+            dispatcher.SafeToExit()};
+}
 
 int RunHardwareCameraAgentNamedPipeServer(
     std::string_view pipe_name,

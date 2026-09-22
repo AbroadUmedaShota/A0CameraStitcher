@@ -2,6 +2,18 @@
 
 ## 結論
 
+### 2026-09-22 worker命令・実パイプhostの接続
+
+`WorkerPreviewDispatcher` と内部 `RunWorkerPreviewNamedPipeServer` を追加。既存Camera Agentの同一logon SID限定・remote拒否・長さ付きJSON・delivery ACK・取消drainを使い、既存3種類のdispatcherには新条件を適用しない。新workerだけは `GetNamedPipeClientProcessId` が保持した親processのPIDと一致することを要求する。親生存/固定期限を各通常命令の前後で確認し、schema/epoch/専用capability/連続sequenceを照合する。capabilityは応答へ出さない。
+
+命令は `enumerate/select/start/frame/suspend/resume/close` のみ。frameは最大256 KiBの受信バイト列をhex（最大512 KiB）で返すプレビュー専用で、原画像や合成入力ではない。Source候補の内容/再開条件は実Nikon transportで再検査する。close応答はepoch/worker PID/sequenceと、停止・Source・Module・SDK占有解放・safeToExitを含む。停止不明やhandoff中のSource Close不明を後のローカル解放で成功に変えない。重複/不正要求・失効・通信失敗はterminalで一回だけcloseし、自動SDK再試行や子の強制終了を行わない。安全に片付いたことと正常セッション完了は別で、明示closeと配送確認なしの期限終了をexit 0へ変えない。
+
+これは内部hostまでの接続であり、実worker起動CLI/親controller/物理A/B確認UIはまだない。実行可能ファイルから実二台SDKを起動する入口は増やしていない。今後の親controllerはmarker arm・起動handle登録・強いランダムcapability・物理個体確認後の同時grantを担当し、`status=closed`、全close項目、`safeToExit=true`、epoch/sequence/PID/起動handleの一致と両OS正常終了をすべて照合してからのみ解除する。internal hostが `safe_to_exit=false` を返したworkerはプロセスを保持し、人の復旧まで隔離する必要がある。
+
+検証: SDK構成のdispatcher build exit 0、fake命令試験1/1 PASS（0.12秒）。最終のquarantined応答追加後、stub build exit 0、`ctest --test-dir build/worker-selection-stub -C Release -R '^worker_preview_(dispatcher|pipe)_contracts$' --output-on-failure` は2/2 PASS（0.75秒）、exit 0。要求順序、禁止命令、capability不一致、通信/親失効、各停止失敗をfakeで確認。実パイプ試験はCMakeでSDK無効構成にだけ生成し、実Windows子processへの明示close/不正capability、応答PID、配送ACK、OS exit 0/3を確認した。SDK列挙/Source Open/実機は未実行、preview枠は2/5。今回の試験起動はSDK側1回とstub側1回（計2回）で、自動再実行なし。
+
+最終変更後のSDK構成も同targetを再ビルドしexit 0を確認（既存C4819警告あり）。SDK側の同一fake試験は重複実行せず、最終動作は上記stub試験を根拠とする。二台同時の成功、実機通信性能、親controllerによる隔離解除は未検証のまま。
+
 ### 2026-09-22 個体確認後の同一候補handoff
 
 実験用worker selectionに明示的な一回限りのhandoffを追加。候補を一度Openし、Live Viewを開始して個体確認した後、checked STOP成功を条件に `SuspendSelectedWorkerPreview` でSourceのみを閉じる。Module/worker-local候補generationは維持する。`ResumeSelectedWorkerPreview` は同じtoken/同じinventoryの同じSourceだけを一度再Openでき、D810型と初期Live View OFFを再確認してからプレビューへ進む。別候補・再度のhandoff・失敗後の再開・途中のAdd/Remove（同じIDのAddも含む）はterminalにする。handoffのSource CloseではZombieObjectも正常終了と扱わない。既存DualのClose契約は変更しない。
