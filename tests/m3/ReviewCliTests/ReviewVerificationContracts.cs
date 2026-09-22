@@ -6,14 +6,15 @@ using A0CameraStitcher.M3.Foundation.DualCamera;
 
 internal static class ReviewVerificationContracts
 {
-    internal static async Task<int> RunAsync(string cli, string adapterPath)
+    internal static async Task<int> RunAsync(string cli, string adapterPath, bool useExistingDeployment = false)
     {
         if (!Path.IsPathFullyQualified(cli) || !File.Exists(cli) || !Path.IsPathFullyQualified(adapterPath) || !File.Exists(adapterPath)) return 2;
         var fixture = Path.Combine(Path.GetTempPath(), "A0-VerifyReviewCli-" + Guid.NewGuid().ToString("N"));
-        var deployment = Path.Combine(fixture, "cli");
+        var deployment = useExistingDeployment ? Path.GetDirectoryName(cli)! : Path.Combine(fixture, "cli");
         var root = Path.Combine(fixture, "product");
         Directory.CreateDirectory(deployment);
-        foreach (var file in Directory.GetFiles(Path.GetDirectoryName(cli)!)) File.Copy(file, Path.Combine(deployment, Path.GetFileName(file)));
+        if (!useExistingDeployment)
+            foreach (var file in Directory.GetFiles(Path.GetDirectoryName(cli)!)) File.Copy(file, Path.Combine(deployment, Path.GetFileName(file)));
         var deployedCli = Path.Combine(deployment, Path.GetFileName(cli));
         var job = Guid.NewGuid();
         var tx = Guid.NewGuid();
@@ -48,9 +49,12 @@ internal static class ReviewVerificationContracts
             string[] Valid(string? kind = null, string? id = null) => ["verify-review", "--product-root", root,
                 "--result-id", id ?? record.ResultId, "--expected-kind", kind ?? "Simulated"];
             var before = Snapshot(root);
-            using (var missingAdapter = await Invoke(deployedCli, 2, Valid()))
-                Check(missingAdapter.RootElement.GetProperty("errorCode").GetString() == "observation_unavailable", "Missing adapter was misclassified.");
-            File.Copy(adapterPath, Path.Combine(deployment, "A0CameraStitcher.M2Adapter.exe"), overwrite: true);
+            if (!useExistingDeployment)
+            {
+                using (var missingAdapter = await Invoke(deployedCli, 2, Valid()))
+                    Check(missingAdapter.RootElement.GetProperty("errorCode").GetString() == "observation_unavailable", "Missing adapter was misclassified.");
+                File.Copy(adapterPath, Path.Combine(deployment, "A0CameraStitcher.M2Adapter.exe"), overwrite: true);
+            }
             using (var description = await Invoke(deployedCli, 0, "describe"))
                 Check(description.RootElement.GetProperty("version").GetInt32() == 2 &&
                     description.RootElement.GetProperty("data").GetProperty("operations").EnumerateArray().Any(item => item.GetString() == "verify-review"),

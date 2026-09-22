@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using A0CameraStitcher.M3.Foundation;
 
+if (args is [var packagedCli, var packagedAdapter, "--packaged"])
+    return await ReviewVerificationContracts.RunAsync(packagedCli, packagedAdapter, useExistingDeployment: true);
 if (args is [var verificationCli, var adapter])
     return await ReviewVerificationContracts.RunAsync(verificationCli, adapter);
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0]) || !File.Exists(args[0])) return 2;
