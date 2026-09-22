@@ -1,5 +1,11 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 別コンテキストからのCLI発見
+
+READMEから [正規機械操作の入口](MACHINE_OPERATION.md) へ接続した。対象を固定候補 `software-f9cafd4-01` とし、記録されたmanifest hash/source commit/23ファイルのsize・hashを照合した後に同梱CLIのdescribeへ進む。Windowsローカル・同一利用者の読取り権限、対応version、保存先を推測しないこと、空結果/観測不能の区別、非対応のGUI操作/撮影/採用を明記した。
+
+2026-09-22 22:08 JST頃、会話履歴を渡さない独立担当がREADMEから文書を発見し、文書中の照合手順を実行して全件一致を確認。その後のdescribeは一回のみ、exit 0、appId `a0-camera-stitcher-review-cli`、version 2、build `1.0.0+f9cafd4e2b01f90e484ec20c949b0d33a8ea3779`、environment `Windows-local standalone read-only`、operations `describe/reviews/verify-review` を取得した（発見系列1/5）。実データ照会・GUI操作・実機操作は0回。これで当該候補の静的配置/読取り契約発見は確認したが、起動中GUI instance発見・業務更新・AI採用認可・製品全体の機械操作適合は未完。新しい候補を自動選択する機能は設けていない。
+
 ## 2026-09-22 SDK非同梱ローカル候補
 
 GUI確認追記（新規GUI候補系列1/5、実機0回）: `software-f9cafd4-01/app/A0CameraStitcher.M3.OperatorShell.exe` を引数なしで一度起動。起動モード選択の実ウィンドウとaccessibility treeを取得し、明示SIMULATED選択、HardwarePending表示、選択前にカメラ操作を開始しない案内を確認した。ただしSIMULATEDボタン入力は `coordinate input geometry is unavailable`、再観測後の前面化は `failed to activate captured window`。起動画面のままで履歴操作へ未到達、GUI受入はInconclusive。画面取得はアプリ描画を示さず、OS上にLockAppあり（存在だけではロック確定の証拠ではない）。追加入力を停止し、操作者のデスクトップ確認を待つ。OperatorShell PID 19656の起動画面を残した。CameraAgent/DualCameraAgentプロセスはその時点で検出されず、候補23ファイルのSHA-256は全件manifestと一致。採用・撮影・SDK/WPD操作を実施していない。起動検出を履歴導線・正常終了・実機受入の合格へ読み替えない。
