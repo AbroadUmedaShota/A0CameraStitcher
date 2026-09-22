@@ -867,7 +867,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
             TaskScheduler.Default);
     }
 
-    private static (int Width, int Height) ReadJpegDimensions(ReadOnlySpan<byte> bytes)
+    internal static (int Width, int Height) ReadJpegDimensions(ReadOnlySpan<byte> bytes)
     {
         var offset = 2;
         while (offset + 3 < bytes.Length)

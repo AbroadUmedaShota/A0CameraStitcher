@@ -105,6 +105,14 @@ flowchart TD
 
 ### 失敗時・AI操作・受入条件
 
+履歴成果物のmanaged接続（2026-09-22）: `M2OfflineStitcherProcessAdapter.VerifyHistoricalReviewAsync` は明示されたPending/ProductまたはSimulated記録のN形式job/transaction IDからcanonical pathを組み立て、manifestと合成画像、CAM-A/B原画像を読取りlockで保持する。実M2Adapterの `verify-published-stitch` 応答を照合し、左右それぞれのsize/SHA-256/JPEG寸法とnative全画素decode、合成画像のsize/hash/寸法を再確認して `HistoricalReviewArtifacts` を返す。未知alias・別ID・欠落・改変・reparseを拒否し、30秒協調cancel、再試行・撮影・再合成・書込みなし。read lockはAPI完了時に解放されるため、このsnapshotを将来の採用時点までの不変保証には使わない。ReviewKindとprofile ID/versionは記録由来の情報として保持し、実機証明・rig承認・品質承認には昇格しない。GUI一覧・明示選択・閲覧・採用直前再検証は引き続き未接続。
+
+初回の実process統合試験でnative manifest readerの不要なDELETE権限がmanaged読取りlockと競合しWin32 32でFAIL。`ManifestFileHandle` をreadとrename用途に分け、publisherだけDELETEを要求する修正を行った。読取り側の保護は緩和していない。二回目は拒否が正しく返したInvalidDataExceptionをtest helperが捕捉しない不備でFAIL、helperの型判定を修正。三回目の `dotnet run --project tests/m3/HistoricalReviewTests/A0CameraStitcher.M3.HistoricalReviewTests.csproj -c Release -- <M2Adapter.exe絶対path>` はexit 0、`historicalReviewArtifacts=passed`。v1/v2の正常、破損v2 seam、Accepted/不正ID/別transaction、precancel、左右原画像改変/欠落、合成画像改変、正常照会前後のfile hash不変を確認。fixture画像生成のみで実機操作0回。独立レビューのv2不足指摘をこの追加試験で解消した。
+
+native変更後のM2Adapterと `a0_published_stitch_command_tests` build exit 0、`published_stitch_command_contracts` は1/1 PASS（0.27秒、当series累計3回）。manifestのpublish/renameとread-only照合を同じfixtureで確認した。実機preview枠は2/5消費・残り3回を維持。
+
+独立再レビューはrename専用DELETE権限と通常readerの読取り権限分離、およびv2正常/範囲外seam拒否の追加を確認し、この変更範囲の残存blockerなし。GUI復元・実画像の品質・製品受入を合格範囲へ含めない。
+
 二台Pending履歴の復元準備（2026-09-22）: 既存VMはPendingを列挙して未対応と表示するだけで、`RecoverAndStitchAsync` は再合成を伴うため閲覧には使わない。M2Adapterへ `verify-published-stitch --job-directory <absolute-local-directory> --stitch-job-id <id> --capture-transaction-id <id>` を追加。既存 `VerifyPublishedStitchJob` によりmanifest schema/出力size/hash/job IDを照合し、capture ID、WICによるJPEG全画素decodeと寸法、decode後hashを確認する。root ancestorと対象fileのreparseを拒否し、撮影・再合成・保存・削除なし。stdoutは `result=verified-published-stitch` と正規化済み `manifestJson` のみ。これは合成出力の読取り時点の検証であり、左右原画像・実行環境・rig承認・品質受入の検証ではない。原画像照合・managed adapter・履歴選択UI・採用直前の再検証接続は残件。
 
 検証: M2Adapter/専用fixture target build exit 0。専用CTestの初回は生成helperへstitched.jpgを渡したfixture準備不備でFAIL（製品検証へ未到達）。生成をoriginal.jpgで行いexact synthetic fixtureのみrenameする修正後、二回目は `published_stitch_command_contracts` 1/1 PASS（0.37秒、exit 0）。同じwmain入口をprocess内で呼び、正常、別job ID、別capture ID、出力改変、manifest欠落を確認。正常/ID拒否照会前後でmanifest/画像hash不変を確認。独立レビューでも同じfixture不備を指摘し修正した。別processでのmanaged接続や実ユーザー画像による受入は未実施、カメラ操作0回、実機preview予算2/5のまま。

@@ -152,7 +152,7 @@ std::string RequireIdField(const JsonValue& object, std::string_view field) {
 
 class ManifestFileHandle final {
 public:
-    ManifestFileHandle(const std::filesystem::path& path, const bool for_write) {
+    ManifestFileHandle(const std::filesystem::path& path, const bool for_write, const bool for_rename = false) {
         handle_ = for_write
             ? CreateFileW(
                   path.c_str(),
@@ -167,8 +167,8 @@ public:
                   nullptr)
             : CreateFileW(
                   path.c_str(),
-                  GENERIC_READ | DELETE,
-                  FILE_SHARE_READ | FILE_SHARE_DELETE,
+                  GENERIC_READ | (for_rename ? DELETE : 0),
+                  FILE_SHARE_READ | (for_rename ? FILE_SHARE_DELETE : 0),
                   nullptr,
                   OPEN_EXISTING,
                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
@@ -570,7 +570,7 @@ void PublishAndVerifyStitchJobManifest(
         writer.WriteAllAndFlush(document);
     }
     {
-        const ManifestFileHandle publisher(partial, false);
+        const ManifestFileHandle publisher(partial, false, true);
         publisher.RenameToWithoutReplace(destination);
     }
 

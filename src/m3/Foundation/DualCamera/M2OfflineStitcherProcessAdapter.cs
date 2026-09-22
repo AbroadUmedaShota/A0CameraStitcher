@@ -138,6 +138,15 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         }
     }
 
+    // Read-only historical verification. This proves only the observed files
+    // and native decoder result; it never promotes a review to quality or
+    // hardware acceptance.
+    public Task<HistoricalReviewArtifacts> VerifyHistoricalReviewAsync(
+        string productRoot,
+        OperatorReviewRecord record,
+        CancellationToken cancellationToken = default) =>
+        HistoricalReviewArtifactsVerifier.VerifyAsync(this, productRoot, record, cancellationToken);
+
     public async Task ExportAsync(
         string stitchedJpeg,
         string destinationJpeg,
@@ -148,7 +157,7 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string> RunAsync(
+    internal async Task<string> RunAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
