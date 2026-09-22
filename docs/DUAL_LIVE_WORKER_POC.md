@@ -109,6 +109,8 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - 前段software-only Goalの完了記録を、本実機接続や二台動作の完成証明へ読み替えない。
 - 実機候補は `e8986dc`、Release exe SHA-256 `EB5C29A2E87D99AE35527011EC11F2506A53190BF7716965DD46CEC6E6C7ADF7`。実行processへのmodule設定後の `describe` は `sdkAvailable=true, dualEnabled=false, bindingProof=false`。
 - 実機1回目の事前チェックで中断。本人の一台準備後にはOSでD810一台を観測したが、実行直前は0台となったため、SDK/カメラOpenより前に拒否。実SDK起動・Live View開始・撮影・設定変更はいずれも0回、hardware-run-01.logも未作成。読取りで0台を再確認し、本人へAの電源/USB確認を依頼した。接続回復待ちであり、実機PASSではない。試験枠は0/5消費、再送なし。
+- 本人の再接続連絡後、OSで正常なD810一台、関連camera processなし、上記exe hash一致、既存run-01ログなしを確認して実機1回目を実行。`preview-single --confirm-one-physical-camera` はexit 0、`status=passed`、`frames=3`、`bytes=52219`、`stopConfirmed=true`、`closeConfirmed=true`、`bindingProof=false`。終了後の関連camera processは0。rawログはignoredの `build/single-worker-sdk/hardware-run-01.log` に保持し、画像の保存・撮影・設定変更・WPD操作は行っていない。
+- 実機枠は **1/5消費、単体preview 1回合格**。接続対象は本人がAとして準備した一台であり、永続個体IDやA/B bindingの証明ではない。次は本人によるAからB一台へのUSB切替待ち。二台同時Live View、二worker実SDK委譲、製品UI統合は未確認・未完了のまま。
 
 ## 既存経路のOpen前フィルターに関する制約
 
