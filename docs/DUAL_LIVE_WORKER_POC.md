@@ -132,6 +132,14 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - 新規の `build/worker-selection-stub` と `build/worker-selection-sdk` で、それぞれ `worker_preview_selection_contracts` と `single_worker_preview_contracts` は 2/2 PASS。前者はSDK stub、後者はlicensed SDK headersを有効にした**コンパイルとsoftware-only test**であり、どちらもSDK DLL/カメラを実行していない。focused CTestは有効実行2回（各2/2 PASS）。初回のstub CTestはexe生成前のNot Runで、合格・実機回数のいずれにも数えない。
 - controller消滅時に既存CLIがabandoned leaseを警告だけで継続し得る経路は今回の対象外であり、二worker SDKを有効化する前に全入口を止めるquarantine/guardianが必要である。worker process終了をSource/Moduleの正常Close証明として扱わない。
 
+### 二worker委譲の永続停止記録（実装・検証中）
+
+- `HardwareProcessLease` の既定本番名は、同一Windows sessionの固定ローカル領域に委譲markerがあれば、SDK/WPDへ入る前に拒否する。controllerはworker起動前にmarkerを作成・flush・再読込し、destructorやprocess消滅では解除しない。旧binaryには適用されず、二worker運用前に入口を同一対応版へ揃える必要がある。
+- marker解除は両側のLive View OFF・Source close・Module close・worker回収を表すtyped evidenceが必要。ただし現状はcaller assertionであり、実SDK/IPCから証拠を作るcontrollerは未接続。これだけで実機二workerを有効化しない。
+- 独立レビューで固定ローカルdriveとroot自体のreparse拒否不足を検出し修正した。本番marker保存先のoverrideは拒否し、テスト専用lease名と隔離rootだけで検証する。人手復旧CLIは未実装、自動解除しない。
+- 初回の専用buildは主担当がexit 0を回収。`hardware_process_lease_delegation_contracts` は1/1 PASS、0.40秒、exit 0。模擬子processの`ExitProcess(91)`によるdestructor非実行、次owner拒否、同thread再入拒否、不完全終了証拠の拒否、正常解除を確認。これは実SDK異常終了試験ではない。
+- 上記PASS後に固定drive検査と機械整形を加えた最終差分も、専用build exit 0、同CTest 1/1 PASS（0.60秒、exit 0）。このseriesのCTestは計2回。既定本番名のstorage分岐を隔離環境で直接通す試験と、I/O故障注入の網羅は残る。実機操作0回、preview枠は2/5のまま。
+
 ## 実機 PoC（未実行）
 
 別承認後でも最大 5 回。各回は、二 worker の SDK 初期化、Source Open trace（担当外 Open 0）、両 Live View の停止、source/module 解放、全体 lease が保持されたこと、capture/WPD 未遷移を記録する。今回の試作はその承認・実行を含まない。
