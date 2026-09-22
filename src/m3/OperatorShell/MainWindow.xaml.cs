@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
+using A0CameraStitcher.M3.Foundation.OperatorStatus;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Simulated;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
@@ -20,6 +21,7 @@ public partial class MainWindow : Window
     private readonly OperatorShellViewModel _viewModel;
     private readonly string _dualProductRoot;
     private readonly string _historicalReviewKind;
+    private OperatorStatusServer? _statusServer;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
     private readonly DispatcherTimer? _dualBindingHostLifetimeMonitor;
@@ -166,6 +168,23 @@ public partial class MainWindow : Window
             }
             Loaded += OnLoaded;
             Closing += OnClosing;
+            // Start last: a later constructor failure must not leave an observation endpoint alive.
+            // Observation only: reads the same UI gates on the Dispatcher and never dispatches commands.
+            try
+            {
+                _statusServer = new OperatorStatusServer(async token =>
+                    await Dispatcher.InvokeAsync(() => new OperatorStatusSnapshot(
+                        environment == DualCameraExecutionEnvironment.HardwareDual ? "HardwareDual" : "Simulated",
+                        _viewModel.UiState.ToString(), _viewModel.IsBusy, _viewModel.IsLiveViewActive,
+                        !_shutdownStarted && _viewModel.CanCapture,
+                        !_shutdownStarted && _viewModel.CanOpenHistoricalReview, _shutdownStarted),
+                        DispatcherPriority.Background, token));
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
+            {
+                // Missing observation is not a camera failure and must not change existing operation gates.
+                _statusServer = null;
+            }
         }
         catch
         {
@@ -270,6 +289,7 @@ public partial class MainWindow : Window
             }
         }
 
+        if (_statusServer is not null) await _statusServer.DisposeAsync();
         _liveViewFramePump.Dispose();
         _lifetime.Dispose();
         _sessionLease?.Dispose();
@@ -315,7 +335,9 @@ public partial class MainWindow : Window
         MessageBox.Show(this, _viewModel.TechnicalDetail, "技術情報（error code・ログ位置）", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void ShowVersion_Click(object sender, RoutedEventArgs eventArgs) =>
-        MessageBox.Show(this, OperatorShellViewModel.AppVersionText, "バージョン", MessageBoxButton.OK, MessageBoxImage.Information);
+        MessageBox.Show(this, OperatorShellViewModel.AppVersionText + "\n読取り専用 instance: " +
+            (_statusServer is not null && !_statusServer.Completion.IsCompleted ? _statusServer.InstanceId : "取得不能"),
+            "バージョン", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs eventArgs) => Close();
 

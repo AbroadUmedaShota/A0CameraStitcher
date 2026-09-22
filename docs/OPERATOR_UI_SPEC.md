@@ -1,5 +1,15 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 本体状態の正規読取り経路（開発ソースv3）
+
+ReviewCli契約v3に `gui-status --instance <PID-UTC起動ticks>` を追加した。MainWindowのバージョンダイアログでinstanceを提示し、GUIと同じDispatcher上からUiState/busy/live-view/撮影可否/履歴可否/終了中を観測する。照会はCommandを呼ばない。Launcher/HardwareSingleは対象外。固定prefix pipe、CurrentUserOnly、client/server双方の同一Windows session、process開始時刻と保持handle、OS pipe server PIDを照合する。5秒の協調deadline・要求256/応答4096 bytes、status固定命令だけ。停止したinstanceへ再接続/fallback/自動再試行しない。観測された可否は業務承認ではなく、撮影・採用の命令は追加していない。
+
+server契約version/buildと観測時刻を返し、CLI自身のbuildと区別する。通信障害でカメラ状態を変更しない。終了時は既存のSDK/Agent終了確認を先に維持し、その後status endpointを閉じる。終了確認が失敗して本体が残る場合、そのまま観測可能とし、lease解放やカメラ強制終了を行わない。具体的手順・限界は [機械操作入口](MACHINE_OPERATION.md) を参照。
+
+検証（実機0回）: 新OperatorStatusTests系列は4/5消費（初回compile error CS9135、修正後実pipe/CLI試験3回PASS。追加ごとにserver version/oversized拒否/同sessionサーバー検証を確認）。実CLI子processから明示instanceの値を取得し、非正規ID/開始時刻違い/未知命令/サイズ超過を拒否、拒否後endpoint継続、Dispose完了を確認した。WPF最新buildはexit 0、warning 0/error 0。新試験をM3ソリューションへ登録し、初回はDualCameraFlowTestsのassets未復元でNETSDK1004、当該projectを復元後のsolution buildはexit 0、warning 0/error 0。既存verify-review native統合をv3で1回回帰確認しPASS（当該系列累計5/5、以後根拠なく再実行しない）。独立read-onlyレビューPASS。
+
+実GUIに表示されたinstanceからの照会、異Windows session拒否の実行試験、実GUI通常終了後の拒否、最新v3の梱包は未検証。合成observerを用いた実pipe試験を実GUI/実機証拠にしない。既存凍結候補 `software-f9cafd4-01` は契約v2のまま保持し変更していない。GUI操作、対象結果表示、採用認可、撮影/次の準備への外部AI命令は未完で、roadmap stage 5はpartial。
+
 ## 2026-09-22 別コンテキストからのCLI発見
 
 READMEから [正規機械操作の入口](MACHINE_OPERATION.md) へ接続した。対象を固定候補 `software-f9cafd4-01` とし、記録されたmanifest hash/source commit/23ファイルのsize・hashを照合した後に同梱CLIのdescribeへ進む。Windowsローカル・同一利用者の読取り権限、対応version、保存先を推測しないこと、空結果/観測不能の区別、非対応のGUI操作/撮影/採用を明記した。

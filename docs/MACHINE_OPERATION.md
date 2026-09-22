@@ -2,6 +2,16 @@
 
 この手順は `codex/dual-live-worker-poc-20260922` の開発候補に対するもの。main/releaseの状態は示さない。対象は保存済み確認結果の読取り・検証であり、実機操作、GUI制御、採用代行は未対応。GUI自動操作をこの正規経路の代用にしない。
 
+## 開発ソースの契約v3（下記の凍結候補v2とは別）
+
+開発ソースに `gui-status --instance <PID-UTC起動ticks>` を追加した。本体MainWindowの「バージョン」に表示される読取り専用instanceを明示する。Launcher/HardwareSingle画面にはendpointがなく、自動探索・別instanceへのfallbackをしない。古い `software-f9cafd4-01` は契約v2で、本操作を持たない。上書き更新しない。
+
+v3のCLIは同一Windows利用者・同一ログオンセッションのMainWindowへ固定名Named Pipeで接続し、PIDと起動時刻・OSのpipe server PIDを検証する。本体も接続相手のOS process/sessionを確認する。接続と要求/応答は5秒の協調deadline、要求256 bytes/応答4096 bytes。同期OS呼出しの強制中断は保証しない。照会は同じDispatcher上でGUIの状態/操作可否を読むだけで、Commandを呼ばない。結果にはinstance/process identity、観測時刻、server契約version/build、Simulated/HardwareDual、画面state、busy、live-view状態、撮影/履歴ボタンの可否、終了処理中を含む。CLI envelopeのbuildとserverのbuildは別々に確認する。
+
+`CanCapture`等がtrueでも業務承認ではない。正規AI経路は照会のみで、画像表示・撮影・次の準備・採用はまだ実行できない。読取りendpointの障害は取得不能でありカメラ故障や実機停止を意味しない。終了時はカメラの既存終了確認を維持した後にendpointを終了する。終了確認失敗で本体が残る場合はendpointも残り、既存の安全ゲートを変えない。同一アカウントの悪意あるプロセスを信頼するための署名/アプリ認証基盤ではなく、指定されたprocessを照会する契約である。
+
+実pipe/CLIの合成状態試験と、実GUIインスタンスへの接続受入は区別する。新しいv3候補の梱包/GUI接続受入は未実施。以下の候補照合/describe手順は引き続きv2の検証済み候補に限る。
+
 ## 1. 候補を特定する
 
 本手順を置いたリポジトリルートを作業ディレクトリとする。現ホストの検証済みソフトウェア候補は次の一つ。別worktreeに候補がない場合、最新版を推測して選択・再build・downloadしない。担当者に対象候補を確認する。
@@ -64,7 +74,8 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=2`、`status=ok`、`env
 | --- | --- | --- |
 | 候補/契約発見 | 本手順＋manifest＋describe | SDK非同梱候補が対象 |
 | 保存記録の一覧/1結果検証 | reviews / verify-review | 同梱CLIで合成fixture検証済み |
-| 起動中GUIの状態/対象結果表示 | なし | 未実装、UIAを正式APIとは呼ばない |
+| 起動中GUIの状態 | 開発ソースv3 gui-status | 明示instance読取り、実GUI接続未受入、v2候補に非同梱 |
+| GUIの対象結果表示 | なし | 未実装、UIAを正式APIとは呼ばない |
 | GUIと同じゲートで撮影/次の準備 | なし | 未実装、実機承認も必要 |
 | AIによる採用代行 | なし | 別の明示依頼とアプリ側認可が必要 |
 | 実GUI/二台同時Live View/撮影品質 | 別受入 | 未完、CLI成功では代替不可 |

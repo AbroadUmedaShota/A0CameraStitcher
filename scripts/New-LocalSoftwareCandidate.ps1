@@ -96,7 +96,7 @@ try {
     $descriptionText = & (Join-Path $cli 'A0CameraStitcher.M3.ReviewCli.exe') describe
     if ($LASTEXITCODE -ne 0) { throw 'Packaged CLI describe failed.' }
     $description = ($descriptionText -join "`n") | ConvertFrom-Json
-    if ($description.appId -cne 'a0-camera-stitcher-review-cli' -or $description.version -ne 2 -or
+    if ($description.appId -cne 'a0-camera-stitcher-review-cli' -or $description.version -ne 3 -or
         $description.status -cne 'ok' -or $description.data.operations -cnotcontains 'verify-review') { throw 'Packaged CLI contract mismatch.' }
     [IO.File]::WriteAllText((Join-Path $candidate 'cli-describe.json'), ($description | ConvertTo-Json -Depth 12))
     [IO.File]::WriteAllText((Join-Path $candidate 'README.txt'), @'
@@ -107,7 +107,7 @@ Requires the host .NET 10 Windows Desktop runtime and native runtime dependencie
 GUI: app/A0CameraStitcher.M3.OperatorShell.exe (GUI acceptance not performed by this recipe)
 CLI: app/review-cli/A0CameraStitcher.M3.ReviewCli.exe describe
 Read-only verification: verify-review --product-root <absolute local product root> --result-id <GUID N> --expected-kind <Product|Simulated>
-CLI does not connect to the GUI instance, accept results, operate cameras, or capture images.
+CLI gui-status observes an explicitly identified MainWindow instance; it cannot send GUI commands, accept results, operate cameras, or capture images.
 Preserve this directory and its manifest. Build a new candidate rather than overwriting it.
 '@)
     $files = @(Get-ChildItem -LiteralPath $candidate -File -Recurse | Sort-Object FullName | ForEach-Object {
@@ -118,7 +118,7 @@ Preserve this directory and its manifest. Build a new candidate rather than over
     $manifest = @{ schemaVersion = 1; status = 'local-software-candidate'; sourceCommit = $sourceCommit;
         sourceDirty = $sourceStatus.Count -ne 0; recipeSha256 = $scriptHash; createdAtUtc = [DateTimeOffset]::UtcNow.ToString('O');
         hardwareAccepted = $false; guiAccepted = $false; redistributionApproved = $false; sdkIncluded = $false;
-        selfContained = $false; cliContractVersion = 2; files = $files }
+        selfContained = $false; cliContractVersion = 3; files = $files }
     $manifestPath = Join-Path $candidate 'candidate.manifest.json'
     $finalCommit = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $finalCommit -cne $sourceCommit) { throw 'Source commit changed during packaging.' }
