@@ -37,8 +37,24 @@ if (args is ["--review-ux"])
     foreach (var (name, test) in new (string Name, Func<Task> Run)[]
     {
         ("review UX preserves originals, records acceptance, and rejects changed files", ReviewUxPersistsAcceptanceAndRejectsChangedFilesAsync),
+        ("hardware single review records explicit acceptance", HardwareSingleReviewRecordsExplicitAcceptanceAsync),
+        ("hardware single review restores pending results and rejects changed originals", HardwareSingleReviewRestoreRejectsChangedOriginalAsync),
         ("formal dual WPF workflow remains intact", FormalDualCameraWpfFlowAsync),
         ("formal dual export failure progress remains intact", FormalDualCameraExportFailureProgressAsync),
+    })
+    {
+        try { await test(); Console.WriteLine($"PASS {name}"); }
+        catch (Exception exception) { reviewFailures++; Console.Error.WriteLine($"FAIL {name}: {exception}"); }
+    }
+    return reviewFailures == 0 ? 0 : 1;
+}
+if (args is ["--hardware-single-review"])
+{
+    var reviewFailures = 0;
+    foreach (var (name, test) in new (string Name, Func<Task> Run)[]
+    {
+        ("hardware single review records explicit acceptance", HardwareSingleReviewRecordsExplicitAcceptanceAsync),
+        ("hardware single review restores pending results and rejects changed originals", HardwareSingleReviewRestoreRejectsChangedOriginalAsync),
     })
     {
         try { await test(); Console.WriteLine($"PASS {name}"); }
@@ -2604,6 +2620,109 @@ static HardwareObservedCameraSettings ApprovedCamAObservedSettings()
             CurrentLabel = null,
         },
     };
+}
+
+static async Task HardwareSingleReviewRecordsExplicitAcceptanceAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (transactionId, alias) => CompleteCapture(artifactsRoot, transactionId, alias).Result,
+        };
+        var stateStore = new HardwareSingleAppStateStore(Path.Combine(root, "state"));
+        var reviewStore = new FileOperatorReviewStore(Path.Combine(root, "state", "operator-review"));
+        using var viewModel = new HardwareSingleCameraViewModel(
+            operations, stateStore, new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            preferencesStore: null, profileStore: null, operatorReviewStore: reviewStore);
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+        await viewModel.CaptureAsync();
+
+        Check.True(viewModel.CanAcceptReview, "A re-verified complete original must await an explicit acceptance.");
+        Check.True(viewModel.CanPrepareNewCapture, "Retake preparation remains available while it retains the old original.");
+        var pending = (await reviewStore.LoadAsync()).Single();
+        Check.Equal("Pending", pending.State);
+
+        await viewModel.AcceptReviewAsync();
+
+        Check.True(await stateStore.LoadPendingAsync() is null, "Acceptance must prepare only after its durable record is written.");
+        var accepted = (await reviewStore.LoadAsync()).Single();
+        Check.Equal("Accepted", accepted.State);
+        Check.Equal(1, operations.CaptureCallCount);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task HardwareSingleReviewRestoreRejectsChangedOriginalAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        HardwareSingleCaptureResult? captured = null;
+        var firstOperations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (transactionId, alias) =>
+            {
+                captured = CompleteCapture(artifactsRoot, transactionId, alias).Result;
+                return captured;
+            },
+        };
+        var stateStore = new HardwareSingleAppStateStore(Path.Combine(root, "state"));
+        var reviewStore = new FileOperatorReviewStore(Path.Combine(root, "state", "operator-review"));
+        using (var first = new HardwareSingleCameraViewModel(
+                   firstOperations, stateStore, new HardwareOriginalExporter(Path.Combine(root, "exports")),
+                   preferencesStore: null, profileStore: null, operatorReviewStore: reviewStore))
+        {
+            await first.InitializeAsync();
+            first.ExclusiveCameraControlConfirmed = true;
+            await first.CheckReadinessAsync();
+            first.DedicatedSpoolScopeConfirmed = true;
+            first.ExactObjectDeleteConfirmed = true;
+            await first.CaptureAsync();
+            Check.True(first.CanAcceptReview, "The first complete result must be stored Pending before application exit.");
+        }
+
+        Check.True(captured is not null, "The test must retain the agent result for the same transaction lookup.");
+        var restartedOperations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+        };
+        restartedOperations.TransactionResults.Enqueue(captured!);
+        using var restarted = new HardwareSingleCameraViewModel(
+            restartedOperations, stateStore, new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            preferencesStore: null, profileStore: null, operatorReviewStore: reviewStore);
+        await restarted.InitializeAsync();
+        Check.True(restarted.CanAcceptReview, "Restart must restore only the same pending transaction after canonical re-verification.");
+        Check.True(restarted.ReviewStatus.Contains("再検証して復元", StringComparison.Ordinal),
+            "The restored review must disclose that its original was re-verified.");
+
+        await File.WriteAllBytesAsync(captured!.RetainedOriginal!.Path, [0x00, 0x01, 0x02]);
+        await restarted.AcceptReviewAsync();
+
+        Check.Equal("Pending", (await reviewStore.LoadAsync()).Single().State);
+        Check.True(await stateStore.LoadPendingAsync() is not null,
+            "A changed original must preserve the pending transaction and prevent a new capture.");
+        Check.False(restarted.CanAcceptReview, "A failed final re-verification must not leave the stale original acceptable.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static async Task HardwareSingleHappyPathAsync()

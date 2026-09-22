@@ -182,6 +182,11 @@
                             <Button Content="単体原画像を保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
                                     Margin="0,14,0,0" HorizontalAlignment="Stretch"
                                     AutomationProperties.Name="検証済み単体原画像をbyte identicalで明示保存" />
+                            <TextBlock Text="{Binding ReviewStatus}" Margin="0,12,0,4" TextWrapping="Wrap"
+                                       AutomationProperties.LiveSetting="Polite" />
+                            <Button Content="採用して次の撮影を準備" Command="{Binding AcceptReviewCommand}"
+                                    IsEnabled="{Binding CanAcceptReview}" HorizontalAlignment="Stretch"
+                                    AutomationProperties.Name="再検証済み単体原画像を採用して次の撮影を準備" />
                             <Button Content="再合成（SingleCameraでは対象外）" IsEnabled="False" HorizontalAlignment="Stretch" />
                             <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}"
                                     IsEnabled="{Binding CanPrepareNewCapture}" HorizontalAlignment="Stretch" />

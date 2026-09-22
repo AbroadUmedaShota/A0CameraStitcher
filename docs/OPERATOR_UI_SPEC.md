@@ -87,9 +87,11 @@ flowchart TD
 
 実装追跡（2026-09-21）: `FileOperatorReviewStore` は `Pending` → `Accepted` のローカルmetadataを原画像と別に保存する。未知項目、破損JSON、未publishの `.partial`、競合書込み、別対象への差替えを拒否し、AcceptedからPendingへ戻さない。未完了metadataを自動削除しない。公開後の再読込検証はキャンセルされても完遂する。これはreview保存の部品であり、画像確認・実機GUI受入の完了を意味しない。
 
-今回の実装範囲は `MainWindow` の撮影結果導線。`AcceptReviewCommand` は現在の撮影ID・結果ID・原画像/合成画像hashを照合し、Pending保存済みの成功結果だけを採用できる。採用保存失敗では画面を維持し、自動再送しない。`PrepareNewCaptureCommand` は旧画像を保持した準備のみで、撮影を開始しない。結果画像は保存済みartifactからのみ表示し、`ReviewImageWindow` で全体・実ピクセル100%・中央の拡大とスクロールを提供する。中央移動は実際のseam位置の自動検出ではない。
+今回の実装範囲は `MainWindow` と `HardwareSingleCameraWindow` の撮影結果導線。`AcceptReviewCommand` は現在の撮影ID・結果ID・原画像/合成画像hashを照合し、Pending保存済みの成功結果だけを採用できる。Hardware SingleもCamera Agentのcanonical run/transaction/alias pathから原画像を再検証してからPendingを復元し、採用直前にも再検証する。採用保存失敗では画面を維持し、自動再送しない。`PrepareNewCaptureCommand` は未採用でも旧画像を保持した撮り直し準備を許し、撮影を開始しない。結果画像は保存済みartifactからのみ表示し、`ReviewImageWindow` で全体・実ピクセル100%・中央の拡大とスクロールを提供する。中央移動は実際のseam位置の自動検出ではない。
 
-残件: 専用 `HardwareSingleCameraWindow` への同じ採用導線の展開、過去の未確認結果への再入場・画像再検証・再採用、実seam位置への移動、実機GUI受入。再起動時は保存済みreview状態の件数/IDを表示するが、画像を再検証せず過去結果を採用可能にはしない。二台同時ライブの技術gateと外部機械操作経路は別に残る。
+残件: 過去の任意のPending結果を一覧から選んで再入場する導線、実seam位置への移動、実機GUI受入。今回のHardware Single復元は、未確定transactionとして残った同一結果を再照会し、canonical原画像を再検証できた場合に限る。すでに準備を完了してtransaction markerを閉じた結果をファイル走査や推測で再発見・採用しない。二台同時ライブの技術gateと外部機械操作経路は別に残る。
+
+2026-09-22 software verification: `dotnet restore A0CameraStitcher.M3.slnx --locked-mode`（既存依存のみ）は成功。`dotnet build tests\\m3\\OperatorShellTests\\A0CameraStitcher.M3.OperatorShellTests.csproj --no-restore -c Release` は0 warning / 0 errorで成功した。追加した `--hardware-single-review` は3.1秒で `hardware single review records explicit acceptance` と `hardware single review restores pending results and rejects changed originals` の2件がPASSした。先行した包括 `--review-ux` は時間上限前に上記を含む4件のPASSを出力したが終了コードを回収できなかったため、suite PASSの証拠にはしない。実機・SDK/WPD・GUI受入は実行していない。
 
 機械操作標準の段階対応: 今回のUI commandと安定したUI識別子はGUI受入用の補助経路。外部AIが起動中アプリの特定結果を照会・採用する認可済みCLI/IPCは未接続であり、内部VMの試験を正式な外部API受入に代用しない。採用対象ID・環境・副作用・再送結果を確認できる正規経路の追加と実接続受入を残件として維持する。
 

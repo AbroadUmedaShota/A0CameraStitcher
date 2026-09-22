@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using Microsoft.Win32;
+using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 
@@ -42,7 +43,9 @@ public partial class HardwareSingleCameraWindow : Window
                 new HardwareOriginalExporter(storagePaths.DefaultExportDirectory),
                 preferencesStore,
                 profileStore,
-                handoffEvidenceCollector: _handoffEvidenceCollector);
+                handoffEvidenceCollector: _handoffEvidenceCollector,
+                operatorReviewStore: new FileOperatorReviewStore(
+                    Path.Combine(storagePaths.StateDirectory, "operator-review")));
             DataContext = _viewModel;
             Loaded += OnLoaded;
             Closing += OnClosing;

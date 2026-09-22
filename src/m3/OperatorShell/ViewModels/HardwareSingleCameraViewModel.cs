@@ -2,6 +2,7 @@ using System.IO;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
+using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 
@@ -16,12 +17,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private HardwareOriginalExporter _exporter;
     private readonly HardwareSinglePreferencesStore? _preferencesStore;
     private readonly HardwareSingleCaptureProfileStore? _profileStore;
+    private readonly IOperatorReviewStore? _operatorReviewStore;
     private readonly IHardwareSingleHandoffEvidenceCollector? _handoffEvidenceCollector;
     private readonly TimeProvider _timeProvider;
     private HardwarePendingTransaction? _pendingTransaction;
     private HardwareSingleReadinessResult? _readiness;
     private HardwareSingleCaptureResult? _captureResult;
     private VerifiedHardwareJpeg? _verifiedOriginal;
+    private OperatorReviewRecord? _currentReviewRecord;
     private string _selectedCamera = "CAM-A";
     private bool _exclusiveCameraControlConfirmed;
     private bool _dedicatedSpoolScopeConfirmed;
@@ -56,13 +59,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private string _exportSummary = "未保存";
     private string _lastExportPath = string.Empty;
     private string _technicalDetail = "automatic retry count: 0";
+    private string _reviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
 
     public HardwareSingleCameraViewModel(
         IHardwareSingleCameraOperations operations,
         IHardwareSingleAppStateStore stateStore,
         HardwareOriginalExporter exporter,
         TimeProvider? timeProvider = null)
-        : this(operations, stateStore, exporter, null, null, timeProvider, null)
+        : this(operations, stateStore, exporter, null, null, timeProvider, null, null)
     {
     }
 
@@ -73,7 +77,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         HardwareSinglePreferencesStore? preferencesStore,
         HardwareSingleCaptureProfileStore? profileStore,
         TimeProvider? timeProvider = null,
-        IHardwareSingleHandoffEvidenceCollector? handoffEvidenceCollector = null)
+        IHardwareSingleHandoffEvidenceCollector? handoffEvidenceCollector = null,
+        IOperatorReviewStore? operatorReviewStore = null)
     {
         _operations = operations ?? throw new ArgumentNullException(nameof(operations));
         _continuousLiveViewOperations = operations as IHardwareContinuousLiveViewOperations;
@@ -83,6 +88,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _profileStore = profileStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _handoffEvidenceCollector = handoffEvidenceCollector;
+        _operatorReviewStore = operatorReviewStore;
         // An injected exporter is an explicit destination chosen by the caller.
         // The product composition supplies a preference store, so its default
         // LocalAppData path remains only a folder-picker starting point until a
@@ -98,6 +104,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         CaptureCommand = new AsyncRelayCommand(CaptureAsync, () => CanCapture, HandleCommandException);
         RecoverTransactionCommand = new AsyncRelayCommand(RecoverTransactionAsync, () => CanRecoverTransaction, HandleCommandException);
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, HandleCommandException);
+        AcceptReviewCommand = new AsyncRelayCommand(AcceptReviewAsync, () => CanAcceptReview, HandleCommandException);
         PrepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, HandleCommandException);
         ApproveProfileCommand = new AsyncRelayCommand(ApproveProfileAsync, () => CanApproveProfile, HandleCommandException);
     }
@@ -312,6 +319,12 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         private set => SetProperty(ref _exportSummary, value);
     }
 
+    public string ReviewStatus
+    {
+        get => _reviewStatus;
+        private set => SetProperty(ref _reviewStatus, value);
+    }
+
     public string LastExportPath
     {
         get => _lastExportPath;
@@ -439,6 +452,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _captureResult.TerminalState is not ("Reserved" or "InProgress") &&
         _verifiedOriginal is not null && _hasOperatorSelectedExportDirectory;
 
+    public bool CanAcceptReview =>
+        _initializationComplete && !IsBusy && _captureResult?.TerminalState == "Complete" &&
+        _verifiedOriginal is not null && _currentReviewRecord is { State: "Pending" } &&
+        _operatorReviewStore is not null;
+
     public bool CanPrepareNewCapture =>
         _initializationComplete && !IsBusy && !_stateLoadFailed && _pendingTransaction is not null &&
         (_captureResult is not null || _localPreDispatchFailure);
@@ -465,6 +483,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public ICommand RecoverTransactionCommand { get; }
 
     public ICommand ExportCommand { get; }
+
+    public ICommand AcceptReviewCommand { get; }
 
     public ICommand PrepareNewCaptureCommand { get; }
 
@@ -1318,7 +1338,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             ? $"成功: {reply.Payload.CameraAlias} original.jpg"
             : $"{reply.Payload.TerminalState}: {reply.Payload.ErrorCategory}";
         ActivityText = completeAndVerified
-            ? "一台撮影が完了しました。合成は対象外です。必要なら明示保存してください。"
+            ? "一台撮影が完了しました。原画像を確認してから明示採用または保存してください。"
             : "transactionは失敗または部分失敗で確定しました。自動再試行しません。";
         TechnicalDetail =
             $"transaction: {reply.Payload.TransactionId}\n" +
@@ -1341,6 +1361,119 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             $"postCaptureLiveViewProbeSucceeded: {reply.Payload.PostCaptureLiveViewProbeSucceeded}\n" +
             $"automatic retry count: {reply.Payload.AutomaticRetryCount}" +
             (validationIssues.Count == 0 ? string.Empty : $"\n{string.Join("\n", validationIssues)}");
+
+        if (completeAndVerified)
+        {
+            await RestoreOrRecordPendingReviewAsync().ConfigureAwait(true);
+        }
+        else
+        {
+            _currentReviewRecord = null;
+            ReviewStatus = "この結果は採用対象ではありません。原画像を保持したまま、必要な点検後に新しい撮影を準備してください。";
+        }
+
+        NotifyAvailability();
+    }
+
+    private string CurrentReviewResultId =>
+        _captureResult is null ? string.Empty : $"single-original-{_captureResult.TransactionId}";
+
+    // The review record contains only the operator decision. The artifact itself is
+    // never trusted from metadata: every restored result is independently rebuilt
+    // from the agent's canonical run/transaction/alias path and re-verified above.
+    private async Task RestoreOrRecordPendingReviewAsync()
+    {
+        if (_operatorReviewStore is null || _captureResult is null || _verifiedOriginal is null)
+        {
+            _currentReviewRecord = null;
+            ReviewStatus = "確認記録の保存先が未接続のため、採用できません。原画像は明示保存できます。";
+            return;
+        }
+
+        var resultId = CurrentReviewResultId;
+        var records = await _operatorReviewStore.LoadAsync(CancellationToken.None).ConfigureAwait(true);
+        var existing = records.SingleOrDefault(record => string.Equals(record.ResultId, resultId, StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            if (!string.Equals(existing.TransactionId, _captureResult.TransactionId, StringComparison.Ordinal) ||
+                existing.ReviewKind != "OriginalsOnly")
+            {
+                throw new InvalidDataException("The existing review record does not match the restored transaction.");
+            }
+
+            _currentReviewRecord = existing;
+            ReviewStatus = existing.State == "Accepted"
+                ? "この原画像は採用済みです。新しい撮影を準備するには明示操作が必要です。"
+                : "以前の未確認結果を再検証して復元しました。原画像を確認して採用してください。";
+            return;
+        }
+
+        var pending = new OperatorReviewRecord
+        {
+            ResultId = resultId,
+            TransactionId = _captureResult.TransactionId,
+            ReviewKind = "OriginalsOnly",
+            State = "Pending",
+            UpdatedAtUtc = _timeProvider.GetUtcNow(),
+        };
+        await _operatorReviewStore.SaveAsync(pending, CancellationToken.None).ConfigureAwait(true);
+        _currentReviewRecord = pending;
+        ReviewStatus = "人による確認待ちです。原画像を確認してから「採用して次の撮影を準備」を押してください。";
+    }
+
+    public async Task AcceptReviewAsync()
+    {
+        if (!CanAcceptReview || _captureResult?.RetainedOriginal is null || _currentReviewRecord is null ||
+            _operatorReviewStore is null)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        var acceptanceCommitted = false;
+        try
+        {
+            // Re-read the canonical original immediately before the durable decision.
+            // A changed, missing, or non-canonical file remains Pending and is never accepted.
+            var expectedOriginalPath = HardwareAgentArtifactLayout.OriginalPath(
+                _operations.AgentArtifactsRoot,
+                _captureResult.RunId,
+                _captureResult.TransactionId,
+                _captureResult.RetainedOriginal.CameraAlias);
+            _verifiedOriginal = await HardwareArtifactVerifier
+                .VerifyOriginalAsync(_captureResult.RetainedOriginal, expectedOriginalPath)
+                .ConfigureAwait(true);
+
+            var accepted = _currentReviewRecord with
+            {
+                State = "Accepted",
+                UpdatedAtUtc = _timeProvider.GetUtcNow(),
+            };
+            await _operatorReviewStore.SaveAsync(accepted, CancellationToken.None).ConfigureAwait(true);
+            _currentReviewRecord = accepted;
+            acceptanceCommitted = true;
+            ReviewStatus = "採用を記録しました。次の撮影を準備しています。";
+            IsBusy = false;
+            await PrepareNewCaptureAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            if (!acceptanceCommitted)
+            {
+                _verifiedOriginal = null;
+                ReviewStatus = "採用を記録できませんでした。自動では再送せず、原画像を保持して確認してください。";
+            }
+            else
+            {
+                ReviewStatus = "採用は記録済みですが、新しい撮影の準備を完了できません。撮影IDを保持したまま状態を確認してください。";
+            }
+            TechnicalDetail += $"\nreview_accept_failed: {SafeMessage(exception)}";
+        }
+        finally
+        {
+            IsBusy = false;
+            NotifyAvailability();
+        }
     }
 
     public async Task PrepareNewCaptureAsync()
@@ -1367,6 +1500,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _pendingTransaction = null;
         _captureResult = null;
         _verifiedOriginal = null;
+        _currentReviewRecord = null;
         _readiness = null;
         _liveViewHandoffRequested = false;
         _localPreDispatchFailure = false;
@@ -1385,6 +1519,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         PreviewImage = null;
         LiveViewSummary = "未実行";
         ActivityText = "新しいSingleCamera transactionの準備を開始しました。";
+        ReviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
         TechnicalDetail = "automatic retry count: 0";
         IsBusy = false;
         OnPropertyChanged(nameof(CanSelectCamera));
@@ -1537,6 +1672,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CanRecoverTransaction));
         OnPropertyChanged(nameof(CanExport));
+        OnPropertyChanged(nameof(CanAcceptReview));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanApproveProfile));
         OnPropertyChanged(nameof(CanChangeExportDirectory));
@@ -1549,6 +1685,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ((AsyncRelayCommand)CaptureCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)RecoverTransactionCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)AcceptReviewCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)PrepareNewCaptureCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ApproveProfileCommand).NotifyCanExecuteChanged();
     }
