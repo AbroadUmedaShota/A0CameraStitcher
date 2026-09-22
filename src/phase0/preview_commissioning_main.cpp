@@ -2,6 +2,7 @@
 // separate Win32 executable: it is not the .NET product UI and it has no
 // capture, WPD, settings, card, or image-saving controls.
 #include "a0/phase0/preview_worker_owner.hpp"
+#include "a0/phase0/preview_run_journal.hpp"
 #include <Windows.h>
 #include <shellapi.h>
 #include <wincodec.h>
@@ -36,7 +37,7 @@ constexpr INT_PTR kClose = 106;
 constexpr INT_PTR kCandidates = 107;
 constexpr INT_PTR kStatus = 108;
 
-enum class Command { Start, Preview, ConfirmA, ConfirmB, StartBoth, Close, Quit };
+enum class Command { Start, Preview, ConfirmA, ConfirmB, StartBoth, Close, RenderFailed, Quit };
 enum class EventKind { Status, Candidates, Frame, PaneStopped, Closed, Quarantined };
 
 struct CommandItem { Command command; std::size_t candidate{}; };
@@ -65,7 +66,7 @@ public:
     ControlThread& operator=(const ControlThread&) = delete;
 
     void Request(Command command, std::size_t candidate = 0) {
-        if (command == Command::Close || command == Command::Quit) stop_requested_ = true;
+        if (command == Command::Close || command == Command::RenderFailed || command == Command::Quit) stop_requested_ = true;
         {
             std::lock_guard lock(mutex_);
             commands_.push({command, candidate});
@@ -74,6 +75,25 @@ public:
     }
 
 private:
+    void BeginJournal() {
+        std::array<wchar_t, 32768> executable{};
+        const auto length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+        if (!length || length >= executable.size()) throw std::runtime_error("journal location unavailable");
+        const auto directory = std::filesystem::path(executable.data()).parent_path() / L"logs";
+        std::filesystem::create_directories(directory);
+        const auto file = directory / (L"preview-run-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(GetTickCount64()) + L".jsonl");
+        journal_ = std::make_unique<a0::phase0::experimental::PreviewRunJournal>(file);
+        journal_->Record("run_started"); // Must persist before any worker/SDK startup.
+    }
+    void Record(std::string_view event, std::uint64_t value = 0) {
+        if (!journal_) throw std::runtime_error("journal unavailable");
+        journal_->Record(event, value);
+    }
+    bool RecordShutdown(std::string_view event) noexcept {
+        if (!journal_) return false;
+        try { journal_->Record(event); return true; } catch (...) { return false; }
+    }
     void Post(std::unique_ptr<UiEvent> event) {
         auto* raw = event.release();
         if (!PostMessageW(window_, kUiEvent, 0, reinterpret_cast<LPARAM>(raw))) {
@@ -85,11 +105,13 @@ private:
     void Status(std::wstring text) { Post(std::make_unique<UiEvent>(UiEvent{EventKind::Status, std::move(text)})); }
     bool CloseOnce(PreviewWorkerOwner*& owner) {
         if (construction_failed_) {
+            RecordShutdown("startup_quarantined");
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Quarantined,
                 L"ワーカー構築中に失敗しました。部分起動・隔離記録の有無が未確認のため、正常終了とは扱いません。"}));
             return false;
         }
         if (!owner) {
+            RecordShutdown("no_active_owner");
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Closed, L"開始前に終了しました。"}));
             return true;
         }
@@ -97,14 +119,19 @@ private:
         if (closed) {
             delete owner;
             owner = nullptr;
-            Post(std::make_unique<UiEvent>(UiEvent{EventKind::Closed, L"停止済み。最後のプレビューは保存せず画面表示のみ保持しています。"}));
+            const bool recorded = RecordShutdown("both_workers_close_verified");
+            Post(std::make_unique<UiEvent>(UiEvent{EventKind::Closed, recorded
+                ? L"停止済み。終了確認を記録しました。プレビュー画像は保存していません。"
+                : L"停止済み。ただし試験記録に失敗したため、実機試験の合格とは扱いません。"}));
         } else {
+            RecordShutdown("close_unconfirmed");
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Quarantined,
                 L"終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。"}));
         }
         return closed;
     }
     void FailAndClose(PreviewWorkerOwner*& owner) {
+        RecordShutdown("operation_failed");
         Status(ErrorText());
         CloseOnce(owner);
     }
@@ -126,6 +153,11 @@ private:
             }
             if (terminal) continue;
             try {
+                if (item.command == Command::RenderFailed) {
+                    RecordShutdown("display_failed");
+                    CloseOnce(owner);
+                    continue;
+                }
                 if (stop_requested_ && item.command != Command::Close) {
                     CloseOnce(owner);
                     continue;
@@ -138,12 +170,14 @@ private:
                 case Command::Start: {
                     if (start_attempted_) throw std::runtime_error("session cannot be restarted");
                     start_attempted_ = true;
+                    BeginJournal();
                     Status(L"二つの実験用ワーカーを開始し、SDK候補列挙を開始しています。撮影はしません。");
                     deadline_ = GetTickCount64() + 60000; // conservative, starts before bootstrap.
                     try { owner = new PreviewWorkerOwner(); }
                     catch (const a0::phase0::experimental::PreviewWorkerStartupError& error) {
                         construction_failed_ = error.WorkersMayExist();
                         if (!construction_failed_) {
+                            RecordShutdown("startup_no_workers");
                             stop_requested_ = true;
                             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Closed,
                                 L"ワーカー生成前に失敗しました。この画面は閉じられます。隔離記録があれば維持します。"}));
@@ -154,6 +188,7 @@ private:
                     catch (...) { construction_failed_ = true; throw; }
                     if (stop_requested_) { CloseOnce(owner); break; }
                     const auto candidates = owner->Enumerate(0);
+                    Record("worker_a_enumerated", candidates.size());
                     candidates_[0] = candidates;
                     auto event = std::make_unique<UiEvent>();
                     event->kind = EventKind::Candidates;
@@ -169,6 +204,7 @@ private:
                     // sends a candidate ordinal only and never interprets opaque IDs.
                     const auto worker = active_worker_;
                     const auto bytes = owner->Preview(worker, candidates_[worker][item.candidate]);
+                    Record(worker == 0 ? "worker_a_observed_bytes" : "worker_b_observed_bytes", bytes.size());
                     auto event = std::make_unique<UiEvent>();
                     event->kind = EventKind::Frame;
                     event->pane = static_cast<int>(worker);
@@ -185,6 +221,7 @@ private:
                     const auto body = item.command == Command::ConfirmA ? ObservedPreviewBody::CameraA : ObservedPreviewBody::CameraB;
                     const auto worker = active_worker_;
                     owner->ConfirmAndSuspend(worker, body);
+                    Record(body == ObservedPreviewBody::CameraA ? "operator_confirmed_cam_a" : "operator_confirmed_cam_b", worker);
                     if (stop_requested_) { CloseOnce(owner); break; }
                     auto stopped = std::make_unique<UiEvent>();
                     stopped->kind = EventKind::PaneStopped;
@@ -197,6 +234,7 @@ private:
                     if (worker == 0) {
                         active_worker_ = 1;
                         candidates_[1] = owner->Enumerate(1);
+                        Record("worker_b_enumerated", candidates_[1].size());
                         auto event = std::make_unique<UiEvent>();
                         event->kind = EventKind::Candidates;
                         event->worker = 1;
@@ -214,6 +252,7 @@ private:
                 case Command::StartBoth: {
                     if (!owner) throw std::runtime_error("both previews are not ready");
                     owner->StartBoth();
+                    Record("both_live_views_started");
                     // A bounded, one-shot feasibility sample.  This is not a retry loop,
                     // synchronization claim, capture, or persisted preview artifact.
                     for (int pair = 1; pair <= 3; ++pair) {
@@ -222,9 +261,12 @@ private:
                             throw std::runtime_error("experimental worker lifetime expired");
                         auto left = owner->Read(ObservedPreviewBody::CameraA);
                         const auto left_received = GetTickCount64();
+                        Record("cam_a_frame_bytes", left.size());
                         if (stop_requested_) break;
                         auto right = owner->Read(ObservedPreviewBody::CameraB);
                         const auto right_received = GetTickCount64();
+                        Record("cam_b_frame_bytes", right.size());
+                        Record("frame_pair_received", pair);
                         auto left_event = std::make_unique<UiEvent>();
                         left_event->kind = EventKind::Frame;
                         left_event->pane = 0;
@@ -250,6 +292,7 @@ private:
                     CloseOnce(owner);
                     break;
                 case Command::Quit:
+                case Command::RenderFailed:
                     break;
                 }
             } catch (...) { FailAndClose(owner); }
@@ -261,6 +304,7 @@ private:
     std::condition_variable condition_;
     std::queue<CommandItem> commands_;
     std::thread thread_;
+    std::unique_ptr<a0::phase0::experimental::PreviewRunJournal> journal_;
     std::array<std::array<std::string, 2>, 2> candidates_{};
     std::size_t active_worker_{};
     ULONGLONG deadline_{};
@@ -281,6 +325,7 @@ struct App {
     int active_worker{};
     bool close_pending{};
     bool completed{};
+    bool render_failed{};
     bool concurrent{};
     bool stopping{};
     ULONGLONG deadline{};
@@ -492,9 +537,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             auto bitmap = DecodeJpeg(event->bytes);
             if (!bitmap) {
                 app->stopping = true;
+                app->render_failed = true;
                 SetStatus(*app, L"プレビューJPEGを表示できません。終了確認を開始します。");
                 EnableControls(window, false, false, false, false, false);
-                app->controller->Request(Command::Close);
+                app->controller->Request(Command::RenderFailed);
             } else {
                 if (app->panes[event->pane]) DeleteObject(app->panes[event->pane]);
                 app->panes[event->pane] = bitmap;
@@ -516,7 +562,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             app->stopped[0] = app->stopped[1] = true;
             app->completed = true;
             KillTimer(window, 1);
-            SetStatus(*app, event->text);
+            SetStatus(*app, app->render_failed
+                ? L"停止済み。プレビュー表示に失敗したため、実機試験は未合格です。"
+                : event->text);
             EnableControls(window, false, false, false, false, false);
             InvalidateRect(window, nullptr, FALSE);
             if (app->close_pending) DestroyWindow(window);

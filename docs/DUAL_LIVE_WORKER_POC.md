@@ -2,6 +2,16 @@
 
 ## 結論
 
+### 非画像の試験記録と表示失敗の保持（2026-09-22）
+
+実機試験画面は開始ボタン時、worker生成より前にexe隣接の `logs/preview-run-<process>-<tick>.jsonl` をCREATE_NEWで作成する。固定ASCII event・連番・単調時刻・数値だけを各行write/flushし、画像・Source token・serial・自由文例外を保存しない。通常起動/UI-only/describeでは記録を作らない。作成失敗はSDK開始を禁止、操作後の記録失敗は終了確認へ進む。終了記録の失敗もSDK閉鎖を妨げず画面で未合格とする。ログはignored build配下で保持し、既存ログの上書き・自動削除はない。
+
+`frame_pair_received` はバイト受信だけの事実であり、表示成功、異なる物理個体、フレーム同期、製品合格の証明ではない。実WIC表示の失敗はUIで保持し、制御threadに `display_failed` を記録させる。後続のClosedでも未合格表示を消さない。終了不明時の隔離・自動再試行禁止は維持する。完全なログ、本人の物理alias確認、左右映像の実観測、両側終了確認を合わせて実機結果を判定する。
+
+最終stub/SDK PreviewCommissioning buildはいずれもexit 0。新規2試験 `ctest --test-dir build/worker-selection-stub -C Release -R '^preview_(run_journal|display_failure)_contracts$' --output-on-failure` は一回実行、2/2 PASS（0.41秒、exit 0）。前者は記録構文・連番・既存file拒否・不正event拒否、後者は非表示の実WindowProc/WICへ破損JPEGを渡しClose後の未合格保持を確認した。Start命令なし、SDK/worker/lease開始なし。disk write/flush障害の注入と実カメラ映像表示は未検証。既存owner/lease試験は再実行していない。
+
+同ターンのOS確認はAOPC-11-NOTEでD810 2台/正常2台、A0関連processなし。実機preview予算は **2/5消費・残り3回** のまま。本人にA/Bそれぞれだけへ映る目印の準備と割当操作が可能かを確認中で、SDK版実行はまだ行っていない。
+
 ### 委譲検証・起動失敗分類の修正（software検証済み、実機未実行）
 
 委譲marker v2に親PID・登録済み子PID二つ・ランダムepochを永続化し、workerがSDK transport生成前と各SDK操作前後に照合する。親の生存・同一Windows session・既存mutexの占有も確認する。mutexの占有だけを所有者PIDのOS証明とは呼ばず、保持process handleと登録記録を合わせた通常起動経路の検証とする。同一アカウントによる意図的な記録改ざんへのセキュリティ境界ではない。SDK有効buildは試験用lease/root overrideを拒否する。
