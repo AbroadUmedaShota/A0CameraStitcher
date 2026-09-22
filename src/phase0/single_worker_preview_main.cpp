@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
             return 4;
         }
         NikonSdkTransport transport;
+        const auto worker_run = NewRunId();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         const auto result = RunSingleWorkerPreview(transport,
             [](std::string_view stage) {
@@ -53,6 +54,13 @@ int main(int argc, char** argv) {
                   << "\",\"bindingProof\":false,\"frames\":" << result.frames << ",\"bytes\":" << result.bytes
                   << ",\"stopConfirmed\":" << (result.stopped ? "true" : "false")
                   << ",\"closeConfirmed\":" << (result.closed ? "true" : "false")
+                  << ",\"closeReceipt\":{\"schema\":\"a0.worker-close.v1\",\"runId\":\"" << worker_run
+                  << "\",\"processId\":" << GetCurrentProcessId()
+                  << ",\"liveViewOff\":" << (result.stopped ? "true" : "false")
+                  << ",\"sourceClosed\":" << (result.source_closed ? "true" : "false")
+                  << ",\"moduleClosed\":" << (result.module_closed ? "true" : "false")
+                  << ",\"processClaimReleased\":" << (result.process_claim_released ? "true" : "false")
+                  << "}"
                   << ",\"error\":\"" << result.error << "\"}\n" << std::flush;
         if (!result.SafeToRelease()) {
             // Intentional quarantine, not success/automatic recovery. Keep the

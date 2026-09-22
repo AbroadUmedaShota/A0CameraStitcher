@@ -1,5 +1,6 @@
 #include "a0/phase0/single_worker_source.hpp"
 #include "a0/phase0/single_worker_preview.hpp"
+#include "a0/phase0/nikon_sdk_transport.hpp"
 #include <iostream>
 #include <vector>
 using namespace a0::phase0;
@@ -17,8 +18,9 @@ struct Fake {
     std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds) { ++reads; Fault("frame"); return {1,2}; }
     void StopLiveView(std::chrono::seconds) { ++stops; Fault("stop"); }
     void Close(std::chrono::seconds) { ++closes; Fault("close"); ended = fail != "retained"; }
-    struct Exit { bool ended; bool FullyEnded() const { return ended; } };
-    Exit InspectDualSessionExitState() const { return {ended}; }
+    INikonDualSessionTransport::ExitState InspectDualSessionExitState() const {
+        return {!ended || fail == "claim", !ended || fail == "module", !ended || fail == "source"};
+    }
 };
 }
 int main() {
@@ -36,6 +38,8 @@ int main() {
     Fake normal; auto result = RunSingleWorkerPreview(normal, observe, check);
     Check(result.Passed() && result.SafeToRelease() && normal.opens == 1 && normal.starts == 1 &&
         normal.reads == 3 && normal.stops == 1 && normal.closes == 1, "normal lifecycle");
+    Check(result.source_closed && result.module_closed && result.process_claim_released,
+          "checked close reports all three independent exit states");
     for (const auto* failure : {"open", "start", "topology", "frame", "stop", "close", "retained"}) {
         Fake f; f.fail = failure; auto r = RunSingleWorkerPreview(f, observe, check);
         Check(!r.Passed() && f.opens == 1 && f.closes == 1 && f.reads <= 3 && f.stops <= 1, "failure must not retry");
@@ -46,6 +50,17 @@ int main() {
         if (f.fail == "frame" || f.fail == "topology") Check(f.stops == 1 && r.SafeToRelease(), "failed preview still closes once");
     }
     Fake deadline;
+    for (const auto* retained : {"source", "module", "claim"}) {
+        Fake f; f.fail = retained;
+        const auto r = RunSingleWorkerPreview(f, observe, check);
+        Check(!r.Passed() && !r.SafeToRelease() && !r.closed, "any retained SDK state quarantines");
+        Check(r.source_closed == (f.fail != "source") && r.module_closed == (f.fail != "module") &&
+              r.process_claim_released == (f.fail != "claim"), "receipt preserves independent state");
+    }
+    Fake failed_close; failed_close.fail = "close";
+    const auto failed_receipt = RunSingleWorkerPreview(failed_close, observe, check);
+    Check(!failed_receipt.source_closed && !failed_receipt.module_closed &&
+          !failed_receipt.process_claim_released, "failed close emits no successful close flags");
     auto expired = RunSingleWorkerPreview(deadline, observe, [] { throw TransportError("deadline", "expired"); });
     Check(deadline.opens == 0 && deadline.reads == 0 && deadline.closes == 1 && !expired.Passed(), "expired run cannot start");
     std::cout << "{\"mode\":\"simulation\",\"failures\":" << failures << "}\n";

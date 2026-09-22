@@ -2,6 +2,14 @@
 
 ## 結論
 
+### 2026-09-22 SDK終了状態のワーカー出力
+
+単体workerの終了JSONに `closeReceipt` (`a0.worker-close.v1`) を追加した。実行ID・PIDと、Live View停止、Source解放、Module/DLL解放、プロセス内SDK占有解除を別々に出力する。Source/Module/占有状態は実transportの `InspectDualSessionExitState` から取得し、checked `Close` が例外なく戻った場合だけ成功フラグを立てる。close失敗後の後始末でローカルobjectが消えても、成功の証拠へ昇格させない。既存 `closeConfirmed` は全解放の集約として維持する。
+
+実行IDは既存 `NewRunId` による診断用相関値で、認証nonceやcamera identityではない。二台統括のIPC受信・grant/generation照合・登録processとの統合は未実装。新出力だけで二台の操作禁止記録を解除してはならない。実機で合格済みの `build/single-worker-sdk` バイナリは変更せず、別の `build/worker-selection-sdk` でビルドする。
+
+検証: `cmake --build build/worker-selection-sdk --config Release --target a0_single_worker_preview_tests A0CameraStitcher.SingleWorkerPreview` exit 0（既存C4819警告あり）。`ctest --test-dir build/worker-selection-sdk -C Release -R '^single_worker_preview_contracts$' --output-on-failure` は今回1回、1/1 PASS、0.49秒、exit 0。実型ExitStateを返すfakeでSource/Module/占有の各残留、close例外時の成功フラグ抑止を確認。実SDKのビルド成立とfake試験であり、実機での新JSON受信や二台解放は未検証。凍結済み単体workerのSHA-256は `EB5C29A2E87D99AE35527011EC11F2506A53190BF7716965DD46CEC6E6C7ADF7` のまま。実機preview枠は2/5。
+
 ### 2026-09-22 終了プロセス照合の追加
 
 後続変更: `ArmDualDelegation` 後に `RegisterDualWorkers` を一度だけ呼び、CAM-A/B順でプロセスを登録する契約を追加。leaseが照会/待機権限だけの非継承handleを複製して保持し、解除時の証拠が同じ順の登録プロセスに対応することを検証する。未登録・入替・再登録では解除しない。保持handleにより登録後のPID再利用を防ぐ。登録はSDK操作の許可ではなく、起動元がSDK grantより前に正しいworkerを登録する実controllerの接続はまだ必要。SDK終了フラグとIPC generationの照合も未実装。

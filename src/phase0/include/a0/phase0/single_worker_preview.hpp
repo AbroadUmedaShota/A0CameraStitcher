@@ -9,6 +9,7 @@ struct SingleWorkerPreviewResult {
     std::string error;
     std::size_t frames{}, bytes{};
     bool start_attempted{}, stopped{}, closed{};
+    bool source_closed{}, module_closed{}, process_claim_released{};
     bool SafeToRelease() const { return closed && (!start_attempted || stopped); }
     bool Passed() const { return error.empty() && frames == 3 && stopped && closed; }
 };
@@ -43,7 +44,13 @@ SingleWorkerPreviewResult RunSingleWorkerPreview(Transport& transport, Observe&&
     }
     try {
         observe("closing"); transport.Close(10s);
-        result.closed = transport.InspectDualSessionExitState().FullyEnded();
+        // Only inspect after checked Close succeeds. Cleanup after a failed SDK
+        // command can erase local objects without proving device-side closure.
+        const auto state = transport.InspectDualSessionExitState();
+        result.source_closed = !state.source_open;
+        result.module_closed = !state.module_retained;
+        result.process_claim_released = !state.process_claim_retained;
+        result.closed = state.FullyEnded();
         if (!result.closed && result.error.empty()) result.error = "worker_close_unconfirmed";
     } catch (...) { if (result.error.empty()) result.error = "worker_close_failed"; }
     return result;
