@@ -1,5 +1,13 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 SDK非同梱ローカル候補
+
+`scripts/New-LocalSoftwareCandidate.ps1` はcleanなcommitから本体とReviewCli v2を新規候補へpublishする。既存候補・native buildの再利用は禁止。候補専用の新規native buildをSDK root明示空・VS2022 x64でconfigure/buildし、同梱ファイルを許可リストで限定する。開始/終了時のsource状態を確認し、commit・recipe SHA-256・全同梱ファイルのsize/hashを完成manifestへ記録する。失敗時は未完成候補を残し、上書き・自動再試行しない。
+
+ソフトウェア候補 `build/local-software-candidates/software-f9cafd4-01` をsource commit `f9cafd4` から1回で生成しexit 0。既存nativeソースのC4819警告あり。完成manifest SHA-256は `2A284F550F0AC68070E9333466407301D642C92728FB7A4D7218845D7BBE0117`。23ファイルのsize/hashを照合した。同梱apphostのdescribe v2成功、同梱CLI DLLと同梱native adapterを使う `ReviewCliTests ... --packaged` はexit 0（verify-review系列累計4/5）。正常結果、種別/ID、不正metadata、原画像欠落/改変、採用拒否を合成fixtureで検証し、候補23ファイルのhashが前後不変だった。既存候補名での再実行は生成前に拒否されmanifest不変（候補系列2/5、生成1回＋拒否確認1回）。テストproject buildはwarning 0/error 0、初回の誤ったproject名はMSB1009でテスト未実行、訂正後build成功。独立レビューの既存native出力再利用とdirty出所の指摘は修正済み。
+
+本候補はSDK・撮影画像を含まないソフトウェア確認用であり、実機用候補・GUI受入・配布承認・releaseではない。.NET 10 Windows Desktop runtimeとnative runtime依存があり、clean PC未検証。ライセンス文書2件は同梱するが再配布審査を代替しない。稼働中GUIへの外部AI操作、AI採用代行、新セッションからの配置発見、実GUI導線、二台同時Live View、撮影/品質の受入は引き続き未完。今回実機操作0回、preview枠2/5のまま。
+
 ## 2026-09-22 正規CLIの保存結果検証（契約v2）
 
 `ReviewCli`に `verify-review --product-root <固定ローカルdriveの既存product root絶対path> --result-id <空でない小文字GUID N> --expected-kind <Product|Simulated>` を追加した。`describe`が入力・出力・制限・権限を返す。`reviews`のrootはoperator-reviewディレクトリ、`verify-review`のproduct-rootはその親であり区別する。契約versionは2。従来のmetadata一覧とJSON envelope形状は維持するが、呼出側はversionとoperationsを確認する。
