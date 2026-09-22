@@ -152,5 +152,6 @@ struct WorkerPreviewHostResult { int ipc_exit_code; bool safe_to_exit; };
 // retain/quarantine the worker process if safe_to_exit is false.
 WorkerPreviewHostResult RunWorkerPreviewNamedPipeServer(
     std::string_view pipe_name, NikonSdkTransport& transport, std::string epoch,
-    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime);
+    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime,
+    std::function<bool()> delegation_authority);
 } // namespace a0::phase0::experimental

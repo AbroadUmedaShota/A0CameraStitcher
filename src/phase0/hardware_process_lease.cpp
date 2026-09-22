@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <filesystem>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace a0::phase0 {
 namespace {
@@ -213,17 +215,23 @@ void HardwareProcessLease::ArmDualDelegation() {
         throw TransportError("camera_control_marker_failed", "delegation cannot arm");
     delegation_ever_armed_ = true;
     RequireSafeDirectoryTree(std::filesystem::path(marker_path_).parent_path());
-    std::array<unsigned char, 16> nonce{};
-    if (BCryptGenRandom(nullptr, nonce.data(), static_cast<ULONG>(nonce.size()),
+    std::array<unsigned char, 16> nonce_bytes{};
+    if (BCryptGenRandom(nullptr, nonce_bytes.data(), static_cast<ULONG>(nonce_bytes.size()),
                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
         throw TransportError("camera_control_marker_failed", "nonce generation failed");
     static constexpr char hex[] = "0123456789abcdef";
-    marker_contents_ = "a0-dual-delegation-v1\nnonce=";
-    for (auto b : nonce) {
-        marker_contents_ += hex[b >> 4];
-        marker_contents_ += hex[b & 15];
+    std::string nonce;
+    nonce.reserve(nonce_bytes.size() * 2);
+    for (const auto byte : nonce_bytes) {
+        nonce += hex[byte >> 4];
+        nonce += hex[byte & 15];
     }
-    marker_contents_ += "\n";
+    // The durable record starts incomplete. It is deliberately a quarantine
+    // record until RegisterDualWorkers atomically proves both child identities.
+    owner_process_id_ = GetCurrentProcessId();
+    marker_contents_ = "a0-dual-delegation-v2\nnonce=" + nonce + "\nownerPid=" +
+        std::to_string(owner_process_id_) + "\nepoch=" + std::string(32, '0') +
+        "\nworkerAPid=1\nworkerBPid=2\n";
     HANDLE f = CreateFileW(marker_path_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     if (f == INVALID_HANDLE_VALUE)
@@ -241,6 +249,96 @@ void HardwareProcessLease::ArmDualDelegation() {
         throw TransportError("camera_control_marker_failed", "marker reread mismatch");
     delegation_armed_ = true;
 }
+bool IsLowerHex(std::string_view value, std::size_t exact_size) noexcept {
+    return value.size() == exact_size && std::all_of(value.begin(), value.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
+    });
+}
+bool ParseUnsigned(std::string_view value, DWORD &out) noexcept {
+    unsigned long long parsed{};
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (value.empty() || result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+        !parsed || parsed > std::numeric_limits<DWORD>::max())
+        return false;
+    out = static_cast<DWORD>(parsed);
+    return true;
+}
+struct DelegationMarker final {
+    std::string nonce;
+    DWORD owner_pid{};
+    std::string epoch;
+    DWORD worker_a_pid{};
+    DWORD worker_b_pid{};
+};
+bool ParseDelegationMarker(std::string_view wire, DelegationMarker &marker) {
+    // Keep this deliberately rigid: marker content is a small safety record,
+    // not a forward-compatible configuration file.
+    constexpr std::string_view header = "a0-dual-delegation-v2\n";
+    if (!wire.starts_with(header) || !wire.ends_with('\n')) return false;
+    const auto fields = wire.substr(header.size());
+    const auto line = [&](std::string_view key, std::size_t &cursor, std::string_view &value) -> bool {
+        if (!fields.substr(cursor).starts_with(key)) return false;
+        cursor += key.size();
+        const auto end = fields.find('\n', cursor);
+        if (end == std::string_view::npos) return false;
+        value = fields.substr(cursor, end - cursor);
+        cursor = end + 1;
+        return true;
+    };
+    std::size_t cursor{};
+    std::string_view nonce, owner, epoch, worker_a, worker_b;
+    if (!line("nonce=", cursor, nonce) || !line("ownerPid=", cursor, owner) ||
+        !line("epoch=", cursor, epoch) || !line("workerAPid=", cursor, worker_a) ||
+        !line("workerBPid=", cursor, worker_b) || cursor != fields.size() ||
+        !IsLowerHex(nonce, 32) || !IsLowerHex(epoch, 32) || !ParseUnsigned(owner, marker.owner_pid) ||
+        !ParseUnsigned(worker_a, marker.worker_a_pid) || !ParseUnsigned(worker_b, marker.worker_b_pid) ||
+        marker.worker_a_pid == marker.worker_b_pid || marker.owner_pid == marker.worker_a_pid ||
+        marker.owner_pid == marker.worker_b_pid)
+        return false;
+    marker.nonce.assign(nonce);
+    marker.epoch.assign(epoch);
+    return true;
+}
+std::string MakeHexRandom(std::array<unsigned char, 16> &bytes) {
+    if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        throw TransportError("camera_control_marker_failed", "nonce generation failed");
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        result += hex[byte >> 4];
+        result += hex[byte & 15];
+    }
+    return result;
+}
+std::string MakeMarkerContents(std::string_view nonce, DWORD owner_pid, std::string_view epoch,
+                               DWORD worker_a_pid, DWORD worker_b_pid) {
+    return "a0-dual-delegation-v2\nnonce=" + std::string(nonce) + "\nownerPid=" +
+        std::to_string(owner_pid) + "\nepoch=" + std::string(epoch) + "\nworkerAPid=" +
+        std::to_string(worker_a_pid) + "\nworkerBPid=" + std::to_string(worker_b_pid) + "\n";
+}
+void RewriteMarker(const std::wstring &path, std::string_view expected, std::string_view replacement) {
+    RequireSafeDirectoryTree(std::filesystem::path(path).parent_path());
+    if (ReadMarker(path) != expected)
+        throw TransportError("camera_control_marker_failed", "marker instance mismatch");
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (f == INVALID_HANDLE_VALUE)
+        throw TransportError("camera_control_marker_failed", WindowsError("CreateFileW", GetLastError()));
+    LARGE_INTEGER start{};
+    DWORD n{};
+    const BOOL ok = SetFilePointerEx(f, start, nullptr, FILE_BEGIN) && SetEndOfFile(f) &&
+        WriteFile(f, replacement.data(), static_cast<DWORD>(replacement.size()), &n, nullptr) &&
+        n == replacement.size() && FlushFileBuffers(f);
+    const DWORD error = GetLastError();
+    CloseHandle(f);
+    if (!ok)
+        throw TransportError("camera_control_marker_failed", WindowsError("SetEndOfFile/WriteFile", error));
+    RequireSafeDirectoryTree(std::filesystem::path(path).parent_path());
+    if (ReadMarker(path) != replacement)
+        throw TransportError("camera_control_marker_failed", "marker reread mismatch");
+}
 void HardwareProcessLease::RegisterDualWorkers(void *camera_a_process, void *camera_b_process) {
     HANDLE a{}, b{};
     try {
@@ -256,6 +354,17 @@ void HardwareProcessLease::RegisterDualWorkers(void *camera_a_process, void *cam
         if (!pid_a || !pid_b || pid_a == pid_b || pid_a == GetCurrentProcessId() ||
             pid_b == GetCurrentProcessId())
             throw TransportError("camera_control_marker_failed", "distinct child workers required");
+        std::array<unsigned char, 16> epoch_bytes{};
+        const auto epoch = MakeHexRandom(epoch_bytes);
+        DelegationMarker armed_marker;
+        if (!ParseDelegationMarker(marker_contents_, armed_marker) || armed_marker.owner_pid != GetCurrentProcessId() ||
+            armed_marker.epoch != std::string(32, '0') || armed_marker.worker_a_pid != 1 ||
+            armed_marker.worker_b_pid != 2)
+            throw TransportError("camera_control_marker_failed", "armed marker is malformed");
+        const auto replacement = MakeMarkerContents(armed_marker.nonce, GetCurrentProcessId(), epoch, pid_a, pid_b);
+        RewriteMarker(marker_path_, marker_contents_, replacement);
+        marker_contents_ = replacement;
+        delegation_epoch_ = epoch;
         worker_a_ = a;
         worker_b_ = b;
     } catch (...) {
@@ -263,6 +372,53 @@ void HardwareProcessLease::RegisterDualWorkers(void *camera_a_process, void *cam
         if (b) CloseHandle(b);
         delegation_disarm_failed_ = true;
         throw;
+    }
+}
+const std::string &HardwareProcessLease::DelegationEpoch() const {
+    if (!owned_ || owner_thread_id_ != GetCurrentThreadId() || !delegation_armed_ || delegation_disarm_failed_ || !worker_a_ || !worker_b_ ||
+        delegation_epoch_.empty())
+        throw TransportError("camera_control_marker_failed", "delegation epoch unavailable");
+    return delegation_epoch_;
+}
+bool HardwareProcessLease::ValidateWorkerDelegation(void *inherited_parent_process, std::string_view epoch,
+                                                    std::string_view lease_name,
+                                                    const std::filesystem::path &test_marker_root) {
+    try {
+        if (!IsSafeLeaseName(lease_name) || epoch.empty() || !IsLowerHex(epoch, 32) ||
+            (!test_marker_root.empty() && (lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name))))
+            return false;
+#if defined(A0_NIKON_SDK_AVAILABLE)
+        if (lease_name != kProductionLeaseName || !test_marker_root.empty()) return false;
+#endif
+        const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);
+        const DWORD parent_pid = GetProcessId(parent);
+        if (!parent_pid || parent_pid == GetCurrentProcessId() || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT)
+            return false;
+        DWORD parent_session{}, worker_session{};
+        if (!ProcessIdToSessionId(parent_pid, &parent_session) ||
+            !ProcessIdToSessionId(GetCurrentProcessId(), &worker_session) || parent_session != worker_session)
+            return false;
+        const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
+        RequireSafeDirectoryTree(root);
+        const auto marker_wire = ReadMarker(MarkerPath(root));
+        DelegationMarker marker;
+        if (!ParseDelegationMarker(marker_wire, marker) || marker.owner_pid != parent_pid || marker.epoch != epoch ||
+            (GetCurrentProcessId() != marker.worker_a_pid && GetCurrentProcessId() != marker.worker_b_pid))
+            return false;
+
+        // Do not acquire or create this mutex. WAIT_TIMEOUT proves an existing
+        // lease is occupied; trusted registration binds that owner to parent_pid.
+        // A missing or abandoned mutex is fail-closed even with a valid marker.
+        const std::wstring mutex_name = L"Local\\" + ToWide(lease_name);
+        HANDLE mutex = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, mutex_name.c_str());
+        if (!mutex) return false;
+        const DWORD wait = WaitForSingleObject(mutex, 0);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED)
+            ReleaseMutex(mutex);
+        CloseHandle(mutex);
+        return wait == WAIT_TIMEOUT;
+    } catch (...) {
+        return false;
     }
 }
 void HardwareProcessLease::DisarmDualDelegation(const DualDelegationCloseEvidence &evidence) {

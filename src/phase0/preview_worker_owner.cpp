@@ -78,9 +78,16 @@ void Spawn(Child& child, const std::filesystem::path& executable) {
     CloseHandle(created.hThread);
     child.process.value = created.hProcess;
 }
-void Bootstrap(Child& child, const std::string& epoch, std::chrono::milliseconds lifetime) {
-    const std::string body = "{\"pipe\":\"" + child.pipe + "\",\"epoch\":\"" + epoch +
-        "\",\"capability\":\"" + child.capability + "\",\"lifetimeMs\":" + std::to_string(lifetime.count()) + "}";
+void Bootstrap(Child& child, const std::string& epoch, std::chrono::milliseconds lifetime,
+               std::string_view name, const std::filesystem::path* root) {
+    std::string body = "{\"pipe\":\"" + child.pipe + "\",\"epoch\":\"" + epoch +
+        "\",\"capability\":\"" + child.capability + "\",\"lifetimeMs\":" + std::to_string(lifetime.count());
+    if (root) {
+        const auto encoded = root->u8string();
+        const std::string path(encoded.begin(), encoded.end());
+        body += ",\"leaseName\":\"" + json::JsonEscape(name) + "\",\"testMarkerRoot\":\"" + json::JsonEscape(path) + "\"";
+    }
+    body += "}";
     Require(body.size() <= 1024, "bootstrap too large");
     const auto size = static_cast<std::uint32_t>(body.size());
     std::vector<char> packet(sizeof(size) + body.size());
@@ -186,14 +193,24 @@ bool CloseChild(Child& child, const std::string& epoch) {
 struct PreviewWorkerOwner::Impl {
     std::unique_ptr<HardwareProcessLease> lease;
     std::array<Child, 2> children;
-    std::string epoch = Nonce();
+    std::string epoch;
+    const DWORD owner_thread = GetCurrentThreadId();
     bool close_attempted{}, closed{};
     PreviewCommissioning commissioning{[this](std::size_t worker, std::string_view op, std::string_view candidate) {
+        RequireOwnerThread();
         Require(!close_attempted, "owner already closing");
+        for (const auto& child : children)
+            Require(WaitForSingleObject(child.process.value, 0) == WAIT_TIMEOUT, "paired worker no longer alive");
         return Exchange(children.at(worker), epoch, op, candidate);
     }};
+    void RequireOwnerThread() const { Require(GetCurrentThreadId() == owner_thread, "camera owner thread required"); }
     Impl(std::string_view name, const std::filesystem::path* root,
-         const std::filesystem::path& executable, std::chrono::milliseconds lifetime) {
+         const std::filesystem::path& executable, std::chrono::milliseconds lifetime,
+         const std::function<void(std::array<std::uint32_t, 2>)>& after_spawn = {}) {
+      try {
+#if defined(A0_NIKON_SDK_AVAILABLE)
+        Require(root == nullptr && !after_spawn, "test startup context unavailable in SDK build");
+#endif
         Require(executable.is_absolute() && std::filesystem::is_regular_file(executable), "worker executable unavailable");
         Require(lifetime.count() > 0 && lifetime <= std::chrono::minutes(10), "worker lifetime rejected");
         lease = root ? std::make_unique<HardwareProcessLease>(name, std::chrono::milliseconds(0), *root)
@@ -201,11 +218,20 @@ struct PreviewWorkerOwner::Impl {
         lease->ArmDualDelegation();
         Require(!lease->RecoveredAbandonedOwner(), "previous owner abandoned; quarantine retained");
         for (auto& child : children) Spawn(child, executable);
+        if (after_spawn) after_spawn({GetProcessId(children[0].process.value), GetProcessId(children[1].process.value)});
         lease->RegisterDualWorkers(children[0].process.value, children[1].process.value);
+        epoch = lease->DelegationEpoch();
         // Children cannot enter the host until both handles are registered.
-        for (auto& child : children) Bootstrap(child, epoch, lifetime);
+        for (auto& child : children) Bootstrap(child, epoch, lifetime, name, root);
+      } catch (...) {
+        // Observe before member destruction. Marker cleanup is deliberately not attempted.
+        throw PreviewWorkerStartupError(children[0].process.value || children[1].process.value);
+      }
     }
     bool Close() noexcept {
+        // Do not send shutdown or mutate workflow state from another thread.
+        // The UI must queue this operation to the thread holding the OS lease.
+        if (GetCurrentThreadId() != owner_thread) return false;
         commissioning.End();
         if (close_attempted) return closed;
         close_attempted = true;
@@ -223,33 +249,45 @@ struct PreviewWorkerOwner::Impl {
         return closed;
     }
 };
-PreviewWorkerOwner::PreviewWorkerOwner()
-    : impl_(std::make_unique<Impl>("", nullptr, SiblingWorker(), std::chrono::seconds(60))) {}
+PreviewWorkerOwner::PreviewWorkerOwner() {
+    try { impl_ = std::make_unique<Impl>("", nullptr, SiblingWorker(), std::chrono::seconds(60)); }
+    catch (const PreviewWorkerStartupError&) { throw; }
+    catch (...) { throw PreviewWorkerStartupError(false); }
+}
 PreviewWorkerOwner::PreviewWorkerOwner(std::string_view name, const std::filesystem::path& root,
-    const std::filesystem::path& executable, std::chrono::milliseconds lifetime)
-    : impl_(std::make_unique<Impl>(name, &root, executable, lifetime)) {}
+    const std::filesystem::path& executable, std::chrono::milliseconds lifetime,
+    std::function<void(std::array<std::uint32_t, 2>)> after_spawn) {
+    try { impl_ = std::make_unique<Impl>(name, &root, executable, lifetime, after_spawn); }
+    catch (const PreviewWorkerStartupError&) { throw; }
+    catch (...) { throw PreviewWorkerStartupError(false); }
+}
 PreviewWorkerOwner::~PreviewWorkerOwner() = default; // Destruction never disarms or kills children.
 bool PreviewWorkerOwner::Close() noexcept { return impl_->Close(); }
 std::array<std::uint32_t, 2> PreviewWorkerOwner::ProcessIds() const noexcept {
     return {GetProcessId(impl_->children[0].process.value), GetProcessId(impl_->children[1].process.value)};
 }
 std::array<std::string, 2> PreviewWorkerOwner::Enumerate(std::size_t worker) {
+    impl_->RequireOwnerThread();
     try { return impl_->commissioning.Enumerate(worker); }
     catch (...) { impl_->Close(); throw; }
 }
 std::vector<unsigned char> PreviewWorkerOwner::Preview(std::size_t worker, std::string_view candidate) {
+    impl_->RequireOwnerThread();
     try { return impl_->commissioning.Preview(worker, candidate); }
     catch (...) { impl_->Close(); throw; }
 }
 void PreviewWorkerOwner::ConfirmAndSuspend(std::size_t worker, ObservedPreviewBody body) {
+    impl_->RequireOwnerThread();
     try { impl_->commissioning.ConfirmAndSuspend(worker, body); }
     catch (...) { impl_->Close(); throw; }
 }
 void PreviewWorkerOwner::StartBoth() {
+    impl_->RequireOwnerThread();
     try { impl_->commissioning.StartBoth(); }
     catch (...) { impl_->Close(); throw; }
 }
 std::vector<unsigned char> PreviewWorkerOwner::Read(ObservedPreviewBody body) {
+    impl_->RequireOwnerThread();
     try { return impl_->commissioning.Read(body); }
     catch (...) { impl_->Close(); throw; }
 }

@@ -2,6 +2,34 @@
 
 ## 結論
 
+### 委譲検証・起動失敗分類の修正（software検証済み、実機未実行）
+
+委譲marker v2に親PID・登録済み子PID二つ・ランダムepochを永続化し、workerがSDK transport生成前と各SDK操作前後に照合する。親の生存・同一Windows session・既存mutexの占有も確認する。mutexの占有だけを所有者PIDのOS証明とは呼ばず、保持process handleと登録記録を合わせた通常起動経路の検証とする。同一アカウントによる意図的な記録改ざんへのセキュリティ境界ではない。SDK有効buildは試験用lease/root overrideを拒否する。
+
+`PreviewWorkerStartupError` は子process未生成の確定失敗と部分起動を区別する。前者は画面を閉じられるが、既存隔離記録があっても解除しない。後者は隔離を維持する。owner試験にexe欠落と二子生成後bootstrap前の注入失敗を追加した。新規authorization試験は偽epoch・null親・未登録子・欠落記録・偽bootstrapをSDKなしの実processで検査する。
+
+独立再レビューでは旧HIGH/MEDIUMのコード修正を確認。空authority callbackによる既存IPC試験の回帰を指摘されたため、callback引数の既定値を削除しstub専用試験だけ明示callbackを渡す修正を加えた。欠落root検証で作られる試験用空directoryの厳密cleanupは維持。実機停止・期限切れ・物理個体確認は未検証で、二台実機成立や製品受入へ昇格しない。
+
+最終stub Release build exit 0。`ctest --test-dir build/worker-selection-stub -C Release -R '^(preview_worker_owner|worker_delegation_authorization|worker_preview_pipe)_contracts$' --output-on-failure` を一回実行し3/3 PASS、29.07秒、exit 0（authorization 15.72秒、owner 11.54秒、pipe 1.27秒）。owner試験seriesは累計5回となり、この枠で追加再実行しない。旧delegation suiteも再実行なし。SDK有効のPreviewWorker/PreviewCommissioning build exit 0、SDK版生成projectに `A0_NIKON_SDK_AVAILABLE=1` がありstub test context定義がないことを確認。既存core/headerのC4819警告は残る。SDK版実行・撮影・設定変更・WPD・カード操作は0回、preview実機予算は2/5消費・残り3回。
+
+### 前回の実機移行判定: BLOCK（以下は修正前のレビュー記録）
+
+独立read-onlyレビューで、workerが任意の生存parent handleと自己発行bootstrapを受理し、登録済み本番lease ownerからの委譲をworker自身で確認できない欠落を検出した。現状のparent PID/capability照合だけでは、別launcherによる隔離marker迂回を拒否できない。次は永続委譲記録をowner PID・登録worker PID・世代nonceに結び、workerのSDK入口で照合し、不一致/記録欠落/偽bootstrapをSDK open前に拒否する。同じWindowsアカウントによるbinary/markerの意図的改ざん耐性は別の非保証であり、通常の直接起動経路を許可する理由にはしない。
+
+もう一点、owner constructorのすべての例外を部分起動として扱うため、worker exe欠落など起動前の確定失敗でも画面が閉じられない。owner側で子process生成の有無を区別して伝え、確定的な起動前失敗だけは正常な画面終了を許し、部分起動不明は隔離を維持する修正が必要。これらは未解決で、UI-only合格・build成功は実機投入許可ではない。
+
+レビュー後の確認: AOPC-11-NOTEのOS列挙ではD810 2台/正常2台（個体IDは出力・保存なし）。SDK操作0回、preview予算2/5のまま。GUIのSDK版buildはexit 0（その後の停止要求チェック1行追加はSDK版再build待ち）。最終stub buildとdescribe再検証はexit 0、describe 1/1 PASS（0.68秒、累計2回）。混在 `--describe --commission-preview-only` と重複 `--ui-only --ui-only` はそれぞれexit 2、UI/SDK開始なし。現在の画面は未受入で、実機モードを起動しない。
+
+### 2026-09-22 実験用の操作者画面（統合検証中、実機未実行）
+
+`A0CameraStitcher.PreviewCommissioning` をPhase 0 C++の独立した試験画面として追加。本体.NETアプリの代替や製品受入ではない。通常起動と `--ui-only` は表示専用でSDK/lease/workerを作らない。`--describe` は副作用のないJSON発見操作で、機械操作標準は `partial` と明記する。実機操作は別の `--commission-preview-only` と操作者の開始ボタンを必要とし、そのflagだけを本人承認の証拠として扱わない。
+
+専用threadがowner構築・SDK列挙・候補preview・物理alias観測・停止・二台開始・終了を所有する。候補はworker内の0/1として選び、初期表示は物理alias未確定。二台開始後はCAM-A/Bの順に各3frameを取得して終了を確認する限定PoCで、常時表示の完成品ではない。previewはメモリーだけ、保存/撮影/設定/WPD/カード操作はない。画像受信の時刻と古い表示を区別し、終了不明を成功やLiveとして表示しない。
+
+統合時に、owner構築途中の失敗を「開始前の正常終了」にしない処理、停止要求後の追加frame抑止、確認画像を新しい同時frameへ偽装しない処理、同時取得中の再割当禁止、UI-onlyの操作入口拒否、SDK列挙中からの固定60秒期限表示を補強した。終了未確認は画面・制御threadと隔離を保持し、自動kill/restartしない。人手確認を含む60秒運用の実機での妥当性は未検証。
+
+stub build exit 0。`preview_commissioning_describe` は1/1 PASS（0.33秒、exit 0）。最初の非表示UI-only起動は画面観測不可だったため、実行pathと `--ui-only` を照合した試験processだけを終了した。実workerは起動していない。その後通常起動をUI-onlyへ揃え再build exit 0（当targetの警告0）。Computer Useで対象画面を前面化して左右pane、未受信表示、開始/候補/割当/同時開始のdisabled状態を確認し、タイトルバーの閉じるで終了、対象windowとA0 processの残存0を確認した。実画像decode、SDK操作中のUI操作/取消/期限、実物理割当は未確認。独立安全レビューとSDK版buildを回収するまで実機へ進めない。
+
 ### 2026-09-22 親側commissioning命令の接続（最新、実機未実行）
 
 `PreviewWorkerOwner` へ列挙・候補preview・操作者の物理alias確認とSource停止・同時開始・alias別frame取得を接続した。`PreviewCommissioning` はworker 0のpreview確認とsuspendが成功するまでworker 1の列挙を許可せず、二台の異なる物理aliasを明示確認して両Sourceを閉じた後だけ、一度のresume/startを許す。tokenが別workerで同じ文字列でも同じ実機とは判断せず、worker順序をCAM-A/Bへ自動対応させない。候補変更・重複割当・途中失敗・二回目startはterminalで、自動再試行しない。
@@ -15,6 +43,8 @@ frame返信はraw最大256 KiBをhex化するため、親の明示的なJSON上�
 このAPIは内部実験用で、本体UIや操作者用CLIからはまだ呼ばない。物理aliasは操作者の映像確認であり、SDK/WPD capture bindingやシリアル照合の証拠ではない。次は操作者が一台ずつ映像を見て確認できる限定UI/CLIの接続と候補版の検証。実機枠は2/5のまま。以下は各段階の履歴であり「親controller未接続」などの記述は当時の状態を示す。
 
 SDK有効構成もworkerとcommissioning test targetのbuild exit 0を確認。既存C4819と負例testの戻り値破棄C4834警告あり。同じfake試験のSDK側重複実行はしていない。SDK版workerの起動・カメラ操作はいずれも0回。
+
+UI接続前にowner threadをコードでも強制した。別threadのCloseは状態を変更せずfalse、通常APIは送信前に拒否する。通常命令前には登録した両processの生存を確認し、相手worker終了後の新規SDK命令も拒否する。stub build exit 0、owner suiteの追加回帰1/1 PASS（0.92秒、exit 0、累計4回）。別threadからのClose/Enumerate拒否後も正規owner threadで正常終了でき、終了済みpairへの命令が拒否されることを確認。これはGUI responsivenessや実SDK実行中の異常の受入ではない。
 
 ### 2026-09-22 worker命令・実パイプhostの接続
 

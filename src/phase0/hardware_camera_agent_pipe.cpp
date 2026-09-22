@@ -443,7 +443,8 @@ int RunNamedPipeServerLoop(
 
 experimental::WorkerPreviewHostResult experimental::RunWorkerPreviewNamedPipeServer(
     std::string_view pipe_name, NikonSdkTransport& transport, std::string epoch,
-    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime) {
+    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime,
+    std::function<bool()> delegation_authority) {
     const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);
     const auto pid = GetProcessId(parent);
     if (!pid || pid == GetCurrentProcessId() || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT ||
@@ -451,8 +452,10 @@ experimental::WorkerPreviewHostResult experimental::RunWorkerPreviewNamedPipeSer
         throw TransportError("worker_authority_missing", "live inherited controller and bounded lifetime required");
     const auto deadline = std::chrono::steady_clock::now() + lifetime;
     WorkerPreviewDispatcher dispatcher(transport, std::move(epoch), std::move(capability), pid, GetCurrentProcessId(),
-        [parent, deadline] { return WaitForSingleObject(parent, 0) == WAIT_TIMEOUT &&
-            std::chrono::steady_clock::now() < deadline; });
+        [parent, deadline, delegation_authority = std::move(delegation_authority)] {
+            return delegation_authority && delegation_authority() &&
+                WaitForSingleObject(parent, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline;
+        });
     int code = kDispatchedDeliveryFailureExitCode;
     try {
         code = RunNamedPipeServerLoop(pipe_name, dispatcher, false,

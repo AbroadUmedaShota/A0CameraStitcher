@@ -8,14 +8,23 @@
 #include "a0/phase0/preview_commissioning.hpp"
 
 namespace a0::phase0::experimental {
-// Internal experimental integration; no application/CLI enables this yet.
+class PreviewWorkerStartupError final : public std::runtime_error {
+public:
+    explicit PreviewWorkerStartupError(bool workers_may_exist)
+        : std::runtime_error("preview worker startup failed"), workers_may_exist_(workers_may_exist) {}
+    bool WorkersMayExist() const noexcept { return workers_may_exist_; }
+private:
+    bool workers_may_exist_;
+};
+// Internal experimental integration; hardware acceptance remains gated.
 // Thread-affine: create, close and destroy on the lease-owning thread.
 // Destruction does not close workers or clear an armed quarantine marker.
 class PreviewWorkerOwner final {
 public:
     PreviewWorkerOwner();
     PreviewWorkerOwner(std::string_view test_lease_name, const std::filesystem::path& test_marker_root,
-                       const std::filesystem::path& worker_executable, std::chrono::milliseconds lifetime);
+                       const std::filesystem::path& worker_executable, std::chrono::milliseconds lifetime,
+                       std::function<void(std::array<std::uint32_t, 2>)> after_spawn_for_testing = {});
     ~PreviewWorkerOwner();
     PreviewWorkerOwner(const PreviewWorkerOwner&) = delete;
     PreviewWorkerOwner& operator=(const PreviewWorkerOwner&) = delete;

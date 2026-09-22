@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <charconv>
+#include <future>
 using namespace a0::phase0;
 using namespace a0::phase0::experimental;
 namespace fs = std::filesystem;
@@ -106,10 +107,22 @@ int main(int argc, char** argv) {
         if (argc == 5 && std::string_view(argv[1]) == "--abandon") return AbandonHelper(argv, temporary, worker);
         if (argc != 1) return 2;
         {
+            bool before_spawn{};
+            try { PreviewWorkerOwner missing(name, root / "not-started", root / "missing-worker.exe", std::chrono::seconds(10)); }
+            catch (const PreviewWorkerStartupError& error) { before_spawn = !error.WorkersMayExist(); }
+            Check(before_spawn && !fs::exists(Marker(root / "not-started")), "missing executable is a verified pre-worker failure");
+        }
+        {
             PreviewWorkerOwner owner(name, root / "normal", worker, std::chrono::seconds(10));
             const auto ids = owner.ProcessIds();
             Check(ids[0] && ids[1] && ids[0] != ids[1], "two actual registered worker processes");
             Check(fs::exists(Marker(root / "normal")), "marker armed before bootstrap");
+            const bool wrong_thread_rejected = std::async(std::launch::async, [&] {
+                if (owner.Close()) return false;
+                try { owner.Enumerate(0); } catch (const TransportError&) { return true; }
+                return false;
+            }).get();
+            Check(wrong_thread_rejected && fs::exists(Marker(root / "normal")), "UI thread cannot mutate or close the lease owner's session");
             Check(owner.Close(), "both IPC receipts and OS exits allow disarm");
             Check(owner.Close(), "repeated close returns cached success without resend");
             Check(!fs::exists(Marker(root / "normal")), "marker removed only after verified close");
@@ -132,6 +145,9 @@ int main(int argc, char** argv) {
                 if (!ended) return 3; // Never remove quarantine while a worker might live.
                 Check(code == 3, "uncommanded expiry is not a successful close receipt");
             }
+            bool command_denied{};
+            try { owner.Enumerate(0); } catch (const TransportError&) { command_denied = true; }
+            Check(command_denied, "dead pair cannot receive new camera commands");
             Check(!owner.Close() && !owner.Close(), "missing receipts remain terminal without retries");
             Check(fs::exists(Marker(root / "expired")), "clean OS exit alone never disarms");
         }
@@ -142,6 +158,31 @@ int main(int argc, char** argv) {
         // Exact test-created marker; both stub workers were observed exited above.
         if (!DeleteFileW(Marker(root / "expired").c_str())) return 4;
         Check(RemoveDirectoryW((root / "expired").c_str()), "expired fixture directory removed");
+        {
+            std::array<OwnedHandle, 2> partial_workers;
+            bool partial{};
+            try {
+                PreviewWorkerOwner injected(name, root / "partial", worker, std::chrono::seconds(10), [&](auto ids) {
+                    for (std::size_t i = 0; i != ids.size(); ++i)
+                        partial_workers[i].value = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ids[i]);
+                    throw std::runtime_error("injected before registration and bootstrap");
+                });
+            } catch (const PreviewWorkerStartupError& error) { partial = error.WorkersMayExist(); }
+            Check(partial && fs::exists(Marker(root / "partial")), "partial startup is never reported as pre-worker failure");
+            for (auto& process : partial_workers) {
+                DWORD code{};
+                if (!process.value || WaitForSingleObject(process.value, 5000) != WAIT_OBJECT_0 ||
+                    !GetExitCodeProcess(process.value, &code)) return 3; // Preserve all evidence if exit is unknown.
+                Check(code == 3, "bootstrap EOF rejects partially started stub worker before SDK");
+            }
+            bool partial_blocked{};
+            try { HardwareProcessLease denied(name, std::chrono::milliseconds(0), root / "partial"); }
+            catch (const TransportError&) { partial_blocked = true; }
+            Check(partial_blocked, "partial startup retains next-owner exclusion");
+            // Exact test fixture; both stub children above were observed exited.
+            if (!DeleteFileW(Marker(root / "partial").c_str())) return 4;
+            Check(RemoveDirectoryW((root / "partial").c_str()), "partial fixture directory removed");
+        }
         CheckAbandonedOwner(executable, root, name);
         Check(RemoveDirectoryW(root.c_str()), "fixture root removed");
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 2; }

@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
         const auto parent = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(raw));
         NikonSdkTransport transport;
         const auto result = RunWorkerPreviewNamedPipeServer(argv[2], transport, "epoch", "capability", parent,
-                                                            std::chrono::seconds(3));
+                                                            std::chrono::seconds(3), [] { return true; }); // Stub-only IPC fixture.
         return result.safe_to_exit ? result.ipc_exit_code : 4;
     }
     try {

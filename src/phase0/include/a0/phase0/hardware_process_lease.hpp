@@ -45,6 +45,17 @@ class HardwareProcessLease final {
     void ArmDualDelegation();
     // Call once after spawning, before granting SDK access. Keeps non-inherited duplicates.
     void RegisterDualWorkers(void *camera_a_process, void *camera_b_process);
+    // Opaque, per-delegation value for the two registered workers. It is not a
+    // camera identity and is unavailable until registration is durable.
+    [[nodiscard]] const std::string &DelegationEpoch() const;
+    // A delegated worker calls this before constructing an SDK transport and
+    // again around each SDK command. It intentionally does not take the mutex:
+    // it proves that the controller still owns it. Test roots are accepted only
+    // with a test lease and must never be supplied by an SDK-enabled executable.
+    [[nodiscard]] static bool ValidateWorkerDelegation(
+        void *inherited_parent_process, std::string_view epoch,
+        std::string_view lease_name = "A0CameraStitcher.Phase0.CameraControl.v1",
+        const std::filesystem::path &test_marker_root = {});
     void DisarmDualDelegation(const DualDelegationCloseEvidence &evidence);
     [[nodiscard]] bool DualDelegationArmed() const noexcept;
 
@@ -57,6 +68,8 @@ class HardwareProcessLease final {
         delegation_disarm_failed_{false};
     std::wstring marker_path_;
     std::string marker_contents_;
+    std::string delegation_epoch_;
+    unsigned long owner_process_id_{};
     void *worker_a_{nullptr};
     void *worker_b_{nullptr};
 };
