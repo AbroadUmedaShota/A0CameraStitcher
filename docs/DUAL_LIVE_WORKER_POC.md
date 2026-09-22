@@ -2,7 +2,7 @@
 
 ## 結論
 
-本試作は、統括と CAM-A/CAM-B の二 worker 間で模擬フレームを IPC する試験専用の実装である。Nikon SDK/WPDをリンクせず、実機 Live View、撮影、カード操作、設定変更を行わない。SDK の同一 Module/同一 Source の制約を回避・緩和する実装ではない。製品UI・実機Agent・既存leaseへの組込みは未実施。
+本試作は、統括と CAM-A/CAM-B の二 worker 間で模擬フレームを IPC する試験専用の実装である。実機 Live View、撮影、カード操作、設定変更を行わない。初期IPC試験はSDK/WPD依存なし。後続の排他統合試験は既存HardwareProcessLeaseを使うためcoreへリンクするが、SDK rootを空にしたstub構成で、SDK/WPD APIは呼ばない。SDK の同一 Module/同一 Source の制約を回避・緩和する実装ではない。製品UI・実機Agent・本番leaseへの組込みは未実施。
 
 ## 境界
 
@@ -36,7 +36,7 @@
 
 ### 今回の契約モデル
 
-`dual_live_session_contract.hpp` と専用 `dual_live_session_contracts` は純粋なoffline契約モデルであり、前段の二process IPC試作や実HardwareProcessLeaseへまだ結線していない。
+`dual_live_session_contract.hpp` と専用 `dual_live_session_contracts` は純粋なoffline契約モデルである。後続の `dual_live_session_integration` が実child processのIPCと試験専用名のHardwareProcessLeaseに結線する。製品へ組み込むruntimeではなく、software-onlyの成立性を確認する試験用hostである。
 
 - worker内でのみSource番号を保持し、instance/epochが異なる選択、未検出・重複候補、再Openをfake transport callback前に拒否。二workerのSource番号が同じでも異なっても物理個体対応を推論しない。
 - binding receiptは模擬カメラの独立したfixture identityであり、SDK Source/serialの証明ではない。同じsynthetic body、worker instance、receiptの二重割当を拒否する。実環境にはその対応入力が未確立のため、モデルのReadyは`SimulatedReady`でしかない。
@@ -49,13 +49,31 @@
 - 新規モデルだけをRelease buildし、focused CTestは2回、いずれも1/1 PASS（最終0.74秒）。前段の5回IPC試験は再実行していない。
 - fake Open/frame callbackと認可を接続し、親失効後の両worker callback停止を確認。独立レビューの発行時刻・Closed遅延通知に関する指摘は修正し再試験した。
 - コマンド: `cmake --build build/dual-live-worker-poc --config Release --target a0_dual_live_session_contract_tests`、`ctest --test-dir build/dual-live-worker-poc -C Release -R '^dual_live_session_contracts$' --output-on-failure`。
-- **Goalは進行中**。次は、この認可契約を試験専用IPCへ接続し、実カメラと無関係な専用名のOS排他で統括だけが所有することを検証する。モデル単体PASSを実processの権限委譲完了へ読み替えない。前段テストを根拠なく再実行せず、後続変更に必要な検証の反復は最大5回以内（現在2回）。
+- 後続3回目は `ctest --test-dir build/dual-live-worker-poc -C Release -R '^dual_live_session_integration$' --output-on-failure`: **1/1 PASS、3.06秒、exit 0**。出力は `mode=simulation, hardwareAllowed=false, status=PASS, failures=0`。後続シリーズは計3回/上限5回（モデル2回、統合1回）。前段5回のIPC suiteは再実行していない。
+- `NIKON_D810_SDK_ROOT=` のstub構成でintegration/model/旧IPCのRelease build成功。初回integration buildの既存例外API名の誤記は修正済み。旧IPCのutilityを共通headerへ機械的抽出し、utility本文と残る旧test本文の文字列同一性を確認。旧試験の実行結果を新protocolの証拠としては使わない。
+- **software-only Goalの受入項目は完了**。実processのreceipt→model grant→wire→worker gate→fake frame→両mock closeを接続。統括だけが `A0.Poc.TestLease.*` の既存HardwareProcessLeaseを保持し、別process probeが保持中は正確に `camera_control_busy`、解放後は取得成功する。workerはmutex名/handleを受け取らず、production lease名は未変更。
+- grant全8 fieldの改変・別worker grant・期限不正をOpen/frame callback 0で拒否。SDK/WPD/CAPTURE opcodeと連番再送を追加frame callback 0で拒否。統括共通ReceiveがDENIED観測で全grant失効→拒否側ACK終了→兄弟STOPを行い、両process非生存を確認する。両mock close receiptの前にはClosedにせず、閉鎖後もhardwareは許可しない。全試験後のJob残存childは0。
+- 独立read-onlyレビューの「兄弟停止がテストからの手動呼出しに留まる」指摘は共通Receiveへの接続で修正し、再レビューでP1/P2なし。試験wireは最大1 KiB、各I/O期限1500 ms、全体CTest期限15秒。既存試験utilityのbounded I/O、限定handle継承、Job回収を再利用した。
+- 限界: 新grant protocolの親死亡・OS lease abandonmentの故障注入は未実施（モデル検証と旧protocolの証拠は代用しない）。試験のbootstrap identity/tokenは固定値であり、production認証・悪意ある同一ユーザーへの耐性は証明しない。SDK/driver共有、実個体識別、実SDK stop/close、長時間連続動作、製品UIへの組込みは未実施。
 
 ### 将来の排他・個体対応設計
 
 実機経路へ接続する場合、統括が現在のoperator-session-wide leaseを唯一保持し、workerへ渡すのは所有そのものではなく親の生存期間に限ったpreview権限だけとする。子workerは独立lease取得/解放、leaseなし起動、親喪失後の操作を行わない。実HardwareProcessLeaseの既定名・既存一台制限は今回変更しない。
 
 worker-local映像の操作者確認は候補だが、二workerが別物理bodyを開いた証拠は別途必要。親のSource token移送・列挙順対応・同一番号一致判定は禁止。担当外カメラをOpenしない選択方法が確立しない間は実機workerを有効化しない。全module close後は新generation・再割当が必要で、自動再接続しない。
+
+### software-only Goalの受入境界
+
+このGoalの完了は製品の二台同時Live View完成を意味しない。次を区別して記録する。
+
+| 項目 | このGoalの受入条件 | このGoalでは証明しないこと |
+| --- | --- | --- |
+| 割当 | 各workerの模擬receiptをIPCで回収し、接続世代・worker・aliasの対応を契約で検証 | Source番号からの物理個体特定、実機二台の区別 |
+| 限定委譲 | IPC grantをworker側でも検証し、偽preview以外の要求を拒否 | SDKを二つのprocessから使えること、本番IPC認証 |
+| 排他 | 既存HardwareProcessLeaseを試験専用名で統括が保持し、別processの取得を阻止。解放後の取得も確認 | 本番leaseの変更、別Windows logon sessionからの操作 |
+| 終了 | 両workerの模擬停止・close receiptを確認してからClosedへ遷移 | Nikon callback収束、実Source/Module teardown |
+
+実機移行前には、担当外Openを起こさない個体選択方法と、SDK/driverの共有可否について別途根拠が必要。どちらも今回のsynthetic fixtureやsoftware-only PASSで代用しない。FR-LV-003と既存の本番一session制限は変更しない。
 
 ### 別承認の実機PoC案（未実行）
 

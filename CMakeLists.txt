@@ -370,6 +370,16 @@ if(BUILD_TESTING)
     add_test(NAME dual_live_session_contracts COMMAND a0_dual_live_session_contract_tests)
     set_tests_properties(dual_live_session_contracts PROPERTIES TIMEOUT 10)
 
+    add_executable(a0_dual_live_session_integration_tests tests/dual_live_session_integration_tests.cpp)
+    target_link_libraries(a0_dual_live_session_integration_tests PRIVATE a0_phase0_core)
+    if(MSVC)
+        target_compile_options(a0_dual_live_session_integration_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    else()
+        target_compile_options(a0_dual_live_session_integration_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME dual_live_session_integration COMMAND a0_dual_live_session_integration_tests)
+    set_tests_properties(dual_live_session_integration PROPERTIES TIMEOUT 15)
+
     add_executable(a0_dual_hardware_camera_agent_pipe_tests
         tests/dual_hardware_camera_agent_pipe_tests.cpp)
     target_link_libraries(a0_dual_hardware_camera_agent_pipe_tests PRIVATE a0_phase0_core)
