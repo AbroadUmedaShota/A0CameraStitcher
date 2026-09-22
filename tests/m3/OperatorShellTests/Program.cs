@@ -2703,6 +2703,18 @@ static async Task HardwareSingleHistoricalReviewIsReadOnlyAndFailClosedAsync()
             await first.PrepareNewCaptureAsync();
         }
 
+        for (var index = 0; index < 26; index++)
+        {
+            await reviews.SaveAsync(new OperatorReviewRecord
+            {
+                ResultId = $"historical-result-{index:D2}",
+                TransactionId = $"historical-transaction-{index:D2}",
+                ReviewKind = "OriginalsOnly",
+                State = "Pending",
+                UpdatedAtUtc = DateTimeOffset.UnixEpoch.AddMinutes(index),
+            });
+        }
+
         var operations = new FakeHardwareSingleCameraOperations
         {
             AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"), AgentArtifactsRoot = artifactsRoot,
@@ -2712,8 +2724,14 @@ static async Task HardwareSingleHistoricalReviewIsReadOnlyAndFailClosedAsync()
             new HardwareOriginalExporter(Path.Combine(root, "exports")),
             preferencesStore: null, profileStore: null, operatorReviewStore: reviews);
         await reopened.InitializeAsync();
-        Check.Equal(1, reopened.HistoricalReviewChoices.Count);
-        reopened.SelectedHistoricalReview = reopened.HistoricalReviewChoices.Single();
+        Check.Equal(25, reopened.HistoricalReviewChoices.Count);
+        Check.True(reopened.CanNextHistoricalReviewPage, "Only a bounded page is displayed, but later pending results remain reachable.");
+        reopened.NextHistoricalReviewPageCommand.Execute(null);
+        Check.Equal(2, reopened.HistoricalReviewChoices.Count);
+        Check.True(reopened.CanPreviousHistoricalReviewPage, "The operator can return to earlier pending results.");
+        reopened.PreviousHistoricalReviewPageCommand.Execute(null);
+        reopened.SelectedHistoricalReview = reopened.HistoricalReviewChoices.Single(choice =>
+            choice.Record.TransactionId == captured!.TransactionId);
         Check.True(reopened.CanReopenHistoricalReview, "Only an explicit pending selection may be opened.");
         await reopened.ReopenHistoricalReviewAsync();
         Check.True(reopened.CanAcceptReview, "Historical result must be canonical/hash re-verified before review.");
@@ -2721,7 +2739,18 @@ static async Task HardwareSingleHistoricalReviewIsReadOnlyAndFailClosedAsync()
         Check.Equal(0, operations.CaptureCallCount);
 
         await reopened.PrepareNewCaptureAsync();
-        Check.True(reopened.CanAcceptReview, "History view must not create a current transaction marker that can be cleared.");
+        Check.False(reopened.CanAcceptReview, "Closing history must not retain a stale accepted-looking review presentation.");
+        Check.True(reopened.HistoricalReviewChoices.Any(choice => choice.Record.TransactionId == captured!.TransactionId),
+            "Closing history preserves the pending record and its original for later review.");
+        Check.Equal(0, operations.CaptureCallCount);
+
+        reopened.SelectedHistoricalReview = reopened.HistoricalReviewChoices.Single(choice =>
+            choice.Record.TransactionId == captured!.TransactionId);
+        operations.HistoricalTransactionResults.Enqueue(captured! with { TransactionId = "mismatched-transaction" });
+        await reopened.ReopenHistoricalReviewAsync();
+        Check.False(reopened.CanAcceptReview, "A mismatched read-only result is rejected instead of becoming reviewable.");
+        Check.Equal(2, operations.HistoricalTransactionResultCallCount);
+        Check.Equal(0, operations.CaptureCallCount);
     }
     finally { Directory.Delete(root, recursive: true); }
 }

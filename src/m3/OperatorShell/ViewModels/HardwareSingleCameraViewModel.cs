@@ -27,7 +27,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private VerifiedHardwareJpeg? _verifiedOriginal;
     private OperatorReviewRecord? _currentReviewRecord;
     private IReadOnlyList<HistoricalReviewChoice> _historicalReviewChoices = [];
+    private IReadOnlyList<OperatorReviewRecord> _historicalPendingRecords = [];
     private HistoricalReviewChoice? _selectedHistoricalReview;
+    private int _historicalReviewPage;
     private bool _showingHistoricalReview;
     private string _selectedCamera = "CAM-A";
     private bool _exclusiveCameraControlConfirmed;
@@ -112,6 +114,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         AcceptReviewCommand = new AsyncRelayCommand(AcceptReviewAsync, () => CanAcceptReview, HandleCommandException);
         ReopenHistoricalReviewCommand = new AsyncRelayCommand(
             ReopenHistoricalReviewAsync, () => CanReopenHistoricalReview, HandleCommandException);
+        PreviousHistoricalReviewPageCommand = new RelayCommand(
+            () => MoveHistoricalReviewPage(-1), () => CanPreviousHistoricalReviewPage);
+        NextHistoricalReviewPageCommand = new RelayCommand(
+            () => MoveHistoricalReviewPage(1), () => CanNextHistoricalReviewPage);
         PrepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, HandleCommandException);
         ApproveProfileCommand = new AsyncRelayCommand(ApproveProfileAsync, () => CanApproveProfile, HandleCommandException);
     }
@@ -356,6 +362,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         private set => SetProperty(ref _historicalReviewStatus, value);
     }
 
+    public string HistoricalReviewPageText => _historicalPendingRecords.Count == 0
+        ? string.Empty
+        : $"{_historicalReviewPage + 1} / {HistoricalReviewPageCount} ページ";
+
     public string LastExportPath
     {
         get => _lastExportPath;
@@ -489,13 +499,18 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _operatorReviewStore is not null;
 
     public bool CanPrepareNewCapture =>
-        _initializationComplete && !IsBusy && !_stateLoadFailed && _pendingTransaction is not null &&
-        (_captureResult is not null || _localPreDispatchFailure);
+        _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        ((_pendingTransaction is not null && (_captureResult is not null || _localPreDispatchFailure)) ||
+         (_showingHistoricalReview && _pendingTransaction is null));
 
     public bool CanReopenHistoricalReview =>
         _initializationComplete && !IsBusy && !_stateLoadFailed && !IsContinuousLiveViewActive &&
         _pendingTransaction is null && _captureResult is null && _operatorReviewStore is not null &&
         _operations.AgentExecutableAvailable && SelectedHistoricalReview is not null;
+
+    public bool CanPreviousHistoricalReviewPage => _historicalReviewPage > 0;
+
+    public bool CanNextHistoricalReviewPage => _historicalReviewPage + 1 < HistoricalReviewPageCount;
 
     public bool CanApproveProfile =>
         _profileStore is not null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
@@ -523,6 +538,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public ICommand AcceptReviewCommand { get; }
 
     public ICommand ReopenHistoricalReviewCommand { get; }
+
+    public ICommand PreviousHistoricalReviewPageCommand { get; }
+
+    public ICommand NextHistoricalReviewPageCommand { get; }
 
     public ICommand PrepareNewCaptureCommand { get; }
 
@@ -1468,30 +1487,56 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         if (_operatorReviewStore is null)
         {
             HistoricalReviewChoices = [];
+            _historicalPendingRecords = [];
+            OnPropertyChanged(nameof(HistoricalReviewPageText));
             HistoricalReviewStatus = "確認記録の保存先が未接続です。";
             return;
         }
 
         try
         {
-            HistoricalReviewChoices = (await _operatorReviewStore.LoadAsync(CancellationToken.None).ConfigureAwait(true))
+            _historicalPendingRecords = (await _operatorReviewStore.LoadAsync(CancellationToken.None).ConfigureAwait(true))
                 .Where(record => record.State == "Pending" && record.ReviewKind == "OriginalsOnly")
                 .OrderByDescending(record => record.UpdatedAtUtc)
-                .Take(MaximumHistoricalReviewChoices)
-                .Select(record => new HistoricalReviewChoice(record))
                 .ToArray();
-            SelectedHistoricalReview = null;
-            HistoricalReviewStatus = HistoricalReviewChoices.Count == 0
+            _historicalReviewPage = Math.Min(_historicalReviewPage, Math.Max(0, HistoricalReviewPageCount - 1));
+            UpdateHistoricalReviewPage();
+            HistoricalReviewStatus = _historicalPendingRecords.Count == 0
                 ? "未確認の保存結果はありません。"
-                : $"未確認の保存結果 {HistoricalReviewChoices.Count}件（最新{MaximumHistoricalReviewChoices}件まで）";
+                : $"未確認の保存結果 {_historicalPendingRecords.Count}件（1ページ{MaximumHistoricalReviewChoices}件）";
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
             HistoricalReviewChoices = [];
+            _historicalPendingRecords = [];
             SelectedHistoricalReview = null;
+            OnPropertyChanged(nameof(HistoricalReviewPageText));
             HistoricalReviewStatus = "確認記録を安全に読めないため、過去結果は開けません。";
             TechnicalDetail += $"\nhistorical_review_load_failed: {SafeMessage(exception)}";
         }
+    }
+
+    private int HistoricalReviewPageCount =>
+        (_historicalPendingRecords.Count + MaximumHistoricalReviewChoices - 1) / MaximumHistoricalReviewChoices;
+
+    private void MoveHistoricalReviewPage(int delta)
+    {
+        var next = _historicalReviewPage + delta;
+        if (next < 0 || next >= HistoricalReviewPageCount) return;
+        _historicalReviewPage = next;
+        UpdateHistoricalReviewPage();
+        NotifyAvailability();
+    }
+
+    private void UpdateHistoricalReviewPage()
+    {
+        HistoricalReviewChoices = _historicalPendingRecords
+            .Skip(_historicalReviewPage * MaximumHistoricalReviewChoices)
+            .Take(MaximumHistoricalReviewChoices)
+            .Select(record => new HistoricalReviewChoice(record))
+            .ToArray();
+        SelectedHistoricalReview = null;
+        OnPropertyChanged(nameof(HistoricalReviewPageText));
     }
 
     public async Task ReopenHistoricalReviewAsync()
@@ -1546,6 +1591,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         LastTransactionId = string.Empty;
         ExportSummary = "未保存";
         LastExportPath = string.Empty;
+        PreviewPath = string.Empty;
+        PreviewImage = null;
+        LiveViewSummary = "未実行";
         ReviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
     }
 
@@ -1616,6 +1664,17 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     {
         if (!CanPrepareNewCapture)
         {
+            return;
+        }
+
+        if (_showingHistoricalReview && _pendingTransaction is null)
+        {
+            IsBusy = true;
+            ClearHistoricalReviewPresentation();
+            ActivityText = "保存結果を閉じました。新しい撮影は状態確認後に明示開始できます。";
+            await RefreshHistoricalReviewsAsync().ConfigureAwait(true);
+            IsBusy = false;
+            NotifyAvailability();
             return;
         }
 
@@ -1812,6 +1871,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanAcceptReview));
         OnPropertyChanged(nameof(CanReopenHistoricalReview));
+        OnPropertyChanged(nameof(CanPreviousHistoricalReviewPage));
+        OnPropertyChanged(nameof(CanNextHistoricalReviewPage));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanApproveProfile));
         OnPropertyChanged(nameof(CanChangeExportDirectory));
@@ -1826,6 +1887,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ((AsyncRelayCommand)ExportCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)AcceptReviewCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ReopenHistoricalReviewCommand).NotifyCanExecuteChanged();
+        ((RelayCommand)PreviousHistoricalReviewPageCommand).NotifyCanExecuteChanged();
+        ((RelayCommand)NextHistoricalReviewPageCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)PrepareNewCaptureCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ApproveProfileCommand).NotifyCanExecuteChanged();
     }
