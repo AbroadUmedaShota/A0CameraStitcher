@@ -36,6 +36,7 @@ template<class Action> bool Rejects(Action action) {
 }
 } // namespace
 int main(int argc, char **argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--clean-exit") return 0;
     const auto root = argc == 4 ? std::filesystem::path(argv[3]) : Root();
     const auto name = argc == 4 ? std::string(argv[2]) : Name();
     if (argc == 4 && std::string_view(argv[1]) == "--crash") {
@@ -46,6 +47,17 @@ int main(int argc, char **argv) {
     wchar_t exe[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
         return 2;
+    HANDLE clean[2]{};
+    for (auto& handle : clean) {
+        std::wstring command = L"\"" + std::wstring(exe) + L"\" --clean-exit";
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+        PROCESS_INFORMATION child{};
+        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, nullptr, &startup, &child)) return 2;
+        CloseHandle(child.hThread);
+        handle = child.hProcess;
+        if (WaitForSingleObject(handle, 5000) != WAIT_OBJECT_0) return 3;
+    }
     std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --crash " + std::wstring(name.begin(), name.end()) +
                        L" \"" + root.wstring() + L"\"";
     STARTUPINFOW si{};
@@ -58,7 +70,6 @@ int main(int argc, char **argv) {
     DWORD exit_code{};
     const bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
     // Never remove the fixture marker while the child may still be alive.
     if (!exited)
         return 3;
@@ -89,11 +100,11 @@ int main(int argc, char **argv) {
     {
         HardwareProcessLease x(name, std::chrono::milliseconds(0), root);
         x.ArmDualDelegation();
-        DualDelegationCloseEvidence ok{{true, true, true, true}, {true, true, true, true}};
+        DualDelegationCloseEvidence ok{{true, true, true, clean[0]}, {true, true, true, clean[1]}};
         x.DisarmDualDelegation(ok);
-        Check(!x.DualDelegationArmed(), "typed evidence disarms");
+        Check(!x.DualDelegationArmed(), "OS-verified clean exits disarm");
     }
-    const DualDelegationCloseEvidence complete{{true,true,true,true},{true,true,true,true}};
+    const DualDelegationCloseEvidence complete{{true,true,true,clean[0]},{true,true,true,clean[1]}};
     for (int missing = 0; missing < 8; ++missing) {
         {
             HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
@@ -104,7 +115,7 @@ int main(int argc, char **argv) {
                 case 0: body.live_view_off = false; break;
                 case 1: body.source_closed = false; break;
                 case 2: body.module_closed = false; break;
-                case 3: body.worker_reaped = false; break;
+                case 3: body.worker_process = nullptr; break;
             }
             Check(Rejects([&] { lease.DisarmDualDelegation(evidence); }), "each missing receipt rejects");
             Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "failed disarm is terminal");
@@ -112,6 +123,23 @@ int main(int argc, char **argv) {
         Check(Quarantined(name, root), "missing receipt preserves cross-instance quarantine");
         if (!DeleteFileW(marker.c_str())) return 4;
     }
+    HANDLE event = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (!event) return 2;
+    for (auto invalid : {GetCurrentProcess(), pi.hProcess, clean[1], event}) {
+        {
+            HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
+            lease.ArmDualDelegation();
+            auto evidence = complete;
+            evidence.camera_a.worker_process = invalid;
+            Check(Rejects([&] { lease.DisarmDualDelegation(evidence); }),
+                  "running, crashed, duplicate, or non-process handle must reject");
+            Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "OS failure cannot retry");
+        }
+        Check(Quarantined(name, root), "OS failure retains quarantine");
+        if (!DeleteFileW(marker.c_str())) return 4;
+    }
+    CloseHandle(event);
+    CloseHandle(pi.hProcess);
     {
         HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
         lease.ArmDualDelegation();
@@ -130,6 +158,7 @@ int main(int argc, char **argv) {
         HardwareProcessLease lease(name, std::chrono::milliseconds(0), std::filesystem::path(L"relative"));
     }), "relative marker location rejects");
     if (!RemoveDirectoryW(root.c_str())) return 4;
+    for (auto handle : clean) CloseHandle(handle);
     std::cout << "{\"mode\":\"simulation\",\"failures\":" << failures << "}\n";
     return failures ? 1 : 0;
 }

@@ -245,6 +245,19 @@ void HardwareProcessLease::DisarmDualDelegation(const DualDelegationCloseEvidenc
             !delegation_armed_ || delegation_disarm_failed_ || !evidence.Complete())
             throw TransportError("camera_control_marker_failed",
                                  "complete typed close evidence required; marker remains armed");
+        const auto process_a = static_cast<HANDLE>(evidence.camera_a.worker_process);
+        const auto process_b = static_cast<HANDLE>(evidence.camera_b.worker_process);
+        const auto pid_a = GetProcessId(process_a);
+        const auto pid_b = GetProcessId(process_b);
+        if (!pid_a || !pid_b || pid_a == pid_b)
+            throw TransportError("camera_control_marker_failed", "two distinct worker processes required");
+        for (const auto process : {process_a, process_b}) {
+            DWORD exit_code{};
+            if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0 ||
+                !GetExitCodeProcess(process, &exit_code) || exit_code != 0)
+                throw TransportError("camera_control_marker_failed",
+                                     "worker clean exit unconfirmed; marker remains armed");
+        }
         RequireSafeDirectoryTree(std::filesystem::path(marker_path_).parent_path());
         if (ReadMarker(marker_path_) != marker_contents_)
             throw TransportError("camera_control_marker_failed",

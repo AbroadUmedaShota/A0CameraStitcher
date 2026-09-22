@@ -10,12 +10,13 @@ struct WorkerDelegationCloseEvidence final {
     bool live_view_off{};
     bool source_closed{};
     bool module_closed{};
-    bool worker_reaped{};
+    // Borrowed process handle, kept open by the controller until disarm completes.
+    void *worker_process{};
     [[nodiscard]] bool Complete() const noexcept {
-        return live_view_off && source_closed && module_closed && worker_reaped;
+        return live_view_off && source_closed && module_closed && worker_process != nullptr;
     }
 };
-// Typed caller assertion only; SDK exitstate/controller reaping are not wired here yet.
+// SDK close flags remain caller assertions; process termination is verified by the lease.
 struct DualDelegationCloseEvidence final {
     WorkerDelegationCloseEvidence camera_a;
     WorkerDelegationCloseEvidence camera_b;

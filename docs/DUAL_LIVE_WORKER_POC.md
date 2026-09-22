@@ -2,6 +2,14 @@
 
 ## 結論
 
+### 2026-09-22 終了プロセス照合の追加
+
+永続操作禁止記録の解除APIから `worker_reaped` の自己申告を除去し、呼出元が保持する二つのプロセスhandleを受け取る。解除前に `GetProcessId` で別プロセスであること、ゼロ待機で両方が終了済みであること、`GetExitCodeProcess` が両方0であることを確認する。稼働中・非0終了・同一プロセスの重複・非プロセスhandleは解除せず、そのleaseでの再試行も拒否する。プロセスを強制終了したり、終了を待ち続けたりはしない。
+
+これはOS終了確認の実装であり、SDK終了の証明ではない。Live View/Source/Module終了フラグは依然呼出元の申告である。実controllerによる起動handle保持、generation/個体/終了通知との照合は未接続で、無関係な正常終了processを渡せない契約も今後の統合対象。実二台SDK起動はまだ許可しない。
+
+検証: stub構成 `cmake --build build/lease-marker-stub --config Release --target a0_hardware_process_lease_delegation_tests` exit 0（既存C4819警告あり）。`ctest --test-dir build/lease-marker-stub -C Release -R '^hardware_process_lease_delegation_contracts$' --output-on-failure` は今回1回、1/1 PASS、0.68秒、exit 0。正常終了した二つの実Windows子プロセスで解除可能、稼働中/exit 91/重複/signaled eventでは隔離維持と再試行拒否を確認。従前の欠落8項目・削除失敗・統括異常終了試験も含む。カメラ/SDK/WPDは未実行。これまでの同試験系列は計4回、実機preview枠は2/5のまま。
+
 本試作は、統括と CAM-A/CAM-B の二 worker 間で模擬フレームを IPC する試験専用の実装である。実機 Live View、撮影、カード操作、設定変更を行わない。初期IPC試験はSDK/WPD依存なし。後続の排他統合試験は既存HardwareProcessLeaseを使うためcoreへリンクするが、SDK rootを空にしたstub構成で、SDK/WPD APIは呼ばない。SDK の同一 Module/同一 Source の制約を回避・緩和する実装ではない。製品UI・実機Agent・本番leaseへの組込みは未実施。
 
 ## 境界
