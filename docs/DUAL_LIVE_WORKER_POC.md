@@ -191,6 +191,8 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - SDK stub build exit 0。新規 `preview_worker_owner_contracts` を1回実行し1/1 PASS（0.59秒、exit 0）。実際の二子processで正常close後のmarker解除、期限切れexit 3、解除拒否・再取得拒否を確認。テスト専用lease/rootであり本番markerとカメラには触れていない。
 - SDK有効構成のworker buildもexit 0。既存headerのC4819警告あり。SDK版実行、カメラOpen、撮影、WPDは0回。preview実機枠は **2/5のまま**。
 - 次工程は段階的commissioning・異なる物理個体の明示確認・同時preview grant。異常な親終了・実SDK解放失敗・製品UI連携の受入は未完で、今回のprocess試験で代替しない。
+- 追加の起動段階の親死亡試験: 専用stub helper内で実際の `PreviewWorkerOwner` を構築し、外側observerが二workerのprocess handleを保持した後、helperが `ExitProcess(91)` でdestructorを通らず終了する。二workerが正常完了ではないexit 2（bootstrap前の親消失）または3（hostでの親消失）で終了し、marker残存と次owner拒否を確認する。10秒のworker寿命より短い待機で親死亡への収束を検査し、両workerと親の終了が不明な場合はtest markerも消さない。テストは実SDK操作中の親死亡を証明しない。
+- この追加後のstub build exit 0、`preview_worker_owner_contracts` 1/1 PASS（0.96秒、exit 0）。今回CTestは1回、当owner試験seriesの累計2回。実機操作0回、preview枠2/5のまま。カメラ操作を伴う二台同時試験はまだ実施していない。
 
 ## 実機 PoC（未実行）
 
