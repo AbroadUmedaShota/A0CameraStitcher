@@ -111,6 +111,8 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - 実機1回目の事前チェックで中断。本人の一台準備後にはOSでD810一台を観測したが、実行直前は0台となったため、SDK/カメラOpenより前に拒否。実SDK起動・Live View開始・撮影・設定変更はいずれも0回、hardware-run-01.logも未作成。読取りで0台を再確認し、本人へAの電源/USB確認を依頼した。接続回復待ちであり、実機PASSではない。試験枠は0/5消費、再送なし。
 - 本人の再接続連絡後、OSで正常なD810一台、関連camera processなし、上記exe hash一致、既存run-01ログなしを確認して実機1回目を実行。`preview-single --confirm-one-physical-camera` はexit 0、`status=passed`、`frames=3`、`bytes=52219`、`stopConfirmed=true`、`closeConfirmed=true`、`bindingProof=false`。終了後の関連camera processは0。rawログはignoredの `build/single-worker-sdk/hardware-run-01.log` に保持し、画像の保存・撮影・設定変更・WPD操作は行っていない。
 - 実機枠は **1/5消費、単体preview 1回合格**。接続対象は本人がAとして準備した一台であり、永続個体IDやA/B bindingの証明ではない。次は本人によるAからB一台へのUSB切替待ち。二台同時Live View、二worker実SDK委譲、製品UI統合は未確認・未完了のまま。
+- 本人の「接続しなおしました」を受け、Bとして準備された一台で実機2回目を実施。同じ候補exe hash、OSで正常D810一台、関連camera processなし、run-02ログ未存在を照合。exit 0、`status=passed`、`frames=3`、`bytes=122799`、`stopConfirmed=true`、`closeConfirmed=true`、`bindingProof=false`。終了後の関連camera processは0。ignoredの `build/single-worker-sdk/hardware-run-02.log` に保持。撮影・撮影設定変更・WPD操作・画像保存・再試行なし。
+- 現在の実機枠は **2/5消費、操作者指定A/Bの単体preview各1回合格**。永続的な個体照合は行っていない。二台同時への移行には担当外Openを防ぐ個体選択と実worker委譲経路が必要で、単体成功を根拠に同時接続経路を有効化しない。
 
 ## 既存経路のOpen前フィルターに関する制約
 
