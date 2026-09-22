@@ -35,10 +35,37 @@ public:
     void OpenSelected(std::string_view token, std::vector<std::uint32_t> current, Open&& open) {
         CheckInventory(std::move(current));
         const auto found = std::find(tokens_.begin(), tokens_.end(), token);
-        if (opened_ || found == tokens_.end()) Reject("worker_candidate_unavailable");
+        if (ever_opened_ || found == tokens_.end()) Reject("worker_candidate_unavailable");
+        selected_ = static_cast<std::size_t>(found - tokens_.begin());
+        ever_opened_ = true;
         opened_ = true; // Consumed before SDK entry; no retry after unknown completion.
         try { open(inventory_[static_cast<std::size_t>(found - tokens_.begin())]); }
         catch (...) { Invalidate(); throw; }
+    }
+    // Explicit commissioning handoff only. The caller must already have
+    // confirmed Live View OFF. Module and inventory generation stay alive.
+    template<class Close>
+    void Suspend(std::vector<std::uint32_t> current, Close&& close) {
+        CheckInventory(std::move(current));
+        if (!opened_ || suspended_ || resumed_) Reject("worker_handoff_unavailable");
+        try {
+            close();
+            if (!valid_) Reject("worker_selection_invalidated");
+            opened_ = false;
+            suspended_ = true;
+        } catch (...) { Invalidate(); throw; }
+    }
+    template<class Open>
+    void Resume(std::string_view token, std::vector<std::uint32_t> current, Open&& open) {
+        CheckInventory(std::move(current));
+        if (!suspended_ || resumed_ || token != tokens_[selected_]) Reject("worker_handoff_unavailable");
+        resumed_ = true; // An explicit phase transition, never a failed-command retry.
+        suspended_ = false;
+        try {
+            open(inventory_[selected_]);
+            if (!valid_) Reject("worker_selection_invalidated");
+            opened_ = true;
+        } catch (...) { Invalidate(); throw; }
     }
 private:
     [[noreturn]] void Reject(const char* reason) {
@@ -47,5 +74,7 @@ private:
     std::vector<std::uint32_t> inventory_;
     std::vector<std::string> tokens_;
     bool valid_{true}, opened_{};
+    bool ever_opened_{}, suspended_{}, resumed_{};
+    std::size_t selected_{};
 };
 } // namespace a0::phase0

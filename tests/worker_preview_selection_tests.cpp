@@ -87,6 +87,48 @@ int main() {
     Rejects([&] { accepted.OpenSelected(accepted.Tokens().at(0), {71, 83}, [](std::uint32_t) {}); },
             "worker_candidate_unavailable", "only one candidate can be opened per selection");
 
+    auto handoff = Pair();
+    const auto chosen = handoff.Tokens().at(1);
+    std::vector<std::uint32_t> opened;
+    unsigned closed{};
+    handoff.OpenSelected(chosen, {71,83}, [&](auto id) { opened.push_back(id); });
+    handoff.Suspend({71,83}, [&] { ++closed; });
+    Check(!handoff.Opened() && closed == 1, "suspended selection has no open source");
+    handoff.Resume(chosen, {71,83}, [&](auto id) { opened.push_back(id); });
+    Check(handoff.Opened() && opened == std::vector<std::uint32_t>{83,83},
+          "handoff opens only the same worker-local source");
+    Rejects([&] { handoff.Suspend({71,83}, [] {}); }, "worker_handoff_unavailable",
+            "a second handoff is not a retry path");
+
+    for (int fault = 0; fault < 5; ++fault) {
+        auto s = Pair();
+        const auto token = s.Tokens().front();
+        s.OpenSelected(token, {71,83}, [](auto) {});
+        if (fault == 0) {
+            Rejects([&] { s.Suspend({71,83}, [] { throw TransportError("injected", "close"); }); },
+                    "injected", "close failure invalidates handoff");
+        } else {
+            s.Suspend({71,83}, [] {});
+            if (fault == 1) s.ObserveTopology(true, 71);
+            if (fault == 2) {
+                Rejects([&] { s.Resume(s.Tokens().back(), {71,83}, [](auto) {}); },
+                        "worker_handoff_unavailable", "handoff cannot switch camera");
+            }
+            if (fault == 3) {
+                Rejects([&] { s.Resume(token, {71,97}, [](auto) {}); },
+                        "worker_selection_invalidated", "changed inventory prevents resume");
+            }
+            if (fault == 4) {
+                Rejects([&] { s.Resume(token, {71,83}, [](auto) { throw TransportError("injected", "open"); }); },
+                        "injected", "resume failure invalidates without retry");
+            }
+        }
+        unsigned retries{};
+        Rejects([&] { s.Resume(token, {71,83}, [&](auto) { ++retries; }); },
+                "worker_selection_invalidated", "failed handoff cannot recover");
+        Check(retries == 0 && !s.Opened(), "terminal selection never calls SDK again");
+    }
+
     std::cout << "{\"mode\":\"simulation\",\"failures\":" << failures << "}\n";
     return failures == 0 ? 0 : 1;
 }

@@ -328,6 +328,10 @@ public:
     [[nodiscard]] std::vector<std::string> BeginWorkerPreviewSelection(std::chrono::seconds timeout);
     void OpenWorkerPreviewCandidate(std::string_view candidate, std::chrono::seconds timeout);
     void StartSelectedWorkerLiveView(std::chrono::seconds timeout);
+    // Explicit sequential commissioning -> preview handoff, not a retry.
+    // Suspend requires checked Live View OFF and retains the module generation.
+    void SuspendSelectedWorkerPreview(std::chrono::seconds timeout);
+    void ResumeSelectedWorkerPreview(std::string_view candidate, std::chrono::seconds timeout);
     void StartLiveView(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;

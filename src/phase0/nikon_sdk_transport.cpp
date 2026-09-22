@@ -1045,6 +1045,32 @@ public:
         });
     }
 
+    void SuspendSelectedWorkerPreview(std::chrono::seconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const auto current = WorkerPreviewInventory(deadline);
+        worker_selection_->Suspend(current, [&] {
+            if (!source_.opened || live_view_started_ || !live_view_stop_attempted_)
+                throw TransportError("worker_stop_required", "checked Live View stop required before handoff");
+            CloseSourceOnly(deadline, true);
+            RequireSdkSessionNotPoisoned();
+            if (source_.opened || !module_.opened)
+                throw TransportError("worker_handoff_unconfirmed", "source close/module retention unconfirmed");
+        });
+    }
+
+    void ResumeSelectedWorkerPreview(std::string_view candidate, std::chrono::seconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const auto current = WorkerPreviewInventory(deadline);
+        worker_selection_->Resume(candidate, current, [&](std::uint32_t id) {
+            if (source_.opened)
+                throw TransportError("worker_handoff_unconfirmed", "source still open before resume");
+            OpenSelectedSource(static_cast<ULONG>(id), false, deadline, CaptureStorageMode::none);
+            if (GetUnsigned(source_, kNkMAIDCapability_CameraType, deadline,
+                    "worker_camera_type_failed") != kNkMAIDCameraType_D810)
+                throw TransportError("worker_camera_type_mismatch", "resumed preview source is not D810");
+        });
+    }
+
     void StartSelectedWorkerLiveView(std::chrono::seconds timeout) {
         (void)WorkerPreviewInventory(std::chrono::steady_clock::now() + timeout);
         if (!worker_selection_->Opened())
@@ -1804,7 +1830,7 @@ private:
         trace_.sdk_session_opened = true;
     }
 
-    void CloseSourceOnly(std::chrono::steady_clock::time_point deadline) {
+    void CloseSourceOnly(std::chrono::steady_clock::time_point deadline, bool require_clean_close = false) {
         std::optional<TransportError> pending_error;
         if (source_.opened && live_view_session_ && live_view_started_ &&
             !live_view_stop_attempted_) {
@@ -1855,7 +1881,7 @@ private:
             card_capture_events_.SessionClosed();
             pc_direct_events_.SessionClosed();
             if (result != kNkMAIDResult_NoError &&
-                result != kNkMAIDResult_ZombieObject && !pending_error) {
+                (require_clean_close || result != kNkMAIDResult_ZombieObject) && !pending_error) {
                 pending_error.emplace(
                     "close_failed",
                     "SDK source close failed: " + ResultText(result));
@@ -3216,6 +3242,12 @@ void NikonSdkTransport::OpenWorkerPreviewCandidate(std::string_view candidate, s
 void NikonSdkTransport::StartSelectedWorkerLiveView(std::chrono::seconds timeout) {
     impl_->StartSelectedWorkerLiveView(timeout);
 }
+void NikonSdkTransport::SuspendSelectedWorkerPreview(std::chrono::seconds timeout) {
+    impl_->SuspendSelectedWorkerPreview(timeout);
+}
+void NikonSdkTransport::ResumeSelectedWorkerPreview(std::string_view candidate, std::chrono::seconds timeout) {
+    impl_->ResumeSelectedWorkerPreview(candidate, timeout);
+}
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds timeout) {
     impl_->StartSingleWorkerLiveView(timeout);
 }
@@ -3340,6 +3372,8 @@ void NikonSdkTransport::OpenSingleWorkerLiveView(std::chrono::seconds) { ThrowGa
 std::vector<std::string> NikonSdkTransport::BeginWorkerPreviewSelection(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenWorkerPreviewCandidate(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartSelectedWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::SuspendSelectedWorkerPreview(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::ResumeSelectedWorkerPreview(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::ValidateSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }

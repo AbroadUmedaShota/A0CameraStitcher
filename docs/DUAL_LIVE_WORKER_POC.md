@@ -2,6 +2,16 @@
 
 ## 結論
 
+### 2026-09-22 個体確認後の同一候補handoff
+
+実験用worker selectionに明示的な一回限りのhandoffを追加。候補を一度Openし、Live Viewを開始して個体確認した後、checked STOP成功を条件に `SuspendSelectedWorkerPreview` でSourceのみを閉じる。Module/worker-local候補generationは維持する。`ResumeSelectedWorkerPreview` は同じtoken/同じinventoryの同じSourceだけを一度再Openでき、D810型と初期Live View OFFを再確認してからプレビューへ進む。別候補・再度のhandoff・失敗後の再開・途中のAdd/Remove（同じIDのAddも含む）はterminalにする。handoffのSource CloseではZombieObjectも正常終了と扱わない。既存DualのClose契約は変更しない。
+
+これにより次の統括実装で、Aを単独確認→AのSourceを閉じる→Bを単独確認→BのSourceを閉じる→異なる物理個体であることを明示確認→同時プレビュー、という順序を組める。現時点はtransport APIと選択状態の実装のみで、二台CLI・UI・controllerからは未接続。tokenは個体識別の証明ではなく、operator bindingの代わりにはならない。Module保持中の二プロセス共存と実Source再Openは未検証である。既存単体preview CLIはhandoffを使わず、実機preview枠も消費しない。
+
+検証: `build/worker-selection-sdk` / `build/worker-selection-stub` のRelease `a0_worker_preview_selection_tests` ビルドはいずれもexit 0。SDK側は最終Close厳格化後に差分再ビルド済み。各構成で `ctest -C Release -R '^worker_preview_selection_contracts$' --output-on-failure` を1回ずつ実行し各1/1 PASS（SDK 0.13秒、stub 0.26秒）、exit 0。正常handoffでOpen先が83→83、別候補・inventory変更・Add・Close例外・Resume例外・2回目handoffの拒否を確認。これは選択stateのfake試験であり、実SDK Close結果や二台同時成立の実証ではない。
+
+次の統合対象は新しい実worker host/controllerで、上記APIを世代付きIPCへ接続すること。順序はmarker arm→子プロセス起動/登録→worker-local列挙/単独確認→両Source停止・閉鎖→物理A/Bの明示確定→一回の同時プレビューgrant→両終了通知と登録process終了の照合→marker解除。SDKコマンド前の親生存・期限・grant検査、未知の通信/終了状態での隔離維持が必要。テスト専用IPCの強制終了cleanup helperは実workerへ流用しない。
+
 ### 2026-09-22 SDK終了状態のワーカー出力
 
 単体workerの終了JSONに `closeReceipt` (`a0.worker-close.v1`) を追加した。実行ID・PIDと、Live View停止、Source解放、Module/DLL解放、プロセス内SDK占有解除を別々に出力する。Source/Module/占有状態は実transportの `InspectDualSessionExitState` から取得し、checked `Close` が例外なく戻った場合だけ成功フラグを立てる。close失敗後の後始末でローカルobjectが消えても、成功の証拠へ昇格させない。既存 `closeConfirmed` は全解放の集約として維持する。
