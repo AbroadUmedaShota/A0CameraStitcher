@@ -87,6 +87,22 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
         return records.OrderBy(record => record.UpdatedAtUtc).ToArray();
     }
 
+    public async Task<OperatorReviewRecord> ReadOneReadOnlyAsync(string resultId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParseExact(resultId, "N", out _)) throw new ArgumentException("Result ID must be canonical.", nameof(resultId));
+        cancellationToken.ThrowIfCancellationRequested();
+        using var lease = AcquireExistingLease(FileAccess.Read);
+        if (Directory.EnumerateFiles(_root, "*.partial").Any())
+            throw new InvalidDataException("Incomplete review metadata requires inspection.");
+        var path = RecordPath(resultId);
+        if (!File.Exists(path)) throw new FileNotFoundException("Review record is unavailable.");
+        var record = await ReadAsync(path, cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(record.ResultId, resultId, StringComparison.Ordinal))
+            throw new InvalidDataException("Review record identity does not match its file name.");
+        return record;
+    }
+
     // Internal acceptance transition for an already displayed Pending record.
     // It never creates metadata storage or a lock; callers must explicitly
     // confirm the review after independently re-verifying the artifacts.
@@ -169,7 +185,7 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
         return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
 
-    private FileStream AcquireExistingLease()
+    private FileStream AcquireExistingLease(FileAccess access = FileAccess.ReadWrite)
     {
         for (DirectoryInfo? ancestor = new(_root); ancestor is not null; ancestor = ancestor.Parent)
         {
@@ -179,7 +195,7 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
         }
         var lockPath = Path.Combine(_root, ".review.lock");
         RejectReparsePoint(lockPath);
-        return new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        return new FileStream(lockPath, FileMode.Open, access, FileShare.None);
     }
 
     private string RecordPath(string id) => Path.Combine(_root,

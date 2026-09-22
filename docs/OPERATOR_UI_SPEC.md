@@ -1,5 +1,19 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 正規CLIの保存結果検証（契約v2）
+
+`ReviewCli`に `verify-review --product-root <固定ローカルdriveの既存product root絶対path> --result-id <空でない小文字GUID N> --expected-kind <Product|Simulated>` を追加した。`describe`が入力・出力・制限・権限を返す。`reviews`のrootはoperator-reviewディレクトリ、`verify-review`のproduct-rootはその親であり区別する。契約versionは2。従来のmetadata一覧とJSON envelope形状は維持するが、呼出側はversionとoperationsを確認する。
+
+検証対象は既存Pendingの1結果のみ。確認記録を読み、GUIと同じ `VerifyHistoricalReviewAsync` でmanifest・左右原画像・合成をnative decode/hash検証し、最後に確認記録を読み直して途中変更がないことを確かめる。CLIが実行できるのは配置ディレクトリ直下の固定名 `A0CameraStitcher.M2Adapter.exe` のみ。任意exe引数・環境変数上書き・shell経由を設けない。exeと祖先のreparse/UNC/device/ADS/非固定driveを拒否し、exe read-lockを保ちながらhash取得・起動する。既存directory・lockがなければ作らず観測不能を返す。同じWindows利用者のfilesystem読取り権限を使用し、昇格しない。
+
+結果は対象fingerprint、結果ID/撮影ID、宣言されたreviewKind、manifest hash、合成とCAM-A/Bの相対path/hash/寸法、原画像size、adapter hash、metadataの更新時刻/観測時刻を返す。絶対path・画像bytes・SDK個体情報・自由文例外は返さない。reviewKindは保存記録の種別であり、機材の実在やhardware acceptanceの証明ではない。観測後にファイルが変わらない保証や採用の許可にはならず、採用はその時点で再検証する。
+
+`invalid_input`、`invalid_metadata`、`invalid_artifacts`、`access_denied`、`observation_unavailable`、`observation_timeout`を区別する。対象画像ファイルの欠落/改変はinvalid_artifacts、固定adapterの欠落はobservation_unavailable。verifyには40秒の協調deadline（内部artifact検証30秒）があり、自動再試行なし。OS同期I/Oの強制停止を保証しない。SDK/WPD/CameraAgent・撮影・採用・削除・再合成は実行せず、`accept`/`capture`は非公開のまま。
+
+この段階で確認したのはテスト用の独立CLI配置＋自製M2adapterによる正規read-only経路である。実配布候補への同梱、新セッションからの発見、稼働中GUI instanceへの認可済み業務操作、AIの採用代行承認、実GUI/実機受入は残件。CLIの成功を主要業務全体の機械操作適合にしない。
+
+統合検証: ReviewCliのRelease buildはexit 0（warning 0/error 0）。`dotnet run --project tests/m3/ReviewCliTests/A0CameraStitcher.M3.ReviewCliTests.csproj -c Release --no-restore -- <ReviewCli.dll絶対path> <M2Adapter.exe絶対path>` は、検証項目追加に合わせた3回すべてexit 0（新規系列3/5）。実CLI＋native子processでdescribe v2、ID/種別分離、adapter不足、原画像欠落・改変、不正JSON、未知/重複引数、非公開採用拒否を確認。返された相対path/hash/寸法と実fixtureを照合し、製品保存root内の全ファイルSHA-256が読取り前後で不変であること、JSON文字列を展開して絶対path漏れがないことを確認した。従来のmetadata CLI契約もDLLを1回実行してexit 0（系列累計2/5）。独立レビューの欠落分類指摘を修正しPASS。実機操作0回、GUI受入・実配布確認なし。
+
 ## 2026-09-22 過去Pendingの明示採用
 
 本節は次節の閲覧のみの導線を更新する。「ファイル → 未採用の履歴」で、保存結果を再検証し、合成/CAM-A/CAM-Bを選んで詳細表示できる。確認状況の件数は案内であり、3枚すべての表示や追加のチェックボックスを採用の必須条件にしない。選択した結果を詳細表示した後、人が「採用を記録」を一回押すことで採用を開始する。画像表示だけでは採用・撮影しない。
@@ -157,7 +171,7 @@ Hardware Singleは、`Pending`かつ`OriginalsOnly`の既存review recordを新�
 
 機械操作標準の段階対応: 今回のUI commandと安定したUI識別子はGUI受入用の補助経路。外部AIが起動中アプリの特定結果を照会・採用する認可済みCLI/IPCは未接続であり、内部VMの試験を正式な外部API受入に代用しない。採用対象ID・環境・副作用・再送結果を確認できる正規経路の追加と実接続受入を残件として維持する。
 
-2026-09-22の段階実装: `src/m3/ReviewCli/A0CameraStitcher.M3.ReviewCli.csproj` をWindowsローカルの保存済みreview metadata読取り専用CLIとして追加した。`describe` と `reviews --root <既存operator-review絶対path> [--offset 0] [--limit 25]` のみを公開し、GUIが使用する `FileOperatorReviewStore` の検証を共有する。rootは同一Windows利用者が読める固定drive上の既存directory、ancestor reparse/UNC/device pathは拒否。アプリinstanceには接続せず、権限昇格・camera agent起動・画像読込み・撮影・採用・削除はしない。明示的なroot指定は観測対象を指定するだけで、採用の業務承認にはならない。
+2026-09-22の段階実装（以下は契約v1時点の記録。現行は冒頭のv2節を参照）: `src/m3/ReviewCli/A0CameraStitcher.M3.ReviewCli.csproj` をWindowsローカルの保存済みreview metadata読取り専用CLIとして追加した。`describe` と `reviews --root <既存operator-review絶対path> [--offset 0] [--limit 25]` のみを公開し、GUIが使用する `FileOperatorReviewStore` の検証を共有する。rootは同一Windows利用者が読める固定drive上の既存directory、ancestor reparse/UNC/device pathは拒否。アプリinstanceには接続せず、権限昇格・camera agent起動・画像読込み・撮影・採用・削除はしない。明示的なroot指定は観測対象を指定するだけで、採用の業務承認にはならない。
 
 出力はstdout JSON、requestId/契約version/build/環境/観測時刻/status/data/errorCodeを含む。対象pathは直接返さず正規化pathのSHA-256 fingerprintを返す。成功0件と `observation_unavailable`・`invalid_metadata`・`access_denied`・`observation_timeout` を区別し、異常時のexitは2、成功は0。自由文例外・未知の入力operationは反射しない。既存 `.review.lock` を読取りで排他Openし、directory/lockを新規作成しない。未初期化は0件にせず観測不能、`.partial`や破損記録は推測せず拒否する。最大1000記録を検証、返却25件まで、offset 0..1000。10秒の協調cancelがあり、自動再試行なし。OSの同期file I/Oの強制停止保証ではない。
 
