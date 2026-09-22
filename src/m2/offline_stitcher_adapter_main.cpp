@@ -1,4 +1,5 @@
 #include "a0/m2/offline_stitcher.hpp"
+#include "a0/m2/stitch_job_manifest.hpp"
 
 #include <Windows.h>
 #include <wincodec.h>
@@ -350,6 +351,36 @@ int wmain(const int argc, wchar_t* argv[]) {
                     ParseInteger<std::uint32_t>(Required(options, L"width"), "width"),
                     ParseInteger<std::uint32_t>(Required(options, L"height"), "height"));
                 std::cout << "result=validated-canonical-jpeg\n";
+            } else if (operation == L"verify-published-stitch") {
+                if (options.size() != 3) throw std::invalid_argument("verification requires exactly three options");
+                const std::filesystem::path directory(Required(options, L"job-directory"));
+                const auto expected_job = Utf8(Required(options, L"stitch-job-id"));
+                const auto expected_capture = Utf8(Required(options, L"capture-transaction-id"));
+                if (!directory.is_absolute() || GetDriveTypeW(directory.root_path().c_str()) != DRIVE_FIXED)
+                    throw std::invalid_argument("verification requires a local absolute job directory");
+                for (auto path = directory; !path.empty();) {
+                    const auto attributes = GetFileAttributesW(path.c_str());
+                    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                        throw std::invalid_argument("verification path unavailable or redirected");
+                    const auto parent = path.parent_path();
+                    if (parent == path) break;
+                    path = parent;
+                }
+                for (const auto name : {L"stitched.jpg", L"stitch-job.manifest.json"}) {
+                    const auto attributes = GetFileAttributesW((directory / name).c_str());
+                    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                        throw std::invalid_argument("verification artifact unavailable or redirected");
+                }
+                const auto manifest = a0::m2::VerifyPublishedStitchJob(directory, expected_job);
+                if (manifest.capture_transaction_id != expected_capture)
+                    throw std::invalid_argument("capture transaction does not match the requested review");
+                ValidateCanonicalJpeg(directory / L"stitched.jpg", manifest.output.width_pixels, manifest.output.height_pixels);
+                if (a0::m2::ComputeFileSha256Hex(directory / L"stitched.jpg") != manifest.output.sha256)
+                    throw std::runtime_error("artifact changed during verification");
+                // Output verification only: callers must separately verify both originals
+                // and execution environment before restoring a review or accepting it.
+                std::cout << "result=verified-published-stitch\nmanifestJson="
+                    << a0::m2::SerializeStitchJobManifest(manifest) << '\n';
             } else if (operation == L"stitch") {
                 const auto result = a0::m2::StitchCanonicalPair({
                     Required(options, L"camera-a"),

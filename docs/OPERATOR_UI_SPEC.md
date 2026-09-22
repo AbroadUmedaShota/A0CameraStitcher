@@ -105,6 +105,10 @@ flowchart TD
 
 ### 失敗時・AI操作・受入条件
 
+二台Pending履歴の復元準備（2026-09-22）: 既存VMはPendingを列挙して未対応と表示するだけで、`RecoverAndStitchAsync` は再合成を伴うため閲覧には使わない。M2Adapterへ `verify-published-stitch --job-directory <absolute-local-directory> --stitch-job-id <id> --capture-transaction-id <id>` を追加。既存 `VerifyPublishedStitchJob` によりmanifest schema/出力size/hash/job IDを照合し、capture ID、WICによるJPEG全画素decodeと寸法、decode後hashを確認する。root ancestorと対象fileのreparseを拒否し、撮影・再合成・保存・削除なし。stdoutは `result=verified-published-stitch` と正規化済み `manifestJson` のみ。これは合成出力の読取り時点の検証であり、左右原画像・実行環境・rig承認・品質受入の検証ではない。原画像照合・managed adapter・履歴選択UI・採用直前の再検証接続は残件。
+
+検証: M2Adapter/専用fixture target build exit 0。専用CTestの初回は生成helperへstitched.jpgを渡したfixture準備不備でFAIL（製品検証へ未到達）。生成をoriginal.jpgで行いexact synthetic fixtureのみrenameする修正後、二回目は `published_stitch_command_contracts` 1/1 PASS（0.37秒、exit 0）。同じwmain入口をprocess内で呼び、正常、別job ID、別capture ID、出力改変、manifest欠落を確認。正常/ID拒否照会前後でmanifest/画像hash不変を確認。独立レビューでも同じfixture不備を指摘し修正した。別processでのmanaged接続や実ユーザー画像による受入は未実施、カメラ操作0回、実機preview予算2/5のまま。
+
 実装追跡（2026-09-21）: `FileOperatorReviewStore` は `Pending` → `Accepted` のローカルmetadataを原画像と別に保存する。未知項目、破損JSON、未publishの `.partial`、競合書込み、別対象への差替えを拒否し、AcceptedからPendingへ戻さない。未完了metadataを自動削除しない。公開後の再読込検証はキャンセルされても完遂する。これはreview保存の部品であり、画像確認・実機GUI受入の完了を意味しない。
 
 今回の実装範囲は `MainWindow` と `HardwareSingleCameraWindow` の撮影結果導線。`AcceptReviewCommand` は現在の撮影ID・結果ID・原画像/合成画像hashを照合し、Pending保存済みの成功結果だけを採用できる。Hardware SingleもCamera Agentのcanonical run/transaction/alias pathから原画像を再検証してからPendingを復元し、採用直前にも再検証する。採用保存失敗では画面を維持し、自動再送しない。`PrepareNewCaptureCommand` は未採用でも旧画像を保持した撮り直し準備を許し、撮影を開始しない。結果画像は保存済みartifactからのみ表示し、`ReviewImageWindow` で全体・実ピクセル100%・中央の拡大とスクロールを提供する。中央移動は実際のseam位置の自動検出ではない。
