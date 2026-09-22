@@ -70,11 +70,11 @@ inline void AppendUtf8(std::string& output, std::uint32_t code_point) {
 }
 
 
-template <typename Failure>
+template <typename Failure, std::size_t MaximumBytes = kMaximumProtocolJsonBytes>
 class BasicJsonParser final {
 public:
     explicit BasicJsonParser(std::string_view input) : input_(input) {
-        if (input.empty() || input.size() > kMaximumProtocolJsonBytes) {
+        if (input.empty() || input.size() > MaximumBytes) {
             Failure::Fail(
                 "MalformedEnvelope",
                 "Dual hardware protocol JSON length is outside the allowed range");

@@ -2,6 +2,20 @@
 
 ## 結論
 
+### 2026-09-22 親側commissioning命令の接続（最新、実機未実行）
+
+`PreviewWorkerOwner` へ列挙・候補preview・操作者の物理alias確認とSource停止・同時開始・alias別frame取得を接続した。`PreviewCommissioning` はworker 0のpreview確認とsuspendが成功するまでworker 1の列挙を許可せず、二台の異なる物理aliasを明示確認して両Sourceを閉じた後だけ、一度のresume/startを許す。tokenが別workerで同じ文字列でも同じ実機とは判断せず、worker順序をCAM-A/Bへ自動対応させない。候補変更・重複割当・途中失敗・二回目startはterminalで、自動再試行しない。
+
+親の実pipe clientは各workerの連続sequence・epoch・OS PIDを検証する。送信/応答不明なら同workerへ追加送信しない。公開APIの失敗時は両workerのCloseを試みるが、未確認応答は正常終了として扱わずmarkerを残す。正常な命令応答と、両SDK閉鎖・両process終了による解除は別判定のまま。
+
+frame返信はraw最大256 KiBをhex化するため、親の明示的なJSON上限を512 KiB+4096へ設定した。共有parserの既定256 KiBと既存利用側は変更していない。previewはメモリー上の表示素材のみで、原画像・合成入力にはしない。
+
+検証: stub Release build exit 0。`ctest --test-dir build/worker-selection-stub -C Release -R '^(preview_commissioning|preview_worker_owner)_contracts$' --output-on-failure` は2/2 PASS（1.70秒、exit 0）。実dispatcherとfake transportによる最大frame往復・逆順alias割当・二重割当・早期start・未知候補・二台目resume失敗の再送禁止を確認。owner側の実process/pipe終了と親死亡の回帰もPASS（owner suite累計3回）。最大frameを実pipe越しに送る試験、SDK操作後の終了、物理個体の実確認はまだ未検証である。
+
+このAPIは内部実験用で、本体UIや操作者用CLIからはまだ呼ばない。物理aliasは操作者の映像確認であり、SDK/WPD capture bindingやシリアル照合の証拠ではない。次は操作者が一台ずつ映像を見て確認できる限定UI/CLIの接続と候補版の検証。実機枠は2/5のまま。以下は各段階の履歴であり「親controller未接続」などの記述は当時の状態を示す。
+
+SDK有効構成もworkerとcommissioning test targetのbuild exit 0を確認。既存C4819と負例testの戻り値破棄C4834警告あり。同じfake試験のSDK側重複実行はしていない。SDK版workerの起動・カメラ操作はいずれも0回。
+
 ### 2026-09-22 worker命令・実パイプhostの接続
 
 `WorkerPreviewDispatcher` と内部 `RunWorkerPreviewNamedPipeServer` を追加。既存Camera Agentの同一logon SID限定・remote拒否・長さ付きJSON・delivery ACK・取消drainを使い、既存3種類のdispatcherには新条件を適用しない。新workerだけは `GetNamedPipeClientProcessId` が保持した親processのPIDと一致することを要求する。親生存/固定期限を各通常命令の前後で確認し、schema/epoch/専用capability/連続sequenceを照合する。capabilityは応答へ出さない。

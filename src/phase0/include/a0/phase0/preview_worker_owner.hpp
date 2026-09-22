@@ -5,10 +5,10 @@
 #include <filesystem>
 #include <memory>
 #include <string_view>
+#include "a0/phase0/preview_commissioning.hpp"
 
 namespace a0::phase0::experimental {
-// Parent-side launch/close integration. Commissioning/preview commands are not
-// exposed until physical A/B binding and concurrent grants are connected.
+// Internal experimental integration; no application/CLI enables this yet.
 // Thread-affine: create, close and destroy on the lease-owning thread.
 // Destruction does not close workers or clear an armed quarantine marker.
 class PreviewWorkerOwner final {
@@ -22,6 +22,11 @@ public:
     // Cached result on repeated calls: never resends an ambiguous close.
     bool Close() noexcept;
     std::array<std::uint32_t, 2> ProcessIds() const noexcept;
+    std::array<std::string, 2> Enumerate(std::size_t worker);
+    std::vector<unsigned char> Preview(std::size_t worker, std::string_view candidate);
+    void ConfirmAndSuspend(std::size_t worker, ObservedPreviewBody body);
+    void StartBoth();
+    std::vector<unsigned char> Read(ObservedPreviewBody body);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
