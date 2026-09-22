@@ -87,7 +87,28 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 
 全回で撮影・カード操作・WPD・カメラ設定変更をしない。識別不明、対象外Open、片側停止/close未確認、電力/温度異常は中止し、再試行・worker再起動・サービス操作・強制killを行わない。実機SDK/WPD非重複や撮影handoffは、このpreview-only試験の合格とは別工程とする。
 
-## Open 前フィルター
+## 実機接続の第一段階: 一台限定worker（2026-09-22、検証中）
+
+本人の「実機検証を始めて」「進めてください」に基づく実装。PCはAOPC-11-NOTE、BのUSBを抜いて一台だけとする準備を本人が確認済み。初回は接続中の一台だけを対象とし、3フレームの取得を1回の試験として数える。最大5回、自動再試行なし。これは物理CAM-A/Bの対応証明ではない。
+
+- 新CLI `A0CameraStitcher.SingleWorkerPreview describe` はSDKを開かない発見操作。`sdkAvailable` はSDK有効buildかつ実行時moduleパスの配置検査成功を示し、実ロード・カメラ通信成功の証拠ではない。
+- `preview-single --confirm-one-physical-camera` は実機操作。SDKのraw Sourceが厳密に一つでなければSource Open前に拒否し、唯一のSourceだけを一回開いてD810であることを確認する。既存の全候補Openによる識別経路は使わない。Source IDを保存・process間転送しない。
+- 開始前にLive View OFFを要求し、既にONなら自動OFF復旧しない。SDK moduleのcallback通知と列挙結果の集合を再確認してから各フレームを取得する。画像はメモリー上のpreviewのみで、撮影・保存・カード操作・WPD・撮影設定変更はない。
+- この単体commissioning段階では**一台のworker自身**が既存production HardwareProcessLeaseを全期間保持する。二workerへのlease委譲は未実装であり、前段の試験用IPCへSDKを接続したという意味ではない。二台同時操作は無効のまま。
+- 各SDK操作には既存の期限を渡し、新規操作の全体期限は60秒。停止とCloseは期限後も行う。SDK関数自体が戻らない場合の強制終了はしない。開始成功時のStopは一回だけ、明示Closeと `InspectDualSessionExitState().FullyEnded()` を確認する。開始結果不明、Stop/Close不成立、abandoned leaseでは同じthreadがleaseを保持したまま `quarantined` とし、人手復旧を待つ。process終了やtimeoutをClose成功に読み替えない。
+- 結果はJSONの `mode=hardware`、`passed/failed/quarantined`、frame数・byte数・stop/close確認、`bindingProof=false`。例外本文・個体番号・SDKパスは出力しない。結果不明でもコマンドを再送しない。隔離されたprocessを自動killしない。
+- privateなSDKの一組だけをCMake rootとし、実行processだけに `NIKON_D810_SDK_MODULE_PATH` を設定する。SDK素材はコピー・commitしない。本体UI/既存camera agentは変更しない。
+
+機械操作標準は部分対応: 発見・限定CLI・状態/結果出力は実装、承認の自動検証・A/B binding・二worker委譲・本体UI操作は未対応。実機起動時は本人の対象/回数/禁止事項、正確な候補版とOS上一台を操作者が照合する。コマンドの確認flagそのものを承認証明とは扱わない。
+
+### 検証記録
+
+- 独立レビューで発見したabandoned lease解放、開始拒否後の不要Stopを修正。開始途中の状態変化でも既存ONを自動OFFにしないstrict経路、callback由来Sourceのtopology確認を追加。
+- SDKなし構成のRelease build成功。`single_worker_preview_contracts` は1/1 PASS（0.13秒）。raw Source 0/2/重複でOpen 0、唯一SourceのOpen一回、3frame成功、Open/Start/topology/frame/Stop/Close失敗時no-retry、開始拒否時Stop 0、終了不明時quarantine、期限切れで開始禁止を確認。
+- SDK有効構成のRelease build成功。新規lifecycleと既存dual-session adapterのsoftware-only回帰試験は2/2 PASS（0.48秒）。本変更のCTest実行は2回、前工程の5回IPC suiteは再実行なし。`describe` のSDK指標は環境設定にも依存するため `sdkBuilt` という初稿の名前を `sdkAvailable` に訂正。coreに既存の文字コード警告C4819があるがbuild errorはない。実機結果は実行後に追記する。
+- 前段software-only Goalの完了記録を、本実機接続や二台動作の完成証明へ読み替えない。
+
+## 既存経路のOpen前フィルターに関する制約
 
 現行 `NikonSdkTransport::BeginDualSession` は `D810SourceIds` が各候補を Open して機種を判定する。この処理を worker に流用すると、worker 担当外の Source を Open する。`SelectAssignedSourceBeforeOpen` は列挙済みの worker-local assigned Source だけを選択し、重複・未検出なら Open 計画を返さない。
 

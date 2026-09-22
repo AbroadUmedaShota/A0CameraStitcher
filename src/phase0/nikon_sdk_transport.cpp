@@ -12,6 +12,7 @@
 #endif
 
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/single_worker_source.hpp"
 #include "a0/phase0/sdk_buffer_arena.hpp"
 #include "a0/phase0/sdk_pending_command.hpp"
 #include "nikon_sdk_runtime_path.hpp"
@@ -960,6 +961,49 @@ public:
         }
     }
 
+    void OpenSingleWorkerLiveView(std::chrono::seconds timeout) {
+        ClaimSession();
+        trace_ = {};
+        try {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            OpenModule(deadline);
+            const auto ids = WaitForSourceIds(deadline, "worker_inventory_failed");
+            OpenOnlyWorkerSource(std::vector<std::uint32_t>(ids.begin(), ids.end()),
+                [&](std::uint32_t id) {
+                    OpenSelectedSource(static_cast<ULONG>(id), false, deadline, CaptureStorageMode::none);
+                });
+            if (GetUnsigned(source_, kNkMAIDCapability_CameraType, deadline,
+                    "worker_camera_type_failed") != kNkMAIDCameraType_D810) {
+                throw TransportError("worker_camera_type_mismatch", "single preview source is not a D810");
+            }
+            single_worker_preview_ = true;
+        } catch (...) {
+            // Caller performs one explicit checked Close. Do not hide a failed
+            // module/source cleanup behind an automatic reopen or retry.
+            throw;
+        }
+    }
+
+    void ValidateSingleWorkerLiveView(std::chrono::seconds timeout) {
+        RequireLiveViewSession();
+        RequireSdkSessionNotPoisoned();
+        if (!single_worker_preview_) throw TransportError("worker_session_required", "not a single-worker session");
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        Pump(module_, "worker_topology_failed");
+        auto ids = Children(module_, deadline, "worker_topology_failed");
+        ids.insert(ids.end(), module_sources_.begin(), module_sources_.end());
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        if (ids.size() != 1 || ids.front() != source_id_) {
+            throw TransportError("worker_topology_changed", "single-worker source inventory changed");
+        }
+    }
+
+    void StartSingleWorkerLiveView(std::chrono::seconds timeout) {
+        ValidateSingleWorkerLiveView(timeout);
+        StartLiveView(timeout, true);
+    }
+
     std::size_t BeginDualReadOnlyProbe(std::chrono::seconds timeout) {
         ClaimSession();
         trace_ = {};
@@ -1373,7 +1417,7 @@ public:
         // fully closes, so CaptureComplete cannot cause ambiguous adoption.
     }
 
-    void StartLiveView(std::chrono::seconds timeout) {
+    void StartLiveView(std::chrono::seconds timeout, bool require_initially_off = false) {
         RequireLiveViewSession();
         RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1389,6 +1433,9 @@ public:
         const ULONG current = GetUnsigned(
             source_, kNkMAIDCapability_LiveViewStatus, deadline, "live_view_start_failed");
         if (current != kNkMAIDLiveViewStatus_OFF) {
+            if (require_initially_off) {
+                throw TransportError("worker_live_view_already_on", "do not recover an existing live view automatically");
+            }
             SetUnsigned(source_, kNkMAIDCapability_LiveViewStatus,
                 kNkMAIDLiveViewStatus_OFF, deadline, "live_view_recovery_failed");
             if (GetUnsigned(source_, kNkMAIDCapability_LiveViewStatus, deadline,
@@ -1570,6 +1617,7 @@ private:
                 "open_failed", "SDK source open preconditions are not satisfied");
         }
         source_.capabilities.clear();
+        single_worker_preview_ = false;
         sdk_session_poisoned_ = false;
         card_capture_events_.ResetForSession();
         pc_direct_events_.ResetForSession();
@@ -3007,6 +3055,7 @@ private:
     bool sdk_session_poisoned_{false};
     bool capture_session_{false};
     bool live_view_session_{false};
+    bool single_worker_preview_{false};
     bool live_view_started_{false};
     bool live_view_stop_attempted_{false};
     bool capture_complete_{false};
@@ -3064,6 +3113,15 @@ SdkCameraStatus NikonSdkTransport::ProbeOpenCaptureSessionStatus(
 }
 void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {
     impl_->RequireExactlyOneD810ForProductAgent();
+}
+void NikonSdkTransport::OpenSingleWorkerLiveView(std::chrono::seconds timeout) {
+    impl_->OpenSingleWorkerLiveView(timeout);
+}
+void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds timeout) {
+    impl_->StartSingleWorkerLiveView(timeout);
+}
+void NikonSdkTransport::ValidateSingleWorkerLiveView(std::chrono::seconds timeout) {
+    impl_->ValidateSingleWorkerLiveView(timeout);
 }
 void NikonSdkTransport::Open(std::string_view stable_identity, std::chrono::seconds timeout) {
     impl_->Open(stable_identity, timeout);
@@ -3179,6 +3237,9 @@ void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {}
 void NikonSdkTransport::Open(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenPcDirect(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::ValidateSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }
 std::vector<unsigned char> NikonSdkTransport::ReadLiveViewFrame(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StopLiveView(std::chrono::seconds) { ThrowGated(); }

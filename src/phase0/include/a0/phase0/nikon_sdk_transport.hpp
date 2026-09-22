@@ -317,6 +317,11 @@ public:
     void CaptureToCard(std::chrono::seconds image_event_timeout,
                        std::chrono::seconds transaction_timeout) override;
     void OpenLiveView(std::string_view stable_identity, std::chrono::seconds timeout) override;
+    // Experimental single-body worker only. Caller holds HardwareProcessLease.
+    // Does not identify candidates by opening them; rejects raw inventory != 1.
+    void OpenSingleWorkerLiveView(std::chrono::seconds timeout);
+    void StartSingleWorkerLiveView(std::chrono::seconds timeout);
+    void ValidateSingleWorkerLiveView(std::chrono::seconds timeout);
     void StartLiveView(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;
