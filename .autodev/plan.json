@@ -1,8 +1,8 @@
 {
   "schema_version": "autodev.plan.v1",
-  "plan_version": "2.19.0",
+  "plan_version": "2.20.0",
   "requirements_version": "2.13.0",
-  "generated_at": "2026-09-21",
+  "generated_at": "2026-09-22",
   "status": "human-gated",
   "mvp_scope": {
     "required": ["explicit SingleCamera or DualCamera mode without automatic fallback","USB-connected Nikon D810 x1 exactly for initial SingleCamera or x2 for DualCamera","DualCamera per-Agent-session operator CAM-A/B binding with sequential one-at-a-time Live View","SDK capture plus WPD single-slot JPEG recovery","approved exact-object cleanup after canonical PC verification","one selected-camera SDK Live View","SingleCamera canonical-original explicit export with Stitch NotApplicable","DualCamera CaptureRecoveryOnly transport verification with Stitch Pending and A0 quality Unapproved","DualCamera fixed planar A0-class stitching","FX JPEG Fine L","mode-specific approved profile","guided setup assessment","approved-profile bounded automatic correction for DualCamera","canonical PC original preservation","read-only camera settings","Windows 11 x64"],
@@ -69,6 +69,23 @@
     {"id":"WI-0041","milestone":"M4","title":"Create installer and diagnostic bundle","safety_class":"S2","dependencies":["WI-0040"],"requirement_refs":["NFR-PLAT-001","NFR-OBS-001"],"human_gate":null,"verification":"clean-PC install, smoke, uninstall, and log collection pass"},
     {"id":"WI-0042","milestone":"M4","title":"Obtain mode-aware MVP release decision","safety_class":"S3","dependencies":["WI-0041"],"requirement_refs":["FR-MODE-001","FR-CAP-001","FR-CAP-002","FR-CAP-003","FR-CAP-004","FR-CAP-005","FR-CAP-006","FR-CAP-007","FR-STI-001","FR-STI-002","FR-STI-003","FR-STI-004","FR-STI-005","FR-STI-006","FR-DATA-001","FR-DATA-002","FR-EXP-001","FR-UI-001","FR-UI-002","FR-UI-003","NFR-PLAT-001","NFR-PERF-001","NFR-REL-001","NFR-OBS-001","NFR-SEC-001","NFR-MEM-001","CON-001","CON-002","CON-003","CON-004","CON-005"],"human_gate":"release-decision","verification":"product owner approves separate SingleCamera and DualCamera evidence and the combined release candidate; CaptureRecoveryOnly evidence remains transport-only with StitchOutcome Pending and A0 quality Unapproved, and neither it nor an approved p95 completes stitching, A0 quality, packaging, or release acceptance"}
   ],
+  "roadmap_execution": {
+    "authority": "2026-09-22 user request to pursue the full roadmap as a Goal",
+    "branch": "codex/dual-live-worker-poc-20260922",
+    "baseline_commit": "f1f860d",
+    "status": "in_progress_not_accepted",
+    "hardware_preview_budget": {"maximum": 5, "consumed": 2, "remaining": 3, "evidence_ref": "docs/DUAL_LIVE_WORKER_POC.md"},
+    "stages": [
+      {"id": 1, "work_item_ids": ["WI-0014L"], "status": "in_progress", "acceptance": "Distinct physical camera selection, controller-death quarantine across all camera entrypoints, and independently confirmed close of both workers; local source tokens alone are not body identity."},
+      {"id": 2, "work_item_ids": ["WI-0014L"], "depends_on": [1], "status": "not_verified", "acceptance": "Both physical bodies deliver fresh concurrent frames and stop/close safely within the existing remaining preview-only budget; no capture, WPD, settings write, card operation or retry."},
+      {"id": 3, "work_item_ids": ["WI-0014L", "WI-0033"], "depends_on": [2], "status": "not_accepted", "acceptance": "Actual application left/right CAM-A/B panes expose fresh/stopped state and binding loss, not a stale or simulated second pane."},
+      {"id": 4, "work_item_ids": ["WI-0032", "WI-0033", "WI-0034", "WI-0035"], "depends_on": [3], "status": "partial", "acceptance": "Stop preview, capture with preserved canonical originals, approved-profile stitch, detailed review, durable explicit acceptance and manual next capture. Existing hardware/optical gates remain; preview authorization is not capture authorization."},
+      {"id": 5, "work_item_ids": ["WI-0033", "WI-0035", "WI-0040", "WI-0041"], "depends_on": [4], "status": "partial", "acceptance": "Verified historical Pending reentry, actual seam navigation, authorized external AI operation path, local candidate and user workflow acceptance. Redistribution review precedes packaging licensed assets; no publication or release is authorized."}
+    ],
+    "parallel_software_scope": "Review/history/AI operations may proceed before hardware gates; this does not complete dependent integrated acceptance.",
+    "preserved_gates": ["HG-0001", "HG-0002", "HG-0005", "ADR-0031", "separate capture and quality test authorization"],
+    "evidence_refs": ["docs/DUAL_LIVE_WORKER_POC.md", "docs/OPERATOR_UI_SPEC.md"]
+  },
   "synchronization": {
     "source_commit": "3e9ae406272027274fb454b8f9b4d9d63ac2569f",
     "previous_plan_version": "2.17.0",
