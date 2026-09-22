@@ -56,6 +56,7 @@ add_library(a0_phase0_core
     src/phase0/phase0.cpp
     src/phase0/fake_camera_transport.cpp
     src/phase0/hardware_process_lease.cpp
+    src/phase0/preview_worker_owner.cpp
     src/phase0/nikon_sdk_runtime_path.cpp
     src/phase0/nikon_sdk_transport.cpp
     src/phase0/pc_direct_capture.cpp
@@ -83,6 +84,9 @@ endif()
 
 add_executable(A0CameraStitcher.Phase0 src/phase0/main.cpp)
 add_executable(A0CameraStitcher.SingleWorkerPreview src/phase0/single_worker_preview_main.cpp)
+add_executable(A0CameraStitcher.PreviewWorker src/phase0/preview_worker_main.cpp)
+target_link_libraries(A0CameraStitcher.PreviewWorker PRIVATE a0_phase0_core)
+target_compile_definitions(A0CameraStitcher.PreviewWorker PRIVATE NOMINMAX)
 target_link_libraries(A0CameraStitcher.SingleWorkerPreview PRIVATE a0_phase0_core)
 target_compile_definitions(A0CameraStitcher.SingleWorkerPreview PRIVATE NOMINMAX)
 if(MSVC)
@@ -371,6 +375,11 @@ if(BUILD_TESTING)
     add_test(NAME worker_preview_dispatcher_contracts COMMAND a0_worker_preview_dispatcher_tests)
     set_tests_properties(worker_preview_dispatcher_contracts PROPERTIES TIMEOUT 10)
     if(NOT A0_NIKON_SDK_AVAILABLE)
+        add_executable(a0_preview_worker_owner_tests tests/preview_worker_owner_tests.cpp)
+        target_link_libraries(a0_preview_worker_owner_tests PRIVATE a0_phase0_core)
+        add_dependencies(a0_preview_worker_owner_tests A0CameraStitcher.PreviewWorker)
+        add_test(NAME preview_worker_owner_contracts COMMAND a0_preview_worker_owner_tests)
+        set_tests_properties(preview_worker_owner_contracts PROPERTIES TIMEOUT 20)
         add_executable(a0_worker_preview_pipe_tests tests/worker_preview_pipe_tests.cpp)
         target_link_libraries(a0_worker_preview_pipe_tests PRIVATE a0_phase0_core)
         add_test(NAME worker_preview_pipe_contracts COMMAND a0_worker_preview_pipe_tests)

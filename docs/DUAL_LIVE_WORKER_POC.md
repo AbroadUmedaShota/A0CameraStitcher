@@ -183,6 +183,15 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - 上記PASS後に固定drive検査と機械整形を加えた最終差分も、専用build exit 0、同CTest 1/1 PASS（0.60秒、exit 0）。このseriesのCTestは計2回。既定本番名のstorage分岐を隔離環境で直接通す試験と、I/O故障注入の網羅は残る。実機操作0回、preview枠は2/5のまま。
 - 追加負例をまとめた3回目もbuild exit 0、同CTest 1/1 PASS（0.69秒、exit 0）。A/B各4終了項目の一つずつの欠落、失敗後に完全証拠を渡しても解除不可、readonly markerによる削除失敗・その後の再解除拒否、本番保存先overrideと相対path拒否を確認。計3回でこの試験seriesを終了。write/flush故障、既定本番storage分岐、実controller/SDK証拠の接続は未検証として残す。
 
+## 親processの起動・終了接続（2026-09-22、software-only）
+
+- `PreviewWorkerOwner` と内部専用 `A0CameraStitcher.PreviewWorker` を追加。本番lease取得・marker永続化・二子process登録の後だけ、継承した匿名pipeで起動情報を渡す。capabilityはコマンドラインへ出さず、継承handleをparent参照とbootstrap readerだけに限定する。
+- OSのpipe server PIDを登録済みworkerと照合し、epoch・sequence・終了応答の全5項目、ACK、両processのexit 0を確認した場合だけmarker解除へ進む。Closeは一回限り。失敗・期限切れ・destructorではmarkerを消さず、自動kill/restartもしない。
+- 親側APIは起動・closeだけを公開。候補列挙・個体確認・preview grantは未接続で、実機二台操作や製品UIを有効化していない。構築・Close・破棄は同じlease所有threadで行う。
+- SDK stub build exit 0。新規 `preview_worker_owner_contracts` を1回実行し1/1 PASS（0.59秒、exit 0）。実際の二子processで正常close後のmarker解除、期限切れexit 3、解除拒否・再取得拒否を確認。テスト専用lease/rootであり本番markerとカメラには触れていない。
+- SDK有効構成のworker buildもexit 0。既存headerのC4819警告あり。SDK版実行、カメラOpen、撮影、WPDは0回。preview実機枠は **2/5のまま**。
+- 次工程は段階的commissioning・異なる物理個体の明示確認・同時preview grant。異常な親終了・実SDK解放失敗・製品UI連携の受入は未完で、今回のprocess試験で代替しない。
+
 ## 実機 PoC（未実行）
 
 別承認後でも最大 5 回。各回は、二 worker の SDK 初期化、Source Open trace（担当外 Open 0）、両 Live View の停止、source/module 解放、全体 lease が保持されたこと、capture/WPD 未遷移を記録する。今回の試作はその承認・実行を含まない。
