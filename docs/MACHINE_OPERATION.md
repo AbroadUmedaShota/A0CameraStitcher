@@ -2,7 +2,7 @@
 
 この手順は `codex/dual-live-worker-poc-20260922` の開発候補に対するもの。main/releaseの状態は示さない。対象は保存済み確認結果の読取り・検証であり、実機操作、GUI制御、採用代行は未対応。GUI自動操作をこの正規経路の代用にしない。
 
-## 開発ソースの契約v3（下記の凍結候補v2とは別）
+## 契約v3の状態照会
 
 開発ソースに `gui-status --instance <PID-UTC起動ticks>` を追加した。本体MainWindowの「バージョン」に表示される読取り専用instanceを明示する。Launcher/HardwareSingle画面にはendpointがなく、自動探索・別instanceへのfallbackをしない。古い `software-f9cafd4-01` は契約v2で、本操作を持たない。上書き更新しない。
 
@@ -10,27 +10,27 @@ v3のCLIは同一Windows利用者・同一ログオンセッションのMainWind
 
 `CanCapture`等がtrueでも業務承認ではない。正規AI経路は照会のみで、画像表示・撮影・次の準備・採用はまだ実行できない。読取りendpointの障害は取得不能でありカメラ故障や実機停止を意味しない。終了時はカメラの既存終了確認を維持した後にendpointを終了する。終了確認失敗で本体が残る場合はendpointも残り、既存の安全ゲートを変えない。同一アカウントの悪意あるプロセスを信頼するための署名/アプリ認証基盤ではなく、指定されたprocessを照会する契約である。
 
-実pipe/CLIの合成状態試験と、実GUIインスタンスへの接続受入は区別する。新しいv3候補の梱包/GUI接続受入は未実施。以下の候補照合/describe手順は引き続きv2の検証済み候補に限る。
+実pipe/CLIの合成状態試験と、実GUIインスタンスへの接続受入は区別する。v3候補の生成・同梱CLI通信試験は完了したが、実GUI接続受入は未実施。以下は新しいv3候補を固定指定する手順。旧v2候補は履歴として保持する。
 
 ## 1. 候補を特定する
 
-本手順を置いたリポジトリルートを作業ディレクトリとする。現ホストの検証済みソフトウェア候補は次の一つ。別worktreeに候補がない場合、最新版を推測して選択・再build・downloadしない。担当者に対象候補を確認する。
+本手順を置いたリポジトリルートを作業ディレクトリとする。今回の確認対象は次の候補に固定する。別worktreeに候補がない場合、最新版を推測して選択・再build・downloadしない。担当者に対象候補を確認する。
 
-- 候補: `build/local-software-candidates/software-f9cafd4-01`
-- source commit: `f9cafd4e2b01f90e484ec20c949b0d33a8ea3779`
-- `candidate.manifest.json` SHA-256: `2A284F550F0AC68070E9333466407301D642C92728FB7A4D7218845D7BBE0117`
+- 候補: `build/local-software-candidates/software-a1aa215-01`
+- source commit: `a1aa21565661fc80db97d5f89e52dbab44cc062e`
+- `candidate.manifest.json` SHA-256: `5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E`
 - Windows 11 x64、同一Windows利用者、PowerShell 7/.NET 10。SDK非同梱、framework-dependent、clean PC未受入。
 - この記録は公開・配布・実機・品質・AI採用代行の承認ではない。ローカル管理者や同一アカウントによる悪意ある改変に対する署名検証の代替でもない。
 
 まずread-onlyで固定候補と内容を照合する。期待hashは検証記録の固定値を使い、その場で計算した値を期待値へ代入しない。
 
 ```powershell
-$a0Candidate = Join-Path (Get-Location) 'build/local-software-candidates/software-f9cafd4-01'
+$a0Candidate = Join-Path (Get-Location) 'build/local-software-candidates/software-a1aa215-01'
 $a0ManifestPath = Join-Path $a0Candidate 'candidate.manifest.json'
-$a0ExpectedManifestHash = '2A284F550F0AC68070E9333466407301D642C92728FB7A4D7218845D7BBE0117'
+$a0ExpectedManifestHash = '5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E'
 if ((Get-FileHash -LiteralPath $a0ManifestPath -ErrorAction Stop).Hash -cne $a0ExpectedManifestHash) { throw 'Candidate manifest mismatch' }
 $a0Manifest = Get-Content -LiteralPath $a0ManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
-if ($a0Manifest.sourceCommit -cne 'f9cafd4e2b01f90e484ec20c949b0d33a8ea3779' -or $a0Manifest.sourceDirty -ne $false -or $a0Manifest.sdkIncluded -ne $false) { throw 'Candidate identity mismatch' }
+if ($a0Manifest.sourceCommit -cne 'a1aa21565661fc80db97d5f89e52dbab44cc062e' -or $a0Manifest.sourceDirty -ne $false -or $a0Manifest.sdkIncluded -ne $false -or $a0Manifest.cliContractVersion -ne 3) { throw 'Candidate identity mismatch' }
 foreach ($a0Entry in $a0Manifest.files) {
     $a0File = Get-Item -LiteralPath (Join-Path $a0Candidate $a0Entry.path) -ErrorAction Stop
     if ($a0File.Length -ne $a0Entry.size -or (Get-FileHash -LiteralPath $a0File.FullName).Hash -cne $a0Entry.sha256) { throw 'Candidate file mismatch' }
@@ -47,7 +47,7 @@ $a0Cli = Join-Path $a0Candidate 'app/review-cli/A0CameraStitcher.M3.ReviewCli.ex
 if ($LASTEXITCODE -ne 0) { throw 'CLI discovery failed' }
 ```
 
-JSONで `appId=a0-camera-stitcher-review-cli`、`version=2`、`status=ok`、`environment=Windows-local standalone read-only`、`operations=describe/reviews/verify-review` を確認する。buildは上記source commitに対応する。version/操作が違う場合、互換性を推測して続行しない。資格情報・昇格・ネットワーク接続は不要で、現在のWindowsアカウントが読める既存ファイルだけが対象。WSL/cloud/別ホストからの接続はこの手順の対象外。GUI instanceには接続しない。
+JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`environment=Windows-local standalone read-only`、`operations=describe/reviews/verify-review/gui-status` を確認する。buildは上記source commitに対応する。version/操作が違う場合、互換性を推測して続行しない。資格情報・昇格・ネットワーク接続は不要。ファイル照会は現在のWindowsアカウントが読める既存ファイルだけが対象で、GUI接続は明示instanceのgui-statusだけ。WSL/cloud/別ホストからの接続はこの手順の対象外。describeではGUIへ接続しない。
 
 ## 3. 対象を明示して読む
 
@@ -74,7 +74,7 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=2`、`status=ok`、`env
 | --- | --- | --- |
 | 候補/契約発見 | 本手順＋manifest＋describe | SDK非同梱候補が対象 |
 | 保存記録の一覧/1結果検証 | reviews / verify-review | 同梱CLIで合成fixture検証済み |
-| 起動中GUIの状態 | 開発ソースv3 gui-status | 明示instance読取り、実GUI接続未受入、v2候補に非同梱 |
+| 起動中GUIの状態 | v3 gui-status | 新候補に同梱、明示instance読取り、実GUI接続未受入 |
 | GUIの対象結果表示 | なし | 未実装、UIAを正式APIとは呼ばない |
 | GUIと同じゲートで撮影/次の準備 | なし | 未実装、実機承認も必要 |
 | AIによる採用代行 | なし | 別の明示依頼とアプリ側認可が必要 |

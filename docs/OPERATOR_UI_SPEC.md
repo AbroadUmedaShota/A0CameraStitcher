@@ -1,5 +1,11 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 契約v3のローカル候補
+
+clean commit `a1aa21565661fc80db97d5f89e52dbab44cc062e` から `scripts/New-LocalSoftwareCandidate.ps1 -CandidateName software-a1aa215-01` を1回実行しexit 0（候補系列累計3/5）。新規専用native buildをSDK root空で構成し、本体/CLIを別publish、23ファイルのsize/hash、両Foundation一致、同梱apphostのdescribe v3/build/source一致を確認した。既存native C4819警告あり。manifest SHA-256は `5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E`。旧v2候補は上書きせず、旧manifest hashも不変だった。
+
+同梱CLI DLLを指定してOperatorStatusTestsを1回実行しexit 0（状態照会系列累計5/5、初回compile failureを含む）。実pipeで別CLI processから合成状態の照会、instanceの正規形式/起動時刻違い、未知命令/過大要求拒否、拒否後の継続、終了を確認し、候補23ファイルは試験前後でhash不変。保存結果検証系列は既に5/5のため再実行していない。SDK/WPD/GUI操作/実機操作は0回。試験hostは合成observerであり、本体MainWindowや異セッションからの実接続、視覚的GUI受入、clean PC、二台実機の証拠ではない。新候補もSDK非同梱・GUI/実機未受入・配布未承認のまま。機械操作入口はこのv3候補を固定指定するよう更新した。
+
 ## 2026-09-22 本体状態の正規読取り経路（開発ソースv3）
 
 ReviewCli契約v3に `gui-status --instance <PID-UTC起動ticks>` を追加した。MainWindowのバージョンダイアログでinstanceを提示し、GUIと同じDispatcher上からUiState/busy/live-view/撮影可否/履歴可否/終了中を観測する。照会はCommandを呼ばない。Launcher/HardwareSingleは対象外。固定prefix pipe、CurrentUserOnly、client/server双方の同一Windows session、process開始時刻と保持handle、OS pipe server PIDを照合する。5秒の協調deadline・要求256/応答4096 bytes、status固定命令だけ。停止したinstanceへ再接続/fallback/自動再試行しない。観測された可否は業務承認ではなく、撮影・採用の命令は追加していない。
