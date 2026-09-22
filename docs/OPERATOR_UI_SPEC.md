@@ -2,6 +2,8 @@
 
 ## 2026-09-22 SDK非同梱ローカル候補
 
+GUI確認追記（新規GUI候補系列1/5、実機0回）: `software-f9cafd4-01/app/A0CameraStitcher.M3.OperatorShell.exe` を引数なしで一度起動。起動モード選択の実ウィンドウとaccessibility treeを取得し、明示SIMULATED選択、HardwarePending表示、選択前にカメラ操作を開始しない案内を確認した。ただしSIMULATEDボタン入力は `coordinate input geometry is unavailable`、再観測後の前面化は `failed to activate captured window`。起動画面のままで履歴操作へ未到達、GUI受入はInconclusive。画面取得はアプリ描画を示さず、OS上にLockAppあり（存在だけではロック確定の証拠ではない）。追加入力を停止し、操作者のデスクトップ確認を待つ。OperatorShell PID 19656の起動画面を残した。CameraAgent/DualCameraAgentプロセスはその時点で検出されず、候補23ファイルのSHA-256は全件manifestと一致。採用・撮影・SDK/WPD操作を実施していない。起動検出を履歴導線・正常終了・実機受入の合格へ読み替えない。
+
 `scripts/New-LocalSoftwareCandidate.ps1` はcleanなcommitから本体とReviewCli v2を新規候補へpublishする。既存候補・native buildの再利用は禁止。候補専用の新規native buildをSDK root明示空・VS2022 x64でconfigure/buildし、同梱ファイルを許可リストで限定する。開始/終了時のsource状態を確認し、commit・recipe SHA-256・全同梱ファイルのsize/hashを完成manifestへ記録する。失敗時は未完成候補を残し、上書き・自動再試行しない。
 
 ソフトウェア候補 `build/local-software-candidates/software-f9cafd4-01` をsource commit `f9cafd4` から1回で生成しexit 0。既存nativeソースのC4819警告あり。完成manifest SHA-256は `2A284F550F0AC68070E9333466407301D642C92728FB7A4D7218845D7BBE0117`。23ファイルのsize/hashを照合した。同梱apphostのdescribe v2成功、同梱CLI DLLと同梱native adapterを使う `ReviewCliTests ... --packaged` はexit 0（verify-review系列累計4/5）。正常結果、種別/ID、不正metadata、原画像欠落/改変、採用拒否を合成fixtureで検証し、候補23ファイルのhashが前後不変だった。既存候補名での再実行は生成前に拒否されmanifest不変（候補系列2/5、生成1回＋拒否確認1回）。テストproject buildはwarning 0/error 0、初回の誤ったproject名はMSB1009でテスト未実行、訂正後build成功。独立レビューの既存native出力再利用とdirty出所の指摘は修正済み。
