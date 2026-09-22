@@ -1,5 +1,11 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-22 統合確認
+
+`d500cac` の統合先で既存依存をlocked restoreし、`dotnet build tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj --no-restore -c Release` はexit 0（既存native文字コード警告26件、error 0）。生成した同worktreeのDLLを `--hardware-single-history` で1回実行し、`PASS hardware single historical review is read-only and fail-closed`、exit 0を回収した。ページ送り・未採用で閉じる・撮影ID不一致拒否を含むfake operationsの試験で、実機GUI/SDK/WPD受入ではない。
+
+先行buildには資産情報不足、CMake検索path不足、既存CMake cacheのplatform不一致があり、合格扱いしない。旧buildの観測handle消失時も成否を推定せず、関連process非残存を確認した後に上記の実行結果を取得した。実機追加操作0回、preview枠2/5のまま。
+
 ## 2026-09-21 改訂設計：撮影ごとの詳細確認
 
 本人合意により、標準運用を「位置合わせ → 撮影 → 詳細確認 → 採用 → 次の原稿」とする。本節は以下の既存画面仕様のうち、ステージ自動切替・撮影後の戻り先・主操作の配置について優先する。実装済みを表すものではない。機体照合、保存、失敗時の安全契約は維持する。
@@ -89,7 +95,7 @@ flowchart TD
 
 今回の実装範囲は `MainWindow` と `HardwareSingleCameraWindow` の撮影結果導線。`AcceptReviewCommand` は現在の撮影ID・結果ID・原画像/合成画像hashを照合し、Pending保存済みの成功結果だけを採用できる。Hardware SingleもCamera Agentのcanonical run/transaction/alias pathから原画像を再検証してからPendingを復元し、採用直前にも再検証する。採用保存失敗では画面を維持し、自動再送しない。`PrepareNewCaptureCommand` は未採用でも旧画像を保持した撮り直し準備を許し、撮影を開始しない。結果画像は保存済みartifactからのみ表示し、`ReviewImageWindow` で全体・実ピクセル100%・中央の拡大とスクロールを提供する。中央移動は実際のseam位置の自動検出ではない。
 
-Hardware Singleは、`Pending`かつ`OriginalsOnly`の既存review recordを最新25件まで一覧表示できる。操作者が一件を明示選択した時だけ、その撮影IDでCamera Agentへread-only `get-transaction-result` を照会する。返答の撮影ID一致、完了状態、canonical原画像の既存path/size/SHA-256再検証が揃った時だけ確認画面へ入る。撮影・Live View・未確定transaction中は開けない。journal欠落・破損・別ID・未完了・原画像改変・Agent未検出では結果を開かず、撮影・再試行・削除を行わない。追加のartifact indexやファイル走査は使わない。
+Hardware Singleは、`Pending`かつ`OriginalsOnly`の既存review recordを新しい順に25件ずつ一覧表示でき、前後のページ送りで古い記録にも到達できる。未採用のまま「新しい撮影を準備」で履歴表示を閉じても、Pending記録と原画像は保持し、自動撮影しない。操作者が一件を明示選択した時だけ、その撮影IDでCamera Agentへread-only `get-transaction-result` を照会する。返答の撮影ID一致、完了状態、canonical原画像の既存path/size/SHA-256再検証が揃った時だけ確認画面へ入る。撮影・Live View・未確定transaction中は開けない。journal欠落・破損・別ID・未完了・原画像改変・Agent未検出では結果を開かず、撮影・再試行・削除を行わない。追加のartifact indexやファイル走査は使わない。
 
 残件: 実seam位置への移動、実機GUI受入。二台同時ライブの技術gateと外部機械操作経路は別に残る。
 
