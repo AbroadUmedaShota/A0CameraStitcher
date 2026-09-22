@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.Foundation.DualCamera;
@@ -8,22 +7,42 @@ namespace A0CameraStitcher.M3.OperatorShell;
 public partial class LaunchWindow : Window
 {
     private readonly string _cameraAgentExecutablePath;
+    private HardwareSingleCandidateInspection _candidateInspection;
 
     public LaunchWindow(string cameraAgentExecutablePath)
     {
         InitializeComponent();
         _cameraAgentExecutablePath = cameraAgentExecutablePath;
-        AgentPathText.Text = cameraAgentExecutablePath;
-        AgentAvailabilityText.Text = File.Exists(cameraAgentExecutablePath)
-            ? "検出済み（選択するまでカメラ操作は開始しません）"
-            : "未検出（実機画面はfail-closedで撮影を無効化します）";
-        AgentAvailabilityText.Foreground = File.Exists(cameraAgentExecutablePath)
-            ? System.Windows.Media.Brushes.DarkGreen
-            : System.Windows.Media.Brushes.DarkRed;
+        _candidateInspection = HardwareSingleCandidateManifest.Inspect(cameraAgentExecutablePath);
+        ApplyCandidateInspection(_candidateInspection);
     }
 
-    private void OnHardwareSingleClick(object sender, RoutedEventArgs eventArgs) =>
+    private void ApplyCandidateInspection(HardwareSingleCandidateInspection inspection)
+    {
+        AgentPathText.Text = "実行候補を読み取り確認（SDK・カメラは起動・照会しません）";
+        AgentAvailabilityText.Text = inspection.AvailabilityText;
+        AgentAvailabilityText.Foreground = inspection.CanStartHardware
+            ? System.Windows.Media.Brushes.DarkOrange
+            : System.Windows.Media.Brushes.DarkRed;
+        HardwareSingleButton.IsEnabled = inspection.CanStartHardware;
+    }
+
+    private void OnHardwareSingleClick(object sender, RoutedEventArgs eventArgs)
+    {
+        _candidateInspection = HardwareSingleCandidateManifest.Inspect(_cameraAgentExecutablePath);
+        ApplyCandidateInspection(_candidateInspection);
+        if (!_candidateInspection.CanStartHardware)
+        {
+            MessageBox.Show(
+                _candidateInspection.AvailabilityText,
+                "A0 Camera Stitcher — 実機一台構成は開始できません",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
         OpenAndClose(() => new HardwareSingleCameraWindow(_cameraAgentExecutablePath));
+    }
 
     private void OnSimulatedClick(object sender, RoutedEventArgs eventArgs) =>
         OpenAndClose(() => new MainWindow());

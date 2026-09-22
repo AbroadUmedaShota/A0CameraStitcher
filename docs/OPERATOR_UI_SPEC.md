@@ -1,5 +1,15 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-23 SDK非同梱候補の実機開始拒否と未取得表示
+
+実行ファイルの存在を緑色の接続確認として扱わない。launcherは `candidate/app/<agent>.exe` の一段上にある `candidate.manifest.json` を最大64KiBで読取り、schemaVersion 1・local-software-candidate・sdkIncluded falseなら「SDK非同梱のソフトウェア確認用候補。カメラ未照会」と表示してSingleCamera開始を無効化する。直接 `--hardware-single` の引数経路にも同じ拒否を適用し、クリック時にはmanifestを再確認する。manifestの追加fieldsは許容するが不正JSON・重複・型/数値overflow・過大・読取不能・reparse等は開始不可。manifest欠落やSDK同梱宣言trueも「SDK・実機接続は未確認」であり、既存のfail-closed readiness画面に進めるだけである。このmetadata確認はSDKをロードせず、カメラやAgentも起動しない。
+
+readinessのSDK未提供・読込み失敗は台数を未取得と表示する。未提供だけを未照会とし、読込み失敗から「カメラへ一切触れていない」とは推測しない。その他の失敗も、既存sdkStatusProbed/identity-boundまたは台数列挙後の固定binding結果がない限り既定0/0を接続0台と表示しない。spoolInspectedがfalseのカードは未照会、sdkStatusProbedがfalseの設定値等は未取得とする。撮影可否・設定・retry・protocol schemaは変更していない。
+
+検証: 最新OperatorShellTests Release buildはexit 0、warning 0/error 0。`--software-candidate-launch <software-a1aa215-01のAgent絶対path>` は2回ともPASS（新規表示/起動拒否系列2/5、2回目はレビューで修正した設定要約の未取得表示も検査）。実物の多field manifest認識、software-onlyの直接引数拒否、SDK宣言true/欠落の未確認表示、不正/重複/overflow/過大拒否を確認。fake VMでSDK未提供・読込み失敗・profile不正・readiness例外を未取得とし、確定したcamera_count_mismatchの0/0とは区別、撮影/LV呼出し0を確認した。最初のSDK-free native再buildは既存C4819警告24件、error 0。アクセス拒否/reparseの実環境故障注入、視覚的GUI受入、実機受入は未実施。旧凍結候補を変更していない。
+
+画面確認はComputer Useの `list_apps` がtimeoutとなり、2秒後の同一読取り再試行とkernel reset後の最終読取りも失敗したため中止。アプリ起動・GUI入力・SDK操作は行わず、GUI合格とはしない。ソフト検証後のA0関連processは0だった。
+
 ## 2026-09-22 契約v3のローカル候補
 
 clean commit `a1aa21565661fc80db97d5f89e52dbab44cc062e` から `scripts/New-LocalSoftwareCandidate.ps1 -CandidateName software-a1aa215-01` を1回実行しexit 0（候補系列累計3/5）。新規専用native buildをSDK root空で構成し、本体/CLIを別publish、23ファイルのsize/hash、両Foundation一致、同梱apphostのdescribe v3/build/source一致を確認した。既存native C4819警告あり。manifest SHA-256は `5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E`。旧v2候補は上書きせず、旧manifest hashも不変だった。

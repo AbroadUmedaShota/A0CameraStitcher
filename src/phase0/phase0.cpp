@@ -378,10 +378,36 @@ private:
 
 } // namespace
 
-TransportError::TransportError(std::string category, std::string message)
-    : std::runtime_error(std::move(message)), category_(std::move(category)) {}
+std::string_view SdkLoadStageToken(SdkLoadStage stage) noexcept {
+    switch (stage) {
+    case SdkLoadStage::none: return "";
+    case SdkLoadStage::runtime_module: return "runtime_module";
+    case SdkLoadStage::dll_directory: return "dll_directory";
+    case SdkLoadStage::ptp_library: return "ptp_library";
+    case SdkLoadStage::module_library: return "module_library";
+    case SdkLoadStage::maid_entrypoint: return "maid_entrypoint";
+    case SdkLoadStage::maid_open: return "maid_open";
+    case SdkLoadStage::module_capabilities: return "module_capabilities";
+    case SdkLoadStage::progress_callback: return "progress_callback";
+    case SdkLoadStage::event_callback: return "event_callback";
+    case SdkLoadStage::ui_callback: return "ui_callback";
+    case SdkLoadStage::module_mode: return "module_mode";
+    case SdkLoadStage::enum_children: return "enum_children";
+    case SdkLoadStage::module_version: return "module_version";
+    }
+    return "";
+}
+
+TransportError::TransportError(
+    std::string category,
+    std::string message,
+    SdkLoadStage load_stage)
+    : std::runtime_error(std::move(message)),
+      category_(std::move(category)),
+      load_stage_(load_stage) {}
 
 const std::string& TransportError::Category() const noexcept { return category_; }
+SdkLoadStage TransportError::LoadStage() const noexcept { return load_stage_; }
 
 UncertainDispatchError::UncertainDispatchError(
     std::string category, std::string message, std::vector<ImageCandidate> candidates)

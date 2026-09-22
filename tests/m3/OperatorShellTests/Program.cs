@@ -19,6 +19,21 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 const string persistentChildScenarioVariable = "A0_CAMERA_AGENT_TEST_CHILD_SCENARIO";
+if (args is ["--software-candidate-launch"] or ["--software-candidate-launch", _])
+{
+    try
+    {
+        SoftwareCandidateLaunchContracts.Run(args.Length == 2 ? args[1] : null);
+        await HardwareSingleUnavailableReadinessDisplayAsync();
+        Console.WriteLine("PASS software candidate launch gates and unobserved hardware display; hardwareOperations=0");
+        return 0;
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL software candidate launch: {error}");
+        return 1;
+    }
+}
 if (args is ["--historical-review-window"])
 {
     try
@@ -1700,6 +1715,64 @@ static async Task<IReadOnlyList<(string Operation, string SessionId)>> ReadRecor
             Operation: entry.GetProperty("operation").GetString() ?? string.Empty,
             SessionId: entry.GetProperty("sessionId").GetString() ?? string.Empty))
         .ToList();
+}
+
+static async Task HardwareSingleUnavailableReadinessDisplayAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        foreach (var category in new[] { "licensed_adapter_unavailable", "sdk_load_failed", "capture_profile_invalid", "readiness_exception", "camera_count_mismatch" })
+        {
+            var operations = new FakeHardwareSingleCameraOperations
+            {
+                ReadinessFactory = alias => HardwareTestData.ReadyHardware(alias) with
+                {
+                    Ready = false,
+                    SdkCameraCount = 0,
+                    WpdCameraCount = 0,
+                    SdkStatusProbed = false,
+                    SdkIdentityBound = false,
+                    WpdIdentityBound = false,
+                    SdkAliasMatches = false,
+                    WpdAliasMatches = false,
+                    SpoolInspected = false,
+                    FailureCategory = category,
+                },
+            };
+            using var viewModel = new HardwareSingleCameraViewModel(operations,
+                new HardwareSingleAppStateStore(Path.Combine(root, category)),
+                new HardwareOriginalExporter(Path.Combine(root, category, "exports")));
+            await viewModel.InitializeAsync();
+            viewModel.ExclusiveCameraControlConfirmed = true;
+            await viewModel.CheckReadinessAsync();
+            var observedZero = category == "camera_count_mismatch";
+            Check.True(viewModel.ReadinessDetail.StartsWith(observedZero ? "SDK/WPD: 0/0 台" : "SDK/WPD: 未取得/未取得", StringComparison.Ordinal),
+                "Unobserved inventory and confirmed zero cameras must remain distinct.");
+            Check.False(viewModel.ReadinessDetail.Contains("spool payload: 0", StringComparison.Ordinal),
+                "Failed readiness must not invent an empty-card observation.");
+            if (category is not ("licensed_adapter_unavailable" or "sdk_load_failed"))
+            {
+                Check.True(viewModel.ReadinessDetail.Contains("settings: 未取得", StringComparison.Ordinal) &&
+                    viewModel.ReadinessDetail.Contains("profile: 未確認", StringComparison.Ordinal),
+                    "Unobserved settings must not be described as matching or mismatching a profile.");
+            }
+            Check.True(viewModel.AgentAvailabilityText.Contains("未確認", StringComparison.Ordinal) &&
+                viewModel.ObservedSettingsText.Contains("未取得", StringComparison.Ordinal),
+                "Executable existence must not imply hardware readiness.");
+            if (category == "sdk_load_failed")
+                Check.False(viewModel.ReadinessDetail.Contains("未照会", StringComparison.Ordinal),
+                    "Failed SDK initialization must not claim it never touched the device.");
+            Check.False(viewModel.CanCapture, "SDK failure must leave capture gated.");
+            Check.Equal(1, operations.ReadinessCallCount);
+            Check.Equal(0, operations.CaptureCallCount);
+            Check.Equal(0, operations.LiveViewCallCount);
+        }
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static async Task<int> RunSdklessPersistentReadinessE2EAsync(string agentExecutablePath)

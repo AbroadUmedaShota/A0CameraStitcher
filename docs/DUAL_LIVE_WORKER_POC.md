@@ -2,6 +2,20 @@
 
 ## 結論
 
+### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
+
+本人の一台で進める指示を受け、既存preview枠の3回目を実施した。AOPC-11-NOTEで正常なD810一台、A0関連processなし、委譲隔離markerなしを確認。current source `319335fa96f76819b36fee7d33fd8d0e40fc8de9` の `SingleWorkerPreview` をSDK有効構成でbuild（exit 0）し、SHA-256 `E02813FD0757672271D2D206A9B07EE0EE170FDF6C5E8E85C39980CFB0279B68` のexeで `preview-single --confirm-one-physical-camera` を一回だけ実行した。目的は更新後の終了receiptを含む単体経路の確認であり、凍結済み旧workerの再合格ではない。
+
+結果はexit 5、`status=failed`、`error=sdk_load_failed`、`frames=0`、`bytes=0`。openingからclosingへ移り、starting段階には達しなかった。`closeReceipt` はSource/Module/process claimの解放をすべてtrueと報告し、終了後のA0関連processは0。`closeConfirmed=true` だが、開始していないLive Viewのoff確認はfalseであり、Live Viewの取得・停止成功とは扱わない。エラー分類だけではDLL読み込み、Module Open、初期化callback等のどこが失敗したか確定できない。
+
+rawログはignoredの `build/worker-selection-sdk/hardware-run-03.log` に保持した。撮影・撮影設定変更・WPD・カード操作・画像保存・自動再試行は0回。凍結済み旧workerと既存配布候補は変更していない。**実機preview枠は累計3/5消費、残り2回**。追加実行は原因切り分け後に別の有効な検証として判断し、同条件では再試行しない。以下の2/5記述は当時の履歴である。二台同時Live View、物理alias照合、撮影/品質受入は未達のまま。
+
+### SDK初期化の匿名段階診断（software検証、実機再実行なし）
+
+run-03の分類だけでは失敗点を特定できなかったため、次の既承認preview実行に備えて `sdkLoadStage` を追加した。SDK初期化の `sdk_load_failed` に限り、runtime配置確認、DLL directory、PTP/module library、entrypoint、Module Open、capability/callback、module mode、子列挙、version取得のどこで例外が発生したかをenumから固定tokenで返す。stageなし・未知enumは空文字。SDK戻り値・OS自由文・path・個体情報はJSONへ追加しない。既存error分類/exit/終了確認/リース/自動再試行禁止は維持する。旧run-03にはこの情報がなく、今回の原因は未確定のまま。
+
+`build/single-worker-diagnostics-sdk` を新規生成し、SDK有効のworkerとfakeテストをbuildしてexit 0（既存C4819警告あり）。`ctest --test-dir build/single-worker-diagnostics-sdk -C Release -R '^single_worker_preview_contracts$' --output-on-failure` を1回実行、1/1 PASS、0.35秒、exit 0。sdk_load_failed段階伝搬、Open一回・Start/Frame/Stopなし・Close一回、終了receipt、未知stage空をfakeで検証した。実SDKロード/実機追加試験は0回。run-03のexeおよび旧凍結workerのhash不変を確認し、診断buildによる上書きを避けた。予算は3/5・残り2回。
+
 ### 非画像の試験記録と表示失敗の保持（2026-09-22）
 
 実機試験画面は開始ボタン時、worker生成より前にexe隣接の `logs/preview-run-<process>-<tick>.jsonl` をCREATE_NEWで作成する。固定ASCII event・連番・単調時刻・数値だけを各行write/flushし、画像・Source token・serial・自由文例外を保存しない。通常起動/UI-only/describeでは記録を作らない。作成失敗はSDK開始を禁止、操作後の記録失敗は終了確認へ進む。終了記録の失敗もSDK閉鎖を妨げず画面で未合格とする。ログはignored build配下で保持し、既存ログの上書き・自動削除はない。

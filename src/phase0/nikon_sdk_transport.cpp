@@ -2695,54 +2695,75 @@ private:
     }
 
     void OpenModule(std::chrono::steady_clock::time_point deadline) {
-        const auto resolved_module = detail::ResolveNikonSdkModuleFromEnvironment();
-        if (!resolved_module) {
-            throw TransportError(
-                "sdk_load_failed",
-                "Nikon D810 SDK runtime module is unavailable, untrusted, or incomplete");
-        }
-        const fs::path& module_path = *resolved_module;
-        const std::wstring directory = module_path.parent_path().wstring();
-        dll_directory_ = AddDllDirectory(directory.c_str());
-        if (dll_directory_ == nullptr) throw TransportError("sdk_load_failed", "SDK DLL directory could not be registered");
-        // Type0014 loads the USB transport at runtime rather than through its
-        // import table.  Preload it from the licensed SDK directory so camera
-        // discovery never depends on the process working directory.
-        const fs::path ptp_path = module_path.parent_path() / L"NkdPTP.dll";
-        ptp_handle_ = LoadLibraryExW(ptp_path.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
-        if (ptp_handle_ == nullptr) throw TransportError("sdk_load_failed", "Nikon USB transport could not be loaded");
-        module_handle_ = LoadLibraryExW(module_path.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
-        if (module_handle_ == nullptr) throw TransportError("sdk_load_failed", "Type0014 module could not be loaded");
-        entry_ = reinterpret_cast<LPMAIDEntryPointProc>(GetProcAddress(module_handle_, "MAIDEntryPoint"));
-        if (entry_ == nullptr) throw TransportError("sdk_load_failed", "MAIDEntryPoint was not found");
+        SdkLoadStage load_stage = SdkLoadStage::runtime_module;
+        try {
+            const auto resolved_module = detail::ResolveNikonSdkModuleFromEnvironment();
+            if (!resolved_module) {
+                throw TransportError(
+                    "sdk_load_failed",
+                    "Nikon D810 SDK runtime module is unavailable, untrusted, or incomplete");
+            }
+            const fs::path& module_path = *resolved_module;
+            const std::wstring directory = module_path.parent_path().wstring();
+            load_stage = SdkLoadStage::dll_directory;
+            dll_directory_ = AddDllDirectory(directory.c_str());
+            if (dll_directory_ == nullptr) throw TransportError("sdk_load_failed", "SDK DLL directory could not be registered");
+            // Type0014 loads the USB transport at runtime rather than through its
+            // import table.  Preload it from the licensed SDK directory so camera
+            // discovery never depends on the process working directory.
+            const fs::path ptp_path = module_path.parent_path() / L"NkdPTP.dll";
+            load_stage = SdkLoadStage::ptp_library;
+            ptp_handle_ = LoadLibraryExW(ptp_path.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+            if (ptp_handle_ == nullptr) throw TransportError("sdk_load_failed", "Nikon USB transport could not be loaded");
+            load_stage = SdkLoadStage::module_library;
+            module_handle_ = LoadLibraryExW(module_path.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+            if (module_handle_ == nullptr) throw TransportError("sdk_load_failed", "Type0014 module could not be loaded");
+            load_stage = SdkLoadStage::maid_entrypoint;
+            entry_ = reinterpret_cast<LPMAIDEntryPointProc>(GetProcAddress(module_handle_, "MAIDEntryPoint"));
+            if (entry_ == nullptr) throw TransportError("sdk_load_failed", "MAIDEntryPoint was not found");
 
-        module_.value.refClient = reinterpret_cast<NKREF>(this);
-        const NKERROR opened = Call(nullptr, kNkMAIDCommand_Open, 0, kNkMAIDDataType_ObjectPtr,
-            reinterpret_cast<NKPARAM>(&module_.value));
-        if (opened != kNkMAIDResult_NoError) {
-            throw TransportError("sdk_load_failed", "SDK module open failed: " + ResultText(opened));
-        }
-        module_.opened = true;
-        EnumerateCapabilities(module_, deadline, "sdk_load_failed");
-        SetProgressCallback(module_, deadline, "sdk_load_failed");
-        SetEventCallback(module_, deadline, "sdk_load_failed");
-        SetUiCallback(module_, deadline);
-        if (Supports(module_, kNkMAIDCapability_ModuleMode, kNkMAIDCapOperation_Set)) {
-            SetUnsigned(module_, kNkMAIDCapability_ModuleMode, kNkMAIDModuleMode_Controller,
-                deadline, "sdk_load_failed");
-        }
-        // Ask MAID to publish the currently attached source objects.  Reading
-        // the Children capability alone is not sufficient on the D810 module:
-        // EnumChildren emits the AddChild events that make the source visible.
-        RunCompleted(module_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
-            0, deadline, "sdk_load_failed");
-        if (Supports(module_, kNkMAIDCapability_Version, kNkMAIDCapOperation_Get)) {
-            std::ostringstream version;
-            version << "0x" << std::hex << std::uppercase
-                    << GetUnsigned(module_, kNkMAIDCapability_Version, deadline, "sdk_load_failed");
-            sdk_version_ = version.str();
+            module_.value.refClient = reinterpret_cast<NKREF>(this);
+            load_stage = SdkLoadStage::maid_open;
+            const NKERROR opened = Call(nullptr, kNkMAIDCommand_Open, 0, kNkMAIDDataType_ObjectPtr,
+                reinterpret_cast<NKPARAM>(&module_.value));
+            if (opened != kNkMAIDResult_NoError) {
+                throw TransportError("sdk_load_failed", "SDK module open failed: " + ResultText(opened));
+            }
+            module_.opened = true;
+            load_stage = SdkLoadStage::module_capabilities;
+            EnumerateCapabilities(module_, deadline, "sdk_load_failed");
+            load_stage = SdkLoadStage::progress_callback;
+            SetProgressCallback(module_, deadline, "sdk_load_failed");
+            load_stage = SdkLoadStage::event_callback;
+            SetEventCallback(module_, deadline, "sdk_load_failed");
+            load_stage = SdkLoadStage::ui_callback;
+            SetUiCallback(module_, deadline);
+            if (Supports(module_, kNkMAIDCapability_ModuleMode, kNkMAIDCapOperation_Set)) {
+                load_stage = SdkLoadStage::module_mode;
+                SetUnsigned(module_, kNkMAIDCapability_ModuleMode, kNkMAIDModuleMode_Controller,
+                    deadline, "sdk_load_failed");
+            }
+            // Ask MAID to publish the currently attached source objects.  Reading
+            // the Children capability alone is not sufficient on the D810 module:
+            // EnumChildren emits the AddChild events that make the source visible.
+            load_stage = SdkLoadStage::enum_children;
+            RunCompleted(module_, kNkMAIDCommand_EnumChildren, 0, kNkMAIDDataType_Null,
+                0, deadline, "sdk_load_failed");
+            if (Supports(module_, kNkMAIDCapability_Version, kNkMAIDCapOperation_Get)) {
+                load_stage = SdkLoadStage::module_version;
+                std::ostringstream version;
+                version << "0x" << std::hex << std::uppercase
+                        << GetUnsigned(module_, kNkMAIDCapability_Version, deadline, "sdk_load_failed");
+                sdk_version_ = version.str();
+            }
+        } catch (const TransportError& error) {
+            if (error.Category() == "sdk_load_failed" &&
+                error.LoadStage() == SdkLoadStage::none) {
+                throw TransportError(error.Category(), error.what(), load_stage);
+            }
+            throw;
         }
     }
 

@@ -140,7 +140,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public string AgentExecutablePath => _operations.AgentExecutablePath;
 
     public string AgentAvailabilityText => _operations.AgentExecutableAvailable
-        ? "Camera Agent実行ファイル: 検出済み"
+        ? "実行ファイルあり（SDK・実機接続は未確認）"
         : "Camera Agent実行ファイル: 未検出";
 
     public string ExportDirectory => _exporter.ExportDirectory;
@@ -699,19 +699,50 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             var reply = await _operations.GetReadinessAsync(SelectedCamera).ConfigureAwait(true);
             _readiness = reply.Payload;
             ReadinessSummary = reply.Payload.Ready ? "撮影準備OK" : "撮影不可";
-            ReadinessDetail =
-                $"SDK/WPD: {reply.Payload.SdkCameraCount}/{reply.Payload.WpdCameraCount} 台、" +
-                $"alias: {(reply.Payload.SdkAliasMatches && reply.Payload.WpdAliasMatches ? "一致" : "不一致")}、" +
-                $"spool payload: {reply.Payload.SpoolPayloadObjectCount}、" +
-                $"profile: {(reply.Payload.CaptureProfileApproved ? $"{reply.Payload.CaptureProfileId} v{reply.Payload.CaptureProfileVersion}" : "未承認")} / " +
-                $"期限(UTC): {(reply.Payload.CaptureProfileExpiresAtUtc is { } expiry ? expiry.ToString("O") : "なし")} / " +
-                $"alias: {(reply.Payload.CaptureProfileAliasMatches ? "一致" : "未一致")} / " +
-                $"settings: {(reply.Payload.SettingsMatchApprovedProfile ? "一致" : "未一致")}、" +
-                $"firmware: {reply.Payload.Firmware}、Live View: {reply.Payload.LiveViewStatus}";
-            ObservedSettingsText = FormatObservedSettings(reply.Payload.ObservedSettings);
-            ActivityText = reply.Payload.Ready
-                ? $"{SelectedCamera} は一台構成の撮影条件を満たしています。"
-                : $"状態確認でblockerを検出しました: {reply.ResultCode}";
+            var sdkUnavailable = reply.Payload.FailureCategory is "sdk_load_failed" or "licensed_adapter_unavailable";
+            if (sdkUnavailable)
+            {
+                var reason = reply.Payload.FailureCategory == "licensed_adapter_unavailable"
+                    ? "SDKが利用できないため、カメラは未照会です。"
+                    : "SDK読込みに失敗したため、カメラ状態を確認できません。";
+                ReadinessDetail = "SDK/WPD: 未取得/未取得。" + reason;
+                ObservedSettingsText = "SDKが利用できないため未取得";
+                ActivityText = reason + "撮影は開始されません。";
+            }
+            else
+            {
+                // hardware.v1 has no inventory-attempt field. Only existing proof
+                // flags or ResolveExactlyOneBoundCamera's completed-inventory
+                // outcomes establish that zero counts are observations. Unknown
+                // failures (including preflight/profile failures) stay unobserved.
+                var inventoryObserved = reply.Payload.SdkStatusProbed ||
+                    reply.Payload.SdkIdentityBound || reply.Payload.WpdIdentityBound ||
+                    reply.Payload.FailureCategory is "camera_count_mismatch" or
+                        "identity_unbound" or "cross_transport_alias_mismatch";
+                var counts = inventoryObserved
+                    ? $"{reply.Payload.SdkCameraCount}/{reply.Payload.WpdCameraCount} 台"
+                    : "未取得/未取得";
+                var aliasStatus = !inventoryObserved ? "未照会"
+                    : reply.Payload.SdkAliasMatches && reply.Payload.WpdAliasMatches ? "一致" : "不一致";
+                var spoolCount = reply.Payload.SpoolInspected
+                    ? reply.Payload.SpoolPayloadObjectCount.ToString()
+                    : "未照会";
+                ReadinessDetail =
+                    $"SDK/WPD: {counts}、alias: {aliasStatus}、" +
+                    $"spool payload: {spoolCount}、" +
+                    $"profile: {(!reply.Payload.SdkStatusProbed ? "未確認" : reply.Payload.CaptureProfileApproved ? $"{reply.Payload.CaptureProfileId} v{reply.Payload.CaptureProfileVersion}" : "未承認")} / " +
+                    $"期限(UTC): {(!reply.Payload.SdkStatusProbed ? "未確認" : reply.Payload.CaptureProfileExpiresAtUtc is { } expiry ? expiry.ToString("O") : "なし")} / " +
+                    $"alias: {(!reply.Payload.SdkStatusProbed ? "未確認" : reply.Payload.CaptureProfileAliasMatches ? "一致" : "未一致")} / " +
+                    $"settings: {(!reply.Payload.SdkStatusProbed ? "未取得" : reply.Payload.SettingsMatchApprovedProfile ? "一致" : "未一致")}、" +
+                    $"firmware: {(reply.Payload.SdkStatusProbed ? reply.Payload.Firmware : "未取得")}、" +
+                    $"Live View: {(reply.Payload.SdkStatusProbed ? reply.Payload.LiveViewStatus : "未取得")}";
+                ObservedSettingsText = reply.Payload.SdkStatusProbed
+                    ? FormatObservedSettings(reply.Payload.ObservedSettings)
+                    : "設定値は未取得です。";
+                ActivityText = reply.Payload.Ready
+                    ? $"{SelectedCamera} は一台構成の撮影条件を満たしています。"
+                    : $"状態確認でblockerを検出しました: {reply.ResultCode}";
+            }
             TechnicalDetail =
                 $"resultCode: {reply.ResultCode}\n" +
                 $"captureProfileId: {reply.Payload.CaptureProfileId}\n" +

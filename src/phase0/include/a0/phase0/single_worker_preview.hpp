@@ -7,6 +7,7 @@
 namespace a0::phase0 {
 struct SingleWorkerPreviewResult {
     std::string error;
+    SdkLoadStage sdk_load_stage{SdkLoadStage::none};
     std::size_t frames{}, bytes{};
     bool start_attempted{}, stopped{}, closed{};
     bool source_closed{}, module_closed{}, process_claim_released{};
@@ -35,7 +36,10 @@ SingleWorkerPreviewResult RunSingleWorkerPreview(Transport& transport, Observe&&
         }
         observe("stopping"); stop_attempted = true;
         transport.StopLiveView(10s); result.stopped = true;
-    } catch (const TransportError& e) { result.error = e.Category(); }
+    } catch (const TransportError& e) {
+        result.error = e.Category();
+        result.sdk_load_stage = e.LoadStage();
+    }
       catch (...) { result.error = "worker_unexpected_error"; }
     // Safe close is permitted past the operation deadline. Never repeat STOP.
     if (started && !stop_attempted) {

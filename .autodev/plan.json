@@ -74,7 +74,9 @@
     "branch": "codex/dual-live-worker-poc-20260922",
     "baseline_commit": "f1f860d",
     "status": "in_progress_not_accepted",
-    "hardware_preview_budget": {"maximum": 5, "consumed": 2, "remaining": 3, "evidence_ref": "docs/DUAL_LIVE_WORKER_POC.md"},
+    "hardware_preview_budget": {"maximum": 5, "consumed": 3, "remaining": 2, "evidence_ref": "docs/DUAL_LIVE_WORKER_POC.md"},
+    "latest_hardware_preview": "2026-09-23 single-camera run-03, source 319335f, failed before Live View start with sdk_load_failed, frames 0, exit 5. Close receipt confirmed source/module/process claim released and no A0 process remained. No capture, settings change, WPD, card operation or retry. Exact SDK initialization failure stage is not observed; dual physical acceptance remains unverified.",
+    "single_camera_software_progress": "2026-09-23 software-only candidates now block launcher and direct hardware-single entry using bounded parent manifest inspection. Executable presence remains unconfirmed. Unobserved SDK/WPD counts, card spool and settings no longer appear as measured zero/empty/mismatch. Focused real-manifest and fake-VM contract passed twice (2/5 including summary-setting review fix). Added enum-only sdkLoadStage to future single-worker results; SDK-enabled compile and fake lifecycle contract passed once without rerunning physical hardware. Existing run-03 and frozen artifacts preserved. Computer Use list-apps timeout blocked GUI observation before app launch/input; GUI and hardware acceptance remain incomplete.",
     "stages": [
       {"id": 1, "work_item_ids": ["WI-0014L"], "status": "in_progress", "acceptance": "Distinct physical camera selection, controller-death quarantine across all camera entrypoints, and independently confirmed close of both workers; local source tokens alone are not body identity."},
       {"id": 2, "work_item_ids": ["WI-0014L"], "depends_on": [1], "status": "not_verified", "acceptance": "Both physical bodies deliver fresh concurrent frames and stop/close safely within the existing remaining preview-only budget; no capture, WPD, settings write, card operation or retry."},

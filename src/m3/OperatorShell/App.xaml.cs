@@ -280,6 +280,16 @@ public sealed record ApplicationLaunchOptions(
                 : CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent),
             _ => singleDefault,
         };
+        if (mode == ApplicationLaunchMode.HardwareSingle)
+        {
+            // Direct CLI launch must not bypass the software-candidate launcher gate.
+            // Packaging metadata never establishes SDK or camera readiness.
+            var candidate = HardwareSingleCandidateManifest.Inspect(singlePath);
+            if (!candidate.CanStartHardware)
+            {
+                throw new ArgumentException(candidate.AvailabilityText);
+            }
+        }
         var dualPath = mode == ApplicationLaunchMode.HardwareDual
             ? CameraAgentExecutablePolicy.Resolve(normalizedBase, configuredAgent ?? dualDefault)
             : dualDefault;

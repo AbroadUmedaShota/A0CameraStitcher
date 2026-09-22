@@ -9,9 +9,13 @@ int failures{};
 void Check(bool value, const char* message) { if (!value) { ++failures; std::cerr << message << '\n'; } }
 struct Fake {
     std::string fail;
+    std::string category{"injected"};
+    SdkLoadStage load_stage{SdkLoadStage::none};
     unsigned opens{}, starts{}, reads{}, stops{}, closes{};
     bool ended{};
-    void Fault(const char* phase) { if (fail == phase) throw TransportError("injected", phase); }
+    void Fault(const char* phase) {
+        if (fail == phase) throw TransportError(category, phase, load_stage);
+    }
     void OpenSingleWorkerLiveView(std::chrono::seconds) { ++opens; Fault("open"); }
     void StartSingleWorkerLiveView(std::chrono::seconds) { ++starts; Fault("start"); }
     void ValidateSingleWorkerLiveView(std::chrono::seconds) { Fault("topology"); }
@@ -40,6 +44,23 @@ int main() {
         normal.reads == 3 && normal.stops == 1 && normal.closes == 1, "normal lifecycle");
     Check(result.source_closed && result.module_closed && result.process_claim_released,
           "checked close reports all three independent exit states");
+    Fake typed_open;
+    typed_open.fail = "open";
+    typed_open.category = "sdk_load_failed";
+    typed_open.load_stage = SdkLoadStage::module_library;
+    const auto typed_result = RunSingleWorkerPreview(typed_open, observe, check);
+    Check(typed_result.error == "sdk_load_failed" &&
+              typed_result.sdk_load_stage == SdkLoadStage::module_library &&
+              SdkLoadStageToken(typed_result.sdk_load_stage) == "module_library",
+          "typed SDK load stage is preserved without changing the error category");
+    Check(typed_open.opens == 1 && typed_open.starts == 0 && typed_open.reads == 0 &&
+              typed_open.stops == 0 && typed_open.closes == 1 && typed_result.SafeToRelease() &&
+              typed_result.source_closed && typed_result.module_closed && typed_result.process_claim_released,
+          "typed SDK load stage preserves no-start, no-retry, and checked close behavior");
+    Check(result.sdk_load_stage == SdkLoadStage::none &&
+              SdkLoadStageToken(SdkLoadStage::none).empty() &&
+              SdkLoadStageToken(static_cast<SdkLoadStage>(999)).empty(),
+          "absent and unknown stages must not invent diagnostic text");
     for (const auto* failure : {"open", "start", "topology", "frame", "stop", "close", "retained"}) {
         Fake f; f.fail = failure; auto r = RunSingleWorkerPreview(f, observe, check);
         Check(!r.Passed() && f.opens == 1 && f.closes == 1 && f.reads <= 3 && f.stops <= 1, "failure must not retry");

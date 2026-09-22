@@ -61,6 +61,7 @@ int main(int argc, char** argv) {
                   << ",\"moduleClosed\":" << (result.module_closed ? "true" : "false")
                   << ",\"processClaimReleased\":" << (result.process_claim_released ? "true" : "false")
                   << "}"
+                  << ",\"sdkLoadStage\":\"" << SdkLoadStageToken(result.sdk_load_stage) << "\""
                   << ",\"error\":\"" << result.error << "\"}\n" << std::flush;
         if (!result.SafeToRelease()) {
             // Intentional quarantine, not success/automatic recovery. Keep the

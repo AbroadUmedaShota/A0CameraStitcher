@@ -17,13 +17,40 @@ namespace a0::phase0 {
 
 struct ProductionDualIdentityPreflightRequest;
 
+// Fixed, anonymous attribution for a failure while opening the licensed SDK
+// runtime. These tokens deliberately omit SDK result codes, paths, and any
+// camera-derived data.
+enum class SdkLoadStage {
+    none,
+    runtime_module,
+    dll_directory,
+    ptp_library,
+    module_library,
+    maid_entrypoint,
+    maid_open,
+    module_capabilities,
+    progress_callback,
+    event_callback,
+    ui_callback,
+    module_mode,
+    enum_children,
+    module_version,
+};
+
+[[nodiscard]] std::string_view SdkLoadStageToken(SdkLoadStage stage) noexcept;
+
 class TransportError final : public std::runtime_error {
 public:
-    TransportError(std::string category, std::string message);
+    TransportError(
+        std::string category,
+        std::string message,
+        SdkLoadStage load_stage = SdkLoadStage::none);
     [[nodiscard]] const std::string& Category() const noexcept;
+    [[nodiscard]] SdkLoadStage LoadStage() const noexcept;
 
 private:
     std::string category_;
+    SdkLoadStage load_stage_;
 };
 
 struct Timeouts {
