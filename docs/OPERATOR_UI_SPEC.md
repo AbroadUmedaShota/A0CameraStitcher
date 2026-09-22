@@ -117,6 +117,16 @@ Hardware Singleは、`Pending`かつ`OriginalsOnly`の既存review recordを新�
 
 機械操作標準の段階対応: 今回のUI commandと安定したUI識別子はGUI受入用の補助経路。外部AIが起動中アプリの特定結果を照会・採用する認可済みCLI/IPCは未接続であり、内部VMの試験を正式な外部API受入に代用しない。採用対象ID・環境・副作用・再送結果を確認できる正規経路の追加と実接続受入を残件として維持する。
 
+2026-09-22の段階実装: `src/m3/ReviewCli/A0CameraStitcher.M3.ReviewCli.csproj` をWindowsローカルの保存済みreview metadata読取り専用CLIとして追加した。`describe` と `reviews --root <既存operator-review絶対path> [--offset 0] [--limit 25]` のみを公開し、GUIが使用する `FileOperatorReviewStore` の検証を共有する。rootは同一Windows利用者が読める固定drive上の既存directory、ancestor reparse/UNC/device pathは拒否。アプリinstanceには接続せず、権限昇格・camera agent起動・画像読込み・撮影・採用・削除はしない。明示的なroot指定は観測対象を指定するだけで、採用の業務承認にはならない。
+
+出力はstdout JSON、requestId/契約version/build/環境/観測時刻/status/data/errorCodeを含む。対象pathは直接返さず正規化pathのSHA-256 fingerprintを返す。成功0件と `observation_unavailable`・`invalid_metadata`・`access_denied`・`observation_timeout` を区別し、異常時のexitは2、成功は0。自由文例外・未知の入力operationは反射しない。既存 `.review.lock` を読取りで排他Openし、directory/lockを新規作成しない。未初期化は0件にせず観測不能、`.partial`や破損記録は推測せず拒否する。最大1000記録を検証、返却25件まで、offset 0..1000。10秒の協調cancelがあり、自動再試行なし。OSの同期file I/Oの強制停止保証ではない。
+
+各ページは独立したlock内snapshotであり、ページ間のGUI更新があればoffset位置は変わり得る。metadataのAcceptedは画像検証・品質承認・release受入の証拠ではない。元画像hash照合、稼働中GUIへの明示対象操作、AIによる採用認可、主要業務のend-to-end機械操作受入は未完である。
+
+独立read-onlyレビューはstandalone metadata照会の範囲でblocking findingなし。既存lockの非作成、reparse/partial拒否、scan/page上限、自由文抑制、画像検証を保証しない出力を確認。GUI採用や実画像整合性をレビュー合格へ含めない。
+
+検証: CLI/testのRelease build成功（警告0、error0）。`dotnet run --project tests/m3/ReviewCliTests/A0CameraStitcher.M3.ReviewCliTests.csproj -c Release -- <ReviewCli.dll絶対path>` を1回実行、exit 0、`reviewCliContracts=passed`。実CLI子processでdescribe、27件のページ送り、正常0件、未初期化/欠落/重複引数/上限超過/非公開accept/partial拒否を確認。読み取り前後の全fixture fileのSHA-256一致を確認した。合成metadataのみで実カメラ/実画像/実ユーザーreview保存先への操作は0回。既存GUIの実機受入を代替しない。
+
 エラーは「何が失敗したか」「何が保存されたか」「次にできる操作」を通常表示し、SDKコードやログは技術詳細へ分ける。原因未確定のエラーを電池不足と断定しない。
 
 人とAIは同一の状態・操作可否判定を使う。撮影開始、状態照会、画像表示、採用、次の準備を別操作とし、安定した操作ID、対象撮影ID、完了結果、拒否理由を提供する。AIによる採用代行は別の明示依頼がある場合に限り、既定では人の確認を待つ。結果照会やタイムアウトを理由に撮影・採用を再送しない。

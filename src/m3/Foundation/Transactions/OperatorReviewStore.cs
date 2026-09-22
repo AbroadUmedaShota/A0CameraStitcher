@@ -20,6 +20,8 @@ public interface IOperatorReviewStore
     Task<IReadOnlyList<OperatorReviewRecord>> LoadAsync(CancellationToken cancellationToken = default);
 }
 
+public sealed record ReviewMetadataPage(IReadOnlyList<OperatorReviewRecord> Records, int? NextOffset, int Total);
+
 // Review metadata is separate from immutable capture originals and product manifests.
 // The caller must verify the selected result before recording human acceptance.
 public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorReviewStore
@@ -83,6 +85,43 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
             records.Add(record);
         }
         return records.OrderBy(record => record.UpdatedAtUtc).ToArray();
+    }
+
+    // Standalone metadata observation only: never initializes storage, accepts a
+    // review, verifies image quality, or starts/queries the Camera Agent.
+    public async Task<ReviewMetadataPage> QueryReadOnlyAsync(int offset = 0, int limit = 25,
+        CancellationToken cancellationToken = default)
+    {
+        if (offset is < 0 or > 1000 || limit is < 1 or > 25)
+            throw new ArgumentOutOfRangeException(nameof(offset), "Review query bounds exceeded.");
+        cancellationToken.ThrowIfCancellationRequested();
+        for (DirectoryInfo? ancestor = new(_root); ancestor is not null; ancestor = ancestor.Parent)
+        {
+            if (!ancestor.Exists) throw new DirectoryNotFoundException("Review storage is unavailable.");
+            if ((ancestor.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("Review storage ancestors must not be reparse points.");
+        }
+        var lockPath = Path.Combine(_root, ".review.lock");
+        RejectReparsePoint(lockPath);
+        // Existing GUI writers use FileShare.None too. Opening an existing lock
+        // for reading prevents an inconsistent observation without creating it.
+        using var lease = new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        if (Directory.EnumerateFiles(_root, "*.partial").Any())
+            throw new InvalidDataException("Incomplete review metadata requires inspection.");
+        var records = new List<OperatorReviewRecord>();
+        foreach (var path in Directory.EnumerateFiles(_root, "*.json"))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (records.Count == 1000) throw new InvalidDataException("Review query scan limit exceeded.");
+            var record = await ReadAsync(path, cancellationToken);
+            if (!string.Equals(path, RecordPath(record.ResultId), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Review filename does not match its result.");
+            records.Add(record);
+        }
+        var page = records.OrderByDescending(record => record.UpdatedAtUtc)
+            .ThenBy(record => record.ResultId, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
+        int? next = offset + page.Length < records.Count ? offset + page.Length : null;
+        return new ReviewMetadataPage(page, next, records.Count);
     }
 
     private FileStream AcquireLease()
