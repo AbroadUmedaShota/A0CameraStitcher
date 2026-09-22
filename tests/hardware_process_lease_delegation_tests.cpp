@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
         HardwareProcessLease x(name, std::chrono::milliseconds(0), root);
         x.ArmDualDelegation();
         DualDelegationCloseEvidence ok{{true, true, true, clean[0]}, {true, true, true, clean[1]}};
+        x.RegisterDualWorkers(clean[0], clean[1]);
         x.DisarmDualDelegation(ok);
         Check(!x.DualDelegationArmed(), "OS-verified clean exits disarm");
     }
@@ -110,6 +111,7 @@ int main(int argc, char **argv) {
             HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
             lease.ArmDualDelegation();
             auto evidence = complete;
+            lease.RegisterDualWorkers(clean[0], clean[1]);
             auto& body = missing < 4 ? evidence.camera_a : evidence.camera_b;
             switch (missing % 4) {
                 case 0: body.live_view_off = false; break;
@@ -131,6 +133,7 @@ int main(int argc, char **argv) {
             lease.ArmDualDelegation();
             auto evidence = complete;
             evidence.camera_a.worker_process = invalid;
+            lease.RegisterDualWorkers(invalid == pi.hProcess ? pi.hProcess : clean[0], clean[1]);
             Check(Rejects([&] { lease.DisarmDualDelegation(evidence); }),
                   "running, crashed, duplicate, or non-process handle must reject");
             Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "OS failure cannot retry");
@@ -140,10 +143,27 @@ int main(int argc, char **argv) {
     }
     CloseHandle(event);
     CloseHandle(pi.hProcess);
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        {
+            HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
+            lease.ArmDualDelegation();
+            if (invalid == 1) lease.RegisterDualWorkers(clean[1], clean[0]);
+            if (invalid == 2) {
+                lease.RegisterDualWorkers(clean[0], clean[1]);
+                Check(Rejects([&] { lease.RegisterDualWorkers(clean[0], clean[1]); }),
+                      "second registration rejects");
+            }
+            Check(Rejects([&] { lease.DisarmDualDelegation(complete); }),
+                  "missing, swapped, or repeated registration cannot disarm");
+        }
+        Check(Quarantined(name, root), "registration failure retains quarantine");
+        if (!DeleteFileW(marker.c_str())) return 4;
+    }
     {
         HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
         lease.ArmDualDelegation();
         if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_READONLY)) return 4;
+        lease.RegisterDualWorkers(clean[0], clean[1]);
         Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure rejects");
         if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_NORMAL)) return 4;
         Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure cannot be retried");

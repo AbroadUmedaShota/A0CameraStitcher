@@ -4,6 +4,10 @@
 
 ### 2026-09-22 終了プロセス照合の追加
 
+後続変更: `ArmDualDelegation` 後に `RegisterDualWorkers` を一度だけ呼び、CAM-A/B順でプロセスを登録する契約を追加。leaseが照会/待機権限だけの非継承handleを複製して保持し、解除時の証拠が同じ順の登録プロセスに対応することを検証する。未登録・入替・再登録では解除しない。保持handleにより登録後のPID再利用を防ぐ。登録はSDK操作の許可ではなく、起動元がSDK grantより前に正しいworkerを登録する実controllerの接続はまだ必要。SDK終了フラグとIPC generationの照合も未実装。
+
+この後続変更の同一stub target buildはexit 0、同じCTestを1回実行し1/1 PASS（1.88秒、exit 0）。未登録・A/B入替・再登録後の解除拒否を追加確認。異常終了の検査はexit 91の子を登録してから行う。系列累計5回で終了。実機previewは未実行、2/5消費済みのまま。
+
 永続操作禁止記録の解除APIから `worker_reaped` の自己申告を除去し、呼出元が保持する二つのプロセスhandleを受け取る。解除前に `GetProcessId` で別プロセスであること、ゼロ待機で両方が終了済みであること、`GetExitCodeProcess` が両方0であることを確認する。稼働中・非0終了・同一プロセスの重複・非プロセスhandleは解除せず、そのleaseでの再試行も拒否する。プロセスを強制終了したり、終了を待ち続けたりはしない。
 
 これはOS終了確認の実装であり、SDK終了の証明ではない。Live View/Source/Module終了フラグは依然呼出元の申告である。実controllerによる起動handle保持、generation/個体/終了通知との照合は未接続で、無関係な正常終了processを渡せない契約も今後の統合対象。実二台SDK起動はまだ許可しない。

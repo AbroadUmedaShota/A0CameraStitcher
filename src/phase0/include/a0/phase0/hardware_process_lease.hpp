@@ -43,6 +43,8 @@ class HardwareProcessLease final {
 
     [[nodiscard]] bool RecoveredAbandonedOwner() const noexcept;
     void ArmDualDelegation();
+    // Call once after spawning, before granting SDK access. Keeps non-inherited duplicates.
+    void RegisterDualWorkers(void *camera_a_process, void *camera_b_process);
     void DisarmDualDelegation(const DualDelegationCloseEvidence &evidence);
     [[nodiscard]] bool DualDelegationArmed() const noexcept;
 
@@ -55,6 +57,8 @@ class HardwareProcessLease final {
         delegation_disarm_failed_{false};
     std::wstring marker_path_;
     std::string marker_contents_;
+    void *worker_a_{nullptr};
+    void *worker_b_{nullptr};
 };
 
 } // namespace a0::phase0

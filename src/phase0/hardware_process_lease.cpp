@@ -194,6 +194,8 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
 }
 
 HardwareProcessLease::~HardwareProcessLease() {
+    if (worker_a_) CloseHandle(static_cast<HANDLE>(worker_a_));
+    if (worker_b_) CloseHandle(static_cast<HANDLE>(worker_b_));
     HANDLE handle = static_cast<HANDLE>(handle_);
     if (handle == nullptr)
         return;
@@ -239,10 +241,34 @@ void HardwareProcessLease::ArmDualDelegation() {
         throw TransportError("camera_control_marker_failed", "marker reread mismatch");
     delegation_armed_ = true;
 }
+void HardwareProcessLease::RegisterDualWorkers(void *camera_a_process, void *camera_b_process) {
+    HANDLE a{}, b{};
+    try {
+        if (!owned_ || owner_thread_id_ != GetCurrentThreadId() || !delegation_armed_ ||
+            delegation_disarm_failed_ || worker_a_ || worker_b_)
+            throw TransportError("camera_control_marker_failed", "worker registration unavailable");
+        const auto self = GetCurrentProcess();
+        const DWORD access = SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        if (!DuplicateHandle(self, static_cast<HANDLE>(camera_a_process), self, &a, access, FALSE, 0) ||
+            !DuplicateHandle(self, static_cast<HANDLE>(camera_b_process), self, &b, access, FALSE, 0))
+            throw TransportError("camera_control_marker_failed", "worker handle retention failed");
+        const auto pid_a = GetProcessId(a), pid_b = GetProcessId(b);
+        if (!pid_a || !pid_b || pid_a == pid_b || pid_a == GetCurrentProcessId() ||
+            pid_b == GetCurrentProcessId())
+            throw TransportError("camera_control_marker_failed", "distinct child workers required");
+        worker_a_ = a;
+        worker_b_ = b;
+    } catch (...) {
+        if (a) CloseHandle(a);
+        if (b) CloseHandle(b);
+        delegation_disarm_failed_ = true;
+        throw;
+    }
+}
 void HardwareProcessLease::DisarmDualDelegation(const DualDelegationCloseEvidence &evidence) {
     try {
         if (!durable_marker_enabled_ || !owned_ || owner_thread_id_ != GetCurrentThreadId() ||
-            !delegation_armed_ || delegation_disarm_failed_ || !evidence.Complete())
+            !delegation_armed_ || delegation_disarm_failed_ || !worker_a_ || !worker_b_ || !evidence.Complete())
             throw TransportError("camera_control_marker_failed",
                                  "complete typed close evidence required; marker remains armed");
         const auto process_a = static_cast<HANDLE>(evidence.camera_a.worker_process);
@@ -251,7 +277,10 @@ void HardwareProcessLease::DisarmDualDelegation(const DualDelegationCloseEvidenc
         const auto pid_b = GetProcessId(process_b);
         if (!pid_a || !pid_b || pid_a == pid_b)
             throw TransportError("camera_control_marker_failed", "two distinct worker processes required");
-        for (const auto process : {process_a, process_b}) {
+        if (pid_a != GetProcessId(static_cast<HANDLE>(worker_a_)) ||
+            pid_b != GetProcessId(static_cast<HANDLE>(worker_b_)))
+            throw TransportError("camera_control_marker_failed", "close evidence worker binding mismatch");
+        for (const auto process : {static_cast<HANDLE>(worker_a_), static_cast<HANDLE>(worker_b_)}) {
             DWORD exit_code{};
             if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0 ||
                 !GetExitCodeProcess(process, &exit_code) || exit_code != 0)
