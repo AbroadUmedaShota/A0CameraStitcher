@@ -13,6 +13,7 @@
 
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/single_worker_source.hpp"
+#include "a0/phase0/worker_preview_selection.hpp"
 #include "a0/phase0/sdk_buffer_arena.hpp"
 #include "a0/phase0/sdk_pending_command.hpp"
 #include "nikon_sdk_runtime_path.hpp"
@@ -1004,6 +1005,54 @@ public:
         StartLiveView(timeout, true);
     }
 
+    std::vector<std::string> BeginWorkerPreviewSelection(std::chrono::seconds timeout) {
+        ClaimSession();
+        trace_ = {};
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        OpenModule(deadline);
+        const auto ids = WaitForSourceIds(deadline, "worker_inventory_failed");
+        worker_selection_ = std::make_unique<WorkerPreviewSelection>(NewRunId(),
+            std::vector<std::uint32_t>(ids.begin(), ids.end()));
+        // CameraType/serial/name probes are deliberately absent: these require
+        // Source Open. The caller owes a checked Close even when this throws.
+        return worker_selection_->Tokens();
+    }
+
+    std::vector<std::uint32_t> WorkerPreviewInventory(std::chrono::steady_clock::time_point deadline) {
+        if (!worker_selection_ || !module_.opened)
+            throw TransportError("worker_selection_required", "no worker-local inventory session");
+        try {
+            RequireSdkSessionNotPoisoned();
+            Pump(module_, "worker_topology_failed");
+            auto ids = Children(module_, deadline, "worker_topology_failed");
+            ids.insert(ids.end(), module_sources_.begin(), module_sources_.end());
+            std::sort(ids.begin(), ids.end());
+            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            std::vector<std::uint32_t> current(ids.begin(), ids.end());
+            worker_selection_->CheckInventory(current);
+            return current;
+        } catch (...) { worker_selection_->Invalidate(); throw; }
+    }
+
+    void OpenWorkerPreviewCandidate(std::string_view candidate, std::chrono::seconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        const auto current = WorkerPreviewInventory(deadline);
+        worker_selection_->OpenSelected(candidate, current, [&](std::uint32_t id) {
+            OpenSelectedSource(static_cast<ULONG>(id), false, deadline, CaptureStorageMode::none);
+            if (GetUnsigned(source_, kNkMAIDCapability_CameraType, deadline,
+                    "worker_camera_type_failed") != kNkMAIDCameraType_D810)
+                throw TransportError("worker_camera_type_mismatch", "selected preview source is not D810");
+        });
+    }
+
+    void StartSelectedWorkerLiveView(std::chrono::seconds timeout) {
+        (void)WorkerPreviewInventory(std::chrono::steady_clock::now() + timeout);
+        if (!worker_selection_->Opened())
+            throw TransportError("worker_source_required", "candidate has not been opened");
+        try { StartLiveView(timeout, true); }
+        catch (...) { worker_selection_->Invalidate(); throw; }
+    }
+
     std::size_t BeginDualReadOnlyProbe(std::chrono::seconds timeout) {
         ClaimSession();
         trace_ = {};
@@ -1116,6 +1165,7 @@ public:
     }
 
     void EndDualSession(std::chrono::seconds timeout) {
+        if (worker_selection_) worker_selection_->Invalidate();
         if (!claimed_) return;
         std::optional<TransportError> pending_error;
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1418,6 +1468,22 @@ public:
     }
 
     void StartLiveView(std::chrono::seconds timeout, bool require_initially_off = false) {
+        try {
+        // The worker-selection seam must remain strict even when its caller
+        // reaches this generic transport entrypoint.  It never recovers an
+        // unknown Source or an already-running live view automatically.
+        if (worker_selection_) {
+            try {
+                (void)WorkerPreviewInventory(std::chrono::steady_clock::now() + timeout);
+                if (!worker_selection_->Opened()) {
+                    throw TransportError("worker_source_required", "candidate has not been opened");
+                }
+                require_initially_off = true;
+            } catch (...) {
+                worker_selection_->Invalidate();
+                throw;
+            }
+        }
         RequireLiveViewSession();
         RequireSdkSessionNotPoisoned();
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1455,9 +1521,16 @@ public:
         // D810 changes the available Source operations after entering live view.
         // Refresh the capability table before asking for the first frame.
         EnumerateCapabilities(source_, deadline, "live_view_start_failed");
+        } catch (...) {
+            if (worker_selection_) worker_selection_->Invalidate();
+            throw;
+        }
     }
 
     std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) {
+        try {
+        if (worker_selection_)
+            (void)WorkerPreviewInventory(std::chrono::steady_clock::now() + timeout);
         RequireLiveViewSession();
         RequireSdkSessionNotPoisoned();
         if (!live_view_started_) {
@@ -1500,9 +1573,14 @@ public:
         const auto* raw_begin = raw.as<unsigned char>();
         const std::vector<unsigned char> raw_copy(raw_begin, raw_begin + elements * physical_bytes);
         return ExtractD810LiveViewJpeg(raw_copy);
+        } catch (...) {
+            if (worker_selection_) worker_selection_->Invalidate();
+            throw;
+        }
     }
 
     void StopLiveView(std::chrono::seconds timeout) {
+        try {
         RequireLiveViewSession();
         if (live_view_stop_attempted_) {
             throw TransportError("live_view_stop_already_attempted", "live view stop is not automatically retried");
@@ -1516,9 +1594,14 @@ public:
             throw TransportError("live_view_stop_failed", "D810 did not leave live view mode");
         }
         live_view_started_ = false;
+        } catch (...) {
+            if (worker_selection_) worker_selection_->Invalidate();
+            throw;
+        }
     }
 
     void Close(std::chrono::seconds timeout) {
+        if (worker_selection_) worker_selection_->Invalidate();
         if (!claimed_) return;
         std::optional<TransportError> pending_error;
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1795,6 +1878,9 @@ private:
     }
 
     void ReleaseSession() noexcept {
+        // Tokens and raw IDs are strictly module-generation local.  Do not
+        // carry even an invalid selection into the next claimed session.
+        worker_selection_.reset();
         std::lock_guard lock(g_session_mutex);
         if (claimed_) g_session_active = false;
         claimed_ = false;
@@ -2972,6 +3058,9 @@ private:
         auto* self = reinterpret_cast<Impl*>(reference);
         if (self == nullptr) return;
         const ULONG id = static_cast<ULONG>(data);
+        if (self->worker_selection_ &&
+            (event == kNkMAIDEvent_AddChild || event == kNkMAIDEvent_RemoveChild))
+            self->worker_selection_->ObserveTopology(event == kNkMAIDEvent_AddChild, id);
         if (event == kNkMAIDEvent_AddChild) {
             if (self->dual_manager_active_ &&
                 !self->dual_expected_module_source_ids_.contains(id)) {
@@ -3056,6 +3145,7 @@ private:
     bool capture_session_{false};
     bool live_view_session_{false};
     bool single_worker_preview_{false};
+    std::unique_ptr<WorkerPreviewSelection> worker_selection_;
     bool live_view_started_{false};
     bool live_view_stop_attempted_{false};
     bool capture_complete_{false};
@@ -3116,6 +3206,15 @@ void NikonSdkTransport::RequireExactlyOneD810ForProductAgent() {
 }
 void NikonSdkTransport::OpenSingleWorkerLiveView(std::chrono::seconds timeout) {
     impl_->OpenSingleWorkerLiveView(timeout);
+}
+std::vector<std::string> NikonSdkTransport::BeginWorkerPreviewSelection(std::chrono::seconds timeout) {
+    return impl_->BeginWorkerPreviewSelection(timeout);
+}
+void NikonSdkTransport::OpenWorkerPreviewCandidate(std::string_view candidate, std::chrono::seconds timeout) {
+    impl_->OpenWorkerPreviewCandidate(candidate, timeout);
+}
+void NikonSdkTransport::StartSelectedWorkerLiveView(std::chrono::seconds timeout) {
+    impl_->StartSelectedWorkerLiveView(timeout);
 }
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds timeout) {
     impl_->StartSingleWorkerLiveView(timeout);
@@ -3238,6 +3337,9 @@ void NikonSdkTransport::Open(std::string_view, std::chrono::seconds) { ThrowGate
 void NikonSdkTransport::OpenPcDirect(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenLiveView(std::string_view, std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::OpenSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
+std::vector<std::string> NikonSdkTransport::BeginWorkerPreviewSelection(std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::OpenWorkerPreviewCandidate(std::string_view, std::chrono::seconds) { ThrowGated(); }
+void NikonSdkTransport::StartSelectedWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::ValidateSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }

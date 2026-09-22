@@ -120,6 +120,18 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 
 これは実機 identity 解決ではない。将来の実機試験では、各 worker が自分の session-local 映像で担当を確認し、worker-local Source を得る方法、二つの物理個体に対する対応、driver/module 共有可否を別途証明するまで実機経路を遮断する。
 
+### Worker-local selection のソフトウェア準備（実機未実行）
+
+`WorkerPreviewSelection` は、一つの worker/module が列挙した **厳密に二つの異なる raw Source ID** だけから、同worker・同module世代で一回だけ使える不透明トークンを作る。これは CAM-A/CAM-B、シリアル番号、USBパス、または物理個体の証明ではない。Source を Open する前にその対応を得る公開SDK APIは確認できていない。
+
+- inventory の差分、Add/Remove（既存IDの再Addを含む）、不正/旧世代トークン、SDK callback例外は選択を恒久的に失効させ、再試行・自動再割当をしない。
+- generic `StartLiveView` を通る場合にも、選択済みSource・不変inventory・初期Live View OFFを強制する。終了時の `ReleaseSession` は選択トークンを破棄する。
+- このAPIはCLI/UIへ公開しておらず、既存の production lease にも接続していない。SDK/WPD/カメラへの実行は **0回** である。
+- focused software test は新規build directoryで実行し、実機試験カウンタは **2/5のまま** とする。二台同時Live Viewのidentity/lease/SDK-driver共有のgateは未解決である。
+- これらのselection試験はheader-onlyの契約callbackとSDKなしの既存single-worker fake lifecycleを対象にする。実SDKが例外を返した場合のSource/Module状態を注入・証明する試験ではない。
+- 新規の `build/worker-selection-stub` と `build/worker-selection-sdk` で、それぞれ `worker_preview_selection_contracts` と `single_worker_preview_contracts` は 2/2 PASS。前者はSDK stub、後者はlicensed SDK headersを有効にした**コンパイルとsoftware-only test**であり、どちらもSDK DLL/カメラを実行していない。focused CTestは有効実行2回（各2/2 PASS）。初回のstub CTestはexe生成前のNot Runで、合格・実機回数のいずれにも数えない。
+- controller消滅時に既存CLIがabandoned leaseを警告だけで継続し得る経路は今回の対象外であり、二worker SDKを有効化する前に全入口を止めるquarantine/guardianが必要である。worker process終了をSource/Moduleの正常Close証明として扱わない。
+
 ## 実機 PoC（未実行）
 
 別承認後でも最大 5 回。各回は、二 worker の SDK 初期化、Source Open trace（担当外 Open 0）、両 Live View の停止、source/module 解放、全体 lease が保持されたこと、capture/WPD 未遷移を記録する。今回の試作はその承認・実行を含まない。

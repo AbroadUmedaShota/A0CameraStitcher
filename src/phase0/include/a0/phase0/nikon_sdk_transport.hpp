@@ -322,6 +322,12 @@ public:
     void OpenSingleWorkerLiveView(std::chrono::seconds timeout);
     void StartSingleWorkerLiveView(std::chrono::seconds timeout);
     void ValidateSingleWorkerLiveView(std::chrono::seconds timeout);
+    // Experimental preparation seam, not enabled by any hardware CLI. Returns
+    // two opaque candidates from this worker/module without opening a Source.
+    // Caller must establish physical ownership separately before concurrent use.
+    [[nodiscard]] std::vector<std::string> BeginWorkerPreviewSelection(std::chrono::seconds timeout);
+    void OpenWorkerPreviewCandidate(std::string_view candidate, std::chrono::seconds timeout);
+    void StartSelectedWorkerLiveView(std::chrono::seconds timeout);
     void StartLiveView(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;
