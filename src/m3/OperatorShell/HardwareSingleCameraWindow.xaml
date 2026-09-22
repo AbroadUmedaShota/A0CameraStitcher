@@ -190,6 +190,16 @@
                             <Button Content="再合成（SingleCameraでは対象外）" IsEnabled="False" HorizontalAlignment="Stretch" />
                             <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}"
                                     IsEnabled="{Binding CanPrepareNewCapture}" HorizontalAlignment="Stretch" />
+                            <Separator Margin="0,14,0,10" />
+                            <TextBlock Text="未確認の保存結果" FontWeight="Bold" />
+                            <TextBlock Text="{Binding HistoricalReviewStatus}" Margin="0,4,0,6" TextWrapping="Wrap" />
+                            <ComboBox ItemsSource="{Binding HistoricalReviewChoices}"
+                                      SelectedItem="{Binding SelectedHistoricalReview}"
+                                      DisplayMemberPath="DisplayText" MinWidth="280"
+                                      AutomationProperties.Name="未確認の保存結果を選択" />
+                            <Button Content="選択した保存結果を開く" Command="{Binding ReopenHistoricalReviewCommand}"
+                                    IsEnabled="{Binding CanReopenHistoricalReview}" HorizontalAlignment="Stretch"
+                                    AutomationProperties.Name="未確認の保存結果を再検証して開く" />
                         </StackPanel>
                     </Border>
 

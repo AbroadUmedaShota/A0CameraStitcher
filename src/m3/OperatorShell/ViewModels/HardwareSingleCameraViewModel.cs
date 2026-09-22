@@ -10,6 +10,7 @@ namespace A0CameraStitcher.M3.OperatorShell.ViewModels;
 
 public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposable
 {
+    private const int MaximumHistoricalReviewChoices = 25;
     private static readonly TimeSpan MaximumProfileExpiryTimerDelay = TimeSpan.FromHours(1);
     private readonly IHardwareSingleCameraOperations _operations;
     private readonly IHardwareContinuousLiveViewOperations? _continuousLiveViewOperations;
@@ -25,6 +26,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private HardwareSingleCaptureResult? _captureResult;
     private VerifiedHardwareJpeg? _verifiedOriginal;
     private OperatorReviewRecord? _currentReviewRecord;
+    private IReadOnlyList<HistoricalReviewChoice> _historicalReviewChoices = [];
+    private HistoricalReviewChoice? _selectedHistoricalReview;
+    private bool _showingHistoricalReview;
     private string _selectedCamera = "CAM-A";
     private bool _exclusiveCameraControlConfirmed;
     private bool _dedicatedSpoolScopeConfirmed;
@@ -60,6 +64,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private string _lastExportPath = string.Empty;
     private string _technicalDetail = "automatic retry count: 0";
     private string _reviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
+    private string _historicalReviewStatus = "未確認の保存結果を読み込んでいます。";
 
     public HardwareSingleCameraViewModel(
         IHardwareSingleCameraOperations operations,
@@ -105,6 +110,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         RecoverTransactionCommand = new AsyncRelayCommand(RecoverTransactionAsync, () => CanRecoverTransaction, HandleCommandException);
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, HandleCommandException);
         AcceptReviewCommand = new AsyncRelayCommand(AcceptReviewAsync, () => CanAcceptReview, HandleCommandException);
+        ReopenHistoricalReviewCommand = new AsyncRelayCommand(
+            ReopenHistoricalReviewAsync, () => CanReopenHistoricalReview, HandleCommandException);
         PrepareNewCaptureCommand = new AsyncRelayCommand(PrepareNewCaptureAsync, () => CanPrepareNewCapture, HandleCommandException);
         ApproveProfileCommand = new AsyncRelayCommand(ApproveProfileAsync, () => CanApproveProfile, HandleCommandException);
     }
@@ -325,6 +332,30 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         private set => SetProperty(ref _reviewStatus, value);
     }
 
+    public IReadOnlyList<HistoricalReviewChoice> HistoricalReviewChoices
+    {
+        get => _historicalReviewChoices;
+        private set => SetProperty(ref _historicalReviewChoices, value);
+    }
+
+    public HistoricalReviewChoice? SelectedHistoricalReview
+    {
+        get => _selectedHistoricalReview;
+        set
+        {
+            if (SetProperty(ref _selectedHistoricalReview, value))
+            {
+                NotifyAvailability();
+            }
+        }
+    }
+
+    public string HistoricalReviewStatus
+    {
+        get => _historicalReviewStatus;
+        private set => SetProperty(ref _historicalReviewStatus, value);
+    }
+
     public string LastExportPath
     {
         get => _lastExportPath;
@@ -461,6 +492,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _initializationComplete && !IsBusy && !_stateLoadFailed && _pendingTransaction is not null &&
         (_captureResult is not null || _localPreDispatchFailure);
 
+    public bool CanReopenHistoricalReview =>
+        _initializationComplete && !IsBusy && !_stateLoadFailed && !IsContinuousLiveViewActive &&
+        _pendingTransaction is null && _captureResult is null && _operatorReviewStore is not null &&
+        _operations.AgentExecutableAvailable && SelectedHistoricalReview is not null;
+
     public bool CanApproveProfile =>
         _profileStore is not null && _initializationComplete && !IsBusy && !_stateLoadFailed &&
         _pendingTransaction is null && _captureResult is null && _readiness is not null &&
@@ -485,6 +521,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     public ICommand ExportCommand { get; }
 
     public ICommand AcceptReviewCommand { get; }
+
+    public ICommand ReopenHistoricalReviewCommand { get; }
 
     public ICommand PrepareNewCaptureCommand { get; }
 
@@ -546,6 +584,10 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             }
 
             _initializationComplete = true;
+            if (_pendingTransaction is null)
+            {
+                await RefreshHistoricalReviewsAsync().ConfigureAwait(true);
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
@@ -1421,6 +1463,92 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ReviewStatus = "人による確認待ちです。原画像を確認してから「採用して次の撮影を準備」を押してください。";
     }
 
+    private async Task RefreshHistoricalReviewsAsync()
+    {
+        if (_operatorReviewStore is null)
+        {
+            HistoricalReviewChoices = [];
+            HistoricalReviewStatus = "確認記録の保存先が未接続です。";
+            return;
+        }
+
+        try
+        {
+            HistoricalReviewChoices = (await _operatorReviewStore.LoadAsync(CancellationToken.None).ConfigureAwait(true))
+                .Where(record => record.State == "Pending" && record.ReviewKind == "OriginalsOnly")
+                .OrderByDescending(record => record.UpdatedAtUtc)
+                .Take(MaximumHistoricalReviewChoices)
+                .Select(record => new HistoricalReviewChoice(record))
+                .ToArray();
+            SelectedHistoricalReview = null;
+            HistoricalReviewStatus = HistoricalReviewChoices.Count == 0
+                ? "未確認の保存結果はありません。"
+                : $"未確認の保存結果 {HistoricalReviewChoices.Count}件（最新{MaximumHistoricalReviewChoices}件まで）";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            HistoricalReviewChoices = [];
+            SelectedHistoricalReview = null;
+            HistoricalReviewStatus = "確認記録を安全に読めないため、過去結果は開けません。";
+            TechnicalDetail += $"\nhistorical_review_load_failed: {SafeMessage(exception)}";
+        }
+    }
+
+    public async Task ReopenHistoricalReviewAsync()
+    {
+        if (!CanReopenHistoricalReview || SelectedHistoricalReview is null)
+        {
+            return;
+        }
+
+        var choice = SelectedHistoricalReview;
+        IsBusy = true;
+        HistoricalReviewStatus = $"保存結果 {choice.Record.TransactionId} をread-only照会中…";
+        try
+        {
+            var reply = await _operations.GetTransactionResultAsync(choice.Record.TransactionId).ConfigureAwait(true);
+            if (!reply.Success || reply.Payload.TransactionId != choice.Record.TransactionId ||
+                reply.Payload.TerminalState != "Complete" || reply.Payload.RetainedOriginal is null)
+            {
+                throw new InvalidDataException("Historical transaction result is not an acceptable completed original.");
+            }
+
+            _showingHistoricalReview = true;
+            await ApplyTerminalResultAsync(reply).ConfigureAwait(true);
+            if (_currentReviewRecord?.ResultId != choice.Record.ResultId ||
+                _currentReviewRecord.State != "Pending" || _verifiedOriginal is null)
+            {
+                throw new InvalidDataException("Historical review could not be re-verified.");
+            }
+            HistoricalReviewStatus = "保存結果を再検証して開きました。採用または撮り直しの準備を明示してください。";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            ClearHistoricalReviewPresentation();
+            HistoricalReviewStatus = "保存結果を安全に再検証できないため、開きませんでした。";
+            TechnicalDetail += $"\nhistorical_review_open_failed: {SafeMessage(exception)}";
+        }
+        finally
+        {
+            IsBusy = false;
+            NotifyAvailability();
+        }
+    }
+
+    private void ClearHistoricalReviewPresentation()
+    {
+        _showingHistoricalReview = false;
+        _captureResult = null;
+        _verifiedOriginal = null;
+        _currentReviewRecord = null;
+        CaptureSummary = "未撮影";
+        RetainedOriginalSummary = "なし";
+        LastTransactionId = string.Empty;
+        ExportSummary = "未保存";
+        LastExportPath = string.Empty;
+        ReviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
+    }
+
     public async Task AcceptReviewAsync()
     {
         if (!CanAcceptReview || _captureResult?.RetainedOriginal is null || _currentReviewRecord is null ||
@@ -1454,7 +1582,15 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             acceptanceCommitted = true;
             ReviewStatus = "採用を記録しました。次の撮影を準備しています。";
             IsBusy = false;
-            await PrepareNewCaptureAsync().ConfigureAwait(true);
+            if (_showingHistoricalReview)
+            {
+                ClearHistoricalReviewPresentation();
+                await RefreshHistoricalReviewsAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await PrepareNewCaptureAsync().ConfigureAwait(true);
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
@@ -1501,6 +1637,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _captureResult = null;
         _verifiedOriginal = null;
         _currentReviewRecord = null;
+        _showingHistoricalReview = false;
         _readiness = null;
         _liveViewHandoffRequested = false;
         _localPreDispatchFailure = false;
@@ -1522,6 +1659,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ReviewStatus = "撮影後、検証済み原画像を確認して採用できます。";
         TechnicalDetail = "automatic retry count: 0";
         IsBusy = false;
+        await RefreshHistoricalReviewsAsync().ConfigureAwait(true);
         OnPropertyChanged(nameof(CanSelectCamera));
         OnPropertyChanged(nameof(CanChangeConfirmations));
         NotifyAvailability();
@@ -1673,6 +1811,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         OnPropertyChanged(nameof(CanRecoverTransaction));
         OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanAcceptReview));
+        OnPropertyChanged(nameof(CanReopenHistoricalReview));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanApproveProfile));
         OnPropertyChanged(nameof(CanChangeExportDirectory));
@@ -1686,6 +1825,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         ((AsyncRelayCommand)RecoverTransactionCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)AcceptReviewCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)ReopenHistoricalReviewCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)PrepareNewCaptureCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ApproveProfileCommand).NotifyCanExecuteChanged();
     }
@@ -1784,4 +1924,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             CameraSettingsChanged: false,
             RealIdentifiersIncluded: false,
         };
+}
+
+public sealed record HistoricalReviewChoice(OperatorReviewRecord Record)
+{
+    public string DisplayText => $"{Record.UpdatedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm} / {Record.TransactionId}";
 }

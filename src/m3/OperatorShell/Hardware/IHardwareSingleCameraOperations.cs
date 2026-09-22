@@ -33,6 +33,10 @@ public interface IHardwareSingleCameraOperations
 
     Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
         string transactionId,
+        CancellationToken cancellationToken = default);
+
+    Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
+        string transactionId,
         string expectedCameraAlias,
         HardwareCaptureProfileSnapshot expectedProfile,
         bool expectedLiveViewHandoffRequested,

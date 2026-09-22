@@ -62,6 +62,20 @@ if (args is ["--hardware-single-review"])
     }
     return reviewFailures == 0 ? 0 : 1;
 }
+if (args is ["--hardware-single-history"])
+{
+    try
+    {
+        await HardwareSingleHistoricalReviewIsReadOnlyAndFailClosedAsync();
+        Console.WriteLine("PASS hardware single historical review is read-only and fail-closed");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL hardware single historical review is read-only and fail-closed: {exception}");
+        return 1;
+    }
+}
 if (args is ["--wpf-command-stop-probe", var runnerProbe])
 {
     return await WpfCommandLifetimeContracts.RunStopProbeAsync(runnerProbe);
@@ -2662,6 +2676,54 @@ static async Task HardwareSingleReviewRecordsExplicitAcceptanceAsync()
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+static async Task HardwareSingleHistoricalReviewIsReadOnlyAndFailClosedAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        HardwareSingleCaptureResult? captured = null;
+        var firstOperations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (id, alias) => captured = CompleteCapture(artifactsRoot, id, alias).Result,
+        };
+        var state = new HardwareSingleAppStateStore(Path.Combine(root, "state"));
+        var reviews = new FileOperatorReviewStore(Path.Combine(root, "state", "operator-review"));
+        using (var first = new HardwareSingleCameraViewModel(firstOperations, state,
+                   new HardwareOriginalExporter(Path.Combine(root, "exports")),
+                   preferencesStore: null, profileStore: null, operatorReviewStore: reviews))
+        {
+            await first.InitializeAsync(); first.ExclusiveCameraControlConfirmed = true;
+            await first.CheckReadinessAsync(); first.DedicatedSpoolScopeConfirmed = true;
+            first.ExactObjectDeleteConfirmed = true; await first.CaptureAsync();
+            await first.PrepareNewCaptureAsync();
+        }
+
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"), AgentArtifactsRoot = artifactsRoot,
+        };
+        operations.HistoricalTransactionResults.Enqueue(captured!);
+        using var reopened = new HardwareSingleCameraViewModel(operations, state,
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            preferencesStore: null, profileStore: null, operatorReviewStore: reviews);
+        await reopened.InitializeAsync();
+        Check.Equal(1, reopened.HistoricalReviewChoices.Count);
+        reopened.SelectedHistoricalReview = reopened.HistoricalReviewChoices.Single();
+        Check.True(reopened.CanReopenHistoricalReview, "Only an explicit pending selection may be opened.");
+        await reopened.ReopenHistoricalReviewAsync();
+        Check.True(reopened.CanAcceptReview, "Historical result must be canonical/hash re-verified before review.");
+        Check.Equal(1, operations.HistoricalTransactionResultCallCount);
+        Check.Equal(0, operations.CaptureCallCount);
+
+        await reopened.PrepareNewCaptureAsync();
+        Check.True(reopened.CanAcceptReview, "History view must not create a current transaction marker that can be cleared.");
+    }
+    finally { Directory.Delete(root, recursive: true); }
 }
 
 static async Task HardwareSingleReviewRestoreRejectsChangedOriginalAsync()
@@ -12752,6 +12814,8 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
 
     public int TransactionResultCallCount { get; private set; }
 
+    public int HistoricalTransactionResultCallCount { get; private set; }
+
     public bool LastCaptureLiveViewHandoffRequested { get; private set; }
 
     public HardwareCaptureProfileSnapshot? LastCaptureExpectedProfile { get; private set; }
@@ -12777,6 +12841,8 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
     public Exception? CaptureException { get; init; }
 
     public Queue<HardwareSingleCaptureResult> TransactionResults { get; } = new();
+
+    public Queue<HardwareSingleCaptureResult> HistoricalTransactionResults { get; } = new();
 
     public Task<HardwareCameraAgentReply<HardwareSingleReadinessResult>> GetReadinessAsync(
         string cameraAlias,
@@ -12847,6 +12913,24 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
             ?? throw new InvalidOperationException("A fake capture result was not configured.");
         return Task.FromResult(new HardwareCameraAgentReply<HardwareSingleCaptureResult>(
             "capture-request",
+            payload.TerminalState == "Complete",
+            payload.TerminalState == "Complete" ? "CaptureComplete" : payload.ErrorCategory,
+            payload));
+    }
+
+    public Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
+        string transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        HistoricalTransactionResultCallCount++;
+        CallOrder.Add("get-historical-result");
+        if (!HistoricalTransactionResults.TryDequeue(out var payload))
+        {
+            throw new InvalidOperationException("A fake historical transaction result was not configured.");
+        }
+
+        return Task.FromResult(new HardwareCameraAgentReply<HardwareSingleCaptureResult>(
+            "historical-transaction-request",
             payload.TerminalState == "Complete",
             payload.TerminalState == "Complete" ? "CaptureComplete" : payload.ErrorCategory,
             payload));

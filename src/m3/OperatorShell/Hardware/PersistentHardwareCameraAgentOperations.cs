@@ -185,6 +185,14 @@ public sealed class PersistentHardwareCameraAgentOperations :
 
     public Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
         string transactionId,
+        CancellationToken cancellationToken = default) =>
+        RunV1Async(
+            QueryResponseTimeout,
+            (client, token) => client.GetTransactionResultAsync(transactionId, token),
+            cancellationToken);
+
+    public Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
+        string transactionId,
         string expectedCameraAlias,
         HardwareCaptureProfileSnapshot expectedProfile,
         bool expectedLiveViewHandoffRequested,

@@ -258,6 +258,14 @@ public sealed class ServeOnceHardwareCameraAgentOperations : IHardwareSingleCame
 
     public Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
         string transactionId,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(
+            QueryResponseTimeout,
+            (client, token) => client.GetTransactionResultAsync(transactionId, token),
+            cancellationToken);
+
+    public Task<HardwareCameraAgentReply<HardwareSingleCaptureResult>> GetTransactionResultAsync(
+        string transactionId,
         string expectedCameraAlias,
         HardwareCaptureProfileSnapshot expectedProfile,
         bool expectedLiveViewHandoffRequested,

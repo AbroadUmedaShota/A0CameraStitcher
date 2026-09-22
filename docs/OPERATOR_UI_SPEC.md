@@ -89,7 +89,9 @@ flowchart TD
 
 今回の実装範囲は `MainWindow` と `HardwareSingleCameraWindow` の撮影結果導線。`AcceptReviewCommand` は現在の撮影ID・結果ID・原画像/合成画像hashを照合し、Pending保存済みの成功結果だけを採用できる。Hardware SingleもCamera Agentのcanonical run/transaction/alias pathから原画像を再検証してからPendingを復元し、採用直前にも再検証する。採用保存失敗では画面を維持し、自動再送しない。`PrepareNewCaptureCommand` は未採用でも旧画像を保持した撮り直し準備を許し、撮影を開始しない。結果画像は保存済みartifactからのみ表示し、`ReviewImageWindow` で全体・実ピクセル100%・中央の拡大とスクロールを提供する。中央移動は実際のseam位置の自動検出ではない。
 
-残件: 過去の任意のPending結果を一覧から選んで再入場する導線、実seam位置への移動、実機GUI受入。今回のHardware Single復元は、未確定transactionとして残った同一結果を再照会し、canonical原画像を再検証できた場合に限る。すでに準備を完了してtransaction markerを閉じた結果をファイル走査や推測で再発見・採用しない。二台同時ライブの技術gateと外部機械操作経路は別に残る。
+Hardware Singleは、`Pending`かつ`OriginalsOnly`の既存review recordを最新25件まで一覧表示できる。操作者が一件を明示選択した時だけ、その撮影IDでCamera Agentへread-only `get-transaction-result` を照会する。返答の撮影ID一致、完了状態、canonical原画像の既存path/size/SHA-256再検証が揃った時だけ確認画面へ入る。撮影・Live View・未確定transaction中は開けない。journal欠落・破損・別ID・未完了・原画像改変・Agent未検出では結果を開かず、撮影・再試行・削除を行わない。追加のartifact indexやファイル走査は使わない。
+
+残件: 実seam位置への移動、実機GUI受入。二台同時ライブの技術gateと外部機械操作経路は別に残る。
 
 2026-09-22 software verification: `dotnet restore A0CameraStitcher.M3.slnx --locked-mode`（既存依存のみ）は成功。`dotnet build tests\\m3\\OperatorShellTests\\A0CameraStitcher.M3.OperatorShellTests.csproj --no-restore -c Release` は0 warning / 0 errorで成功した。追加した `--hardware-single-review` は3.1秒で `hardware single review records explicit acceptance` と `hardware single review restores pending results and rejects changed originals` の2件がPASSした。先行した包括 `--review-ux` は時間上限前に上記を含む4件のPASSを出力したが終了コードを回収できなかったため、suite PASSの証拠にはしない。実機・SDK/WPD・GUI受入は実行していない。
 
