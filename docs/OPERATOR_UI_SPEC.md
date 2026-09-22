@@ -1,5 +1,11 @@
 # 操作者画面・警告・失敗復旧仕様
 
+## 2026-09-23 修正版のローカル確認用候補
+
+clean commit `c415668bbae4a858402960678aa529fc4e3857e6` から `software-c415668-01` を新規生成しexit 0（候補系列4/5）。完成manifest SHA-256は `F620F54BE5903057B1CB143908D4BF5E5AB84AFF1A64DBFF1F98E717CEE35752`。SDK root空の専用native build、本体/CLI publish、同梱apphostのdescribe v3、23ファイルのsize/hashを照合した。旧v2/v3候補のmanifest hashも不変で、上書きはしていない。
+
+新候補のAgent pathを指定した表示/起動拒否契約は1回PASS（当該系列累計3/5）。新候補のmanifestをsoftware-onlyと認識し、fake VMの未取得表示を確認。候補23ファイルのhashは試験前後で不変。これは実GUIのクリック・表示受入ではなく、SDKをロードする試験でもない。Computer Useの接続失敗により本体GUI起動は行っていない。SDK非同梱・framework-dependent・clean PC未検証・実機/品質/配布未承認を維持する。実機preview枠は3/5のまま。独立レビューの台数/設定値の未照会表示指摘は修正され、最終PASS、追加の表示契約もexit 0。
+
 ## 2026-09-23 SDK非同梱候補の実機開始拒否と未取得表示
 
 実行ファイルの存在を緑色の接続確認として扱わない。launcherは `candidate/app/<agent>.exe` の一段上にある `candidate.manifest.json` を最大64KiBで読取り、schemaVersion 1・local-software-candidate・sdkIncluded falseなら「SDK非同梱のソフトウェア確認用候補。カメラ未照会」と表示してSingleCamera開始を無効化する。直接 `--hardware-single` の引数経路にも同じ拒否を適用し、クリック時にはmanifestを再確認する。manifestの追加fieldsは許容するが不正JSON・重複・型/数値overflow・過大・読取不能・reparse等は開始不可。manifest欠落やSDK同梱宣言trueも「SDK・実機接続は未確認」であり、既存のfail-closed readiness画面に進めるだけである。このmetadata確認はSDKをロードせず、カメラやAgentも起動しない。

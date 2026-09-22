@@ -10,27 +10,27 @@ v3のCLIは同一Windows利用者・同一ログオンセッションのMainWind
 
 `CanCapture`等がtrueでも業務承認ではない。正規AI経路は照会のみで、画像表示・撮影・次の準備・採用はまだ実行できない。読取りendpointの障害は取得不能でありカメラ故障や実機停止を意味しない。終了時はカメラの既存終了確認を維持した後にendpointを終了する。終了確認失敗で本体が残る場合はendpointも残り、既存の安全ゲートを変えない。同一アカウントの悪意あるプロセスを信頼するための署名/アプリ認証基盤ではなく、指定されたprocessを照会する契約である。
 
-実pipe/CLIの合成状態試験と、実GUIインスタンスへの接続受入は区別する。v3候補の生成・同梱CLI通信試験は完了したが、実GUI接続受入は未実施。以下は新しいv3候補を固定指定する手順。旧v2候補は履歴として保持する。
+実pipe/CLIの合成状態試験と、実GUIインスタンスへの接続受入は区別する。旧v3候補 `software-a1aa215-01` の同梱CLI通信試験は完了したが、実GUI接続受入は未実施。以下はSDK非同梱候補の実機開始拒否と未取得表示を修正した新v3候補を固定指定する手順。新候補は生成・describe・ファイル照合済みで、変更していない既存の通信/保存検証系列（各5/5）は再実行していない。旧v2/v3候補は履歴として保持する。
 
 ## 1. 候補を特定する
 
 本手順を置いたリポジトリルートを作業ディレクトリとする。今回の確認対象は次の候補に固定する。別worktreeに候補がない場合、最新版を推測して選択・再build・downloadしない。担当者に対象候補を確認する。
 
-- 候補: `build/local-software-candidates/software-a1aa215-01`
-- source commit: `a1aa21565661fc80db97d5f89e52dbab44cc062e`
-- `candidate.manifest.json` SHA-256: `5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E`
+- 候補: `build/local-software-candidates/software-c415668-01`
+- source commit: `c415668bbae4a858402960678aa529fc4e3857e6`
+- `candidate.manifest.json` SHA-256: `F620F54BE5903057B1CB143908D4BF5E5AB84AFF1A64DBFF1F98E717CEE35752`
 - Windows 11 x64、同一Windows利用者、PowerShell 7/.NET 10。SDK非同梱、framework-dependent、clean PC未受入。
 - この記録は公開・配布・実機・品質・AI採用代行の承認ではない。ローカル管理者や同一アカウントによる悪意ある改変に対する署名検証の代替でもない。
 
 まずread-onlyで固定候補と内容を照合する。期待hashは検証記録の固定値を使い、その場で計算した値を期待値へ代入しない。
 
 ```powershell
-$a0Candidate = Join-Path (Get-Location) 'build/local-software-candidates/software-a1aa215-01'
+$a0Candidate = Join-Path (Get-Location) 'build/local-software-candidates/software-c415668-01'
 $a0ManifestPath = Join-Path $a0Candidate 'candidate.manifest.json'
-$a0ExpectedManifestHash = '5EC8B1230779E10FD3A773BC78ACB65F947C36BE48FACC831EE1F2162561054E'
+$a0ExpectedManifestHash = 'F620F54BE5903057B1CB143908D4BF5E5AB84AFF1A64DBFF1F98E717CEE35752'
 if ((Get-FileHash -LiteralPath $a0ManifestPath -ErrorAction Stop).Hash -cne $a0ExpectedManifestHash) { throw 'Candidate manifest mismatch' }
 $a0Manifest = Get-Content -LiteralPath $a0ManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
-if ($a0Manifest.sourceCommit -cne 'a1aa21565661fc80db97d5f89e52dbab44cc062e' -or $a0Manifest.sourceDirty -ne $false -or $a0Manifest.sdkIncluded -ne $false -or $a0Manifest.cliContractVersion -ne 3) { throw 'Candidate identity mismatch' }
+if ($a0Manifest.sourceCommit -cne 'c415668bbae4a858402960678aa529fc4e3857e6' -or $a0Manifest.sourceDirty -ne $false -or $a0Manifest.sdkIncluded -ne $false -or $a0Manifest.cliContractVersion -ne 3) { throw 'Candidate identity mismatch' }
 foreach ($a0Entry in $a0Manifest.files) {
     $a0File = Get-Item -LiteralPath (Join-Path $a0Candidate $a0Entry.path) -ErrorAction Stop
     if ($a0File.Length -ne $a0Entry.size -or (Get-FileHash -LiteralPath $a0File.FullName).Hash -cne $a0Entry.sha256) { throw 'Candidate file mismatch' }
