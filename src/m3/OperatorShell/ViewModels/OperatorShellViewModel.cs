@@ -2155,6 +2155,29 @@ public sealed class OperatorShellViewModel : ObservableObject
         IsBusy = false;
     }
 
+    internal void ObserveHistoricalAcceptance(OperatorReviewRecord accepted)
+    {
+        if (accepted.State != "Accepted") throw new ArgumentException("Only verified acceptance may be observed.");
+        _recoveredPendingReviews = _recoveredPendingReviews.Where(item => item.ResultId != accepted.ResultId).ToArray();
+        _historicalAcceptanceNotice = $"起動時の未確認履歴：残り {_recoveredPendingReviews.Count} 件。履歴を開いて最新の一覧を確認できます。";
+        if (_currentReviewRecord is null)
+        {
+            _reviewStatusText = "履歴から採用を記録しました。次の撮影は自動開始しません。";
+            RaiseReviewProperties();
+            return;
+        }
+        if (_currentReviewRecord is not { } current || current.ResultId != accepted.ResultId ||
+            current.TransactionId != accepted.TransactionId || current.ReviewKind != accepted.ReviewKind)
+        {
+            RaiseReviewProperties();
+            return;
+        }
+        _currentReviewRecord = accepted;
+        _acceptedReviewCandidate = null;
+        _reviewStatusText = "履歴から採用を記録しました。次の撮影は自動開始しません。";
+        RaiseReviewProperties();
+    }
+
     public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
     /// <summary>人による採用は、今回の成功済み結果を Pending として耐久記録できた後だけ許可する。
     /// 起動時に見つけた未確認記録は、画像を再検証していないためここから採用できない。</summary>
@@ -2163,7 +2186,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         string.Equals(current.ResultId, CurrentReviewResultId, StringComparison.Ordinal) &&
         string.Equals(current.TransactionId, LastTransactionId, StringComparison.Ordinal) &&
         ReviewImageAvailable && IsCurrentResultReviewable();
-    public string ReviewStatusText => _reviewStatusText;
+    private string _historicalAcceptanceNotice = string.Empty;
+    public string ReviewStatusText => string.IsNullOrEmpty(_historicalAcceptanceNotice)
+        ? _reviewStatusText : _reviewStatusText + "\n" + _historicalAcceptanceNotice;
     public IReadOnlyList<string> ReviewImageOptions =>
         [.. new[] { ("合成結果", "stitched"), ("左原画像", "CAM-A"), ("右原画像", "CAM-B") }
             .Where(item => _reviewImagePaths.TryGetValue(item.Item2, out var path) && File.Exists(path))
@@ -2219,7 +2244,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                     ? $"過去の採用済み結果 {acceptedCount}件を確認（未確認なし）"
                     : $"未確認の結果 {_recoveredPendingReviews.Count}件、採用済み {acceptedCount}件を検出: " +
                       string.Join(", ", _recoveredPendingReviews.Select(review => review.ResultId)) +
-                      "（ファイル → 未採用の履歴から合成結果を閲覧できます。履歴の採用は未対応）";
+                      "（ファイル → 未採用の履歴から合成結果を確認・採用できます）";
                 OnPropertyChanged(nameof(ReviewStatusText));
             }
             if (recovered.Count > 0)

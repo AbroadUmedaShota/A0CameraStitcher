@@ -197,11 +197,13 @@ public partial class MainWindow : Window
         try
         {
             var adapter = DualCameraProductComposition.CreateHistoricalReviewAdapter();
-            new HistoricalReviewWindow(_dualProductRoot, adapter, _historicalReviewKind) { Owner = this }.ShowDialog();
+            var history = new HistoricalReviewWindow(_dualProductRoot, adapter, _historicalReviewKind) { Owner = this };
+            history.ShowDialog();
+            foreach (var accepted in history.AcceptedReviews) _viewModel.ObserveHistoricalAcceptance(accepted);
         }
         catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            MessageBox.Show(this, "履歴を開けませんでした。保存済みの記録・画像は変更していません。", "未採用の履歴", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, "履歴を正常に処理できませんでした。採用状態は履歴を読み直して確認してください。", "未採用の履歴", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally { _viewModel.EndHistoricalReview(); }
     }

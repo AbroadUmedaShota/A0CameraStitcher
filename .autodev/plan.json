@@ -83,7 +83,7 @@
       {"id": 5, "work_item_ids": ["WI-0033", "WI-0035", "WI-0040", "WI-0041"], "depends_on": [4], "status": "partial", "acceptance": "Verified historical Pending reentry, actual seam navigation, authorized external AI operation path, local candidate and user workflow acceptance. Redistribution review precedes packaging licensed assets; no publication or release is authorized."}
     ],
     "parallel_software_scope": "Review/history/AI operations may proceed before hardware gates; this does not complete dependent integrated acceptance.",
-    "historical_review_progress": "Main shell read-only Pending history entry, 25-record paging and manifest/original/output revalidation implemented. History acceptance, external AI action route and actual GUI/hardware acceptance remain incomplete. Evidence: docs/OPERATOR_UI_SPEC.md.",
+    "historical_review_progress": "Main shell Pending history entry, 25-record paging, detailed view and single-action explicit acceptance implemented. Acceptance revalidates the displayed manifest/original/output snapshot, holds artifact locks through exact Pending compare and durable metadata publication. External AI action route and actual GUI/hardware acceptance remain incomplete. Evidence: docs/OPERATOR_UI_SPEC.md.",
     "preserved_gates": ["HG-0001", "HG-0002", "HG-0005", "ADR-0031", "separate capture and quality test authorization"],
     "evidence_refs": ["docs/DUAL_LIVE_WORKER_POC.md", "docs/OPERATOR_UI_SPEC.md"]
   },

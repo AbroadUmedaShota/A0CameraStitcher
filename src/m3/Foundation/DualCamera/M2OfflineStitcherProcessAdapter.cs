@@ -147,6 +147,25 @@ public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOff
         CancellationToken cancellationToken = default) =>
         HistoricalReviewArtifactsVerifier.VerifyAsync(this, productRoot, record, cancellationToken);
 
+    /// <summary>
+    /// Records an explicit human acceptance only after re-verifying the locked
+    /// historical files. This is not an image-quality or hardware-proof claim.
+    /// </summary>
+    public async Task<OperatorReviewRecord> AcceptHistoricalReviewAsync(
+        string productRoot, OperatorReviewRecord pending, HistoricalReviewArtifacts reviewed,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(pending);
+        ArgumentNullException.ThrowIfNull(reviewed);
+        using var verified = await HistoricalReviewArtifactsVerifier.VerifyLockedAsync(
+            this, productRoot, pending, cancellationToken).ConfigureAwait(false);
+        if (!HistoricalReviewArtifactsComparer.EqualsExactly(verified.Artifacts, reviewed))
+            throw new InvalidDataException("Historical review changed after it was shown.");
+        var root = Path.GetFullPath(productRoot);
+        var store = new FileOperatorReviewStore(Path.Combine(root, "operator-review"));
+        return await store.AcceptPendingAsync(pending, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task ExportAsync(
         string stitchedJpeg,
         string destinationJpeg,

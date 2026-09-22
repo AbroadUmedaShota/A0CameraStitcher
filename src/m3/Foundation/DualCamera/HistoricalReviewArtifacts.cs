@@ -14,13 +14,38 @@ public sealed record HistoricalReviewArtifacts(
     int Width,
     int Height,
     string ProfileId,
-    string ProfileVersion);
+    string ProfileVersion,
+    string ManifestSha256);
+
+/// <summary>Internal lock-bearing verification result; never expose file locks to UI callers.</summary>
+internal sealed class HistoricalReviewArtifactsLease : IDisposable
+{
+    private readonly IReadOnlyList<FileStream> _streams;
+    internal HistoricalReviewArtifactsLease(HistoricalReviewArtifacts artifacts, IReadOnlyList<FileStream> streams)
+    {
+        Artifacts = artifacts;
+        _streams = streams;
+    }
+    internal HistoricalReviewArtifacts Artifacts { get; }
+    public void Dispose()
+    {
+        foreach (var stream in _streams) stream.Dispose();
+    }
+}
 
 internal static class HistoricalReviewArtifactsVerifier
 {
     private const long MaximumBytes = 64L * 1024L * 1024L;
 
     internal static async Task<HistoricalReviewArtifacts> VerifyAsync(
+        M2OfflineStitcherProcessAdapter adapter, string productRoot, OperatorReviewRecord record,
+        CancellationToken cancellationToken)
+    {
+        using var lease = await VerifyLockedAsync(adapter, productRoot, record, cancellationToken).ConfigureAwait(false);
+        return lease.Artifacts;
+    }
+
+    internal static async Task<HistoricalReviewArtifactsLease> VerifyLockedAsync(
         M2OfflineStitcherProcessAdapter adapter, string productRoot, OperatorReviewRecord record,
         CancellationToken cancellationToken)
     {
@@ -48,11 +73,14 @@ internal static class HistoricalReviewArtifactsVerifier
 
         // ShareRead holds a read lock against writers while the adapter and the
         // managed hash/header checks observe the exact immutable candidates.
-        using var stitched = OpenRegularReadLocked(stitchedPath);
-        using var manifest = OpenRegularReadLocked(manifestPath);
+        FileStream? stitched = null;
+        FileStream? manifest = null;
         var lockedOriginals = new List<(string Alias, string Path, FileStream Stream)>(2);
+        HistoricalReviewArtifactsLease? verified = null;
         try
         {
+            stitched = OpenRegularReadLocked(stitchedPath);
+            manifest = OpenRegularReadLocked(manifestPath);
             foreach (var item in originalPaths)
             {
                 token.ThrowIfCancellationRequested();
@@ -63,6 +91,7 @@ internal static class HistoricalReviewArtifactsVerifier
                 ["verify-published-stitch", "--job-directory", jobDirectory, "--stitch-job-id", jobId.ToString("N"),
                  "--capture-transaction-id", transactionId.ToString("N")], token).ConfigureAwait(false);
             var metadata = ParseNativeVerification(output, jobId, transactionId);
+            var manifestSha256 = Convert.ToHexString(SHA256.HashData(await ReadLockedAsync(manifest, token).ConfigureAwait(false))).ToLowerInvariant();
             var originals = new List<CanonicalJpegOriginal>(2);
             foreach (var item in lockedOriginals)
             {
@@ -87,12 +116,20 @@ internal static class HistoricalReviewArtifactsVerifier
             if (outputWidth != metadata.Width || outputHeight != metadata.Height)
                 throw new InvalidDataException("Historical stitched dimensions do not match the manifest.");
             await adapter.ValidateCanonicalJpegAsync(stitchedPath, outputWidth, outputHeight, token).ConfigureAwait(false);
-            return new HistoricalReviewArtifacts(jobId, transactionId, record.ReviewKind, originals, stitchedPath,
-                metadata.OutputSha256, outputWidth, outputHeight, metadata.ProfileId, metadata.ProfileVersion);
+            var artifacts = new HistoricalReviewArtifacts(jobId, transactionId, record.ReviewKind, originals, stitchedPath,
+                metadata.OutputSha256, outputWidth, outputHeight, metadata.ProfileId, metadata.ProfileVersion, manifestSha256);
+            verified = new HistoricalReviewArtifactsLease(artifacts,
+                [stitched, manifest, .. lockedOriginals.Select(item => item.Stream)]);
+            return verified;
         }
         finally
         {
-            foreach (var item in lockedOriginals) item.Stream.Dispose();
+            if (verified is null)
+            {
+                stitched?.Dispose();
+                manifest?.Dispose();
+                foreach (var item in lockedOriginals) item.Stream.Dispose();
+            }
         }
     }
 
@@ -216,4 +253,15 @@ internal static class HistoricalReviewArtifactsVerifier
         if (bytes.Length < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 || bytes[^2] != 0xff || bytes[^1] != 0xd9)
             throw new InvalidDataException("Historical JPEG envelope is invalid.");
     }
+}
+
+internal static class HistoricalReviewArtifactsComparer
+{
+    internal static bool EqualsExactly(HistoricalReviewArtifacts left, HistoricalReviewArtifacts right) =>
+        left.JobId == right.JobId && left.TransactionId == right.TransactionId && left.ReviewKind == right.ReviewKind &&
+        left.StitchedPath == right.StitchedPath && left.StitchedSha256 == right.StitchedSha256 &&
+        left.ManifestSha256 == right.ManifestSha256 && left.Width == right.Width && left.Height == right.Height &&
+        left.ProfileId == right.ProfileId && left.ProfileVersion == right.ProfileVersion &&
+        left.Originals.Count == 2 && right.Originals.Count == 2 &&
+        left.Originals.OrderBy(original => original.Alias).SequenceEqual(right.Originals.OrderBy(original => original.Alias));
 }

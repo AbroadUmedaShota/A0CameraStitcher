@@ -1,7 +1,7 @@
 <Window x:Class="A0CameraStitcher.M3.OperatorShell.HistoricalReviewWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="過去の確認結果" Width="720" Height="520" MinWidth="560" MinHeight="380"
+        Title="過去の確認結果" Width="900" Height="600" MinWidth="820" MinHeight="480"
         WindowStartupLocation="CenterOwner" Background="#202426" Foreground="#F4F4F4">
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -9,18 +9,24 @@
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-        <TextBlock x:Name="ContextLabel" Text="表示のみ：Pendingの過去結果を再検証してから1枚ずつ開きます。採用・撮影・再合成は行いません。" TextWrapping="Wrap" />
+        <TextBlock x:Name="ContextLabel" Text="未採用の結果を再検証して1枚ずつ開きます。合成・左右原画像のうち必要な詳細を確認し、判断した後に「採用を記録」を押してください。撮影・再合成は行いません。" TextWrapping="Wrap" />
         <ListBox x:Name="ReviewList" Grid.Row="1" Margin="0,12" ItemsSource="{Binding Items}" SelectedItem="{Binding Selected, Mode=TwoWay}"
-                 DisplayMemberPath="Display" AutomationProperties.AutomationId="HistoricalReviewList" />
+                 IsEnabled="{Binding CanSelect}" DisplayMemberPath="Display" AutomationProperties.AutomationId="HistoricalReviewList" />
         <TextBlock Grid.Row="2" Text="{Binding Status}" TextWrapping="Wrap" Margin="0,0,0,10" />
-        <Grid Grid.Row="3">
+        <StackPanel Grid.Row="3" Margin="0,0,0,12">
+            <TextBlock Text="{Binding VerificationProgress}" TextWrapping="Wrap" />
+        </StackPanel>
+        <Grid Grid.Row="4">
             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <Button Grid.Column="0" Content="前へ" Click="OnPrevious" IsEnabled="{Binding CanPrevious}" Padding="14,6" Margin="0,0,8,0" />
             <Button Grid.Column="1" Content="次へ" Click="OnNext" IsEnabled="{Binding CanNext}" Padding="14,6" />
             <StackPanel Grid.Column="3" Orientation="Horizontal" Margin="8,0">
-                <ComboBox x:Name="ImageChoice" Width="100" SelectedIndex="0"><ComboBoxItem Content="合成"/><ComboBoxItem Content="CAM-A"/><ComboBoxItem Content="CAM-B"/></ComboBox>
+            <ComboBox x:Name="ImageChoice" Width="100" SelectedIndex="0" IsEnabled="{Binding CanSelect}"><ComboBoxItem Content="合成"/><ComboBoxItem Content="CAM-A"/><ComboBoxItem Content="CAM-B"/></ComboBox>
                 <Button Content="再検証して開く" Click="OnOpen" IsEnabled="{Binding CanOpen}" Padding="14,6" Margin="8,0,0,0" AutomationProperties.AutomationId="HistoricalReviewOpen" />
+                <Button Content="履歴を読直す" Click="OnRefresh" IsEnabled="{Binding CanSelect}" Padding="10,6" Margin="8,0,0,0" />
+                <Button Content="採用を記録" Click="OnAccept" IsEnabled="{Binding CanAccept}" Padding="14,6" Margin="8,0,0,0" AutomationProperties.AutomationId="HistoricalReviewAccept" />
             </StackPanel>
             <Button Grid.Column="4" Content="閉じる" Click="OnClose" Padding="14,6" />
         </Grid>

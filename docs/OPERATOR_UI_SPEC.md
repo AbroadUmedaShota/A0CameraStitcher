@@ -1,6 +1,24 @@
 # 操作者画面・警告・失敗復旧仕様
 
-## 2026-09-22 過去Pendingの本体閲覧導線
+## 2026-09-22 過去Pendingの明示採用
+
+本節は次節の閲覧のみの導線を更新する。「ファイル → 未採用の履歴」で、保存結果を再検証し、合成/CAM-A/CAM-Bを選んで詳細表示できる。確認状況の件数は案内であり、3枚すべての表示や追加のチェックボックスを採用の必須条件にしない。選択した結果を詳細表示した後、人が「採用を記録」を一回押すことで採用を開始する。画像表示だけでは採用・撮影しない。
+
+採用時はもう一度nativeのmanifest検証・JPEG decodeとmanaged hash照合を行う。表示時と同じ結果ID・撮影ID・運用種別・manifest hash・原画像/合成のhash/path/寸法/profileか確認し、左右原画像・合成・manifestのread-lockを保存完了まで保持する。既存確認記録のlockを取得し、`.partial`なし・期待したPendingと全フィールド一致を確認してから、Acceptedを`.partial`→flush→atomic rename→再読取りで記録する。確認記録のroot/lockがない場合は作らない。変更済み・採用済み・不完全な記録は拒否し、自動再試行しない。
+
+保存結果不明時は当該採用操作を再送しない。明示的に履歴を読み直して状態を確認する。採用中の「閉じる」は保存処理へcancelを送らず、結果確定まで本体の操作ゲートとwindowを維持する。閉じる要求があっても、失敗・timeout・不明の場合は警告を表示したwindowを残し、操作者の次の判断を待つ。元の結果を削除・変更せず、採用成功後も次の撮影は自動開始しない。本体で現在確認中の同じ結果を履歴から採用した場合は、採用状態だけを本体へ反映する。
+
+これは合成結果の人による採用であり、rig承認・実機成立・品質の自動合格を意味しない。正規外部AI操作、実GUI操作の受入、二台同時Live Viewおよび撮影/品質の実機確認は未完了。roadmap stage 5はpartialのまま。
+
+統合検証（実機0回）:
+
+- `dotnet run --project tests/m3/HistoricalReviewTests/A0CameraStitcher.M3.HistoricalReviewTests.csproj -c Release --no-restore -- <build/worker-selection-stub/Release/A0CameraStitcher.M2Adapter.exeの絶対path> --acceptance` は1回目でexit 0。実native子processと合成fixtureで、既存storage必須、manifest/原画像変更、古いPending、cancel、partial、重複採用の拒否、保持中4ファイルの書込み拒否、manifest open失敗時のlock解放、採用の再読取りと原画像保持を確認した。
+- 同じHistoricalReviewTests DLLを従来の読取り検証引数で1回実行しexit 0（当該系列累計4/5）。従来のv1/v2、欠落・改変・ID不一致の拒否を回帰確認した。
+- `dotnet run --project tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj -c Release --no-restore -- --historical-review-window` は今回3回ともexit 0（前回compile失敗を含む系列累計5/5、追加実行なし）。採用開始は一回の明示操作のみ、表示後は未採用維持、結果変更で表示件数をリセット、結果不明時の再送禁止、成功時の候補除去、起動時Pending一覧の採用後更新、撮影0を検証した。
+
+独立レビューで、採用中の閉じるによるpartial誘発、古いPending表示、失敗時にclose要求へ従って警告が消える問題を修正した。最後のclose条件修正は上限到達後のため同系列を再実行せず、`dotnet build tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj -c Release --no-restore -v quiet`（exit 0、warning 0/error 0、47.06秒）と独立コードレビュー（確定blockerなし）で確認した。実windowの終了競合操作・描画受入は未検証であり、ソフトテストを実GUI/実機受入へ読み替えない。
+
+## 2026-09-22 過去Pendingの本体閲覧導線（7a55fc2時点の検証記録）
 
 本体の「ファイル → 未採用の履歴（閲覧のみ）」から、同じproduct rootの確認記録を25件単位で読み取る。ページ内のPendingかつ運用種別一致（Product/Simulated）のみを開く対象にし、採用済みだけのページでも次ページへ進める。OriginalsOnlyはこの画面の対象外。明示選択した合成/CAM-A/CAM-Bの1枚を、保存済みmanifest・左右原画像・合成画像の再検証後に詳細表示する。画像を開く際にも同じread-lock付きstreamでSHA-256照合とdecodeを行う。SIMULATED表示は実機受入へ読み替えない。
 

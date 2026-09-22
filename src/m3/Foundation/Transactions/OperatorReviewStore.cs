@@ -87,6 +87,41 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
         return records.OrderBy(record => record.UpdatedAtUtc).ToArray();
     }
 
+    // Internal acceptance transition for an already displayed Pending record.
+    // It never creates metadata storage or a lock; callers must explicitly
+    // confirm the review after independently re-verifying the artifacts.
+    internal async Task<OperatorReviewRecord> AcceptPendingAsync(OperatorReviewRecord expected,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        Validate(expected);
+        if (expected.State != "Pending") throw new InvalidDataException("Only Pending reviews can be accepted.");
+        using var lease = AcquireExistingLease();
+        if (Directory.EnumerateFiles(_root, "*.partial").Any())
+            throw new InvalidDataException("Incomplete review metadata requires inspection.");
+        var path = RecordPath(expected.ResultId);
+        if (!File.Exists(path)) throw new FileNotFoundException("Expected Pending review is unavailable.");
+        var current = await ReadAsync(path, cancellationToken).ConfigureAwait(false);
+        if (!Same(current, expected) || current.State != "Pending")
+            throw new InvalidDataException("Pending review changed before acceptance.");
+        var acceptedAt = DateTimeOffset.UtcNow;
+        if (acceptedAt < expected.UpdatedAtUtc) throw new InvalidDataException("Review clock moved backwards.");
+        var accepted = expected with { State = "Accepted", UpdatedAtUtc = acceptedAt };
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".partial";
+        await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
+                         FileShare.None, 4096, FileOptions.WriteThrough | FileOptions.Asynchronous))
+        {
+            await JsonSerializer.SerializeAsync(stream, accepted, Options, cancellationToken).ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            stream.Flush(flushToDisk: true);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        File.Move(temporary, path, overwrite: true);
+        var reread = await ReadAsync(path, CancellationToken.None).ConfigureAwait(false);
+        if (!Same(reread, accepted)) throw new IOException("Accepted review reread verification failed.");
+        return reread;
+    }
+
     // Standalone metadata observation only: never initializes storage, accepts a
     // review, verifies image quality, or starts/queries the Camera Agent.
     public async Task<ReviewMetadataPage> QueryReadOnlyAsync(int offset = 0, int limit = 25,
@@ -134,6 +169,19 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
         return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
 
+    private FileStream AcquireExistingLease()
+    {
+        for (DirectoryInfo? ancestor = new(_root); ancestor is not null; ancestor = ancestor.Parent)
+        {
+            if (!ancestor.Exists) throw new DirectoryNotFoundException("Review storage is unavailable.");
+            if ((ancestor.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("Review storage ancestors must not be reparse points.");
+        }
+        var lockPath = Path.Combine(_root, ".review.lock");
+        RejectReparsePoint(lockPath);
+        return new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    }
+
     private string RecordPath(string id) => Path.Combine(_root,
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id))).ToLowerInvariant() + ".json");
 
@@ -163,4 +211,8 @@ public sealed class FileOperatorReviewStore(string rootDirectory) : IOperatorRev
             record.State is not ("Pending" or "Accepted") || record.UpdatedAtUtc == default)
             throw new InvalidDataException("Review record is invalid.");
     }
+
+    private static bool Same(OperatorReviewRecord left, OperatorReviewRecord right) =>
+        left.ResultId == right.ResultId && left.TransactionId == right.TransactionId &&
+        left.ReviewKind == right.ReviewKind && left.State == right.State && left.UpdatedAtUtc == right.UpdatedAtUtc;
 }

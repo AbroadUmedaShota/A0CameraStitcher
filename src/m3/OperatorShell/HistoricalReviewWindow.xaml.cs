@@ -19,6 +19,10 @@ public partial class HistoricalReviewWindow : Window
     private readonly CancellationTokenSource _lifetime = new();
     private bool _closed;
     private bool _lifetimeDisposed;
+    private bool _acceptanceInProgress;
+    private bool _closeRequested;
+    private readonly List<OperatorReviewRecord> _acceptedReviews = [];
+    internal IReadOnlyList<OperatorReviewRecord> AcceptedReviews => _acceptedReviews;
 
     internal HistoricalReviewWindow(string productRoot, M2OfflineStitcherProcessAdapter adapter, string expectedReviewKind)
     {
@@ -33,6 +37,15 @@ public partial class HistoricalReviewWindow : Window
         ContextLabel.Text = (expectedReviewKind == "Simulated" ? "SIMULATED：実機の撮影・品質受入ではありません。\n" : "品質合格・採用を自動判定しません。\n") + ContextLabel.Text;
         DataContext = _viewModel;
         Loaded += OnLoaded;
+        Closing += (_, args) =>
+        {
+            if (!_acceptanceInProgress) return;
+            args.Cancel = true;
+            _closeRequested = true;
+            // Do not interrupt a metadata publication just because the operator
+            // closes the window. Keep the shell gate until its outcome is known.
+            _viewModel.Status = "採用記録の保存状態を確認してから閉じます。自動再送はしません。";
+        };
         Closed += (_, _) =>
         {
             _closed = true;
@@ -53,8 +66,8 @@ public partial class HistoricalReviewWindow : Window
             if (_closed || _lifetime.IsCancellationRequested) return false;
             _viewModel.ApplyPage(page, offset, _expectedReviewKind);
             _viewModel.Status = _viewModel.Items.Count == 0
-                ? "このページに開けるPending結果はありません。採用は未対応です。"
-                : $"Pending結果 {_viewModel.Items.Count}件を表示しています。採用は未対応です。";
+                ? "このページに開ける未採用結果はありません。"
+                : $"未採用結果 {_viewModel.Items.Count}件。選択して合成・左右原画像を詳しく確認してください。";
             return true;
         }
         catch (OperationCanceledException)
@@ -112,15 +125,18 @@ public partial class HistoricalReviewWindow : Window
                 Owner = this,
                 Title = _expectedReviewKind == "Simulated" ? "模擬結果の詳細確認（SIMULATED・閲覧のみ）" : "保存結果の詳細確認（閲覧のみ）",
             }.ShowDialog();
-            _viewModel.Status = "表示のみで開きました。採用は未対応です。";
+            if (!_closed) _viewModel.RecordViewed(snapshot.Record, artifacts, choice);
+            _viewModel.Status = "画像を表示しました。詳細確認と明示操作が済むまで採用は記録しません。";
         }
         catch (OperationCanceledException)
         {
+            _viewModel.ResetVerification();
             if (!_closed) _viewModel.Status = "再検証が中断または時間切れになりました。自動再試行はしません。";
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or
             InvalidDataException or InvalidOperationException or NotSupportedException or JsonException or Win32Exception or FormatException)
         {
+            _viewModel.ResetVerification();
             _viewModel.Status = "保存結果を安全に再検証できないため、開きませんでした。";
         }
         finally
@@ -129,6 +145,41 @@ public partial class HistoricalReviewWindow : Window
             DisposeLifetimeIfClosed();
         }
     }
+
+    private async void OnAccept(object sender, RoutedEventArgs e)
+    {
+        if (_closed || _lifetime.IsCancellationRequested ||
+            !_viewModel.TryBeginAcceptance(out var pending, out var reviewed)) return;
+        _acceptanceInProgress = true;
+        var acceptanceSucceeded = false;
+        _viewModel.Status = "確認した画像と記録を再検証し、採用を保存しています…";
+        try
+        {
+            var accepted = await _adapter.AcceptHistoricalReviewAsync(_productRoot, pending!, reviewed!, _lifetime.Token);
+            _acceptedReviews.Add(accepted);
+            _viewModel.RecordAcceptance(accepted);
+            acceptanceSucceeded = true;
+            _viewModel.Status = "採用を保存・再読取り確認しました。撮影は開始しません。閉じて次の原稿を準備できます。";
+        }
+        catch (OperationCanceledException)
+        {
+            _viewModel.Status = "採用処理を中止しました。再送せず、履歴を読み直して保存状態を確認してください。";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidDataException or InvalidOperationException or NotSupportedException or JsonException or Win32Exception or FormatException)
+        {
+            _viewModel.Status = "採用の保存結果を確認できません。自動再送せず、履歴を読み直してください。";
+        }
+        finally
+        {
+            _acceptanceInProgress = false;
+            _viewModel.IsBusy = false;
+            if (_closeRequested && acceptanceSucceeded) Close();
+            else _closeRequested = false; // Keep failure/unknown visible for an explicit next decision.
+        }
+    }
+
+    private async void OnRefresh(object sender, RoutedEventArgs e) => await LoadPageAsync(_viewModel.Offset);
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 

@@ -4,6 +4,8 @@ using System.Text.Json.Nodes;
 using A0CameraStitcher.M3.Foundation;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 
+if (args is [var executable, "--acceptance"] && Path.IsPathFullyQualified(executable) && File.Exists(executable))
+    return await HistoricalAcceptanceContracts.RunAsync(executable);
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0]) || !File.Exists(args[0])) return 2;
 var adapter = new M2OfflineStitcherProcessAdapter(args[0]);
 var root = Path.Combine(Path.GetTempPath(), "A0HistoricalReview-" + Guid.NewGuid().ToString("N"));

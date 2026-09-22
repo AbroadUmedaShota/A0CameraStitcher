@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
 
@@ -66,6 +67,25 @@ internal static class HistoricalReviewWindowContracts
             "Previous page offset or mode isolation is incorrect.");
         history.Selected = history.Items[0];
         Require(history.CanOpen, "Explicit selection did not enable verification.");
+        var pending = history.Selected.Record;
+        var shown = new HistoricalReviewArtifacts(Guid.ParseExact(pending.ResultId, "N"),
+            Guid.ParseExact(pending.TransactionId, "N"), "Simulated", [], "synthetic-only", new string('a', 64),
+            16, 8, "synthetic", "1", new string('b', 64));
+        Require(!history.CanAccept, "Unviewed result was confirmable.");
+        history.RecordViewed(pending, shown, 0);
+        Require(history.CanAccept && !history.IsBusy, "Verified review did not permit a single explicit acceptance action.");
+        history.RecordViewed(pending, shown, 1);
+        var changed = shown with { ManifestSha256 = new string('c', 64) };
+        history.RecordViewed(pending, changed, 2);
+        Require(history.VerificationProgress.Contains("1/3", StringComparison.Ordinal), "Changed result retained previous image view counts.");
+        history.RecordViewed(pending, changed, 0);
+        history.RecordViewed(pending, changed, 1);
+        Require(history.CanAccept && !history.IsBusy, "Viewing started acceptance automatically.");
+        Require(history.TryBeginAcceptance(out var selectedPending, out var selectedShown) && selectedPending == pending && selectedShown == changed,
+            "Explicit acceptance did not retain the selected snapshot.");
+        Require(!history.TryBeginAcceptance(out _, out _) && history.IsBusy, "Acceptance allowed concurrent submission.");
+        history.IsBusy = false; // Ambiguous failure: no durable success was returned.
+        Require(!history.CanAccept && !history.TryBeginAcceptance(out _, out _), "Ambiguous acceptance was resubmitted.");
         // A failed page load does not commit navigation or lose the return offset.
         Require(history.TryGetPreviousOffset(out previous) && previous == 0, "Reading navigation consumed its offset.");
         history.ApplyPage(page, 0, "Simulated");
@@ -74,6 +94,23 @@ internal static class HistoricalReviewWindowContracts
             "Page change retained an obsolete selection.");
         Require((await store.QueryReadOnlyAsync(25, 25)).Records.All(record => record.State == "Pending"),
             "Viewing metadata accepted a result.");
+        var historyShell = new OperatorShellViewModel(new SimulationFoundationService(Path.Combine(root, "history-journals")),
+            null, operatorReviewStore: store);
+        await historyShell.InitializeAsync(CancellationToken.None);
+        var historyShellState = historyShell.UiState;
+        historyShell.ObserveHistoricalAcceptance(pending with { State = "Accepted" });
+        Require(historyShell.ReviewStatusText.Contains("残り 1 件", StringComparison.Ordinal) &&
+            !historyShell.ReviewStatusText.Contains(pending.ResultId, StringComparison.Ordinal) &&
+            historyShell.TransactionStartCount == 0 && historyShell.UiState == historyShellState,
+            "Historical acceptance left stale Pending status or started capture.");
+        history.ApplyPage(new ReviewMetadataPage([pending], null, 1), 0, "Simulated");
+        history.Selected = history.Items[0];
+        foreach (var choice in new[] { 0, 1, 2 }) history.RecordViewed(pending, shown, choice);
+        Require(history.TryBeginAcceptance(out _, out _), "Fresh explicit review could not begin acceptance.");
+        history.RecordAcceptance(pending with { State = "Accepted" }); // UI-only durable-success response fixture.
+        history.IsBusy = false;
+        Require(history.Items.Count == 0 && history.Selected is null && !history.CanAccept,
+            "Accepted result remained eligible for another acceptance.");
 
         var imagePath = Path.Combine(root, "synthetic.jpg");
         var bitmap = BitmapSource.Create(2, 2, 96, 96, PixelFormats.Bgr24, null,
