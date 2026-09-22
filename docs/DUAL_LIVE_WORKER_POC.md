@@ -139,6 +139,7 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 - 独立レビューで固定ローカルdriveとroot自体のreparse拒否不足を検出し修正した。本番marker保存先のoverrideは拒否し、テスト専用lease名と隔離rootだけで検証する。人手復旧CLIは未実装、自動解除しない。
 - 初回の専用buildは主担当がexit 0を回収。`hardware_process_lease_delegation_contracts` は1/1 PASS、0.40秒、exit 0。模擬子processの`ExitProcess(91)`によるdestructor非実行、次owner拒否、同thread再入拒否、不完全終了証拠の拒否、正常解除を確認。これは実SDK異常終了試験ではない。
 - 上記PASS後に固定drive検査と機械整形を加えた最終差分も、専用build exit 0、同CTest 1/1 PASS（0.60秒、exit 0）。このseriesのCTestは計2回。既定本番名のstorage分岐を隔離環境で直接通す試験と、I/O故障注入の網羅は残る。実機操作0回、preview枠は2/5のまま。
+- 追加負例をまとめた3回目もbuild exit 0、同CTest 1/1 PASS（0.69秒、exit 0）。A/B各4終了項目の一つずつの欠落、失敗後に完全証拠を渡しても解除不可、readonly markerによる削除失敗・その後の再解除拒否、本番保存先overrideと相対path拒否を確認。計3回でこの試験seriesを終了。write/flush故障、既定本番storage分岐、実controller/SDK証拠の接続は未検証として残す。
 
 ## 実機 PoC（未実行）
 

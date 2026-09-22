@@ -30,6 +30,10 @@ bool Quarantined(const std::string &n, const std::filesystem::path &r) {
         return e.Category() == "camera_control_delegation_quarantined";
     }
 }
+template<class Action> bool Rejects(Action action) {
+    try { action(); } catch (const TransportError&) { return true; }
+    return false;
+}
 } // namespace
 int main(int argc, char **argv) {
     const auto root = argc == 4 ? std::filesystem::path(argv[3]) : Root();
@@ -89,7 +93,43 @@ int main(int argc, char **argv) {
         x.DisarmDualDelegation(ok);
         Check(!x.DualDelegationArmed(), "typed evidence disarms");
     }
-    RemoveDirectoryW(root.c_str());
-    std::cout << "{\"failures\":" << failures << "}\n";
+    const DualDelegationCloseEvidence complete{{true,true,true,true},{true,true,true,true}};
+    for (int missing = 0; missing < 8; ++missing) {
+        {
+            HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
+            lease.ArmDualDelegation();
+            auto evidence = complete;
+            auto& body = missing < 4 ? evidence.camera_a : evidence.camera_b;
+            switch (missing % 4) {
+                case 0: body.live_view_off = false; break;
+                case 1: body.source_closed = false; break;
+                case 2: body.module_closed = false; break;
+                case 3: body.worker_reaped = false; break;
+            }
+            Check(Rejects([&] { lease.DisarmDualDelegation(evidence); }), "each missing receipt rejects");
+            Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "failed disarm is terminal");
+        }
+        Check(Quarantined(name, root), "missing receipt preserves cross-instance quarantine");
+        if (!DeleteFileW(marker.c_str())) return 4;
+    }
+    {
+        HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
+        lease.ArmDualDelegation();
+        if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_READONLY)) return 4;
+        Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure rejects");
+        if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_NORMAL)) return 4;
+        Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure cannot be retried");
+    }
+    Check(Quarantined(name, root), "delete failure retains marker");
+    if (!DeleteFileW(marker.c_str())) return 4;
+    Check(Rejects([&] {
+        HardwareProcessLease lease("A0CameraStitcher.Phase0.CameraControl.v1",
+            std::chrono::milliseconds(0), root);
+    }), "production marker location cannot be overridden");
+    Check(Rejects([&] {
+        HardwareProcessLease lease(name, std::chrono::milliseconds(0), std::filesystem::path(L"relative"));
+    }), "relative marker location rejects");
+    if (!RemoveDirectoryW(root.c_str())) return 4;
+    std::cout << "{\"mode\":\"simulation\",\"failures\":" << failures << "}\n";
     return failures ? 1 : 0;
 }
