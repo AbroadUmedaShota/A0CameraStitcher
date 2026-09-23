@@ -75,7 +75,7 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 | 候補/契約発見 | 本手順＋manifest＋describe | SDK非同梱候補が対象 |
 | 保存記録の一覧/1結果検証 | reviews / verify-review | 同梱CLIで合成fixture検証済み |
 | 起動中GUIの状態 | v3 gui-status | 新候補に同梱、明示instance読取り、実GUI接続未受入 |
-| GUIの対象結果表示 | 開発ソースv4 `gui-show-review` | 別パイプのsoftware契約PASS、実GUIでの画像表示は未受入。上記固定候補v3には含まれない |
+| GUIの対象結果表示 | 開発ソースv4 `gui-show-review` | 別パイプ契約とSimulatedの実WPF画面E2EはPASS。Productの実結果・人の目視は未受入。上記固定候補v3には含まれない |
 | GUIと同じゲートで撮影/次の準備 | なし | 未実装、実機承認も必要 |
 | AIによる採用代行 | なし | 別の明示依頼とアプリ側認可が必要 |
 | 実GUI/二台同時Live View/撮影品質 | 別受入 | 未完、CLI成功では代替不可 |
@@ -88,4 +88,4 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 
 開発ソースv4では、状態照会の読取り専用pipeを変えず、別の `gui-show-review --instance <MainWindowのPID-起動ticks> --result-id <小文字GUID N> --image <stitched|cam-a|cam-b>` を追加した。要求に保存先pathは含めず、GUIが既に保持するProduct/Simulated保存先からPendingの1結果を選ぶ。同一利用者・同一logon session、対象processのPID/起動ticksと接続先pipe server PIDを照合し、UIの `TryBeginHistoricalReview` を先に取得する。記録と原画像・合成画像を再検証し、記録を再読取りした後、選んだ画像のhashを同一streamで再照合する閲覧専用ウィンドウを開く。採用・撮影・設定write・WPD・削除はコマンドにない。終了または拒否で履歴操作ゲートを解放する。45秒の協調期限を設けるが、同期OS呼出しの強制中断は保証しない。応答喪失・期限切れから「画面は開いていない」と推定せず、自動再送しない。同一利用者の悪意あるprocessを認証する仕組みではない。
 
-v4のsoftware証拠: CLI/Foundation Release buildとOperatorShell Release buildはいずれも警告0・エラー0。別process CLI→実Windows pipe→fake表示handlerの専用試験2回はPASSし、正常応答、画面not-ready、対象unavailable、不正コマンド・result ID、古いinstanceを確認した。実MainWindowに画像を表示するE2E、画面の目視、別logon session拒否の実測は**未実施**。この開発ソースは固定候補 `software-c415668-01` を変更せず、配布候補にもしていない。CLIの `Displayed` はウィンドウを開けたという報告であり、AI/人が画像内容を見たこと、品質・実機の受入、採用許可ではない。
+v4のsoftware証拠: CLI/Foundation Release buildとOperatorShell Release buildはいずれも警告0・エラー0。別process CLI→実Windows pipe→fake表示handlerの専用試験2回はPASSし、正常応答、画面not-ready、対象unavailable、不正コマンド・result ID、古いinstanceを確認した。隔離したSimulated保存先を使う実MainWindowの専用試験は初回compile警告による不実行を修正後、直接clientと別process CLIの各1回でPASS。指定CAM-A画像のWPF viewerが可視、履歴ゲートの保持/解放、未採用記録と原画像の不変、改変後の表示拒否を確認した。Productの実結果、操作者/AIの画像内容の目視、別logon session拒否の実測は**未実施**。この開発ソースは固定候補 `software-c415668-01` を変更せず、配布候補にもしていない。CLIの `Displayed` はウィンドウを開けたという報告であり、AI/人が画像内容を見たこと、品質・実機の受入、採用許可ではない。

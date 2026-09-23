@@ -55,6 +55,21 @@ public partial class MainWindow : Window
         string? approvedCaptureProfilePath = null,
         string? dualIdentityProofPath = null,
         int captureRecoveryRunCount = 1)
+        : this(environment, dualCameraAgentExecutablePath, dualWpdCameraMapPath, captureRecoveryOnly,
+            approvedCaptureProfilePath, dualIdentityProofPath, captureRecoveryRunCount, null)
+    {
+    }
+
+    // Isolated software-only product root for the OperatorShell test assembly.
+    internal MainWindow(string syntheticTestRoot)
+        : this(DualCameraExecutionEnvironment.TestSynthetic, null, null, false, null, null, 1,
+            Path.GetFullPath(syntheticTestRoot))
+    {
+    }
+
+    private MainWindow(DualCameraExecutionEnvironment environment, string? dualCameraAgentExecutablePath,
+        string? dualWpdCameraMapPath, bool captureRecoveryOnly, string? approvedCaptureProfilePath,
+        string? dualIdentityProofPath, int captureRecoveryRunCount, string? syntheticTestRoot)
     {
         if (captureRecoveryOnly && environment != DualCameraExecutionEnvironment.HardwareDual)
         {
@@ -78,6 +93,9 @@ public partial class MainWindow : Window
                 nameof(captureRecoveryRunCount));
         }
 
+        if (syntheticTestRoot is not null && environment != DualCameraExecutionEnvironment.TestSynthetic)
+            throw new ArgumentException("Synthetic test root cannot be used with hardware.", nameof(syntheticTestRoot));
+
         // HardwareDual shares the same exclusive OS-lease Single uses: at most one
         // hardware operator window (Single or Dual) may be open in this Windows logon
         // session, so a mode switch can only start Dual after Single has fully exited.
@@ -87,16 +105,16 @@ public partial class MainWindow : Window
         try
         {
             InitializeComponent();
-            var simulatedRoot = Path.Combine(
+            var simulatedRoot = syntheticTestRoot is null ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "A0CameraStitcher",
-                "m3-simulated");
-            var dualProductRoot = Path.Combine(
+                "m3-simulated") : Path.Combine(syntheticTestRoot, "simulated");
+            var dualProductRoot = syntheticTestRoot is null ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "A0CameraStitcher",
                 environment == DualCameraExecutionEnvironment.HardwareDual
                     ? "dual-camera-hardware-products"
-                    : "dual-camera-test-synthetic-products");
+                    : "dual-camera-test-synthetic-products") : Path.Combine(syntheticTestRoot, "product");
             IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null;
             CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null;
             if (environment == DualCameraExecutionEnvironment.HardwareDual)
@@ -406,8 +424,10 @@ public partial class MainWindow : Window
         MessageBox.Show(this, _viewModel.TechnicalDetail, "技術情報（error code・ログ位置）", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void ShowVersion_Click(object sender, RoutedEventArgs eventArgs) =>
-        MessageBox.Show(this, OperatorShellViewModel.AppVersionText + "\n読取り専用 instance: " +
-            (_statusServer is not null && !_statusServer.Completion.IsCompleted ? _statusServer.InstanceId : "取得不能"),
+        MessageBox.Show(this, OperatorShellViewModel.AppVersionText + "\nGUI instance（状態照会・保存結果の照会表示）: " +
+            (_statusServer is not null && !_statusServer.Completion.IsCompleted ? _statusServer.InstanceId : "取得不能") +
+            "\n保存結果の照会表示: " +
+            (_reviewDisplayServer is not null && !_reviewDisplayServer.Completion.IsCompleted ? "利用可能" : "取得不能"),
             "バージョン", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs eventArgs) => Close();

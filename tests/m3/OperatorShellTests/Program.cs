@@ -48,6 +48,19 @@ if (args is ["--historical-review-window"])
         return 1;
     }
 }
+if (args is ["--gui-review-display", var reviewCliPath])
+{
+    try
+    {
+        RunOnStaRenderThread(() => GuiReviewDisplayContracts.RunAsync(reviewCliPath));
+        return 0;
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL GUI review display: {error}");
+        return 1;
+    }
+}
 if (args is ["--five-run-acceptance"])
 {
     HardwareLaunchOptionsAreExplicit();
