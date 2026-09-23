@@ -52,6 +52,9 @@ internal static class GuiReviewDisplayContracts
             await WaitUntilAsync(() => viewModel.CanOpenHistoricalReview, "Synthetic GUI did not reach the history gate.");
             using var process = Process.GetCurrentProcess();
             var instance = FormattableString.Invariant($"{process.Id}-{process.StartTime.ToUniversalTime().Ticks}");
+            var beforeStatus = await OperatorStatusClient.ObserveAsync(instance);
+            Check(beforeStatus.Snapshot.CanOpenHistoricalReview && !beforeStatus.Snapshot.IsBusy,
+                "Existing read-only GUI status endpoint changed before display.");
             using var cliReply = await ShowViaCliAsync(reviewCliPath, instance, pending.ResultId, "cam-a");
             Check(cliReply.RootElement.GetProperty("status").GetString() == "ok" &&
                 cliReply.RootElement.GetProperty("data").GetProperty("reply").GetProperty("outcome").GetInt32() == 0,
@@ -62,6 +65,9 @@ internal static class GuiReviewDisplayContracts
                 "Verified read-only image was not actually visible.");
             Check(!viewModel.CanOpenHistoricalReview && !viewModel.CanCapture && viewModel.TransactionStartCount == 0,
                 "Display did not hold the history gate or started capture.");
+            var showingStatus = await OperatorStatusClient.ObserveAsync(instance);
+            Check(!showingStatus.Snapshot.CanOpenHistoricalReview && showingStatus.Snapshot.IsBusy,
+                "Existing status endpoint did not reflect the display gate.");
             viewer.Close();
             Check(viewModel.CanOpenHistoricalReview, "Closing the viewer did not release the history gate.");
             Check((await store.ReadOneReadOnlyAsync(pending.ResultId)).State == "Pending" &&
