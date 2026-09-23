@@ -68,6 +68,8 @@ software-only確認（2026-09-23）: 既存SDK-stub CMake target `a0_hardware_pr
 
 CLI追加後のSDK-stub Release buildはexit 0。`--diagnostic` を追加で3回実行し、いずれも `failures=0`、exit 0。synthetic markerに対してCLI子processがexit 0で人手レビュー候補を返し、出力JSONに固定statusと匿名hashがあり、nonce/owner PIDの値やfield名が出ないこと、test-root fixtureが保持されることを確認した。診断専用系列は合計5/5回で終了し、同条件の追加反復はしない。CLIの本番 `--read-only` は起動していない。SDK有効buildでの`--test-root`拒否はコード上のbuild条件のみで、実行確認はまだない。
 
+SDK有効構成 `build/worker-selection-sdk` の `A0CameraStitcher.MarkerDiagnostic` Release buildはexit 0。生成されたCLI projectのcompile定義に `A0_MARKER_DIAGNOSTIC_TEST_ROOT` はなく、SDKなし構成のCLI projectには存在することを読取りで確認した。これはbuild条件の証拠であり、SDK有効exeを実行しての `--test-root` 拒否、製品環境での本番marker読取り、例外解除の受入ではない。診断系列5/5の枠を追加反復に使わず、CLIは未実行のまま隔離を保持した。
+
 残り1/5の実機preview試験は現時点で**実施不可**。実施判断の最低条件は、失敗命令・匿名category・worker終了receiptを失わない改修とfake/IPC負例、markerの承認済み回復手順、両実機の新たな接続/物理alias確認、変更後候補のexact hash、SDK/WPD非重複、1回だけの開始・左右新規frame・両側停止/closeを記録できること。どれか欠ければ中止し、SDK close不明、片側停止、通信不明、期限切れでは再試行・marker解除・撮影へ進まない。プレビュー成功でも撮影、保存原画像、光学品質、製品受入の証拠にはしない。
 
 ### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
