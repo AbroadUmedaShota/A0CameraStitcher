@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace a0::phase0 {
 namespace {
@@ -254,6 +255,25 @@ bool IsLowerHex(std::string_view value, std::size_t exact_size) noexcept {
         return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
     });
 }
+bool ExistingSafeDirectoryTree(const std::filesystem::path &root) {
+    const auto drive = root.root_name().wstring();
+    if (!root.is_absolute() || root.lexically_normal() != root || drive.size() != 2 || drive[1] != L':' ||
+        GetDriveTypeW(root.root_path().c_str()) != DRIVE_FIXED)
+        return false;
+    std::filesystem::path current = root.root_path();
+    const auto safe_directory = [](const std::filesystem::path &path) {
+        const DWORD a = GetFileAttributesW(path.c_str());
+        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+               (a & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    };
+    if (!safe_directory(current)) return false;
+    for (const auto &part : root.relative_path()) {
+        if (part == L".." || part == L".") return false;
+        current /= part;
+        if (!safe_directory(current)) return false;
+    }
+    return true;
+}
 bool ParseUnsigned(std::string_view value, DWORD &out) noexcept {
     unsigned long long parsed{};
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
@@ -298,6 +318,85 @@ bool ParseDelegationMarker(std::string_view wire, DelegationMarker &marker) {
     marker.nonce.assign(nonce);
     marker.epoch.assign(epoch);
     return true;
+}
+struct DiagnosticSnapshot final {
+    std::string contents;
+    BY_HANDLE_FILE_INFORMATION info{};
+};
+bool ReadDiagnosticSnapshot(const std::wstring &path, DiagnosticSnapshot &snapshot) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+        return false;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool regular = GetFileType(file) == FILE_TYPE_DISK && GetFileInformationByHandle(file, &info) &&
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+        info.nFileSizeHigh == 0 && info.nFileSizeLow >= 1 && info.nFileSizeLow <= 255;
+    if (!regular) {
+        CloseHandle(file);
+        return false;
+    }
+    std::array<char, 256> bytes{};
+    DWORD read{};
+    const bool ok = ReadFile(file, bytes.data(), info.nFileSizeLow, &read, nullptr) &&
+                    read == info.nFileSizeLow;
+    CloseHandle(file);
+    if (!ok) return false;
+    snapshot.contents.assign(bytes.data(), read);
+    snapshot.info = info;
+    return true;
+}
+bool SameDiagnosticSnapshot(const DiagnosticSnapshot &a, const DiagnosticSnapshot &b) {
+    const auto &x = a.info;
+    const auto &y = b.info;
+    return a.contents == b.contents && x.dwFileAttributes == y.dwFileAttributes &&
+           x.nFileSizeHigh == y.nFileSizeHigh && x.nFileSizeLow == y.nFileSizeLow &&
+           x.dwVolumeSerialNumber == y.dwVolumeSerialNumber && x.nFileIndexHigh == y.nFileIndexHigh &&
+           x.nFileIndexLow == y.nFileIndexLow &&
+           CompareFileTime(&x.ftLastWriteTime, &y.ftLastWriteTime) == 0;
+}
+bool ProcessAbsent(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    if (process == nullptr) return GetLastError() == ERROR_INVALID_PARAMETER;
+    const DWORD state = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return state == WAIT_OBJECT_0;
+}
+DualDelegationMarkerDiagnostic InspectDualDelegationMarkerReadOnly(const std::filesystem::path &test_marker_root) {
+    // No lease, directory creation, worker start, SDK/WPD call, or marker write.
+    const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
+    if (!ExistingSafeDirectoryTree(root)) return {"marker_root_untrusted"};
+    const std::wstring expected = std::filesystem::path(MarkerPath(root)).filename().wstring();
+    WIN32_FIND_DATAW entry{};
+    const std::wstring pattern = (root / L"armed-session-*.marker").wstring();
+    HANDLE found = FindFirstFileW(pattern.c_str(), &entry);
+    if (found == INVALID_HANDLE_VALUE) {
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? DualDelegationMarkerDiagnostic{"marker_missing"}
+                                                     : DualDelegationMarkerDiagnostic{"marker_unavailable"};
+    }
+    unsigned count{};
+    bool exact{};
+    do {
+        ++count;
+        exact = exact || expected == entry.cFileName;
+    } while (count < 2 && FindNextFileW(found, &entry));
+    const DWORD enumeration_error = GetLastError();
+    FindClose(found);
+    if (count != 1 || !exact) return {"marker_ambiguous"};
+    if (enumeration_error != ERROR_NO_MORE_FILES) return {"marker_unavailable"};
+    const std::wstring path = (root / expected).wstring();
+    DiagnosticSnapshot first{}, second{};
+    if (!ReadDiagnosticSnapshot(path, first)) return {"marker_invalid"};
+    DelegationMarker parsed{};
+    if (!ParseDelegationMarker(first.contents, parsed)) return {"marker_invalid"};
+    if (!ExistingSafeDirectoryTree(root) || !ReadDiagnosticSnapshot(path, second) ||
+        !SameDiagnosticSnapshot(first, second)) return {"marker_changed"};
+    if (!ProcessAbsent(parsed.owner_pid) || !ProcessAbsent(parsed.worker_a_pid) ||
+        !ProcessAbsent(parsed.worker_b_pid)) return {"process_active_or_unknown"};
+    const std::vector<unsigned char> bytes(second.contents.begin(), second.contents.end());
+    return {"eligible_for_human_review", Sha256Hex(bytes), second.contents.size()};
 }
 std::string MakeHexRandom(std::array<unsigned char, 16> &bytes) {
     if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),

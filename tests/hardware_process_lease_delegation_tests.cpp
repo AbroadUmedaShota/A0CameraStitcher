@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <string>
 
 using namespace a0::phase0;
 namespace {
@@ -34,9 +35,68 @@ template<class Action> bool Rejects(Action action) {
     try { action(); } catch (const TransportError&) { return true; }
     return false;
 }
+int RunDiagnosticTests() {
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp)) return 2;
+    const auto root = std::filesystem::path(temp) /
+        (L"A0MarkerDiagnosticTest-" + std::to_wstring(GetCurrentProcessId()));
+    if (!CreateDirectoryW(root.c_str(), nullptr)) return 2;
+    DWORD sid{};
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &sid)) return 2;
+    const auto marker = root / (L"armed-session-" + std::to_wstring(sid) + L".marker");
+    const auto other = root / L"armed-session-4294967295.marker";
+    const auto write = [](const std::filesystem::path &path, const std::string &content) {
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        DWORD written{};
+        const bool ok = WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr) &&
+                        written == content.size();
+        CloseHandle(file);
+        return ok;
+    };
+    const std::string header = "a0-dual-delegation-v2\nnonce=" + std::string(32, 'a') +
+        "\nownerPid=";
+    const std::string tail = "\nepoch=" + std::string(32, 'b') +
+        "\nworkerAPid=4294967289\nworkerBPid=4294967288\n";
+    const auto absent_root = root / L"not-created";
+    Check(InspectDualDelegationMarkerReadOnly(absent_root).status == "marker_root_untrusted" &&
+          !std::filesystem::exists(absent_root), "diagnostic must not create a missing root");
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_missing", "missing marker is read-only");
+    const auto valid = header + "4294967290" + tail;
+    if (!write(marker, valid)) return 3;
+    const auto timestamp = std::filesystem::last_write_time(marker);
+    const auto accepted = InspectDualDelegationMarkerReadOnly(root);
+    Check(accepted.status == "eligible_for_human_review" && accepted.anonymous_sha256.size() == 64 &&
+          accepted.size == valid.size(), "valid marker only becomes a human-review candidate");
+    Check(GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES &&
+          std::filesystem::file_size(marker) == valid.size() &&
+          std::filesystem::last_write_time(marker) == timestamp, "diagnostic must retain marker unchanged");
+    if (!write(other, valid)) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_ambiguous",
+          "multiple session markers must stop");
+    if (!DeleteFileW(other.c_str())) return 3;
+    if (!write(marker, "invalid\n")) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_invalid",
+          "invalid syntax must stop");
+    if (!write(marker, std::string(256, 'x'))) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_invalid",
+          "oversized marker must stop");
+    if (!write(marker, header + std::to_string(GetCurrentProcessId()) + tail)) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "process_active_or_unknown",
+          "live owner PID must stop without asserting historical identity");
+    if (!DeleteFileW(marker.c_str())) return 3;
+    if (!CreateDirectoryW(marker.c_str(), nullptr)) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_invalid",
+          "directory in place of marker must stop");
+    if (!RemoveDirectoryW(marker.c_str()) || !RemoveDirectoryW(root.c_str())) return 3;
+    std::cout << "{\"mode\":\"diagnostic-simulation\",\"failures\":" << failures << "}\n";
+    return failures ? 1 : 0;
+}
 } // namespace
 int main(int argc, char **argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--clean-exit") return 0;
+    if (argc == 2 && std::string_view(argv[1]) == "--diagnostic") return RunDiagnosticTests();
     const auto root = argc == 4 ? std::filesystem::path(argv[3]) : Root();
     const auto name = argc == 4 ? std::string(argv[2]) : Name();
     if (argc == 4 && std::string_view(argv[1]) == "--crash") {

@@ -6,6 +6,16 @@
 #include <string_view>
 
 namespace a0::phase0 {
+// Read-only preflight for a stranded dual-delegation marker. A positive result
+// is only a candidate for human review; it never authorizes deletion or SDK use.
+struct DualDelegationMarkerDiagnostic final {
+    std::string status;
+    std::string anonymous_sha256;
+    unsigned long long size{};
+};
+[[nodiscard]] DualDelegationMarkerDiagnostic InspectDualDelegationMarkerReadOnly(
+    const std::filesystem::path &test_marker_root = {});
+
 struct WorkerDelegationCloseEvidence final {
     bool live_view_off{};
     bool source_closed{};
