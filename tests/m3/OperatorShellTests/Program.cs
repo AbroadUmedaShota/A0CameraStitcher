@@ -5084,6 +5084,16 @@ static async Task ReviewUxPersistsAcceptanceAndRejectsChangedFilesAsync()
         Check.True(ambiguousViewModel.UiState == OperatorUiState.Review &&
                    ambiguousViewModel.ReviewStatusText.Contains("自動では再送せず", StringComparison.Ordinal),
             "An ambiguous accepted save must retain review instead of moving on.");
+        Check.False(ambiguousViewModel.CanPrepareNewCapture,
+            "An ambiguous accepted save must block next-capture preparation until that same result is confirmed.");
+        Check.False(ambiguousViewModel.PrepareNewCaptureCommand.CanExecute(null),
+            "The next-capture command must be disabled while the accepted save is unconfirmed.");
+        ambiguousViewModel.PrepareNewCaptureCommand.Execute(null);
+        await WaitUntilAsync(() => !ambiguousViewModel.IsBusy, "The blocked preparation command did not return.");
+        Check.True(ambiguousViewModel.UiState == OperatorUiState.Review &&
+                   ambiguousViewModel.ReviewImagePath is not null &&
+                   ambiguousViewModel.TransactionStartCount == ambiguousCaptureCount,
+            "A blocked next-capture request must retain the ambiguous review result without capturing.");
         await ExecuteNativeCommandAsync(ambiguousViewModel.AcceptReviewCommand);
         await WaitUntilAsync(() => !ambiguousViewModel.IsBusy && ambiguousViewModel.UiState is OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection,
             "An explicit same-record acceptance replay did not proceed to preparation.");

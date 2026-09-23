@@ -2178,7 +2178,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         RaiseReviewProperties();
     }
 
-    public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed && !_initializationFailed;
+    // An Accepted record whose save threw may already be durable. Until the
+    // operator explicitly confirms that same result again, leaving this screen
+    // would hide the only result that can resolve the ambiguous write.
+    public bool CanPrepareNewCapture => _availability.PrepareNewCapture.Allowed &&
+        !_initializationFailed && _acceptedReviewCandidate is null;
     /// <summary>人による採用は、今回の成功済み結果を Pending として耐久記録できた後だけ許可する。
     /// 起動時に見つけた未確認記録は、画像を再検証していないためここから採用できない。</summary>
     public bool CanAcceptReview => !IsBusy && UiState == OperatorUiState.Review &&
@@ -3140,7 +3144,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
-            _reviewStatusText = $"採用の保存結果を確認できません。自動では再送せず、同じ採用操作で確認してください: {exception.GetType().Name}";
+            _reviewStatusText = $"採用の保存結果を確認できません。結果画面を維持し、自動では再送せず、同じ採用操作で確認してください: {exception.GetType().Name}";
             RaiseReviewProperties();
         }
         finally
@@ -3525,7 +3529,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(ReviewStatusText));
         OnPropertyChanged(nameof(ReviewPrimaryActionText));
         OnPropertyChanged(nameof(PrepareNewCaptureText));
+        OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanAcceptReview));
+        _prepareNewCaptureCommand.NotifyCanExecuteChanged();
         _acceptReviewCommand.NotifyCanExecuteChanged();
     }
 
