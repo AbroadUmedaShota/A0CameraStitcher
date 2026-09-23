@@ -16,6 +16,20 @@
 
 run-04では `PreviewRunJournal` が排他書込みで開かれ、隔離中に記録を読めなかった。記録済み行をwriter存続中に別のread handleから読める契約試験を追加し、変更前は1/1 FAIL（この読取り条件のみ）、`FILE_SHARE_READ` 追加後は1/1 PASS。`CREATE_NEW`、write-through/flush、書込み独占、既存ファイル上書き禁止は維持。SDK有効の `PreviewCommissioning` Release buildもexit 0。これは今後の隔離調査の可観測性修正であり、run-04の終了証拠の欠落や残存markerを解決しない。SDK・カメラ再操作0回、実機preview枠は4/5のまま。
 
+### run-04の失敗伝搬と隔離復旧の停止判定（software-only調査）
+
+確定した順序はjournalの `run_started` → `worker_a_enumerated(2)` → 13.75秒後の `operation_failed` → `close_unconfirmed` である。`worker_a_observed_bytes` はなく、CAM-A/B確認も同時開始もない。`PreviewCommissioning::Preview` は候補 `select`、Live View `start`、`frame` を順に送るため、このいずれか、またはそのIPCで失敗した可能性がある。どの命令か、SDKの戻り値、workerのexit codeは記録されておらず、今回の実SDK失敗原因は**未確定**。60秒の全体期限が直接発火したとの記録もない。
+
+コード上の伝搬欠落は別に確認できる。`WorkerPreviewDispatcher::Handle` は `TransportError` を捕捉するとSDKの一回限りの終了処理を試み、`status=failed` にエラー分類と終了receiptを入れ得る。一方、親の `preview_worker_owner.cpp::Exchange` は通常操作の `status=ok` を要求し、`failed` 応答ではpayloadのエラー分類・終了receiptを採用せず、delivery未確認のままACK前に失敗する。その後の `CloseChild` は同workerへの追加送信を拒否する。worker側は正常な明示 `close` 以外では、SDKが閉じていても正常終了code 0を保証しない。したがって、失敗応答が届いた場合でもmarker解除のための証跡が親に残らない経路がある。これは**コードからの機構上の説明**であり、run-04で実際に `failed` 応答が親まで届いた事実は未観測。通信途絶・worker先行終了も区別できない。
+
+ソフトウェア実行証拠: SDKなしのfake候補選択失敗を `worker_preview_dispatcher_tests` へ追加し、親に返す応答の `status=failed`、固定 `error`、`safeToExit=true`、一回のclose、明示close成功ではない状態を検査した。stub Release build exit 0（既存C4819警告）、専用exeを1回実行して `failures=0`、exit 0。これはworker応答の契約確認であり、親 `Exchange` の実IPC配送、run-04の実SDK失敗category、marker解除の成立を証明しない。owner既存試験系列は5/5のため再実行していない。
+
+非破壊の人手復旧手順は、①操作者がカメラの電源・背面Live View・USB状態を確認し、不明ならカメラを安全に電源OFF/切断する、②OS上のD810・試験画面・worker・同一sessionの委譲markerを読取りで照合する、③ignored journalとアプリ表示を保全する、④markerを**削除・編集せず**カメラ制御入口を停止したまま原因と終了証跡を評価する、である。2026-09-23の本調査時点ではmarkerは1件、v2構造は妥当、reparseでなく、試験画面/workerは0件。ただしOS上のD810は再び2台見えており、その後の物理状態や再接続の理由は未確認。接続済みであっても隔離を解除しない。秘密のnonce/epochや個体番号は記録・commitしない。
+
+既存の `DisarmDualDelegation` は両workerの型付き完全終了証拠、保持process handleとの一致、両exit code 0、marker内容一致を要求する。run-04ではこれらが揃わず、親画面も既に終了しているため、**既存APIだけで安全にmarkerを解除する経路はない**。手動のファイル削除、再起動、旧binaryからの操作を復旧手順にしない。解除が必要なら、カメラの物理隔離、証拠保全、正確な対象確認、監査可能な一回限りの操作を含む別の人間判断・実装・software-only検証が先に必要。
+
+残り1/5の実機preview試験は現時点で**実施不可**。実施判断の最低条件は、失敗命令・匿名category・worker終了receiptを失わない改修とfake/IPC負例、markerの承認済み回復手順、両実機の新たな接続/物理alias確認、変更後候補のexact hash、SDK/WPD非重複、1回だけの開始・左右新規frame・両側停止/closeを記録できること。どれか欠ければ中止し、SDK close不明、片側停止、通信不明、期限切れでは再試行・marker解除・撮影へ進まない。プレビュー成功でも撮影、保存原画像、光学品質、製品受入の証拠にはしない。
+
 ### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
 
 本人の一台で進める指示を受け、既存preview枠の3回目を実施した。AOPC-11-NOTEで正常なD810一台、A0関連processなし、委譲隔離markerなしを確認。current source `319335fa96f76819b36fee7d33fd8d0e40fc8de9` の `SingleWorkerPreview` をSDK有効構成でbuild（exit 0）し、SHA-256 `E02813FD0757672271D2D206A9B07EE0EE170FDF6C5E8E85C39980CFB0279B68` のexeで `preview-single --confirm-one-physical-camera` を一回だけ実行した。目的は更新後の終了receiptを含む単体経路の確認であり、凍結済み旧workerの再合格ではない。

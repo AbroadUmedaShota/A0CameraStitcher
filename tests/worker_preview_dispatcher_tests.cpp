@@ -55,6 +55,17 @@ int main() {
         Check(!Ok(x.Handle(Request(1,operation))) && denied.enumerations == 0 && denied.closes == 0,
               "unavailable operations do not load SDK");
     }
+    Fake select_fault;
+    WorkerPreviewDispatcher selection(select_fault,"epoch","secret",10,11,[] { return true; });
+    Check(Ok(selection.Handle(Request(1,"enumerate"))), "fault fixture enumerates before selection");
+    select_fault.fail = "select";
+    const auto selection_reply = selection.Handle(Request(2,"select","x"));
+    Check(selection_reply.find("\"status\":\"failed\"") != std::string::npos &&
+          selection_reply.find("\"error\":\"injected\"") != std::string::npos &&
+          selection_reply.find("\"safeToExit\":true") != std::string::npos,
+          "selection failure reply retains fixed category and close receipt");
+    Check(selection.SafeToExit() && !selection.Completed() && select_fault.closes == 1 &&
+          select_fault.starts == 0, "selection failure closes once without claiming explicit success");
     for (auto failure : {"frame","stop","close","retained","suspend"}) {
         Fake fault; WorkerPreviewDispatcher x(fault,"epoch","secret",10,11,[] { return true; }); Start(x);
         fault.fail = failure;
