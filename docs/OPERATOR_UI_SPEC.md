@@ -70,6 +70,8 @@ GUI確認追記（新規GUI候補系列1/5、実機0回）: `software-f9cafd4-01
 
 保存結果不明時は当該採用操作を再送しない。明示的に履歴を読み直して状態を確認する。採用中の「閉じる」は保存処理へcancelを送らず、結果確定まで本体の操作ゲートとwindowを維持する。閉じる要求があっても、失敗・timeout・不明の場合は警告を表示したwindowを残し、操作者の次の判断を待つ。元の結果を削除・変更せず、保存結果が不明な間は「撮り直しの準備へ」を無効化して結果画面を維持する。状態を解決するために許すのは同じ結果への明示的な採用操作だけであり、採用成功後も次の撮影は自動開始しない。本体で現在確認中の同じ結果を履歴から採用した場合は、採用状態だけを本体へ反映する。
 
+統合後のsoftware-only確認（2026-09-23、commit `5d9d0ea`）: `dotnet run --project tests/m3/OperatorShellTests/A0CameraStitcher.M3.OperatorShellTests.csproj -c Release --no-restore -- --review-ux` を1回実行し、対象の採用保存不明・同一結果への明示再操作を含む5件すべてPASS、exit 0。初回はCMakeがPATHに無くbuild前にexit 9009となったため、Visual Studio Build Tools同梱CMakeを一時PATHに追加した。これはfake/ローカル確認であり、実GUIの目視・外部AIによる採用・実機撮影の受入ではない。
+
 これは合成結果の人による採用であり、rig承認・実機成立・品質の自動合格を意味しない。正規外部AI操作、実GUI操作の受入、二台同時Live Viewおよび撮影/品質の実機確認は未完了。roadmap stage 5はpartialのまま。
 
 統合検証（実機0回）:
