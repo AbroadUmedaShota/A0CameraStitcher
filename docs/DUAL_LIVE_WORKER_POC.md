@@ -2,6 +2,20 @@
 
 ## 結論
 
+### 二台実機run-04: 終了確認不能・隔離維持（2026-09-23）
+
+本人の二台接続復旧を受け、AOPC-11-NOTEでOS上の正常なD810二台、A0関連processなし、委譲markerなしを確認した。隔離SDK一組と付随DLL三つの存在を読取りで確認。SDK有効の `PreviewCommissioning` / `PreviewWorker` を既存Visual Studio生成projectからRelease buildし、exit 0。画面exeのSHA-256は `132FA1975F8E6EB5D074B6B5EA3403F1318D7F10A84B3DBCAC8E4E288D3F3260`、worker exeは `056E4F003362E0794FBE1080CBEA334B579B34506633CD874AB75E98906EAE0C`。実行processに限りSDK module pathを渡し、`--commission-preview-only` で画面を起動した。起動時点ではカメラ操作0回。
+
+本人による「開始」後に二workerの起動を観測した。試験画面は候補選択欄を表示したが、その後 `終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。` を表示。worker二つはOS上で終了したが、委譲markerは残存し、画面processは存続した。本人は二台とも電源ON・背面ライブビュー映像なしを目視確認した。ただしこれをSDK停止・Source/Module closeの証明には使わない。明示的なCAM-A/B割当、左右同時フレーム、両workerの完全close receiptは未確認。
+
+本人が二台の電源OFF・USB切断を実施し、OSでD810 0台・worker 0件を確認。通常のウィンドウ終了を一度要求しても隔離画面は閉じなかった。本人から画面だけの手動終了の明示承認を得て、実行ファイルpath/PID、D810 0台、worker 0件、marker 1件を再照合して画面PID 32488のみを終了した。markerは1件のまま維持した。これにより読めたignored記録 `build/worker-selection-sdk/Release/logs/preview-run-32488-434863421.jsonl` は `run_started` → `worker_a_enumerated(value=2)` → 13.75秒後に `operation_failed` → `close_unconfirmed`、後刻の通常終了要求でも `close_unconfirmed`。CAM-A/B確認・同時開始・frame受信の記録はない。失敗したSDK操作の詳細categoryとworker終了codeはこの記録では不明。再送・marker削除・撮影・設定変更・WPD・カード操作は行っていない。
+
+**実機preview枠は累計4/5消費、残り1回。結果は未合格かつ隔離中。** 同条件の再実行はしない。次はSDK操作失敗時の匿名category・close receipt伝搬とworker終了codeの欠落をsoftware-onlyで解析する。隔離markerは正常終了の証拠なしに解除しない。
+
+### 隔離中の記録読取りを許可（software-only、実機再実行なし）
+
+run-04では `PreviewRunJournal` が排他書込みで開かれ、隔離中に記録を読めなかった。記録済み行をwriter存続中に別のread handleから読める契約試験を追加し、変更前は1/1 FAIL（この読取り条件のみ）、`FILE_SHARE_READ` 追加後は1/1 PASS。`CREATE_NEW`、write-through/flush、書込み独占、既存ファイル上書き禁止は維持。SDK有効の `PreviewCommissioning` Release buildもexit 0。これは今後の隔離調査の可観測性修正であり、run-04の終了証拠の欠落や残存markerを解決しない。SDK・カメラ再操作0回、実機preview枠は4/5のまま。
+
 ### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
 
 本人の一台で進める指示を受け、既存preview枠の3回目を実施した。AOPC-11-NOTEで正常なD810一台、A0関連processなし、委譲隔離markerなしを確認。current source `319335fa96f76819b36fee7d33fd8d0e40fc8de9` の `SingleWorkerPreview` をSDK有効構成でbuild（exit 0）し、SHA-256 `E02813FD0757672271D2D206A9B07EE0EE170FDF6C5E8E85C39980CFB0279B68` のexeで `preview-single --confirm-one-physical-camera` を一回だけ実行した。目的は更新後の終了receiptを含む単体経路の確認であり、凍結済み旧workerの再合格ではない。

@@ -17,7 +17,7 @@ class PreviewRunJournal final {
   public:
     explicit PreviewRunJournal(const std::filesystem::path& path) {
         if (!path.is_absolute()) throw std::invalid_argument("preview journal path must be absolute");
-        handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) {
             handle_ = nullptr;

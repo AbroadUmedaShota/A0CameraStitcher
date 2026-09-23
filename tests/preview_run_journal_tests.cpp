@@ -50,6 +50,11 @@ int main() {
             PreviewRunJournal journal(path);
             journal.Record("worker_started");
             journal.Record("worker_closed", 2);
+            std::ifstream live_reader(path, std::ios::binary);
+            std::string live_first;
+            std::getline(live_reader, live_first);
+            Check(MatchesRecord(live_first, 1, "worker_started", 0),
+                  "flushed journal must be readable while the writer is retained");
             Check(Rejects([&] { PreviewRunJournal duplicate(path); }), "existing journal must never be overwritten");
             Check(Rejects([&] { journal.Record("Worker_started"); }), "uppercase event must reject");
             Check(Rejects([&] { journal.Record("has-dash"); }), "punctuation event must reject");
