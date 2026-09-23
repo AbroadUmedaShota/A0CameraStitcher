@@ -1,5 +1,6 @@
 #include "a0/phase0/preview_commissioning.hpp"
 #include "a0/phase0/worker_preview_dispatcher.hpp"
+#include "a0/phase0/preview_worker_reply.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include <iostream>
 using namespace a0::phase0;
@@ -35,9 +36,10 @@ struct Fixture {
         const auto wire = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"epoch\",\"capability\":\"secret\",\"sequence\":" +
             std::to_string(++sequence[worker]) + ",\"operation\":\"" + std::string(op) + "\",\"candidate\":\"" + json::JsonEscape(candidate) + "\"}";
         const auto reply = (worker == 0 ? da : db).Handle(wire);
-        auto value = json::BasicJsonParser<Failure, 512U * 1024U + 4096>(reply).Parse();
-        if (value.object.at("status").string != "ok") throw std::runtime_error("worker failed");
-        return value.object.at("payload");
+        auto parsed = ParsePreviewWorkerReply(reply, "epoch", worker == 0 ? 11 : 12,
+                                              sequence[worker], op);
+        if (parsed.status != PreviewWorkerReplyStatus::ok) throw std::runtime_error("worker failed");
+        return std::move(parsed.payload);
     }};
     Fixture() { a.pixel = 0xab; b.pixel = 0xcd; }
     void Observe(std::size_t worker, ObservedPreviewBody body) {
@@ -85,6 +87,38 @@ int main() {
     Reject([&] { json::BasicJsonParser<Failure>(large).Parse(); }, "legacy parser size limit preserved");
     Check(json::BasicJsonParser<Failure, 512U * 1024U + 4096>(large).Parse().string.size() == 300U * 1024U,
           "explicit preview parser accepts bounded large replies");
+    const std::string failed_reply =
+        R"({"schema":"a0.preview-worker.v1","epoch":"epoch","workerPid":11,"sequence":2,"status":"failed","payload":{"error":"open_failed","close":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true}}})";
+    const auto failed = ParsePreviewWorkerReply(failed_reply, "epoch", 11, 2, "select");
+    Check(failed.status == PreviewWorkerReplyStatus::failed && failed.error_category == "open_failed" &&
+          failed.close_receipt.has_value() && failed.close_receipt->safe_to_exit,
+          "validated failure retains bounded category and reported close receipt");
+    const std::string closed_reply =
+        R"({"schema":"a0.preview-worker.v1","epoch":"epoch","workerPid":11,"sequence":3,"status":"closed","payload":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true}})";
+    Check(ParsePreviewWorkerReply(closed_reply, "epoch", 11, 3, "close").close_receipt->Complete(),
+          "explicit close requires complete reported receipt");
+    auto incomplete_close = closed_reply;
+    incomplete_close.replace(incomplete_close.find("\"sourceClosed\":true"), sizeof("\"sourceClosed\":true") - 1, "\"sourceClosed\":false");
+    Reject([&] { (void)ParsePreviewWorkerReply(incomplete_close, "epoch", 11, 3, "close"); },
+           "incomplete explicit close remains unconfirmed");
+    incomplete_close.replace(incomplete_close.find("\"closed\""), sizeof("\"closed\"") - 1, "\"quarantined\"");
+    Check(ParsePreviewWorkerReply(incomplete_close, "epoch", 11, 3, "close").status ==
+              PreviewWorkerReplyStatus::quarantined,
+          "quarantined close preserves incomplete reported receipt for diagnosis");
+    auto missing_close = failed_reply;
+    missing_close.replace(missing_close.find("\"safeToExit\":true"), sizeof("\"safeToExit\":true") - 1, "\"safeToExit\":null");
+    Reject([&] { (void)ParsePreviewWorkerReply(missing_close, "epoch", 11, 2, "select"); },
+           "missing or non-boolean close evidence is rejected");
+    auto bad_category = failed_reply;
+    bad_category.replace(bad_category.find("open_failed"), sizeof("open_failed") - 1, "C:/private/device");
+    Reject([&] { (void)ParsePreviewWorkerReply(bad_category, "epoch", 11, 2, "select"); },
+           "free-form worker error text cannot cross the diagnostic boundary");
+    Reject([&] { (void)ParsePreviewWorkerReply(failed_reply, "other-epoch", 11, 2, "select"); },
+           "failure evidence from another epoch is rejected");
+    Reject([&] { (void)ParsePreviewWorkerReply(failed_reply, "epoch", 12, 2, "select"); },
+           "failure evidence from another PID is rejected");
+    Reject([&] { (void)ParsePreviewWorkerReply(failed_reply, "epoch", 11, 3, "select"); },
+           "failure evidence from another sequence is rejected");
     std::cout << "{\"mode\":\"fake-commissioning\",\"failures\":" << failures << "}\n";
     return failures ? 1 : 0;
 }

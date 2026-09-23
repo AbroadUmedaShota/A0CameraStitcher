@@ -1,5 +1,6 @@
 // Built only against the gated SDK stub. These children cannot open a camera.
 #include "a0/phase0/worker_preview_dispatcher.hpp"
+#include "a0/phase0/preview_worker_reply.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "dual_live_test_ipc.hpp"
 using namespace a0::phase0::experimental;
@@ -38,10 +39,11 @@ int main(int argc, char** argv) {
             Require(WriteMessage(pipe.value, request), "request delivered");
             std::string reply;
             Require(ReadMessage(pipe.value, reply), "close reply received");
-            Check(reply.find("\"workerPid\":" + std::to_string(server)) != std::string::npos,
-                  "close receipt bound to worker PID");
-            Check(reply.find(valid ? "\"status\":\"closed\"" : "\"status\":\"failed\"") != std::string::npos,
-                  "authenticated close or rejected capability");
+            const auto parsed = ParsePreviewWorkerReply(reply, "epoch", server, valid ? 1 : 0, "close");
+            Check(parsed.status == (valid ? PreviewWorkerReplyStatus::closed : PreviewWorkerReplyStatus::failed) &&
+                  parsed.close_receipt.has_value() && parsed.close_receipt->Complete(),
+                  "bound IPC reply distinguishes explicit close and terminal error with reported receipt");
+            if (!valid) Check(parsed.error_category == "worker_authority", "IPC failure category survives validation");
             unsigned char ack = 0x06;
             Require(Io(pipe.value, &ack, 1, true), "delivery acknowledgement");
             Require(WaitForSingleObject(child.value, 5000) == WAIT_OBJECT_0, "child exited without kill");

@@ -4,10 +4,24 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include "a0/phase0/preview_commissioning.hpp"
+#include "a0/phase0/preview_worker_reply.hpp"
 
 namespace a0::phase0::experimental {
+struct PreviewWorkerFailureObservation {
+    std::size_t worker_index{};
+    std::string operation;
+    std::string category; // Bounded worker code, never an SDK exception message.
+    bool response_received{};
+    bool response_validated{};
+    bool ack_write_completed{}; // Local write only; not proof of server ACK processing.
+    std::optional<PreviewWorkerReplyStatus> response_status;
+    std::optional<PreviewWorkerCloseReceipt> reported_close;
+};
+
 class PreviewWorkerStartupError final : public std::runtime_error {
 public:
     explicit PreviewWorkerStartupError(bool workers_may_exist)
@@ -30,6 +44,7 @@ public:
     PreviewWorkerOwner& operator=(const PreviewWorkerOwner&) = delete;
     // Cached result on repeated calls: never resends an ambiguous close.
     bool Close() noexcept;
+    [[nodiscard]] std::optional<PreviewWorkerFailureObservation> FirstFailure() const;
     std::array<std::uint32_t, 2> ProcessIds() const noexcept;
     std::array<std::string, 2> Enumerate(std::size_t worker);
     std::vector<unsigned char> Preview(std::size_t worker, std::string_view candidate);

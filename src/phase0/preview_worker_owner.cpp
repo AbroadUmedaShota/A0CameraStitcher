@@ -47,6 +47,7 @@ struct Child {
     std::string capability = Nonce();
     std::uint64_t sequence{};
     bool delivery_failed{};
+    std::optional<PreviewWorkerFailureObservation> last_exchange;
 };
 void Spawn(Child& child, const std::filesystem::path& executable) {
     Handle parent, reader;
@@ -128,11 +129,25 @@ void Transfer(HANDLE pipe, void* buffer, DWORD size, bool write, ULONGLONG deadl
         offset += done;
     }
 }
-json::JsonValue Exchange(Child& child, const std::string& epoch, std::string_view operation, std::string_view candidate = "") {
-    Require(!child.delivery_failed, "previous command delivery unconfirmed");
+json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::string& epoch,
+                         std::string_view operation,
+                         std::optional<PreviewWorkerFailureObservation>& first_failure,
+                         std::string_view candidate = "") {
+    PreviewWorkerFailureObservation observation;
+    observation.worker_index = worker_index;
+    observation.operation = operation;
+    const auto remember_failure = [&] {
+        child.last_exchange = observation;
+        if (!first_failure) first_failure = observation;
+    };
+    if (child.delivery_failed) {
+        remember_failure();
+        Require(false, "previous command delivery unconfirmed");
+    }
     // Consume the sequence before I/O; any failed exchange forbids further sends.
     const auto sequence = ++child.sequence;
     child.delivery_failed = true;
+    try {
     const auto path = L"\\\\.\\pipe\\" + Wide(child.pipe);
     Handle pipe;
     const auto deadline = GetTickCount64() + 30000;
@@ -161,32 +176,47 @@ json::JsonValue Exchange(Child& child, const std::string& epoch, std::string_vie
     Require(size && size <= (operation == "frame" ? maximum : 4096), "worker reply length rejected");
     std::string response(size, '\0');
     Transfer(pipe.value, response.data(), size, false, deadline);
-    const auto receipt = json::BasicJsonParser<Failure, maximum>(response).Parse();
-    Require(receipt.kind == json::JsonKind::object && receipt.object.size() == 6, "close envelope rejected");
-    const auto text = [&](const char* key, json::JsonKind kind = json::JsonKind::string) {
-        return json::RequireFieldWith<Failure>(receipt, key, kind).string;
-    };
-    Require(text("schema") == "a0.preview-worker.v1" && text("epoch") == epoch && text("status") == (operation == "close" ? "closed" : "ok") &&
-        text("sequence", json::JsonKind::number) == std::to_string(sequence) &&
-        text("workerPid", json::JsonKind::number) == std::to_string(server), "close context mismatch");
-    const auto found = receipt.object.find("payload");
-    Require(found != receipt.object.end(), "worker payload missing");
-    const auto& payload = found->second;
-    if (operation == "close") {
-        Require(payload.kind == json::JsonKind::object && payload.object.size() == 5, "close evidence fields rejected");
-        for (const char* key : {"liveViewOff", "sourceClosed", "moduleClosed", "processClaimReleased", "safeToExit"})
-            Require(json::RequireFieldWith<Failure>(payload, key, json::JsonKind::boolean).boolean, "SDK closure unconfirmed");
-    }
+    observation.response_received = true;
+    auto reply = ParsePreviewWorkerReply(response, epoch, server, sequence, operation);
+    observation.response_validated = true;
+    observation.response_status = reply.status;
+    observation.category = reply.error_category;
+    observation.reported_close = reply.close_receipt;
     unsigned char ack = 0x06;
     Transfer(pipe.value, &ack, 1, true, deadline);
+    observation.ack_write_completed = true;
+    child.last_exchange = observation;
+    if (reply.status == PreviewWorkerReplyStatus::failed ||
+        reply.status == PreviewWorkerReplyStatus::quarantined) {
+        // The worker may have already exited or may not have processed the ACK.
+        // Keep this command terminal and never re-send close to it.
+        remember_failure();
+        throw TransportError("worker_operation_failed", "worker reported a terminal failure");
+    }
     child.delivery_failed = false;
-    return payload;
+    return std::move(reply.payload);
+    } catch (...) {
+        if (observation.category.empty())
+            observation.category = observation.response_validated ? "worker_ack_unconfirmed" :
+                                   observation.response_received ? "worker_reply_invalid" : "worker_ipc_unconfirmed";
+        remember_failure();
+        throw;
+    }
 }
-bool CloseChild(Child& child, const std::string& epoch) {
-    Exchange(child, epoch, "close");
+bool CloseChild(Child& child, std::size_t worker_index, const std::string& epoch,
+                std::optional<PreviewWorkerFailureObservation>& first_failure) {
+    Exchange(child, worker_index, epoch, "close", first_failure);
     DWORD code{};
-    return WaitForSingleObject(child.process.value, 5000) == WAIT_OBJECT_0 &&
+    const bool clean = WaitForSingleObject(child.process.value, 5000) == WAIT_OBJECT_0 &&
         GetExitCodeProcess(child.process.value, &code) && code == 0;
+    if (!clean && !first_failure) {
+        PreviewWorkerFailureObservation failure = child.last_exchange.value_or(PreviewWorkerFailureObservation{});
+        failure.worker_index = worker_index;
+        failure.operation = "close";
+        failure.category = "worker_exit_unconfirmed";
+        first_failure = std::move(failure);
+    }
+    return clean;
 }
 }
 
@@ -196,12 +226,23 @@ struct PreviewWorkerOwner::Impl {
     std::string epoch;
     const DWORD owner_thread = GetCurrentThreadId();
     bool close_attempted{}, closed{};
+    std::optional<PreviewWorkerFailureObservation> first_failure;
     PreviewCommissioning commissioning{[this](std::size_t worker, std::string_view op, std::string_view candidate) {
         RequireOwnerThread();
         Require(!close_attempted, "owner already closing");
-        for (const auto& child : children)
-            Require(WaitForSingleObject(child.process.value, 0) == WAIT_TIMEOUT, "paired worker no longer alive");
-        return Exchange(children.at(worker), epoch, op, candidate);
+        for (std::size_t index = 0; index < children.size(); ++index) {
+            if (WaitForSingleObject(children[index].process.value, 0) != WAIT_TIMEOUT) {
+                if (!first_failure) {
+                    PreviewWorkerFailureObservation failure;
+                    failure.worker_index = index;
+                    failure.operation = op;
+                    failure.category = "worker_prior_exit";
+                    first_failure = std::move(failure);
+                }
+                Require(false, "paired worker no longer alive");
+            }
+        }
+        return Exchange(children.at(worker), worker, epoch, op, first_failure, candidate);
     }};
     void RequireOwnerThread() const { Require(GetCurrentThreadId() == owner_thread, "camera owner thread required"); }
     Impl(std::string_view name, const std::filesystem::path* root,
@@ -236,8 +277,8 @@ struct PreviewWorkerOwner::Impl {
         if (close_attempted) return closed;
         close_attempted = true;
         bool both = true;
-        for (auto& child : children) {
-            try { both = CloseChild(child, epoch) && both; }
+        for (std::size_t worker = 0; worker < children.size(); ++worker) {
+            try { both = CloseChild(children[worker], worker, epoch, first_failure) && both; }
             catch (...) { both = false; }
         }
         if (!both) return false;
@@ -245,7 +286,15 @@ struct PreviewWorkerOwner::Impl {
             lease->DisarmDualDelegation({{true,true,true,children[0].process.value},
                                         {true,true,true,children[1].process.value}});
             closed = true;
-        } catch (...) {}
+        } catch (...) {
+            if (!first_failure) {
+                PreviewWorkerFailureObservation failure;
+                failure.worker_index = children.size();
+                failure.operation = "disarm";
+                failure.category = "delegation_disarm_unconfirmed";
+                first_failure = std::move(failure);
+            }
+        }
         return closed;
     }
 };
@@ -263,6 +312,9 @@ PreviewWorkerOwner::PreviewWorkerOwner(std::string_view name, const std::filesys
 }
 PreviewWorkerOwner::~PreviewWorkerOwner() = default; // Destruction never disarms or kills children.
 bool PreviewWorkerOwner::Close() noexcept { return impl_->Close(); }
+std::optional<PreviewWorkerFailureObservation> PreviewWorkerOwner::FirstFailure() const {
+    return impl_->first_failure;
+}
 std::array<std::uint32_t, 2> PreviewWorkerOwner::ProcessIds() const noexcept {
     return {GetProcessId(impl_->children[0].process.value), GetProcessId(impl_->children[1].process.value)};
 }
