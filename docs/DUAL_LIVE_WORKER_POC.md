@@ -20,9 +20,15 @@ run-04では `PreviewRunJournal` が排他書込みで開かれ、隔離中に�
 
 確定した順序はjournalの `run_started` → `worker_a_enumerated(2)` → 13.75秒後の `operation_failed` → `close_unconfirmed` である。`worker_a_observed_bytes` はなく、CAM-A/B確認も同時開始もない。`PreviewCommissioning::Preview` は候補 `select`、Live View `start`、`frame` を順に送るため、このいずれか、またはそのIPCで失敗した可能性がある。どの命令か、SDKの戻り値、workerのexit codeは記録されておらず、今回の実SDK失敗原因は**未確定**。60秒の全体期限が直接発火したとの記録もない。
 
-コード上の伝搬欠落は別に確認できる。`WorkerPreviewDispatcher::Handle` は `TransportError` を捕捉するとSDKの一回限りの終了処理を試み、`status=failed` にエラー分類と終了receiptを入れ得る。一方、親の `preview_worker_owner.cpp::Exchange` は通常操作の `status=ok` を要求し、`failed` 応答ではpayloadのエラー分類・終了receiptを採用せず、delivery未確認のままACK前に失敗する。その後の `CloseChild` は同workerへの追加送信を拒否する。worker側は正常な明示 `close` 以外では、SDKが閉じていても正常終了code 0を保証しない。したがって、失敗応答が届いた場合でもmarker解除のための証跡が親に残らない経路がある。これは**コードからの機構上の説明**であり、run-04で実際に `failed` 応答が親まで届いた事実は未観測。通信途絶・worker先行終了も区別できない。
+修正前（run-04当時）のコード上の伝搬欠落は別に確認できる。`WorkerPreviewDispatcher::Handle` は `TransportError` を捕捉するとSDKの一回限りの終了処理を試み、`status=failed` にエラー分類と終了receiptを入れ得る。一方、当時の親 `Exchange` は通常操作の `status=ok` を要求し、`failed` 応答ではpayloadのエラー分類・終了receiptを採用せず、delivery未確認のままACK前に失敗していた。その後の `CloseChild` は同workerへの追加送信を拒否する。worker側は正常な明示 `close` 以外では、SDKが閉じていても正常終了code 0を保証しない。したがって、失敗応答が届いた場合でもmarker解除のための証跡が親に残らない経路があった。これは**コードからの機構上の説明**であり、run-04で実際に `failed` 応答が親まで届いた事実は未観測。通信途絶・worker先行終了も区別できない。
 
 ソフトウェア実行証拠: SDKなしのfake候補選択失敗を `worker_preview_dispatcher_tests` へ追加し、親に返す応答の `status=failed`、固定 `error`、`safeToExit=true`、一回のclose、明示close成功ではない状態を検査した。stub Release build exit 0（既存C4819警告）、専用exeを1回実行して `failures=0`、exit 0。これはworker応答の契約確認であり、親 `Exchange` の実IPC配送、run-04の実SDK失敗category、marker解除の成立を証明しない。owner既存試験系列は5/5のため再実行していない。
+
+### 親への失敗証跡伝搬（software-only、実機再実行なし）
+
+実装commit `0c199519416ff2295b8c3a2f9039d0da36429bf9` は親応答をepoch・PID・sequence・status・payloadで検証し、`failed` の固定分類とworker申告の5項目close receiptを保持する。通常の `ok`、明示 `closed`、`quarantined` を区別し、妥当な失敗応答にもACKを**一度だけ**書く。ACK書込み完了はworkerによる処理確認ではない。応答未受信・不正応答・ACK不明・worker先行終了・worker非0/未確認終了・disarm失敗は引き続き隔離を維持し、曖昧な `close` の再送やmarker解除をしない。画面にはworker番号、命令、固定分類、応答検証、ACK書込み、worker申告receiptの状態を表示し、journalには固定イベントのみ追記する。SDK自由文・個体情報は表示/保存しない。
+
+修正前に追加したfake候補選択失敗が赤確認の起点で、今回の親reply parser追加前は新規契約テストのheader不在でbuild失敗を確認した。修正後はstub Releaseの `a0_preview_commissioning_tests` と `a0_worker_preview_pipe_tests` が各2回、いずれも `failures=0`、exit 0。前者は通常flowと失敗/不正/不完全receiptを、後者は別processの正常close・認証失敗応答とACK後の終了codeを検査した。stub試験画面とSDK有効試験画面のRelease buildもexit 0（既存C4819、一部既存C4834警告）。SDK有効exe SHA-256は画面 `1B539A9BE22368609750B4CF17BDB7C49271F916B6EDD84E86AF2A85EC79EAF4`、worker `C754489402C2ECE507C8445B1D37A6A242584678096B4959BCC6456EC37C7E4F`。この候補は**ビルド成果であり実機試験・配布候補ではない**。親 `Exchange` を実worker失敗で駆動する統合試験と、run-04の実際の失敗分類・worker exit codeはなお未取得。既存owner系列5/5は根拠なく再実行せず、隔離markerと残り実機枠1/5を維持する。
 
 非破壊の人手復旧手順は、①操作者がカメラの電源・背面Live View・USB状態を確認し、不明ならカメラを安全に電源OFF/切断する、②OS上のD810・試験画面・worker・同一sessionの委譲markerを読取りで照合する、③ignored journalとアプリ表示を保全する、④markerを**削除・編集せず**カメラ制御入口を停止したまま原因と終了証跡を評価する、である。2026-09-23の本調査時点ではmarkerは1件、v2構造は妥当、reparseでなく、試験画面/workerは0件。ただしOS上のD810は再び2台見えており、その後の物理状態や再接続の理由は未確認。接続済みであっても隔離を解除しない。秘密のnonce/epochや個体番号は記録・commitしない。
 
