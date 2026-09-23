@@ -89,3 +89,14 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 開発ソースv4では、状態照会の読取り専用pipeを変えず、別の `gui-show-review --instance <MainWindowのPID-起動ticks> --result-id <小文字GUID N> --image <stitched|cam-a|cam-b>` を追加した。要求に保存先pathは含めず、GUIが既に保持するProduct/Simulated保存先からPendingの1結果を選ぶ。同一利用者・同一logon session、対象processのPID/起動ticksと接続先pipe server PIDを照合し、UIの `TryBeginHistoricalReview` を先に取得する。記録と原画像・合成画像を再検証し、記録を再読取りした後、選んだ画像のhashを同一streamで再照合する閲覧専用ウィンドウを開く。採用・撮影・設定write・WPD・削除はコマンドにない。終了または拒否で履歴操作ゲートを解放する。45秒の協調期限を設けるが、同期OS呼出しの強制中断は保証しない。応答喪失・期限切れから「画面は開いていない」と推定せず、自動再送しない。同一利用者の悪意あるprocessを認証する仕組みではない。
 
 v4のsoftware証拠: CLI/Foundation Release buildとOperatorShell Release buildはいずれも警告0・エラー0。別process CLI→実Windows pipe→fake表示handlerの専用試験2回はPASSし、正常応答、画面not-ready、対象unavailable、不正コマンド・result ID、古いinstanceを確認した。隔離したSimulated保存先を使う実MainWindowの専用系列は4/5回実行（初回compile警告による不実行、直接client PASS、別process CLI PASS、既存status endpointの前後ゲート確認を加えてPASS）。指定CAM-A画像のWPF viewerが可視、履歴ゲートの保持/解放、未採用記録と原画像の不変、改変後の表示拒否を確認した。Productの実結果、操作者/AIの画像内容の目視、別logon session拒否の実測は**未実施**。この開発ソースは固定候補 `software-c415668-01` を変更せず、配布候補にもしていない。CLIの `Displayed` はウィンドウを開けたという報告であり、AI/人が画像内容を見たこと、品質・実機の受入、採用許可ではない。
+
+## 次の業務時間の限定作業（計画・未実行）
+
+2026-09-23の業務時間外に、既存ブランチ `codex/dual-live-worker-poc-20260922` のclean HEAD `011fcf498e801a01368253d767b9dc7b14869c80` と上記v4ソフトウェア証拠を照合した。今夜は候補生成・実装・試験・実機操作を行わず、新規の無人実行も設定しない。以下は次の業務時間に再照合して着手する順番であり、候補や合格結果が存在するという記録ではない。
+
+1. `git remote`・branch・dirty・source SHA、既存候補と進行中担当、run-04隔離条件を再確認する。物理接続状態は推測しない。実機操作を要する場合はこの作業から切り離して停止する。
+2. 候補生成レシピ [`scripts/New-LocalSoftwareCandidate.ps1`](../scripts/New-LocalSoftwareCandidate.ps1) は現時点で `describe.version == 3`、manifestの `cliContractVersion = 3`、READMEの「CLIはGUI commandを送れない」を固定している。v4ソースに対してこのまま実行すると、候補ディレクトリ生成後に契約不一致で停止し、不完全候補を残す。先にレシピの検査・manifest・READMEをv4の `gui-show-review` の閲覧限定契約へ修正し、差分を確認して通常ブランチにコミットする。既存v2/v3候補やmanifestは上書きしない。
+3. 修正後のclean source commitを固定し、Windows 11 x64・PowerShell 7・.NET 10 Desktop・Visual Studio 2022 Build Tools/CMake・Gitを確認する。固定ローカルドライブの新規一意名を使い、SDK root空のレシピで**SDK非同梱のローカル候補を1件だけ**生成する。失敗や応答不明なら成果ディレクトリとprocess状態を確認し、同じ名前で再実行・上書きしない。候補系列は既に4/5を消費しているため、追加生成は残り1件に収める。
+4. 候補のmanifest・全ファイルのsize/hash・source commit・`sdkIncluded=false`・`cliContractVersion=4`を再読取りし、同梱CLIの `describe` でv4と `gui-show-review` を確認する。隔離したSimulated fixture・同一Windows利用者/sessionで、**同梱CLI→同梱GUI→指定した未採用結果の閲覧専用画像**を限定1回確認し、結果ID/画像種別、可視viewer、履歴ゲートの保持と復帰、記録・原画像の不変、改変画像の拒否、撮影/採用/実機操作0を記録する。CLIの応答だけで可視・画像内容の評価を代用しない。同条件の失敗を自動再試行しない。
+
+候補生成とSimulated E2Eが合格しても、clean PC、Product実結果、操作者/AIの画像内容の目視、二台同時Live View、撮影・合成品質、配布・mergeは別の受入である。run-04の委譲markerは保持し、残り実機preview枠1回、run-05、撮影、SDK/WPD、marker解除には進まない。業務時間の具体的定義に既存の本人指定があればそれを優先する。
