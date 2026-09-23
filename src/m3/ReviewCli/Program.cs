@@ -12,7 +12,7 @@ namespace A0CameraStitcher.M3.ReviewCli;
 internal static class Program
 {
     private const string AppId = "a0-camera-stitcher-review-cli";
-    private const int ContractVersion = 3;
+    private const int ContractVersion = 4;
     private static readonly string Build = typeof(Program).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unavailable";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -28,17 +28,19 @@ internal static class Program
         string? ErrorCode)
     {
         public string AppId => Program.AppId;
-        public string Environment => Operation == "gui-status" ? "Windows-local same-session GUI observation" : "Windows-local standalone read-only";
+        public string Environment => Operation is "gui-status" or "gui-show-review"
+            ? "Windows-local same-session GUI" : "Windows-local standalone read-only";
     }
 
     private sealed record ReviewsArguments(string Root, int Offset, int Limit);
     private sealed record VerifyReviewArguments(string ProductRoot, string ResultId, string ExpectedKind);
     private sealed class ArtifactVerificationException : Exception { }
+    private sealed class ReviewDisplayRejectedException(string code) : Exception { public string Code => code; }
 
     public static async Task<int> Main(string[] args)
     {
         var requestId = Guid.NewGuid().ToString("N");
-        var operation = args.FirstOrDefault() is "describe" or "reviews" or "verify-review" or "gui-status" ? args[0] : "unknown";
+        var operation = args.FirstOrDefault() is "describe" or "reviews" or "verify-review" or "gui-status" or "gui-show-review" ? args[0] : "unknown";
         try
         {
             object data = operation switch
@@ -47,6 +49,7 @@ internal static class Program
                 "reviews" => await ReviewsAsync(ParseReviews(args), CancellationToken.None),
                 "verify-review" => await VerifyReviewAsync(ParseVerifyReview(args), CancellationToken.None),
                 "gui-status" => await GuiStatusAsync(args),
+                "gui-show-review" => await GuiShowReviewAsync(args),
                 _ => throw new ArgumentException("Unknown operation."),
             };
             Write(new Envelope(requestId, ContractVersion, Build, "ok", DateTimeOffset.UtcNow,
@@ -77,6 +80,10 @@ internal static class Program
         {
             return Fail(requestId, operation, "invalid_artifacts");
         }
+        catch (ReviewDisplayRejectedException error)
+        {
+            return Fail(requestId, operation, error.Code);
+        }
         catch (UnauthorizedAccessException)
         {
             return Fail(requestId, operation, "access_denied");
@@ -103,22 +110,23 @@ internal static class Program
             appId = AppId,
             contractVersion = ContractVersion,
             environment = "Windows-local standalone read-only",
-            operations = new[] { "describe", "reviews", "verify-review", "gui-status" },
+            operations = new[] { "describe", "reviews", "verify-review", "gui-status", "gui-show-review" },
             inputs = new
             {
                 reviews = "--root <existing operator-review absolute fixed-local path> [--offset 0..1000] [--limit 1..25]",
                 verifyReview = "--product-root <absolute fixed-local path> --result-id <nonempty lowercase GUID N> --expected-kind <Product|Simulated>",
                 guiStatus = "--instance <PID-UTC-process-start-ticks from the target MainWindow version dialog>",
+                guiShowReview = "--instance <same MainWindow instance> --result-id <nonempty lowercase GUID N> --image <stitched|cam-a|cam-b>",
             },
             verifyOutput = "result and transaction IDs, declared review kind, manifest/output/original hashes and relative paths, dimensions, adapter hash; no image bytes",
             adapter = "fixed sibling A0CameraStitcher.M2Adapter.exe; no executable argument or environment override",
-            compatibility = "version 3 adds explicit-instance read-only GUI status; clients must check version and operations",
-            mutation = "not supported",
-            guiInstance = "gui-status only: same-user same-session exact PID/start-time and pipe server PID verification; launcher and HardwareSingle are not supported",
-            artifactVerification = "verify-review only; not hardware or quality acceptance",
-            limits = new { maxScanned = 1000, offset = "0..1000", limit = "1..25", defaultOffset = 0, defaultLimit = 25, verifyTimeoutSeconds = 40, guiStatusTimeoutSeconds = 5 },
+            compatibility = "version 4 adds explicit-instance verified GUI image display; clients must check version and operations",
+            mutation = "GUI display only; no review acceptance, capture, settings, WPD, camera, delete or export",
+            guiInstance = "gui-status and gui-show-review only: same-user same-session exact PID/start-time and pipe server PID verification; launcher and HardwareSingle are not supported",
+            artifactVerification = "verify-review and GUI display reverify stored artifacts; neither is hardware or quality acceptance",
+            limits = new { maxScanned = 1000, offset = "0..1000", limit = "1..25", defaultOffset = 0, defaultLimit = 25, verifyTimeoutSeconds = 40, guiStatusTimeoutSeconds = 5, guiShowReviewTimeoutSeconds = 45 },
             unavailableOperations = new[] { "accept", "capture" },
-            authorization = "current Windows account read permissions; gui-status uses same-user same-session pipe; no elevation or GUI commands",
+            authorization = "current Windows account read permissions; GUI commands use same-user same-session pipes and GUI history gate; no elevation or acceptance authority",
             pagination = "offset is within each locked snapshot; concurrent changes can move later pages",
         };
     }
@@ -129,6 +137,18 @@ internal static class Program
         var observation = await OperatorStatusClient.ObserveAsync(args[2]);
         return new { observation, mutation = "not supported", hardwareAcceptance = "not evaluated",
             availability = "observed GUI gates only; not authorization to perform an action" };
+    }
+
+    private static async Task<object> GuiShowReviewAsync(string[] args)
+    {
+        if (args.Length != 7 || args[1] != "--instance" || args[3] != "--result-id" || args[5] != "--image")
+            throw new ArgumentException("Explicit instance, result and image are required.");
+        var reply = await OperatorReviewDisplayClient.ShowAsync(args[2], args[4], args[6]);
+        if (reply.Outcome != ReviewDisplayOutcome.Displayed)
+            throw new ReviewDisplayRejectedException(reply.Outcome == ReviewDisplayOutcome.NotReady
+                ? "gui_not_ready" : "display_unavailable");
+        return new { reply, artifactVerification = "GUI reverified before display", acceptance = "not performed",
+            actualHumanReview = "not evaluated", hardwareAcceptance = "not evaluated" };
     }
 
     private static async Task<object> ReviewsAsync(ReviewsArguments args, CancellationToken cancellationToken)

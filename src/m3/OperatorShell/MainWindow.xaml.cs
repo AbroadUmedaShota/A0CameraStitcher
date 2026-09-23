@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly string _dualProductRoot;
     private readonly string _historicalReviewKind;
     private OperatorStatusServer? _statusServer;
+    private OperatorReviewDisplayServer? _reviewDisplayServer;
     private readonly HardwareSingleAppSessionLease? _sessionLease;
     private readonly DualCameraAgentLifecycle? _dualAgentLifecycle;
     private readonly DispatcherTimer? _dualBindingHostLifetimeMonitor;
@@ -185,6 +186,14 @@ public partial class MainWindow : Window
                 // Missing observation is not a camera failure and must not change existing operation gates.
                 _statusServer = null;
             }
+            if (_statusServer is not null)
+            {
+                try { _reviewDisplayServer = new OperatorReviewDisplayServer(ShowVerifiedReviewAsync); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
+                {
+                    _reviewDisplayServer = null;
+                }
+            }
         }
         catch
         {
@@ -225,6 +234,67 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "履歴を正常に処理できませんでした。採用状態は履歴を読み直して確認してください。", "未採用の履歴", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally { _viewModel.EndHistoricalReview(); }
+    }
+
+    private async Task<ReviewDisplayOutcome> ShowVerifiedReviewAsync(ReviewDisplayRequest request, CancellationToken token)
+    {
+        var reserved = await Dispatcher.InvokeAsync(() =>
+            !_shutdownStarted && IsLoaded && _viewModel.TryBeginHistoricalReview(),
+            DispatcherPriority.Background, token);
+        if (!reserved) return ReviewDisplayOutcome.NotReady;
+        var shown = false;
+        try
+        {
+            var store = new FileOperatorReviewStore(Path.Combine(_dualProductRoot, "operator-review"));
+            var pending = await store.ReadOneReadOnlyAsync(request.ResultId, token).ConfigureAwait(false);
+            if (pending.State != "Pending" || pending.ReviewKind != _historicalReviewKind)
+                return ReviewDisplayOutcome.Unavailable;
+            var adapter = DualCameraProductComposition.CreateHistoricalReviewAdapter();
+            var artifacts = await adapter.VerifyHistoricalReviewAsync(_dualProductRoot, pending, token).ConfigureAwait(false);
+            var after = await store.ReadOneReadOnlyAsync(request.ResultId, token).ConfigureAwait(false);
+            if (after != pending) return ReviewDisplayOutcome.Unavailable;
+            var selected = request.Image switch
+            {
+                "stitched" => (Path: artifacts.StitchedPath, Hash: artifacts.StitchedSha256),
+                "cam-a" => SelectOriginal("CAM-A"),
+                "cam-b" => SelectOriginal("CAM-B"),
+                _ => throw new ArgumentException("Invalid image choice."),
+            };
+            (string Path, string Hash) SelectOriginal(string alias)
+            {
+                var original = artifacts.Originals.Single(item => item.Alias == alias);
+                return (original.Path, original.Sha256);
+            }
+            var outcome = await Dispatcher.InvokeAsync(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                if (_shutdownStarted || !IsLoaded) return ReviewDisplayOutcome.NotReady;
+                var seam = request.Image == "stitched"
+                    ? StitchSeamNavigationManifestReader.TryReadForStitchedOutput(selected.Path) : null;
+                var viewer = new ReviewImageWindow(selected.Path, seam, selected.Hash)
+                {
+                    Owner = this,
+                    Title = _historicalReviewKind == "Simulated"
+                        ? "模擬結果の照会（SIMULATED・採用不可）" : "保存結果の照会（採用不可）",
+                };
+                viewer.Closed += (_, _) => _viewModel.EndHistoricalReview();
+                viewer.Show();
+                shown = true;
+                return ReviewDisplayOutcome.Displayed;
+            }, DispatcherPriority.Background, token);
+            return outcome;
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or
+            ArgumentException or InvalidOperationException or NotSupportedException or System.Text.Json.JsonException or
+            FormatException or System.ComponentModel.Win32Exception)
+        {
+            return ReviewDisplayOutcome.Unavailable;
+        }
+        finally
+        {
+            if (!shown && !Dispatcher.HasShutdownStarted)
+                await Dispatcher.InvokeAsync(() => _viewModel.EndHistoricalReview(), DispatcherPriority.Background);
+        }
     }
 
     private void OnOpenReviewImage(object sender, RoutedEventArgs eventArgs)
@@ -289,6 +359,7 @@ public partial class MainWindow : Window
             }
         }
 
+        if (_reviewDisplayServer is not null) await _reviewDisplayServer.DisposeAsync();
         if (_statusServer is not null) await _statusServer.DisposeAsync();
         _liveViewFramePump.Dispose();
         _lifetime.Dispose();

@@ -56,7 +56,7 @@ internal static class ReviewVerificationContracts
                 File.Copy(adapterPath, Path.Combine(deployment, "A0CameraStitcher.M2Adapter.exe"), overwrite: true);
             }
             using (var description = await Invoke(deployedCli, 0, "describe"))
-                Check(description.RootElement.GetProperty("version").GetInt32() is 2 or 3 &&
+                Check(description.RootElement.GetProperty("version").GetInt32() is 2 or 3 or 4 &&
                     description.RootElement.GetProperty("data").GetProperty("operations").EnumerateArray().Any(item => item.GetString() == "verify-review"),
                     "Verification was not discoverable in the versioned contract.");
             using (var verified = await Invoke(deployedCli, 0, Valid()))

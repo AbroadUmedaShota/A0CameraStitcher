@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using A0CameraStitcher.M3.Foundation.OperatorStatus;
 
+if (args is ["--review-display", var reviewCliPath] && Path.IsPathFullyQualified(reviewCliPath) && File.Exists(reviewCliPath))
+    return await ReviewDisplayContractAsync(reviewCliPath);
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0]) || !File.Exists(args[0])) return 2;
 var observed = 0;
 var expected = new OperatorStatusSnapshot("Simulated", "Review", false, false, false, true, false);
@@ -13,7 +15,7 @@ try
     using (var status = await Cli("gui-status", "--instance", server.InstanceId))
     {
         var root = status.RootElement;
-        Check(root.GetProperty("version").GetInt32() == 3 && root.GetProperty("status").GetString() == "ok", "CLI status/version");
+        Check(root.GetProperty("version").GetInt32() == 4 && root.GetProperty("status").GetString() == "ok", "CLI status/version");
         var observation = root.GetProperty("data").GetProperty("observation");
         Check(observation.GetProperty("instanceId").GetString() == server.InstanceId, "Wrong instance");
         Check(observation.GetProperty("contractVersion").GetInt32() == 1 &&
@@ -76,4 +78,77 @@ async Task<JsonDocument> Cli(params string[] arguments)
     Check(child.ExitCode == (arguments[0] == "capture" ? 2 : 0), "Unexpected CLI exit");
     Check(string.IsNullOrWhiteSpace(await errors), "CLI stderr");
     return JsonDocument.Parse(await output);
+}
+
+static async Task<int> ReviewDisplayContractAsync(string cliPath)
+{
+    var resultId = Guid.NewGuid().ToString("N");
+    var displayed = 0;
+    var nextOutcome = ReviewDisplayOutcome.Displayed;
+    await using var server = new OperatorReviewDisplayServer((request, _) =>
+    {
+        if (request.ResultId != resultId || request.Image != "cam-a") throw new Exception("Request changed in transit.");
+        Interlocked.Increment(ref displayed);
+        return Task.FromResult(nextOutcome);
+    });
+    try
+    {
+        using (var response = await Invoke("gui-show-review", 0, "--instance", server.InstanceId,
+            "--result-id", resultId, "--image", "cam-a"))
+        {
+            var root = response.RootElement;
+            Check(root.GetProperty("version").GetInt32() == 4 && root.GetProperty("status").GetString() == "ok", "Display CLI contract");
+            Check(root.GetProperty("data").GetProperty("reply").GetProperty("outcome").GetInt32() == 0,
+                "Display acknowledgement was not returned.");
+        }
+        Check(displayed == 1, "Display callback must run once.");
+        await using (var pipe = new NamedPipeClientStream(".", "a0.operator.review-display.v1." + server.InstanceId,
+            PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        {
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await pipe.ConnectAsync(limit.Token);
+            var wire = Encoding.UTF8.GetBytes("{\"command\":\"capture\",\"resultId\":\"" + resultId + "\",\"image\":\"cam-a\"}");
+            await pipe.WriteAsync(BitConverter.GetBytes(wire.Length), limit.Token);
+            await pipe.WriteAsync(wire, limit.Token);
+            Check(await pipe.ReadAsync(new byte[1], limit.Token) == 0, "Unsupported command received a reply.");
+        }
+        Check(displayed == 1, "Unsupported command reached display callback.");
+        nextOutcome = ReviewDisplayOutcome.NotReady;
+        using (var notReady = await Invoke("gui-show-review", 2, "--instance", server.InstanceId,
+            "--result-id", resultId, "--image", "cam-a"))
+            Check(notReady.RootElement.GetProperty("errorCode").GetString() == "gui_not_ready", "Busy GUI was reported as displayed.");
+        nextOutcome = ReviewDisplayOutcome.Unavailable;
+        using (var missing = await Invoke("gui-show-review", 2, "--instance", server.InstanceId,
+            "--result-id", resultId, "--image", "cam-a"))
+            Check(missing.RootElement.GetProperty("errorCode").GetString() == "display_unavailable", "Missing review was reported as displayed.");
+        using (var invalid = await Invoke("gui-show-review", 2, "--instance", server.InstanceId,
+            "--result-id", Guid.Empty.ToString("N"), "--image", "cam-a"))
+            Check(invalid.RootElement.GetProperty("errorCode").GetString() == "invalid_input", "Invalid result ID accepted.");
+        var parts = server.InstanceId.Split('-');
+        using (var stale = await Invoke("gui-show-review", 2, "--instance", parts[0] + "-" + (long.Parse(parts[1]) + 1),
+            "--result-id", resultId, "--image", "cam-a"))
+            Check(stale.RootElement.GetProperty("status").GetString() == "error", "Stale GUI identity accepted.");
+        Check(displayed == 3, "Rejected requests reached display callback.");
+        await server.DisposeAsync();
+        Check(server.Completion.IsCompleted, "Display server did not stop.");
+        Console.WriteLine("PASS review display exact-instance real-pipe CLI, bounded command, stale identity refusal; hardwareOperations=0; actualGuiAcceptance=notRun");
+        return 0;
+    }
+    catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+
+    async Task<JsonDocument> Invoke(string operation, int expectedExit, params string[] arguments)
+    {
+        var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardOutput = true,
+            RedirectStandardError = true, CreateNoWindow = true };
+        start.ArgumentList.Add(cliPath);
+        start.ArgumentList.Add(operation);
+        foreach (var item in arguments) start.ArgumentList.Add(item);
+        using var child = Process.Start(start)!;
+        var output = child.StandardOutput.ReadToEndAsync();
+        var errors = child.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await child.WaitForExitAsync(timeout.Token);
+        Check(child.ExitCode == expectedExit && string.IsNullOrWhiteSpace(await errors), "Display CLI exit/stderr");
+        return JsonDocument.Parse(await output);
+    }
 }
