@@ -28,7 +28,19 @@ run-04では `PreviewRunJournal` が排他書込みで開かれ、隔離中に�
 
 実装commit `0c199519416ff2295b8c3a2f9039d0da36429bf9` は親応答をepoch・PID・sequence・status・payloadで検証し、`failed` の固定分類とworker申告の5項目close receiptを保持する。通常の `ok`、明示 `closed`、`quarantined` を区別し、妥当な失敗応答にもACKを**一度だけ**書く。ACK書込み完了はworkerによる処理確認ではない。応答未受信・不正応答・ACK不明・worker先行終了・worker非0/未確認終了・disarm失敗は引き続き隔離を維持し、曖昧な `close` の再送やmarker解除をしない。画面にはworker番号、命令、固定分類、応答検証、ACK書込み、worker申告receiptの状態を表示し、journalには固定イベントのみ追記する。SDK自由文・個体情報は表示/保存しない。
 
-修正前に追加したfake候補選択失敗が赤確認の起点で、今回の親reply parser追加前は新規契約テストのheader不在でbuild失敗を確認した。修正後はstub Releaseの `a0_preview_commissioning_tests` と `a0_worker_preview_pipe_tests` が各2回、いずれも `failures=0`、exit 0。前者は通常flowと失敗/不正/不完全receiptを、後者は別processの正常close・認証失敗応答とACK後の終了codeを検査した。stub試験画面とSDK有効試験画面のRelease buildもexit 0（既存C4819、一部既存C4834警告）。SDK有効exe SHA-256は画面 `1B539A9BE22368609750B4CF17BDB7C49271F916B6EDD84E86AF2A85EC79EAF4`、worker `C754489402C2ECE507C8445B1D37A6A242584678096B4959BCC6456EC37C7E4F`。この候補は**ビルド成果であり実機試験・配布候補ではない**。親 `Exchange` を実worker失敗で駆動する統合試験と、run-04の実際の失敗分類・worker exit codeはなお未取得。既存owner系列5/5は根拠なく再実行せず、隔離markerと残り実機枠1/5を維持する。
+修正前に追加したfake候補選択失敗が赤確認の起点で、今回の親reply parser追加前は新規契約テストのheader不在でbuild失敗を確認した。修正後はstub Releaseの `a0_preview_commissioning_tests` と `a0_worker_preview_pipe_tests` が各2回、いずれも `failures=0`、exit 0。前者は通常flowと失敗/不正/不完全receiptを、後者は別processの正常close・認証失敗応答とACK後の終了codeを検査した。stub試験画面とSDK有効試験画面のRelease buildもexit 0（既存C4819、一部既存C4834警告）。当時のSDK有効exe SHA-256は画面 `1B539A9BE22368609750B4CF17BDB7C49271F916B6EDD84E86AF2A85EC79EAF4`、worker `C754489402C2ECE507C8445B1D37A6A242584678096B4959BCC6456EC37C7E4F`。この候補は**ビルド成果であり実機試験・配布候補ではない**。この時点では親 `Exchange` を実worker失敗で駆動する統合試験は未実施だった。run-04の実際の失敗分類・worker exit codeはなお未取得。既存owner系列5/5は根拠なく再実行せず、隔離markerと残り実機枠1/5を維持する。
+
+### 親Exchange→表示用診断の独立プロセス負例（software-only）
+
+commit `a75f670c1f9f3e67141bf450bc2a50b2b020bc29` でSDK-stub専用owner試験exe自身を、明示したtest-rootでのみ独立fake workerとして起動する入口を追加した。親の実 `PreviewWorkerOwner::Exchange` とOS pipe/子processを通し、(1) bound `failed` 応答、(2) sequence不正応答、(3) 応答欠落、(4) worker先行終了を決定的に作る。各条件で最初のworker/operation、固定分類、応答検証、ACK書込み、worker申告close receiptが親に保持されること、画面が実際に呼ぶ `FormatPreviewWorkerFailure` の表示文字列へ伝わることを検査した。失敗後の `Close()` 二度目はcached falseであり、両fake workerの終了codeと隔離test markerを確認した。妥当な失敗のACKはfake workerが受信するが、これを一般のSDK workerによるACK処理保証にはしない。不正・欠落ではACKしない。test markerは本試験専用root内に限り、両fake childの終了確認と次owner拒否を確認してから当該fixtureだけを除去した。本番のrun-04 marker、D810、SDK/WPDには触れていない。
+
+専用 `--reply-contract` は改善中の4回だけ実行し、各回 `failures=0`、exit 0（4/5）。SDK-stub試験target、stub試験画面、SDK有効試験画面のRelease buildはexit 0（既存C4819）。最終buildのSDK有効exe SHA-256は画面 `980E01EF19DFB7809CE911E52E6943EAB955006FDC8ED90EAD782FEA2B20A7D7`、worker `5FA96F1A133F0ADA9DE47C8ED7B0F76E14752BABF320201D765D533B87C6189A`。これは配布・実機実行の許可ではない。試験した子は**本物のOS子processだがproduction PreviewWorkerではなくSDKなしのfake**であり、実SDK失敗時の挙動、ACK書込み失敗の決定的再現、Win32画面の目視、run-04の原因/exit codeは未確認。
+
+### run-04残存markerの判断パケット（解除判断は保留）
+
+現状: run-04の親と両workerは終了したが、明示close応答・両workerのexit code 0の同時証跡は保存されていない。既存 `DisarmDualDelegation` の必須条件を後から満たせず、今回のsoftware試験も過去の欠落を補えない。したがってmarkerは隔離として残し、手動削除・編集・再起動による迂回、run-05、撮影・保存・配布へ進まない。
+
+次の本人判断が必要な範囲は、**物理隔離と証拠保全を前提にした一回限りの監査可能なmarker回復操作を設計・検証し、その正確な対象と実行を承認するか**である。実行前の必要証拠は、操作者による二台の電源OFF/USB切断確認、OS上のD810・旧画面・旧workerが0件である新鮮な確認、同一sessionの対象markerが一件でreparseでないこと、run-04 journalとmarkerの秘密を漏らさない保全、他のカメラ制御入口の停止である。これらが揃ってもSDK終了を証明し直すものではなく、隔離解除の例外判断として記録する。どれか不明なら保留。回復後も残り一回の実機preview試験には別の本人判断と新たな物理alias/接続確認が要る。
 
 非破壊の人手復旧手順は、①操作者がカメラの電源・背面Live View・USB状態を確認し、不明ならカメラを安全に電源OFF/切断する、②OS上のD810・試験画面・worker・同一sessionの委譲markerを読取りで照合する、③ignored journalとアプリ表示を保全する、④markerを**削除・編集せず**カメラ制御入口を停止したまま原因と終了証跡を評価する、である。2026-09-23の本調査時点ではmarkerは1件、v2構造は妥当、reparseでなく、試験画面/workerは0件。ただしOS上のD810は再び2台見えており、その後の物理状態や再接続の理由は未確認。接続済みであっても隔離を解除しない。秘密のnonce/epochや個体番号は記録・commitしない。
 
