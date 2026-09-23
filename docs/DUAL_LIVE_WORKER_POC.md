@@ -36,11 +36,19 @@ commit `a75f670c1f9f3e67141bf450bc2a50b2b020bc29` でSDK-stub専用owner試験ex
 
 専用 `--reply-contract` は改善中の4回だけ実行し、各回 `failures=0`、exit 0（4/5）。SDK-stub試験target、stub試験画面、SDK有効試験画面のRelease buildはexit 0（既存C4819）。最終buildのSDK有効exe SHA-256は画面 `980E01EF19DFB7809CE911E52E6943EAB955006FDC8ED90EAD782FEA2B20A7D7`、worker `5FA96F1A133F0ADA9DE47C8ED7B0F76E14752BABF320201D765D533B87C6189A`。これは配布・実機実行の許可ではない。試験した子は**本物のOS子processだがproduction PreviewWorkerではなくSDKなしのfake**であり、実SDK失敗時の挙動、ACK書込み失敗の決定的再現、Win32画面の目視、run-04の原因/exit codeは未確認。
 
-### run-04残存markerの判断パケット（解除判断は保留）
+### ACK書込み失敗の決定的負例（software-only）
 
-現状: run-04の親と両workerは終了したが、明示close応答・両workerのexit code 0の同時証跡は保存されていない。既存 `DisarmDualDelegation` の必須条件を後から満たせず、今回のsoftware試験も過去の欠落を補えない。したがってmarkerは隔離として残し、手動削除・編集・再起動による迂回、run-05、撮影・保存・配布へ進まない。
+事前SHA `9241ef8c83b98494a478883566bee2f72f43076d`、実装SHA `fb0085645e8637d13799adddc8bd70b113a48ad3`。SDK-stubの隔離test-rootと独立fake childの場合だけ、親が妥当な `failed` 応答を検証した直後に当該test pipe handleを閉じ、実 `WriteFile` のACK書込みを確実に失敗させる。SDK有効buildでは故障注入本体をコンパイルせず、test-root付きownerの生成も拒否する。専用 `--ack-failure-contract` 一回（1/5）は `failures=0`、exit 0。親は `response_received=true`、`response_validated=true`、`ack_write_completed=false`、固定失敗category、worker申告の完全receiptを保持し、UI表示用の文字列にもACK未確認を出す。fake childはACKを受けず非0で終了、他方は明示close 0、二度目の `Close()` は再送せずfalse、隔離test markerと次owner拒否を確認した。両child終了確認後に除去したのはその試験専用markerだけ。本番run-04 marker、D810、SDK/WPDには触れていない。SDK有効試験画面Release build exit 0（既存C4819）、exe SHA-256は画面 `189C31CCD14DDDEE31E69DCF1987E161E77BCDDEAE816A603BAB9B349B91F03F`、worker `F745B333DAF8C920066ACB6215A873DEC9E4F73627B06D235FDD26DB4843626F`。ビルドは実機受入・配布を意味しない。
 
-次の本人判断が必要な範囲は、**物理隔離と証拠保全を前提にした一回限りの監査可能なmarker回復操作を設計・検証し、その正確な対象と実行を承認するか**である。実行前の必要証拠は、操作者による二台の電源OFF/USB切断確認、OS上のD810・旧画面・旧workerが0件である新鮮な確認、同一sessionの対象markerが一件でreparseでないこと、run-04 journalとmarkerの秘密を漏らさない保全、他のカメラ制御入口の停止である。これらが揃ってもSDK終了を証明し直すものではなく、隔離解除の例外判断として記録する。どれか不明なら保留。回復後も残り一回の実機preview試験には別の本人判断と新たな物理alias/接続確認が要る。
+### 本人判断パケットA: run-04残存markerの一回限り回復
+
+現状: run-04の親と両workerは終了したが、明示close応答・両workerのexit code 0の同時証跡は保存されていない。既存 `DisarmDualDelegation` の必須条件を後から満たせず、今回のsoftware試験も過去の欠落を補えない。対象候補は同一Windows logon sessionのLocalAppData配下 `A0CameraStitcher/Phase0/DualDelegation/armed-session-<session-id>.marker` **一件のみ**。これはpath patternであり、実行対象の確定には直前の絶対path・session ID・ファイル属性・内容の匿名hash・サイズを読取りで再照合する必要がある。関連する別のmarker、directory、撮影原画像は対象外。
+
+提案する承認範囲は、まだ未実装の監査可能な**一回限りの例外回復操作**の設計・software-only検証と、その確定した単一対象への実行を明示承認するか、である。前提は操作者による二台の電源OFF/USB切断、OS上のD810・旧画面・旧workerが0件という新鮮な確認、同一sessionでmarker一件・reparseなし・他のカメラ制御入口停止、run-04 journalとmarkerの機密保全。dry-runで対象と不変条件を確定し、承認後に保護されたローカル証拠控えを作ってから**当該一件だけ**処理し、結果を再読取り・記録する構成が必要。APIに架空のclose receiptを渡す、bulk削除、再試行、再起動による迂回はしない。対象・状態・処理結果が不明ならmarkerを保持して停止する。これらを満たしても過去のSDK終了を証明するものではなく、隔離解除の例外として人間が判断する。現時点でこの回復操作・marker削除は**未承認・未実施**。
+
+### 本人判断パケットB: 回復後の実機run-05
+
+marker回復が別途承認・完了してもrun-05は自動許可しない。残りの実機preview枠は1/5で、二台の新鮮な接続状態・物理alias、電源/固定設置、変更後exeのexact hash、SDK/WPD非重複、左右の新規frameと両側停止/closeの一回限り記録手順を再確認したうえで、本人が別にGO/保留を判断する。失敗・通信不明・片側停止・期限切れでは再試行せず隔離に戻す。preview成功を撮影・保存原画像・品質・製品受入へ拡張しない。
 
 非破壊の人手復旧手順は、①操作者がカメラの電源・背面Live View・USB状態を確認し、不明ならカメラを安全に電源OFF/切断する、②OS上のD810・試験画面・worker・同一sessionの委譲markerを読取りで照合する、③ignored journalとアプリ表示を保全する、④markerを**削除・編集せず**カメラ制御入口を停止したまま原因と終了証跡を評価する、である。2026-09-23の本調査時点ではmarkerは1件、v2構造は妥当、reparseでなく、試験画面/workerは0件。ただしOS上のD810は再び2台見えており、その後の物理状態や再接続の理由は未確認。接続済みであっても隔離を解除しない。秘密のnonce/epochや個体番号は記録・commitしない。
 
