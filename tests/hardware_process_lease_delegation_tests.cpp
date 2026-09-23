@@ -35,6 +35,48 @@ template<class Action> bool Rejects(Action action) {
     try { action(); } catch (const TransportError&) { return true; }
     return false;
 }
+#ifdef A0_MARKER_DIAGNOSTIC_TEST_ROOT
+bool DiagnosticCliAcceptsTestRoot(const std::filesystem::path &root, std::string &output,
+                                  bool &child_finished) {
+    child_finished = true;
+    wchar_t own_path[MAX_PATH]{};
+    if (!GetModuleFileNameW(nullptr, own_path, MAX_PATH)) return false;
+    const auto cli = std::filesystem::path(own_path).parent_path() / L"A0CameraStitcher.MarkerDiagnostic.exe";
+    std::wstring command = L"\"" + cli.wstring() + L"\" --test-root \"" + root.wstring() + L"\"";
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+    HANDLE reader{}, writer{};
+    if (!CreatePipe(&reader, &writer, &security, 0)) return false;
+    SetHandleInformation(reader, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = writer;
+    startup.hStdError = writer;
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &child)) {
+        CloseHandle(reader);
+        CloseHandle(writer);
+        return false;
+    }
+    CloseHandle(writer);
+    CloseHandle(child.hThread);
+    const DWORD wait = WaitForSingleObject(child.hProcess, 5000);
+    child_finished = wait == WAIT_OBJECT_0;
+    DWORD exit_code{};
+    const bool accepted = child_finished && GetExitCodeProcess(child.hProcess, &exit_code) &&
+                          exit_code == 0;
+    CloseHandle(child.hProcess);
+    char bytes[512]{};
+    DWORD read{};
+    if (accepted && ReadFile(reader, bytes, sizeof(bytes), &read, nullptr)) output.assign(bytes, read);
+    CloseHandle(reader);
+    return accepted;
+}
+#endif
 int RunDiagnosticTests() {
     wchar_t temp[MAX_PATH]{};
     if (!GetTempPathW(MAX_PATH, temp)) return 2;
@@ -69,6 +111,19 @@ int RunDiagnosticTests() {
     const auto accepted = InspectDualDelegationMarkerReadOnly(root);
     Check(accepted.status == "eligible_for_human_review" && accepted.anonymous_sha256.size() == 64 &&
           accepted.size == valid.size(), "valid marker only becomes a human-review candidate");
+#ifdef A0_MARKER_DIAGNOSTIC_TEST_ROOT
+    std::string cli_output;
+    bool cli_finished{};
+    Check(DiagnosticCliAcceptsTestRoot(root, cli_output, cli_finished) &&
+          cli_output.find("\"status\":\"eligible_for_human_review\"") != std::string::npos &&
+          cli_output.find(accepted.anonymous_sha256) != std::string::npos &&
+          cli_output.find("nonce=") == std::string::npos &&
+          cli_output.find(std::string(32, 'a')) == std::string::npos &&
+          cli_output.find("ownerPid") == std::string::npos &&
+          cli_output.find("4294967290") == std::string::npos,
+          "read-only CLI must report only anonymous synthetic marker status");
+    if (!cli_finished) return 3; // Never clean a fixture while a diagnostic child may still be alive.
+#endif
     Check(GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES &&
           std::filesystem::file_size(marker) == valid.size() &&
           std::filesystem::last_write_time(marker) == timestamp, "diagnostic must retain marker unchanged");

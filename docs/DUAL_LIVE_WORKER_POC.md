@@ -62,9 +62,11 @@ marker回復が別途承認・完了してもrun-05は自動許可しない。�
 
 synthetic v2 markerを使うtest-rootだけで、単一正常、なし・複数・別session、reparse/非通常file/サイズ・構文不正、二読取り間の変化、生存fake child、次ownerによる隔離継続を最大5回のまとまったsoftware試験で確認する。production markerは試験fixtureにせず、診断実装後も本番読取り・証拠控え・一件限定の例外解除は別の本人判断パケットAに従う。診断PASSだけでrun-05、撮影、製品受入へ進めない。
 
-実装中のライブラリ入口 `InspectDualDelegationMarkerReadOnly` は既存directoryのみを検査し、現行sessionの単一markerを二回読み、厳格なv2構文・ファイル同一性・記録されたPIDの現在の生存状態を判定する。PIDが既に終了または見つからない場合でも、過去のSDK closeを証明せず `eligible_for_human_review` のみ返す。検査結果は固定status・匿名SHA-256・サイズに限定する。テスト用rootのsynthetic markerでの実行までとし、**本番marker用CLI、証拠保全、例外解除は未実装・未実行**。二読取り間の意図的な置換競合、reparse差替えの決定的試験は残る。
+ライブラリ入口 `InspectDualDelegationMarkerReadOnly` は既存directoryのみを検査し、現行sessionの単一markerを二回読み、厳格なv2構文・ファイル同一性・記録されたPIDの現在の生存状態を判定する。PIDが既に終了または見つからない場合でも、過去のSDK closeを証明せず `eligible_for_human_review` のみ返す。検査結果は固定status・匿名SHA-256・サイズに限定する。専用CLI `A0CameraStitcher.MarkerDiagnostic --read-only` も追加し、SDK/WPD・leaseを開始せずに同じ診断だけを呼ぶ。SDKなしbuildのみ `--test-root` を許し、SDK有効buildでは拒否する。**本番markerへのCLI実行、証拠保全、例外解除は未実行・未実装**。二読取り間の意図的な置換競合、reparse差替えの決定的試験は残る。
 
 software-only確認（2026-09-23）: 既存SDK-stub CMake target `a0_hardware_process_lease_delegation_tests` のRelease buildはexit 0（既存C4819警告）。専用 `--diagnostic` を2回実行し、いずれも `failures=0`、exit 0。欠落rootを作成しない、markerなし、正常な単一v2 markerの人手レビュー候補、内容/更新時刻/サイズの不変、別session marker混在、不正構文、256 byte超、現行PID生存、markerの代わりのdirectoryを確認した。これはtest-root内のsynthetic markerだけであり、本番markerの検査や解除成功ではない。
+
+CLI追加後のSDK-stub Release buildはexit 0。`--diagnostic` を追加で3回実行し、いずれも `failures=0`、exit 0。synthetic markerに対してCLI子processがexit 0で人手レビュー候補を返し、出力JSONに固定statusと匿名hashがあり、nonce/owner PIDの値やfield名が出ないこと、test-root fixtureが保持されることを確認した。診断専用系列は合計5/5回で終了し、同条件の追加反復はしない。CLIの本番 `--read-only` は起動していない。SDK有効buildでの`--test-root`拒否はコード上のbuild条件のみで、実行確認はまだない。
 
 残り1/5の実機preview試験は現時点で**実施不可**。実施判断の最低条件は、失敗命令・匿名category・worker終了receiptを失わない改修とfake/IPC負例、markerの承認済み回復手順、両実機の新たな接続/物理alias確認、変更後候補のexact hash、SDK/WPD非重複、1回だけの開始・左右新規frame・両側停止/closeを記録できること。どれか欠ければ中止し、SDK close不明、片側停止、通信不明、期限切れでは再試行・marker解除・撮影へ進まない。プレビュー成功でも撮影、保存原画像、光学品質、製品受入の証拠にはしない。
 
