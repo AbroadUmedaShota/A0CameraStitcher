@@ -54,6 +54,14 @@ marker回復が別途承認・完了してもrun-05は自動許可しない。�
 
 既存の `DisarmDualDelegation` は両workerの型付き完全終了証拠、保持process handleとの一致、両exit code 0、marker内容一致を要求する。run-04ではこれらが揃わず、親画面も既に終了しているため、**既存APIだけで安全にmarkerを解除する経路はない**。手動のファイル削除、再起動、旧binaryからの操作を復旧手順にしない。解除が必要なら、カメラの物理隔離、証拠保全、正確な対象確認、監査可能な一回限りの操作を含む別の人間判断・実装・software-only検証が先に必要。
 
+#### 回復dry-runの実装境界（software-only、未実装）
+
+最初に追加するのは、解除機能を持たない**読取り専用診断**に限定する。既存の通常解除 `DisarmDualDelegation` を緩めず、テストfixture用 `DeleteFileW` を本番回復に転用しない。診断入口はSDK/WPD、カメラ、worker、camera-control mutexを起動・接続・作成しない。既存の `RequireSafeDirectoryTree` は不足directoryを作成するため読取り専用診断から呼ばず、既存directoryだけを検査する別経路とする。
+
+診断では固定ローカルdriveのrootと祖先directoryが既存・非reparseであることを確認し、現行Windows logon sessionの `armed-session-<session-id>.marker` 一件だけを候補にする。markerは通常disk file・非reparse・1～255 byte・厳格なv2構文を要求し、path、属性、サイズ、内容を二度読んで同一性を検査する。複数候補、別session、検査中の変化、process生存・状態不明はいずれも停止理由とし、診断結果にはnonce、epoch、PID、個体番号を出さず、匿名hashと固定statusのみを出す。正常な読取りのstatusも `eligible_for_human_review` までであり、`safe_to_delete` やSDK終了済みの意味を持たせない。
+
+synthetic v2 markerを使うtest-rootだけで、単一正常、なし・複数・別session、reparse/非通常file/サイズ・構文不正、二読取り間の変化、生存fake child、次ownerによる隔離継続を最大5回のまとまったsoftware試験で確認する。production markerは試験fixtureにせず、診断実装後も本番読取り・証拠控え・一件限定の例外解除は別の本人判断パケットAに従う。診断PASSだけでrun-05、撮影、製品受入へ進めない。
+
 残り1/5の実機preview試験は現時点で**実施不可**。実施判断の最低条件は、失敗命令・匿名category・worker終了receiptを失わない改修とfake/IPC負例、markerの承認済み回復手順、両実機の新たな接続/物理alias確認、変更後候補のexact hash、SDK/WPD非重複、1回だけの開始・左右新規frame・両側停止/closeを記録できること。どれか欠ければ中止し、SDK close不明、片側停止、通信不明、期限切れでは再試行・marker解除・撮影へ進まない。プレビュー成功でも撮影、保存原画像、光学品質、製品受入の証拠にはしない。
 
 ### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
