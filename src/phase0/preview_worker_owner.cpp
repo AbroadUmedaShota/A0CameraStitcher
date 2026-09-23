@@ -312,6 +312,17 @@ PreviewWorkerOwner::PreviewWorkerOwner(std::string_view name, const std::filesys
 }
 PreviewWorkerOwner::~PreviewWorkerOwner() = default; // Destruction never disarms or kills children.
 bool PreviewWorkerOwner::Close() noexcept { return impl_->Close(); }
+std::wstring FormatPreviewWorkerFailure(const PreviewWorkerFailureObservation& failure) {
+    const auto token = [](const std::string& value) { return std::wstring(value.begin(), value.end()); };
+    const auto receipt = failure.reported_close
+        ? (failure.reported_close->Complete() ? L"complete_reported" : L"incomplete_reported") : L"missing";
+    return L"worker=" + (failure.worker_index < 2 ? std::to_wstring(failure.worker_index) : L"global") +
+        L" operation=" + token(failure.operation) +
+        L" category=" + (failure.category.empty() ? L"missing" : token(failure.category)) +
+        L" response=" + (failure.response_validated ? L"validated" : failure.response_received ? L"invalid" : L"missing") +
+        L" ack_write=" + (failure.ack_write_completed ? L"completed_not_processed" : L"unconfirmed") +
+        L" close_receipt=" + receipt;
+}
 std::optional<PreviewWorkerFailureObservation> PreviewWorkerOwner::FirstFailure() const {
     return impl_->first_failure;
 }

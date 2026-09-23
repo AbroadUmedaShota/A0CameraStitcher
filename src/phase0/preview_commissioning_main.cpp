@@ -26,7 +26,7 @@
 namespace {
 using a0::phase0::experimental::ObservedPreviewBody;
 using a0::phase0::experimental::PreviewWorkerOwner;
-using a0::phase0::experimental::PreviewWorkerFailureObservation;
+using a0::phase0::experimental::FormatPreviewWorkerFailure;
 
 constexpr UINT kUiEvent = WM_APP + 41;
 constexpr INT_PTR kStart = 101;
@@ -57,19 +57,6 @@ std::wstring ErrorText() {
     // Do not reflect SDK exception details into the display: they can include
     // device paths or proprietary runtime details.  The safe state is visible.
     return L"実験用プレビュー制御に失敗しました。安全な終了確認を開始します。";
-}
-
-std::wstring FailureDetail(const PreviewWorkerFailureObservation& failure) {
-    // Operation and category are fixed/bounded protocol tokens, never SDK messages.
-    const auto token = [](const std::string& value) { return std::wstring(value.begin(), value.end()); };
-    const auto receipt = failure.reported_close
-        ? (failure.reported_close->Complete() ? L"完全と申告" : L"不完全と申告") : L"未取得";
-    return L" worker=" + (failure.worker_index < 2 ? std::to_wstring(failure.worker_index) : L"global") +
-        L" operation=" + token(failure.operation) +
-        L" category=" + (failure.category.empty() ? L"未取得" : token(failure.category)) +
-        L" / 応答=" + (failure.response_validated ? L"検証済み" : failure.response_received ? L"受信・検証不可" : L"未受信") +
-        L" / ACK書込み=" + (failure.ack_write_completed ? L"完了（処理確認ではありません）" : L"未確認") +
-        L" / 終了receipt=" + receipt + L"（worker申告）";
 }
 
 class ControlThread final {
@@ -147,7 +134,7 @@ private:
             }
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Quarantined,
                 L"終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。" +
-                    (failure ? FailureDetail(*failure) : L" 失敗段階は未取得です。")}));
+                    (failure ? FormatPreviewWorkerFailure(*failure) : L" 失敗段階は未取得です。")}));
         }
         return closed;
     }

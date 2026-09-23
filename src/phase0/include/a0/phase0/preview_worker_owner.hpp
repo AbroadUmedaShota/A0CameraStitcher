@@ -22,6 +22,9 @@ struct PreviewWorkerFailureObservation {
     std::optional<PreviewWorkerCloseReceipt> reported_close;
 };
 
+// Fixed/bounded diagnostic fields only. Never include SDK free-form errors.
+[[nodiscard]] std::wstring FormatPreviewWorkerFailure(const PreviewWorkerFailureObservation& failure);
+
 class PreviewWorkerStartupError final : public std::runtime_error {
 public:
     explicit PreviewWorkerStartupError(bool workers_may_exist)
