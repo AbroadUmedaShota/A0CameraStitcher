@@ -132,7 +132,7 @@ void Transfer(HANDLE pipe, void* buffer, DWORD size, bool write, ULONGLONG deadl
 json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::string& epoch,
                          std::string_view operation,
                          std::optional<PreviewWorkerFailureObservation>& first_failure,
-                         std::string_view candidate = "") {
+                         std::string_view candidate = "", bool inject_ack_write_failure = false) {
     PreviewWorkerFailureObservation observation;
     observation.worker_index = worker_index;
     observation.operation = operation;
@@ -183,6 +183,16 @@ json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::stri
     observation.category = reply.error_category;
     observation.reported_close = reply.close_receipt;
     unsigned char ack = 0x06;
+#if !defined(A0_NIKON_SDK_AVAILABLE)
+    if (inject_ack_write_failure) {
+        // Test-root owner only: close this fake IPC handle after a validated
+        // reply, forcing the actual ACK WriteFile path to fail deterministically.
+        CloseHandle(pipe.value);
+        pipe.value = INVALID_HANDLE_VALUE;
+    }
+#else
+    (void)inject_ack_write_failure;
+#endif
     Transfer(pipe.value, &ack, 1, true, deadline);
     observation.ack_write_completed = true;
     child.last_exchange = observation;
@@ -226,6 +236,7 @@ struct PreviewWorkerOwner::Impl {
     std::string epoch;
     const DWORD owner_thread = GetCurrentThreadId();
     bool close_attempted{}, closed{};
+    bool inject_ack_write_failure{};
     std::optional<PreviewWorkerFailureObservation> first_failure;
     PreviewCommissioning commissioning{[this](std::size_t worker, std::string_view op, std::string_view candidate) {
         RequireOwnerThread();
@@ -242,16 +253,21 @@ struct PreviewWorkerOwner::Impl {
                 Require(false, "paired worker no longer alive");
             }
         }
-        return Exchange(children.at(worker), worker, epoch, op, first_failure, candidate);
+        return Exchange(children.at(worker), worker, epoch, op, first_failure, candidate,
+                        inject_ack_write_failure && worker == 0 && op == "enumerate");
     }};
     void RequireOwnerThread() const { Require(GetCurrentThreadId() == owner_thread, "camera owner thread required"); }
     Impl(std::string_view name, const std::filesystem::path* root,
          const std::filesystem::path& executable, std::chrono::milliseconds lifetime,
-         const std::function<void(std::array<std::uint32_t, 2>)>& after_spawn = {}) {
+         const std::function<void(std::array<std::uint32_t, 2>)>& after_spawn = {},
+         bool inject_ack_write_failure_for_testing = false)
+        : inject_ack_write_failure(inject_ack_write_failure_for_testing) {
       try {
 #if defined(A0_NIKON_SDK_AVAILABLE)
-        Require(root == nullptr && !after_spawn, "test startup context unavailable in SDK build");
+        Require(root == nullptr && !after_spawn && !inject_ack_write_failure,
+                "test startup context unavailable in SDK build");
 #endif
+        Require(!inject_ack_write_failure || root != nullptr, "ACK fault requires isolated test root");
         Require(executable.is_absolute() && std::filesystem::is_regular_file(executable), "worker executable unavailable");
         Require(lifetime.count() > 0 && lifetime <= std::chrono::minutes(10), "worker lifetime rejected");
         lease = root ? std::make_unique<HardwareProcessLease>(name, std::chrono::milliseconds(0), *root)
@@ -305,8 +321,8 @@ PreviewWorkerOwner::PreviewWorkerOwner() {
 }
 PreviewWorkerOwner::PreviewWorkerOwner(std::string_view name, const std::filesystem::path& root,
     const std::filesystem::path& executable, std::chrono::milliseconds lifetime,
-    std::function<void(std::array<std::uint32_t, 2>)> after_spawn) {
-    try { impl_ = std::make_unique<Impl>(name, &root, executable, lifetime, after_spawn); }
+    std::function<void(std::array<std::uint32_t, 2>)> after_spawn, bool inject_ack_write_failure) {
+    try { impl_ = std::make_unique<Impl>(name, &root, executable, lifetime, after_spawn, inject_ack_write_failure); }
     catch (const PreviewWorkerStartupError&) { throw; }
     catch (...) { throw PreviewWorkerStartupError(false); }
 }

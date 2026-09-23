@@ -41,7 +41,8 @@ public:
     PreviewWorkerOwner();
     PreviewWorkerOwner(std::string_view test_lease_name, const std::filesystem::path& test_marker_root,
                        const std::filesystem::path& worker_executable, std::chrono::milliseconds lifetime,
-                       std::function<void(std::array<std::uint32_t, 2>)> after_spawn_for_testing = {});
+                       std::function<void(std::array<std::uint32_t, 2>)> after_spawn_for_testing = {},
+                       bool inject_ack_write_failure_for_testing = false);
     ~PreviewWorkerOwner();
     PreviewWorkerOwner(const PreviewWorkerOwner&) = delete;
     PreviewWorkerOwner& operator=(const PreviewWorkerOwner&) = delete;

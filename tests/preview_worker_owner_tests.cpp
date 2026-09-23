@@ -109,17 +109,19 @@ int FakeReplyWorker(char** argv) {
         !WriteExact(pipe.value, response.data(), response_length)) return 3;
     unsigned char ack{};
     const bool acknowledged = ReadExact(pipe.value, &ack, 1) && ack == 0x06;
-    if (root.filename() == "invalid" && failing) return acknowledged ? 5 : 3;
+    if ((root.filename() == "invalid" || root.filename() == "ackfail") && failing)
+        return acknowledged ? 5 : 3;
     return acknowledged ? (failing ? 3 : 0) : 5;
 }
-int ReplyContract(const fs::path& executable, const fs::path& temporary) {
+int ReplyContract(const fs::path& executable, const fs::path& temporary, bool ack_only = false) {
     const auto base = temporary / (L"A0WorkerReplyContract-" + std::to_wstring(GetCurrentProcessId()));
-    for (const char* scenario : {"failed", "invalid", "missing", "prior"}) {
+    for (const char* scenario : {"failed", "invalid", "missing", "prior", "ackfail"}) {
+        if (ack_only != (std::string_view(scenario) == "ackfail")) continue;
         const auto root = base / scenario;
         const auto name = "A0.Poc.TestLease.Reply." + std::to_string(GetCurrentProcessId());
         std::array<OwnedHandle, 2> processes;
         {
-            PreviewWorkerOwner owner(name, root, executable, std::chrono::seconds(10));
+            PreviewWorkerOwner owner(name, root, executable, std::chrono::seconds(10), {}, ack_only);
             const auto ids = owner.ProcessIds();
             for (std::size_t index = 0; index < ids.size(); ++index)
                 processes[index].value = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ids[index]);
@@ -148,12 +150,18 @@ int ReplyContract(const fs::path& executable, const fs::path& temporary) {
                 else if (std::string_view(scenario) == "missing")
                     Check(failure->category == "worker_ipc_unconfirmed" && !failure->response_received &&
                           !failure->ack_write_completed, "missing response leaves delivery unconfirmed");
+                else if (std::string_view(scenario) == "ackfail")
+                    Check(failure->category == "injected_select_failure" && failure->response_received &&
+                          failure->response_validated && !failure->ack_write_completed &&
+                          failure->reported_close && failure->reported_close->Complete(),
+                          "validated failure with ACK write fault retains receipt but never credits ACK");
                 else
                     Check(failure->category == "worker_prior_exit" && !failure->response_received,
                           "prior worker exit is distinct from a reported failure");
                 Check(display.find(std::string_view(scenario) == "failed" ? L"ack_write=completed_not_processed" :
                                    L"ack_write=unconfirmed") != std::wstring::npos &&
-                      display.find(std::string_view(scenario) == "failed" ? L"close_receipt=complete_reported" :
+                      display.find(std::string_view(scenario) == "failed" || std::string_view(scenario) == "ackfail" ?
+                                   L"close_receipt=complete_reported" :
                                    L"close_receipt=missing") != std::wstring::npos,
                       "UI diagnostic distinguishes ACK write and worker-reported receipt");
             }
@@ -174,7 +182,8 @@ int ReplyContract(const fs::path& executable, const fs::path& temporary) {
         if (!DeleteFileW(Marker(root).c_str()) || !RemoveDirectoryW(root.c_str())) return 4;
     }
     Check(RemoveDirectoryW(base.c_str()), "isolated reply fixture root removed");
-    std::cout << "{\"mode\":\"stub-parent-reply-contract\",\"failures\":" << failures << "}\n";
+    std::cout << "{\"mode\":\"" << (ack_only ? "stub-parent-ack-write-fault" : "stub-parent-reply-contract") <<
+        "\",\"failures\":" << failures << "}\n";
     return failures ? 1 : 0;
 }
 // The helper owns a real PreviewWorkerOwner, but this target is SDK-stub only.
@@ -261,6 +270,8 @@ int main(int argc, char** argv) {
     try {
         if (argc == 4 && std::string_view(argv[1]) == "--delegated-worker") return FakeReplyWorker(argv);
         if (argc == 2 && std::string_view(argv[1]) == "--reply-contract") return ReplyContract(executable, temporary);
+        if (argc == 2 && std::string_view(argv[1]) == "--ack-failure-contract")
+            return ReplyContract(executable, temporary, true);
         if (argc == 5 && std::string_view(argv[1]) == "--abandon") return AbandonHelper(argv, temporary, worker);
         if (argc != 1) return 2;
         {
