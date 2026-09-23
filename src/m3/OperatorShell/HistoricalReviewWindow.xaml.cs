@@ -15,6 +15,7 @@ public partial class HistoricalReviewWindow : Window
     private readonly M2OfflineStitcherProcessAdapter _adapter;
     private readonly string _productRoot;
     private readonly string _expectedReviewKind;
+    private readonly bool _readOnly;
     private readonly HistoricalReviewViewModel _viewModel = new();
     private readonly CancellationTokenSource _lifetime = new();
     private bool _closed;
@@ -24,17 +25,25 @@ public partial class HistoricalReviewWindow : Window
     private readonly List<OperatorReviewRecord> _acceptedReviews = [];
     internal IReadOnlyList<OperatorReviewRecord> AcceptedReviews => _acceptedReviews;
 
-    internal HistoricalReviewWindow(string productRoot, M2OfflineStitcherProcessAdapter adapter, string expectedReviewKind)
+    internal HistoricalReviewWindow(string productRoot, M2OfflineStitcherProcessAdapter adapter, string expectedReviewKind, bool readOnly = false)
     {
         if (string.IsNullOrWhiteSpace(productRoot) || adapter is null || expectedReviewKind is not ("Product" or "Simulated"))
             throw new ArgumentException("Historical review context is invalid.");
         _productRoot = Path.GetFullPath(productRoot);
         _adapter = adapter;
         _expectedReviewKind = expectedReviewKind;
+        _readOnly = readOnly;
         _store = new FileOperatorReviewStore(Path.Combine(_productRoot, "operator-review"));
         InitializeComponent();
-        Title = expectedReviewKind == "Simulated" ? "模擬結果の履歴（SIMULATED）" : "保存済み合成結果の履歴";
+        Title = readOnly ? "保存済み結果の照会（採用不可）" :
+            expectedReviewKind == "Simulated" ? "模擬結果の履歴（SIMULATED）" : "保存済み合成結果の履歴";
         ContextLabel.Text = (expectedReviewKind == "Simulated" ? "SIMULATED：実機の撮影・品質受入ではありません。\n" : "品質合格・採用を自動判定しません。\n") + ContextLabel.Text;
+        if (readOnly)
+        {
+            ContextLabel.Text = "照会専用：この画面から採用・撮影・再合成はできません。\n" + ContextLabel.Text;
+            AcceptButton.Visibility = Visibility.Collapsed;
+            AcceptButton.IsEnabled = false;
+        }
         DataContext = _viewModel;
         Loaded += OnLoaded;
         Closing += (_, args) =>
@@ -148,7 +157,7 @@ public partial class HistoricalReviewWindow : Window
 
     private async void OnAccept(object sender, RoutedEventArgs e)
     {
-        if (_closed || _lifetime.IsCancellationRequested ||
+        if (_readOnly || _closed || _lifetime.IsCancellationRequested ||
             !_viewModel.TryBeginAcceptance(out var pending, out var reviewed)) return;
         _acceptanceInProgress = true;
         var acceptanceSucceeded = false;

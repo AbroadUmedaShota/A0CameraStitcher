@@ -1,5 +1,7 @@
 using System.IO;
 using System.Security.Cryptography;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using A0CameraStitcher.M3.Foundation;
@@ -24,6 +26,13 @@ internal static class HistoricalReviewWindowContracts
             !failedShell.TryBeginHistoricalReview(), "Initialization failure allowed history.");
         Require(!shell.CanOpenHistoricalReview && !shell.TryBeginHistoricalReview(), "Initialization was bypassed.");
         await shell.InitializeAsync(CancellationToken.None);
+        var readOnlyHistory = new HistoricalReviewWindow(root,
+            new M2OfflineStitcherProcessAdapter(Environment.ProcessPath!), "Simulated", readOnly: true);
+        var acceptButton = readOnlyHistory.FindName("AcceptButton") as Button;
+        Require(acceptButton is { Visibility: Visibility.Collapsed, IsEnabled: false } &&
+            readOnlyHistory.Title.Contains("採用不可", StringComparison.Ordinal),
+            "Read-only history exposed the acceptance action.");
+        readOnlyHistory.Close();
         Require(shell.CanOpenHistoricalReview, "Idle initialized shell cannot browse history.");
         var state = shell.UiState;
         var starts = shell.TransactionStartCount;

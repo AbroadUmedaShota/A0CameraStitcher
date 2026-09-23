@@ -81,3 +81,7 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 | 実GUI/二台同時Live View/撮影品質 | 別受入 | 未完、CLI成功では代替不可 |
 
 実行証拠・試験回数と最新の差分は [操作者仕様](OPERATOR_UI_SPEC.md)、ロードマップ状態は `.autodev/plan.json` の `roadmap_execution` を参照する。製品全体の機械操作適合は未達である。
+
+## 次工程の照会専用画面（開発中）
+
+履歴画面に `readOnly` モードを追加し、そのモードでは採用ボタンを非表示・無効化し、採用イベントも拒否する。`--historical-review-window` のsoftware-only試験1回で画面ゲートと既存の画像検証を確認した。通常の人手による履歴・採用経路は変更しない。現時点で照会専用画面を起動する正規CLI/IPCはなく、上表の「GUIの対象結果表示」は**未実装のまま**である。将来のIPCは、現行 `gui-status` の読取り専用契約を変更せず別契約とし、明示instance、対象結果、同一session、画面側の履歴ゲート、表示前再検証を満たす必要がある。CLI応答だけを実画面表示・人による内容確認の証拠にしない。

@@ -26,7 +26,7 @@
             <ComboBox x:Name="ImageChoice" Width="100" SelectedIndex="0" IsEnabled="{Binding CanSelect}"><ComboBoxItem Content="合成"/><ComboBoxItem Content="CAM-A"/><ComboBoxItem Content="CAM-B"/></ComboBox>
                 <Button Content="再検証して開く" Click="OnOpen" IsEnabled="{Binding CanOpen}" Padding="14,6" Margin="8,0,0,0" AutomationProperties.AutomationId="HistoricalReviewOpen" />
                 <Button Content="履歴を読直す" Click="OnRefresh" IsEnabled="{Binding CanSelect}" Padding="10,6" Margin="8,0,0,0" />
-                <Button Content="採用を記録" Click="OnAccept" IsEnabled="{Binding CanAccept}" Padding="14,6" Margin="8,0,0,0" AutomationProperties.AutomationId="HistoricalReviewAccept" />
+                <Button x:Name="AcceptButton" Content="採用を記録" Click="OnAccept" IsEnabled="{Binding CanAccept}" Padding="14,6" Margin="8,0,0,0" AutomationProperties.AutomationId="HistoricalReviewAccept" />
             </StackPanel>
             <Button Grid.Column="4" Content="閉じる" Click="OnClose" Padding="14,6" />
         </Grid>
