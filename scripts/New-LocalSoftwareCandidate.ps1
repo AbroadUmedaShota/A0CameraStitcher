@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')]
-    [string]$CandidateName = ('software-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    [string]$CandidateName = ('software-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)),
+    [switch]$PreflightOnly
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,7 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Window
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $nativeBuild = Join-Path $repository "build/local-software-native/$CandidateName"
 $candidate = Join-Path $repository "build/local-software-candidates/$CandidateName"
+$cliContractVersion = 4
 
 function Assert-LocalUnredirected([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
@@ -42,6 +44,14 @@ function Assert-Files([string]$Directory, [string[]]$Expected) {
     foreach ($file in Get-ChildItem -LiteralPath $Directory -File) { Assert-LocalUnredirected $file.FullName }
 }
 
+function Assert-CliContract($Description) {
+    if ($Description.appId -cne 'a0-camera-stitcher-review-cli' -or
+        $Description.version -ne $cliContractVersion -or $Description.data.contractVersion -ne $cliContractVersion -or
+        $Description.status -cne 'ok' -or $Description.data.operations -cnotcontains 'verify-review' -or
+        $Description.data.operations -cnotcontains 'gui-status' -or
+        $Description.data.operations -cnotcontains 'gui-show-review') { throw 'CLI contract mismatch.' }
+}
+
 Assert-LocalUnredirected $repository
 Assert-LocalUnredirected $candidate
 Assert-LocalUnredirected $nativeBuild
@@ -59,6 +69,20 @@ try {
     & git diff --quiet HEAD -- .
     if ($LASTEXITCODE -ne 0) { throw 'Tracked source changes must be committed before building a candidate.' }
     $scriptHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+    # Reject a mismatched source contract before either one-time candidate directory is created.
+    Invoke-Dotnet @('build', 'src/m3/ReviewCli/A0CameraStitcher.M3.ReviewCli.csproj', '-c', 'Release', '--no-restore')
+    $sourceCli = Join-Path $repository 'src/m3/ReviewCli/bin/Release/net10.0/A0CameraStitcher.M3.ReviewCli.exe'
+    if (-not (Test-Path -LiteralPath $sourceCli -PathType Leaf)) { throw 'Source CLI is unavailable.' }
+    $sourceDescriptionText = & $sourceCli describe
+    if ($LASTEXITCODE -ne 0) { throw 'Source CLI describe failed.' }
+    Assert-CliContract (($sourceDescriptionText -join "`n") | ConvertFrom-Json)
+    if ($PreflightOnly) {
+        [pscustomobject]@{ status = 'preflight_ok'; sourceCommit = $sourceCommit; sourceDirty = $false;
+            candidateName = $CandidateName; candidateCreated = $false; nativeBuildCreated = $false;
+            manifestContract = @{ cliContractVersion = $cliContractVersion; sdkIncluded = $false;
+                hardwareAccepted = $false; guiAccepted = $false; redistributionApproved = $false } } | ConvertTo-Json -Depth 5
+        return
+    }
     $null = New-Item -ItemType Directory -Path $candidate # Atomic refusal of an existing leaf, no -Force.
     $app = Join-Path $candidate 'app'
     $cli = Join-Path $app 'review-cli'
@@ -96,8 +120,7 @@ try {
     $descriptionText = & (Join-Path $cli 'A0CameraStitcher.M3.ReviewCli.exe') describe
     if ($LASTEXITCODE -ne 0) { throw 'Packaged CLI describe failed.' }
     $description = ($descriptionText -join "`n") | ConvertFrom-Json
-    if ($description.appId -cne 'a0-camera-stitcher-review-cli' -or $description.version -ne 3 -or
-        $description.status -cne 'ok' -or $description.data.operations -cnotcontains 'verify-review') { throw 'Packaged CLI contract mismatch.' }
+    Assert-CliContract $description
     [IO.File]::WriteAllText((Join-Path $candidate 'cli-describe.json'), ($description | ConvertTo-Json -Depth 12))
     [IO.File]::WriteAllText((Join-Path $candidate 'README.txt'), @'
 A0CameraStitcher - LOCAL SOFTWARE CANDIDATE ONLY
@@ -107,7 +130,7 @@ Requires the host .NET 10 Windows Desktop runtime and native runtime dependencie
 GUI: app/A0CameraStitcher.M3.OperatorShell.exe (GUI acceptance not performed by this recipe)
 CLI: app/review-cli/A0CameraStitcher.M3.ReviewCli.exe describe
 Read-only verification: verify-review --product-root <absolute local product root> --result-id <GUID N> --expected-kind <Product|Simulated>
-CLI gui-status observes an explicitly identified MainWindow instance; it cannot send GUI commands, accept results, operate cameras, or capture images.
+CLI gui-status observes an explicitly identified MainWindow instance. gui-show-review may display one verified Pending image in that same-session GUI; it cannot accept results, operate cameras, or capture images.
 Preserve this directory and its manifest. Build a new candidate rather than overwriting it.
 '@)
     $files = @(Get-ChildItem -LiteralPath $candidate -File -Recurse | Sort-Object FullName | ForEach-Object {
@@ -118,7 +141,7 @@ Preserve this directory and its manifest. Build a new candidate rather than over
     $manifest = @{ schemaVersion = 1; status = 'local-software-candidate'; sourceCommit = $sourceCommit;
         sourceDirty = $sourceStatus.Count -ne 0; recipeSha256 = $scriptHash; createdAtUtc = [DateTimeOffset]::UtcNow.ToString('O');
         hardwareAccepted = $false; guiAccepted = $false; redistributionApproved = $false; sdkIncluded = $false;
-        selfContained = $false; cliContractVersion = 3; files = $files }
+        selfContained = $false; cliContractVersion = $cliContractVersion; files = $files }
     $manifestPath = Join-Path $candidate 'candidate.manifest.json'
     $finalCommit = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $finalCommit -cne $sourceCommit) { throw 'Source commit changed during packaging.' }
