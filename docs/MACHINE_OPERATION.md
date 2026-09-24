@@ -1,6 +1,6 @@
 # 正規機械操作の入口（Windowsローカル）
 
-この手順は `codex/dual-live-worker-poc-20260922` の開発候補に対するもの。main/releaseの状態は示さない。対象は保存済み確認結果の読取り・検証であり、実機操作、GUI制御、採用代行は未対応。GUI自動操作をこの正規経路の代用にしない。
+この手順は `codex/dual-live-worker-poc-20260922` の開発候補に対するもの。main/releaseの状態は示さない。対象は保存済み確認結果の読取り・検証と、v4候補での指定したPending画像の閲覧専用表示である。実機操作・採用代行は未対応。GUI自動操作をこの正規経路の代用にしない。
 
 ## 契約v3の状態照会
 
@@ -90,9 +90,17 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 
 v4のsoftware証拠: CLI/Foundation Release buildとOperatorShell Release buildはいずれも警告0・エラー0。別process CLI→実Windows pipe→fake表示handlerの専用試験2回はPASSし、正常応答、画面not-ready、対象unavailable、不正コマンド・result ID、古いinstanceを確認した。隔離したSimulated保存先を使う実MainWindowの専用系列は4/5回実行（初回compile警告による不実行、直接client PASS、別process CLI PASS、既存status endpointの前後ゲート確認を加えてPASS）。指定CAM-A画像のWPF viewerが可視、履歴ゲートの保持/解放、未採用記録と原画像の不変、改変後の表示拒否を確認した。Productの実結果、操作者/AIの画像内容の目視、別logon session拒否の実測は**未実施**。この開発ソースは固定候補 `software-c415668-01` を変更せず、配布候補にもしていない。CLIの `Displayed` はウィンドウを開けたという報告であり、AI/人が画像内容を見たこと、品質・実機の受入、採用許可ではない。
 
-## 次の業務時間の限定作業（計画・未実行）
+## 2026-09-24の限定作業結果
 
-2026-09-23の業務時間外に、既存ブランチ `codex/dual-live-worker-poc-20260922` のclean HEAD `011fcf498e801a01368253d767b9dc7b14869c80` と上記v4ソフトウェア証拠を照合した。今夜は候補生成・実装・試験・実機操作を行わず、新規の無人実行も設定しない。以下は次の業務時間に再照合して着手する順番であり、候補や合格結果が存在するという記録ではない。
+`scripts/New-LocalSoftwareCandidate.ps1` をv4契約に合わせ、候補ディレクトリ作成前にソースCLIの `describe` を照合できる `-PreflightOnly` を追加した。変更は `dab9c0be3fc2b1e31f8087309cab957d2af8719e` にコミット済み。構文検査・`git diff --check`・事前検証はPASSし、事前検証では候補・native buildの両ディレクトリが未作成であることを確認した。
+
+SDK root空のレシピで新規候補 `build/local-software-candidates/software-dab9c0b-v4-01` を1件だけ作成した。`candidate.manifest.json` SHA-256は `2BC584D763DB74B45F5AA78E0DDDA6E6777263CA4D9C930FAF12C0CC723DFCB5`。source commitは上記、23ファイルのsize/hash照合は全件PASS、`sdkIncluded=false`、`cliContractVersion=4`、同梱CLIの `describe.version=4` と `gui-show-review` を確認した。`hardwareAccepted/guiAccepted/redistributionApproved=false` は維持。候補系列は5/5を消費し、旧候補は変更していない。nativeビルドには既存のコードページ警告C4819が出たが生成は成功した。
+
+GUI表示の限定試験1回は、**同梱CLI→開発ソースのSimulated MainWindow**でPASSした。CAM-Aの検証済み画像viewerの可視、履歴ゲートの保持/復帰、記録・原画像の不変、改変後の表示拒否、撮影/採用/実機操作0を確認した。開発GUIを使う試験ハーネスは同梱GUIではないため、計画した「同梱CLI→同梱GUI」のE2EとGUI受入は**未達**。この差をCLI応答だけで埋めない。新候補生成の残枠は0であり、追加生成や同条件の再試験は行わない。Product実結果、画像内容の人/AI目視、clean PC、実機・品質・配布・mergeも未受入。
+
+## 次の業務時間の限定作業（実施前の計画記録）
+
+以下は2026-09-23に記した当時の計画であり、現在の未実施タスクリストではない。2026-09-24の実施結果と未達範囲は直前の節を正とする。
 
 1. `git remote`・branch・dirty・source SHA、既存候補と進行中担当、run-04隔離条件を再確認する。物理接続状態は推測しない。実機操作を要する場合はこの作業から切り離して停止する。
 2. 候補生成レシピ [`scripts/New-LocalSoftwareCandidate.ps1`](../scripts/New-LocalSoftwareCandidate.ps1) は現時点で `describe.version == 3`、manifestの `cliContractVersion = 3`、READMEの「CLIはGUI commandを送れない」を固定している。v4ソースに対してこのまま実行すると、候補ディレクトリ生成後に契約不一致で停止し、不完全候補を残す。先にレシピの検査・manifest・READMEをv4の `gui-show-review` の閲覧限定契約へ修正し、差分を確認して通常ブランチにコミットする。既存v2/v3候補やmanifestは上書きしない。
