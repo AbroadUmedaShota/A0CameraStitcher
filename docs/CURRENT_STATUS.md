@@ -1,14 +1,15 @@
 # 現在の開発状況
 
-更新日: 2026-10-01（T1 計装の追記。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-01（T1 計装・T2 close待ち整合の追記。以下の 2026-09-23 節は当時の記録）
 
 ## 2026-10-01 引き継ぎ後の現在地
 
 - 引き継ぎ後の最初の作業として、二worker試作の失敗証跡をjournalへ固定語彙で永続化する計装T1をsoftware-onlyで実装した（未commit）。失敗したworker番号・命令・57語の固定分類・応答検証・ACK書込み・worker申告close receipt・両workerのexit観測をjournalに残す。語彙と記録順は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「失敗証跡のjournal永続化 T1」節を参照する。
 - 合格の読み方を明文化した。判定行 `both_workers_close_verified` に加え、index 0と1のexitブロックが揃い両方の `worker_exit_code` が0であること。判定行だけでは部分書込みと区別できない。
-- 制約: worker0が応答前にexitするCase 4のexit codeは再観測で取れる場合に限る。ビルド負荷下の `--exit-recheck` × 20（2026-10-01 19:13）で17回取得、3回は `worker_exit_not_observed_at_recheck`。受入基準は「数値、または両時点で未終了という固定イベント」とし、数値の決定的取得はT2/WU2へ送る（※仮定）。
+- 制約: worker0が応答前にexitするCase 4のexit codeは再観測で取れる場合に限る。ビルド負荷下の `--exit-recheck` × 20（2026-10-01 19:13）で17回取得、3回は `worker_exit_not_observed_at_recheck`。受入基準は「数値、または両時点で未終了という固定イベント」とし、数値の決定的取得はT2/WU2へ送る（※仮定）。（T1当時の記録。T2で解消）
 - 検証: `a0_preview_worker_owner_tests` の新規4系列と既存2系列をctestに登録。実装者実行と独立QA（7系列 `failures=0`、2026-10-01 18:13〜18:14、`build/t1-stub` SDK-stub・Release）、総合レビュー2回目承認・セキュリティ表層承認。全体検証（2026-10-01）: C++ CTestはDebug 45/45、Release 43/45で、失敗2件は本変更と無関係な試作IPC試験の断続的失敗（※要調査）。M3 simulated／WPF flowはoperator shell tests 95/96 PASSで、残り1件はこのPCのシンボリックリンク権限不足（開発者モード無効）による環境差。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT1節。
-- 未検証・未着手: 実SDK・実機での動作（このPCにSDKは到着したがSDK有効ビルド・実機実行は未実施）、相方workerのclose応答のjournal化、`licensed_adapter_unavailable`、journal書込み失敗の注入試験、T2（WU1〜WU3）。
+- T2「停止ブロックとclose待ちの整合」をsoftware-onlyで実装した（未commit）。操作別の予算表を `preview_worker_timing.hpp` の1か所に置き、親のExchange期限を D = W + M で操作ごとに計算する。close送信とexit観測を分け、窓（E_ok 5 s / 0 ms / E_fail 30 s）の後も生存するworkerは `worker_stop_in_progress`（停止処理中）とする。操作期限（既定60 s）と受付寿命（既定170 s）を分け、期限後の命令は親がIPCの前に `owner_operation_deadline_expired` で拒否する。相方workerのclose応答（`worker_close_*`）と `licensed_adapter_unavailable` もjournalに残すようにした（分類60語）。Case 4のexit codeは25/25、Case 4bは15/15で決定的に取得できた。試験は新4系列をctestに登録し、実装者の修正ラウンド後 `--repeat until-fail:3` で18/18×3 PASS（2026-10-01 22:51）、独立QAは修正ラウンド前にRelease・Debugとも失敗0。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT2節。
+- 未検証・残件: 実SDK・実機での動作。SDK有効構成での本ビルド確認（T2分は構文検査 `/Zs` のみ。※追記予定）。親が期限で拒否した後にcloseがcleanになった場合、拒否分類が画面の `FirstFailure()` にしか残らずjournalに失敗ブロックが無い（※要対応・次回）。G・Close同期枠10 s・起動枠9 sは経験則で、実機journalの所要時間で検証が要る。journal書込み失敗の注入試験。
 - 前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは変更していない。
 
 ## 2026-09-23 二台構成の現在地

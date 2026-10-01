@@ -29,6 +29,12 @@ namespace {
 using a0::phase0::experimental::ObservedPreviewBody;
 using a0::phase0::experimental::PreviewWorkerOwner;
 using a0::phase0::experimental::FormatPreviewWorkerFailure;
+namespace preview_timing = a0::phase0::experimental::preview_worker_timing;
+
+// The commissioning deadline for camera commands (screen timer included) is
+// the workers' operation deadline. Close stays possible after it: the workers
+// keep serving close until their longer serving lifetime ends.
+constexpr ULONGLONG kOperationDeadlineMs = static_cast<ULONGLONG>(preview_timing::kDefaultOperationDeadline.count());
 
 constexpr UINT kUiEvent = WM_APP + 41;
 constexpr INT_PTR kStart = 101;
@@ -108,7 +114,7 @@ private:
                             const std::array<a0::phase0::experimental::PreviewWorkerExitObservation, 2>& exits) noexcept {
         if (!journal_) return false;
         return a0::phase0::experimental::RecordCloseOutcomeToJournal(*journal_, closed, failure, exits,
-                                                                     close_details_recorded_);
+                                                                     close_journal_state_);
     }
     void Post(std::unique_ptr<UiEvent> event) {
         auto* raw = event.release();
@@ -146,9 +152,10 @@ private:
                 ? L"停止済み。終了確認を記録しました。プレビュー画像は保存していません。"
                 : L"停止済み。ただし試験記録に失敗したため、実機試験の合格とは扱いません。"}));
         } else {
-            (void)RecordCloseOutcome(false, failure, exits);
+            const bool recorded = RecordCloseOutcome(false, failure, exits);
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Quarantined,
-                L"終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。" +
+                std::wstring(L"終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。") +
+                    (recorded ? L"" : L"試験記録にも失敗しました。") +
                     (failure ? FormatPreviewWorkerFailure(*failure) : L" 失敗段階は未取得です。")}));
         }
         return closed;
@@ -187,7 +194,7 @@ private:
                 }
                 if (owner && item.command != Command::Close &&
                     GetTickCount64() >= deadline_) {
-                    throw std::runtime_error("experimental worker lifetime expired");
+                    throw std::runtime_error("experimental operation deadline expired");
                 }
                 switch (item.command) {
                 case Command::Start: {
@@ -195,7 +202,7 @@ private:
                     start_attempted_ = true;
                     BeginJournal();
                     Status(L"二つの実験用ワーカーを開始し、SDK候補列挙を開始しています。撮影はしません。");
-                    deadline_ = GetTickCount64() + 60000; // conservative, starts before bootstrap.
+                    deadline_ = GetTickCount64() + kOperationDeadlineMs; // conservative, starts before bootstrap.
                     try { owner = new PreviewWorkerOwner(); }
                     catch (const a0::phase0::experimental::PreviewWorkerStartupError& error) {
                         construction_failed_ = error.WorkersMayExist();
@@ -281,7 +288,7 @@ private:
                     for (int pair = 1; pair <= 3; ++pair) {
                         if (stop_requested_) break;
                         if (GetTickCount64() >= deadline_)
-                            throw std::runtime_error("experimental worker lifetime expired");
+                            throw std::runtime_error("experimental operation deadline expired");
                         auto left = owner->Read(ObservedPreviewBody::CameraA);
                         const auto left_received = GetTickCount64();
                         Record("cam_a_frame_bytes", left.size());
@@ -332,7 +339,9 @@ private:
     std::size_t active_worker_{};
     ULONGLONG deadline_{};
     bool start_attempted_{}, construction_failed_{};
-    bool close_details_recorded_{}; // Failure/exit journal blocks are written once per run.
+    // Failure/exit journal blocks are written once per run; later close
+    // attempts add only new repeated-close looks.
+    a0::phase0::experimental::PreviewCloseJournalState close_journal_state_{};
     std::atomic<bool> stop_requested_{};
 };
 
@@ -501,10 +510,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             !IsWindowEnabled(GetDlgItem(window, LOWORD(wparam)))) return 0;
         switch (LOWORD(wparam)) {
         case kStart:
-            app->deadline = GetTickCount64() + 60000;
+            app->deadline = GetTickCount64() + kOperationDeadlineMs;
             SetTimer(window, 1, 1000, nullptr);
             EnableControls(window, false, false, false, false, true);
-            SetStatus(*app, L"開始を要求しました。ワーカー起動とSDK候補列挙を待っています。寿命は最大60秒です。");
+            SetStatus(*app, L"開始を要求しました。ワーカー起動とSDK候補列挙を待っています。操作期限は" +
+                std::to_wstring(kOperationDeadlineMs / 1000) + L"秒です。");
             app->controller->Request(Command::Start);
             return 0;
         case kPreview: {
@@ -607,13 +617,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (app && wparam == 1 && app->deadline) {
             const auto now = GetTickCount64();
             const auto remaining = now < app->deadline ? static_cast<unsigned long long>((app->deadline - now + 999) / 1000) : 0;
-            const auto suffix = L"  ワーカー寿命の残り目安: " + std::to_wstring(remaining) + L"秒（延長・自動再起動なし）";
+            const auto suffix = L"  操作期限の残り目安: " + std::to_wstring(remaining) + L"秒（延長・自動再起動なし）";
             SetText(app->status, app->last_status + suffix);
             if (!remaining) {
                 app->stopping = true;
                 KillTimer(window, 1);
                 EnableControls(window, false, false, false, false, false);
-                SetStatus(*app, L"60秒の実験用ワーカー寿命が終了しました。安全な終了確認を開始します。");
+                SetStatus(*app, std::to_wstring(kOperationDeadlineMs / 1000) +
+                    L"秒の操作期限が終了しました。安全な終了確認を開始します。");
                 app->controller->Request(Command::Close);
             }
             InvalidateRect(window, nullptr, FALSE);

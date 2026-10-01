@@ -137,9 +137,10 @@ Handle SpawnForgedWorker(const fs::path &worker, HANDLE inherited_parent, std::s
                         nullptr, nullptr, &startup, &created))
         throw std::runtime_error("forged worker launch");
     CloseHandle(created.hThread);
-    // The epoch is intentionally malformed. The worker must reject before it
-    // constructs the stub transport, regardless of the valid parent handle.
-    const std::string wire = "{\"pipe\":\"A0.Poc.Forged\",\"epoch\":\"not-an-epoch\",\"capability\":\"x\",\"lifetimeMs\":1000,\"leaseName\":\"" +
+    // The epoch is intentionally malformed; every other field, including both
+    // lifetimes, is well formed. The worker must reject before it constructs
+    // the stub transport, regardless of the valid parent handle.
+    const std::string wire = "{\"pipe\":\"A0.Poc.Forged\",\"epoch\":\"not-an-epoch\",\"capability\":\"x\",\"lifetimeMs\":1000,\"servingMs\":2000,\"leaseName\":\"" +
         JsonEscape(lease_name) + "\",\"testMarkerRoot\":\"" + JsonEscape(Utf8(root)) + "\"}";
     const std::uint32_t size = static_cast<std::uint32_t>(wire.size());
     DWORD written{};

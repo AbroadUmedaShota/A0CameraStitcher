@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 
@@ -21,9 +22,11 @@ inline constexpr std::string_view kPreviewWorkerJournalOperations[] = {
 // journal as its own event. Sources: the owner/IPC layer
 // (preview_worker_owner.cpp, preview_worker_reply.hpp), the worker protocol
 // layer (worker_preview_dispatcher.hpp, worker_preview_selection.hpp), and the
-// SDK transport layer (nikon_sdk_transport.cpp), including the capture-path
-// categories of that file. A category reported by the worker but absent here is
-// journaled as "failure_category_unknown", never verbatim.
+// SDK transport layer (nikon_sdk_transport.cpp): its worker preview path, its
+// gated (SDK-stub) build, and 7 capture-path categories that the preview path
+// cannot reach but that stay here as fixed vocabulary. A category reported by
+// the worker but absent here is journaled as "failure_category_unknown", never
+// verbatim.
 //
 // When a TransportError category is added on any of those worker paths, add it
 // here as well; the "--category-table" mode of a0_preview_worker_owner_tests
@@ -31,6 +34,7 @@ inline constexpr std::string_view kPreviewWorkerJournalOperations[] = {
 inline constexpr std::string_view kPreviewWorkerFailureCategories[] = {
     // Owner / IPC layer (parent side).
     "delegation_disarm_unconfirmed",
+    "owner_operation_deadline_expired",
     "worker_ack_unconfirmed",
     "worker_exit_unconfirmed",
     "worker_ipc_unconfirmed",
@@ -38,6 +42,7 @@ inline constexpr std::string_view kPreviewWorkerFailureCategories[] = {
     "worker_owner_failed",
     "worker_prior_exit",
     "worker_reply_invalid",
+    "worker_stop_in_progress",
     // Worker protocol layer (dispatcher and candidate selection).
     "worker_authority",
     "worker_authority_expired",
@@ -82,7 +87,11 @@ inline constexpr std::string_view kPreviewWorkerFailureCategories[] = {
     "worker_stop_required",
     "worker_topology_changed",
     "worker_topology_failed",
-    // SDK transport layer, capture path (fixed vocabulary; harmless here).
+    // SDK transport layer, gated build: every adapter call of a build without
+    // the licensed SDK throws this.
+    "licensed_adapter_unavailable",
+    // SDK transport layer, capture path: not reachable from the worker preview
+    // path, kept as fixed vocabulary.
     "ambiguous_image_event",
     "baseline_mismatch",
     "download_failed",
@@ -114,12 +123,25 @@ inline constexpr std::string_view kPreviewWorkerFailureCategories[] = {
 void RecordWorkerFailureToJournal(PreviewRunJournal& journal, const PreviewWorkerFailureObservation& failure);
 
 // Writes the OS-observed terminal state of one worker process (see
-// PreviewWorkerExitObservation): how the at-close check was taken, its result,
-// and, when present, the result of the later 0 ms recheck. Events are only
-// appended; a recheck never rewrites the at-close line. worker_index is
-// expected to be 0 or 1. Throws like RecordWorkerFailureToJournal.
+// PreviewWorkerExitObservation): which exit window was applied, the result
+// inside it, worker_exit_window_capped_by_session_limit and
+// worker_exit_looked_after_window_end when those flags are set, the later 0 ms
+// rechecks when present, and then a summary of the close reply the parent
+// received from this worker (worker_close_not_sent when close was never
+// attempted, worker_close_not_delivered when the request was not written in
+// full, otherwise status, ACK, and the five worker-reported receipt fields).
+// Events are only appended; a recheck never rewrites an earlier line.
+// worker_index is expected to be 0 or 1. Throws like
+// RecordWorkerFailureToJournal.
 void RecordWorkerExitObservationToJournal(PreviewRunJournal& journal, std::size_t worker_index,
                                            const PreviewWorkerExitObservation& exit_observation);
+
+// What RecordCloseOutcomeToJournal has already written for one run.
+struct PreviewCloseJournalState {
+    bool details_recorded{};
+    // PreviewWorkerExitObservation::repeated_close_looks already journaled, per worker.
+    std::array<std::uint32_t, 2> repeated_close_looks_recorded{};
+};
 
 // The journal part of the commissioning display's close handling, shared by
 // preview_commissioning_main.cpp and its tests so that the tested order is the
@@ -128,14 +150,17 @@ void RecordWorkerExitObservationToJournal(PreviewRunJournal& journal, std::size_
 //   not closed: close_unconfirmed, then the failure block (or
 //               failure_observation_missing), then the exit block of worker 0 and 1
 // The verdict line is written on every call. The failure and exit blocks are
-// written only while details_recorded is false, and details_recorded is set on
-// the first call, so repeated close attempts never duplicate them.
+// written only on the first call (state.details_recorded), so repeated close
+// attempts never duplicate them. On a later call, a worker whose repeated
+// Close() took a new 0 ms look since the last write gets a short block after
+// the verdict: worker_exit_observation_index, worker_exit_recheck_at_repeated_close,
+// and its result.
 // Never throws: a journal failure must not interfere with the camera close that
 // already happened. Returns true only if every line attempted by this call was
 // written.
 [[nodiscard]] bool RecordCloseOutcomeToJournal(PreviewRunJournal& journal, bool closed,
                                                const std::optional<PreviewWorkerFailureObservation>& failure,
                                                const std::array<PreviewWorkerExitObservation, 2>& exits,
-                                               bool& details_recorded) noexcept;
+                                               PreviewCloseJournalState& state) noexcept;
 
 } // namespace a0::phase0::experimental

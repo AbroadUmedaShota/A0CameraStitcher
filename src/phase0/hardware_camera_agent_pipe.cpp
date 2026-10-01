@@ -7,6 +7,7 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 #include "a0/phase0/agent_host_lifetime.hpp"
+#include "a0/phase0/agent_pipe_timing.hpp"
 #include "a0/phase0/worker_preview_dispatcher.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
 
@@ -43,9 +44,11 @@ namespace a0::phase0 {
 namespace {
 
 constexpr std::uint32_t kMaximumPipeFrameBytes = 1024U * 1024U;
-constexpr DWORD kAcceptTimeoutMs = 15000;
-constexpr DWORD kFrameReadTimeoutMs = 5000;
-constexpr DWORD kResponseWriteTimeoutMs = 1000;
+// Stage timeouts come from agent_pipe_timing.hpp, which the preview worker
+// timing budget reads as well.
+constexpr DWORD kAcceptTimeoutMs = static_cast<DWORD>(agent_pipe_timing::kAcceptTimeout.count());
+constexpr DWORD kFrameReadTimeoutMs = static_cast<DWORD>(agent_pipe_timing::kFrameReadTimeout.count());
+constexpr DWORD kResponseWriteTimeoutMs = static_cast<DWORD>(agent_pipe_timing::kResponseWriteTimeout.count());
 constexpr unsigned char kDeliveryAcknowledgment = 0x06U;
 constexpr int kFailedBeforeDispatchExitCode = 2;
 constexpr int kDispatchedDeliveryFailureExitCode = 3;
@@ -443,23 +446,30 @@ int RunNamedPipeServerLoop(
 
 experimental::WorkerPreviewHostResult experimental::RunWorkerPreviewNamedPipeServer(
     std::string_view pipe_name, NikonSdkTransport& transport, std::string epoch,
-    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime,
-    std::function<bool()> delegation_authority) {
+    std::string capability, void* inherited_parent_process, std::chrono::milliseconds operation_deadline,
+    std::chrono::milliseconds serving_lifetime, std::function<bool()> delegation_authority) {
     const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);
     const auto pid = GetProcessId(parent);
     if (!pid || pid == GetCurrentProcessId() || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT ||
-        lifetime <= std::chrono::milliseconds(0) || lifetime > std::chrono::minutes(10))
-        throw TransportError("worker_authority_missing", "live inherited controller and bounded lifetime required");
-    const auto deadline = std::chrono::steady_clock::now() + lifetime;
+        operation_deadline <= std::chrono::milliseconds(0) || serving_lifetime <= operation_deadline ||
+        serving_lifetime > preview_worker_timing::kPreviewSessionLimit)
+        throw TransportError("worker_authority_missing", "live inherited controller and bounded lifetimes required");
+    // Both lifetimes count from the same origin. The operation deadline only
+    // gates commands; the serving lifetime bounds the host loop and is the
+    // only expiry that makes OnIdle close the session on its own.
+    const auto origin = std::chrono::steady_clock::now();
+    const auto operations_end = origin + operation_deadline;
+    const auto serving_end = origin + serving_lifetime;
     WorkerPreviewDispatcher dispatcher(transport, std::move(epoch), std::move(capability), pid, GetCurrentProcessId(),
-        [parent, deadline, delegation_authority = std::move(delegation_authority)] {
+        [parent, serving_end, delegation_authority = std::move(delegation_authority)] {
             return delegation_authority && delegation_authority() &&
-                WaitForSingleObject(parent, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline;
-        });
+                WaitForSingleObject(parent, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < serving_end;
+        },
+        [operations_end] { return std::chrono::steady_clock::now() < operations_end; });
     int code = kDispatchedDeliveryFailureExitCode;
     try {
         code = RunNamedPipeServerLoop(pipe_name, dispatcher, false,
-            HardwareCameraAgentPipeFailureInjectionForTesting{}, lifetime);
+            HardwareCameraAgentPipeFailureInjectionForTesting{}, serving_lifetime);
     } catch (...) {
         dispatcher.CloseForShutdown();
         return {code, dispatcher.SafeToExit()};

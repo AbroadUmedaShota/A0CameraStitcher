@@ -1,6 +1,7 @@
 #pragma once
 #include "a0/common/protocol_json.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/preview_worker_timing.hpp"
 #include <charconv>
 #include <functional>
 
@@ -9,12 +10,20 @@ namespace a0::phase0 { class NikonSdkTransport; }
 namespace a0::phase0::experimental {
 // No hardware CLI exposes this dispatcher yet. Its host must hold the parent's
 // process handle and the controller must arm/register before granting commands.
+//
+// `authority` is the serving authority (live parent, valid delegation, serving
+// lifetime not over); OnIdle closes the session only when it is lost.
+// `operation_window` is the operation deadline: once it returns false every
+// command except close is rejected with worker_authority_expired. An empty
+// operation_window leaves `authority` as the only check.
 template<class Transport> class WorkerPreviewDispatcher final {
 public:
     WorkerPreviewDispatcher(Transport& transport, std::string epoch, std::string capability,
-                            std::uint32_t parent_pid, std::uint32_t worker_pid, std::function<bool()> authority)
+                            std::uint32_t parent_pid, std::uint32_t worker_pid, std::function<bool()> authority,
+                            std::function<bool()> operation_window = {})
         : transport_(transport), epoch_(std::move(epoch)), capability_(std::move(capability)),
-          parent_pid_(parent_pid), worker_pid_(worker_pid), authority_(std::move(authority)) {
+          parent_pid_(parent_pid), worker_pid_(worker_pid), authority_(std::move(authority)),
+          operation_window_(std::move(operation_window)) {
         if (epoch_.empty() || capability_.empty() || !parent_pid_ || !worker_pid_ || !authority_)
             throw TransportError("worker_authority_missing", "worker context required");
     }
@@ -32,11 +41,11 @@ public:
         if (!sdk_attempted_) { source_closed_ = module_closed_ = claim_released_ = closed_ = true; return; }
         if (started_ && !stop_attempted_) {
             stop_attempted_ = true;
-            try { transport_.StopLiveView(std::chrono::seconds(10)); stopped_ = true; }
+            try { transport_.StopLiveView(preview_worker_timing::kStopLiveViewTimeout); stopped_ = true; }
             catch (...) {}
         }
         try {
-            transport_.Close(std::chrono::seconds(10));
+            transport_.Close(preview_worker_timing::kCloseTimeout);
             const auto state = transport_.InspectDualSessionExitState();
             source_closed_ = !state.source_open;
             module_closed_ = !state.module_retained;
@@ -46,7 +55,7 @@ public:
     }
     std::string Handle(std::string_view wire) {
         namespace json = a0::common::protocol_json;
-        using namespace std::chrono_literals;
+        namespace timing = preview_worker_timing;
         try {
             if (terminal_) Fail("worker_terminal");
             const auto request = json::BasicJsonParser<Failure>(wire).Parse();
@@ -65,28 +74,29 @@ public:
             const auto& operation = string("operation");
             const auto& candidate = string("candidate");
             if (operation != "select" && operation != "resume" && !candidate.empty()) Fail("worker_candidate");
-            // Authenticated close remains legal after the operation deadline.
+            // Authenticated close remains legal after the operation deadline,
+            // for as long as the host still serves (serving lifetime).
             if (operation == "close") {
                 explicit_close_ = true; CloseForShutdown();
                 return Reply(SafeToExit() ? "closed" : "quarantined", Receipt());
             }
-            if (!authority_()) Fail("worker_authority_expired");
+            if (!OperationAllowed()) Fail("worker_authority_expired");
             std::string payload = "null";
             if (operation == "enumerate" && stage_ == Stage::Fresh) {
                 sdk_attempted_ = true;
-                const auto candidates = transport_.BeginWorkerPreviewSelection(10s);
+                const auto candidates = transport_.BeginWorkerPreviewSelection(timing::kSdkOperationTimeout);
                 if (candidates.size() != 2 || candidates[0] == candidates[1]) Fail("worker_inventory");
                 payload = "[\"" + json::JsonEscape(candidates[0]) + "\",\"" + json::JsonEscape(candidates[1]) + "\"]";
                 stage_ = Stage::Enumerated;
             } else if (operation == "select" && stage_ == Stage::Enumerated) {
-                transport_.OpenWorkerPreviewCandidate(candidate, 10s);
+                transport_.OpenWorkerPreviewCandidate(candidate, timing::kSdkOperationTimeout);
                 stage_ = Stage::Selected;
             } else if (operation == "start" && (stage_ == Stage::Selected || stage_ == Stage::Resumed)) {
                 start_attempted_ = true; stopped_ = false; stop_attempted_ = false;
-                transport_.StartSelectedWorkerLiveView(10s);
+                transport_.StartSelectedWorkerLiveView(timing::kSdkOperationTimeout);
                 started_ = true; stage_ = Stage::Live;
             } else if (operation == "frame" && stage_ == Stage::Live) {
-                const auto frame = transport_.ReadLiveViewFrame(3s);
+                const auto frame = transport_.ReadLiveViewFrame(timing::kFrameTimeout);
                 if (frame.empty() || frame.size() > 256U * 1024U) Fail("worker_frame_size");
                 // Hex is bounded to 512 KiB, below the shared pipe's 1 MiB limit.
                 static constexpr char digits[] = "0123456789abcdef";
@@ -96,17 +106,17 @@ public:
                 payload += '"';
             } else if (operation == "suspend" && stage_ == Stage::Live && !handoff_) {
                 stop_attempted_ = true;
-                transport_.StopLiveView(10s); stopped_ = true; started_ = false;
-                if (!authority_()) Fail("worker_authority_expired");
+                transport_.StopLiveView(timing::kStopLiveViewTimeout); stopped_ = true; started_ = false;
+                if (!OperationAllowed()) Fail("worker_authority_expired");
                 handoff_close_unconfirmed_ = true;
-                transport_.SuspendSelectedWorkerPreview(10s);
+                transport_.SuspendSelectedWorkerPreview(timing::kSdkOperationTimeout);
                 handoff_close_unconfirmed_ = false;
                 handoff_ = true; stage_ = Stage::Suspended;
             } else if (operation == "resume" && stage_ == Stage::Suspended) {
-                transport_.ResumeSelectedWorkerPreview(candidate, 10s);
+                transport_.ResumeSelectedWorkerPreview(candidate, timing::kSdkOperationTimeout);
                 stage_ = Stage::Resumed;
             } else Fail("worker_operation_unavailable");
-            if (!authority_()) Fail("worker_authority_expired");
+            if (!OperationAllowed()) Fail("worker_authority_expired");
             return Reply("ok", payload);
         } catch (const TransportError& error) {
             failed_ = true;
@@ -126,6 +136,7 @@ private:
         }
     };
     [[noreturn]] static void Fail(const char* category) { throw TransportError(category, "worker command rejected"); }
+    bool OperationAllowed() const { return authority_() && (!operation_window_ || operation_window_()); }
     static std::string Boolean(bool value) { return value ? "true" : "false"; }
     std::string Receipt() const {
         return "{\"liveViewOff\":" + Boolean(!start_attempted_ || stopped_) +
@@ -141,6 +152,7 @@ private:
     std::string epoch_, capability_;
     std::uint32_t parent_pid_{}, worker_pid_{};
     std::function<bool()> authority_;
+    std::function<bool()> operation_window_;
     std::uint64_t sequence_{};
     Stage stage_{Stage::Fresh};
     bool sdk_attempted_{}, start_attempted_{}, started_{}, stop_attempted_{}, stopped_{}, handoff_{};
@@ -150,8 +162,11 @@ private:
 struct WorkerPreviewHostResult { int ipc_exit_code; bool safe_to_exit; };
 // Internal integration seam only, no public executable entrypoint. Caller must
 // retain/quarantine the worker process if safe_to_exit is false.
+// operation_deadline: commands other than close are rejected after it.
+// serving_lifetime: close is accepted until it; then the host closes itself.
+// Requires 0 < operation_deadline < serving_lifetime <= kPreviewSessionLimit.
 WorkerPreviewHostResult RunWorkerPreviewNamedPipeServer(
     std::string_view pipe_name, NikonSdkTransport& transport, std::string epoch,
-    std::string capability, void* inherited_parent_process, std::chrono::milliseconds lifetime,
-    std::function<bool()> delegation_authority);
+    std::string capability, void* inherited_parent_process, std::chrono::milliseconds operation_deadline,
+    std::chrono::milliseconds serving_lifetime, std::function<bool()> delegation_authority);
 } // namespace a0::phase0::experimental

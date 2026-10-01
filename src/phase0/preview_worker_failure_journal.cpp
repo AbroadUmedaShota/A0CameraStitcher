@@ -23,9 +23,8 @@ std::string_view StatusEvent(const std::optional<PreviewWorkerReplyStatus>& stat
 }
 
 // One process check, as a single result line. `not_exited_event` names the
-// still-running result for the check that produced it, because a 5000 ms wait
-// that ran out and a 0 ms look that found the process running mean different
-// things.
+// still-running result for the check that produced it, because a wait that ran
+// out and a 0 ms look that found the process running mean different things.
 void RecordProcessCheck(PreviewRunJournal& journal, const PreviewWorkerProcessCheck& check,
                         std::string_view not_exited_event) {
     if (check.wait_failed) {
@@ -37,6 +36,51 @@ void RecordProcessCheck(PreviewRunJournal& journal, const PreviewWorkerProcessCh
     } else {
         journal.Record(not_exited_event);
     }
+}
+
+std::string_view CloseStatusEvent(PreviewWorkerReplyStatus status) {
+    switch (status) {
+    case PreviewWorkerReplyStatus::closed: return "worker_close_status_closed";
+    case PreviewWorkerReplyStatus::quarantined: return "worker_close_status_quarantined";
+    case PreviewWorkerReplyStatus::failed: return "worker_close_status_failed";
+    case PreviewWorkerReplyStatus::ok: break; // Rejected for close by ParsePreviewWorkerReply.
+    }
+    return "worker_close_status_unknown";
+}
+
+// The close reply of one worker, right after its exit lines.
+void RecordCloseReply(PreviewRunJournal& journal, const PreviewWorkerCloseReply& reply) {
+    if (!reply.attempted) {
+        journal.Record("worker_close_not_sent");
+        return;
+    }
+    if (!reply.sent) {
+        // Attempted, but the request never left the parent in full.
+        journal.Record("worker_close_not_delivered");
+        return;
+    }
+    if (reply.response_validated && reply.status) {
+        journal.Record(CloseStatusEvent(*reply.status));
+        journal.Record(reply.ack_write_completed ? "worker_close_ack_write_completed"
+                                                 : "worker_close_ack_write_unconfirmed");
+    } else {
+        journal.Record(reply.response_received ? "worker_close_response_invalid" : "worker_close_response_missing");
+    }
+    if (reply.receipt) {
+        const auto& receipt = *reply.receipt;
+        journal.Record("worker_close_receipt_live_view_off", Flag(receipt.live_view_off));
+        journal.Record("worker_close_receipt_source_closed", Flag(receipt.source_closed));
+        journal.Record("worker_close_receipt_module_closed", Flag(receipt.module_closed));
+        journal.Record("worker_close_receipt_process_claim_released", Flag(receipt.process_claim_released));
+        journal.Record("worker_close_receipt_safe_to_exit", Flag(receipt.safe_to_exit));
+    } else {
+        journal.Record("worker_close_receipt_missing");
+    }
+}
+
+void RecordRepeatedCloseLook(PreviewRunJournal& journal, const PreviewWorkerProcessCheck& check) {
+    journal.Record("worker_exit_recheck_at_repeated_close");
+    RecordProcessCheck(journal, check, "worker_exit_not_observed_at_repeated_close");
 }
 
 } // namespace
@@ -101,25 +145,55 @@ void RecordWorkerExitObservationToJournal(PreviewRunJournal& journal, std::size_
         journal.Record("worker_exit_check_instant_at_close_failure");
         RecordProcessCheck(journal, exit_observation.at_close, "worker_exit_not_observed_at_close");
         break;
+    case PreviewWorkerExitCheckKind::waited_after_failure_receipt:
+        journal.Record("worker_exit_check_waited_after_failure_receipt");
+        RecordProcessCheck(journal, exit_observation.at_close, "worker_exit_wait_timed_out");
+        break;
+    case PreviewWorkerExitCheckKind::waited_for_worker_cleanup:
+        journal.Record("worker_exit_check_waited_for_worker_cleanup");
+        RecordProcessCheck(journal, exit_observation.at_close, "worker_exit_wait_timed_out");
+        break;
     }
+    // Where the window ended and when the look started; diagnostic lines only.
+    if (exit_observation.window_capped_by_session_limit) journal.Record("worker_exit_window_capped_by_session_limit");
+    if (exit_observation.looked_after_window_end) journal.Record("worker_exit_looked_after_window_end");
     if (exit_observation.after_both_closes) {
         journal.Record("worker_exit_recheck_after_both_closes");
         RecordProcessCheck(journal, *exit_observation.after_both_closes, "worker_exit_not_observed_at_recheck");
     }
+    if (exit_observation.at_repeated_close) RecordRepeatedCloseLook(journal, *exit_observation.at_repeated_close);
+    if (exit_observation.close_reply) RecordCloseReply(journal, *exit_observation.close_reply);
 }
 
 bool RecordCloseOutcomeToJournal(PreviewRunJournal& journal, bool closed,
                                  const std::optional<PreviewWorkerFailureObservation>& failure,
                                  const std::array<PreviewWorkerExitObservation, 2>& exits,
-                                 bool& details_recorded) noexcept {
+                                 PreviewCloseJournalState& state) noexcept {
     bool complete = true;
     try {
         journal.Record(closed ? "both_workers_close_verified" : "close_unconfirmed");
     } catch (...) {
         complete = false;
     }
-    if (details_recorded) return complete;
-    details_recorded = true;
+    if (state.details_recorded) {
+        // Later calls: only new looks taken by a repeated Close().
+        for (std::size_t worker = 0; worker < exits.size(); ++worker) {
+            const auto& exit = exits[worker];
+            if (!exit.at_repeated_close || exit.repeated_close_looks <= state.repeated_close_looks_recorded[worker])
+                continue;
+            state.repeated_close_looks_recorded[worker] = exit.repeated_close_looks;
+            try {
+                journal.Record("worker_exit_observation_index", static_cast<std::uint64_t>(worker));
+                RecordRepeatedCloseLook(journal, *exit.at_repeated_close);
+            } catch (...) {
+                complete = false;
+            }
+        }
+        return complete;
+    }
+    state.details_recorded = true;
+    for (std::size_t worker = 0; worker < exits.size(); ++worker)
+        state.repeated_close_looks_recorded[worker] = exits[worker].repeated_close_looks;
     if (!closed) {
         try {
             if (failure) RecordWorkerFailureToJournal(journal, *failure);

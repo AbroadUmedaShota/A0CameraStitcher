@@ -2,6 +2,102 @@
 
 ## 結論
 
+### 停止ブロックとclose待ちの整合 T2（software-only、2026-10-01）
+
+T1の次のsoftware-only作業。T1で残した「close時の待ち時間が操作ごとの最悪値と合っていない」「Case 4のexit codeが猶予次第」「相方workerのclose応答がjournalに残らない」をまとめて扱う。方針はarchitect裁定 (b)「SDK呼び出しは途中で止めず、待つ側の期限を予算から計算する」。成功条件は「検証済みclosed receipt」「窓内のexit 0」「`DisarmDualDelegation` 成功」の3つで、時間切れを成功にしない。本物のworkerはkillしない。曖昧なcloseは再送しない（子ごとに1回、`delivery_failed` の子には送らない。送った後の観測は `WaitForSingleObject(0)` / `GetExitCodeProcess` だけ）。作業はWU1（予算表と操作別期限）、WU2（close送信とexit観測の分離）、WU3（操作期限と受付寿命の分離）の3つ。
+
+#### 予算表と期限
+
+正本は `src/phase0/include/a0/phase0/preview_worker_timing.hpp` の1か所。dispatcherにあった10 s / 3 sのリテラルは表の参照に置き換えた（値は不変）。
+
+- G = 1 s: Abort猶予25×10 msの公称250 msに、Pumpとschedulingの分を足して切り上げた値（※経験則）
+- M = 5 s: 応答段3 sに2 sを足した値。応答段3 sは新設 `src/phase0/include/a0/phase0/agent_pipe_timing.hpp` の `kResponseWriteTimeout`（1 s）の3倍として導出する
+
+操作別のworker返信最悪W（秒）と親のExchange期限 D = W + M（秒）:
+
+| 操作 | W | D |
+|---|---|---|
+| enumerate | 22 | 27 |
+| select | 22 | 27 |
+| start | 42 | 47 |
+| frame | 29 | 34 |
+| suspend | 33 | 38 |
+| resume | 22 | 27 |
+| close | 22 | 27 |
+
+親の期限は `min(now + D, 受付寿命の終わり, owner構築 + 180 s)`。初回の交換だけ起動枠 S = 9 s を加える（C1）。表から操作が欠けると `static_assert` でビルドが止まる。
+
+#### close段階の窓と分類
+
+WU2でclose送信（直列・各子最大1回）とexit観測を分けた。exit観測は絶対時刻の窓で、操作の期限には足さない。
+
+| 条件 | 窓 | 観測種別の行 |
+|---|---|---|
+| 検証済みclosed receiptで `safeToExit=true`、ACK書込み済み | E_ok = 5 s | `worker_exit_check_waited_after_close_ack` |
+| 検証済みfailed receiptで `safeToExit=true`、ACK書込み済み | E_ok = 5 s | `worker_exit_check_waited_after_failure_receipt` |
+| `safeToExit=false`（quarantined等） | 0 ms | `worker_exit_check_instant_at_close_failure` |
+| 応答なし・不正・ACK未確認・未送信 | E_fail = 30 s（closeのW 22 + 応答段3 + M 5） | `worker_exit_check_waited_for_worker_cleanup` |
+
+分類は、窓内にexit 0ならclean、窓内にexit≠0または取得不能なら `worker_exit_unconfirmed`、窓の後も生存していれば `worker_stop_in_progress`。`worker_stop_in_progress` の表示文は「停止処理中: SDKの停止中か、人の復旧待ちで保持されているかは親からは区別できない」。
+
+窓は親が待つ上限であってworkerの締切ではない。窓の終了後に0 msで確認してexit 0を見た場合はcleanとして扱い、`worker_exit_window_capped_by_session_limit` / `worker_exit_looked_after_window_end` を記録する（R1）。2回目以降の `Close()` はIPCを0回とし、`worker_exit_recheck_at_repeated_close` を記録する。各exitブロックの後にclose応答の要約（`worker_close_*`）を書く（T1レビュー M-b への対応）。
+
+T1では決定的に取れなかったCase 4（worker0が応答前にexit）はE_failの窓によって25/25、Case 4b（worker1が自分のcloseの最中にexit）は15/15でexit codeを取得できた。
+
+#### journal語彙（T2追加）
+
+exitブロック:
+
+- 観測種別: `worker_exit_check_waited_after_failure_receipt`, `worker_exit_check_waited_for_worker_cleanup`
+- 窓の記録: `worker_exit_window_capped_by_session_limit`, `worker_exit_looked_after_window_end`
+- 再Close時: `worker_exit_recheck_at_repeated_close`, `worker_exit_not_observed_at_repeated_close`
+
+close応答の要約:
+
+- 送信: `worker_close_not_sent`, `worker_close_not_delivered`（送ろうとしたが要求を書けなかった）
+- status: `worker_close_status_closed` / `quarantined` / `failed` / `unknown`
+- ACK: `worker_close_ack_write_completed` / `worker_close_ack_write_unconfirmed`
+- 応答の状態: `worker_close_response_invalid` / `worker_close_response_missing`
+- receipt: `worker_close_receipt_live_view_off` / `source_closed` / `module_closed` / `process_claim_released` / `safe_to_exit`（value 0/1）。無ければ `worker_close_receipt_missing`
+
+失敗分類は57語から60語になった。追加は `worker_stop_in_progress`、`licensed_adapter_unavailable`、`owner_operation_deadline_expired`。
+
+exitブロックの行順: index → 窓の種類 → 結果 → [capped] → [looked_after] → [両close後の再確認と結果] → [再Close時の確認と結果] → close応答の要約。T1の記録順で「worker 1のexitブロックが最後」としていた部分は、各exitブロックの直後にそのworkerのclose要約が続く形に変わった。
+
+#### 設計判断と制約
+
+WU3で操作期限（既定60 s）と受付寿命（既定170 s）を分けた。bootstrapに `servingMs` を追加し（本番は5項目）、`0 < 操作期限 < 受付寿命 ≤ 180 s` をworker側（parse時とpipeサーバ起動時）と親側（Impl ctor、marker arm前）でそれぞれ独立に検査する。操作期限を過ぎたclose以外の命令は `worker_authority_expired`。closeは受付寿命の内側なら受け付ける。OnIdleが自分からcloseするのは、親の消滅・委譲の失効・受付寿命切れのときだけ。親も操作期限を強制し（R3）、期限後の命令はIPCの前に `owner_operation_deadline_expired` で拒否する（sequenceは消費しない。closeは送れる）。
+
+構築時の検査は `操作期限 60 + 最長D(start) 47 + close送信2回 27×2 = 161 ≤ 170 ≤ 180`。exit窓は親だけの待ちなので不等式から外し、実行時に「owner構築 + 180 s」の頭打ちで守る（ぼたん裁定）。この結果、親がcloseを送らなかった場合、workerは受付寿命の170 sまでLive Viewを続け、その後自分でcloseしてexit 3で終わる。実機では本体の発熱・電池に影響する可能性がある（※要確認）。
+
+architectの裁定:
+
+- 判断1（180 sの解釈）: 採用
+- 判断2（`safeToExit=true` のfailed応答にE_okを使う）: 採用
+- 判断3（E_failから要求読取り段を除く）: 採用
+- 判断4（段タイムアウトの写し）: R4で `agent_pipe_timing.hpp` に正本化
+- L-2の表示文に「まだ受付中」を足さない。`worker_stop_in_progress` は両closeが正常に応答したときだけ付き、closeが届かなかった場合は `worker_ipc_unconfirmed` 等が先に記録されるため
+
+制約・残件:
+
+1. 親が期限で拒否した後にcloseがcleanになると、`Close()` はtrueを返す。journalは `operation_failed` → `both_workers_close_verified` となり失敗ブロックが無く、拒否の分類は `FirstFailure()`（画面）にしか残らない（※要対応・次回）
+2. G、Closeの同期枠10 s、S = 9 sは経験則。実機journalの所要時間で検証する（C3）
+3. startがLive View ON後に失敗すると `SafeToExit=false` でquarantinedになる既存挙動はそのまま（C5）
+4. SDK有効ビルドでの本ビルド確認（`Scale()` が恒等、試験用ctorの拒否、`static_assert`）は構文検査 `/Zs` だけ。本ビルドは※追記予定（えーちゃん）
+5. 試作IPC試験 `dual_live_worker_poc_contracts` / `dual_live_session_integration` はReleaseで断続的に失敗する（T1節を参照）
+6. R1の試験は余裕が±312 msしかなく、単独実行を前提とする
+
+#### 試験・検証・未検証
+
+`a0_preview_worker_owner_tests` に `--exchange-deadline` / `--close-windows` / `--serving-lifetime` / `--bootstrap-limits` を追加し、ctestにTIMEOUT 60 / 90 / 60 / 30で登録した。時間は1/5〜1/10に縮めて試験する。縮尺は試験用ctorでだけ有効で、SDKビルドでは `#if` で除外する。
+
+- 実装者: `ctest -I 17,34 --repeat until-fail:5` で18系列×5回、失敗0（2026-10-01 21:33〜21:40）。赤確認で4件を検出した。修正ラウンド後は `--repeat until-fail:3` で18/18×3 PASS（22:51）。修正ラウンド後の1回目のctestで `slowenumerate` が1回失敗した。起動が重く、操作期限が構築時点から数えられていたためと見ている（※推定）。試験側の期限を10 s / 32 sに変更した
+- 独立検証（QA、修正ラウンド前）: Release 1巡と3回反復で失敗0、Debug 1巡で失敗0、journal 67行をregexで照合（2026-10-01 21:52〜22:08）
+- Orchestratorのctest 1巡（修正ラウンド後の最終ツリー、2026-10-01 22:54〜22:55、`build/t1-stub` SDK-stub・Release、他のビルドなし）: `ctest --test-dir build/t1-stub -C Release -I 17,34 -j 1 --output-on-failure` は18/18 PASS（98.96秒。`preview_worker_close_window_contracts` 40.82秒、`preview_worker_exchange_deadline_contracts` 25.07秒、`preview_worker_serving_lifetime_contracts` 17.25秒）、`hardware_process_lease_delegation_contracts` 1/1 PASS
+- レビュー: 総合は条件付き承認、修正後の再レビューは承認（CRITICAL/HIGH 0件。MEDIUM 1件: 親の期限拒否が `FirstFailure` を先に埋めるため、その後にclose段で失敗した回は失敗ブロックと画面が `owner_operation_deadline_expired` を指し、`worker_stop_in_progress` の注記は出ない。判定はfalseでmarkerも残るので安全側。`FirstFailure` は時系列で最初の失敗であり、期限拒否が先に立った回はclose段の分類をexitブロック（`worker_exit_wait_timed_out` とclose応答の要約）で読む。LOW 5件: 0 ms窓でも `window_capped_by_session_limit` が立ち得る／stuckstart試験は `!attempted` に締める／フラグの「立たない側」の固定／起動枠Sが縮尺される試験側の余裕／`kAcceptTimeout`・`kFrameReadTimeout` の値固定試験。いずれも次回）。セキュリティ表層は承認（LOW: `ParseMilliseconds` の上限は `LifetimesAccepted` 側で保証する旨をコメントに追記済み）。設計判断はarchitect裁定
+
+実SDK・実機での動作は※未検証。前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは本作業で変更していない。
+
 ### 失敗証跡のjournal永続化 T1（software-only、2026-10-01）
 
 引き継ぎ後の最初のsoftware-only作業。run-04のjournalには `operation_failed` / `close_unconfirmed` / `worker_response_*` / `worker_ack_write_completed` の固定イベントしか残らず、失敗したworker番号・命令・分類・close receipt・workerのexit codeは画面表示（`FormatPreviewWorkerFailure`）にしか渡っていなかった。T1はこれらをjournalに固定語彙で残す。coreに `preview_worker_failure_journal.{hpp,cpp}` を追加し、分類はヘッダで公開する57語の定数表 `kPreviewWorkerFailureCategories` と `IsKnownFailureCategory` の完全一致だけを書く。表にない非空の分類は `failure_category_unknown`、空は `failure_category_missing` に置き換える。close結果の記録 `RecordCloseOutcomeToJournal` は `CloseOnce`（`preview_commissioning_main.cpp`）と試験が共用する。
@@ -48,11 +144,11 @@ exitブロック（workerごとに1回。OSの `WaitForSingleObject` と `GetExi
 
 #### 制約・試験・未検証
 
-Case 4（worker0が応答前にexit）のexit codeは、相方worker1のclose往復と終了待ちが猶予になる場合に再観測で取れる。無負荷では3/3回取得した。全体検証のビルド負荷下では20回ループ中17回取得、3回は再観測でも未終了（`worker_exit_not_observed_at_recheck`）だった（2026-10-01 19:13、`a0_preview_worker_owner_tests.exe --exit-recheck` × 20）。worker1が自分のcloseの最中に落ちるCase 4bは猶予がほぼなく、未観測のまま終わり得る。このため受入基準は「exit codeの数値、またはclose時点と再観測時点の両方で未終了という固定イベント」とし、数値の決定的取得はT2/WU2で待ち時間の窓を設計してから行う（※仮定）。
+Case 4（worker0が応答前にexit）のexit codeは、相方worker1のclose往復と終了待ちが猶予になる場合に再観測で取れる。無負荷では3/3回取得した。全体検証のビルド負荷下では20回ループ中17回取得、3回は再観測でも未終了（`worker_exit_not_observed_at_recheck`）だった（2026-10-01 19:13、`a0_preview_worker_owner_tests.exe --exit-recheck` × 20）。worker1が自分のcloseの最中に落ちるCase 4bは猶予がほぼなく、未観測のまま終わり得る。このため受入基準は「exit codeの数値、またはclose時点と再観測時点の両方で未終了という固定イベント」とし、数値の決定的取得はT2/WU2で待ち時間の窓を設計してから行う（※仮定）。※T2で解消: E_failの窓（30 s）によりCase 4は25/25、Case 4bは15/15でexit codeを決定的に取得できた。窓と分類は上の「停止ブロックとclose待ちの整合 T2」節を参照する。
 
 `a0_preview_worker_owner_tests` に `--journal-contract`（select/start/frameの個別失敗、応答前exit、正常close、writer存続中の別ハンドル読取り、nonce/PID/シリアル形式0件）、`--category-table`（57語の表と試験側の独立集合の一致、重複なし、ValidEvent適合）、`--journal-vocabulary`、`--exit-recheck` を追加し、既存 `--reply-contract` / `--ack-failure-contract` とともにctestへTIMEOUT付きで登録した。`--category-table` は表から `live_view_frame_failed` を1語抜くと失敗することを確認済み。実装者の実行は `--journal-contract` が改善中を含め累計5回（最終 `failures=0`）、`--category-table` 3回（うち1回は赤確認）、`--exit-recheck` 1回、既存系列各1回で、いずれも2026-10-01、`build/t1-stub`（SDK-stub・Release・VS2019）。独立検証（QA）は7系列 `failures=0`（2026-10-01 18:13〜18:14）で、独立プローブによりjournalの秘匿性も確認した。総合レビューは1回目差し戻し（allow-list漏れ、Case 4の数値未保証）、修正後の2回目で承認。セキュリティ表層レビューは承認で、`IsKnownOperation` が呼び出し元のリテラル前提に乗る旨をコードに記載した。
 
-実SDK・実機での動作は※未検証（このPCにSDKは到着したが、SDK有効ビルドと実機実行は未実施）。相方workerのclose応答（status/receipt）はjournalに残らない（T2へ）。gated build専用分類 `licensed_adapter_unavailable` は表にない（T2へ）。journal書込み失敗の注入試験はない。T2（WU1: 予算表と操作別期限、WU2: close送信とexit観測の分離・「停止処理中」分類、WU3: 操作期限と受付寿命の分離）は未着手。前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは本作業で変更していない。
+実SDK・実機での動作は※未検証（このPCにSDKは到着したが、SDK有効ビルドと実機実行は未実施）。相方workerのclose応答（status/receipt）はjournalに残らない（T2へ。※T2で対応済み: 各exitブロックの後に `worker_close_*` の要約を記録）。gated build専用分類 `licensed_adapter_unavailable` は表にない（T2へ。※T2で対応済み: 分類表に追加し60語）。journal書込み失敗の注入試験はない。T2（WU1: 予算表と操作別期限、WU2: close送信とexit観測の分離・「停止処理中」分類、WU3: 操作期限と受付寿命の分離）は未着手。※T2で対応済み（上のT2節、未commit）。前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは本作業で変更していない。
 
 全体検証の証跡（2026-10-01、AOPC-20-NOTE、VS2019 BuildTools・cmake 3.31.12・SDK-stub構成 `build/handoff-verify`）: `ctest --test-dir build/handoff-verify -C Debug -j 1 --output-on-failure` は45/45 PASS（405秒、20:19〜20:26）。同 `-C Release` は43/45（371秒、20:13〜20:19）で、失敗2件は本変更と無関係な試作IPC試験 `dual_live_worker_poc_contracts`（`FAIL: helper reports actual worker identities`）と `dual_live_session_integration`（Timeout 15秒）。この2件は負荷なしの単独再実行3回で1回失敗・2回PASSであり、このPCでは断続的に失敗する（※要調査。常駐ウイルス対策によるプロセス起動遅延を疑うが未確認）。T1で登録した6系列は負荷なしの単独実行（`-R` で10件、19:43〜19:44）でDebug/Releaseとも全件PASS。全体実行の初回（18:54〜19:29）はDebug 44/45・Release 42/45で、差分は (a) `hardware_process_lease_delegation_contracts` の既存試験バグ（marker v2化以降、読取り専用化の後に `RegisterDualWorkers` を呼ぶため access denied で abort する。別コミットで順序を直し、Debug/Release・`--diagnostic` とも PASS）、(b) 緩和前のCase 4、(c) 同時ビルド負荷によるIPC期限切れ、で説明できる。M3 simulated（`scripts/Test-M3Simulated.ps1` Debug/Release）と `scripts/Test-DualCameraWpfFlow.ps1` は不合格。operator shell tests は95/96 PASSで、残る1件 `HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync` はfixtureのシンボリックリンク作成に `SeCreateSymbolicLinkPrivilege` を要し、このPC（開発者モード無効・非管理者）では `IOException: クライアントは要求された特権を保有していません` で止まる。製品コードの不具合ではなく環境差で、開発者モードの有効化か、試験をジャンクションへ代替する対応が要る（※要対応）。
 
