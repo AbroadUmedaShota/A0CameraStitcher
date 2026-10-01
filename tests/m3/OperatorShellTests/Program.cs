@@ -204,6 +204,21 @@ if (args is ["--formal-wpf-flow"])
     return diagnosticFailures == 0 ? 0 : 1;
 }
 
+if (args is ["--dual-simulated-e2e"])
+{
+    try
+    {
+        await DualSimulatedEndToEndSummaryAsync();
+        Console.WriteLine("PASS dual simulated end-to-end capture-review-accept-next flow publishes a structured summary and covers CAM-A/CAM-B WPF failure injection");
+        return 0;
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL dual simulated end-to-end capture-review-accept-next flow publishes a structured summary and covers CAM-A/CAM-B WPF failure injection: {exception}");
+        return 1;
+    }
+}
+
 if (args is ["--hundred-run-core"])
 {
     try
@@ -402,6 +417,17 @@ catch (Exception exception)
 {
     failures.Add("formal WPF maps active and failed explicit export progress");
     Console.Error.WriteLine($"FAIL formal WPF maps active and failed explicit export progress: {exception}");
+}
+
+try
+{
+    await DualSimulatedEndToEndSummaryAsync();
+    Console.WriteLine("PASS dual simulated end-to-end capture-review-accept-next flow publishes a structured summary and covers CAM-A/CAM-B WPF failure injection");
+}
+catch (Exception exception)
+{
+    failures.Add("dual simulated end-to-end capture-review-accept-next flow publishes a structured summary and covers CAM-A/CAM-B WPF failure injection");
+    Console.Error.WriteLine($"FAIL dual simulated end-to-end capture-review-accept-next flow publishes a structured summary and covers CAM-A/CAM-B WPF failure injection: {exception}");
 }
 
 try
@@ -1296,7 +1322,7 @@ catch (Exception exception)
     failures.Add("persistent EOF diagnostic and primary preservation contracts");
     Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
 }
-Console.WriteLine($"Operator shell tests: {96 - failures.Count}/96 passed.");
+Console.WriteLine($"Operator shell tests: {97 - failures.Count}/97 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -5480,6 +5506,164 @@ static async Task FormalDualCameraExportFailureProgressAsync()
     {
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
+}
+
+// T3 (PM ココ Should): 二台 Simulated 撮影→保存→合成→確認→採用→次原稿 を 1 本で通し、
+// 構造化 summary を出す。既存の ReviewUxPersistsAcceptanceAndRejectsChangedFilesAsync
+// (Capture→Review→Accept→PrepareNewCapture) と FormalDualCameraWpfFlowAsync の
+// 失敗診断シナリオを繋ぎ合わせ、CAM-B だけでなく CAM-A の WPF 層失敗注入も自己完結で検査する。
+static async Task DualSimulatedEndToEndSummaryAsync()
+{
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "A0CameraStitcher-M3-DualSimulatedE2ETests",
+        Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var reviews = new FileOperatorReviewStore(Path.Combine(root, "operator-review"));
+        var productFlow = DualCameraProductComposition.Create(Path.Combine(root, "products"));
+        var viewModel = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "journals")),
+            productFlow,
+            operatorReviewStore: reviews);
+        await viewModel.InitializeAsync(CancellationToken.None);
+        viewModel.AcceptSafetyCommand.Execute(null);
+        Check.True(viewModel.CanCapture, "The simulated dual flow must reach the explicit capture gate before the end-to-end run starts.");
+
+        // ---- 正常系: 撮影→保存→合成→確認→採用、構造化summaryを出す ----
+        await ExecuteNativeCommandAsync(viewModel.CaptureCommand);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.UiState == OperatorUiState.Review,
+            "The simulated end-to-end capture, persist, and stitch stages did not finish.");
+
+        var pendingState = productFlow.Current;
+        Check.True(pendingState?.Capture is not null, "A completed simulated transaction must publish its capture result.");
+        Check.Equal(2, pendingState!.Capture!.Originals.Count);
+        Check.True(
+            pendingState.Capture.Originals.All(original => original.Sha256.Length == 64),
+            "Both canonical originals must carry a SHA-256 digest before they can be summarized.");
+        Check.True(
+            pendingState.Stitch is not null && File.Exists(pendingState.Stitch.OutputPath),
+            "The simulated composition must exist on disk before the summary can reference it.");
+        var pendingTransactionId = viewModel.LastTransactionId;
+        var pendingRecord = (await reviews.LoadAsync()).Single(record => record.TransactionId == pendingTransactionId);
+        Check.Equal("Pending", pendingRecord.State);
+        Check.Equal("Simulated", pendingRecord.ReviewKind);
+
+        await ExecuteNativeCommandAsync(viewModel.AcceptReviewCommand);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.UiState is OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection,
+            "Explicit acceptance did not return the simulated flow to preparation for the next capture.");
+        var acceptedRecord = (await reviews.LoadAsync()).Single(record => record.TransactionId == pendingTransactionId);
+        Check.Equal("Accepted", acceptedRecord.State);
+        Check.True(viewModel.CanCapture, "Acceptance must leave the shell ready for the next manuscript capture.");
+
+        var summaryJson = BuildDualSimulatedSummary(
+            productFlow.ExecutionEnvironment,
+            pendingState.Capture.Originals,
+            pendingState.Stitch!.OutputPath,
+            fromState: pendingRecord.State,
+            toState: acceptedRecord.State);
+        var summaryPath = Path.Combine(root, "dual-simulated-e2e-summary.json");
+        await File.WriteAllTextAsync(summaryPath, summaryJson);
+        Console.WriteLine(summaryJson);
+
+        var summaryNode = JsonNode.Parse(summaryJson)!.AsObject();
+        Check.True((bool)summaryNode["simulated"]!, "The summary must explicitly mark this run as simulated, not a hardware acceptance.");
+        Check.Equal("TestSynthetic", (string)summaryNode["executionEnvironment"]!);
+        Check.Equal("Pending", (string)summaryNode["resultState"]!["from"]!);
+        Check.Equal("Accepted", (string)summaryNode["resultState"]!["to"]!);
+        var originalsNode = summaryNode["originals"]!.AsArray();
+        Check.Equal(2, originalsNode.Count);
+        Check.True(
+            originalsNode.Select(node => (string)node!["alias"]!).OrderBy(alias => alias, StringComparer.Ordinal)
+                .SequenceEqual(["CAM-A", "CAM-B"]),
+            "The summary must identify both canonical originals by camera alias.");
+        foreach (var node in originalsNode)
+        {
+            var sha256 = (string)node!["sha256"]!;
+            Check.True(sha256.Length == 64 && sha256.All(Uri.IsHexDigit), "Each summarized original must carry a well-formed SHA-256 digest.");
+        }
+        var stitchFileName = (string)summaryNode["stitchOutputFileName"]!;
+        Check.Equal("stitched.jpg", stitchFileName);
+        Check.False(Path.IsPathRooted(stitchFileName), "The summary must publish a file name, not an absolute path.");
+        Check.False(summaryNode.ContainsKey("cameraIdentity"), "The summary must not expose camera identity or serial information.");
+
+        // ---- CAM-A撮影失敗 (WPF層の未カバー分): 合成不開始・自動再試行0 ----
+        // CAM-A→CAM-Bは厳密に順次撮影されるため（ProgressSteps: capture-a→persist-a→capture-b→…）、
+        // CAM-Aが失敗した時点でCAM-Bはまだ着手されていない。よって「もう片方を保持する」側ではなく、
+        // 両原画像とも存在しないのが正しい契約（Foundation層CaptureFailuresAsyncのCAM-Aケースと同じ:
+        // Originals.Count==0）。片側失敗注入の対称形はCAM-B側（直後のケース）で検査する。
+        var startCountBeforeCamAFailure = viewModel.TransactionStartCount;
+        viewModel.SelectedDiagnosticScenario = "CAM-A撮影失敗";
+        await ExecuteNativeCommandAsync(viewModel.DiagnosticCommand);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.TransactionStartCount == startCountBeforeCamAFailure + 1,
+            "The simulated CAM-A capture failure diagnostic did not finish.");
+        Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+        Check.Equal("なし", viewModel.RetainedOriginals);
+        var camAFailureState = productFlow.Current;
+        Check.Equal(DualCameraFailureCode.CaptureCameraA, camAFailureState!.FailureCode);
+        Check.Equal(0, camAFailureState.Capture?.Originals.Count ?? 0);
+        Check.True(camAFailureState.Stitch is null, "A CAM-A capture failure must not start composition.");
+        Check.Equal(0, camAFailureState.AutomaticRetryCount);
+        Check.True(viewModel.TechnicalDetail.Contains("automatic retry count: 0", StringComparison.Ordinal), "The CAM-A failure diagnostic must show zero automatic retries.");
+
+        await ExecuteNativeCommandAsync(viewModel.PrepareNewCaptureCommand);
+        await WaitUntilAsync(() => viewModel.CanCapture, "Preparing a new capture after the CAM-A failure did not finish.");
+
+        // ---- CAM-B撮影失敗 (対称ケース。同一 selector 内で自己完結): 原画像保持・合成不開始・自動再試行0 ----
+        var startCountBeforeCamBFailure = viewModel.TransactionStartCount;
+        viewModel.SelectedDiagnosticScenario = "CAM-B撮影失敗";
+        await ExecuteNativeCommandAsync(viewModel.DiagnosticCommand);
+        await WaitUntilAsync(
+            () => !viewModel.IsBusy && viewModel.TransactionStartCount == startCountBeforeCamBFailure + 1,
+            "The simulated CAM-B capture failure diagnostic did not finish.");
+        Check.Equal(OperatorUiState.FailedPartial, viewModel.UiState);
+        Check.True(viewModel.RetainedOriginals.Contains("CAM-A: original.jpg", StringComparison.Ordinal), "A CAM-B capture failure must retain the already-captured CAM-A original.");
+        Check.False(viewModel.RetainedOriginals.Contains("CAM-B: original.jpg", StringComparison.Ordinal), "A CAM-B capture failure must not invent a CAM-B original.");
+        var camBFailureState = productFlow.Current;
+        Check.Equal(DualCameraFailureCode.CaptureCameraB, camBFailureState!.FailureCode);
+        Check.True(camBFailureState.Stitch is null, "A CAM-B capture failure must not start composition.");
+        Check.Equal(0, camBFailureState.AutomaticRetryCount);
+        Check.True(viewModel.TechnicalDetail.Contains("automatic retry count: 0", StringComparison.Ordinal), "The CAM-B failure diagnostic must show zero automatic retries.");
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+// Simulated であることと結果状態の遷移を明示した、個体情報・絶対パスを含まない構造化summary。
+static string BuildDualSimulatedSummary(
+    DualCameraExecutionEnvironment environment,
+    IReadOnlyList<CanonicalJpegOriginal> originals,
+    string stitchOutputPath,
+    string fromState,
+    string toState)
+{
+    var summary = new JsonObject
+    {
+        ["schema"] = "a0.dual-simulated-e2e-summary.v1",
+        ["simulated"] = environment == DualCameraExecutionEnvironment.TestSynthetic,
+        ["executionEnvironment"] = environment.ToString(),
+        ["originals"] = new JsonArray(originals
+            .OrderBy(original => original.Alias, StringComparer.Ordinal)
+            .Select(original => (JsonNode)new JsonObject
+            {
+                ["alias"] = original.Alias,
+                ["sha256"] = original.Sha256,
+            })
+            .ToArray()),
+        ["stitchOutputFileName"] = Path.GetFileName(stitchOutputPath),
+        ["resultState"] = new JsonObject
+        {
+            ["from"] = fromState,
+            ["to"] = toState,
+        },
+    };
+    return summary.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
 }
 
 static async Task SingleCameraRestartPreservesPlanAsync()
