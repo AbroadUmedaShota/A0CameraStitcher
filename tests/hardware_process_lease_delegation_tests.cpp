@@ -149,7 +149,18 @@ int RunDiagnosticTests() {
     return failures ? 1 : 0;
 }
 } // namespace
+int RunMain(int argc, char **argv);
+// Surface uncaught non-TransportError exceptions as a readable failure instead of
+// an abort() with no output, so a CTest failure records the reason.
 int main(int argc, char **argv) {
+    try {
+        return RunMain(argc, argv);
+    } catch (const std::exception &e) {
+        std::cerr << "uncaught exception: " << e.what() << '\n';
+        return 99;
+    }
+}
+int RunMain(int argc, char **argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--clean-exit") return 0;
     if (argc == 2 && std::string_view(argv[1]) == "--diagnostic") return RunDiagnosticTests();
     const auto root = argc == 4 ? std::filesystem::path(argv[3]) : Root();
@@ -277,8 +288,10 @@ int main(int argc, char **argv) {
     {
         HardwareProcessLease lease(name, std::chrono::milliseconds(0), root);
         lease.ArmDualDelegation();
-        if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_READONLY)) return 4;
+        // Register before making the marker read-only: the v2 marker rewrite in
+        // RegisterDualWorkers needs write access. This case targets the delete step.
         lease.RegisterDualWorkers(clean[0], clean[1]);
+        if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_READONLY)) return 4;
         Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure rejects");
         if (!SetFileAttributesW(marker.c_str(), FILE_ATTRIBUTE_NORMAL)) return 4;
         Check(Rejects([&] { lease.DisarmDualDelegation(complete); }), "delete failure cannot be retried");
