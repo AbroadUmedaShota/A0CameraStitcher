@@ -48,6 +48,7 @@ struct Child {
     std::uint64_t sequence{};
     bool delivery_failed{};
     std::optional<PreviewWorkerFailureObservation> last_exchange;
+    PreviewWorkerExitObservation exit_observation;
 };
 void Spawn(Child& child, const std::filesystem::path& executable) {
     Handle parent, reader;
@@ -213,12 +214,52 @@ json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::stri
         throw;
     }
 }
+PreviewWorkerProcessCheck CheckProcess(HANDLE process, DWORD timeout_ms) noexcept {
+    PreviewWorkerProcessCheck check;
+    const auto wait = WaitForSingleObject(process, timeout_ms);
+    if (wait == WAIT_OBJECT_0) {
+        check.exited = true;
+        DWORD code{};
+        if (GetExitCodeProcess(process, &code)) {
+            check.code_available = true;
+            check.exit_code = static_cast<std::uint32_t>(code);
+        }
+    } else if (wait != WAIT_TIMEOUT) {
+        check.wait_failed = true;
+    }
+    return check;
+}
 bool CloseChild(Child& child, std::size_t worker_index, const std::string& epoch,
                 std::optional<PreviewWorkerFailureObservation>& first_failure) {
-    Exchange(child, worker_index, epoch, "close", first_failure);
-    DWORD code{};
-    const bool clean = WaitForSingleObject(child.process.value, 5000) == WAIT_OBJECT_0 &&
-        GetExitCodeProcess(child.process.value, &code) && code == 0;
+    // The OS exit observation below must be captured whether or not the close
+    // exchange itself threw (e.g. the child already exited, or a prior command
+    // left this child terminal): otherwise an early-exited worker's exit code
+    // is lost exactly when a diagnostic needs it most. first_failure semantics
+    // are unchanged: Exchange() already records the real cause via
+    // remember_failure() before any exception reaches here.
+    //
+    // The wait itself must not grow on the failure path. The existing 5000 ms
+    // wait below belongs only to the already-working success path (the close
+    // exchange was answered and ACKed; the process is expected to exit almost
+    // immediately after). On the failure path a worker may still be mid
+    // teardown -- that can legitimately take far longer than 5s -- so this is
+    // a single 0 ms observation taken at the moment the close was attempted,
+    // not a wait for the worker to finish. Impl::Close() may take one more 0 ms
+    // look after both children's close steps (see RecheckAfterBothCloses);
+    // redesigning how long/whether to wait for a still-alive worker is a
+    // separate change.
+    bool exchange_threw = false;
+    try {
+        Exchange(child, worker_index, epoch, "close", first_failure);
+    } catch (...) {
+        exchange_threw = true;
+    }
+    PreviewWorkerExitObservation observation;
+    observation.kind = exchange_threw ? PreviewWorkerExitCheckKind::instant_at_close_failure
+                                      : PreviewWorkerExitCheckKind::waited_after_close_ack;
+    observation.at_close = CheckProcess(child.process.value, exchange_threw ? 0 : 5000);
+    child.exit_observation = observation;
+    const bool clean = !exchange_threw && observation.at_close.code_available && observation.at_close.exit_code == 0;
     if (!clean && !first_failure) {
         PreviewWorkerFailureObservation failure = child.last_exchange.value_or(PreviewWorkerFailureObservation{});
         failure.worker_index = worker_index;
@@ -227,6 +268,18 @@ bool CloseChild(Child& child, std::size_t worker_index, const std::string& epoch
         first_failure = std::move(failure);
     }
     return clean;
+}
+// Diagnostic only: never changes the close verdict, first_failure, or the
+// quarantine decision, and adds no wait. A child whose close exchange failed
+// was looked at only once, with 0 ms, at the moment of its close attempt; a
+// worker that was already tearing down then (for example one that exited before
+// replying) is usually finished by the time the other child's close exchange
+// and success-path wait are done, so a second 0 ms look here can record its exit
+// code. The at-close observation is kept as is; this only adds a later one.
+void RecheckAfterBothCloses(Child& child) noexcept {
+    auto& observation = child.exit_observation;
+    if (observation.kind != PreviewWorkerExitCheckKind::instant_at_close_failure || observation.at_close.exited) return;
+    observation.after_both_closes = CheckProcess(child.process.value, 0);
 }
 }
 
@@ -297,6 +350,7 @@ struct PreviewWorkerOwner::Impl {
             try { both = CloseChild(children[worker], worker, epoch, first_failure) && both; }
             catch (...) { both = false; }
         }
+        for (auto& child : children) RecheckAfterBothCloses(child);
         if (!both) return false;
         try {
             lease->DisarmDualDelegation({{true,true,true,children[0].process.value},
@@ -341,6 +395,9 @@ std::wstring FormatPreviewWorkerFailure(const PreviewWorkerFailureObservation& f
 }
 std::optional<PreviewWorkerFailureObservation> PreviewWorkerOwner::FirstFailure() const {
     return impl_->first_failure;
+}
+std::array<PreviewWorkerExitObservation, 2> PreviewWorkerOwner::ExitObservations() const noexcept {
+    return {impl_->children[0].exit_observation, impl_->children[1].exit_observation};
 }
 std::array<std::uint32_t, 2> PreviewWorkerOwner::ProcessIds() const noexcept {
     return {GetProcessId(impl_->children[0].process.value), GetProcessId(impl_->children[1].process.value)};

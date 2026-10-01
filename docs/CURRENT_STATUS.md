@@ -1,6 +1,15 @@
 # 現在の開発状況
 
-更新日: 2026-09-23（run-04隔離とsoftware-only診断の追記。以下の2026-09-21節は当時の候補記録）
+更新日: 2026-10-01（T1 計装の追記。以下の 2026-09-23 節は当時の記録）
+
+## 2026-10-01 引き継ぎ後の現在地
+
+- 引き継ぎ後の最初の作業として、二worker試作の失敗証跡をjournalへ固定語彙で永続化する計装T1をsoftware-onlyで実装した（未commit）。失敗したworker番号・命令・57語の固定分類・応答検証・ACK書込み・worker申告close receipt・両workerのexit観測をjournalに残す。語彙と記録順は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「失敗証跡のjournal永続化 T1」節を参照する。
+- 合格の読み方を明文化した。判定行 `both_workers_close_verified` に加え、index 0と1のexitブロックが揃い両方の `worker_exit_code` が0であること。判定行だけでは部分書込みと区別できない。
+- 制約: worker0が応答前にexitするCase 4のexit codeは再観測で取れる場合に限る。ビルド負荷下の `--exit-recheck` × 20（2026-10-01 19:13）で17回取得、3回は `worker_exit_not_observed_at_recheck`。受入基準は「数値、または両時点で未終了という固定イベント」とし、数値の決定的取得はT2/WU2へ送る（※仮定）。
+- 検証: `a0_preview_worker_owner_tests` の新規4系列と既存2系列をctestに登録。実装者実行と独立QA（7系列 `failures=0`、2026-10-01 18:13〜18:14、`build/t1-stub` SDK-stub・Release）、総合レビュー2回目承認・セキュリティ表層承認。全体検証（2026-10-01）: C++ CTestはDebug 45/45、Release 43/45で、失敗2件は本変更と無関係な試作IPC試験の断続的失敗（※要調査）。M3 simulated／WPF flowはoperator shell tests 95/96 PASSで、残り1件はこのPCのシンボリックリンク権限不足（開発者モード無効）による環境差。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT1節。
+- 未検証・未着手: 実SDK・実機での動作（このPCにSDKは到着したがSDK有効ビルド・実機実行は未実施）、相方workerのclose応答のjournal化、`licensed_adapter_unavailable`、journal書込み失敗の注入試験、T2（WU1〜WU3）。
+- 前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは変更していない。
 
 ## 2026-09-23 二台構成の現在地
 

@@ -3,6 +3,7 @@
 // capture, WPD, settings, card, or image-saving controls.
 #include "a0/phase0/preview_worker_owner.hpp"
 #include "a0/phase0/preview_run_journal.hpp"
+#include "a0/phase0/preview_worker_failure_journal.hpp"
 #include <Windows.h>
 #include <shellapi.h>
 #include <wincodec.h>
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -95,6 +97,19 @@ private:
         if (!journal_) return false;
         try { journal_->Record(event); return true; } catch (...) { return false; }
     }
+    // Persist the verdict plus the bounded failure/exit detail that otherwise
+    // only reaches FormatPreviewWorkerFailure's on-screen string. If this
+    // process (or the whole display) goes away right after a quarantine, these
+    // lines let a separate reader reconstruct which worker/command/category/
+    // receipt and which OS exit codes were involved, without any SDK free text.
+    // The detail blocks are written once per run even if close is retried.
+    bool RecordCloseOutcome(bool closed,
+                            const std::optional<a0::phase0::experimental::PreviewWorkerFailureObservation>& failure,
+                            const std::array<a0::phase0::experimental::PreviewWorkerExitObservation, 2>& exits) noexcept {
+        if (!journal_) return false;
+        return a0::phase0::experimental::RecordCloseOutcomeToJournal(*journal_, closed, failure, exits,
+                                                                     close_details_recorded_);
+    }
     void Post(std::unique_ptr<UiEvent> event) {
         auto* raw = event.release();
         if (!PostMessageW(window_, kUiEvent, 0, reinterpret_cast<LPARAM>(raw))) {
@@ -117,21 +132,21 @@ private:
             return true;
         }
         const bool closed = owner->Close(); // Owner caches result; this never resends an ambiguous close.
+        // Available regardless of the close outcome: capture both workers' OS
+        // exit evidence before any further branching or owner deletion.
+        const auto exits = owner->ExitObservations();
+        const auto failure = owner->FirstFailure();
         if (closed) {
             delete owner;
             owner = nullptr;
-            const bool recorded = RecordShutdown("both_workers_close_verified");
+            // Any unwritten line (verdict or exit detail) means the run record is
+            // incomplete, so the run is not presented as a passed hardware test.
+            const bool recorded = RecordCloseOutcome(true, failure, exits);
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Closed, recorded
                 ? L"停止済み。終了確認を記録しました。プレビュー画像は保存していません。"
                 : L"停止済み。ただし試験記録に失敗したため、実機試験の合格とは扱いません。"}));
         } else {
-            RecordShutdown("close_unconfirmed");
-            const auto failure = owner->FirstFailure();
-            if (failure) {
-                RecordShutdown(failure->response_validated ? "worker_response_validated" :
-                               failure->response_received ? "worker_response_invalid" : "worker_response_missing");
-                if (failure->ack_write_completed) RecordShutdown("worker_ack_write_completed");
-            }
+            (void)RecordCloseOutcome(false, failure, exits);
             Post(std::make_unique<UiEvent>(UiEvent{EventKind::Quarantined,
                 L"終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。" +
                     (failure ? FormatPreviewWorkerFailure(*failure) : L" 失敗段階は未取得です。")}));
@@ -317,6 +332,7 @@ private:
     std::size_t active_worker_{};
     ULONGLONG deadline_{};
     bool start_attempted_{}, construction_failed_{};
+    bool close_details_recorded_{}; // Failure/exit journal blocks are written once per run.
     std::atomic<bool> stop_requested_{};
 };
 

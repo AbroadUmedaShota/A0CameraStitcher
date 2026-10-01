@@ -22,6 +22,44 @@ struct PreviewWorkerFailureObservation {
     std::optional<PreviewWorkerCloseReceipt> reported_close;
 };
 
+// One point-in-time look at a child OS process through WaitForSingleObject and
+// GetExitCodeProcess only. Deliberately separate from any SDK/IPC claim.
+struct PreviewWorkerProcessCheck {
+    bool wait_failed{};     // WaitForSingleObject returned neither WAIT_OBJECT_0 nor WAIT_TIMEOUT.
+    bool exited{};          // WaitForSingleObject returned WAIT_OBJECT_0.
+    bool code_available{};  // GetExitCodeProcess succeeded while exited.
+    std::uint32_t exit_code{};
+};
+
+// How PreviewWorkerExitObservation::at_close was taken.
+enum class PreviewWorkerExitCheckKind {
+    // Close() has not run the close step for this child yet (or was called off
+    // the owner thread). There is no OS observation.
+    not_checked,
+    // The close exchange was answered and its ACK written: the existing
+    // success-path wait of up to 5000 ms for the process to be signaled.
+    waited_after_close_ack,
+    // The close exchange threw. This includes a close that was never sent
+    // because an earlier command left this child's delivery unconfirmed. The
+    // check is a single 0 ms look at the moment of the close attempt, not a
+    // wait: a worker still tearing down is reported as not yet exited.
+    instant_at_close_failure,
+};
+
+// What the parent could independently confirm about one child OS process
+// during Close().
+struct PreviewWorkerExitObservation {
+    PreviewWorkerExitCheckKind kind{PreviewWorkerExitCheckKind::not_checked};
+    PreviewWorkerProcessCheck at_close;
+    // Present only when kind is instant_at_close_failure and at_close did not
+    // see the process exit: a second 0 ms look taken by Close() after the close
+    // step of both children has finished. It adds no wait of its own. When the
+    // other child went through the success path, that child's close exchange
+    // and exit wait is the time this child had to finish exiting; when no child
+    // did, the recheck follows the first look almost immediately.
+    std::optional<PreviewWorkerProcessCheck> after_both_closes;
+};
+
 // Fixed/bounded diagnostic fields only. Never include SDK free-form errors.
 [[nodiscard]] std::wstring FormatPreviewWorkerFailure(const PreviewWorkerFailureObservation& failure);
 
@@ -49,6 +87,10 @@ public:
     // Cached result on repeated calls: never resends an ambiguous close.
     bool Close() noexcept;
     [[nodiscard]] std::optional<PreviewWorkerFailureObservation> FirstFailure() const;
+    // Per-child OS exit evidence gathered by Close() (kind not_checked before
+    // that). Available regardless of whether Close() returned true, so a
+    // failure path can still persist both workers' exit evidence.
+    [[nodiscard]] std::array<PreviewWorkerExitObservation, 2> ExitObservations() const noexcept;
     std::array<std::uint32_t, 2> ProcessIds() const noexcept;
     std::array<std::string, 2> Enumerate(std::size_t worker);
     std::vector<unsigned char> Preview(std::size_t worker, std::string_view candidate);

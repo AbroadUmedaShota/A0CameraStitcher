@@ -57,6 +57,7 @@ add_library(a0_phase0_core
     src/phase0/fake_camera_transport.cpp
     src/phase0/hardware_process_lease.cpp
     src/phase0/preview_worker_owner.cpp
+    src/phase0/preview_worker_failure_journal.cpp
     src/phase0/nikon_sdk_runtime_path.cpp
     src/phase0/nikon_sdk_transport.cpp
     src/phase0/pc_direct_capture.cpp
@@ -422,6 +423,20 @@ if(BUILD_TESTING)
         add_dependencies(a0_preview_worker_owner_tests A0CameraStitcher.PreviewWorker)
         add_test(NAME preview_worker_owner_contracts COMMAND a0_preview_worker_owner_tests)
         set_tests_properties(preview_worker_owner_contracts PROPERTIES TIMEOUT 20)
+        add_test(NAME preview_worker_owner_reply_contracts COMMAND a0_preview_worker_owner_tests --reply-contract)
+        set_tests_properties(preview_worker_owner_reply_contracts PROPERTIES TIMEOUT 30)
+        add_test(NAME preview_worker_owner_ack_failure_contracts
+                 COMMAND a0_preview_worker_owner_tests --ack-failure-contract)
+        set_tests_properties(preview_worker_owner_ack_failure_contracts PROPERTIES TIMEOUT 20)
+        add_test(NAME preview_worker_failure_journal_contracts COMMAND a0_preview_worker_owner_tests --journal-contract)
+        set_tests_properties(preview_worker_failure_journal_contracts PROPERTIES TIMEOUT 60)
+        add_test(NAME preview_worker_failure_category_table COMMAND a0_preview_worker_owner_tests --category-table)
+        set_tests_properties(preview_worker_failure_category_table PROPERTIES TIMEOUT 20)
+        add_test(NAME preview_worker_failure_journal_vocabulary
+                 COMMAND a0_preview_worker_owner_tests --journal-vocabulary)
+        set_tests_properties(preview_worker_failure_journal_vocabulary PROPERTIES TIMEOUT 20)
+        add_test(NAME preview_worker_exit_recheck_contracts COMMAND a0_preview_worker_owner_tests --exit-recheck)
+        set_tests_properties(preview_worker_exit_recheck_contracts PROPERTIES TIMEOUT 30)
         add_executable(a0_worker_preview_pipe_tests tests/worker_preview_pipe_tests.cpp)
         target_link_libraries(a0_worker_preview_pipe_tests PRIVATE a0_phase0_core)
         add_test(NAME worker_preview_pipe_contracts COMMAND a0_worker_preview_pipe_tests)

@@ -2,6 +2,60 @@
 
 ## 結論
 
+### 失敗証跡のjournal永続化 T1（software-only、2026-10-01）
+
+引き継ぎ後の最初のsoftware-only作業。run-04のjournalには `operation_failed` / `close_unconfirmed` / `worker_response_*` / `worker_ack_write_completed` の固定イベントしか残らず、失敗したworker番号・命令・分類・close receipt・workerのexit codeは画面表示（`FormatPreviewWorkerFailure`）にしか渡っていなかった。T1はこれらをjournalに固定語彙で残す。coreに `preview_worker_failure_journal.{hpp,cpp}` を追加し、分類はヘッダで公開する57語の定数表 `kPreviewWorkerFailureCategories` と `IsKnownFailureCategory` の完全一致だけを書く。表にない非空の分類は `failure_category_unknown`、空は `failure_category_missing` に置き換える。close結果の記録 `RecordCloseOutcomeToJournal` は `CloseOnce`（`preview_commissioning_main.cpp`）と試験が共用する。
+
+`PreviewWorkerOwner` には `ExitObservations()` と `RecheckAfterBothCloses` を追加した。後者は両workerのclose試行後・disarm前に、close交換が失敗して未終了だったchildだけを0 msで再観測する。新しい待ちは足しておらず、成功経路の5000 ms待ちは変えていない。失敗経路の `CloseChild` はclose試行時点で0 msの一度きり観測とした。曖昧なcloseの再送なし、`Close()` の結果キャッシュ、first_failure不変、自動killなし、journal書込み失敗がSDK閉鎖を妨げないこと、`CREATE_NEW` / `FILE_SHARE_READ` / 上書き禁止は維持している。
+
+#### journal語彙
+
+記録の順序（`CloseOnce` が `owner->Close()` を終えた後に書く）:
+
+- closeできた場合: `both_workers_close_verified` → worker 0のexitブロック → worker 1のexitブロック
+- できなかった場合: `close_unconfirmed` → 失敗ブロック（または `failure_observation_missing`）→ worker 0のexitブロック → worker 1のexitブロック
+- 判定行は `CloseOnce` が呼ばれるたびに書く。失敗ブロックとexitブロックは1 runに1回だけ。valueを持つ行以外はvalue=0
+
+失敗ブロック（first_failure。後から上書きしない）:
+
+| 項目 | 行 |
+|---|---|
+| worker | `failure_worker_index`（value 0/1。2は特定workerでなくowner全体のdisarm段階で、画面では worker=global） |
+| 命令 | `failure_operation_enumerate` / `select` / `start` / `frame` / `suspend` / `resume` / `close` / `disarm`（接尾辞）。それ以外は `failure_operation_unknown` |
+| 分類 | 57語のどれかをそのまま1行。表にない非空は `failure_category_unknown`、空は `failure_category_missing` |
+| 応答の状態 | `worker_response_validated` / `invalid` / `missing` |
+| 応答のstatus | `worker_status_ok` / `failed` / `closed` / `quarantined`。検証済み応答が無ければ `worker_status_missing`。`worker_status_unknown` は防御用 |
+| ACK | `worker_ack_write_completed`（親がローカルで書き終えた。workerの処理証明ではない）/ `worker_ack_write_unconfirmed` |
+| close receipt | `close_receipt_live_view_off` / `source_closed` / `module_closed` / `process_claim_released` / `safe_to_exit`（value 1/0）。worker申告であり親が確かめた値ではない。無ければ `close_receipt_missing` |
+
+分類57語の内訳:
+
+- owner/IPC層（8）: `delegation_disarm_unconfirmed`, `worker_ack_unconfirmed`, `worker_exit_unconfirmed`, `worker_ipc_unconfirmed`, `worker_operation_failed`, `worker_owner_failed`, `worker_prior_exit`, `worker_reply_invalid`
+- workerプロトコル層（15）: `worker_authority`, `worker_authority_expired`, `worker_authority_missing`, `worker_candidate`, `worker_candidate_unavailable`, `worker_envelope`, `worker_frame_size`, `worker_handoff_unavailable`, `worker_inventory`, `worker_inventory_not_pair`, `worker_operation_unavailable`, `worker_selection_invalidated`, `worker_sequence`, `worker_terminal`, `worker_unexpected`
+- SDK transport層・preview経路（27）: `close_failed`, `live_view_frame_failed`, `live_view_invalid_frame`, `live_view_not_started`, `live_view_prohibited`, `live_view_recovery_failed`, `live_view_start_failed`, `live_view_stop_already_attempted`, `live_view_stop_failed`, `live_view_unavailable`, `open_failed`, `sdk_load_failed`, `session_busy`, `session_mode_mismatch`, `session_not_open`, `session_poisoned`, `worker_camera_type_failed`, `worker_camera_type_mismatch`, `worker_handoff_unconfirmed`, `worker_inventory_failed`, `worker_live_view_already_on`, `worker_selection_required`, `worker_session_required`, `worker_source_required`, `worker_stop_required`, `worker_topology_changed`, `worker_topology_failed`
+- SDK transport層・capture経路（7、preview経路では到達しないが固定語彙として収録）: `ambiguous_image_event`, `baseline_mismatch`, `download_failed`, `identity_collision`, `image_event_timeout`, `invalid_jpeg`, `transaction_watchdog`
+
+exitブロック（workerごとに1回。OSの `WaitForSingleObject` と `GetExitCodeProcess` だけを使う）:
+
+1. `worker_exit_observation_index`（value=worker番号）
+2. 観測種別を1行: `worker_exit_check_not_run` / `worker_exit_check_waited_after_close_ack`（close応答を検証しACKを書けたので最大5000 ms待って観測）/ `worker_exit_check_instant_at_close_failure`（close交換が失敗したので0 msだけ観測。それ以前の失敗でcloseを送らなかった場合も含む）
+3. 結果を1行: `worker_exit_code`（value=code）/ `worker_exit_code_unavailable` / `worker_exit_wait_failed` / `worker_exit_wait_timed_out`（waitedの後だけ）/ `worker_exit_not_observed_at_close`（instantの後だけ）
+4. instantで未終了だった時だけ再観測 `worker_exit_recheck_after_both_closes` と結果1行: `worker_exit_code` / `worker_exit_code_unavailable` / `worker_exit_wait_failed` / `worker_exit_not_observed_at_recheck`。最初の観測行は書き換えず追記する
+
+#### 合格条件と読み分け
+
+合格は、判定行 `both_workers_close_verified` に加えて、index 0と1のexitブロックが揃い、両方の `worker_exit_code` が0であること。判定行だけでは部分書込みと区別できない。失敗分類の `worker_exit_unconfirmed` とexitブロックの `worker_exit_*` は接頭辞が同じなので、失敗ブロック内かexitブロック内かの位置で読み分ける。
+
+#### 制約・試験・未検証
+
+Case 4（worker0が応答前にexit）のexit codeは、相方worker1のclose往復と終了待ちが猶予になる場合に再観測で取れる。無負荷では3/3回取得した。全体検証のビルド負荷下では20回ループ中17回取得、3回は再観測でも未終了（`worker_exit_not_observed_at_recheck`）だった（2026-10-01 19:13、`a0_preview_worker_owner_tests.exe --exit-recheck` × 20）。worker1が自分のcloseの最中に落ちるCase 4bは猶予がほぼなく、未観測のまま終わり得る。このため受入基準は「exit codeの数値、またはclose時点と再観測時点の両方で未終了という固定イベント」とし、数値の決定的取得はT2/WU2で待ち時間の窓を設計してから行う（※仮定）。
+
+`a0_preview_worker_owner_tests` に `--journal-contract`（select/start/frameの個別失敗、応答前exit、正常close、writer存続中の別ハンドル読取り、nonce/PID/シリアル形式0件）、`--category-table`（57語の表と試験側の独立集合の一致、重複なし、ValidEvent適合）、`--journal-vocabulary`、`--exit-recheck` を追加し、既存 `--reply-contract` / `--ack-failure-contract` とともにctestへTIMEOUT付きで登録した。`--category-table` は表から `live_view_frame_failed` を1語抜くと失敗することを確認済み。実装者の実行は `--journal-contract` が改善中を含め累計5回（最終 `failures=0`）、`--category-table` 3回（うち1回は赤確認）、`--exit-recheck` 1回、既存系列各1回で、いずれも2026-10-01、`build/t1-stub`（SDK-stub・Release・VS2019）。独立検証（QA）は7系列 `failures=0`（2026-10-01 18:13〜18:14）で、独立プローブによりjournalの秘匿性も確認した。総合レビューは1回目差し戻し（allow-list漏れ、Case 4の数値未保証）、修正後の2回目で承認。セキュリティ表層レビューは承認で、`IsKnownOperation` が呼び出し元のリテラル前提に乗る旨をコードに記載した。
+
+実SDK・実機での動作は※未検証（このPCにSDKは到着したが、SDK有効ビルドと実機実行は未実施）。相方workerのclose応答（status/receipt）はjournalに残らない（T2へ）。gated build専用分類 `licensed_adapter_unavailable` は表にない（T2へ）。journal書込み失敗の注入試験はない。T2（WU1: 予算表と操作別期限、WU2: close送信とexit観測の分離・「停止処理中」分類、WU3: 操作期限と受付寿命の分離）は未着手。前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは本作業で変更していない。
+
+全体検証の証跡（2026-10-01、AOPC-20-NOTE、VS2019 BuildTools・cmake 3.31.12・SDK-stub構成 `build/handoff-verify`）: `ctest --test-dir build/handoff-verify -C Debug -j 1 --output-on-failure` は45/45 PASS（405秒、20:19〜20:26）。同 `-C Release` は43/45（371秒、20:13〜20:19）で、失敗2件は本変更と無関係な試作IPC試験 `dual_live_worker_poc_contracts`（`FAIL: helper reports actual worker identities`）と `dual_live_session_integration`（Timeout 15秒）。この2件は負荷なしの単独再実行3回で1回失敗・2回PASSであり、このPCでは断続的に失敗する（※要調査。常駐ウイルス対策によるプロセス起動遅延を疑うが未確認）。T1で登録した6系列は負荷なしの単独実行（`-R` で10件、19:43〜19:44）でDebug/Releaseとも全件PASS。全体実行の初回（18:54〜19:29）はDebug 44/45・Release 42/45で、差分は (a) `hardware_process_lease_delegation_contracts` の既存試験バグ（marker v2化以降、読取り専用化の後に `RegisterDualWorkers` を呼ぶため access denied で abort する。別コミットで順序を直し、Debug/Release・`--diagnostic` とも PASS）、(b) 緩和前のCase 4、(c) 同時ビルド負荷によるIPC期限切れ、で説明できる。M3 simulated（`scripts/Test-M3Simulated.ps1` Debug/Release）と `scripts/Test-DualCameraWpfFlow.ps1` は不合格。operator shell tests は95/96 PASSで、残る1件 `HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync` はfixtureのシンボリックリンク作成に `SeCreateSymbolicLinkPrivilege` を要し、このPC（開発者モード無効・非管理者）では `IOException: クライアントは要求された特権を保有していません` で止まる。製品コードの不具合ではなく環境差で、開発者モードの有効化か、試験をジャンクションへ代替する対応が要る（※要対応）。
+
 ### 二台実機run-04: 終了確認不能・隔離維持（2026-09-23）
 
 本人の二台接続復旧を受け、AOPC-11-NOTEでOS上の正常なD810二台、A0関連processなし、委譲markerなしを確認した。隔離SDK一組と付随DLL三つの存在を読取りで確認。SDK有効の `PreviewCommissioning` / `PreviewWorker` を既存Visual Studio生成projectからRelease buildし、exit 0。画面exeのSHA-256は `132FA1975F8E6EB5D074B6B5EA3403F1318D7F10A84B3DBCAC8E4E288D3F3260`、worker exeは `056E4F003362E0794FBE1080CBEA334B579B34506633CD874AB75E98906EAE0C`。実行processに限りSDK module pathを渡し、`--commission-preview-only` で画面を起動した。起動時点ではカメラ操作0回。
