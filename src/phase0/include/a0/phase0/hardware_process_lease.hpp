@@ -38,6 +38,10 @@ struct DualDelegationCloseEvidence final {
 // Serializes all real-camera Phase 0 commands across processes in the current
 // interactive Windows logon session. Cross-session/service enforcement is an
 // installation policy concern. Per-transport session guards are still needed.
+// The durable dual-delegation marker check at construction scans every
+// Windows session sharing the current user profile's marker root, not just
+// the current session; only the in-process mutex wait is scoped to one
+// session at a time.
 class HardwareProcessLease final {
   public:
     explicit HardwareProcessLease(std::string_view lease_name = "A0CameraStitcher.Phase0.CameraControl.v1",

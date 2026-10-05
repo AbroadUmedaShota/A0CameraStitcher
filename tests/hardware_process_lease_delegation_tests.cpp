@@ -31,6 +31,14 @@ bool Quarantined(const std::string &n, const std::filesystem::path &r) {
         return e.Category() == "camera_control_delegation_quarantined";
     }
 }
+bool Succeeds(const std::string &n, const std::filesystem::path &r) {
+    try {
+        HardwareProcessLease x(n, std::chrono::milliseconds(0), r);
+        return true;
+    } catch (const TransportError &) {
+        return false;
+    }
+}
 template<class Action> bool Rejects(Action action) {
     try { action(); } catch (const TransportError&) { return true; }
     return false;
@@ -106,6 +114,16 @@ int RunDiagnosticTests() {
           !std::filesystem::exists(absent_root), "diagnostic must not create a missing root");
     Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_missing", "missing marker is read-only");
     const auto valid = header + "4294967290" + tail;
+    // A canonical-looking marker that belongs to a different session, with
+    // this session's own marker entirely absent, is exactly one candidate
+    // (walk.count == 1) whose name does not match this session's expected
+    // name. That must still be reported as ambiguous, not silently folded
+    // into "nothing matched" -- otherwise the diagnostic would read a
+    // stranded foreign-session marker as if the root were empty.
+    if (!write(other, valid)) return 3;
+    Check(InspectDualDelegationMarkerReadOnly(root).status == "marker_ambiguous",
+          "a single foreign-session marker without this session's own marker must not read as missing");
+    if (!DeleteFileW(other.c_str())) return 3;
     if (!write(marker, valid)) return 3;
     const auto timestamp = std::filesystem::last_write_time(marker);
     const auto accepted = InspectDualDelegationMarkerReadOnly(root);
@@ -148,21 +166,194 @@ int RunDiagnosticTests() {
     std::cout << "{\"mode\":\"diagnostic-simulation\",\"failures\":" << failures << "}\n";
     return failures ? 1 : 0;
 }
+bool WriteFixtureFile(const std::filesystem::path &path, const std::string &content) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written{};
+    const bool ok = WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr) &&
+                    written == content.size();
+    CloseHandle(file);
+    return ok;
+}
+// Directory junctions need no elevated privilege on Windows (unlike
+// symlinks), so a plain `mklink /J` child process is enough to fabricate a
+// reparse point for the fail-closed guard test below.
+bool CreateJunctionFixture(const std::filesystem::path &link, const std::filesystem::path &target) {
+    // Resolve cmd.exe by absolute path rather than letting CreateProcessW's
+    // implicit PATH search find a relative "cmd.exe" (CWE-427, uncontrolled
+    // search path element). Note for callers: cmd.exe expands "%" inside a
+    // double-quoted argument as an environment-variable reference, so link
+    // and target paths containing "%" would not survive this command line
+    // unchanged; test fixture paths built under GetTempPathW never contain one.
+    wchar_t system_directory[MAX_PATH]{};
+    if (!GetSystemDirectoryW(system_directory, MAX_PATH)) return false;
+    const auto cmd_exe = std::filesystem::path(system_directory) / L"cmd.exe";
+    std::wstring command =
+        L"\"" + cmd_exe.wstring() + L"\" /c mklink /J \"" + link.wstring() + L"\" \"" + target.wstring() + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                        &startup, &child))
+        return false;
+    CloseHandle(child.hThread);
+    const DWORD wait = WaitForSingleObject(child.hProcess, 5000);
+    DWORD exit_code{};
+    const bool ok = wait == WAIT_OBJECT_0 && GetExitCodeProcess(child.hProcess, &exit_code) && exit_code == 0;
+    CloseHandle(child.hProcess);
+    return ok && GetFileAttributesW(link.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+// PM brief B (fail-closed cross-session delegation guard): a committed
+// delegation marker from a different Windows session ID (sign-out/sign-in,
+// reboot) must not go unnoticed just because RejectMarker only ever looked at
+// *this* session's own marker filename. Each case below is an isolated
+// Given/When/Then against a synthetic fixture root -- never the production
+// marker root, never a real camera/SDK/WPD call (the lease layer cannot reach
+// those at all, so a quarantine here structurally rules them out).
+int RunCrossSessionMarkerGuardTests() {
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp)) return 2;
+    const auto root = std::filesystem::path(temp) /
+        (L"A0LeaseCrossSessionGuardTest-" + std::to_wstring(GetCurrentProcessId()));
+    const auto name = "A0.Poc.TestLease.CrossSessionGuard." + std::to_string(GetCurrentProcessId());
+    DWORD own_session{};
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &own_session)) return 2;
+    const DWORD foreign_session_a = own_session + 1;
+    const DWORD foreign_session_b = own_session + 2;
+    const std::string fixture_body = "synthetic fixture; the lease guard never parses marker content\n";
+    const auto reset_root = [&] {
+        std::filesystem::remove_all(root);
+    };
+
+    // Given: no marker root exists at all. When: a durable-marker lease is
+    // acquired against that path. Then: acquisition succeeds (root absence is
+    // indistinguishable from "zero markers" once the lease creates it).
+    reset_root();
+    Check(Succeeds(name, root), "no marker root present must allow lease acquisition");
+    reset_root();
+
+    // Given: the marker root exists but holds zero matching entries. When:
+    // the lease is acquired. Then: acquisition succeeds.
+    if (!std::filesystem::create_directories(root)) return 2;
+    Check(Succeeds(name, root), "existing empty marker root must allow lease acquisition");
+    reset_root();
+
+    // Given: a single regular-file marker from a different session ID (e.g.
+    // this session's own ID plus one). When: the lease is acquired. Then:
+    // acquisition is quarantined, proving a cross-session marker is no longer
+    // invisible after a sign-out/sign-in or reboot changes the session ID.
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto foreign_marker = root / (L"armed-session-" + std::to_wstring(foreign_session_a) + L".marker");
+    if (!WriteFixtureFile(foreign_marker, fixture_body)) return 3;
+    Check(Quarantined(name, root), "a foreign session's marker must quarantine lease acquisition");
+    reset_root();
+
+    // Given: two foreign-session markers. When: the lease is acquired. Then:
+    // acquisition is quarantined (multiple strangers are no safer than one).
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto foreign_marker_a = root / (L"armed-session-" + std::to_wstring(foreign_session_a) + L".marker");
+    const auto foreign_marker_b = root / (L"armed-session-" + std::to_wstring(foreign_session_b) + L".marker");
+    if (!WriteFixtureFile(foreign_marker_a, fixture_body) || !WriteFixtureFile(foreign_marker_b, fixture_body))
+        return 3;
+    Check(Quarantined(name, root), "multiple foreign-session markers must quarantine lease acquisition");
+    reset_root();
+
+    // Given: a directory (not a file) whose name matches the marker glob.
+    // When: the lease is acquired. Then: acquisition is quarantined -- the
+    // scan never assumes a glob match is a regular file.
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto marker_shaped_directory =
+        root / (L"armed-session-" + std::to_wstring(own_session + 3) + L".marker");
+    if (!CreateDirectoryW(marker_shaped_directory.c_str(), nullptr)) return 2;
+    Check(Quarantined(name, root), "a directory shaped like a marker name must quarantine lease acquisition");
+    if (!RemoveDirectoryW(marker_shaped_directory.c_str())) return 4;
+    reset_root();
+
+    // Given: a reparse point (directory junction) whose name matches the
+    // marker glob. When: the lease is acquired. Then: acquisition is
+    // quarantined -- the scan never follows or trusts a reparse point.
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto junction_target = root / L"junction-target";
+    if (!std::filesystem::create_directories(junction_target)) return 2;
+    const auto marker_shaped_junction =
+        root / (L"armed-session-" + std::to_wstring(own_session + 4) + L".marker");
+    if (!CreateJunctionFixture(marker_shaped_junction, junction_target)) return 2;
+    Check(Quarantined(name, root), "a reparse point shaped like a marker name must quarantine lease acquisition");
+    // Unlink the reparse point itself first; remove_all must never be asked
+    // to resolve into (and delete) the junction's target through the link.
+    if (!RemoveDirectoryW(marker_shaped_junction.c_str())) return 4;
+    reset_root();
+
+    // Given: a file whose name satisfies the armed-session-*.marker glob but
+    // is not the canonical armed-session-<digits>.marker form. When: the
+    // lease is acquired. Then: acquisition is quarantined -- any glob match
+    // is treated as a candidate, canonical or not.
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto non_canonical_marker = root / L"armed-session-abc.marker";
+    if (!WriteFixtureFile(non_canonical_marker, fixture_body)) return 3;
+    Check(Quarantined(name, root),
+          "a non-canonical name that still matches the glob must quarantine lease acquisition");
+    reset_root();
+
+    // Given: files present under root whose names do not satisfy the
+    // armed-session-*.marker glob at all (wrong trailing extension, unrelated
+    // name). When: the lease is acquired. Then: acquisition succeeds -- a
+    // fail-closed guard still must not quarantine on files that were never a
+    // candidate in the first place.
+    if (!std::filesystem::create_directories(root)) return 2;
+    if (!WriteFixtureFile(root / L"armed-session-2.marker.bak", fixture_body) ||
+        !WriteFixtureFile(root / L"notes.txt", fixture_body))
+        return 3;
+    Check(Succeeds(name, root), "non-matching file names must not block lease acquisition");
+    reset_root();
+
+    // Given: a marker name that differs from the canonical form only by
+    // letter case. When: the lease is acquired. Then: acquisition is
+    // quarantined -- Win32 FindFirstFileW/NTFS name matching is
+    // case-insensitive, so the guard built on it must treat a case-varied
+    // name as the same candidate rather than as a non-match.
+    if (!std::filesystem::create_directories(root)) return 2;
+    const auto case_varied_marker =
+        root / (L"ARMED-SESSION-" + std::to_wstring(own_session + 5) + L".MARKER");
+    if (!WriteFixtureFile(case_varied_marker, fixture_body)) return 3;
+    Check(Quarantined(name, root), "a case-varied marker name must still quarantine lease acquisition");
+    reset_root();
+
+    std::cout << "{\"mode\":\"cross-session-guard-simulation\",\"failures\":" << failures << "}\n";
+    return 0;
+}
+// Defense in depth (CWE-73, external control of file name/path) for the only
+// entry point that lets argv reach HardwareProcessLease's constructor as a
+// lease name and marker root: a production-shaped lease name paired with an
+// empty root would otherwise fall through to the *production* marker root
+// inside the constructor (test_marker_root.empty() there means "use
+// production"), so this process never even calls that constructor unless the
+// lease name is unambiguously test-shaped and the root is a non-empty
+// absolute path.
+bool IsAcceptableTestInvocation(std::string_view lease_name, const std::filesystem::path &root) {
+    return lease_name.starts_with("A0.Poc.TestLease.") && !root.empty() && root.is_absolute();
+}
 } // namespace
 int RunMain(int argc, char **argv);
 // Surface uncaught non-TransportError exceptions as a readable failure instead of
-// an abort() with no output, so a CTest failure records the reason.
+// an abort() with no output, so a CTest failure records the reason. The
+// exception text itself is not printed: std::filesystem failures embed the
+// absolute path they operated on in what(), and a test fixture path is not
+// meant to end up in captured CI output.
 int main(int argc, char **argv) {
     try {
         return RunMain(argc, argv);
-    } catch (const std::exception &e) {
-        std::cerr << "uncaught exception: " << e.what() << '\n';
+    } catch (const std::exception &) {
+        std::cerr << "uncaught exception (see process return code)\n";
         return 99;
     }
 }
 int RunMain(int argc, char **argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--clean-exit") return 0;
     if (argc == 2 && std::string_view(argv[1]) == "--diagnostic") return RunDiagnosticTests();
+    if (argc == 4 && !IsAcceptableTestInvocation(argv[2], std::filesystem::path(argv[3])))
+        return 2;
     const auto root = argc == 4 ? std::filesystem::path(argv[3]) : Root();
     const auto name = argc == 4 ? std::string(argv[2]) : Name();
     if (argc == 4 && std::string_view(argv[1]) == "--crash") {
@@ -170,6 +361,11 @@ int RunMain(int argc, char **argv) {
         x.ArmDualDelegation();
         ExitProcess(91);
     }
+    // Reaching here means this is the top-level invocation (the --clean-exit,
+    // --diagnostic, and --crash branches above all return/exit before this
+    // point), so it is safe to run the fail-closed cross-session guard suite
+    // once, against its own isolated fixture root.
+    if (const auto guard_rc = RunCrossSessionMarkerGuardTests(); guard_rc != 0) return guard_rc;
     wchar_t exe[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
         return 2;

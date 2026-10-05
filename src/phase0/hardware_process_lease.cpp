@@ -130,6 +130,63 @@ void RejectMarker(const std::wstring &path) {
                          "dual delegation marker is armed; human recovery required");
 }
 
+struct MarkerCandidateWalk final {
+    unsigned count{};
+    std::wstring first_name;
+    bool enumeration_not_found{};
+    bool enumeration_clean{};
+};
+// Single owner of the Win32 FindFirstFileW/FindNextFileW walk over
+// `<root>/armed-session-*.marker`, shared by the read-only diagnostic (which
+// needs the exact-match detail for its single candidate) and the lease's
+// fail-closed cross-session guard below (which only needs "did anything
+// match at all"), so the two call sites cannot drift apart on what counts as
+// a match. Stops once `max_entries` matches have been observed.
+MarkerCandidateWalk WalkMarkerCandidates(const std::filesystem::path &root, unsigned max_entries) {
+    MarkerCandidateWalk walk;
+    WIN32_FIND_DATAW entry{};
+    const std::wstring pattern = (root / L"armed-session-*.marker").wstring();
+    HANDLE found = FindFirstFileW(pattern.c_str(), &entry);
+    if (found == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        walk.enumeration_not_found = error == ERROR_FILE_NOT_FOUND;
+        walk.enumeration_clean = walk.enumeration_not_found;
+        return walk;
+    }
+    do {
+        if (walk.count == 0) walk.first_name = entry.cFileName;
+        ++walk.count;
+    } while (walk.count < max_entries && FindNextFileW(found, &entry));
+    const DWORD enumeration_error = GetLastError();
+    FindClose(found);
+    walk.enumeration_clean = walk.count >= max_entries || enumeration_error == ERROR_NO_MORE_FILES;
+    return walk;
+}
+// Fail-closed cross-session guard for lease acquisition: a Windows session ID
+// change (sign-out/sign-in, reboot) must never let a stranded delegation
+// marker go unnoticed just because it no longer matches *this* session's
+// marker filename. Any armed-session-*.marker candidate under root -- another
+// session's marker, this session's own leftover from a crashed owner, a
+// directory or reparse point placed at a matching name, or a name that only
+// satisfies the glob without being the canonical armed-session-<digits>.marker
+// form -- blocks lease acquisition the same way: none of these are silently
+// skipped. An enumeration error other than "nothing matched" is treated the
+// same way, since it could be hiding a marker this process cannot otherwise
+// observe. Different Windows user profiles remain out of the Phase 0 lease's
+// contract; this guard only covers sessions sharing the current user's
+// marker root.
+void RejectAnyArmedSessionMarker(const std::filesystem::path &root) {
+    const auto walk = WalkMarkerCandidates(root, 1);
+    if (walk.count == 0 && walk.enumeration_not_found)
+        return;
+    if (walk.count == 0) {
+        throw TransportError("camera_control_delegation_quarantined",
+                             "could not enumerate the delegation marker root; treating as quarantined");
+    }
+    throw TransportError("camera_control_delegation_quarantined",
+                         "a dual-delegation marker is present in the marker root; human recovery required");
+}
+
 std::string WindowsError(std::string_view operation, DWORD error) {
     std::ostringstream message;
     message << operation << " failed with Windows error " << error;
@@ -176,6 +233,14 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
         recovered_abandoned_owner_ = result == WAIT_ABANDONED;
         if (durable_marker_enabled_) {
             try {
+                // Re-validate the root immediately before the fail-closed
+                // cross-session scan (defense in depth against the gap since
+                // the root was first validated, before the mutex wait above),
+                // then reject on ANY matching marker from ANY session before
+                // falling back to the original same-session-only check.
+                const auto root = std::filesystem::path(marker_path_).parent_path();
+                RequireSafeDirectoryTree(root);
+                RejectAnyArmedSessionMarker(root);
                 RejectMarker(marker_path_);
             } catch (...) {
                 ReleaseMutex(handle);
@@ -369,23 +434,13 @@ DualDelegationMarkerDiagnostic InspectDualDelegationMarkerReadOnly(const std::fi
     const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
     if (!ExistingSafeDirectoryTree(root)) return {"marker_root_untrusted"};
     const std::wstring expected = std::filesystem::path(MarkerPath(root)).filename().wstring();
-    WIN32_FIND_DATAW entry{};
-    const std::wstring pattern = (root / L"armed-session-*.marker").wstring();
-    HANDLE found = FindFirstFileW(pattern.c_str(), &entry);
-    if (found == INVALID_HANDLE_VALUE) {
-        return GetLastError() == ERROR_FILE_NOT_FOUND ? DualDelegationMarkerDiagnostic{"marker_missing"}
-                                                     : DualDelegationMarkerDiagnostic{"marker_unavailable"};
+    const auto walk = WalkMarkerCandidates(root, 2);
+    if (walk.count == 0) {
+        return walk.enumeration_not_found ? DualDelegationMarkerDiagnostic{"marker_missing"}
+                                          : DualDelegationMarkerDiagnostic{"marker_unavailable"};
     }
-    unsigned count{};
-    bool exact{};
-    do {
-        ++count;
-        exact = exact || expected == entry.cFileName;
-    } while (count < 2 && FindNextFileW(found, &entry));
-    const DWORD enumeration_error = GetLastError();
-    FindClose(found);
-    if (count != 1 || !exact) return {"marker_ambiguous"};
-    if (enumeration_error != ERROR_NO_MORE_FILES) return {"marker_unavailable"};
+    if (walk.count != 1 || walk.first_name != expected) return {"marker_ambiguous"};
+    if (!walk.enumeration_clean) return {"marker_unavailable"};
     const std::wstring path = (root / expected).wstring();
     DiagnosticSnapshot first{}, second{};
     if (!ReadDiagnosticSnapshot(path, first)) return {"marker_invalid"};
