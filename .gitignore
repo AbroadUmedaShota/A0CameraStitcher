@@ -54,3 +54,5 @@ logs/
 # Stop/SubagentStop hook が応答ごとに追記する作業ログ。ユーザー指示の原文と
 # 触ったファイルのパスがそのまま入るため、ローカル完結でリモートへ出さない。
 /worklog/
+# Nikon SDK module binaries must never be committed, wherever they are placed
+*.md3
