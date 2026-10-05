@@ -25,6 +25,9 @@ struct PreviewWorkerFailureObservation {
     bool ack_write_completed{}; // Local write only; not proof of server ACK processing.
     std::optional<PreviewWorkerReplyStatus> response_status;
     std::optional<PreviewWorkerCloseReceipt> reported_close;
+    // The validated reply's worker-reported topology counters; present exactly
+    // when response_validated. Diagnostic only, like reported_close.
+    std::optional<PreviewTopologyDiag> topology;
 };
 
 // One point-in-time look at a child OS process through WaitForSingleObject and
@@ -77,6 +80,9 @@ struct PreviewWorkerCloseReply {
     bool ack_write_completed{}; // Local write only, as in PreviewWorkerFailureObservation.
     std::optional<PreviewWorkerReplyStatus> status;
     std::optional<PreviewWorkerCloseReceipt> receipt; // Worker-reported; diagnostic only.
+    // Topology counters of the validated close reply (frozen by the worker's
+    // close); present exactly when response_validated. Diagnostic only.
+    std::optional<PreviewTopologyDiag> topology;
 };
 
 // What the parent could independently confirm about one child OS process
@@ -166,6 +172,11 @@ public:
     // failure path can still persist both workers' exit evidence.
     [[nodiscard]] std::array<PreviewWorkerExitObservation, 2> ExitObservations() const noexcept;
     std::array<std::uint32_t, 2> ProcessIds() const noexcept;
+    // Topology counters of `worker`'s last exchange, when the parent validated
+    // its reply (after a successful Enumerate: the enumerate reply). Empty when
+    // that reply was not validated, before any exchange, or when `worker` is
+    // not 0 or 1. Diagnostic only.
+    [[nodiscard]] std::optional<PreviewTopologyDiag> LastTopology(std::size_t worker) const noexcept;
     std::array<std::string, 2> Enumerate(std::size_t worker);
     std::vector<unsigned char> Preview(std::size_t worker, std::string_view candidate);
     void ConfirmAndSuspend(std::size_t worker, ObservedPreviewBody body);

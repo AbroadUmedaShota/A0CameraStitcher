@@ -14,6 +14,7 @@
 #include "a0/phase0/nikon_sdk_transport.hpp"
 #include "a0/phase0/single_worker_source.hpp"
 #include "a0/phase0/worker_preview_selection.hpp"
+#include "a0/phase0/worker_topology_counters.hpp"
 #include "a0/phase0/sdk_buffer_arena.hpp"
 #include "a0/phase0/sdk_pending_command.hpp"
 #include "nikon_sdk_runtime_path.hpp"
@@ -1007,12 +1008,19 @@ public:
 
     std::vector<std::string> BeginWorkerPreviewSelection(std::chrono::seconds timeout) {
         ClaimSession();
+        // Diagnostics only: counting never changes what the selection decides.
+        topology_owner_thread_ = GetCurrentThreadId();
+        topology_.Reset(std::chrono::steady_clock::now());
         trace_ = {};
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         OpenModule(deadline);
-        const auto ids = WaitForSourceIds(deadline, "worker_inventory_failed");
-        worker_selection_ = std::make_unique<WorkerPreviewSelection>(NewRunId(),
-            std::vector<std::uint32_t>(ids.begin(), ids.end()));
+        topology_.BeginInventoryWait();
+        SourceIdWaitTrace wait_trace;
+        const auto ids = WaitForSourceIds(deadline, "worker_inventory_failed", &wait_trace);
+        std::vector<std::uint32_t> inventory(ids.begin(), ids.end());
+        topology_.Snapshot(wait_trace.last_children, experimental::SaturatingCount(module_sources_.size()),
+            inventory, std::chrono::steady_clock::now());
+        worker_selection_ = std::make_unique<WorkerPreviewSelection>(NewRunId(), std::move(inventory));
         // CameraType/serial/name probes are deliberately absent: these require
         // Source Open. The caller owes a checked Close even when this throws.
         return worker_selection_->Tokens();
@@ -1023,12 +1031,14 @@ public:
             throw TransportError("worker_selection_required", "no worker-local inventory session");
         try {
             RequireSdkSessionNotPoisoned();
+            const bool valid_before_pump = worker_selection_->Valid();
             Pump(module_, "worker_topology_failed");
             auto ids = Children(module_, deadline, "worker_topology_failed");
             ids.insert(ids.end(), module_sources_.begin(), module_sources_.end());
             std::sort(ids.begin(), ids.end());
             ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
             std::vector<std::uint32_t> current(ids.begin(), ids.end());
+            topology_.RecordCheck(valid_before_pump, worker_selection_->SameInventory(current), current.size());
             worker_selection_->CheckInventory(current);
             return current;
         } catch (...) { worker_selection_->Invalidate(); throw; }
@@ -1191,6 +1201,7 @@ public:
     }
 
     void EndDualSession(std::chrono::seconds timeout) {
+        topology_.Freeze();
         if (worker_selection_) worker_selection_->Invalidate();
         if (!claimed_) return;
         std::optional<TransportError> pending_error;
@@ -1223,6 +1234,12 @@ public:
                 ptp_handle_ != nullptr || dll_directory_ != nullptr,
             source_.opened || inventory_source_close_unconfirmed_,
         };
+    }
+
+    experimental::PreviewTopologyDiag WorkerTopologyDiagnostics() const noexcept { return topology_.Values(); }
+
+    void MarkWorkerTopologyOperation(experimental::PreviewTopologyOperation operation) noexcept {
+        topology_.Mark(operation);
     }
 
     std::string Baseline(std::chrono::seconds timeout) {
@@ -1627,6 +1644,7 @@ public:
     }
 
     void Close(std::chrono::seconds timeout) {
+        topology_.Freeze();
         if (worker_selection_) worker_selection_->Invalidate();
         if (!claimed_) return;
         std::optional<TransportError> pending_error;
@@ -2827,13 +2845,24 @@ private:
         return std::vector<ULONG>(inspected.begin(), inspected.end());
     }
 
+    // Worker preview diagnostics of one WaitForSourceIds call.
+    struct SourceIdWaitTrace {
+        // Size of the last Children() result, before module_sources_ is merged in.
+        std::uint32_t last_children{};
+    };
+
+    // `trace` (worker preview selection only) also counts every Pump into the
+    // topology counters' inventory-wait phase. Other callers pass nothing.
     std::vector<ULONG> WaitForSourceIds(
         std::chrono::steady_clock::time_point deadline,
-        std::string_view category) {
+        std::string_view category,
+        SourceIdWaitTrace* trace = nullptr) {
         std::vector<ULONG> ids;
         while (std::chrono::steady_clock::now() < deadline) {
+            if (trace) topology_.CountInventoryPump();
             Pump(module_, category);
             ids = Children(module_, deadline, category);
+            if (trace) trace->last_children = experimental::SaturatingCount(ids.size());
             ids.insert(ids.end(), module_sources_.begin(), module_sources_.end());
             std::sort(ids.begin(), ids.end());
             ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
@@ -3105,6 +3134,12 @@ private:
         auto* self = reinterpret_cast<Impl*>(reference);
         if (self == nullptr) return;
         const ULONG id = static_cast<ULONG>(data);
+        if (event == kNkMAIDEvent_AddChild || event == kNkMAIDEvent_RemoveChild) {
+            // Counting only; allocation-free and noexcept. The owning-thread
+            // comparison detects a broken delivery-thread assumption once.
+            self->topology_.Observe(event == kNkMAIDEvent_AddChild, static_cast<std::uint32_t>(id),
+                std::chrono::steady_clock::now(), GetCurrentThreadId() == self->topology_owner_thread_);
+        }
         if (self->worker_selection_ &&
             (event == kNkMAIDEvent_AddChild || event == kNkMAIDEvent_RemoveChild))
             self->worker_selection_->ObserveTopology(event == kNkMAIDEvent_AddChild, id);
@@ -3193,6 +3228,10 @@ private:
     bool live_view_session_{false};
     bool single_worker_preview_{false};
     std::unique_ptr<WorkerPreviewSelection> worker_selection_;
+    // Worker preview topology diagnostics (see WorkerTopologyCounters). Written
+    // from ModuleEventProc without a lock, like module_sources_.
+    experimental::WorkerTopologyCounters topology_;
+    DWORD topology_owner_thread_{0};
     bool live_view_started_{false};
     bool live_view_stop_attempted_{false};
     bool capture_complete_{false};
@@ -3268,6 +3307,12 @@ void NikonSdkTransport::SuspendSelectedWorkerPreview(std::chrono::seconds timeou
 }
 void NikonSdkTransport::ResumeSelectedWorkerPreview(std::string_view candidate, std::chrono::seconds timeout) {
     impl_->ResumeSelectedWorkerPreview(candidate, timeout);
+}
+experimental::PreviewTopologyDiag NikonSdkTransport::WorkerTopologyDiagnostics() const noexcept {
+    return impl_->WorkerTopologyDiagnostics();
+}
+void NikonSdkTransport::MarkWorkerTopologyOperation(experimental::PreviewTopologyOperation operation) noexcept {
+    impl_->MarkWorkerTopologyOperation(operation);
 }
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds timeout) {
     impl_->StartSingleWorkerLiveView(timeout);
@@ -3395,6 +3440,9 @@ void NikonSdkTransport::OpenWorkerPreviewCandidate(std::string_view, std::chrono
 void NikonSdkTransport::StartSelectedWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::SuspendSelectedWorkerPreview(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::ResumeSelectedWorkerPreview(std::string_view, std::chrono::seconds) { ThrowGated(); }
+// Called by the dispatcher on every command, so these never throw: no SDK, no counters.
+experimental::PreviewTopologyDiag NikonSdkTransport::WorkerTopologyDiagnostics() const noexcept { return {}; }
+void NikonSdkTransport::MarkWorkerTopologyOperation(experimental::PreviewTopologyOperation) noexcept {}
 void NikonSdkTransport::StartSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::ValidateSingleWorkerLiveView(std::chrono::seconds) { ThrowGated(); }
 void NikonSdkTransport::StartLiveView(std::chrono::seconds) { ThrowGated(); }

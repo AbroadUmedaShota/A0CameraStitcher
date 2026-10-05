@@ -3,6 +3,7 @@
 #include "a0/phase0/dual_binding_camera_agent.hpp"
 #include "a0/phase0/pc_direct_capture.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/preview_topology_diag.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -332,6 +333,13 @@ public:
     // Suspend requires checked Live View OFF and retains the module generation.
     void SuspendSelectedWorkerPreview(std::chrono::seconds timeout);
     void ResumeSelectedWorkerPreview(std::string_view candidate, std::chrono::seconds timeout);
+    // Worker preview diagnostics: module AddChild/RemoveChild counters taken
+    // since BeginWorkerPreviewSelection, frozen by Close()/EndDualSession() or
+    // by MarkWorkerTopologyOperation(close). Numbers only, never source IDs.
+    // Neither call issues an SDK command; the gated build returns all zeros
+    // and ignores the mark.
+    [[nodiscard]] experimental::PreviewTopologyDiag WorkerTopologyDiagnostics() const noexcept;
+    void MarkWorkerTopologyOperation(experimental::PreviewTopologyOperation operation) noexcept;
     void StartLiveView(std::chrono::seconds timeout) override;
     [[nodiscard]] std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds timeout) override;
     void StopLiveView(std::chrono::seconds timeout) override;

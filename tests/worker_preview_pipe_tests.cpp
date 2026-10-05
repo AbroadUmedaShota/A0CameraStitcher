@@ -35,7 +35,7 @@ void RunCase(HANDLE parent, const PipeCase& c) {
     Require(GetNamedPipeServerProcessId(pipe.value, &server) && server == GetProcessId(child.value),
             "server is the spawned child");
     if (c.delay_ms) Sleep(c.delay_ms);
-    const std::string request = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"epoch\",\"capability\":\"" +
+    const std::string request = "{\"schema\":\"a0.preview-worker.v2\",\"epoch\":\"epoch\",\"capability\":\"" +
         std::string(c.valid_capability ? "capability" : "wrong") +
         "\",\"sequence\":1,\"operation\":\"" + c.operation + "\",\"candidate\":\"\"}";
     Require(WriteMessage(pipe.value, request), "request delivered");
@@ -45,6 +45,8 @@ void RunCase(HANDLE parent, const PipeCase& c) {
     Check(parsed.status == c.status && parsed.close_receipt.has_value() && parsed.close_receipt->Complete(),
           std::string(c.name) + ": bound IPC reply status and reported receipt");
     Check(parsed.error_category == c.category, std::string(c.name) + ": failure category survives validation");
+    // The gated stub transport has no counters: every v2 reply carries an all-zero diag.
+    Check(parsed.topology == PreviewTopologyDiag{}, std::string(c.name) + ": v2 reply carries an all-zero diag");
     unsigned char ack = 0x06;
     Require(Io(pipe.value, &ack, 1, true), "delivery acknowledgement");
     CloseHandle(pipe.value); // No further command: the worker must end on its own.

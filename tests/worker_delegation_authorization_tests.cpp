@@ -120,8 +120,10 @@ Handle SpawnValidateChild(const fs::path &executable, HANDLE inherited_parent, s
     return Handle(created.hProcess);
 }
 
+// `body`, when not empty, replaces the forged bootstrap JSON; the packet length
+// always matches the body.
 Handle SpawnForgedWorker(const fs::path &worker, HANDLE inherited_parent, std::string_view lease_name,
-                         const fs::path &root) {
+                         const fs::path &root, std::string_view body = {}) {
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     HANDLE reader{}, writer{};
     if (!CreatePipe(&reader, &writer, &security, 0) || !SetHandleInformation(writer, HANDLE_FLAG_INHERIT, 0))
@@ -140,7 +142,8 @@ Handle SpawnForgedWorker(const fs::path &worker, HANDLE inherited_parent, std::s
     // The epoch is intentionally malformed; every other field, including both
     // lifetimes, is well formed. The worker must reject before it constructs
     // the stub transport, regardless of the valid parent handle.
-    const std::string wire = "{\"pipe\":\"A0.Poc.Forged\",\"epoch\":\"not-an-epoch\",\"capability\":\"x\",\"lifetimeMs\":1000,\"servingMs\":2000,\"leaseName\":\"" +
+    const std::string wire = !body.empty() ? std::string(body) :
+        "{\"pipe\":\"A0.Poc.Forged\",\"epoch\":\"not-an-epoch\",\"capability\":\"x\",\"lifetimeMs\":1000,\"servingMs\":2000,\"leaseName\":\"" +
         JsonEscape(lease_name) + "\",\"testMarkerRoot\":\"" + JsonEscape(Utf8(root)) + "\"}";
     const std::uint32_t size = static_cast<std::uint32_t>(wire.size());
     DWORD written{};
@@ -187,6 +190,14 @@ int main(int argc, char **argv) {
             auto parent_forged = DuplicateParentForChild();
             auto forged_worker = SpawnForgedWorker(worker, parent_forged.value, lease_name, root);
             Check(WaitExited(forged_worker.value, 2), "worker main rejects forged bootstrap before SDK transport");
+
+            // A packet of the right length whose JSON is broken: the parser
+            // throws inside main, which is exit 4 (exception before any
+            // dispatcher, SDK untouched), not the explicit-rejection exit 2.
+            auto parent_broken = DuplicateParentForChild();
+            auto broken_worker = SpawnForgedWorker(worker, parent_broken.value, lease_name, root,
+                                                   "{\"pipe\":\"A0.Poc.Broken\",\"epoch\":");
+            Check(WaitExited(broken_worker.value, 4), "worker main exits 4 for a broken bootstrap JSON before SDK transport");
 
             // All registered children ended normally. Their SDK-independent
             // close evidence is only a fixture cleanup proof for this test.

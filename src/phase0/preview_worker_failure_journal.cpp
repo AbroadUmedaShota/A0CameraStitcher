@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -83,7 +84,64 @@ void RecordRepeatedCloseLook(PreviewRunJournal& journal, const PreviewWorkerProc
     RecordProcessCheck(journal, check, "worker_exit_not_observed_at_repeated_close");
 }
 
+std::string_view TopologyBlockEvent(PreviewTopologyBlock block) {
+    switch (block) {
+    case PreviewTopologyBlock::enumerate: return "topo_block_enumerate";
+    case PreviewTopologyBlock::failure: return "topo_block_failure";
+    case PreviewTopologyBlock::close: return "topo_block_close";
+    }
+    throw std::invalid_argument("unknown topology block");
+}
+
+// The failure reply's topology: values when the reply was validated, otherwise
+// how far the failed exchange got.
+void RecordFailureTopology(PreviewRunJournal& journal, const std::optional<PreviewWorkerFailureObservation>& failure) {
+    if (!failure) {
+        RecordTopologyBlock(journal, PreviewTopologyBlock::failure, 2, std::nullopt, PreviewTopologyUnavailable::internal);
+        return;
+    }
+    const auto index = static_cast<std::uint64_t>(failure->worker_index < 2 ? failure->worker_index : 2);
+    const auto reason = failure->response_validated ? PreviewTopologyUnavailable::internal
+        : failure->response_received ? PreviewTopologyUnavailable::response_rejected
+        : failure->request_written ? PreviewTopologyUnavailable::response_missing
+        : PreviewTopologyUnavailable::request_not_written;
+    RecordTopologyBlock(journal, PreviewTopologyBlock::failure, index,
+                        failure->response_validated ? failure->topology : std::nullopt, reason);
+}
+
+// One worker's close reply topology; no close reply, not attempted or not
+// written in full all mean the request did not reach the worker.
+void RecordCloseTopology(PreviewRunJournal& journal, std::size_t worker, const PreviewWorkerExitObservation& exit) {
+    const auto& reply = exit.close_reply;
+    const auto reason = !reply || !reply->attempted || !reply->sent ? PreviewTopologyUnavailable::request_not_written
+        : reply->response_validated ? PreviewTopologyUnavailable::internal
+        : reply->response_received ? PreviewTopologyUnavailable::response_rejected
+        : PreviewTopologyUnavailable::response_missing;
+    const bool values = reply && reply->attempted && reply->sent && reply->response_validated;
+    RecordTopologyBlock(journal, PreviewTopologyBlock::close, static_cast<std::uint64_t>(worker),
+                        values ? reply->topology : std::nullopt, reason);
+}
+
 } // namespace
+
+void RecordTopologyBlock(PreviewRunJournal& journal, PreviewTopologyBlock block, std::uint64_t index,
+                         const std::optional<PreviewTopologyDiag>& topology, PreviewTopologyUnavailable reason) {
+    journal.Record(TopologyBlockEvent(block), index);
+    if (!topology) {
+        journal.Record("topo_unavailable", static_cast<std::uint64_t>(reason));
+        return;
+    }
+    for (std::size_t field = 0; field < kPreviewTopologyDiagFieldCount; ++field)
+        journal.Record(kPreviewTopologyDiagFields[field].journal_event, topology->values[field]);
+}
+
+void RecordEnumerateOutcome(PreviewRunJournal& journal, std::size_t worker, std::uint64_t candidate_count,
+                            const std::optional<PreviewTopologyDiag>& topology) {
+    if (worker > 1) throw std::invalid_argument("enumerate outcome worker must be 0 or 1");
+    journal.Record(worker == 0 ? "worker_a_enumerated" : "worker_b_enumerated", candidate_count);
+    RecordTopologyBlock(journal, PreviewTopologyBlock::enumerate, static_cast<std::uint64_t>(worker), topology,
+                        PreviewTopologyUnavailable::internal);
+}
 
 bool IsKnownOperation(std::string_view operation) noexcept {
     return std::find(std::begin(kPreviewWorkerJournalOperations), std::end(kPreviewWorkerJournalOperations),
@@ -205,6 +263,21 @@ bool RecordCloseOutcomeToJournal(PreviewRunJournal& journal, bool closed,
     for (std::size_t worker = 0; worker < exits.size(); ++worker) {
         try {
             RecordWorkerExitObservationToJournal(journal, worker, exits[worker]);
+        } catch (...) {
+            complete = false;
+        }
+    }
+    // Topology blocks after both exit blocks (diagnostic numbers only).
+    if (!closed) {
+        try {
+            RecordFailureTopology(journal, failure);
+        } catch (...) {
+            complete = false;
+        }
+    }
+    for (std::size_t worker = 0; worker < exits.size(); ++worker) {
+        try {
+            RecordCloseTopology(journal, worker, exits[worker]);
         } catch (...) {
             complete = false;
         }

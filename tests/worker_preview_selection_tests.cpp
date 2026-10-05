@@ -24,6 +24,7 @@ void Rejects(Action&& action, const char* category, const char* message) {
         Check(false, message);
     } catch (const TransportError& error) {
         Check(error.Category() == category, message);
+        if (error.Category() != category) std::cerr << "  actual: " << error.Category() << '\n';
     }
 }
 
@@ -52,21 +53,62 @@ int main() {
             "worker_candidate_unavailable", "stale generation token is rejected");
 
     auto changed = Pair();
-    Rejects([&] { changed.CheckInventory({71, 97}); }, "worker_selection_invalidated",
-            "inventory substitution invalidates selection");
+    Rejects([&] { changed.CheckInventory({71, 97}); }, "worker_selection_inventory_changed",
+            "inventory substitution invalidates selection as inventory_changed");
     Rejects([&] { changed.CheckInventory({71, 83}); }, "worker_selection_invalidated",
-            "invalidated selection cannot recover after inventory returns");
+            "a rejected selection cannot recover after inventory returns and is not reclassified");
 
     auto removed_readded = Pair();
     removed_readded.ObserveTopology(false, 71);
     removed_readded.ObserveTopology(true, 71);
     Rejects([&] { removed_readded.OpenSelected(removed_readded.Tokens().front(), {71, 83}, [](std::uint32_t) {}); },
-            "worker_selection_invalidated", "remove/re-add cannot reuse selection");
+            "worker_selection_topology_event", "remove/re-add cannot reuse selection");
 
     auto duplicate_add = Pair();
     duplicate_add.ObserveTopology(true, 71);
     Rejects([&] { duplicate_add.OpenSelected(duplicate_add.Tokens().front(), {71, 83}, [](std::uint32_t) {}); },
-            "worker_selection_invalidated", "duplicate existing Add invalidates selection");
+            "worker_selection_topology_event", "duplicate existing Add invalidates selection");
+
+    // A changed set wins over an earlier topology event.
+    auto event_then_changed = Pair();
+    event_then_changed.ObserveTopology(true, 71);
+    Rejects([&] { event_then_changed.CheckInventory({71, 97}); }, "worker_selection_inventory_changed",
+            "set mismatch takes precedence over a topology event");
+    Rejects([&] { event_then_changed.CheckInventory({71, 83}); }, "worker_selection_invalidated",
+            "after that rejection the topology event is not reported again");
+
+    // An external invalidation followed by a topology event stays an external one.
+    auto external_first = Pair();
+    external_first.Invalidate();
+    external_first.ObserveTopology(true, 71);
+    Rejects([&] { external_first.CheckInventory({71, 83}); }, "worker_selection_invalidated",
+            "the first invalidation cause wins");
+
+    // Valid() and SameInventory() only read.
+    auto probe = Pair();
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        Check(probe.Valid() && probe.SameInventory({83, 71}) && !probe.SameInventory({71, 97}) &&
+              !probe.SameInventory({71}), "Valid/SameInventory report the state");
+    }
+    probe.CheckInventory({71, 83});
+    std::uint32_t probe_opened{};
+    probe.OpenSelected(probe.Tokens().front(), {83, 71}, [&](std::uint32_t id) { probe_opened = id; });
+    Check(probe.Opened() && probe_opened == 71, "Valid/SameInventory change no state: the selection still opens");
+    probe.ObserveTopology(false, 83);
+    Check(!probe.Valid() && probe.SameInventory({71, 83}), "Valid follows invalidation; SameInventory ignores it");
+
+    // Inside Suspend's close() and Resume's open(), an event keeps the
+    // pre-split category: those checks are not the inventory check.
+    auto close_event = Pair();
+    close_event.OpenSelected(close_event.Tokens().front(), {71, 83}, [](auto) {});
+    Rejects([&] { close_event.Suspend({71, 83}, [&] { close_event.ObserveTopology(true, 71); }); },
+            "worker_selection_invalidated", "an event inside Suspend close() stays worker_selection_invalidated");
+    auto open_event = Pair();
+    const auto open_token = open_event.Tokens().front();
+    open_event.OpenSelected(open_token, {71, 83}, [](auto) {});
+    open_event.Suspend({71, 83}, [] {});
+    Rejects([&] { open_event.Resume(open_token, {71, 83}, [&](auto) { open_event.ObserveTopology(false, 83); }); },
+            "worker_selection_invalidated", "an event inside Resume open() stays worker_selection_invalidated");
 
     auto exceptional = Pair();
     unsigned callback_count{};
@@ -116,7 +158,7 @@ int main() {
             }
             if (fault == 3) {
                 Rejects([&] { s.Resume(token, {71,97}, [](auto) {}); },
-                        "worker_selection_invalidated", "changed inventory prevents resume");
+                        "worker_selection_inventory_changed", "changed inventory prevents resume");
             }
             if (fault == 4) {
                 Rejects([&] { s.Resume(token, {71,83}, [](auto) { throw TransportError("injected", "open"); }); },
@@ -124,8 +166,11 @@ int main() {
             }
         }
         unsigned retries{};
+        // fault 1 is the only topology event; every other fault invalidated
+        // the selection some other way, or was already rejected.
         Rejects([&] { s.Resume(token, {71,83}, [&](auto) { ++retries; }); },
-                "worker_selection_invalidated", "failed handoff cannot recover");
+                fault == 1 ? "worker_selection_topology_event" : "worker_selection_invalidated",
+                "failed handoff cannot recover");
         Check(retries == 0 && !s.Opened(), "terminal selection never calls SDK again");
     }
 

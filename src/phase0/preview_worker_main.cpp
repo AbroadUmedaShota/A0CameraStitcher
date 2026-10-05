@@ -9,6 +9,13 @@
 using namespace a0::phase0;
 namespace json = a0::common::protocol_json;
 namespace {
+// Exit codes: 0 explicit close completed; 2 explicit argument, bootstrap or
+// delegation rejection; 3 the dispatcher ran but did not complete (it has
+// already tried to close the SDK session); 4 an exception reached main before
+// the pipe host ran a dispatcher (bootstrap read or JSON, handle arguments,
+// delegation check, transport construction, host preconditions), so the SDK
+// was never used. No exit at all: safe_to_exit was false (held for recovery).
+constexpr int kWorkerMainExceptionExitCode = 4;
 struct Failure {
     [[noreturn]] static void Fail(std::string_view a, std::string_view b) { throw TransportError(std::string(a), std::string(b)); }
 };
@@ -105,5 +112,5 @@ int main(int argc, char** argv) {
         }
         CloseHandle(parent);
         return result.ipc_exit_code;
-    } catch (...) { return 3; }
+    } catch (...) { return kWorkerMainExceptionExitCode; }
 }

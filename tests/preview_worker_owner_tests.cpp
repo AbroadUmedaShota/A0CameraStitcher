@@ -4,6 +4,8 @@
 #include "a0/phase0/preview_run_journal.hpp"
 #include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/preview_topology_diag.hpp"
+#include "a0/phase0/worker_topology_counters.hpp"
 #include "a0/common/protocol_json.hpp"
 #include <Windows.h>
 #include <algorithm>
@@ -42,6 +44,37 @@ struct OwnedHandle {
 struct JsonFailure {
     [[noreturn]] static void Fail(std::string_view, std::string_view) { throw std::runtime_error("fake worker JSON rejected"); }
 };
+constexpr std::string_view kSchema = "a0.preview-worker.v2";
+// A reply "diag" object for the fake workers: the 18 table keys, value
+// `base + index` for each, and one key left out when `skip` names it.
+std::string DiagJson(std::uint32_t base = 0, std::size_t skip = kPreviewTopologyDiagFieldCount) {
+    std::string result = "{";
+    for (std::size_t index = 0; index < kPreviewTopologyDiagFieldCount; ++index) {
+        if (index == skip) continue;
+        if (result.size() > 1) result += ',';
+        result += "\"" + std::string(kPreviewTopologyDiagFields[index].json_key) + "\":" +
+            std::to_string(base + static_cast<std::uint32_t>(index));
+    }
+    return result + "}";
+}
+// The PreviewTopologyDiag that DiagJson(base) encodes.
+PreviewTopologyDiag DiagValues(std::uint32_t base) {
+    PreviewTopologyDiag diag;
+    for (std::size_t index = 0; index < kPreviewTopologyDiagFieldCount; ++index)
+        diag.values[index] = base + static_cast<std::uint32_t>(index);
+    return diag;
+}
+// Fake worker diag bases: enumerate replies, failing replies, close replies.
+constexpr std::uint32_t kEnumerateDiagBase = 300;
+constexpr std::uint32_t kFailureDiagBase = 100;
+constexpr std::uint32_t kCloseDiagBase = 200;
+// A bound v2 reply as the real dispatcher writes it.
+std::string FakeReply(const std::string& epoch, std::uint64_t sequence, std::string_view status, std::string_view payload,
+                      const std::string& diag) {
+    return "{\"schema\":\"" + std::string(kSchema) + "\",\"epoch\":\"" + epoch + "\",\"workerPid\":" +
+        std::to_string(GetCurrentProcessId()) + ",\"sequence\":" + std::to_string(sequence) + ",\"status\":\"" +
+        std::string(status) + "\",\"payload\":" + std::string(payload) + ",\"diag\":" + diag + "}";
+}
 bool ReadExact(HANDLE pipe, void* buffer, DWORD length) {
     DWORD offset{};
     while (offset < length) {
@@ -89,7 +122,7 @@ int StagedFailureWorker(HANDLE pipe, const std::string& epoch, const std::string
         const auto& request_epoch = json::RequireFieldWith<JsonFailure>(request, "epoch", json::JsonKind::string).string;
         const auto& request_capability = json::RequireFieldWith<JsonFailure>(request, "capability", json::JsonKind::string).string;
         const auto& request_sequence = json::RequireFieldWith<JsonFailure>(request, "sequence", json::JsonKind::number).string;
-        if (request_schema != "a0.preview-worker.v1" || request_epoch != epoch || request_capability != capability) return 4;
+        if (request_schema != kSchema || request_epoch != epoch || request_capability != capability) return 4;
         ++sequence;
         if (request_sequence != std::to_string(sequence)) return 4;
         const auto& operation = json::RequireFieldWith<JsonFailure>(request, "operation", json::JsonKind::string).string;
@@ -102,29 +135,20 @@ int StagedFailureWorker(HANDLE pipe, const std::string& epoch, const std::string
         };
         if (operation == "close") {
             const auto receipt = R"({"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true})";
-            const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
-                "\",\"workerPid\":" + std::to_string(GetCurrentProcessId()) +
-                ",\"sequence\":" + std::to_string(sequence) + ",\"status\":\"closed\",\"payload\":" + receipt + "}";
-            return respond(response) ? 0 : 5;
+            return respond(FakeReply(epoch, sequence, "closed", receipt, DiagJson(kCloseDiagBase))) ? 0 : 5;
         }
         if (!enumerated) {
             if (operation != "enumerate" || sequence != 1) return 4;
             enumerated = true;
-            const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
-                "\",\"workerPid\":" + std::to_string(GetCurrentProcessId()) +
-                ",\"sequence\":" + std::to_string(sequence) +
-                ",\"status\":\"ok\",\"payload\":[\"staged-cand-0\",\"staged-cand-1\"]}";
-            if (!respond(response)) return 5;
+            if (!respond(FakeReply(epoch, sequence, "ok", R"(["staged-cand-0","staged-cand-1"])",
+                                   DiagJson(kEnumerateDiagBase)))) return 5;
             if (!ReconnectPipe(pipe)) return 2;
             continue;
         }
         if (operation != "select" && operation != "start" && operation != "frame") return 4;
         const bool should_fail = operation == fail_at;
         if (!should_fail) {
-            const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
-                "\",\"workerPid\":" + std::to_string(GetCurrentProcessId()) +
-                ",\"sequence\":" + std::to_string(sequence) + ",\"status\":\"ok\",\"payload\":null}";
-            if (!respond(response)) return 5;
+            if (!respond(FakeReply(epoch, sequence, "ok", "null", DiagJson(kEnumerateDiagBase)))) return 5;
             if (!ReconnectPipe(pipe)) return 2;
             continue;
         }
@@ -135,11 +159,8 @@ int StagedFailureWorker(HANDLE pipe, const std::string& epoch, const std::string
         const std::string_view category = operation == "select" ? "open_failed" :
             operation == "start" ? "live_view_start_failed" : "live_view_frame_failed";
         const auto receipt = R"({"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true})";
-        const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
-            "\",\"workerPid\":" + std::to_string(GetCurrentProcessId()) +
-            ",\"sequence\":" + std::to_string(sequence) +
-            ",\"status\":\"failed\",\"payload\":{\"error\":\"" + std::string(category) + "\",\"close\":" + receipt + "}}";
-        return respond(response) ? 3 : 5;
+        const auto payload = "{\"error\":\"" + std::string(category) + "\",\"close\":" + receipt + "}";
+        return respond(FakeReply(epoch, sequence, "failed", payload, DiagJson(kFailureDiagBase))) ? 3 : 5;
     }
 }
 // "late" fixture: Close() closes worker 0 and waits for it before sending close
@@ -298,22 +319,27 @@ struct FakeSession {
         const auto field = [&](const char* key, json::JsonKind kind) -> const std::string& {
             return json::RequireFieldWith<JsonFailure>(request, key, kind).string;
         };
-        if (field("schema", json::JsonKind::string) != "a0.preview-worker.v1" ||
+        if (field("schema", json::JsonKind::string) != kSchema ||
             field("epoch", json::JsonKind::string) != epoch || field("capability", json::JsonKind::string) != capability ||
             field("sequence", json::JsonKind::number) != std::to_string(sequence + 1)) return std::nullopt;
         ++sequence;
         return field("operation", json::JsonKind::string);
     }
     // Writes the reply for the current sequence, then waits for the ACK byte.
-    bool Respond(std::string_view status, std::string_view payload, DWORD timeout_ms) {
-        const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch + "\",\"workerPid\":" +
-            std::to_string(GetCurrentProcessId()) + ",\"sequence\":" + std::to_string(sequence) + ",\"status\":\"" +
-            std::string(status) + "\",\"payload\":" + std::string(payload) + "}";
+    bool Respond(std::string_view status, std::string_view payload, DWORD timeout_ms,
+                 const std::string& diag = DiagJson(kCloseDiagBase)) {
+        return Send(status, payload, timeout_ms, diag) && ReceivedAck(timeout_ms);
+    }
+    // Writes the reply only.
+    bool Send(std::string_view status, std::string_view payload, DWORD timeout_ms, const std::string& diag) {
+        const auto response = FakeReply(epoch, sequence, status, payload, diag);
         const auto length = static_cast<std::uint32_t>(response.size());
+        return server.Write(&length, sizeof(length), timeout_ms) && server.Write(response.data(), length, timeout_ms);
+    }
+    // True only when the ACK byte arrives within `timeout_ms`.
+    bool ReceivedAck(DWORD timeout_ms) {
         unsigned char ack{};
-        return server.Write(&length, sizeof(length), timeout_ms) &&
-            server.Write(response.data(), length, timeout_ms) &&
-            server.Read(&ack, 1, timeout_ms) && ack == 0x06;
+        return server.Read(&ack, 1, timeout_ms) && ack == 0x06;
     }
 };
 // Close is sent to worker 0 and answered before worker 1 receives its close,
@@ -330,7 +356,7 @@ bool ClaimFirstClose(const fs::path& base, std::string_view scenario) {
 bool IsScriptedScenario(std::string_view scenario) {
     return scenario == "slowstart" || scenario == "stuckstart" || scenario == "lingerclosed" ||
         scenario == "quickclosed" || scenario == "silentclose" || scenario == "overlap" || scenario == "quarantined" ||
-        scenario == "slowenumerate" || scenario == "cappedwindow";
+        scenario == "slowenumerate" || scenario == "cappedwindow" || scenario == "diagselect";
 }
 // cappedwindow: the test writes the tick at which worker 1 answers close, as a
 // decimal GetTickCount64 value, before it calls Close(). Test-only file next to
@@ -362,6 +388,10 @@ std::optional<ULONGLONG> ReadAnswerTick(const fs::path& base, std::string_view s
 //   cappedwindow worker 0: `closed` at once, then alive while listening until
 //                2 s past the answer tick; exit 0, or 6 on another command.
 //                worker 1: `closed` at the answer tick; exit 0
+//   diagselect   worker 0: enumerate ok, then select answered `ok` with a diag
+//                missing one key (17 keys), then waits up to 3 s for an ACK
+//                byte (exit 5 if one arrives) and listens 1 s for any further
+//                command (exit 6); otherwise exit 3
 // Every other worker answers close with `closed` and exits 0.
 int ScriptedFakeWorker(const std::wstring& path, const std::string& epoch, const std::string& capability,
                        const std::string& scenario, const fs::path& base) {
@@ -377,6 +407,15 @@ int ScriptedFakeWorker(const std::wstring& path, const std::string& epoch, const
         server.Drop();
         return server.Accept(kIo);
     };
+    if (*operation == "enumerate" && scenario == "diagselect") {
+        if (!session.Respond("ok", R"(["scripted-cand-0","scripted-cand-1"])", kIo) || !reconnect()) return 5;
+        operation = session.Receive(kIo);
+        if (operation != "select") return 4;
+        if (!session.Send("ok", "null", kIo, DiagJson(kFailureDiagBase, 7))) return 5;
+        if (session.ReceivedAck(3000)) return 5; // The parent must never ACK a rejected reply.
+        server.Drop();
+        return server.Accept(1000) ? 6 : 3;
+    }
     if (*operation == "enumerate" && scenario == "slowenumerate") {
         Sleep(SlowEnumerateDelay());
         if (!session.Respond("ok", R"(["scripted-cand-0","scripted-cand-1"])", kIo) || !reconnect()) return 5;
@@ -417,7 +456,7 @@ int ScriptedFakeWorker(const std::wstring& path, const std::string& epoch, const
         return session.Respond("closed", kSafeReceipt, kIo) ? 0 : 5;
     }
     if (!first || scenario == "quickclosed" || scenario == "slowstart" || scenario == "stuckstart" ||
-        scenario == "slowenumerate") {
+        scenario == "slowenumerate" || scenario == "diagselect") {
         if (scenario == "overlap") Sleep(OverlapReplyDelay());
         return session.Respond("closed", kSafeReceipt, kIo) ? 0 : 5;
     }
@@ -491,7 +530,7 @@ int FakeReplyWorker(char** argv) {
     const auto& request_capability = json::RequireFieldWith<JsonFailure>(request, "capability", json::JsonKind::string).string;
     const auto& request_sequence = json::RequireFieldWith<JsonFailure>(request, "sequence", json::JsonKind::number).string;
     if (request.kind != json::JsonKind::object || request.object.size() != 6 ||
-        request_schema != "a0.preview-worker.v1" || request_epoch != epoch ||
+        request_schema != kSchema || request_epoch != epoch ||
         request_capability != capability || request_sequence != "1") return 4;
     const auto& operation = json::RequireFieldWith<JsonFailure>(request, "operation", json::JsonKind::string).string;
     const bool failing = operation == "enumerate";
@@ -502,11 +541,10 @@ int FakeReplyWorker(char** argv) {
     if (!failing && root.filename() == "late" && !ClaimFirstClose(root.parent_path())) return 3;
     const auto receipt = R"({"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true})";
     const auto sequence = root.filename() == "invalid" && failing ? 2 : 1;
-    const auto response = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
-        "\",\"workerPid\":" + std::to_string(GetCurrentProcessId()) +
-        ",\"sequence\":" + std::to_string(sequence) +
-        (failing ? ",\"status\":\"failed\",\"payload\":{\"error\":\"injected_select_failure\",\"close\":" +
-                   std::string(receipt) + "}}" : std::string(",\"status\":\"closed\",\"payload\":") + receipt + "}");
+    const auto response = failing
+        ? FakeReply(epoch, sequence, "failed", "{\"error\":\"injected_select_failure\",\"close\":" + std::string(receipt) + "}",
+                    DiagJson(kFailureDiagBase))
+        : FakeReply(epoch, sequence, "closed", receipt, DiagJson(kCloseDiagBase));
     const auto response_length = static_cast<std::uint32_t>(response.size());
     if (!WriteExact(pipe.value, &response_length, sizeof(response_length)) ||
         !WriteExact(pipe.value, response.data(), response_length)) return 3;
@@ -544,12 +582,14 @@ int ReplyContract(const fs::path& executable, const fs::path& temporary, bool ac
                       "UI diagnostic string retains first command and worker");
                 if (std::string_view(scenario) == "failed")
                     Check(failure->category == "injected_select_failure" && failure->response_validated &&
-                          failure->ack_write_completed && failure->reported_close && failure->reported_close->Complete(),
-                          "bound failed reply carries category, reported close and local ACK write");
+                          failure->ack_write_completed && failure->reported_close && failure->reported_close->Complete() &&
+                          failure->topology == DiagValues(kFailureDiagBase),
+                          "bound failed reply carries category, reported close, diag and local ACK write");
                 else if (std::string_view(scenario) == "invalid")
                     Check(failure->category == "worker_reply_invalid" && failure->response_received &&
-                          !failure->response_validated && !failure->ack_write_completed && !failure->reported_close,
-                          "wrong sequence is not ACKed or credited as a close receipt");
+                          !failure->response_validated && !failure->ack_write_completed && !failure->reported_close &&
+                          !failure->topology,
+                          "wrong sequence is not ACKed or credited as a close receipt or diag");
                 else if (std::string_view(scenario) == "missing")
                     Check(failure->category == "worker_ipc_unconfirmed" && !failure->response_received &&
                           !failure->ack_write_completed, "missing response leaves delivery unconfirmed");
@@ -781,7 +821,12 @@ int CategoryTable(const fs::path& temporary) {
         "worker_stop_in_progress", "licensed_adapter_unavailable",
         // T2: a command refused by the owner past its operation deadline.
         "owner_operation_deadline_expired",
+        // Topology diagnostics: the split of worker_selection_invalidated, which stays above.
+        "worker_selection_inventory_changed", "worker_selection_topology_event",
     };
+    Check(std::size(required) == 62, "reviewed set has 62 categories");
+    Check(IsKnownFailureCategory("worker_selection_invalidated"),
+          "the pre-split category stays readable for older journals");
     const auto table_begin = std::begin(kPreviewWorkerFailureCategories);
     const auto table_end = std::end(kPreviewWorkerFailureCategories);
     for (const auto category : required) {
@@ -1076,9 +1121,15 @@ int JournalVocabulary(const fs::path& temporary) {
         details_after_first = state.details_recorded;
         all_returned_true = RecordCloseOutcomeToJournal(journal, false, std::nullopt, exits, state) && all_returned_true;
         details_after_second = state.details_recorded;
+        // Topology blocks after both exit blocks: no failure observation (2,
+        // reason 0), worker 0's validated close reply without counters (reason
+        // 0, defense in depth), worker 1 without a close reply (reason 1).
+        const JournalEvents topo_lines{{"topo_block_failure", 2}, {"topo_unavailable", 0}, {"topo_block_close", 0},
+                                       {"topo_unavailable", 0}, {"topo_block_close", 1}, {"topo_unavailable", 1}};
         append({{"close_unconfirmed"}, {"failure_observation_missing"}});
         append(Concat(CleanExitBlock(0), ClosedReplyBlock()));
         append(held_lines);
+        append(topo_lines);
         append({{"close_unconfirmed"}});
         exits[1] = with_repeated(held, check(false, false, 0), 1);
         all_returned_true = RecordCloseOutcomeToJournal(journal, false, std::nullopt, exits, state) && all_returned_true;
@@ -1097,7 +1148,9 @@ int JournalVocabulary(const fs::path& temporary) {
         append({{"close_unconfirmed"}, {"failure_observation_missing"}});
         append(Concat(CleanExitBlock(0), ClosedReplyBlock()));
         append(held_lines);
-        append({{"worker_exit_recheck_at_repeated_close"}, {"worker_exit_code", 9}, {"close_unconfirmed"}});
+        append({{"worker_exit_recheck_at_repeated_close"}, {"worker_exit_code", 9}});
+        append(topo_lines);
+        append({{"close_unconfirmed"}});
         // Production close outcome, closed: verdict then exit blocks, no failure block.
         const std::array<PreviewWorkerExitObservation, 2> clean_exits{clean_exit, clean_exit};
         PreviewCloseJournalState closed_state;
@@ -1106,6 +1159,7 @@ int JournalVocabulary(const fs::path& temporary) {
         append({{"both_workers_close_verified"}});
         append(Concat(CleanExitBlock(0), ClosedReplyBlock()));
         append(Concat(CleanExitBlock(1), ClosedReplyBlock()));
+        append({{"topo_block_close", 0}, {"topo_unavailable", 0}, {"topo_block_close", 1}, {"topo_unavailable", 0}});
     }
     const auto events = ReadJournalEvents(journal_path);
     CheckEventsExactly(events, expected, "every recording branch writes its fixed lines in production order");
@@ -1196,6 +1250,21 @@ int ExitRecheck(const fs::path& executable, const fs::path& temporary) {
 }
 
 JournalEvents ClosedWorkerBlock(std::uint64_t worker) { return Concat(CleanExitBlock(worker), ClosedReplyBlock()); }
+// A topology block with values: the header, then the 18 counter lines in table order.
+JournalEvents TopoBlock(std::string_view header, std::uint64_t index, const PreviewTopologyDiag& diag) {
+    JournalEvents block{{std::string(header), index}};
+    for (std::size_t field = 0; field < kPreviewTopologyDiagFieldCount; ++field)
+        block.push_back({std::string(kPreviewTopologyDiagFields[field].journal_event), diag.values[field]});
+    return block;
+}
+// A topology block without values: the header, then topo_unavailable(reason).
+JournalEvents TopoUnavailable(std::string_view header, std::uint64_t index, std::uint64_t reason) {
+    return {{std::string(header), index}, {"topo_unavailable", reason}};
+}
+std::size_t FindEvent(const JournalEvents& events, std::string_view name) {
+    const auto found = std::find_if(events.begin(), events.end(), [&](const JournalEvent& event) { return event.name == name; });
+    return static_cast<std::size_t>(found - events.begin());
+}
 
 // --journal-contract: journals what a real owner produced, through the same
 // RecordCloseOutcomeToJournal call preview_commissioning_main.cpp's CloseOnce
@@ -1242,8 +1311,16 @@ int JournalContract(const fs::path& executable, const fs::path& worker, const fs
                 "journal retains the failing worker's exit code 3 from the E_ok window after its safe failure receipt");
             CheckEventsExactly(WorkerBlock(events, 1), ClosedWorkerBlock(1),
                                "journal retains the paired worker's clean exit code and its close reply summary");
-            Check(!events.empty() && events.back().name == "worker_close_receipt_safe_to_exit",
-                  "worker 1's close reply summary is the last journal block");
+            // The run-05 shape: the failing reply's diag, no close sent to the
+            // failing worker, and the paired worker's close reply diag.
+            const auto topo = FindEvent(events, "topo_block_failure");
+            Check(topo > 0 && topo < events.size() && events[topo - 1].name == "worker_close_receipt_safe_to_exit",
+                  "worker 1's close reply summary is the last exit block, right before the topology blocks");
+            const auto topology = Concat(Concat(TopoBlock("topo_block_failure", 0, DiagValues(kFailureDiagBase)),
+                                                TopoUnavailable("topo_block_close", 0, 1)),
+                                         TopoBlock("topo_block_close", 1, DiagValues(kCloseDiagBase)));
+            CheckEventsAt(events, topo, topology, "topology blocks: failure diag, close not sent to worker 0, worker 1 close diag");
+            Check(topo + topology.size() == events.size(), "the topology blocks end the journal");
             Check(!ContainsSuspiciousValue(content), "journal contains no nonce/epoch/serial-shaped value");
         }
         if (!DeleteFileW(journal_path.c_str())) return 4;
@@ -1284,6 +1361,13 @@ int JournalContract(const fs::path& executable, const fs::path& worker, const fs
             Check(CountEvents(events, "close_unconfirmed") == 2 && CountEvents(events, "failure_worker_index") == 1 &&
                   CountEvents(events, "worker_exit_observation_index") == 2 && events.back().name == "close_unconfirmed",
                   "a repeated close records the verdict again but the failure and exit blocks once");
+            // Request written, no response: reason 2. Close never sent to worker 0: reason 1.
+            CheckEventsAt(events, FindEvent(events, "topo_block_failure"),
+                          Concat(Concat(TopoUnavailable("topo_block_failure", 0, 2), TopoUnavailable("topo_block_close", 0, 1)),
+                                 TopoBlock("topo_block_close", 1, DiagValues(kCloseDiagBase))),
+                          "case 4: topology blocks name the missing response and worker 1's close diag");
+            Check(CountEvents(events, "topo_block_failure") == 1 && CountEvents(events, "topo_block_close") == 2,
+                  "case 4: the repeated close writes no topology block again");
             Check(!ContainsSuspiciousValue(content), "journal contains no nonce/epoch/serial-shaped value");
         }
         if (!DeleteFileW(journal_path.c_str())) return 4;
@@ -1316,6 +1400,12 @@ int JournalContract(const fs::path& executable, const fs::path& worker, const fs
                 {{"worker_exit_observation_index", 1}, {"worker_exit_check_waited_for_worker_cleanup"},
                  {"worker_exit_code", 3}, {"worker_close_response_missing"}, {"worker_close_receipt_missing"}},
                 "case 4b: journal retains worker 1's exit code 3 and its unanswered close");
+            const auto topology = Concat(Concat(TopoUnavailable("topo_block_failure", 1, 2),
+                                                TopoBlock("topo_block_close", 0, DiagValues(kCloseDiagBase))),
+                                         TopoUnavailable("topo_block_close", 1, 2));
+            const auto topo = FindEvent(events, "topo_block_failure");
+            CheckEventsAt(events, topo, topology, "case 4b: worker 0's close diag, worker 1's close sent but unanswered");
+            Check(topo + topology.size() == events.size(), "case 4b: the topology blocks end the journal");
             Check(!ContainsSuspiciousValue(content), "journal contains no nonce/epoch/serial-shaped value");
         }
         if (!DeleteFileW(journal_path.c_str())) return 4;
@@ -1345,10 +1435,13 @@ int JournalContract(const fs::path& executable, const fs::path& worker, const fs
             Check(RecordCloseOutcomeToJournal(journal, closed, failure, exits, state), "close outcome fully journaled");
             const auto content = ReadWholeFile(journal_path);
             const auto events = ParseJournal(content);
-            const auto expected = Concat(Concat({{"run_started"}, {"both_workers_close_verified"}}, ClosedWorkerBlock(0)),
-                                         ClosedWorkerBlock(1));
+            // The real stub worker never enumerated: its frozen counters are all zero.
+            const auto expected = Concat(Concat(Concat(Concat({{"run_started"}, {"both_workers_close_verified"}},
+                                                              ClosedWorkerBlock(0)), ClosedWorkerBlock(1)),
+                                                TopoBlock("topo_block_close", 0, PreviewTopologyDiag{})),
+                                         TopoBlock("topo_block_close", 1, PreviewTopologyDiag{}));
             CheckEventsExactly(events, expected,
-                               "close verification precedes both workers' exit code 0 and close reply summaries, with no failure block");
+                               "close verification precedes both workers' exit code 0, close reply summaries and close diag, with no failure block");
             Check(!ContainsSuspiciousValue(content), "journal contains no nonce/epoch/serial-shaped value");
         }
         if (!DeleteFileW(journal_path.c_str())) return 4;
@@ -1737,6 +1830,427 @@ int CloseWindowsContract(const fs::path& executable, const fs::path& temporary) 
     return failures ? 1 : 0;
 }
 
+// ---- Topology diagnostics: reply envelope v2 and the topology journal blocks ----
+constexpr const char* kCompleteReceipt =
+    R"({"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true})";
+// A reply with schema/epoch/workerPid/sequence/status (workerPid 11, sequence 2),
+// then `payload` when given, then `diag` when given, then `extra` verbatim.
+std::string TableReply(std::string_view schema, std::string_view status, std::optional<std::string_view> payload,
+                       std::optional<std::string> diag, std::string_view extra = "") {
+    std::string reply = "{\"schema\":\"" + std::string(schema) +
+        "\",\"epoch\":\"epoch\",\"workerPid\":11,\"sequence\":2,\"status\":\"" + std::string(status) + "\"";
+    if (payload) reply += ",\"payload\":" + std::string(*payload);
+    if (diag) reply += ",\"diag\":" + *diag;
+    return reply + std::string(extra) + "}";
+}
+// A full diag whose last key (checkCurrentCount) carries `lexeme` verbatim.
+std::string DiagWithLast(std::string_view lexeme) {
+    auto diag = DiagJson(0, kPreviewTopologyDiagFieldCount - 1);
+    diag.pop_back();
+    return diag + ",\"checkCurrentCount\":" + std::string(lexeme) + "}";
+}
+bool ReplyRejected(const std::string& wire, std::string_view operation) {
+    try {
+        (void)ParsePreviewWorkerReply(wire, "epoch", 11, 2, operation);
+    } catch (const TransportError& error) {
+        return error.Category() == "worker_reply_invalid";
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
+std::optional<PreviewWorkerReply> ReplyAccepted(const std::string& wire, std::string_view operation) {
+    try {
+        return ParsePreviewWorkerReply(wire, "epoch", 11, 2, operation);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// --reply-diag-table (T-f): the parent's v2 rejection rules, one wire at a time.
+int ReplyDiagTable() {
+    constexpr std::string_view v1 = "a0.preview-worker.v1";
+    constexpr std::string_view v2 = "a0.preview-worker.v2";
+    const auto failed_payload = FailedPayload("open_failed", kCompleteReceipt);
+    struct Case { const char* name; std::string wire; std::string_view operation; };
+    std::vector<Case> rejected{
+        {"v1 envelope with 6 fields", TableReply(v1, "ok", "null", std::nullopt), "select"},
+        {"v1 envelope with diag (7 fields)", TableReply(v1, "ok", "null", DiagJson()), "select"},
+        {"v2 without diag", TableReply(v2, "ok", "null", std::nullopt), "select"},
+        {"v2 with 8 fields", TableReply(v2, "ok", "null", DiagJson(), ",\"extra\":0"), "select"},
+        {"v2 with 7 fields but no payload", TableReply(v2, "ok", std::nullopt, DiagJson(), ",\"extra\":null"), "select"},
+        {"diag array", TableReply(v2, "ok", "null", std::string("[]")), "select"},
+        {"diag string", TableReply(v2, "ok", "null", std::string("\"x\"")), "select"},
+        {"diag null", TableReply(v2, "ok", "null", std::string("null")), "select"},
+        {"diag number", TableReply(v2, "ok", "null", std::string("1")), "select"},
+        {"diag boolean", TableReply(v2, "ok", "null", std::string("true")), "select"},
+        {"diag 17 keys", TableReply(v2, "ok", "null", DiagJson(0, 5)), "select"},
+        {"diag 19 keys", TableReply(v2, "ok", "null", DiagJson().insert(1, "\"extraKey\":0,")), "select"},
+        {"diag key name differs", TableReply(v2, "ok", "null", "{\"openadd\":0," + DiagJson(0, 0).substr(1)), "select"},
+        {"diag duplicate key", TableReply(v2, "ok", "null", DiagJson().insert(1, "\"openRemove\":0,")), "select"},  // all 18 keys present plus one duplicate: rejected for the duplicate, not for a missing key
+    };
+    for (const char* lexeme : {"-1", "1.0", "1e3", "1E3", "4294967296", "18446744073709551616", "true", "\"1\"", "null",
+                               "{}", "01", "[]"}) {
+        rejected.push_back({lexeme, TableReply(v2, "ok", "null", DiagWithLast(lexeme)), "select"});
+    }
+    const struct { const char* status; std::string payload; std::string_view operation; } statuses[] = {
+        {"ok", "null", "select"},
+        {"failed", failed_payload, "select"},
+        {"closed", kCompleteReceipt, "close"},
+        {"quarantined", kCompleteReceipt, "close"},
+    };
+    for (const auto& status : statuses) {
+        rejected.push_back({status.status, TableReply(v2, status.status, status.payload, std::nullopt), status.operation});
+        // The same reply with a diag is accepted: only the missing diag rejected it.
+        const auto accepted = ReplyAccepted(TableReply(v2, status.status, status.payload, DiagJson(7)), status.operation);
+        Check(accepted && accepted->topology == DiagValues(7), "each status is accepted with a full diag");
+    }
+    for (const auto& c : rejected) {
+        const bool ok = ReplyRejected(c.wire, c.operation);
+        Check(ok, "T-f: reply rejected as worker_reply_invalid");
+        if (!ok) std::cerr << "  case: " << c.name << '\n';
+    }
+    // Accepted boundary values and key order.
+    const auto zero = ReplyAccepted(TableReply(v2, "ok", "null", DiagWithLast("0")), "select");
+    const auto maximum = ReplyAccepted(TableReply(v2, "ok", "null", DiagWithLast("4294967295")), "select");
+    Check(zero && zero->topology.Get(PreviewTopologyField::check_current_count) == 0 &&
+          maximum && maximum->topology.Get(PreviewTopologyField::check_current_count) == 4294967295U,
+          "T-f: 0 and 4294967295 are accepted");
+    std::string reversed = "{";
+    for (std::size_t index = kPreviewTopologyDiagFieldCount; index-- > 0;) {
+        if (reversed.size() > 1) reversed += ',';
+        reversed += "\"" + std::string(kPreviewTopologyDiagFields[index].json_key) + "\":" + std::to_string(40 + index);
+    }
+    reversed += "}";
+    const auto shuffled = ReplyAccepted(TableReply(v2, "ok", "null", reversed), "select");
+    Check(shuffled && shuffled->topology == DiagValues(40), "T-f: diag key order carries no meaning");
+    std::cout << "{\"mode\":\"stub-reply-diag-table\",\"rejectedCases\":" << rejected.size()
+              << ",\"failures\":" << failures << "}\n";
+    return failures ? 1 : 0;
+}
+
+// --reply-diag-contract (T-f): a real owner and a fake child that answers select
+// with a 17-key diag. The whole reply is rejected: no ACK, no close to that
+// child, the marker stays, and the journal says the reply was rejected.
+int ReplyDiagContract(const fs::path& executable, const fs::path& temporary) {
+    const auto base = temporary / (L"A0WorkerReplyDiag-" + std::to_wstring(GetCurrentProcessId()));
+    fs::create_directories(base);
+    // Nothing here waits for a scaled budget, so a wide operation deadline costs
+    // no time; it keeps a slow spawn under load from turning select into
+    // owner_operation_deadline_expired. 30 s + (47 s + 54 s) / 2 = 80.5 s <= 90 s <= 180 s / 2.
+    ScriptedOptions options;
+    options.commands = ScriptedCommands::preview;
+    PreviewWorkerTestTiming timing;
+    timing.operation_deadline = std::chrono::seconds(30);
+    timing.serving_lifetime = std::chrono::seconds(90);
+    timing.scale = {1, 2};
+    options.timing = timing;
+    ScriptedRun run;
+    if (const auto code = RunScripted(executable, base, "diagselect", options, run)) return code;
+    if (run.failure && run.failure->category != "worker_reply_invalid") // Fixed vocabulary and numbers only.
+        std::cerr << "  diagselect: constructMs=" << run.construct_ms << " commandMs=" << run.command_ms
+                  << " category=" << run.failure->category << " operation=" << run.failure->operation << "\n";
+    Check(run.command_rejected, "diagselect: the rejected select reply propagates out of Preview");
+    const auto& failure = run.failure;
+    Check(failure && failure->worker_index == 0 && failure->operation == "select" &&
+          failure->category == "worker_reply_invalid" && failure->request_written && failure->response_received &&
+          !failure->response_validated && !failure->ack_write_completed && !failure->reported_close && !failure->topology,
+          "diagselect: first failure is select / worker_reply_invalid, received but not validated, no ACK, no diag");
+    Check(!run.closed && !run.repeated, "diagselect: Close() is false both times");
+    Check(run.exits[0].close_reply && !run.exits[0].close_reply->attempted,
+          "diagselect: close is never sent to the child whose reply was rejected");
+    Check(run.exits[0].kind == PreviewWorkerExitCheckKind::waited_for_worker_cleanup,
+          "diagselect: worker 0 gets the E_fail window (no validated receipt)");
+    Check(run.codes[0] == 3, "diagselect: the child received no ACK byte and no further command");
+    Check(run.codes[1] == 0, "diagselect: the paired worker closes cleanly");
+    const auto topo = FindEvent(run.journal, "topo_block_failure");
+    CheckEventsAt(run.journal, topo, TopoUnavailable("topo_block_failure", 0, 3),
+                  "diagselect: journal has topo_block_failure(0) then topo_unavailable(3)");
+    Check(run.journal_complete, "diagselect: the close outcome is fully journaled");
+    Check(NextOwnerBlocked(base / "diagselect", ScriptedName("diagselect")), "diagselect: marker retained and next owner blocked");
+    if (const auto code = RemoveScriptedFixture(base, "diagselect", true)) return code;
+    Check(RemoveDirectoryW(base.c_str()), "reply diag fixture root removed");
+    std::cout << "{\"mode\":\"stub-reply-diag-contract\",\"failures\":" << failures << "}\n";
+    return failures ? 1 : 0;
+}
+
+fs::path TopologyJournalPath(const fs::path& temporary, std::string_view name) {
+    return temporary / (L"A0WorkerTopologyJournal-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                        std::wstring(name.begin(), name.end()) + L".jsonl");
+}
+// Lines written so far to an open topology journal, read through a separate handle.
+std::size_t ReadJournalEventsCount(const fs::path& temporary, std::string_view name) {
+    return ReadJournalEvents(TopologyJournalPath(temporary, name)).size();
+}
+// Writes through `write` into a fresh real PreviewRunJournal and reads it back.
+template <class Write>
+JournalEvents JournalOf(const fs::path& temporary, std::string_view name, Write&& write, std::string* text = nullptr) {
+    const auto path = TopologyJournalPath(temporary, name);
+    {
+        PreviewRunJournal journal(path);
+        write(journal);
+    }
+    const auto content = ReadWholeFile(path);
+    Check(!ContainsSuspiciousValue(content), "topology journal contains no nonce/epoch/serial-shaped value");
+    if (text) *text = content;
+    if (!DeleteFileW(path.c_str())) throw std::runtime_error("topology journal cleanup");
+    return ParseJournal(content);
+}
+PreviewWorkerProcessCheck Exited(std::uint32_t code) {
+    PreviewWorkerProcessCheck check;
+    check.exited = true;
+    check.code_available = true;
+    check.exit_code = code;
+    return check;
+}
+PreviewWorkerExitObservation ClosedExit(std::optional<PreviewTopologyDiag> topology) {
+    PreviewWorkerExitObservation exit;
+    exit.kind = PreviewWorkerExitCheckKind::waited_after_close_ack;
+    exit.at_close = Exited(0);
+    PreviewWorkerCloseReply reply;
+    reply.attempted = reply.sent = reply.response_received = reply.response_validated = reply.ack_write_completed = true;
+    reply.status = PreviewWorkerReplyStatus::closed;
+    reply.receipt = PreviewWorkerCloseReceipt{true, true, true, true, true};
+    reply.topology = topology;
+    exit.close_reply = reply;
+    return exit;
+}
+
+// --topology-journal (T-g): order and vocabulary of the topology blocks.
+int TopologyJournal(const fs::path& temporary) {
+    const auto d0 = DiagValues(1000), d1 = DiagValues(2000), failed = DiagValues(3000);
+    // g1: closed.
+    {
+        PreviewCloseJournalState state;
+        bool complete{};
+        const auto events = JournalOf(temporary, "g1", [&](PreviewRunJournal& journal) {
+            complete = RecordCloseOutcomeToJournal(journal, true, std::nullopt, {ClosedExit(d0), ClosedExit(d1)}, state);
+        });
+        CheckEventsExactly(events, Concat(Concat(Concat(Concat({{"both_workers_close_verified"}}, ClosedWorkerBlock(0)),
+                                                        ClosedWorkerBlock(1)), TopoBlock("topo_block_close", 0, d0)),
+                                          TopoBlock("topo_block_close", 1, d1)),
+                           "g1: closed verdict, both exit blocks, then each worker's close diag in table order");
+        Check(complete, "g1: every line written");
+    }
+    // g2: the run-05 shape.
+    PreviewWorkerFailureObservation select_failure;
+    select_failure.worker_index = 0;
+    select_failure.operation = "select";
+    select_failure.category = "worker_selection_topology_event";
+    select_failure.request_written = select_failure.response_received = select_failure.response_validated = true;
+    select_failure.ack_write_completed = true;
+    select_failure.response_status = PreviewWorkerReplyStatus::failed;
+    select_failure.reported_close = PreviewWorkerCloseReceipt{true, true, true, true, true};
+    select_failure.topology = failed;
+    PreviewWorkerExitObservation not_sent;
+    not_sent.kind = PreviewWorkerExitCheckKind::waited_after_failure_receipt;
+    not_sent.at_close = Exited(3);
+    not_sent.close_reply = PreviewWorkerCloseReply{};
+    {
+        PreviewCloseJournalState state;
+        const std::array<PreviewWorkerExitObservation, 2> exits{not_sent, ClosedExit(d1)};
+        std::size_t after_first{};
+        bool first_complete{}, second_complete{};
+        // One journal, two calls (as a retried CloseOnce would): g2 reads the
+        // first call's lines, g4 the second call's.
+        const auto repeated = JournalOf(temporary, "g2", [&](PreviewRunJournal& journal) {
+            first_complete = RecordCloseOutcomeToJournal(journal, false, select_failure, exits, state);
+            after_first = ReadJournalEventsCount(temporary, "g2");
+            second_complete = RecordCloseOutcomeToJournal(journal, false, select_failure, exits, state);
+        });
+        const JournalEvents events(repeated.begin(), repeated.begin() + static_cast<std::ptrdiff_t>(
+                                                         (std::min)(after_first, repeated.size())));
+        Check(first_complete && second_complete, "g2/g4: every line written");
+        const JournalEvents head{
+            {"close_unconfirmed"}, {"failure_worker_index", 0}, {"failure_operation_select"},
+            {"worker_selection_topology_event"}, {"worker_response_validated"}, {"worker_status_failed"},
+            {"worker_ack_write_completed"}, {"close_receipt_live_view_off", 1}, {"close_receipt_source_closed", 1},
+            {"close_receipt_module_closed", 1}, {"close_receipt_process_claim_released", 1}, {"close_receipt_safe_to_exit", 1},
+            {"worker_exit_observation_index", 0}, {"worker_exit_check_waited_after_failure_receipt"}, {"worker_exit_code", 3},
+            {"worker_close_not_sent"}};
+        auto expected = Concat(head, ClosedWorkerBlock(1));
+        expected = Concat(expected, TopoBlock("topo_block_failure", 0, failed));
+        expected = Concat(expected, TopoUnavailable("topo_block_close", 0, 1));
+        expected = Concat(expected, TopoBlock("topo_block_close", 1, d1));
+        CheckEventsExactly(events, expected, "g2: the run-05 shape matches design section 6.3 from close_unconfirmed on");
+        // g4: a repeated close outcome adds the verdict only, never a topo_ line.
+        const auto topo_lines = [](const JournalEvents& list) {
+            return std::count_if(list.begin(), list.end(),
+                                 [](const JournalEvent& event) { return event.name.rfind("topo_", 0) == 0; });
+        };
+        Check(repeated.size() == events.size() + 1 && repeated.back().name == "close_unconfirmed" &&
+              topo_lines(repeated) == topo_lines(events) && topo_lines(events) == 19 + 2 + 19,
+              "g4: the second RecordCloseOutcomeToJournal writes the verdict and no topo_ line");
+    }
+    // g3: the unavailable reasons.
+    const auto failure_reason = [&](const std::optional<PreviewWorkerFailureObservation>& failure, const char* name) {
+        PreviewCloseJournalState state;
+        // Exits without a close reply keep these journals short (each line is flushed).
+        const auto events = JournalOf(temporary, name, [&](PreviewRunJournal& journal) {
+            (void)RecordCloseOutcomeToJournal(journal, false, failure, {}, state);
+        });
+        const auto at = FindEvent(events, "topo_block_failure");
+        return at + 1 < events.size() ? std::make_pair(events[at], events[at + 1]) : std::make_pair(JournalEvent{}, JournalEvent{});
+    };
+    const auto same = [](const std::pair<JournalEvent, JournalEvent>& actual, std::uint64_t index, std::uint64_t reason) {
+        return actual.first.name == "topo_block_failure" && actual.first.value == index &&
+            actual.second.name == "topo_unavailable" && actual.second.value == reason;
+    };
+    {
+        PreviewWorkerFailureObservation written;
+        written.worker_index = 0;
+        written.operation = "select";
+        written.category = "worker_ipc_unconfirmed";
+        written.request_written = true;
+        Check(same(failure_reason(written, "g3a"), 0, 2), "g3: request written, no response -> topo_unavailable(2)");
+        auto rejected = written;
+        rejected.response_received = true;
+        rejected.category = "worker_reply_invalid";
+        Check(same(failure_reason(rejected, "g3b"), 0, 3), "g3: response rejected -> topo_unavailable(3)");
+        PreviewWorkerFailureObservation refused;
+        refused.worker_index = 1;
+        refused.operation = "enumerate";
+        refused.category = "owner_operation_deadline_expired";
+        Check(same(failure_reason(refused, "g3c"), 1, 1), "g3: request not written (owner side) -> topo_unavailable(1)");
+        Check(same(failure_reason(std::nullopt, "g3d"), 2, 0), "g3: no failure observation -> topo_block_failure(2) + (0)");
+        PreviewWorkerFailureObservation disarm;
+        disarm.worker_index = 2;
+        disarm.operation = "disarm";
+        disarm.category = "delegation_disarm_unconfirmed";
+        Check(same(failure_reason(disarm, "g3e"), 2, 1), "g3: the owner-wide stage keeps index 2 (nothing was sent)");
+        auto validated_without = select_failure;
+        validated_without.topology.reset();
+        Check(same(failure_reason(validated_without, "g3f"), 0, 0), "g3: validated without counters -> defense (0)");
+    }
+    {
+        // Close-side reasons: attempted but not written, written but unanswered,
+        // answered but rejected.
+        auto partial = ClosedExit(std::nullopt);
+        partial.close_reply = PreviewWorkerCloseReply{};
+        partial.close_reply->attempted = true;
+        auto unanswered = ClosedExit(std::nullopt);
+        unanswered.close_reply->response_received = unanswered.close_reply->response_validated = false;
+        unanswered.close_reply->status.reset();
+        auto invalid = unanswered;
+        invalid.close_reply->response_received = true;
+        PreviewWorkerExitObservation none;
+        PreviewCloseJournalState state;
+        const auto events = JournalOf(temporary, "g3close", [&](PreviewRunJournal& journal) {
+            (void)RecordCloseOutcomeToJournal(journal, true, std::nullopt, {partial, unanswered}, state);
+            PreviewCloseJournalState second;
+            (void)RecordCloseOutcomeToJournal(journal, true, std::nullopt, {invalid, none}, second);
+        });
+        JournalEvents topo;
+        for (const auto& event : events)
+            if (event.name.rfind("topo_", 0) == 0) topo.push_back(event);
+        CheckEventsExactly(topo, Concat(Concat(Concat(TopoUnavailable("topo_block_close", 0, 1),
+                                                      TopoUnavailable("topo_block_close", 1, 2)),
+                                               TopoUnavailable("topo_block_close", 0, 3)),
+                                        TopoUnavailable("topo_block_close", 1, 1)),
+                           "g3: close not written (1), unanswered (2), rejected (3), no close reply (1)");
+    }
+    // g5: RecordEnumerateOutcome.
+    {
+        bool rejected_worker{};
+        const auto events = JournalOf(temporary, "g5", [&](PreviewRunJournal& journal) {
+            RecordEnumerateOutcome(journal, 0, 2, DiagValues(300));
+            RecordEnumerateOutcome(journal, 1, 2, DiagValues(400));
+            RecordEnumerateOutcome(journal, 0, 2, std::nullopt);
+            try { RecordEnumerateOutcome(journal, 2, 2, DiagValues(300)); }
+            catch (const std::invalid_argument&) { rejected_worker = true; }
+        });
+        CheckEventsExactly(events,
+            Concat(Concat(Concat(Concat(Concat(JournalEvents{{"worker_a_enumerated", 2}},
+                                               TopoBlock("topo_block_enumerate", 0, DiagValues(300))),
+                                        JournalEvents{{"worker_b_enumerated", 2}}),
+                                 TopoBlock("topo_block_enumerate", 1, DiagValues(400))),
+                          JournalEvents{{"worker_a_enumerated", 2}}),
+                   TopoUnavailable("topo_block_enumerate", 0, 0)),
+            "g5: worker_a/b_enumerated then that worker's enumerate block; a missing diag is topo_unavailable(0)");
+        Check(rejected_worker, "g5: a worker index other than 0 or 1 is rejected before any line");
+    }
+    // g6: vocabulary.
+    {
+        std::vector<std::string> names;
+        for (const auto& field : kPreviewTopologyDiagFields) names.emplace_back(field.journal_event);
+        for (const char* name : {"topo_block_enumerate", "topo_block_failure", "topo_block_close", "topo_unavailable",
+                                 "preview_requested"})
+            names.emplace_back(name);
+        Check(names.size() == 23, "g6: 18 counters, 3 block headers, topo_unavailable and preview_requested");
+        static constexpr std::string_view existing[] = {
+            "run_started", "worker_a_enumerated", "worker_b_enumerated", "worker_a_observed_bytes",
+            "worker_b_observed_bytes", "operator_confirmed_cam_a", "operator_confirmed_cam_b", "both_live_views_started",
+            "cam_a_frame_bytes", "cam_b_frame_bytes", "frame_pair_received", "display_failed", "no_active_owner",
+            "operation_failed", "startup_no_workers", "startup_quarantined", "both_workers_close_verified",
+            "close_unconfirmed", "failure_observation_missing", "failure_worker_index", "failure_operation_unknown",
+            "failure_category_missing", "failure_category_unknown", "worker_response_validated", "worker_response_invalid",
+            "worker_response_missing", "worker_status_ok", "worker_status_failed", "worker_status_closed",
+            "worker_status_quarantined", "worker_status_missing", "worker_status_unknown", "worker_ack_write_completed",
+            "worker_ack_write_unconfirmed", "close_receipt_live_view_off", "close_receipt_source_closed",
+            "close_receipt_module_closed", "close_receipt_process_claim_released", "close_receipt_safe_to_exit",
+            "close_receipt_missing", "worker_exit_observation_index", "worker_exit_check_not_run",
+            "worker_exit_check_waited_after_close_ack", "worker_exit_check_instant_at_close_failure",
+            "worker_exit_check_waited_after_failure_receipt", "worker_exit_check_waited_for_worker_cleanup",
+            "worker_exit_code", "worker_exit_code_unavailable", "worker_exit_wait_failed", "worker_exit_wait_timed_out",
+            "worker_exit_not_observed_at_close", "worker_exit_not_observed_at_recheck",
+            "worker_exit_not_observed_at_repeated_close", "worker_exit_recheck_after_both_closes",
+            "worker_exit_recheck_at_repeated_close", "worker_exit_window_capped_by_session_limit",
+            "worker_exit_looked_after_window_end", "worker_close_not_sent", "worker_close_not_delivered",
+            "worker_close_status_closed", "worker_close_status_quarantined", "worker_close_status_failed",
+            "worker_close_status_unknown", "worker_close_ack_write_completed", "worker_close_ack_write_unconfirmed",
+            "worker_close_response_invalid", "worker_close_response_missing", "worker_close_receipt_live_view_off",
+            "worker_close_receipt_source_closed", "worker_close_receipt_module_closed",
+            "worker_close_receipt_process_claim_released", "worker_close_receipt_safe_to_exit",
+            "worker_close_receipt_missing",
+        };
+        for (const auto& name : names) {
+            Check(IsJournalEventName(name), "g6: every new event is a 1..48 char [a-z_] name");
+            Check(std::count(names.begin(), names.end(), name) == 1, "g6: new events are distinct");
+            Check(!IsKnownFailureCategory(name), "g6: no new event collides with the 62 failure categories");
+            Check(name.rfind("failure_operation_", 0) != 0, "g6: no new event looks like failure_operation_*");
+            Check(std::find(std::begin(existing), std::end(existing), name) == std::end(existing),
+                  "g6: no new event collides with an existing fixed event");
+            if (!IsJournalEventName(name)) std::cerr << "  name: " << name << '\n';
+        }
+        for (const auto operation : kPreviewWorkerJournalOperations)
+            Check(std::find(names.begin(), names.end(), "failure_operation_" + std::string(operation)) == names.end(),
+                  "g6: failure_operation_<op> stays distinct");
+        // g1-g5 above already wrote every topo_ event through the real
+        // PreviewRunJournal (Record throws on an invalid name); preview_requested
+        // is written by the display only, so it is written here once.
+        bool accepted = true;
+        (void)JournalOf(temporary, "g6", [&](PreviewRunJournal& journal) {
+            try { journal.Record("preview_requested", 1); } catch (const std::exception&) { accepted = false; }
+        });
+        Check(accepted, "g6: the real PreviewRunJournal accepts preview_requested");
+    }
+    // g7: no source ID reaches the journal.
+    {
+        constexpr std::uint32_t id = 3735928559U;
+        WorkerTopologyCounters counters;
+        const auto start = WorkerTopologyCounters::Clock::now();
+        counters.Reset(start);
+        counters.Observe(true, id, start, true);
+        counters.BeginInventoryWait();
+        const std::array<std::uint32_t, 2> ids{id, 12};
+        counters.Snapshot(2, 2, ids, start);
+        counters.Mark(PreviewTopologyOperation::select);
+        counters.Observe(false, id, start, true);
+        counters.Observe(true, id - 1, start, true);
+        std::string content;
+        (void)JournalOf(temporary, "g7", [&](PreviewRunJournal& journal) {
+            RecordTopologyBlock(journal, PreviewTopologyBlock::failure, 0, counters.Values(),
+                                PreviewTopologyUnavailable::internal);
+        }, &content);
+        Check(content.find(std::to_string(id)) == std::string::npos && content.find(std::to_string(id - 1)) == std::string::npos,
+              "g7: the journal never contains a source ID");
+        Check(content.find("topo_post_remove_known\",\"value\":1") != std::string::npos,
+              "g7: the event is counted, not recorded");
+    }
+    std::cout << "{\"mode\":\"stub-topology-journal\",\"failures\":" << failures << "}\n";
+    return failures ? 1 : 0;
+}
+
 bool BothAlive(const std::array<OwnedHandle, 2>& processes) {
     return processes[0].value && processes[1].value && WaitForSingleObject(processes[0].value, 0) == WAIT_TIMEOUT &&
         WaitForSingleObject(processes[1].value, 0) == WAIT_TIMEOUT;
@@ -2085,8 +2599,10 @@ void CheckAbandonedOwner(const fs::path& executable, const fs::path& root, const
     for (auto& worker : workers) {
         if (WaitForSingleObject(worker.value, 5000) != WAIT_OBJECT_0 || !GetExitCodeProcess(worker.value, &code))
             throw std::runtime_error("worker exit unconfirmed: preserve marker");
-        // Parent may disappear before bootstrap validation (2) or after host start (3).
-        Check(code == 2 || code == 3, "parent death is not normal authorized completion");
+        // Parent may disappear before bootstrap validation (2), between the
+        // delegation check and the host's own parent check (4, an exception in
+        // worker main before any dispatcher), or after host start (3).
+        Check(code == 2 || code == 3 || code == 4, "parent death is not normal authorized completion");
     }
     bool blocked{};
     try { HardwareProcessLease denied(name, std::chrono::milliseconds(0), root / "abandoned"); }
@@ -2118,6 +2634,9 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--close-windows") return CloseWindowsContract(executable, temporary);
         if (argc == 2 && std::string_view(argv[1]) == "--serving-lifetime") return ServingLifetimeContract(worker, temporary);
         if (argc == 2 && std::string_view(argv[1]) == "--bootstrap-limits") return BootstrapLimitsContract(worker, temporary);
+        if (argc == 2 && std::string_view(argv[1]) == "--reply-diag-table") return ReplyDiagTable();
+        if (argc == 2 && std::string_view(argv[1]) == "--reply-diag-contract") return ReplyDiagContract(executable, temporary);
+        if (argc == 2 && std::string_view(argv[1]) == "--topology-journal") return TopologyJournal(temporary);
         if (argc == 5 && std::string_view(argv[1]) == "--abandon") return AbandonHelper(argv, temporary, worker);
         if (argc != 1) return 2;
         {
@@ -2194,7 +2713,8 @@ int main(int argc, char** argv) {
                 DWORD code{};
                 if (!process.value || WaitForSingleObject(process.value, 5000) != WAIT_OBJECT_0 ||
                     !GetExitCodeProcess(process.value, &code)) return 3; // Preserve all evidence if exit is unknown.
-                Check(code == 3, "bootstrap EOF rejects partially started stub worker before SDK");
+                // The bootstrap read throws inside worker main: exit 4, SDK untouched.
+                Check(code == 4, "bootstrap EOF rejects partially started stub worker before SDK");
             }
             bool partial_blocked{};
             try { HardwareProcessLease denied(name, std::chrono::milliseconds(0), root / "partial"); }

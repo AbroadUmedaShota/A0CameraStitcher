@@ -1,6 +1,6 @@
 # 二worker試作の機器イベント計装と委譲 marker 回復 — 設計（手順 0）
 
-状態: 設計確定・実装前（2026-10-05）
+状態: 設計確定・実装済み（2026-10-05、A 実装は未 commit→commit 予定。相違点は補遺を参照）（2026-10-05）
 対象: software-only 作業 A（機器イベント計装・分類の分割・journal・worker exit code）と C（監査付き回復コマンド）。B（lease 取得時に全 session の marker を走査して拒否）は別途実装中で、本書は B が入った状態を前提にする
 正本: 本書（計装の表・応答封筒 v2・journal 語彙・回復コマンドの lease の扱い）。run の経緯は `docs/DUAL_LIVE_WORKER_POC.md`、判断の記録は `docs/DECISIONS.md`
 実装担当: A は Coder A、C は Coder C。B の実装者と C の実装者が同じ `hardware_process_lease.cpp` を触るため、C は B の着地後に着手する（12 節）
@@ -779,6 +779,14 @@ SDK なしビルド。test root に合成の v2 marker を置き、試験用 lea
 13. 手動確認 M-1 の実施承認
 
 ## 補遺（2026-10-05、security レビューの結果）
+- 実装の詳細化（総合レビューの指摘で追記、2026-10-05）: `inventoryPumps` は Pump を呼ぶ直前に数える（例外で終わった Pump も 1 回）。補助型として `PreviewTopologyField`（18 項目の添字 enum）、`PreviewTopologyBlock`／`PreviewTopologyUnavailable`（`RecordTopologyBlock` の引数）を追加し、`kPreviewWorkerSchema` は共有ヘッダ `preview_topology_diag.hpp` に置く。T-g の g1〜g7 は owner 試験の新モード `--topology-journal` にまとめ、`--reply-diag-table`／`--reply-diag-contract` と `worker_topology_counters_contracts` を加えた 4 系列を ctest に登録した。
+- 読み方の規則（6 節の補足）: 「見出しの次の 18 行が値」に加え、18 行の event 名が 3.2 節の表の順と一致することを機械的に照合する。値の行を書いている途中で `Record` が失敗した場合（`complete=false`）は、行数だけで読むと次の見出しと取り違えるため。
+
+- 実装の順序依存（単体検証の指摘、2026-10-05）: dispatcher は enumerate の命令の印（Mark）を transport の Reset より先に付け、Reset は実行中の命令の印を消さない。この順序により snapshot 後の同じ命令中に届いたイベントは命令コード 1（enumerate）で記録される。順序を変えるとコードが 8（idle／所有スレッド外）に化けるため、`tests/worker_topology_counters_tests.cpp` の enumerate ケースがこの順序を固定している。設計上の前提として明記する。
+- 防御的分岐: 親が `response_validated=true` なのに topology を持たない応答を記録しようとした場合は理由 0 に倒す（通常フローでは到達しない defense-in-depth。`--topology-journal` の g3f が固定）。
+
+- `topo_block_failure` の値が 2（owner 全体の段階、例: disarm の失敗）のとき、続く `topo_unavailable(1)` は「worker への要求が存在しない（送信を試みていない）」の意味であり、「要求の書き込みが途中で止まった」ではない（設計適合レビューの指摘を受けた Orchestrator の裁定、2026-10-05。※仮定。6.4 節の一般規則をそのまま適用した実装を変えず、読み手の誤読を本注記で防ぐ。architect が 0 固定を望む場合は `RecordFailureTopology` の `index==2` 分岐 1 か所で変更できる）。
+
 
 - C の対象範囲: root 直下に正規名 `armed-session-<数字>.marker` がちょうど 1 件であること。session ID は問わないが、現在の session と異なるときは人が明示的に確認する（security 承認。※要確認 8 を解消）。非正規名・ディレクトリ・reparse point が 1 件でもあれば、C は処理せず停止理由として返す。
 - 証拠控え（nonce を含む写し等）は marker root の外に置く。root の中に置くと `armed-session-*.marker` の glob に一致し、本物を処理した後も隔離が解けなくなる。

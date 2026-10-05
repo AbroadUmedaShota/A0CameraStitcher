@@ -1,9 +1,11 @@
 #pragma once
 #include "a0/common/protocol_json.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/preview_topology_diag.hpp"
 #include "a0/phase0/preview_worker_timing.hpp"
 #include <charconv>
 #include <functional>
+#include <optional>
 
 namespace a0::phase0 { class NikonSdkTransport; }
 
@@ -16,6 +18,12 @@ namespace a0::phase0::experimental {
 // `operation_window` is the operation deadline: once it returns false every
 // command except close is rejected with worker_authority_expired. An empty
 // operation_window leaves `authority` as the only check.
+//
+// Envelope a0.preview-worker.v2: requests carry 6 fields; every reply carries
+// a seventh, "diag", with Transport::WorkerTopologyDiagnostics(). The
+// dispatcher tells the transport which command runs through
+// MarkWorkerTopologyOperation (idle between commands, close freezes the
+// counters). Both are diagnostics only and change no decision here.
 template<class Transport> class WorkerPreviewDispatcher final {
 public:
     WorkerPreviewDispatcher(Transport& transport, std::string epoch, std::string capability,
@@ -35,6 +43,9 @@ public:
     void TransportFailed() { failed_ = true; CloseForShutdown(); }
     void OnIdle() { if (!terminal_ && !authority_()) { failed_ = true; CloseForShutdown(); } }
     void CloseForShutdown() noexcept {
+        // Freeze the topology counters first: cleanup notifications are not
+        // evidence about the command that failed or the session that ended.
+        transport_.MarkWorkerTopologyOperation(PreviewTopologyOperation::close);
         terminal_ = true;
         if (close_attempted_) return;
         close_attempted_ = true;
@@ -63,7 +74,7 @@ public:
             auto string = [&](const char* key) -> const std::string& {
                 return json::RequireFieldWith<Failure>(request, key, json::JsonKind::string).string;
             };
-            if (string("schema") != "a0.preview-worker.v1" || string("epoch") != epoch_ ||
+            if (string("schema") != kPreviewWorkerSchema || string("epoch") != epoch_ ||
                 string("capability") != capability_) Fail("worker_authority");
             const auto& lexeme = json::RequireFieldWith<Failure>(request, "sequence", json::JsonKind::number).string;
             std::uint64_t sequence{};
@@ -78,8 +89,10 @@ public:
             // for as long as the host still serves (serving lifetime).
             if (operation == "close") {
                 explicit_close_ = true; CloseForShutdown();
-                return Reply(SafeToExit() ? "closed" : "quarantined", Receipt());
+                return Reply(SafeToExit() ? "closed" : "quarantined", Receipt(), Diagnostics());
             }
+            // Back to idle whenever Handle leaves, normally or by exception.
+            const TopologyOperationMark mark(transport_, TopologyOperationOf(operation));
             if (!OperationAllowed()) Fail("worker_authority_expired");
             std::string payload = "null";
             if (operation == "enumerate" && stage_ == Stage::Fresh) {
@@ -117,19 +130,37 @@ public:
                 stage_ = Stage::Resumed;
             } else Fail("worker_operation_unavailable");
             if (!OperationAllowed()) Fail("worker_authority_expired");
-            return Reply("ok", payload);
+            return Reply("ok", payload, Diagnostics());
         } catch (const TransportError& error) {
             failed_ = true;
+            // Taken before the cleanup: the reply reports the counters as the
+            // failing command left them, not as the shutdown changed them.
+            const auto diag = Diagnostics();
             CloseForShutdown();
-            return Reply("failed", "{\"error\":\"" + json::JsonEscape(error.Category()) + "\",\"close\":" + Receipt() + "}");
+            return Reply("failed", "{\"error\":\"" + json::JsonEscape(error.Category()) + "\",\"close\":" + Receipt() + "}",
+                         diag);
         } catch (...) {
             failed_ = true;
+            const auto diag = Diagnostics();
             CloseForShutdown();
-            return Reply("failed", "{\"error\":\"worker_unexpected\",\"close\":" + Receipt() + "}");
+            return Reply("failed", "{\"error\":\"worker_unexpected\",\"close\":" + Receipt() + "}", diag);
         }
     }
 private:
     enum class Stage { Fresh, Enumerated, Selected, Live, Suspended, Resumed };
+    class TopologyOperationMark final {
+    public:
+        TopologyOperationMark(Transport& transport, std::optional<PreviewTopologyOperation> operation) noexcept
+            : transport_(transport) {
+            if (operation) transport_.MarkWorkerTopologyOperation(*operation);
+        }
+        ~TopologyOperationMark() { transport_.MarkWorkerTopologyOperation(PreviewTopologyOperation::idle); }
+        TopologyOperationMark(const TopologyOperationMark&) = delete;
+        TopologyOperationMark& operator=(const TopologyOperationMark&) = delete;
+    private:
+        Transport& transport_;
+    };
+    PreviewTopologyDiag Diagnostics() const noexcept { return transport_.WorkerTopologyDiagnostics(); }
     struct Failure {
         [[noreturn]] static void Fail(std::string_view category, std::string_view message) {
             throw TransportError(std::string(category), std::string(message));
@@ -143,10 +174,11 @@ private:
             ",\"sourceClosed\":" + Boolean(source_closed_) + ",\"moduleClosed\":" + Boolean(module_closed_) +
             ",\"processClaimReleased\":" + Boolean(claim_released_) + ",\"safeToExit\":" + Boolean(SafeToExit()) + "}";
     }
-    std::string Reply(const char* status, const std::string& payload) const {
-        return "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + a0::common::protocol_json::JsonEscape(epoch_) +
+    std::string Reply(const char* status, const std::string& payload, const PreviewTopologyDiag& diag) const {
+        return "{\"schema\":\"" + std::string(kPreviewWorkerSchema) + "\",\"epoch\":\"" +
+            a0::common::protocol_json::JsonEscape(epoch_) +
             "\",\"workerPid\":" + std::to_string(worker_pid_) + ",\"sequence\":" + std::to_string(sequence_) +
-            ",\"status\":\"" + status + "\",\"payload\":" + payload + "}";
+            ",\"status\":\"" + status + "\",\"payload\":" + payload + ",\"diag\":" + SerializePreviewTopologyDiag(diag) + "}";
     }
     Transport& transport_;
     std::string epoch_, capability_;

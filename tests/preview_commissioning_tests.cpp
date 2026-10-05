@@ -26,6 +26,8 @@ struct Fake {
     }
     void Close(std::chrono::seconds) {}
     INikonDualSessionTransport::ExitState InspectDualSessionExitState() { return {}; }
+    PreviewTopologyDiag WorkerTopologyDiagnostics() const noexcept { return {}; }
+    void MarkWorkerTopologyOperation(PreviewTopologyOperation) noexcept {}
 };
 struct Fixture {
     Fake a, b;
@@ -33,7 +35,7 @@ struct Fixture {
     WorkerPreviewDispatcher<Fake> db{b,"epoch","secret",10,12,[] { return true; }};
     std::array<unsigned,2> sequence{};
     PreviewCommissioning flow{[this](std::size_t worker, std::string_view op, std::string_view candidate) {
-        const auto wire = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"epoch\",\"capability\":\"secret\",\"sequence\":" +
+        const auto wire = "{\"schema\":\"a0.preview-worker.v2\",\"epoch\":\"epoch\",\"capability\":\"secret\",\"sequence\":" +
             std::to_string(++sequence[worker]) + ",\"operation\":\"" + std::string(op) + "\",\"candidate\":\"" + json::JsonEscape(candidate) + "\"}";
         const auto reply = (worker == 0 ? da : db).Handle(wire);
         auto parsed = ParsePreviewWorkerReply(reply, "epoch", worker == 0 ? 11 : 12,
@@ -82,19 +84,25 @@ int main() {
     Reject([&] { mid.flow.StartBoth(); }, "second resume failure ends session");
     Reject([&] { mid.flow.StartBoth(); }, "failed resume not retried");
     Check(mid.a.resumes == 1 && mid.b.resumes == 1 && mid.b.starts == 1, "failure never retries or starts failed source");
+    // v2 replies carry the 18 topology counters; all zero here.
+    const std::string kZeroDiag =
+        R"({"openAdd":0,"openRemove":0,"inventoryAdd":0,"inventoryRemove":0,"inventoryPumps":0,)"
+        R"("snapshotChildren":0,"snapshotEventIds":0,"snapshotMs":0,"postAddKnown":0,"postAddUnknown":0,)"
+        R"("postRemoveKnown":0,"postRemoveUnknown":0,"postAddKnownDistinct":0,"postFirstEventOp":0,)"
+        R"("postFirstEventMs":0,"checkValidBeforePump":0,"checkSetEqual":0,"checkCurrentCount":0})";
     // The default parser limit remains unchanged for all existing protocols.
     const std::string large = "\"" + std::string(300U * 1024U, 'a') + "\"";
     Reject([&] { json::BasicJsonParser<Failure>(large).Parse(); }, "legacy parser size limit preserved");
     Check(json::BasicJsonParser<Failure, 512U * 1024U + 4096>(large).Parse().string.size() == 300U * 1024U,
           "explicit preview parser accepts bounded large replies");
     const std::string failed_reply =
-        R"({"schema":"a0.preview-worker.v1","epoch":"epoch","workerPid":11,"sequence":2,"status":"failed","payload":{"error":"open_failed","close":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true}}})";
+        R"({"schema":"a0.preview-worker.v2","epoch":"epoch","workerPid":11,"sequence":2,"status":"failed","payload":{"error":"open_failed","close":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true}},"diag":)" + kZeroDiag + "}";
     const auto failed = ParsePreviewWorkerReply(failed_reply, "epoch", 11, 2, "select");
     Check(failed.status == PreviewWorkerReplyStatus::failed && failed.error_category == "open_failed" &&
           failed.close_receipt.has_value() && failed.close_receipt->safe_to_exit,
           "validated failure retains bounded category and reported close receipt");
     const std::string closed_reply =
-        R"({"schema":"a0.preview-worker.v1","epoch":"epoch","workerPid":11,"sequence":3,"status":"closed","payload":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true}})";
+        R"({"schema":"a0.preview-worker.v2","epoch":"epoch","workerPid":11,"sequence":3,"status":"closed","payload":{"liveViewOff":true,"sourceClosed":true,"moduleClosed":true,"processClaimReleased":true,"safeToExit":true},"diag":)" + kZeroDiag + "}";
     Check(ParsePreviewWorkerReply(closed_reply, "epoch", 11, 3, "close").close_receipt->Complete(),
           "explicit close requires complete reported receipt");
     auto incomplete_close = closed_reply;

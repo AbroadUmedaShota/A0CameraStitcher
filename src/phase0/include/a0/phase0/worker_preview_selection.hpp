@@ -20,16 +20,36 @@ public:
             tokens_.push_back("preview-candidate-" + generation + "-" + std::to_string(i));
     }
     const std::vector<std::string>& Tokens() const noexcept { return tokens_; }
-    void Invalidate() noexcept { valid_ = false; }
+    // External, exceptional or close-time invalidation. The first cause wins.
+    void Invalidate() noexcept {
+        if (cause_ == InvalidationCause::none) cause_ = InvalidationCause::other;
+        valid_ = false;
+    }
     bool Opened() const noexcept { return valid_ && opened_; }
     // A child add/remove is not an identity proof.  In particular, an Add for
     // an already-enumerated ID could be a disconnect/reconnect which happened
     // between polls.  Consume this selection on every topology event rather
     // than attempting to recover or reinterpret it.
-    void ObserveTopology(bool /*added*/, std::uint32_t /*id*/) noexcept { Invalidate(); }
+    void ObserveTopology(bool /*added*/, std::uint32_t /*id*/) noexcept {
+        if (cause_ == InvalidationCause::none) cause_ = InvalidationCause::topology_event;
+        Invalidate();
+    }
+    // Every rejection invalidates the selection. The category names why, in
+    // this order: an already rejected selection is never reclassified; a set
+    // that differs from the enumerated inventory wins over an earlier topology
+    // event; a topology event names itself; anything else is invalidated.
     void CheckInventory(std::vector<std::uint32_t> current) {
         std::sort(current.begin(), current.end());
-        if (!valid_ || current != inventory_) Reject("worker_selection_invalidated");
+        if (rejected_) Reject("worker_selection_invalidated");
+        if (current != inventory_) Reject("worker_selection_inventory_changed");
+        if (cause_ == InvalidationCause::topology_event) Reject("worker_selection_topology_event");
+        if (!valid_) Reject("worker_selection_invalidated");
+    }
+    // Diagnostics only (topology counters); neither changes any state.
+    bool Valid() const noexcept { return valid_; }
+    bool SameInventory(std::vector<std::uint32_t> current) const {
+        std::sort(current.begin(), current.end());
+        return current == inventory_;
     }
     template<class Open>
     void OpenSelected(std::string_view token, std::vector<std::uint32_t> current, Open&& open) {
@@ -68,11 +88,15 @@ public:
         } catch (...) { Invalidate(); throw; }
     }
 private:
+    enum class InvalidationCause { none, topology_event, other };
     [[noreturn]] void Reject(const char* reason) {
+        rejected_ = true;
         Invalidate(); throw TransportError(reason, "worker-local preview selection rejected");
     }
     std::vector<std::uint32_t> inventory_;
     std::vector<std::string> tokens_;
+    InvalidationCause cause_{InvalidationCause::none};
+    bool rejected_{};
     bool valid_{true}, opened_{};
     bool ever_opened_{}, suspended_{}, resumed_{};
     std::size_t selected_{};

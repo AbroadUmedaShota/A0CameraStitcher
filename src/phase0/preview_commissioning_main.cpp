@@ -103,6 +103,12 @@ private:
         if (!journal_) return false;
         try { journal_->Record(event); return true; } catch (...) { return false; }
     }
+    // worker_a/b_enumerated plus that worker's enumerate topology block. Throws
+    // like Record, so an unwritten line fails the command.
+    void RecordEnumerate(std::size_t worker, std::uint64_t count, PreviewWorkerOwner& owner) {
+        if (!journal_) throw std::runtime_error("journal unavailable");
+        a0::phase0::experimental::RecordEnumerateOutcome(*journal_, worker, count, owner.LastTopology(worker));
+    }
     // Persist the verdict plus the bounded failure/exit detail that otherwise
     // only reaches FormatPreviewWorkerFailure's on-screen string. If this
     // process (or the whole display) goes away right after a quarantine, these
@@ -218,7 +224,7 @@ private:
                     catch (...) { construction_failed_ = true; throw; }
                     if (stop_requested_) { CloseOnce(owner); break; }
                     const auto candidates = owner->Enumerate(0);
-                    Record("worker_a_enumerated", candidates.size());
+                    RecordEnumerate(0, candidates.size(), *owner);
                     candidates_[0] = candidates;
                     auto event = std::make_unique<UiEvent>();
                     event->kind = EventKind::Candidates;
@@ -230,6 +236,9 @@ private:
                 }
                 case Command::Preview: {
                     if (!owner || item.candidate > 1) throw std::runtime_error("preview is not ready");
+                    // The operator's request time (tickCount64), with the candidate
+                    // ordinal only; written before any worker command is sent.
+                    Record("preview_requested", item.candidate);
                     // The worker is determined by the commissioning stage; the UI
                     // sends a candidate ordinal only and never interprets opaque IDs.
                     const auto worker = active_worker_;
@@ -264,7 +273,7 @@ private:
                     if (worker == 0) {
                         active_worker_ = 1;
                         candidates_[1] = owner->Enumerate(1);
-                        Record("worker_b_enumerated", candidates_[1].size());
+                        RecordEnumerate(1, candidates_[1].size(), *owner);
                         auto event = std::make_unique<UiEvent>();
                         event->kind = EventKind::Candidates;
                         event->worker = 1;

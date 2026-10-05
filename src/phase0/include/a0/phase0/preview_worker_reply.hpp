@@ -2,6 +2,7 @@
 
 #include "a0/common/protocol_json.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/preview_topology_diag.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -31,11 +32,18 @@ struct PreviewWorkerReply {
     a0::common::protocol_json::JsonValue payload;
     std::string error_category;
     std::optional<PreviewWorkerCloseReceipt> close_receipt;
+    // Worker-reported module topology counters ("diag"). Diagnostic only: the
+    // parent journals them and never bases ACK, close, verdict or disarm on them.
+    PreviewTopologyDiag topology;
 };
 
 // Validate the whole bound reply before the parent acknowledges delivery.
 // A reported close receipt is diagnostic until the parent has independently
 // observed an explicit close response and a clean exit from both workers.
+// Envelope v2: exactly schema, epoch, workerPid, sequence, status, payload and
+// diag, where diag has exactly the 18 kPreviewTopologyDiagFields keys with
+// uint32 decimal values. Any deviation, including in diag alone, rejects the
+// whole reply; nothing is accepted partially.
 inline PreviewWorkerReply ParsePreviewWorkerReply(
     std::string_view wire, std::string_view epoch, std::uint32_t worker_pid,
     std::uint64_t sequence, std::string_view operation) {
@@ -50,16 +58,20 @@ inline PreviewWorkerReply ParsePreviewWorkerReply(
     };
     constexpr std::size_t maximum = 512U * 1024U + 4096;
     auto envelope = json::BasicJsonParser<Invalid, maximum>(wire).Parse();
-    require(envelope.kind == json::JsonKind::object && envelope.object.size() == 6);
+    require(envelope.kind == json::JsonKind::object && envelope.object.size() == 7);
     const auto field = [&](const char* name, json::JsonKind kind) -> const json::JsonValue& {
         return json::RequireFieldWith<Invalid>(envelope, name, kind);
     };
-    require(field("schema", json::JsonKind::string).string == "a0.preview-worker.v1" &&
+    require(field("schema", json::JsonKind::string).string == kPreviewWorkerSchema &&
             field("epoch", json::JsonKind::string).string == epoch &&
             field("workerPid", json::JsonKind::number).string == std::to_string(worker_pid) &&
             field("sequence", json::JsonKind::number).string == std::to_string(sequence));
     const auto status = field("status", json::JsonKind::string).string;
-    const auto& payload = envelope.object.at("payload");
+    const auto payload_field = envelope.object.find("payload");
+    const auto diag_field = envelope.object.find("diag");
+    require(payload_field != envelope.object.end() && diag_field != envelope.object.end());
+    const auto& payload = payload_field->second;
+    const auto topology = ParsePreviewTopologyDiag<Invalid>(diag_field->second);
     const auto close_receipt = [&](const json::JsonValue& value) {
         require(value.kind == json::JsonKind::object && value.object.size() == 5);
         const auto flag = [&](const char* name) {
@@ -95,6 +107,7 @@ inline PreviewWorkerReply ParsePreviewWorkerReply(
         Invalid::Fail("worker_reply_invalid", "worker reply status rejected");
     }
     result.payload = std::move(payload);
+    result.topology = topology;
     return result;
 }
 

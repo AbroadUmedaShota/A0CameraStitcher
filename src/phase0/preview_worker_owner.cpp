@@ -181,7 +181,7 @@ json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::stri
     ULONG server{};
     Require(GetNamedPipeServerProcessId(pipe.value, &server) && server == GetProcessId(child.process.value),
             "pipe is not the registered worker");
-    std::string request = "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"" + epoch +
+    std::string request = "{\"schema\":\"" + std::string(kPreviewWorkerSchema) + "\",\"epoch\":\"" + epoch +
         "\",\"capability\":\"" + child.capability +
         "\",\"sequence\":" + std::to_string(sequence) + ",\"operation\":\"" + std::string(operation) +
         "\",\"candidate\":\"" + json::JsonEscape(candidate) + "\"}";
@@ -200,6 +200,7 @@ json::JsonValue Exchange(Child& child, std::size_t worker_index, const std::stri
     observation.response_status = reply.status;
     observation.category = reply.error_category;
     observation.reported_close = reply.close_receipt;
+    observation.topology = reply.topology;
     unsigned char ack = 0x06;
 #if !defined(A0_NIKON_SDK_AVAILABLE)
     if (inject_ack_write_failure) {
@@ -446,6 +447,7 @@ struct PreviewWorkerOwner::Impl {
                     reply.ack_write_completed = exchange.ack_write_completed;
                     reply.status = exchange.response_status;
                     reply.receipt = exchange.reported_close;
+                    reply.topology = exchange.topology;
                 }
             }
             child.exit_observation.close_reply = std::move(reply);
@@ -595,6 +597,12 @@ std::array<PreviewWorkerExitObservation, 2> PreviewWorkerOwner::ExitObservations
 }
 std::array<std::uint32_t, 2> PreviewWorkerOwner::ProcessIds() const noexcept {
     return {GetProcessId(impl_->children[0].process.value), GetProcessId(impl_->children[1].process.value)};
+}
+std::optional<PreviewTopologyDiag> PreviewWorkerOwner::LastTopology(std::size_t worker) const noexcept {
+    if (worker >= impl_->children.size()) return std::nullopt;
+    const auto& last = impl_->children[worker].last_exchange;
+    if (!last || !last->response_validated) return std::nullopt;
+    return last->topology;
 }
 std::array<std::string, 2> PreviewWorkerOwner::Enumerate(std::size_t worker) {
     impl_->RequireOwnerThread();

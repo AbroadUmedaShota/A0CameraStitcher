@@ -55,7 +55,12 @@ inline constexpr std::string_view kPreviewWorkerFailureCategories[] = {
     "worker_inventory",
     "worker_inventory_not_pair",
     "worker_operation_unavailable",
+    // Before the split into the two entries below, this one covered both an
+    // inventory mismatch and a topology event (run-05 and older journals). It
+    // is still thrown for every other invalidation.
     "worker_selection_invalidated",
+    "worker_selection_inventory_changed",
+    "worker_selection_topology_event",
     "worker_sequence",
     "worker_terminal",
     "worker_unexpected",
@@ -136,6 +141,37 @@ void RecordWorkerFailureToJournal(PreviewRunJournal& journal, const PreviewWorke
 void RecordWorkerExitObservationToJournal(PreviewRunJournal& journal, std::size_t worker_index,
                                            const PreviewWorkerExitObservation& exit_observation);
 
+// Topology block headers. Each header's value is the worker index (0 or 1;
+// topo_block_failure uses 2 when there is no failure observation or the failure
+// belongs to the owner-wide stage).
+enum class PreviewTopologyBlock { enumerate, failure, close };
+
+// Why a topology block has no values (the value of topo_unavailable).
+enum class PreviewTopologyUnavailable : std::uint64_t {
+    internal = 0,            // Defense in depth, e.g. no failure observation.
+    request_not_written = 1, // Request not (fully) written, or close not attempted.
+    response_missing = 2,    // Request written, no response received.
+    response_rejected = 3,   // Response received but rejected (worker_reply_invalid).
+};
+
+// One topology block: the header (topo_block_enumerate|failure|close with
+// `index`), then either the 18 kPreviewTopologyDiagFields journal events in
+// table order with their values, or topo_unavailable(`reason`) alone when
+// `topology` is empty. A reader takes the line after the header: if it is
+// topo_unavailable there are no values, otherwise the next 18 lines are the
+// values. Numbers only. Throws like RecordWorkerFailureToJournal.
+void RecordTopologyBlock(PreviewRunJournal& journal, PreviewTopologyBlock block, std::uint64_t index,
+                         const std::optional<PreviewTopologyDiag>& topology, PreviewTopologyUnavailable reason);
+
+// The commissioning display's enumerate record, shared with its tests:
+// worker_a_enumerated (worker 0) or worker_b_enumerated (worker 1) with the
+// candidate count, then topo_block_enumerate(worker) with the topology of the
+// validated enumerate reply (topo_unavailable(0) if it is missing). Throws like
+// PreviewRunJournal::Record, and std::invalid_argument for a worker other than
+// 0 or 1 before writing anything.
+void RecordEnumerateOutcome(PreviewRunJournal& journal, std::size_t worker, std::uint64_t candidate_count,
+                            const std::optional<PreviewTopologyDiag>& topology);
+
 // What RecordCloseOutcomeToJournal has already written for one run.
 struct PreviewCloseJournalState {
     bool details_recorded{};
@@ -146,12 +182,17 @@ struct PreviewCloseJournalState {
 // The journal part of the commissioning display's close handling, shared by
 // preview_commissioning_main.cpp and its tests so that the tested order is the
 // production order:
-//   closed:     both_workers_close_verified, then the exit block of worker 0 and 1
+//   closed:     both_workers_close_verified, then the exit block of worker 0 and 1,
+//               then topo_block_close for worker 0 and 1
 //   not closed: close_unconfirmed, then the failure block (or
-//               failure_observation_missing), then the exit block of worker 0 and 1
-// The verdict line is written on every call. The failure and exit blocks are
-// written only on the first call (state.details_recorded), so repeated close
-// attempts never duplicate them. On a later call, a worker whose repeated
+//               failure_observation_missing), then the exit block of worker 0 and 1,
+//               then topo_block_failure (the failure reply's topology), then
+//               topo_block_close for worker 0 and 1 (each close reply's topology)
+// The topology blocks come after both exit blocks, so each exit block is still
+// followed directly by that worker's close reply summary.
+// The verdict line is written on every call. The failure, exit and topology
+// blocks are written only on the first call (state.details_recorded), so
+// repeated close attempts never duplicate them. On a later call, a worker whose repeated
 // Close() took a new 0 ms look since the last write gets a short block after
 // the verdict: worker_exit_observation_index, worker_exit_recheck_at_repeated_close,
 // and its result.

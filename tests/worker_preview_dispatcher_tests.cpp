@@ -2,6 +2,7 @@
 #include "a0/phase0/preview_worker_timing.hpp"
 #include "a0/phase0/agent_pipe_timing.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
+#include "a0/phase0/preview_worker_reply.hpp"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -18,20 +19,38 @@ struct Fake {
     std::string fail;
     // Every timeout argument the dispatcher passed, in call order.
     std::vector<std::pair<std::string, std::chrono::seconds>> timeouts;
+    // Topology diagnostics: the value the dispatcher reads, every mark it sent,
+    // and an optional change Close() makes (to prove the failure reply's diag
+    // is taken before the cleanup).
+    PreviewTopologyDiag diag{};
+    std::vector<PreviewTopologyOperation> marks;
+    bool change_diag_on_close{};
+    std::size_t frame_bytes{4};
     void Fault(const char* step) { if (fail == step) throw TransportError("injected", step); }
     void Note(const char* call, std::chrono::seconds timeout) { timeouts.emplace_back(call, timeout); }
     std::vector<std::string> BeginWorkerPreviewSelection(std::chrono::seconds t) { Note("enumerate", t); ++enumerations; Fault("enumerate"); return {"x","y"}; }
     void OpenWorkerPreviewCandidate(std::string_view, std::chrono::seconds t) { Note("select", t); ++opens; Fault("select"); }
     void StartSelectedWorkerLiveView(std::chrono::seconds t) { Note("start", t); ++starts; Fault("start"); }
-    std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds t) { Note("frame", t); ++frames; Fault("frame"); return {0xff,0xd8,0xff,0xd9}; }
+    std::vector<unsigned char> ReadLiveViewFrame(std::chrono::seconds t) {
+        Note("frame", t); ++frames; Fault("frame");
+        if (frame_bytes == 4) return {0xff,0xd8,0xff,0xd9};
+        return std::vector<unsigned char>(frame_bytes, 0xab);
+    }
     void StopLiveView(std::chrono::seconds t) { Note("stop", t); ++stops; Fault("stop"); }
     void SuspendSelectedWorkerPreview(std::chrono::seconds t) { Note("suspend", t); ++suspends; Fault("suspend"); }
     void ResumeSelectedWorkerPreview(std::string_view, std::chrono::seconds t) { Note("resume", t); ++resumes; Fault("resume"); }
-    void Close(std::chrono::seconds t) { Note("close", t); ++closes; Fault("close"); }
+    void Close(std::chrono::seconds t) {
+        Note("close", t); ++closes;
+        if (change_diag_on_close) diag.values.fill(999);
+        Fault("close");
+    }
     INikonDualSessionTransport::ExitState InspectDualSessionExitState() { return {false,fail == "retained",false}; }
+    PreviewTopologyDiag WorkerTopologyDiagnostics() const noexcept { return diag; }
+    void MarkWorkerTopologyOperation(PreviewTopologyOperation operation) noexcept { marks.push_back(operation); }
 };
-std::string Request(unsigned sequence, std::string_view operation, std::string_view candidate = "", std::string_view capability = "secret") {
-    return "{\"schema\":\"a0.preview-worker.v1\",\"epoch\":\"epoch\",\"capability\":\"" + std::string(capability) +
+std::string Request(unsigned sequence, std::string_view operation, std::string_view candidate = "",
+                    std::string_view capability = "secret", std::string_view schema = "a0.preview-worker.v2") {
+    return "{\"schema\":\"" + std::string(schema) + "\",\"epoch\":\"epoch\",\"capability\":\"" + std::string(capability) +
         "\",\"sequence\":" + std::to_string(sequence) + ",\"operation\":\"" + std::string(operation) +
         "\",\"candidate\":\"" + std::string(candidate) + "\"}";
 }
@@ -207,11 +226,106 @@ void OperationDeadline() {
               "serving lifetime end makes OnIdle close the session once");
     }
 }
+
+// T-e: every reply is a 7-field a0.preview-worker.v2 envelope whose diag is the
+// transport's value, read before any failure cleanup.
+struct EnvelopeFailure {
+    [[noreturn]] static void Fail(std::string_view, std::string_view) { throw std::runtime_error("reply JSON rejected"); }
+};
+PreviewTopologyDiag Sample() {
+    PreviewTopologyDiag diag;
+    for (std::size_t index = 0; index < diag.values.size(); ++index) diag.values[index] = static_cast<std::uint32_t>(index * 7 + 1);
+    return diag;
+}
+// Parses the raw reply independently of ParsePreviewWorkerReply: 7 fields,
+// schema v2, and a diag object equal to `expected`.
+bool EnvelopeHas(const std::string& reply, const PreviewTopologyDiag& expected) {
+    namespace json = a0::common::protocol_json;
+    try {
+        const auto envelope = json::BasicJsonParser<EnvelopeFailure, 512U * 1024U + 4096>(reply).Parse();
+        if (envelope.kind != json::JsonKind::object || envelope.object.size() != 7) return false;
+        if (json::RequireFieldWith<EnvelopeFailure>(envelope, "schema", json::JsonKind::string).string != "a0.preview-worker.v2")
+            return false;
+        const auto found = envelope.object.find("diag");
+        if (found == envelope.object.end()) return false;
+        return ParsePreviewTopologyDiag<EnvelopeFailure>(found->second) == expected;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+void EnvelopeV2() {
+    using Op = PreviewTopologyOperation;
+    {
+        Fake f;
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        const auto reply = d.Handle(Request(1, "enumerate", "", "secret", "a0.preview-worker.v1"));
+        Check(Has(reply, "\"status\":\"failed\"") && Has(reply, "\"error\":\"worker_authority\"") &&
+              EnvelopeHas(reply, PreviewTopologyDiag{}) && f.enumerations == 0 && f.closes == 0,
+              "T-e: a v1 request is refused as worker_authority with a v2 reply, all-zero diag, before the SDK");
+    }
+    {
+        Fake f;
+        f.diag = Sample();
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        const auto reply = d.Handle(Request(1, "enumerate"));
+        Check(Ok(reply) && EnvelopeHas(reply, Sample()), "T-e: enumerate reply is v2 with the transport's 18 diag values");
+        Check(f.marks == std::vector<Op>{Op::enumerate, Op::idle}, "T-e: the command is marked, then idle again");
+        const auto parsed = ParsePreviewWorkerReply(reply, "epoch", 11, 1, "enumerate");
+        Check(parsed.topology == Sample(), "T-e: the parent parser reads the same diag");
+    }
+    {
+        Fake f;
+        f.diag = Sample();
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        Check(Ok(d.Handle(Request(1, "enumerate"))), "T-e: fixture enumerates");
+        f.fail = "select";
+        f.change_diag_on_close = true;
+        const auto reply = d.Handle(Request(2, "select", "x"));
+        Check(Has(reply, "\"error\":\"injected\"") && EnvelopeHas(reply, Sample()) && f.closes == 1,
+              "T-e: a failed reply carries the diag from before the cleanup Close() changed it");
+        Check(f.marks == std::vector<Op>{Op::enumerate, Op::idle, Op::select, Op::idle, Op::close},
+              "T-e: the failure cleanup marks close after the failed command");
+    }
+    {
+        Fake f;
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        Start(d);
+        f.diag = Sample();
+        const auto closed = d.Handle(Request(4, "close"));
+        Check(Has(closed, "\"status\":\"closed\"") && EnvelopeHas(closed, Sample()), "T-e: the closed reply carries diag");
+        Check(!f.marks.empty() && f.marks.back() == Op::close &&
+              std::count(f.marks.begin(), f.marks.end(), Op::close) == 1, "T-e: close is marked once and not as a command");
+        const auto parsed = ParsePreviewWorkerReply(closed, "epoch", 11, 4, "close");
+        Check(parsed.status == PreviewWorkerReplyStatus::closed && parsed.topology == Sample(),
+              "T-e: the parent accepts the closed reply with its diag");
+    }
+    {
+        Fake f;
+        f.frame_bytes = 256U * 1024U;
+        f.diag.values.fill(4294967295U);
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        Start(d);
+        const auto frame = d.Handle(Request(4, "frame"));
+        Check(Ok(frame) && frame.size() <= 512U * 1024U + 4096U && EnvelopeHas(frame, f.diag),
+              "T-e: a 256 KiB frame reply with a saturated diag fits 512 KiB + 4096 bytes");
+        const auto parsed = ParsePreviewWorkerReply(frame, "epoch", 11, 4, "frame");
+        Check(parsed.status == PreviewWorkerReplyStatus::ok, "T-e: the parent accepts the largest frame reply");
+    }
+    {
+        // An unknown command is not marked as any operation; the reply still has diag.
+        Fake f;
+        WorkerPreviewDispatcher d(f, "epoch", "secret", 10, 11, [] { return true; });
+        const auto reply = d.Handle(Request(1, "capture"));
+        Check(EnvelopeHas(reply, PreviewTopologyDiag{}) && f.marks == std::vector<Op>{Op::idle, Op::close},
+              "T-e: an unavailable command marks only idle and the cleanup close");
+    }
+}
 }
 int main() {
     BudgetTable();
     TransportTimeouts();
     OperationDeadline();
+    EnvelopeV2();
     Fake f; bool live = true;
     WorkerPreviewDispatcher d(f,"epoch","secret",10,11,[&] { return live; });
     Check(d.PeerAllowed(10) && !d.PeerAllowed(11), "only parent PID allowed");
