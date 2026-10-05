@@ -17,7 +17,7 @@
 - active transaction中は操作者も物理シャッターを操作せず、active modeがその段階で処理するcameraをPhase 0ツールが排他的に使用する。
 - JPEG Fine Lを使用する。
 - ハードウェア同期装置は使用しない。
-- 現行のNikon Camera Remote SDK経路ではsessionを同時に1台だけ開く。二台同時Live Viewは、ADR-0031のSDK capability・安全性gateを満たすまで有効化しない。
+- 現行のNikon Camera Remote SDK経路ではsessionを同時に1台だけ開く。二台同時Live Viewは、ADR-0031のSDK capability・安全性gateを満たすまで有効化しない。注: 二worker Live View試作は開発用のCMake option `A0_BUILD_DUAL_PREVIEW_POC`（SDK有効ビルドでは既定OFF）の下に置く実験であり、本要件上の有効化には当たらず、gate未達の間の実機表示は各回の人の承認に限る。
 
 ## 3. 機能要件
 

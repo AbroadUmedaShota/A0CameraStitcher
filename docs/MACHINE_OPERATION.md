@@ -82,6 +82,28 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 
 実行証拠・試験回数と最新の差分は [操作者仕様](OPERATOR_UI_SPEC.md)、ロードマップ状態は `.autodev/plan.json` の `roadmap_execution` を参照する。製品全体の機械操作適合は未達である。
 
+## カメラ制御入口の運用前提（2026-10-05）
+
+本番名のlease（`HardwareProcessLease`、`A0CameraStitcher.Phase0.CameraControl.v1`）を取るカメラ制御入口は、Phase 0 CLI、`A0CameraStitcher.CameraAgent`、`A0CameraStitcher.DualCameraAgent`、`A0CameraStitcher.SingleWorkerPreview` である。これらはlease取得時に委譲markerを検査し、次の条件で起動を拒否する。
+
+| 状態 | 結果 | 備考 |
+| --- | --- | --- |
+| `%LOCALAPPDATA%\A0CameraStitcher\Phase0\DualDelegation\armed-session-<session-id>.marker` が残っている | `camera_control_delegation_quarantined` で停止 | 二台preview試作だけでなく、main の製品ビルドのカメラ制御入口もすべて拒否する |
+| 上記ディレクトリ、またはその祖先（ドライブroot〜`%LOCALAPPDATA%`）にreparse point（junction・symbolic link）がある、固定ローカルドライブでない、作成できない | `camera_control_marker_failed` で停止 | プロファイルや `AppData` をjunctionで別ドライブへ移したPCで起きる見込み（※要検証） |
+
+- 前任PC（AOPC-11-NOTE）には run-04 の委譲markerが残っている。そのPCで main の製品ビルドを動かすと、上記の入口は全拒否になる。markerの承認済み回復手順（[二worker試作記録](DUAL_LIVE_WORKER_POC.md) の本人判断パケットA）は未承認・未実装であり、markerを手で削除・編集して回避しない。
+- marker名はWindows session IDを含む。logonごとにsession IDが変わった場合に残存markerが検出されるかは※要確認。
+- AOPC-20-NOTE では 2026-10-02 のWPD読取り列挙2回（`A0CameraStitcher.Phase0.exe inventory --transport wpd`、exit 0）でlease取得が通り、`MarkerDiagnostic --read-only` は `marker_missing` だった（[現在の開発状況](CURRENT_STATUS.md) の2026-10-02節）。
+- 起動前の確認には読取り専用の `A0CameraStitcher.MarkerDiagnostic --read-only` を使う。markerの作成・削除は行わない。
+- 二worker Live View試作（`A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning`）は、SDK有効ビルドでは既定でビルドされない。二台previewを動かすには、構成時に次のように明示し、各回の人の承認を得る。ADR-0031のgateは未達であり、製品機能ではない。
+
+```powershell
+cmake -S . -B build/sdk-dual-poc -G "Visual Studio 16 2019" -A x64 "-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk" "-DA0_BUILD_DUAL_PREVIEW_POC=ON"
+# PowerShell では -D の値を引用符で囲む。囲まないと "=." で引数が割れ、黙って SDK なしの stub 構成になる。
+# configure ログに「Nikon D810 licensed adapter enabled」と CMake Warning（試作を SDK 有効でビルドする旨）が出ることを確認する。
+cmake --build build/sdk-dual-poc --config Release
+```
+
 ## 次工程の照会専用画面（開発中）
 
 履歴画面に `readOnly` モードを追加し、そのモードでは採用ボタンを非表示・無効化し、採用イベントも拒否する。`--historical-review-window` のsoftware-only試験1回で画面ゲートと既存の画像検証を確認した。通常の人手による履歴・採用経路は変更しない。

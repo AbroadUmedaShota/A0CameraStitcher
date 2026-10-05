@@ -1,6 +1,10 @@
-# 二プロセス Live View 試作（software-only）
+# 二プロセス Live View 試作（software-only 検証と実機 run の記録）
 
 ## 結論
+
+### ビルドゲートの導入と run-05 の前提（2026-10-05）
+
+main 着地に合わせ、二worker試作の `A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning` と試作の試験targetをCMake option `A0_BUILD_DUAL_PREVIEW_POC` の下に置く。既定値はSDK有効ビルド（必要ファイルが揃って `A0_NIKON_SDK_AVAILABLE` が成立したビルド）でOFF、SDK-stubビルドでONで、`A0CameraStitcher.SingleWorkerPreview` と `A0CameraStitcher.MarkerDiagnostic` は常にビルドする。このため run-05 を行う場合は、SDK有効構成で `-DA0_BUILD_DUAL_PREVIEW_POC=ON` を明示してビルドし、実行するexe（画面・worker）のexact SHA-256を実行前に記録する。run-05 自体は本人判断パケットA（marker回復）と同B（実機run-05）の別承認を要し、ビルドゲートの導入はその許可ではない。ADR-0031のgateは未達のままで、試作は製品機能ではない。
 
 ### 停止ブロックとclose待ちの整合 T2（software-only、2026-10-01）
 
@@ -84,7 +88,7 @@ architectの裁定:
 2. G、Closeの同期枠10 s、S = 9 sは経験則。実機journalの所要時間で検証する（C3）
 3. startがLive View ON後に失敗すると `SafeToExit=false` でquarantinedになる既存挙動はそのまま（C5）
 4. SDK有効ビルドでの本ビルド確認: 構文検査 `/Zs` に加え、clean HEAD `d256dba` から `build/sdk-verify`（`-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk`）でPhase0・SingleWorkerPreview・PreviewWorker・PreviewCommissioning・MarkerDiagnostic・CameraAgent・DualCameraAgent・M2AdapterのRelease buildがすべてexit 0、C4819/C4834以外の警告0（2026-10-01 23:03〜23:05）。予算表の `static_assert`、SDK分岐の `Scale()` 恒等、試験用ctorの拒否はこのビルドでコンパイルを通過した。exe SHA-256は画面 `E1DC604F727E3212EBCE8B3E3615C5CB01DB7547095DD4534760DCF799588D8B`、worker `2B44A059F733ABEC78F5A9CE839467BD06701C023B27E3191BF5B5E2701AFDBE`、単体preview `8D5801B69EA6B7225B0DE9CDF74EA9517F9BD0C8BB2D91CDEAD17909D32F0E85`、MarkerDiagnostic `A5B753192E3F3A3EB9397AE032D106A7F23D6DE4386921C49141B8B781CAB028`、Phase0 `E0CA9D9F8FFDCB2485DAB16548F55C1D4E0CFEBD509E1A28D7C729D665BDC0B2`（M2Adapterは `620d2dc` 時と同一ハッシュ）。owner／pipe／delegation-authorizationの試験targetはSDK-stub構成専用でSDK構成では生成されないため、試験用ctor拒否の実行確認は未実施（※未検証）。これはビルド成果であり、実機試験・配布候補・run-05の許可ではない
-5. 試作IPC試験 `dual_live_worker_poc_contracts` / `dual_live_session_integration` はReleaseで断続的に失敗する（T1節を参照）
+5. 試作IPC試験 `dual_live_worker_poc_contracts` / `dual_live_session_integration` はReleaseで断続的に失敗していた（T1節を参照）。原因は試験側の待ち時間 `kTimeout`（1500 ms）がプロセス起動を含む待ちにも使われていたことで、2026-10-05 の main 着地前レビューで、起動を含む待ちと起動をまたぐ待ちを `kSpawnTimeout`（15000 ms、またぐ回数分）に分け、ctest の TIMEOUT を 60／120 秒にした。修正後は `--repeat until-fail:10` で 10/10 PASS（CURRENT_STATUS の 2026-10-05 節）
 6. R1の試験は余裕が±312 msしかなく、単独実行を前提とする
 
 #### 試験・検証・未検証

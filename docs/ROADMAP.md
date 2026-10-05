@@ -140,4 +140,4 @@ Nikon SDK/WPD adapter内部の大規模分割は実機回帰リスクが高い�
 
 ## MVP後
 
-- TIFF/16-bit、NEF/RAW、GPU、遠景パノラマ、三台以上。Live View二台同時表示はADR-0031のSDK capability・安全性gateを通過後の別work itemとする。
+- TIFF/16-bit、NEF/RAW、GPU、遠景パノラマ、三台以上。Live View二台同時表示はADR-0031のSDK capability・安全性gateを通過後の別work itemとする。二worker Live View試作はCMake option `A0_BUILD_DUAL_PREVIEW_POC`（SDK有効ビルドでは既定OFF、SDK-stubビルドでは既定ON）の下に置き、製品機能としては有効化しない。gate通過までの実機表示は各回の人の承認による実験に限る。

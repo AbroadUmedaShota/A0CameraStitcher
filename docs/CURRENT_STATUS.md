@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-10-02（AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-05（main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
 
 ## 2026-10-02 実機接続の最初の記録（AOPC-20-NOTE）
 
@@ -8,6 +8,13 @@
   - 1回目 2026-10-02 17:04:11、exit 0、303 ms。present だったD810は1台のみで、出力は `UNBOUND model=Nikon D810 firmware=V1.11 shootingMode=S`、`CameraCount: 1`。もう1台はPnPで Present=False（原因は電池切れ。操作者が電池を入れ直した）。
   - 2回目 2026-10-02 17:05:42（電池交換後）、exit 0、283 ms。出力は `UNBOUND model=Nikon D810 firmware=V1.11 shootingMode=S` と `UNBOUND model=Nikon D810 firmware=V1.14 shootingMode=S`、`CameraCount: 2`、`BoundCameraCount: 0`、`UnboundCameraCount: 2`、`IdentityMapChanged: false`。2台のファームウェア版が異なる（V1.11 と V1.14）。※要確認: 試験プロファイルで版の統一を前提にしているか。
 - このPC（AOPC-20-NOTE）はSDKを `.tools/nikon/d810-remote-sdk`（ignored）に配置済みで、SDK有効ビルドは HEAD `d256dba` 以降で成立している。実機でのSDK操作（Live View を含む）はまだ1件も行っていない。
+
+## 2026-10-05 main 着地前レビュー
+
+- `codex/dual-live-worker-poc-20260922`（HEAD `0e5068e` 時点）を main へ着地させる前に `/review-code` の3観点レビューを行った。判定は性能 承認、セキュリティ 承認（LOW 7件、任意対応は下の2026-10-01節の残件に記録）、総合 差し戻し（H1・H2）。
+- H1への対応: CMake option `A0_BUILD_DUAL_PREVIEW_POC` を追加し、`A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning` と二worker試作の試験targetをその下に置く。既定値はSDK有効ビルド（必要ファイルが揃って `A0_NIKON_SDK_AVAILABLE` が成立したビルド）でOFF、SDK-stubビルド（CI・ローカル試験）でON。`A0CameraStitcher.SingleWorkerPreview` と `A0CameraStitcher.MarkerDiagnostic` は常にビルドする。3構成の configure（2026-10-05、PowerShell、cmake 3.31.12、VS2019 BuildTools、リポジトリ直下）で `ctest -N` の登録件数を確認した: stub `cmake -S . -B build/gate-stub -G "Visual Studio 16 2019" -A x64` → 49件（option ON）、SDK既定 `cmake -S . -B build/gate-sdk -G "Visual Studio 16 2019" -A x64 "-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk"` → 29件（option OFF、PreviewWorker／PreviewCommissioning と試作試験の .vcxproj は生成されない）、SDK＋明示ON（同コマンドに `"-DA0_BUILD_DUAL_PREVIEW_POC=ON"` を追加）→ 35件（PreviewWorker／PreviewCommissioning と commissioning・dispatcher・dual_live 系の試験は生成されるが、stub専用の4実行ファイル14試験は入れ子の `if(NOT A0_NIKON_SDK_AVAILABLE)` で生成されず、`CMake Warning` が configure ログに出る）。PowerShell で `-DNIKON_D810_SDK_ROOT=.tools/...` を引用符なしで渡すと `=.` で引数が割れて黙って stub 構成になるため、引用符が必須。H2への対応: 試作IPC試験の待ち時間 `kTimeout`（1500 ms）がプロセス起動を含む待ちにも使われていたため、`tests/dual_live_test_ipc.hpp` に `kSpawnTimeout`（15000 ms）を追加した。起動を含む待ち（`Connect`・`Reap`・helper の待機読取り・poc worker の最初の読取り）を `kSpawnTimeout` に、起動を2回またぐ待ち（integration の grant 待ち、helper の報告読取り）を `2 * kSpawnTimeout` に切り替えた。integration の worker 側の要求待ちも lease probe の起動をまたぐため `kSpawnTimeout` にした（この試験は worker の idle 期限を検査しない）。controller 側の定常 I/O と poc worker の2回目以降の読取りは 1500 ms のまま。「idle IPC deadline」試験は、最初の読取り（観測窓 `2 * kSpawnTimeout`）と1回応答した後（観測窓 `kTimeout * 3`、`static_assert(kTimeout * 3 < kSpawnTimeout)`）の2本にした。ctest の TIMEOUT は `dual_live_worker_poc_contracts` 10→60秒、`dual_live_session_integration` 15→120秒。`ctest --test-dir build/t1-stub -C Release -R '^(dual_live_worker_poc_contracts|dual_live_session_integration)$' -j 1 --repeat until-fail:10 --output-on-failure` は最終版で 10/10 PASS（2026-10-05 11:11、計 234.46 秒。poc 21.6〜21.9 秒、integration 1.5〜3.4 秒）。赤確認として、最初の読取りと grant 待ちだけを 1 ms にすると両試験が失敗することを確認し、復元した。
+- 文書の追従: ARCHITECTURE・ROADMAP・PRODUCT_REQUIREMENTS の二台Live View記述をビルドゲートの実態に合わせ、MACHINE_OPERATION にカメラ制御入口の運用前提（委譲markerが残るPCでは製品ビルドも全拒否、回復手順は未承認、junction環境の注意、二台preview用のoption指定）を追記した。
+- 着地はPRを作らず main への fast-forward の直接 push とする（所有者の指示で GitHub Actions CI は使用しない。ワークフローは `pull_request` と手動起動のみで、push では起動しない）。証跡は最終 HEAD でのローカル全体検証（C++ CTest Debug/Release・M3 simulated・WPF flow）を本節に記録する。着地後も二worker試作は製品機能ではなく、実機は各回の本人承認に限る。ADR-0031のgate（SDK文書が独立sessionの同時Live Viewを許可すること）は未達のまま。
 
 ## 2026-10-01 引き継ぎ後の現在地
 

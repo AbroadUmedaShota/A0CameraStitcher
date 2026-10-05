@@ -1,12 +1,15 @@
 {
   "schema_version": "autodev.completion-report.v1",
-  "snapshot_status": "2026-09-21-five-run-working-candidate",
+  "snapshot_status": "2026-10-05-pre-main-landing-review",
   "current_status_document": "docs/CURRENT_STATUS.md",
-  "evaluated_at": "2026-09-21T00:00:00+09:00",
+  "evaluated_at": "2026-10-05T00:00:00+09:00",
   "completion_state": "in-progress",
   "current_reconciliation": {
     "base_source_commit": "3e9ae406272027274fb454b8f9b4d9d63ac2569f",
-    "branch": "codex/step4-five-run-acceptance-20260921",
+    "branch": "codex/dual-live-worker-poc-20260922",
+    "branch_head_at_review": "0e5068e",
+    "landing_plan": "Land on main by a fast-forward push without a pull request: the owner directed on 2026-10-05 that GitHub Actions CI must not be used, and the workflow only triggers on pull_request or manual dispatch. Evidence is the local full verification at the final HEAD, recorded in docs/CURRENT_STATUS.md. After landing, the dual-worker preview prototype stays behind the A0_BUILD_DUAL_PREVIEW_POC CMake option (default OFF in SDK-enabled builds) and is not a product feature; any hardware run still needs per-run human approval.",
+    "historical_fields_note": "base_source_commit, software_candidate, sdkless_release_ctest, licensed_focused_ctest, next_single_step and dual_state below were recorded on 2026-09-21 for codex/step4-five-run-acceptance-20260921 and have not been re-evaluated; current status is in docs/CURRENT_STATUS.md.",
     "software_candidate": "Five-run focused contract and full M3 simulated Release PASS / HardwareNotRun",
     "sdkless_release_ctest": "24/24 PASS, 261.47 seconds; prior AF timeout did not reproduce in current full M3 run, root cause not established",
     "licensed_focused_ctest": "current candidate not run; previous evidence does not certify changed code",
@@ -16,7 +19,7 @@
     "hardware_operations_in_this_reconciliation": 0
   },
   "automatable_gaps": [
-    "Local software verification passed; submit five-run CLI, WPF, evidence and requirements changes for review without merging or hardware-acceptance claims",
+    "Land codex/dual-live-worker-poc-20260922 on main by a fast-forward push without a pull request (CI not used by owner instruction), with local full-verification evidence, keeping the dual-worker preview prototype behind A0_BUILD_DUAL_PREVIEW_POC and making no hardware-acceptance claims",
     "M2 real quality completion requires actual rig and rights-cleared input; pre-gate and corpus contracts pass but do not prove image quality"
   ],
   "blocking_gaps": [
