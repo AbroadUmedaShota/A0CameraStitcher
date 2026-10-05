@@ -1,6 +1,21 @@
 # 現在の開発状況
 
-更新日: 2026-10-05（main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-05（run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+
+## 2026-10-05 run-05 と次の作業（AOPC-20-NOTE）
+
+- run-05 の結果: 所有者の GO を受けて 12:14 に二台 run を 1 回だけ実施した（`build/sdk-dual-poc/Release` の上記ハッシュの exe）。worker 0 の enumerate は候補 2 を返し、その次の select が `worker_selection_invalidated` で失敗した。画面は fail-closed で隔離を維持した。journal には失敗ブロック（worker 0・select・分類・応答検証・ACK 書込み・close receipt 5 項目）と両 worker の exit ブロックが揃い、worker 0 は exit code 3、worker 1 は exit code 0・close receipt 5 項目すべて完全。Source open と Live View 開始には達していない。撮影・設定変更・WPD・カード操作・自動再試行は 0 回。実機 preview 枠は 5/5 を消費した。詳細と原因の読み（本命は既列挙 ID の AddChild 再通知 ※推定）は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「二台実機run-05」節。
+- 隔離の現状: 画面 process は隔離表示のまま生存しており、通常終了要求（12:17:57）は拒否された。`MarkerDiagnostic --read-only` は `process_active_or_unknown`。所有者の判断で marker の手動削除はしない。**このPCの再ログオン・再起動は、下の B が入るまで行わない。** 現行コードは marker のファイル名に Windows session ID を含め、`RejectMarker` は現在の session の marker しか見ないため、再ログオン・再起動後は隔離が黙って外れる（※コード読み、未検証）。
+- ADR-0031: 2 プロセス × 2 module 構成の二台 Live View 実機 PoC を凍結した（Blocked、2026-10-05）。解除条件はベンダーの書面確認、または所有者による新しい実機予算の明示承認。二画面 Live View の目標は放棄しない。MVP は一台選択式 Live View のまま。根拠は [DECISIONS](DECISIONS.md) の ADR-0031 末尾。
+- 次の software 作業の順番（実機操作なし）:
+  1. D1／D2: run-05 記録の確定と ADR-0031 凍結の記録（本更新）。
+  2. B（Must）: 委譲 marker を全 session 分走査して拒否する修正。security レビュー付き。
+  3. A（Must）: worker 側の topology 計装（機器イベントの回数・種別・時点を固定語彙・数値のみで記録）、分類を「集合不一致」と「イベントによる無効化」に 2 分割、画面の操作時刻を記録する `preview_requested`。fail-closed の規則は緩めない。
+  4. C（Should。E が承認されれば Must）: 監査付きの回復コマンド。承認のうえ、確定した marker 1 件だけを 1 回処理する。
+  5. E-prep（Should）: SDK のみを使うプローブの実装。実行は別承認。
+  6. D3（Could）: Nikon 窓口への照会文の作成。
+- 所有者への未回答の質問: (1) プローブに使う実機枠と、S2 の解釈。(2) Nikon への照会を行ってよいか。(3) 生存中の画面 process を終了してよいか（終了しても marker は残る）。
+- 残件（追加）: 二台 binding 経路の `PollDualInvalidation`（`src/phase0/nikon_sdk_transport.cpp` 1176 行付近。判定に使う `dual_topology_changed_` は同ファイル 3104 行付近の `ModuleEventProc` で、既知 ID の AddChild では立たない）は既知 ID の AddChild を許容しており、worker selection の「イベント 1 件で無効化」（`worker_preview_selection.hpp` の `ObserveTopology`）と判断が食い違う。どちらを正本にするかは A の計装データが出てから reviewer_architecture と security が判断する（今回コードは変えない）。
 
 ## 2026-10-02 実機接続の最初の記録（AOPC-20-NOTE）
 
@@ -14,7 +29,7 @@
 - 着地: `git push origin HEAD:main` で main を `3e9ae40` → `706eaab` に fast-forward（82 commit、PR なし、12:06）。ブランチ `codex/dual-live-worker-poc-20260922` も `706eaab` に同期。push 後の GitHub Actions の run は増えていない（最新は 2026-09-21 の pull_request）。
 - run-05 候補ビルド: clean HEAD `706eaab` から新規フォルダで `cmake -S . -B build/sdk-dual-poc -G "Visual Studio 16 2019" -A x64 "-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk" "-DA0_BUILD_DUAL_PREVIEW_POC=ON"`（12:07）。configure ログに「Nikon D810 licensed adapter enabled」「A0_BUILD_DUAL_PREVIEW_POC=ON (A0_NIKON_SDK_AVAILABLE=ON)」と試作を SDK 有効でビルドする旨の CMake Warning が出て、`ctest -N` は 35 件。Release build は PreviewWorker・PreviewCommissioning・MarkerDiagnostic・SingleWorkerPreview・Phase0 の 5 本とも exit 0、C4819/C4834 以外の警告 0（12:07〜12:11）。exe SHA-256: 試験画面 `11272FFC952DFE8870FCCEA9537B2ABD78323F253EA5108A79B93333F2570619`（196,096 B）、worker `3C62D4A622FCFFDADCD4953486C8B8820048EFA935DEF85BF4179E07F071E83D`（300,544 B）、MarkerDiagnostic `85747F450B0D43349B0E8C56B701697CC8117125BF24635E7AD3982BF3087B9A`、SingleWorkerPreview `40F450753E4C0AB1C145762BE37D9C87B96A8404F73EC6CF8FC3DB6F8A197847`、Phase0 `F5271550167DF4F561BFB6E98506CD7B12CA819BAE753B038341EB99AD73125A`。
 - 注意: `build/sdk-verify/Release` にはビルドゲート導入前（2026-10-01）に SDK 有効でビルドした PreviewWorker／PreviewCommissioning の exe が残っている。run-05 には使わず、`build/sdk-dual-poc/Release` の上記ハッシュの exe だけを使う。
-- 起動前点検（12:06、読取りのみ）: D810 2 台 present、A0 関連 process 0、`MarkerDiagnostic --read-only` は `marker_missing`。run-05 の実施は所有者の GO 待ち。
+- 起動前点検（12:06、読取りのみ）: D810 2 台 present、A0 関連 process 0、`MarkerDiagnostic --read-only` は `marker_missing`。run-05 の実施は所有者の GO 待ち（当時。12:14 に実施し、結果は上の run-05 節）。
 
 ## 2026-10-05 main 着地前レビュー
 
@@ -28,7 +43,7 @@
 - 引き継ぎ後の最初の作業として、二worker試作の失敗証跡をjournalへ固定語彙で永続化する計装T1をsoftware-onlyで実装した（commit `79d6687`）。失敗したworker番号・命令・57語の固定分類・応答検証・ACK書込み・worker申告close receipt・両workerのexit観測をjournalに残す。語彙と記録順は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「失敗証跡のjournal永続化 T1」節を参照する。
 - 合格の読み方を明文化した。判定行 `both_workers_close_verified` に加え、index 0と1のexitブロックが揃い両方の `worker_exit_code` が0であること。判定行だけでは部分書込みと区別できない。
 - 制約: worker0が応答前にexitするCase 4のexit codeは再観測で取れる場合に限る。ビルド負荷下の `--exit-recheck` × 20（2026-10-01 19:13）で17回取得、3回は `worker_exit_not_observed_at_recheck`。受入基準は「数値、または両時点で未終了という固定イベント」とし、数値の決定的取得はT2/WU2へ送る（※仮定）。（T1当時の記録。T2で解消）
-- 検証: `a0_preview_worker_owner_tests` の新規4系列と既存2系列をctestに登録。実装者実行と独立QA（7系列 `failures=0`、2026-10-01 18:13〜18:14、`build/t1-stub` SDK-stub・Release）、総合レビュー2回目承認・セキュリティ表層承認。全体検証（2026-10-01）: C++ CTestはDebug 45/45、Release 43/45で、失敗2件は本変更と無関係な試作IPC試験の断続的失敗（※要調査）。M3 simulated／WPF flowはoperator shell tests 95/96 PASSで、残り1件はこのPCのシンボリックリンク権限不足（開発者モード無効）による環境差。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT1節。
+- 検証: `a0_preview_worker_owner_tests` の新規4系列と既存2系列をctestに登録。実装者実行と独立QA（7系列 `failures=0`、2026-10-01 18:13〜18:14、`build/t1-stub` SDK-stub・Release）、総合レビュー2回目承認・セキュリティ表層承認。全体検証（2026-10-01）: C++ CTestはDebug 45/45、Release 43/45で、失敗2件は本変更と無関係な試作IPC試験の断続的失敗（※要調査。2026-10-05 の着地前レビュー H2 で試験側の起動待ちを分けて解消）。M3 simulated／WPF flowはoperator shell tests 95/96 PASSで、残り1件はこのPCのシンボリックリンク権限不足（開発者モード無効）による環境差。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT1節。
 - T2「停止ブロックとclose待ちの整合」をsoftware-onlyで実装した（commit `d256dba`）。操作別の予算表を `preview_worker_timing.hpp` の1か所に置き、親のExchange期限を D = W + M で操作ごとに計算する。close送信とexit観測を分け、窓（E_ok 5 s / 0 ms / E_fail 30 s）の後も生存するworkerは `worker_stop_in_progress`（停止処理中）とする。操作期限（既定60 s）と受付寿命（既定170 s）を分け、期限後の命令は親がIPCの前に `owner_operation_deadline_expired` で拒否する。相方workerのclose応答（`worker_close_*`）と `licensed_adapter_unavailable` もjournalに残すようにした（分類60語）。Case 4のexit codeは25/25、Case 4bは15/15で決定的に取得できた。試験は新4系列をctestに登録し、実装者の修正ラウンド後 `--repeat until-fail:3` で18/18×3 PASS（2026-10-01 22:51）、独立QAは修正ラウンド前にRelease・Debugとも失敗0。詳細は[二worker試作記録](DUAL_LIVE_WORKER_POC.md)のT2節。
 - 未検証・残件: 実SDK・実機での動作。SDK有効構成の本ビルドはHEAD `d256dba` で8実行ファイルともexit 0（試験用ctor拒否の実行確認は試験targetがSDK構成で生成されないため未実施）。親が期限で拒否した後にcloseがcleanになった場合、拒否分類が画面の `FirstFailure()` にしか残らずjournalに失敗ブロックが無い（※要対応・次回）。G・Close同期枠10 s・起動枠9 sは経験則で、実機journalの所要時間で検証が要る。journal書込み失敗の注入試験。セキュリティレビュー（2026-10-05、承認・LOW 7件）の任意対応: worker／試験画面／単体previewのmain冒頭で `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)` を呼びDLL検索順を固定する（mainから引き継いだ既存の問題。SDKの実行時読込みが変わるため実機確認1回とセットで入れる）、親のパイプ接続に `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` を付ける、`DisarmDualDelegation` へ渡す型付き証跡を定数trueではなくclose receiptの値から組み立てる、MarkerDiagnosticのmarker openに `FILE_SHARE_WRITE | FILE_SHARE_DELETE` を加える、ローカル候補の `.pdb` にビルドPCの絶対パスが入る件（`-p:ContinuousIntegrationBuild=true` か許可リストから除外）、今後の記録ではPC名を別名にする。
 - 前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは変更していない。

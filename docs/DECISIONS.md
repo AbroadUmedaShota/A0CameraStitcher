@@ -248,7 +248,7 @@
 
 ## ADR-0031: DualCameraの最終Live View目標を左右二画面へ更新し、SDK capability gateまで現行一台表示を維持する
 
-- 状態: Accepted product direction; implementation blocked on SDK capability and hardware safety evidence
+- 状態: Accepted product direction; implementation blocked on SDK capability and hardware safety evidence。2026-10-05に実機PoCを凍結（Blocked、末尾の状態の追記）
 - 決定日: 2026-09-21
 - 決定: `DualCamera`の最終operator experienceは、CAM-Aを左、CAM-Bを右に表示する横長の二pane Live Viewとする。各paneはalias、Live/映像停止、最終frame受信時刻を表示する。二paneをframe同期済み・合成済み・原画像と表示せず、previewを撮影・合成入力・永続証拠へ用いない。
 - 現行との差分: 現行`a0.camera-agent.hardware-dual-binding.v1`、`NikonDualBindingSdkAdapter`、fake adapterはいずれも同時に一つのLive Viewだけを許可し、切替時に前candidateをstopしてSDK source/capture sessionをcloseする。このfail-closed制約を、SDK vendor documentationと実機証拠なしに解除しない。従って本ADRは、現行UIへ偽の二画面表示や二重session APIを追加する許可ではない。
@@ -256,3 +256,4 @@
 - 実装前gate: (1) ライセンス下のSDK documentationで二つの独立session/sourceによる同時Live Viewを許可すること、(2) 二台start、継続frame、片側停止、例外、USB切断で全sessionを決定的にstop/closeできること、(3) binding aliasの取り違え防止と再binding条件、(4) capture開始前に両Live Viewと全SDK source/capture sessionをcloseしWPD open中SDK operation 0を維持すること、(5) transaction排他・no retry・原本保持を維持すること、をsoftware contractと明示承認済み最大5回の実機検証で確認する。
 - 失敗時: 片側のframe取得停止、session close未確認、SDK error、USB topology変化、candidate count変化は両paneをLive成功と見せず、bindingをinvalidにして`HardwarePending`へ戻す。capture transaction開始は拒否する。
 - 範囲外: リアルタイム合成、自由homography、previewからのA0品質判断、hardware shutter synchronizationの保証。実機PoCはこのdecisionだけでは開始せず、対象・回数・操作を明記した別承認を要する。
+- 状態の追記（2026-10-05）: 凍結（Blocked）。2プロセス×2 moduleの構成による二台Live Viewの実機PoCを、(i) ベンダーの書面確認、または (ii) 所有者が新しい実機予算を明示承認するまで止める。二画面Live Viewの目標そのものは放棄しない（PMの仮定）。根拠は4点。二台runはrun-04・run-05とも候補列挙の直後、最初の命令で失敗した（run-04の分類は記録が無く※推定、run-05はselectで `worker_selection_invalidated`）。run-05ではworker 1がSDKを読み込む前に止まったため、2 moduleの共存は試験できていない。実装前gate (1)「ライセンス下のSDK資料が独立session／sourceによる同時Live Viewを許可すること」は、手元の資料では満たせない。実機preview枠は5/5を消費した。MVPのLive Viewは一台選択式のまま（AGENTS.md）。経緯と証跡は `docs/DUAL_LIVE_WORKER_POC.md` の「二台実機run-05」節、作業順は `docs/CURRENT_STATUS.md` の2026-10-05 run-05節。
