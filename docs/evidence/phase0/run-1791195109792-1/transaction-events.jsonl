@@ -1,0 +1,23 @@
+{"timestamp":"2026-10-05T10:11:51.332Z","runId":"run-1791195109792-1","state":"CameraProfile","cameraAlias":"CAM-A","model":"Nikon D810","firmware":"unknown"}
+{"timestamp":"2026-10-05T10:11:51.334Z","runId":"run-1791195109792-1","transactionId":"preflight","state":"HardwareAgentCaptureProfileFrozen","cameraAlias":"CAM-A","errorDetail":"single-cam-a-20261005:v1:4e18b8db9767f6cb950361ac900876cee210853a47a5d211821702443dbd42f9"}
+{"timestamp":"2026-10-05T10:11:53.905Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdBaselineOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:53.935Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdBaselineOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:55.382Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSpoolEmptyBefore","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:55.383Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdBaselineClosed","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:55.384Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSdkCardCapture","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:57.476Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSdkSessionOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:57.477Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSdkProfileRevalidation","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:11:57.513Z","runId":"run-1791195109792-1","transactionId":"preflight","state":"HardwareAgentCaptureProfileRevalidatedInShutterSession","cameraAlias":"CAM-A","errorDetail":"single-cam-a-20261005:v1:4e18b8db9767f6cb950361ac900876cee210853a47a5d211821702443dbd42f9"}
+{"timestamp":"2026-10-05T10:11:59.956Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSdkCaptureCompleted","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:00.444Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSdkSessionClosed","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:00.445Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdObserveOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:00.455Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdRecoveryOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:02.241Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridRecoveredExactlyOneCandidate","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:02.242Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridPersistPcOriginal","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:02.981Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"Persisted","cameraAlias":"CAM-A","bytes":17842102,"sha256":"88c4b02fb1511cef1d64bc131180ae6caa4d25a92641fa743ff91050986048ce"}
+{"timestamp":"2026-10-05T10:12:02.983Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridPcOriginalVerified","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:03.113Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridCameraObjectDeleteStarted","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:03.376Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridCameraObjectDeleted","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:04.188Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridSpoolEmptyAfter","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:04.190Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"HybridWpdRecoveryClosed","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-05T10:12:04.192Z","runId":"run-1791195109792-1","transactionId":"hybrid-tx-1791195113905-4","state":"Complete","durationMs":10286}

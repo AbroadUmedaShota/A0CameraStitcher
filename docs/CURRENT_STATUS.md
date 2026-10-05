@@ -1,6 +1,15 @@
 # 現在の開発状況
 
-更新日: 2026-10-05（計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+
+## 2026-10-05 一台実機アプリ撮影の初回（V-1CAM-005、AOPC-20-NOTE）
+
+- 構成: D810 1 台（CAM-A）、`bind-single-identity-v3 --alias CAM-A --single-camera-connected-confirmed` で SDK/WPD 1/1 を結合（撮影なし）。撮影前の `spool-status` は PayloadObjectCount 0。承認済み撮影プロファイル `single-cam-a-20261005` v1（JPEG Fine・L 7360×4912・露出モード M・1/6 s・F8・ISO 64・WB プリセット 1、期限 2026-11-04、SHA-256 `4e18b8db…42f9`）。アプリは `build/wt-988d07a` の WPF Release に SDK 有効の CameraAgent（SHA-256 `AB1A7E98…DFD8`）を同梱して起動した。
+- 実施: 19:11:49 に画面の「安全確認済みの一台実機transactionを一回開始」を UI Automation で 1 回だけ押した。Live View は使っていない。自動再試行は 0 回。
+- カメラ側の結果: run `run-1791195109792-1`、transaction `0879c3a70db84b45a6cef3279bba6416`、terminalState Complete、所要 10.3 秒。SDK 撮影 1 回 → SDK close → WPD で候補ちょうど 1 件を回収 → PC 原画像を `.partial` 経由で保存・検証（17,842,102 B、SHA-256 `88c4b02fb1511cef1d64bc131180ae6caa4d25a92641fa743ff91050986048ce`）→ 該当 1 件だけ削除 → spool 空を確認。証拠は [run-1791195109792-1](evidence/phase0/run-1791195109792-1/transaction-events.jsonl)（実機識別子なし）。保存済み原画像の SHA-256 をローカルで再計算して一致を確認した（`sha256sum`、2026-10-05 19:14）。
+- アプリ側の結果: 保持原画像は「recordはありますが、アプリ側の再検証に失敗しました。保存不可です。」、理由は `original_reread_failed: Camera Agent artifact path is not the canonical location for this run.`。export・採用には進んでいない。
+- 原因: アプリは原画像の場所を `<artifacts>/<run>/<アプリの transaction ID>/<alias>/original.jpg` と決め打ちし、完全一致を要求する（来歴保証の設計）。一方、実機の hybrid 経路はフォルダ名に内部 ID `hybrid-tx-<時刻>` を使い、agent 側の正規位置検査は先頭フォルダ名を問わない。fake 経路の試験ではこの差が表に出なかった。修正方針は agent 側で、アプリが要求した transaction ID を hybrid のフォルダ名に使い、agent 側の検査もその ID との一致に締める（アプリ側の検査は緩めない）。修正・試験の後、SDK 有効ビルドで同じ手順をもう一度行う。
+- 今回の原画像はローカルの artifacts に残したまま（commit しない）。カードは空に戻っている。
 
 ## 2026-10-05 run-05 と次の作業（AOPC-20-NOTE）
 
