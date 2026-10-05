@@ -4,7 +4,7 @@
 
 ### ビルドゲートの導入と run-05 の前提（2026-10-05）
 
-main 着地に合わせ、二worker試作の `A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning` と試作の試験targetをCMake option `A0_BUILD_DUAL_PREVIEW_POC` の下に置く。既定値はSDK有効ビルド（必要ファイルが揃って `A0_NIKON_SDK_AVAILABLE` が成立したビルド）でOFF、SDK-stubビルドでONで、`A0CameraStitcher.SingleWorkerPreview` と `A0CameraStitcher.MarkerDiagnostic` は常にビルドする。このため run-05 を行う場合は、SDK有効構成で `-DA0_BUILD_DUAL_PREVIEW_POC=ON` を明示してビルドし、実行するexe（画面・worker）のexact SHA-256を実行前に記録する。run-05 自体は本人判断パケットA（marker回復）と同B（実機run-05）の別承認を要し、ビルドゲートの導入はその許可ではない。ADR-0031のgateは未達のままで、試作は製品機能ではない。
+main 着地に合わせ、二worker試作の `A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning` と試作の試験targetをCMake option `A0_BUILD_DUAL_PREVIEW_POC` の下に置く。既定値はSDK有効ビルド（必要ファイルが揃って `A0_NIKON_SDK_AVAILABLE` が成立したビルド）でOFF、SDK-stubビルドでONで、`A0CameraStitcher.SingleWorkerPreview` と `A0CameraStitcher.MarkerDiagnostic` は常にビルドする。このため run-05 を行う場合は、SDK有効構成で `-DA0_BUILD_DUAL_PREVIEW_POC=ON` を明示してビルドし、実行するexe（画面・worker）のexact SHA-256を実行前に記録する。run-05 自体は本人判断パケットA（marker回復）と同B（実機run-05）の別承認を要し、ビルドゲートの導入はその許可ではない。ADR-0031のgateは未達のままで、試作は製品機能ではない。 2026-10-05 に main へ着地（`706eaab`）し、同 HEAD から `build/sdk-dual-poc` で候補をビルドした（試験画面 `11272FFC…0619`、worker `3C62D4A6…E83D`。詳細は CURRENT_STATUS の 2026-10-05 節）。
 
 ### 停止ブロックとclose待ちの整合 T2（software-only、2026-10-01）
 

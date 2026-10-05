@@ -9,6 +9,13 @@
   - 2回目 2026-10-02 17:05:42（電池交換後）、exit 0、283 ms。出力は `UNBOUND model=Nikon D810 firmware=V1.11 shootingMode=S` と `UNBOUND model=Nikon D810 firmware=V1.14 shootingMode=S`、`CameraCount: 2`、`BoundCameraCount: 0`、`UnboundCameraCount: 2`、`IdentityMapChanged: false`。2台のファームウェア版が異なる（V1.11 と V1.14）。※要確認: 試験プロファイルで版の統一を前提にしているか。
 - このPC（AOPC-20-NOTE）はSDKを `.tools/nikon/d810-remote-sdk`（ignored）に配置済みで、SDK有効ビルドは HEAD `d256dba` 以降で成立している。実機でのSDK操作（Live View を含む）はまだ1件も行っていない。
 
+## 2026-10-05 main 着地と run-05 候補ビルド（AOPC-20-NOTE）
+
+- 着地: `git push origin HEAD:main` で main を `3e9ae40` → `706eaab` に fast-forward（82 commit、PR なし、12:06）。ブランチ `codex/dual-live-worker-poc-20260922` も `706eaab` に同期。push 後の GitHub Actions の run は増えていない（最新は 2026-09-21 の pull_request）。
+- run-05 候補ビルド: clean HEAD `706eaab` から新規フォルダで `cmake -S . -B build/sdk-dual-poc -G "Visual Studio 16 2019" -A x64 "-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk" "-DA0_BUILD_DUAL_PREVIEW_POC=ON"`（12:07）。configure ログに「Nikon D810 licensed adapter enabled」「A0_BUILD_DUAL_PREVIEW_POC=ON (A0_NIKON_SDK_AVAILABLE=ON)」と試作を SDK 有効でビルドする旨の CMake Warning が出て、`ctest -N` は 35 件。Release build は PreviewWorker・PreviewCommissioning・MarkerDiagnostic・SingleWorkerPreview・Phase0 の 5 本とも exit 0、C4819/C4834 以外の警告 0（12:07〜12:11）。exe SHA-256: 試験画面 `11272FFC952DFE8870FCCEA9537B2ABD78323F253EA5108A79B93333F2570619`（196,096 B）、worker `3C62D4A622FCFFDADCD4953486C8B8820048EFA935DEF85BF4179E07F071E83D`（300,544 B）、MarkerDiagnostic `85747F450B0D43349B0E8C56B701697CC8117125BF24635E7AD3982BF3087B9A`、SingleWorkerPreview `40F450753E4C0AB1C145762BE37D9C87B96A8404F73EC6CF8FC3DB6F8A197847`、Phase0 `F5271550167DF4F561BFB6E98506CD7B12CA819BAE753B038341EB99AD73125A`。
+- 注意: `build/sdk-verify/Release` にはビルドゲート導入前（2026-10-01）に SDK 有効でビルドした PreviewWorker／PreviewCommissioning の exe が残っている。run-05 には使わず、`build/sdk-dual-poc/Release` の上記ハッシュの exe だけを使う。
+- 起動前点検（12:06、読取りのみ）: D810 2 台 present、A0 関連 process 0、`MarkerDiagnostic --read-only` は `marker_missing`。run-05 の実施は所有者の GO 待ち。
+
 ## 2026-10-05 main 着地前レビュー
 
 - `codex/dual-live-worker-poc-20260922`（HEAD `0e5068e` 時点）を main へ着地させる前に `/review-code` の3観点レビューを行った。判定は性能 承認、セキュリティ 承認（LOW 7件、任意対応は下の2026-10-01節の残件に記録）、総合 差し戻し（H1・H2）。
