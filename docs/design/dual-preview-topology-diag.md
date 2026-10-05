@@ -777,3 +777,10 @@ SDK なしビルド。test root に合成の v2 marker を置き、試験用 lea
 11. B の最終形（実装中。9 節は作業ツリーの現状を前提にしている）
 12. `postFirstEventMs` と journal の tick 差の照合幅「数百 ms」（経験則）
 13. 手動確認 M-1 の実施承認
+
+## 補遺（2026-10-05、security レビューの結果）
+
+- C の対象範囲: root 直下に正規名 `armed-session-<数字>.marker` がちょうど 1 件であること。session ID は問わないが、現在の session と異なるときは人が明示的に確認する（security 承認。※要確認 8 を解消）。非正規名・ディレクトリ・reparse point が 1 件でもあれば、C は処理せず停止理由として返す。
+- 証拠控え（nonce を含む写し等）は marker root の外に置く。root の中に置くと `armed-session-*.marker` の glob に一致し、本物を処理した後も隔離が解けなくなる。
+- 読取り専用診断は現在の session の候補 1 件だけを `eligible_for_human_review` にする設計のままなので、再起動後は `marker_ambiguous` を返す。C はこの状態の marker も対象にできる必要がある（dry-run で候補名と session 一致／不一致を状態語で返す）。
+- 本番の marker root の DACL には別アカウント（サンドボックス用グループ）の読取り権限が継承されている（2026-10-05 確認）。marker の内容（nonce・epoch・PID）は読めるが書換え・削除はできず、worker のなりすましにも届かない。将来、root 作成時に保護付き DACL を付ける案を残す（既存ディレクトリの ACL 変更は本番状態の書換えなので所有者承認が要る）。
