@@ -5,7 +5,7 @@
 ## 2026-10-05 run-05 と次の作業（AOPC-20-NOTE）
 
 - run-05 の結果: 所有者の GO を受けて 12:14 に二台 run を 1 回だけ実施した（`build/sdk-dual-poc/Release` の上記ハッシュの exe）。worker 0 の enumerate は候補 2 を返し、その次の select が `worker_selection_invalidated` で失敗した。画面は fail-closed で隔離を維持した。journal には失敗ブロック（worker 0・select・分類・応答検証・ACK 書込み・close receipt 5 項目）と両 worker の exit ブロックが揃い、worker 0 は exit code 3、worker 1 は exit code 0・close receipt 5 項目すべて完全。Source open と Live View 開始には達していない。撮影・設定変更・WPD・カード操作・自動再試行は 0 回。実機 preview 枠は 5/5 を消費した。詳細と原因の読み（本命は既列挙 ID の AddChild 再通知 ※推定）は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「二台実機run-05」節。
-- 隔離の現状: 画面 process は隔離表示のまま生存しており、通常終了要求（12:17:57）は拒否された。`MarkerDiagnostic --read-only` は `process_active_or_unknown`。所有者の判断で marker の手動削除はしない。**このPCの再ログオン・再起動は、下の B が入るまで行わない。** 現行コードは marker のファイル名に Windows session ID を含め、`RejectMarker` は現在の session の marker しか見ないため、再ログオン・再起動後は隔離が黙って外れる（※コード読み、未検証）。
+- 隔離の現状: 画面 process は隔離表示のまま生存しており、通常終了要求（12:17:57）は拒否された。`MarkerDiagnostic --read-only` は `process_active_or_unknown`。所有者の判断で marker の手動削除はしない。**このPCの再ログオン・再起動は、下の B が入るまで行わない。（補足: B が守るのは B を含むビルドの exe だけで、既存の exe は再ログオン後も素通りする。再ログオン後は `MarkerDiagnostic --read-only` が別 session の marker を `marker_ambiguous` で止めるため、別 session の marker の回復は C の仕様として所有者が決めるまで未定。したがって B が入った後も、C の方針が決まるまで再ログオン・再起動の制限を残す）** 現行コードは marker のファイル名に Windows session ID を含め、`RejectMarker` は現在の session の marker しか見ないため、再ログオン・再起動後は隔離が黙って外れる（※コード読み、未検証）。
 - ADR-0031: 2 プロセス × 2 module 構成の二台 Live View 実機 PoC を凍結した（Blocked、2026-10-05）。解除条件はベンダーの書面確認、または所有者による新しい実機予算の明示承認。二画面 Live View の目標は放棄しない。MVP は一台選択式 Live View のまま。根拠は [DECISIONS](DECISIONS.md) の ADR-0031 末尾。
 - 次の software 作業の順番（実機操作なし）:
   1. D1／D2: run-05 記録の確定と ADR-0031 凍結の記録（本更新）。

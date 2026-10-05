@@ -88,11 +88,11 @@ JSONで `appId=a0-camera-stitcher-review-cli`、`version=3`、`status=ok`、`env
 
 | 状態 | 結果 | 備考 |
 | --- | --- | --- |
-| `%LOCALAPPDATA%\A0CameraStitcher\Phase0\DualDelegation\armed-session-<session-id>.marker` が残っている | `camera_control_delegation_quarantined` で停止 | 二台preview試作だけでなく、main の製品ビルドのカメラ制御入口もすべて拒否する |
+| `%LOCALAPPDATA%\A0CameraStitcher\Phase0\DualDelegation\armed-session-*.marker` に当たるエントリ（どの session ID でも、ファイル・ディレクトリ・junction・非正規名の別を問わず）が1件でも残っている | `camera_control_delegation_quarantined` で停止 | 二台preview試作だけでなく、main の製品ビルドのカメラ制御入口もすべて拒否する |
 | 上記ディレクトリ、またはその祖先（ドライブroot〜`%LOCALAPPDATA%`）にreparse point（junction・symbolic link）がある、固定ローカルドライブでない、作成できない | `camera_control_marker_failed` で停止 | プロファイルや `AppData` をjunctionで別ドライブへ移したPCで起きる見込み（※要検証） |
 
 - 前任PC（AOPC-11-NOTE）には run-04 の委譲markerが残っている。そのPCで main の製品ビルドを動かすと、上記の入口は全拒否になる。markerの承認済み回復手順（[二worker試作記録](DUAL_LIVE_WORKER_POC.md) の本人判断パケットA）は未承認・未実装であり、markerを手で削除・編集して回避しない。
-- marker名はWindows session IDを含む。logonごとにsession IDが変わった場合に残存markerが検出されるかは※要確認。
+- marker名はWindows session IDを含む。2026-10-05 の修正（B）以前のビルドは現在の session ID の marker しか見ないため、再ログオン・再起動で session ID が変わると残存 marker を素通りする（コード読み。実行では※未検証）。B 以降のビルドは marker root の `armed-session-*.marker` を全件走査し、1件でもあれば `camera_control_delegation_quarantined` で止める。注意: B が守るのは B を含むビルドの実行ファイルだけで、`build/sdk-dual-poc/Release` など B 以前の既存 exe は再ログオン後も素通りする。「B が入った」とは、この PC で本番 lease を取る exe（Phase0 CLI・CameraAgent・DualCameraAgent・SingleWorkerPreview・PreviewCommissioning・PreviewWorker）をすべて B 入りで作り直した後を指す。また再ログオン後は `MarkerDiagnostic --read-only` が別 session の marker を `marker_ambiguous` で止める（現 session の候補1件だけを扱う設計）。別 session の marker を回復対象にする扱いは監査付き回復コマンド（C）の仕様として所有者が決めるまで未定で、それまで再ログオン・再起動の制限を残す。別ユーザープロファイル間の marker root は MVP の運用契約の範囲外。
 - AOPC-20-NOTE では 2026-10-02 のWPD読取り列挙2回（`A0CameraStitcher.Phase0.exe inventory --transport wpd`、exit 0）でlease取得が通り、`MarkerDiagnostic --read-only` は `marker_missing` だった（[現在の開発状況](CURRENT_STATUS.md) の2026-10-02節）。
 - 起動前の確認には読取り専用の `A0CameraStitcher.MarkerDiagnostic --read-only` を使う。markerの作成・削除は行わない。
 - 二worker Live View試作（`A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning`）は、SDK有効ビルドでは既定でビルドされない。二台previewを動かすには、構成時に次のように明示し、各回の人の承認を得る。ADR-0031のgateは未達であり、製品機能ではない。
