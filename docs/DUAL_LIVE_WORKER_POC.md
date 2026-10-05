@@ -168,6 +168,8 @@ journal `logs/preview-run-21104-347900703.jsonl`（固定イベント29行、識
 
 隔離の現状と方針（2026-10-05）: 12:17:57の通常終了要求は拒否され（journal 30行目の `close_unconfirmed`）、画面process（PID 21104）は隔離表示のまま生存している。委譲markerは `MarkerDiagnostic --read-only` で `process_active_or_unknown`。所有者の判断で、markerの手動削除は行わない。監査付きの回復コマンド（CURRENT_STATUSの作業順C）を実装し、承認を得たうえで1回だけ削除する方針とした。markerを全session分走査する修正（同B）が入るまで、このPCの再ログオン・再起動は行わない。現行コードではmarkerのファイル名が現在のWindows session IDを含み（`hardware_process_lease.cpp` の `MarkerPath`）、`RejectMarker` はそのpathしか確認しないため、再ログオン・再起動後は隔離が黙って外れる（※コード読み、実行では未検証）。run-05の後に再試行・撮影・設定変更・WPD・カード操作は行っていない。終了後の画面processの扱いは所有者の判断待ち（※未回答）。
 
+追記（2026-10-05 13時台）: 画面process（PID 21104）は、起動スクリプトを待機させていたバックグラウンド実行が1時間の上限で停止した際に巻き込まれて終了した（※推定。操作者の承認による終了ではない。Orchestratorの運用上の落ち度として記録する）。workerは既に終了していたためSDK・カメラの状態への影響はない。終了後の `MarkerDiagnostic --read-only` は `eligible_for_human_review`（匿名SHA-256 `2909726e76cef52be3ff2dd967e109c7c31be655a3cc27efbcb7b8ab2e762564`、148 B）で、隔離markerは残っている。journalは30行で不変。回復は監査付き回復コマンド（C）の実装と所有者の承認を待つ。
+
 実機preview枠は累計5/5を消費した。結果は未合格・隔離中で、同条件の再実行はしない。プレビューの可否を撮影・保存原画像・品質・製品受入へ拡張しない。
 
 ### 二台実機run-04: 終了確認不能・隔離維持（2026-09-23）
