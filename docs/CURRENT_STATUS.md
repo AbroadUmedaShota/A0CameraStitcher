@@ -1,21 +1,23 @@
 # 現在の開発状況
 
-更新日: 2026-10-05（run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-05（計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
 
 ## 2026-10-05 run-05 と次の作業（AOPC-20-NOTE）
 
 - run-05 の結果: 所有者の GO を受けて 12:14 に二台 run を 1 回だけ実施した（`build/sdk-dual-poc/Release` の上記ハッシュの exe）。worker 0 の enumerate は候補 2 を返し、その次の select が `worker_selection_invalidated` で失敗した。画面は fail-closed で隔離を維持した。journal には失敗ブロック（worker 0・select・分類・応答検証・ACK 書込み・close receipt 5 項目）と両 worker の exit ブロックが揃い、worker 0 は exit code 3、worker 1 は exit code 0・close receipt 5 項目すべて完全。Source open と Live View 開始には達していない。撮影・設定変更・WPD・カード操作・自動再試行は 0 回。実機 preview 枠は 5/5 を消費した。詳細と原因の読み（本命は既列挙 ID の AddChild 再通知 ※推定）は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「二台実機run-05」節。
 - 隔離の現状: 画面 process は隔離表示のまま生存しており、通常終了要求（12:17:57）は拒否された。`MarkerDiagnostic --read-only` は `process_active_or_unknown`。所有者の判断で marker の手動削除はしない。**このPCの再ログオン・再起動は、下の B が入るまで行わない。（補足: B が守るのは B を含むビルドの exe だけで、既存の exe は再ログオン後も素通りする。再ログオン後は `MarkerDiagnostic --read-only` が別 session の marker を `marker_ambiguous` で止めるため、別 session の marker の回復は C の仕様として所有者が決めるまで未定。したがって B が入った後も、C の方針が決まるまで再ログオン・再起動の制限を残す）** 現行コードは marker のファイル名に Windows session ID を含め、`RejectMarker` は現在の session の marker しか見ないため、再ログオン・再起動後は隔離が黙って外れる（※コード読み、未検証）。 追記（2026-10-05 13時台）: 画面process（PID 21104）は、起動スクリプトを待機させていたバックグラウンド実行が1時間の上限で停止した際に巻き込まれて終了した（※推定。操作者の承認による終了ではない。Orchestratorの運用上の落ち度として記録する）。workerは既に終了していたためSDK・カメラの状態への影響はない。終了後の `MarkerDiagnostic --read-only` は `eligible_for_human_review`（匿名SHA-256 `2909726e76cef52be3ff2dd967e109c7c31be655a3cc27efbcb7b8ab2e762564`、148 B）で、隔離markerは残っている。journalは30行で不変。回復は監査付き回復コマンド（C）の実装と所有者の承認を待つ。
+- 計装 A の完了（software-only、commit `853c075`、2026-10-05 に main へ着地）: worker が module の AddChild／RemoveChild を区間別に数え、18 個の数値を応答封筒 v2（`a0.preview-worker.v2`、`diag` を厳密に検査し、版ずれは SDK に触る前に fail-closed）で親へ返し、親が `topo_block_*` として journal に書く。画面操作の時刻は `preview_requested` で残る。分類は `worker_selection_invalidated` を `worker_selection_inventory_changed`／`worker_selection_topology_event` に分け（旧語は残り、60→62 語）、worker main の最上位例外を exit code 4 に分けた。試験は新モード 4 系列×5 回・既存 preview 系 23 件×3 回・独立検証すべて failures=0、SDK 有効構成のビルド exit 0（2026-10-05、報告の転記）、レビューは総合・設計適合・セキュリティ表層とも承認。journal の読み方の表と exit code 表は [二worker試作記録](DUAL_LIVE_WORKER_POC.md) の「機器イベント計装 A」節、正本は `docs/design/dual-preview-topology-diag.md`。 着地前の全体検証（HEAD `853c075`、SDK-stub `build/handoff-verify`、2026-10-05 16:18〜17:47。ディスクを飽和させる他プロセス `find.exe` が並走）: Debug 51/54、Release 54/55。Debug の `phase0_contracts`（期限 2 秒の時間依存試験）と `pc_direct_summary_v2_e2e`（pwsh ホスト自体の CLR 内部エラー）は環境起因と判定。両構成で落ちた `hardware_camera_agent_contracts`（25 分タイムアウト）は、`TestProductionContinuousLiveViewContracts` が製品の `StartContinuousLiveView` を通じて本番名・本番 root の lease を取り、この PC に実在する run-05 の marker で開始が拒否された後、フレーム読取りの合図を期限なしで待つためと特定した（同試験は marker ができる前の 11:22 には 27.95 秒で PASS）。A・B・C の回帰ではなく、単体試験が PC の本番 marker root に依存する既存の欠陥で、試験を test-root の lease に切り離し待ちに期限を付ける修正を残件とする。なお Release 実行は未コミットの回復コマンド C を取り込んでビルドしていた。
 - ADR-0031: 2 プロセス × 2 module 構成の二台 Live View 実機 PoC を凍結した（Blocked、2026-10-05）。解除条件はベンダーの書面確認、または所有者による新しい実機予算の明示承認。二画面 Live View の目標は放棄しない。MVP は一台選択式 Live View のまま。根拠は [DECISIONS](DECISIONS.md) の ADR-0031 末尾。
 - 次の software 作業の順番（実機操作なし）:
-  1. D1／D2: run-05 記録の確定と ADR-0031 凍結の記録（本更新）。
-  2. B（Must）: 委譲 marker を全 session 分走査して拒否する修正。security レビュー付き。
-  3. A（Must）: worker 側の topology 計装（機器イベントの回数・種別・時点を固定語彙・数値のみで記録）、分類を「集合不一致」と「イベントによる無効化」に 2 分割、画面の操作時刻を記録する `preview_requested`。fail-closed の規則は緩めない。
-  4. C（Should。E が承認されれば Must）: 監査付きの回復コマンド。承認のうえ、確定した marker 1 件だけを 1 回処理する。
+  1. D1／D2: run-05 記録の確定と ADR-0031 凍結の記録（完了）。
+  2. B（Must）: 委譲 marker を全 session 分走査して拒否する修正（完了、`da678a6`）。運用 PC の exe は、B を含む SDK 有効ビルドへの置き換えを待つ。
+  3. A（Must）: worker 側の topology 計装（完了、`853c075`。上の項目）。
+  4. C（次。Should、E が承認されれば Must）: 監査付きの回復コマンド。承認のうえ、確定した marker 1 件だけを 1 回処理する。
   5. E-prep（Should）: SDK のみを使うプローブの実装。実行は別承認。
   6. D3（Could）: Nikon 窓口への照会文の作成。
-- 所有者への未回答の質問: (1) プローブに使う実機枠と、S2 の解釈。(2) Nikon への照会を行ってよいか。(3) 生存中の画面 process を終了してよいか（終了しても marker は残る）。
+- 所有者の決定（2026-10-05 16時台、口頭の一言で確定）: (1) 実機の時間は MVP 本線（一台の実アプリ workflow V-1CAM-005 → 二台順次撮影 V-PAIR-001 → 二台固定校正）へ回し、二台同時 Live View は凍結のまま。(2) SDK のみの topology プローブ（E）に実機枠を付ける（1 回、上限 2 回）。Source を開かない 2 段目は AGENTS.md の「SDK セッションは同時に 1 つ」に当たらないという解釈で可。(3) Nikon 開発者窓口への照会は行わない（D3 は取り下げ）。画面 process の終了可否は、process が時間上限停止に巻き込まれて消滅したため解消（上記の追記を参照）。この決定により、委譲 marker の監査付き回復コマンド C は Must に上がる（marker を回復しないと本線の実機作業もプローブもこの PC では始められない）。
 - 残件（追加）: 二台 binding 経路の `PollDualInvalidation`（`src/phase0/nikon_sdk_transport.cpp` 1176 行付近。判定に使う `dual_topology_changed_` は同ファイル 3104 行付近の `ModuleEventProc` で、既知 ID の AddChild では立たない）は既知 ID の AddChild を許容しており、worker selection の「イベント 1 件で無効化」（`worker_preview_selection.hpp` の `ObserveTopology`）と判断が食い違う。どちらを正本にするかは A の計装データが出てから reviewer_architecture と security が判断する（今回コードは変えない）。
+- 残件（計装 A、2026-10-05）: SDK 経路の実行時動作と callback スレッドの前提は実機 run 待ち（新しい実機 run には所有者の承認が要る）。試験の未カバー 2 点: exit code 4 が実プロセスの境界まで届くこと、v1 応答の拒否を実 IPC 越しに確かめること。LOW 2 点: worker 側の JSON 解析失敗の分類を `worker_envelope` へ正規化する、`kPreviewWorkerSchema` を共有ヘッダ `preview_topology_diag.hpp` に置いたことによる推移的依存。
 
 ## 2026-10-02 実機接続の最初の記録（AOPC-20-NOTE）
 

@@ -6,6 +6,159 @@
 
 main 着地に合わせ、二worker試作の `A0CameraStitcher.PreviewWorker`・`A0CameraStitcher.PreviewCommissioning` と試作の試験targetをCMake option `A0_BUILD_DUAL_PREVIEW_POC` の下に置く。既定値はSDK有効ビルド（必要ファイルが揃って `A0_NIKON_SDK_AVAILABLE` が成立したビルド）でOFF、SDK-stubビルドでONで、`A0CameraStitcher.SingleWorkerPreview` と `A0CameraStitcher.MarkerDiagnostic` は常にビルドする。このため run-05 を行う場合は、SDK有効構成で `-DA0_BUILD_DUAL_PREVIEW_POC=ON` を明示してビルドし、実行するexe（画面・worker）のexact SHA-256を実行前に記録する。run-05 自体は本人判断パケットA（marker回復）と同B（実機run-05）の別承認を要し、ビルドゲートの導入はその許可ではない。ADR-0031のgateは未達のままで、試作は製品機能ではない。 2026-10-05 に main へ着地（`706eaab`）し、同 HEAD から `build/sdk-dual-poc` で候補をビルドした（試験画面 `11272FFC…0619`、worker `3C62D4A6…E83D`。詳細は CURRENT_STATUS の 2026-10-05 節）。
 
+### 機器イベント計装 A（software-only、2026-10-05）
+
+run-05 の `worker_selection_invalidated`（worker 0 の select）は原因が推定のままで、機器イベントの種別・回数・時点が journal に残っていない。計装 A は、次に承認される実機 run 1 回でその原因を切り分けるための software-only 作業で、選択規則（fail-closed）は変えていない。worker の SDK transport が module の AddChild／RemoveChild を区間別に数え、18 個の数値を全応答の `diag` に載せ、親がそれを journal に数値で書く。source ID・自由文は journal にも応答にも出さない。正本は `docs/design/dual-preview-topology-diag.md`（以下「正本」。3.2 節の表、4 節の封筒、5 節の分類、6 節の並び、7 節の exit code、8 節の読み方、補遺）。作業ブランチ `codex/dual-live-worker-poc-20260922` に commit `853c075` として入れた。2026-10-05 に main へ着地した。
+
+#### journal語彙（A追加）
+
+| event | value | 書く位置 |
+|---|---|---|
+| `preview_requested` | 候補の序数（0／1） | 画面の Preview 命令で、候補検査の直後・`owner->Preview(...)` の直前。tickCount64 が画面操作の時刻になる |
+| `topo_block_enumerate` | worker 番号（0／1） | `worker_a_enumerated`／`worker_b_enumerated` の直後 |
+| `topo_block_failure` | 失敗した worker 番号（0／1）。失敗観測が無い、または owner 全体の段階なら 2 | 判定が close_unconfirmed の初回だけ、worker 1 の exit ブロックの後 |
+| `topo_block_close` | worker 番号（0／1） | close 記録の初回だけ、worker 0 → 1 の順 |
+| `topo_unavailable` | 理由 0〜3（下表） | 見出しの直後に、18 行の代わりに 1 行 |
+
+`topo_unavailable` の値:
+
+| value | 意味 |
+|---|---|
+| 0 | 内部の防御（失敗観測が無い、`response_validated` なのに topology が無い等。通常フローでは出ない） |
+| 1 | 要求を書き切っていない（未送信・送信途中・close 未試行）。`topo_block_failure(2)` の後では「worker への要求が存在しない」の意味（正本 補遺、※仮定） |
+| 2 | 応答を受け取っていない |
+| 3 | 応答を受け取ったが拒否した（`worker_reply_invalid`） |
+
+見出しの後に続く 18 行（正本 3.2 節の順。全項目 uint32。件数・回数・個数は飽和加算、ms は 4294967295 で頭打ち）:
+
+| # | journal 名 | JSON キー | 意味 | 値 |
+|---|---|---|---|---|
+| 1 | `topo_open_add` | `openAdd` | OpenModule 中に届いた AddChild | 件 |
+| 2 | `topo_open_remove` | `openRemove` | OpenModule 中に届いた RemoveChild | 件 |
+| 3 | `topo_inventory_add` | `inventoryAdd` | WaitForSourceIds 中の AddChild | 件 |
+| 4 | `topo_inventory_remove` | `inventoryRemove` | WaitForSourceIds 中の RemoveChild | 件 |
+| 5 | `topo_inventory_pumps` | `inventoryPumps` | WaitForSourceIds が呼んだ Pump（呼ぶ直前に数える） | 回 |
+| 6 | `topo_snapshot_children` | `snapshotChildren` | snapshot を決めた最後の Children 取得の ID 数 | 個 |
+| 7 | `topo_snapshot_event_ids` | `snapshotEventIds` | snapshot 時点でイベントから知った ID 集合の個数 | 個 |
+| 8 | `topo_snapshot_ms` | `snapshotMs` | Reset から Snapshot までの経過 | ms |
+| 9 | `topo_post_add_known` | `postAddKnown` | snapshot 後、既知 ID の AddChild | 件 |
+| 10 | `topo_post_add_unknown` | `postAddUnknown` | snapshot 後、未知 ID の AddChild | 件 |
+| 11 | `topo_post_remove_known` | `postRemoveKnown` | snapshot 後、既知 ID の RemoveChild | 件 |
+| 12 | `topo_post_remove_unknown` | `postRemoveUnknown` | snapshot 後、未知 ID の RemoveChild | 件 |
+| 13 | `topo_post_add_known_distinct` | `postAddKnownDistinct` | AddChild を受けた既知 ID の種類数 | 0〜2 |
+| 14 | `topo_post_first_event_op` | `postFirstEventOp` | snapshot 後の最初のイベント時の命令コード | 0 なし／1 enumerate／2 select／3 start／4 frame／5 suspend／6 resume／8 命令外または所有スレッド外（7 は欠番） |
+| 15 | `topo_post_first_event_ms` | `postFirstEventMs` | Snapshot から最初のイベントまで。14 が 0 なら 0 | ms |
+| 16 | `topo_check_valid_before_pump` | `checkValidBeforePump` | 最後の在庫確認で Pump 前に selection が有効だったか | 0 未実施／1 有効／2 無効 |
+| 17 | `topo_check_set_equal` | `checkSetEqual` | 最後の在庫確認で現在集合が snapshot と一致したか | 0 未実施／1 一致／2 不一致 |
+| 18 | `topo_check_current_count` | `checkCurrentCount` | 最後の在庫確認での現在集合の個数 | 個 |
+
+dispatcher は enumerate の命令の印を transport の Reset より先に付けるため、snapshot 後の同じ enumerate 命令中に届いたイベントは 14 が 1 になる。この順序を変えると 8 に化ける（正本 補遺。`tests/worker_topology_counters_tests.cpp` の enumerate ケースで固定）。close の合図で計数は凍結し、close 中のイベントは数えない。
+
+#### journalの並び
+
+既存の行は消さず、相対順序も変えていない。topo ブロックは close 記録の初回だけに書き、2 回目以降の `Close()` では増えない。
+
+- enumerate 段: `worker_a_enumerated` → `topo_block_enumerate(0)` ＋ 18 行 → `preview_requested`（worker 1 は `worker_b_enumerated` → `topo_block_enumerate(1)`）
+- closed: `both_workers_close_verified` → exit 0 → exit 1 → `topo_block_close(0)` ＋ 18 行 → `topo_block_close(1)` ＋ 18 行
+- unconfirmed: `close_unconfirmed` → 失敗ブロック → exit 0 → exit 1 → `topo_block_failure` → `topo_block_close(0)` → `topo_block_close(1)`（各見出しの後は 18 行か `topo_unavailable` 1 行）
+
+run-05 と同じ形なら、末尾は `topo_block_failure(0)` ＋ 18 行、`topo_block_close(0)` ＋ `topo_unavailable(1)`（worker 0 には close を送っていない）、`topo_block_close(1)` ＋ 18 行になる。行数は約 60 行増える。
+
+読み方の規則: 見出しの次の行が `topo_unavailable` なら値なし。そうでなければ続く 18 行が値で、その 18 行の event 名が上の表の順と一致することを機械的に照合する。値の行の途中で `Record` が失敗した場合（`complete=false`）、行数だけで読むと次の見出しと取り違えるため。
+
+#### 分類の変更（60語→62語）
+
+`CheckInventory` 由来の `worker_selection_invalidated` を分けた。判定は上から順に適用する。
+
+1. 既に拒否済みの selection: `worker_selection_invalidated`（再分類しない）
+2. 現在集合が snapshot と不一致: `worker_selection_inventory_changed`（集合不一致を優先）
+3. 機器イベントで無効化された: `worker_selection_topology_event`
+4. それ以外の無効化（例外・外部の Invalidate）: `worker_selection_invalidated`
+
+`worker_selection_invalidated` は残る。Suspend／Resume の内部で close()／open() の後に無効だった場合もこの語のままで、その間のイベントは `topo_post_first_event_op`（5／6）で読む。分類表は 60 語から 62 語になった（worker プロトコル層 15→17）。旧ビルドの journal（run-05 を含む）の `worker_selection_invalidated` は、集合不一致とイベントによる無効化を区別できない。
+
+#### 応答封筒v2
+
+要求・応答とも schema を `a0.preview-worker.v2` に上げた。要求は 6 フィールドのまま、応答は `diag` を加えた 7 フィールドで、status が ok／failed／closed／quarantined のどれでも `diag` は必須。
+
+- 親 `ParsePreviewWorkerReply` は、7 フィールドでない、schema が v2 でない、`diag` が object でない、キーが 18 個ちょうどでない（欠落・名前違い・余分）、値が number でない、値の字句が 0〜4294967295 の 10 進非負整数でない（`-1`・`1.0`・`1e3`・`4294967296` は拒否）のどれかで `worker_reply_invalid` にする。ACK を書かず、その子には以後 close も送らず、隔離を維持する
+- 親は `diag` の値を判定に使わない（形だけを検査する）
+- worker は v2 以外の要求を `worker_authority` で拒否する。この拒否は SDK に触る前に起き、応答は v2 の failed で `diag` は全 0。親と worker の版がずれた組み合わせは、どちらの向きでも SDK に触る前に止まり、隔離側に倒れる
+- 親と worker は同じ commit・同じビルドディレクトリから作り、実行前に両 exe の SHA-256 を記録する（実行時の hash 照合はしない）
+
+#### worker の exit code
+
+`A0CameraStitcher.PreviewWorker` の終了コード（正本 7 節。定数 `kWorkerMainExceptionExitCode` は `src/phase0/preview_worker_main.cpp`）。親は 0 だけを clean と数え、値の意味では分岐しない。
+
+| code | 意味 | SDK |
+|---|---|---|
+| 0 | 明示 close が完了し、pipe ループが 0 を返した | close 済み |
+| 2 | 引数・bootstrap・委譲・権限の検査で明示的に拒否 | 触っていない |
+| 3 | dispatcher は動いたが明示 close で完了しなかった（失敗応答の後の自己 close、配送失敗、権限喪失・受付寿命切れでの自己 close、pipe ループ内の例外） | dispatcher が close を試行済み |
+| 4 | main の最上位 `catch (...)` に例外が届いた（bootstrap の読取り・JSON 解析、handle 引数、委譲検証、transport の構築など dispatcher より前） | 触っていない |
+| 5／6 | 試験用 fake 子プロセス（`tests/preview_worker_owner_tests.cpp`、`tests/dual_live_worker_poc_tests.cpp`）の失敗コード。本物の worker は返さない | — |
+| なし | `safe_to_exit` が false で `Sleep(INFINITE)` のまま残り、人の回復を待つ | 終了未確認 |
+
+run-05 の worker 0 は exit 3 だったが、旧ビルドでは「失敗応答の後に自己 close した」と「bootstrap 中の例外」を区別できなかった。4 を分けたので、新ビルドの 3 は前者だけを指す。
+
+#### 読み方の表
+
+読むのは `topo_block_failure` の 18 行（失敗が無ければ `topo_block_close`）と、`worker_a_enumerated`・`preview_requested` の tickCount64。
+
+候補:
+
+- (1) 遅延配送・再通知: module が既列挙 ID の AddChild を後から配送する。自分の照会（Pump・Children）が再通知を誘発する場合を含む
+- (2) 外部の再列挙: 他の WPD クライアントや OS の再列挙で、同じ ID の Remove → Add が起きる
+- (3) 一時 ID の実変化: 切断・再接続などで ID が実際に変わる
+- (4) 2 module の干渉: 二つの worker の module instance が互いのイベントを誘発する。両 worker が module を読み込んだ回でだけ検討する（run-05 は worker 1 が SDK を読み込んでいないので対象外）
+
+| 観測 | 支持する候補 | 修正の方向 |
+|---|---|---|
+| `postFirstEventOp = 8` | どれでもない。スレッド前提の破れ | F0 を先に扱い、他の値は解釈しない |
+| 既知 Add ≥ 1、未知 Add = 0、Remove（既知・未知）= 0、`checkSetEqual = 1`、`checkValidBeforePump = 1` | (1)。Remove が配送されない再列挙なら (2) も残る | F1 を先に検討。F2 は同じ観測が繰り返された後の別判断 |
+| 上の行で `postAddKnownDistinct = 2` | (1) の「全 child の再通知」寄り | 同上 |
+| 上の行で `inventoryAdd ≥ snapshotChildren` かつ `inventoryPumps` が小さい | (1) のうち自分の照会が誘発する型 | F1 が効きにくい可能性がある。F2 の判断材料 |
+| 既知 Remove ≥ 1 かつ既知 Add ≥ 1、未知 Add = 0、`checkSetEqual = 1` | (2) | F3 ＋ 規則は維持 |
+| 既知 Remove ≥ 1、`checkSetEqual = 2`、`checkCurrentCount < 2` | (2) で戻る前に確認した、または物理的な切断 | F3・F4 |
+| 未知 Add ≥ 1（既知 Remove の有無を問わず）、`checkSetEqual = 2` | (3) | F4 |
+| snapshot 後のイベント 0、`checkValidBeforePump = 1`、`checkSetEqual = 2` | (3) でイベントが届かなかった、または Children とイベントの食い違い | F4 ＋ F6 |
+| snapshot 後のイベント 0、`checkValidBeforePump = 2` | どれでもない（イベント以外の無効化。分類は `worker_selection_invalidated`） | F6 |
+| 相手 worker の `topo_block_close`（両 worker が module を読み込んだ回）にも同じ時間帯の snapshot 後イベントがある | (4) | F5 |
+| `postFirstEventOp = 2` で、`postFirstEventMs` と（`preview_requested` − `worker_a_enumerated`）の tick 差が数百 ms 以内（※経験則） | 補助情報: select の最初の Pump で配送された。発生時刻は分からない | 上の行の判断を変えない |
+
+修正の方向（どれも未実装。選ぶのは A のデータを見た後）:
+
+- F0: callback で触る状態（`module_sources_`・計数器）のスレッド安全化。他の F より先
+- F1: snapshot の前に静穏期間を待つ。閾値は A のデータから決め、今はコードに固定しない。fail-closed は緩めない。enumerate の予算 W（22 s）の見直しを伴う
+- F2: 既知 ID の Add だけ（Remove なし・集合一致）を無効化として扱わない。fail-closed を緩めるため architect と security の判断が要る
+- F3: 運用手順。run 中は他の WPD クライアント（エクスプローラーの自動再生・写真アプリ等）を止め、チェックリストに記録する
+- F4: fail-closed を維持し、ケーブル・ハブ・給電・USB 省電力を物理側で調べる
+- F5: worker 間で module の読み込みを直列化する、または時間差を付ける。あるいは ADR-0031 の範囲で見直す
+- F6: 無効化経路のコード調査
+
+#### 試験・検証
+
+ctest に次を登録した（`CMakeLists.txt`）。
+
+- `worker_topology_counters_contracts`（`a0_worker_topology_counters_tests`、TIMEOUT 10）: 区間・既知／未知・飽和・凍結・スレッド検出
+- `preview_worker_reply_diag_table`（`a0_preview_worker_owner_tests --reply-diag-table`）: 親の拒否規則の単体表
+- `preview_worker_reply_diag_contracts`（同 `--reply-diag-contract`）: fake 子が 17 キーの `diag` で応答した場合の統合
+- `preview_worker_topology_journal`（同 `--topology-journal`）: journal の並び・語彙・理由・ID の非流出
+- `hardware_process_lease_delegation_diagnostic`（`a0_hardware_process_lease_delegation_tests --diagnostic`）
+
+検証結果（2026-10-05。実装・独立検証・Orchestrator の報告による転記で、本節の作成時に再実行はしていない）: 新モード 4 系列×5 回、既存 preview 系 23 件×3 回、赤確認 3 件、独立検証は単体 10 系列・統合 5 系列×2 で、いずれも failures=0。SDK 有効構成でのビルドは exit 0。
+
+#### レビュー
+
+総合 承認、設計適合 承認、セキュリティ表層 承認。条件は 2 点で、実機 run の前に Debug 構成で試験を通す（着地前の全体検証で実施する）こと、正本へ相違点を追記すること（補遺に追記済み）。
+
+#### 未検証・残件
+
+- SDK 経路の実行時動作と、`ModuleEventProc` が transport の所有スレッドで呼ばれるという前提は実機 run 待ち（※未検証）。データを取るには所有者による新しい実機 run の承認が要る（実機 preview 枠は 5/5 消費済み）
+- 未カバー: exit 4 が実プロセスの境界まで届くこと、v1 応答の拒否を実 IPC 越しに確かめる試験は無い
+- LOW: worker 側の JSON 解析失敗の分類を `worker_envelope` へ正規化する
+- LOW: `kPreviewWorkerSchema` を共有ヘッダ `preview_topology_diag.hpp` に置いたため、schema 定数だけを使う側にも計装ヘッダへの推移的依存が生じる
+
 ### 停止ブロックとclose待ちの整合 T2（software-only、2026-10-01）
 
 T1の次のsoftware-only作業。T1で残した「close時の待ち時間が操作ごとの最悪値と合っていない」「Case 4のexit codeが猶予次第」「相方workerのclose応答がjournalに残らない」をまとめて扱う。方針はarchitect裁定 (b)「SDK呼び出しは途中で止めず、待つ側の期限を予算から計算する」。成功条件は「検証済みclosed receipt」「窓内のexit 0」「`DisarmDualDelegation` 成功」の3つで、時間切れを成功にしない。本物のworkerはkillしない。曖昧なcloseは再送しない（子ごとに1回、`delivery_failed` の子には送らない。送った後の観測は `WaitForSingleObject(0)` / `GetExitCodeProcess` だけ）。作業はWU1（予算表と操作別期限）、WU2（close送信とexit観測の分離）、WU3（操作期限と受付寿命の分離）の3つ。
