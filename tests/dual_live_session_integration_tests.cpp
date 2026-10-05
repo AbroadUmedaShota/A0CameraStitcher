@@ -48,7 +48,13 @@ int GrantWorker(const std::string& name, const std::string& alias, HANDLE parent
     };
     auto deny = [&] { return finish("DENIED|" + std::to_string(transport.opens) + "|" + std::to_string(transport.frames)); };
     std::string wire;
-    if (!ReadMessage(pipe.value, wire, parent)) return 7;
+    // This read starts right after the binding receipt is written. Before the
+    // grant arrives the controller spawns and connects the sibling worker (in
+    // Pair's constructor) and, in Normal(), spawns and reaps a lease-probe
+    // process, so the wait spans two process spawns. Budget for both, as
+    // TestParentDeath in dual_live_worker_poc_tests.cpp does for its two
+    // nested spawns.
+    if (!ReadMessage(pipe.value, wire, parent, 2 * kSpawnTimeout)) return 7;
     const auto grant = ParseGrant(wire); const auto now = GetTickCount64();
     if (!grant || grant->controller != kController || grant->epoch != kEpoch || grant->alias != alias ||
         grant->instance != Instance(alias) || grant->receipt != Receipt(alias) || grant->capability != Capability(alias) ||
@@ -58,7 +64,13 @@ int GrantWorker(const std::string& name, const std::string& alias, HANDLE parent
     if (!WriteMessage(pipe.value, "READY", parent)) return 8;
     std::uint64_t sequence{}, last_time = now;
     for (;;) {
-        if (!ReadMessage(pipe.value, wire, parent)) { transport.Close(); selection.Invalidate(); return 9; }
+        // Normal() spawns and reaps a lease-probe process while this worker is
+        // still serving (between A's close and B's STOP), so a wait between
+        // requests can also span a process spawn. No case here asserts the
+        // worker's idle deadline, so the spawn budget weakens no check.
+        if (!ReadMessage(pipe.value, wire, parent, kSpawnTimeout)) {
+            transport.Close(); selection.Invalidate(); return 9;
+        }
         const auto f = Split(wire);
         // Close is allowed after expiry; it cannot generate a frame.
         if (f.size() == 3 && f[0] == "STOP" && f[1] == grant->capability && f[2] == grant->epoch) {
@@ -82,7 +94,7 @@ struct Child {
     Child(std::string a, HANDLE parent) : alias(std::move(a)), name(Unique()), pipe(CreateServer(name)),
         process(Start(L"--grant-worker " + Wide(name) + L" " + Wide(alias) + L" " +
             std::to_wstring(reinterpret_cast<std::uintptr_t>(parent)), parent)) {
-        Require(pipe.valid() && Connect(pipe.value), "worker pipe connect");
+        Require(pipe.valid() && Connect(pipe.value, kSpawnTimeout), "worker pipe connect");
     }
     ~Child() { Reap(process.value); }
     std::string Read() { std::string wire; Require(ReadMessage(pipe.value, wire), "worker reply"); return wire; }

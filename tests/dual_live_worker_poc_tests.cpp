@@ -12,10 +12,16 @@ int Worker(const std::string& pipe_name, const std::string& alias, const std::st
     Handle pipe(CreateFileW(PipePath(pipe_name).c_str(), GENERIC_READ | GENERIC_WRITE, 0,
         nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
     if (!pipe.valid()) return 3;
+    bool first_read = true;
     for (;;) {
         if (WaitForSingleObject(parent, 0) != WAIT_TIMEOUT) return 7;
         std::string request;
-        if (!ReadMessage(pipe.value, request, parent)) {
+        // The controller may still be spawning/connecting the sibling worker
+        // before sending anything, so only the first wait gets the spawn
+        // budget; every later request/response stays on the steady-state one.
+        const auto read_timeout = first_read ? kSpawnTimeout : kTimeout;
+        first_read = false;
+        if (!ReadMessage(pipe.value, request, parent, read_timeout)) {
             // Closing the controller's pipe can precede its process handle
             // becoming signaled. Resolve that exit race without reconnecting.
             return WaitForSingleObject(parent, kTimeout) == WAIT_OBJECT_0 ? 7 : 4;
@@ -45,7 +51,7 @@ struct Child {
           process(pipe.valid() ? Start(L"--worker " + Wide(name) + L" " + Wide(alias) +
               L" g " + Wide(token) + L" " + std::to_wstring(source) + L" " +
               std::to_wstring(reinterpret_cast<std::uintptr_t>(parent)), parent) : nullptr) {
-        if (!pipe.valid() || !process.valid() || !Connect(pipe.value)) {
+        if (!pipe.valid() || !process.valid() || !Connect(pipe.value, kSpawnTimeout)) {
             Reap(process.value);
             throw std::runtime_error("worker connection");
         }
@@ -102,7 +108,11 @@ int Helper(const std::string& report_name, HANDLE outer_parent) {
     const auto pids = std::to_string(GetProcessId(a.process.value)) + "|" + std::to_string(GetProcessId(b.process.value));
     if (!WriteMessage(report.value, pids, outer_parent)) return 11;
     std::string unused;
-    ReadMessage(report.value, unused, outer_parent);
+    // Idles here until the outer test terminates this helper process (its
+    // parent-death injection). Under load, giving this the steady-state
+    // timeout risks a natural timeout racing ahead of that termination, so
+    // this uses the spawn budget instead.
+    ReadMessage(report.value, unused, outer_parent, kSpawnTimeout);
     return 12;
 }
 void TestNormalAndWorkerFault(HANDLE parent) {
@@ -128,9 +138,12 @@ void TestParentDeath(HANDLE parent) {
     const auto name = Unique();
     Handle report(CreateServer(name));
     Handle helper(Start(L"--helper " + Wide(name) + L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(parent)), parent));
-    Require(Connect(report.value), "helper connection");
+    Require(Connect(report.value, kSpawnTimeout), "helper connection");
     std::string pids;
-    Require(ReadMessage(report.value, pids), "helper reports actual worker identities");
+    // This wait spans two nested spawns: the helper process itself, then its
+    // own two CAM-A/CAM-B children, each connecting before the helper reports
+    // back. Budget for both.
+    Require(ReadMessage(report.value, pids, nullptr, 2 * kSpawnTimeout), "helper reports actual worker identities");
     const auto ids = Split(pids);
     std::uint64_t a_pid{}, b_pid{};
     Require(ids.size() == 2 && Number(ids[0], a_pid) && Number(ids[1], b_pid), "worker pid envelope");
@@ -181,9 +194,26 @@ void TestWireFailures(HANDLE parent) {
               "wrong request credential rejected");
     }
     {
+        // No request is ever sent, so this exercises the first read. It uses
+        // kSpawnTimeout, and on that read's own timeout the worker waits on
+        // `parent` for up to another kTimeout before exiting (see Worker()
+        // above), so the worst case before exit is kSpawnTimeout + kTimeout.
+        // Doubling kSpawnTimeout clears that with real margin.
         Child a("CAM-A", "a-token", 71, parent);
+        Check(WaitForSingleObject(a.process.value, 2 * kSpawnTimeout) == WAIT_OBJECT_0 && ExitCode(a.process.value) == 4,
+              "idle IPC deadline on first read closes actual worker");
+    }
+    {
+        // After one served request, every later read must use kTimeout. With
+        // no further request the worker exits 4 within one kTimeout read plus
+        // its kTimeout parent check. The bound below is shorter than
+        // kSpawnTimeout, so a later read that wrongly kept the first-read
+        // budget fails this check instead of passing slowly.
+        static_assert(kTimeout * 3 < kSpawnTimeout, "idle bound must separate the two read budgets");
+        Child a("CAM-A", "a-token", 71, parent);
+        Check(a.Request("1") == "CAM-A|g|a-token|1|71|simulated-frame-1", "idle baseline request served");
         Check(WaitForSingleObject(a.process.value, kTimeout * 3) == WAIT_OBJECT_0 && ExitCode(a.process.value) == 4,
-              "idle IPC deadline closes actual worker");
+              "idle IPC deadline after a served request closes actual worker");
     }
     Check(Worker("unused", "CAM-A", "g", "token", 71, nullptr) == 1, "unowned startup rejected before pipe open");
     Handle unowned(Start(L"--worker unused CAM-A g token 71 0", parent));

@@ -17,6 +17,14 @@
 using namespace a0::phase0;
 namespace {
 constexpr DWORD kTimeout = 1500;
+// Steady-state IPC (an already-connected worker answering a request) stays on
+// kTimeout. A wait that can include OS process creation/scheduling for a
+// freshly spawned child -- connecting to it, reaping its exit, or a worker's
+// very first read before the controller has finished spawning/connecting its
+// sibling -- uses this larger budget instead. Only the specific call sites
+// documented at their use need it; this must never become the default for
+// ordinary request/response I/O.
+constexpr DWORD kSpawnTimeout = 15000;
 constexpr std::size_t kMaxWire = 1024;
 HANDLE cleanup_job = nullptr; // Outer runner owns this; never inherited.
 int failures = 0;
@@ -81,13 +89,13 @@ void CancelAndDrain(HANDLE pipe, OVERLAPPED& pending) {
     DWORD ignored{};
     GetOverlappedResult(pipe, &pending, &ignored, FALSE);
 }
-bool Complete(HANDLE pipe, OVERLAPPED& pending, HANDLE parent, DWORD& transferred) {
+bool Complete(HANDLE pipe, OVERLAPPED& pending, HANDLE parent, DWORD& transferred, DWORD timeout = kTimeout) {
     HANDLE waits[]{pending.hEvent, parent};
-    const DWORD wait = WaitForMultipleObjects(parent ? 2U : 1U, waits, FALSE, kTimeout);
+    const DWORD wait = WaitForMultipleObjects(parent ? 2U : 1U, waits, FALSE, timeout);
     if (wait != WAIT_OBJECT_0) { CancelAndDrain(pipe, pending); return false; }
     return GetOverlappedResult(pipe, &pending, &transferred, FALSE) != FALSE;
 }
-bool Io(HANDLE pipe, void* data, DWORD length, bool write, HANDLE parent = nullptr) {
+bool Io(HANDLE pipe, void* data, DWORD length, bool write, HANDLE parent = nullptr, DWORD timeout = kTimeout) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event.valid()) return false;
     OVERLAPPED pending{};
@@ -97,15 +105,15 @@ bool Io(HANDLE pipe, void* data, DWORD length, bool write, HANDLE parent = nullp
                                  : ReadFile(pipe, data, length, &done, &pending);
     if (immediate) return done == length;
     if (GetLastError() != ERROR_IO_PENDING) return false;
-    return Complete(pipe, pending, parent, done) && done == length;
+    return Complete(pipe, pending, parent, done, timeout) && done == length;
 }
-bool ReadMessage(HANDLE pipe, std::string& result, HANDLE parent = nullptr) {
+bool ReadMessage(HANDLE pipe, std::string& result, HANDLE parent = nullptr, DWORD timeout = kTimeout) {
     std::array<unsigned char, 4> header{};
-    if (!Io(pipe, header.data(), 4, false, parent)) return false;
+    if (!Io(pipe, header.data(), 4, false, parent, timeout)) return false;
     const auto size = Size(header);
     if (size == 0 || size > kMaxWire) return false; // Before allocation.
     result.assign(size, '\0');
-    return Io(pipe, result.data(), size, false, parent);
+    return Io(pipe, result.data(), size, false, parent, timeout);
 }
 bool WriteMessage(HANDLE pipe, const std::string& message, HANDLE parent = nullptr) {
     if (message.empty() || message.size() > kMaxWire) return false;
@@ -118,7 +126,10 @@ HANDLE CreateServer(const std::string& name) {
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1, static_cast<DWORD>(kMaxWire), static_cast<DWORD>(kMaxWire), kTimeout, nullptr);
 }
-bool Connect(HANDLE pipe) {
+// Every real caller connects right after spawning the peer process (Start()),
+// so this wait inherently includes OS process creation/scheduling and
+// defaults to the spawn budget, not the steady-state one.
+bool Connect(HANDLE pipe, DWORD timeout = kSpawnTimeout) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event.valid()) return false;
     OVERLAPPED pending{};
@@ -128,7 +139,7 @@ bool Connect(HANDLE pipe) {
     if (error == ERROR_PIPE_CONNECTED) return true;
     if (error != ERROR_IO_PENDING) return false;
     DWORD ignored{};
-    return Complete(pipe, pending, nullptr, ignored);
+    return Complete(pipe, pending, nullptr, ignored, timeout);
 }
 HANDLE Start(const std::wstring& arguments, HANDLE inherited_parent) {
     SIZE_T size{};
@@ -173,9 +184,11 @@ DWORD ExitCode(HANDLE process) {
 }
 void Reap(HANDLE process) {
     if (!process) return;
-    if (WaitForSingleObject(process, kTimeout) != WAIT_OBJECT_0) {
+    // A just-spawned or just-stopped child's exit can be slow to observe under
+    // load, so this uses the spawn budget rather than the steady-state one.
+    if (WaitForSingleObject(process, kSpawnTimeout) != WAIT_OBJECT_0) {
         TerminateProcess(process, 82); // Only isolated test-owned fake processes.
-        WaitForSingleObject(process, kTimeout);
+        WaitForSingleObject(process, kSpawnTimeout);
     }
 }
 
