@@ -323,6 +323,8 @@ journal `logs/preview-run-21104-347900703.jsonl`（固定イベント29行、識
 
 追記（2026-10-05 13時台）: 画面process（PID 21104）は、起動スクリプトを待機させていたバックグラウンド実行が1時間の上限で停止した際に巻き込まれて終了した（※推定。操作者の承認による終了ではない。Orchestratorの運用上の落ち度として記録する）。workerは既に終了していたためSDK・カメラの状態への影響はない。終了後の `MarkerDiagnostic --read-only` は `eligible_for_human_review`（匿名SHA-256 `2909726e76cef52be3ff2dd967e109c7c31be655a3cc27efbcb7b8ab2e762564`、148 B）で、隔離markerは残っている。journalは30行で不変。回復は監査付き回復コマンド（C）の実装と所有者の承認を待つ。
 
+marker の回復（2026-10-05 18:30、所有者の承認による手動経路 B）: 監査付き回復コマンド C の完成を待たず、所有者が「実害がないなら開発を進めたい」として手動回復を選んだ。Orchestrator が用意した 1 回限りのスクリプト（前提をすべて照合し、1 ファイルだけを削除、再試行なし）は auto mode の分類器に止められたため、所有者自身が実行した。記録: カメラ 2 台の電源 OFF・USB 切断後、D810 は `Get-PnpDevice -PresentOnly` 0 件・`Win32_PnPEntity`（Status OK）0 件、A0 関連 process 0、session id 2 が marker 名と一致、marker root の項目は `armed-session-2.marker` の 1 件だけ、`MarkerDiagnostic --read-only` は `eligible_for_human_review`（匿名 SHA-256 `2909726e…2564`、148 B）でファイルのハッシュも一致。証拠の控えを marker root の外（ローカルのみ・commit しない）に保存してから 1 件だけ削除し、診断は `marker_missing` になった（18:30:57）。監査付き回復コマンド C は実装・総合レビュー承認済みで、security レビューと MEDIUM 対応を残して後で仕上げる。
+
 実機preview枠は累計5/5を消費した。結果は未合格・隔離中で、同条件の再実行はしない。プレビューの可否を撮影・保存原画像・品質・製品受入へ拡張しない。
 
 ### 二台実機run-04: 終了確認不能・隔離維持（2026-09-23）
