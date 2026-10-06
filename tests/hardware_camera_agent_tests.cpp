@@ -1068,6 +1068,21 @@ void TestStrictProtocolAndTypedResponses() {
               std::string::npos,
         "capture must reject a missing readiness-approved profile expiry before backend access");
 
+    // The hybrid executor accepts only lowercase hex as the original's
+    // directory name, so the protocol must reject uppercase IDs up front
+    // instead of letting them reserve a transaction and touch the camera.
+    const std::string uppercase_transaction_id = "0123456789ABCDEF0123456789abcdef";
+    const std::string uppercase_capture =
+        dispatcher.Handle(CaptureEnvelope(uppercase_transaction_id));
+    Check(backend.capture_calls == 1 &&
+          uppercase_capture.find("InvalidTransactionId") != std::string::npos,
+        "capture must reject an uppercase-hex transactionId before backend access");
+    const std::string uppercase_query = dispatcher.Handle(Envelope(
+        "get-transaction-result", "{\"transactionId\":\"" + uppercase_transaction_id + "\"}"));
+    Check(backend.transaction_calls == 0 &&
+          uppercase_query.find("InvalidTransactionId") != std::string::npos,
+        "transaction query must reject an uppercase-hex transactionId before backend access");
+
     std::string simulated = Envelope("get-single-readiness", "{\"cameraAlias\":\"CAM-A\"}");
     const auto marker = simulated.find("\"simulation\":false");
     simulated.replace(marker, std::string("\"simulation\":false").size(), "\"simulation\":true");
@@ -1778,10 +1793,15 @@ void TestExactlyOneBindingAndHybridExecutorReuse() {
         // This asserts the actual on-disk path, not just that some file
         // exists, so a reintroduced mismatch fails here instead of only on
         // real hardware.
+        // error_code overload: a regression that lands the original elsewhere
+        // leaves the expected path missing, and the throwing overload would
+        // abort the rest of this test without printing actual=.
+        std::error_code original_location_error;
         Check(result.retained_original &&
                   fs::equivalent(
                       result.retained_original->path,
-                      evidence.RunRoot() / request.transaction_id / "CAM-A" / "original.jpg"),
+                      evidence.RunRoot() / request.transaction_id / "CAM-A" / "original.jpg",
+                      original_location_error),
             "the retained original must be at run_root/<request transactionId>/<alias>/original.jpg, "
             "matching HardwareAgentArtifactLayout.OriginalPath exactly; actual=" +
                 (result.retained_original ? result.retained_original->path.string() : std::string("<none>")));

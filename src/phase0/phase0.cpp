@@ -170,10 +170,10 @@ std::string ControlledErrorDetail(std::string_view value) {
 
 // Defensive check for a caller-supplied hybrid transaction ID override (see
 // ExecuteHybridCaptureOnce). Deliberately stricter than merely "is a legal
-// path component": exactly 32 lowercase hex characters, matching the shape
-// the hardware Camera Agent protocol and HardwareAgentArtifactLayout (the
-// .NET app side) already require. The explicit separator checks are belt-
-// and-suspenders on top of the character-class check, which already
+// path component": exactly 32 lowercase hex characters, the same shape the
+// hardware Camera Agent protocol requires for capture-single and
+// get-transaction-result transaction IDs. The explicit separator checks are
+// belt-and-suspenders on top of the character-class check, which already
 // excludes '/' and '\\'.
 bool IsSafeHybridTransactionIdOverride(std::string_view value) noexcept {
     if (value.empty() || value.size() != 32) return false;
@@ -1451,6 +1451,10 @@ TransactionResult ExecuteHybridCaptureOnce(
             "hybrid capture transaction ID override failed validation; capture was not started");
         result.frames.push_back({false, std::string(camera_alias), {}, {}, 0,
             result.error_category, result.error_detail});
+        // The "invalid-override" transaction ID is load-bearing: the .NET
+        // handoff evidence collector matches events by transactionId and its
+        // state allowlist does not include HybridTransactionIdOverrideInvalid.
+        // Recording a real transaction ID here would make that collector fail.
         evidence.RecordState(
             "invalid-override", "HybridTransactionIdOverrideInvalid", camera_alias, result.error_detail);
         evidence.RecordResult(result);

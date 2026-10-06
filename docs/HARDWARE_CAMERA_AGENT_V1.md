@@ -187,7 +187,9 @@ Every response repeats `schemaVersion`, `simulation:false`, `marker`, and
 `requestId`, then adds `success`, `resultCode`, and `payload`. Unknown, missing,
 duplicate, trailing, wrongly typed, or structurally invalid fields are rejected
 before backend access. Aliases are exactly `CAM-A` or `CAM-B`; capture
-transaction IDs are exactly 32 hexadecimal characters. Every typed operation
+transaction IDs in `capture-single` and `get-transaction-result` are exactly 32
+lowercase hexadecimal characters. An uppercase ID is rejected as
+`InvalidTransactionId` before a transaction is reserved. Every typed operation
 payload carries `cameraMode:"SingleCamera"`. Capture and durable-query payloads
 also carry `requiredCameraAlias`, exactly equal to their `cameraAlias`.
 
@@ -312,6 +314,20 @@ the fixed client `transactionId`, the frozen profile identity and expiry,
   "sha256": "64-lowercase-hex-characters"
 }
 ```
+
+`path` is always
+`<artifactsRoot>/<runId>/<transactionId>/<cameraAlias>/original.jpg`, where
+`transactionId` is the client's ID. The app checks this exact location, and
+the agent requires the same location before the camera object delete, when
+reverifying the journal, and when recovering a retained original. A journal
+whose original lies under any other directory, including one written by an
+agent build earlier than this rule (`<runId>/hybrid-tx-<time>/...`), reports
+`FailedPartial/transaction_original_invalid`; the file stays on disk and must
+be retrieved manually. As defense in depth for in-process callers, the hybrid
+executor itself ends `FailedPartial/transaction_id_override_invalid` before
+opening WPD or SDK if it receives a transaction ID that is not 32 lowercase hex
+characters. Through this protocol that path is unreachable, because such an ID
+is already rejected as `InvalidTransactionId`.
 
 Success requires `Complete`, one durable reread-verified canonical PC original,
 empty spool before capture, exact-object delete attempted and successful, empty

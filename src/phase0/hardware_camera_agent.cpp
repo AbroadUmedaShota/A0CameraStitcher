@@ -2887,8 +2887,12 @@ HardwareCameraAgentRequest ParseHardwareCameraAgentRequest(std::string_view json
             "liveViewHandoffRequested",
         });
         request.transaction_id = RequireField(payload, "transactionId", JsonKind::string).string;
-        if (!IsSafeTransactionId(request.transaction_id)) {
-            ProtocolFailure("InvalidTransactionId", "capture transactionId must contain exactly 32 hexadecimal characters");
+        // Lowercase only: the hybrid executor uses this ID verbatim as the
+        // original's directory name and accepts only lowercase hex, so an
+        // uppercase ID must be rejected here, before the transaction is
+        // reserved or any camera is touched.
+        if (!IsLowerHex(request.transaction_id, 32)) {
+            ProtocolFailure("InvalidTransactionId", "capture transactionId must contain exactly 32 lowercase hexadecimal characters");
         }
         request.expected_capture_profile_id =
             RequireField(payload, "expectedCaptureProfileId", JsonKind::string).string;
@@ -2938,8 +2942,8 @@ HardwareCameraAgentRequest ParseHardwareCameraAgentRequest(std::string_view json
         request.operation = HardwareCameraAgentOperation::get_transaction_result;
         RequireExactFields(payload, {"transactionId"});
         request.transaction_id = RequireField(payload, "transactionId", JsonKind::string).string;
-        if (!IsSafeTransactionId(request.transaction_id)) {
-            ProtocolFailure("InvalidTransactionId", "transactionId must contain exactly 32 hexadecimal characters");
+        if (!IsLowerHex(request.transaction_id, 32)) {
+            ProtocolFailure("InvalidTransactionId", "transactionId must contain exactly 32 lowercase hexadecimal characters");
         }
         return request;
     } else {
