@@ -1,5 +1,7 @@
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 
+#include "dual_hardware_capture_backend_internal.hpp"
+
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/wpd_transport.hpp"
@@ -42,14 +44,40 @@ bool LabelContains(
         std::string::npos;
 }
 
+// True only when the SDK actually advertised a setting: it is reported
+// available and carries a current label. A D810 reports fileType with
+// available=false and no current_label, which this treats as "not
+// advertised" rather than "advertised and empty".
+bool SettingLabelAdvertised(const SdkCameraStatus::SettingCapability& setting) {
+    return setting.available && setting.current_label.has_value();
+}
+
+} // namespace
+
+namespace detail {
+
 void RequireReadOnlyDualCaptureProfile(const SdkCameraStatus& status) {
     if (!status.live_view_status_available || status.live_view_status != "off") {
         throw TransportError(
             "dual_live_view_not_off",
             "DualCamera Live View OFF was not confirmed in the capture session");
     }
-    if (!LabelContains(status.file_type, "jpeg") ||
-        !LabelContains(status.compression_level, "fine")) {
+    // Some bodies (e.g. Nikon D810) never advertise fileType. When fileType
+    // is advertised, keep the original substring checks (fileType indicates
+    // JPEG and compressionLevel contains "fine"). When it is not advertised,
+    // fall back to requiring compressionLevel's normalized label to be an
+    // exact match for "jpegfine", so combined profiles such as
+    // "RAW + JPEG Fine" (normalized "rawjpegfine") are still rejected.
+    bool jpeg_fine_confirmed = false;
+    if (SettingLabelAdvertised(status.file_type)) {
+        jpeg_fine_confirmed = LabelContains(status.file_type, "jpeg") &&
+            LabelContains(status.compression_level, "fine");
+    } else if (SettingLabelAdvertised(status.compression_level)) {
+        jpeg_fine_confirmed =
+            NormalizeSettingLabel(*status.compression_level.current_label) ==
+            "jpegfine";
+    }
+    if (!jpeg_fine_confirmed) {
         throw TransportError(
             "dual_jpeg_fine_not_confirmed",
             "DualCamera JPEG Fine was not confirmed in the capture session");
@@ -66,6 +94,10 @@ void RequireReadOnlyDualCaptureProfile(const SdkCameraStatus& status) {
             "DualCamera image size L was not confirmed in the capture session");
     }
 }
+
+} // namespace detail
+
+namespace {
 
 class BoundNikonCardCaptureTransport final : public ICameraTransport,
                                              public ICardCaptureTransport {
@@ -468,7 +500,7 @@ DualHardwareFakeCaptureOutcome DualBoundPairCaptureBackend::Capture(
                 throw TransportError("dual_binding_invalidated",
                                      "Dual binding invalidated before shutter command");
             }
-            RequireReadOnlyDualCaptureProfile(
+            detail::RequireReadOnlyDualCaptureProfile(
                 sdk_adapter_->ProbeOpenCaptureSessionStatus(
                     std::chrono::seconds(5)));
             }, &cleanup_state);

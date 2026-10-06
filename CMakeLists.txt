@@ -353,6 +353,18 @@ if(BUILD_TESTING)
     add_test(NAME nikon_dual_session_adapter_contracts
         COMMAND a0_nikon_dual_session_adapter_tests)
 
+    add_executable(a0_dual_hardware_capture_backend_tests
+        tests/dual_hardware_capture_backend_tests.cpp)
+    target_link_libraries(a0_dual_hardware_capture_backend_tests PRIVATE a0_phase0_core)
+    target_include_directories(a0_dual_hardware_capture_backend_tests PRIVATE src/phase0)
+    if(MSVC)
+        target_compile_options(a0_dual_hardware_capture_backend_tests PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(a0_dual_hardware_capture_backend_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME dual_hardware_capture_backend_contracts
+        COMMAND a0_dual_hardware_capture_backend_tests)
+
     add_executable(a0_pc_direct_capture_tests
         tests/pc_direct_capture_tests.cpp)
     target_link_libraries(a0_pc_direct_capture_tests PRIVATE
