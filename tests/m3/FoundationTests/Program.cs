@@ -850,8 +850,11 @@ static async Task DualHardwareCaptureRecoveryOnlyProtocolAsync()
 
 static Task DualHardwareCaptureRecoveryOnlyBindingInvalidationReasonWireFormatAsync()
 {
-    // Captured from a real Agent terminal result (transaction 020a434c..., #224,
-    // AOPC-31-NOTE 2026-10-06). The Agent's native wire format writes
+    // The envelope below (schemaVersion/marker/requestId/success/resultCode) is
+    // synthesized by this test via DualHardwareResponseJson; only the inlined
+    // "result" JSON text is the Agent's actual raw bytes -- captured verbatim
+    // from a real terminal result (transaction 020a434c..., #224, AOPC-31-NOTE
+    // 2026-10-06). The Agent's native wire format writes
     // DualBindingInvalidationReason::None as an empty string, not the name "None"
     // (dual_identity_session_binding.cpp / dual_hardware_camera_agent.cpp). Before
     // the fix, this exact payload made both the query and start response decoders
@@ -923,32 +926,72 @@ static Task DualHardwareCaptureRecoveryOnlyBindingInvalidationReasonWireFormatAs
         Check.Equal(expected, outcome.Result!.Evidence.BindingInvalidationReason);
     }
 
-    var bogusJson = BuildRecoveryOnlyTerminalJson(boundaryTransactionId, "Bogus");
-    using (var bogusDocument = JsonDocument.Parse(bogusJson))
+    // Unknown name -- always a violation, never a silent fallback to None.
+    AssertRecoveryOnlyBindingReasonRejected(boundaryTransactionId, "Bogus");
+
+    // Enum.Parse/Enum.TryParse would accept all of these (a bare numeric token,
+    // a comma-separated flag-style list, and whitespace-padded names via
+    // trimming), but none of them is a name the Agent's wire format defines, so
+    // the reader must reject them exactly like any other unknown string (#224
+    // review M-1).
+    AssertRecoveryOnlyBindingReasonRejected(boundaryTransactionId, "2");
+    AssertRecoveryOnlyBindingReasonRejected(boundaryTransactionId, "None, SdkError");
+    AssertRecoveryOnlyBindingReasonRejected(boundaryTransactionId, " SdkError ");
+
+    // A literal JSON null (as opposed to a missing property, which is read as
+    // the record's own None default) is not a JSON string and must fail the
+    // same way any other wrong-kind token does.
+    var nullJson = BuildRecoveryOnlyTerminalJsonRaw(boundaryTransactionId, "null");
+    using (var nullDocument = JsonDocument.Parse(nullJson))
     {
-        var bogusResponse = DualHardwareResponseJson(
-            "recovery-only-binding-boundary-bogus", true, "PairTransactionFound", new
+        var nullResponse = DualHardwareResponseJson(
+            "recovery-only-binding-boundary-null", true, "PairTransactionFound", new
             {
                 transactionId = boundaryTransactionId.ToString("N"),
                 found = true,
-                result = bogusDocument.RootElement,
+                result = nullDocument.RootElement,
             }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
         Check.ThrowsHardwareProtocol("InvalidPayload", () =>
             DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
-                bogusResponse, "recovery-only-binding-boundary-bogus", boundaryTransactionId));
+                nullResponse, "recovery-only-binding-boundary-null", boundaryTransactionId));
     }
 
     return Task.CompletedTask;
+
+    void AssertRecoveryOnlyBindingReasonRejected(Guid transactionId, string invalidToken)
+    {
+        var json = BuildRecoveryOnlyTerminalJson(transactionId, invalidToken);
+        using var document = JsonDocument.Parse(json);
+        var response = DualHardwareResponseJson(
+            "recovery-only-binding-boundary-rejected", true, "PairTransactionFound", new
+            {
+                transactionId = transactionId.ToString("N"),
+                found = true,
+                result = document.RootElement,
+            }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
+        Check.ThrowsHardwareProtocol("InvalidPayload", () =>
+            DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+                response, "recovery-only-binding-boundary-rejected", transactionId));
+    }
 }
 
 // Minimal CaptureRecoveryOnly terminal (Failed/CaptureCameraA, no originals) with
 // a configurable evidence.bindingInvalidationReason: null omits the property
-// entirely (missing-field case), any other value is written verbatim as a string.
-static string BuildRecoveryOnlyTerminalJson(Guid transactionId, string? bindingInvalidationReasonToken)
+// entirely (missing-field case), any other value is written verbatim as a
+// quoted JSON string.
+static string BuildRecoveryOnlyTerminalJson(Guid transactionId, string? bindingInvalidationReasonToken) =>
+    BuildRecoveryOnlyTerminalJsonRaw(
+        transactionId,
+        bindingInvalidationReasonToken is null ? null : $"\"{bindingInvalidationReasonToken}\"");
+
+// Same shape, but the caller supplies the already-JSON-encoded binding reason
+// value verbatim (e.g. "\"SdkError\"" or the bare token "null"), so a literal
+// JSON null can be exercised too, not just a quoted string.
+static string BuildRecoveryOnlyTerminalJsonRaw(Guid transactionId, string? rawBindingInvalidationReasonJson)
 {
-    var bindingSegment = bindingInvalidationReasonToken is null
+    var bindingSegment = rawBindingInvalidationReasonJson is null
         ? string.Empty
-        : $"\"bindingInvalidationReason\":\"{bindingInvalidationReasonToken}\",";
+        : $"\"bindingInvalidationReason\":{rawBindingInvalidationReasonJson},";
     return "{" +
         $"\"transactionId\":\"{transactionId:N}\"," +
         "\"capturePurpose\":\"CaptureRecoveryOnly\"," +

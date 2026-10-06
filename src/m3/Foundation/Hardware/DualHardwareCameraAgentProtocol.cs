@@ -778,6 +778,25 @@ public static class DualHardwareCameraAgentProtocolCodec
 /// </summary>
 internal sealed class DualHardwareBindingInvalidationReasonConverter : JsonConverter<DualBindingInvalidationReason>
 {
+    // Explicit name -> value map, matched case-insensitively. This is deliberately
+    // not Enum.Parse/Enum.TryParse: those also accept a bare numeric token ("2"),
+    // a comma-separated flag-style list ("None, SdkError"), and leading/trailing
+    // whitespace (" SdkError "). None of those are legitimate wire values for this
+    // enum -- the Agent only ever writes one exact name (or "" for None) -- so a
+    // numeric or composite token must be rejected the same as any other unknown
+    // name, not silently accepted through Enum's more permissive grammar.
+    private static readonly Dictionary<string, DualBindingInvalidationReason> NamesByText =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            [nameof(DualBindingInvalidationReason.None)] = DualBindingInvalidationReason.None,
+            [nameof(DualBindingInvalidationReason.AgentRestart)] = DualBindingInvalidationReason.AgentRestart,
+            [nameof(DualBindingInvalidationReason.UsbReconnect)] = DualBindingInvalidationReason.UsbReconnect,
+            [nameof(DualBindingInvalidationReason.CameraCountChanged)] = DualBindingInvalidationReason.CameraCountChanged,
+            [nameof(DualBindingInvalidationReason.TopologyChanged)] = DualBindingInvalidationReason.TopologyChanged,
+            [nameof(DualBindingInvalidationReason.SdkManagerRecreated)] = DualBindingInvalidationReason.SdkManagerRecreated,
+            [nameof(DualBindingInvalidationReason.SdkError)] = DualBindingInvalidationReason.SdkError,
+        };
+
     public override DualBindingInvalidationReason Read(
         ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -786,15 +805,25 @@ internal sealed class DualHardwareBindingInvalidationReasonConverter : JsonConve
         var text = reader.GetString();
         if (string.IsNullOrEmpty(text))
             return DualBindingInvalidationReason.None;
-        if (Enum.TryParse(text, ignoreCase: true, out DualBindingInvalidationReason value) &&
-            Enum.IsDefined(value))
+        if (NamesByText.TryGetValue(text, out var value))
             return value;
         throw new JsonException($"'{text}' is not a valid DualBindingInvalidationReason.");
     }
 
+    // This codec never writes DualBindingInvalidationReason: the Agent is the
+    // only writer of this field on the wire, and it never uses this converter
+    // (see dual_identity_session_binding.cpp/dual_hardware_camera_agent.cpp).
+    // WPF only ever receives this value inside a response -- no outgoing
+    // request/payload type in this codec declares a DualBindingInvalidationReason
+    // field, and no test round-trips one back out through JsonSerializer.Serialize
+    // (both confirmed by inspection, #224 review). Throwing here makes that
+    // one-directional contract explicit instead of silently accepting a write
+    // path the Agent never reads.
     public override void Write(
         Utf8JsonWriter writer, DualBindingInvalidationReason value, JsonSerializerOptions options) =>
-        writer.WriteStringValue(value.ToString());
+        throw new NotSupportedException(
+            "DualBindingInvalidationReason is read-only in this codec: it is only ever decoded from an " +
+            "Agent response and this codec never writes it back out.");
 }
 
 internal sealed class DualHardwareTransactionIdConverter : JsonConverter<Guid>

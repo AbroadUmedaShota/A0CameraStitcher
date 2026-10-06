@@ -2710,7 +2710,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             $"stitchOutcome={HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome} / " +
             $"a0QualityApproval={HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval} / " +
             $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode} / " +
-            $"bindingInvalidationReason={outcome.BindingInvalidationReason} / failureReason={outcome.FailureReason}";
+            $"bindingInvalidationReason={outcome.BindingInvalidationReason} / " +
+            $"failureReason={outcome.FailureReason ?? "(none)"}";
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
         RaiseReviewImageProperties();
         RaiseLoupeProperties();

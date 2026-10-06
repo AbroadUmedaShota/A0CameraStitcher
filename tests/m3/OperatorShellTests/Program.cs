@@ -1273,6 +1273,17 @@ catch (Exception exception)
 
 try
 {
+    await CaptureRecoveryOnlyRecoverAsyncDecodesRealAgentFixtureAsync();
+    Console.WriteLine("PASS RecoverAsync decodes the real Agent fixture's empty-string binding invalidation reason through the full codec and clears pending on Failed/CaptureCameraA (#224)");
+}
+catch (Exception exception)
+{
+    failures.Add("RecoverAsync decodes the real Agent fixture's empty-string binding invalidation reason through the full codec and clears pending on Failed/CaptureCameraA (#224)");
+    Console.Error.WriteLine($"FAIL RecoverAsync decodes the real Agent fixture's empty-string binding invalidation reason through the full codec and clears pending on Failed/CaptureCameraA (#224): {exception}");
+}
+
+try
+{
     await HundredRunCoordinatorTests.RunAsync();
     Console.WriteLine("PASS CaptureRecoveryOnly internal 100-run coordinator remains software-only and fail-closed");
 }
@@ -1322,7 +1333,7 @@ catch (Exception exception)
     failures.Add("persistent EOF diagnostic and primary preservation contracts");
     Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
 }
-Console.WriteLine($"Operator shell tests: {97 - failures.Count}/97 passed.");
+Console.WriteLine($"Operator shell tests: {98 - failures.Count}/98 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -8082,6 +8093,80 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
     });
 }
 
+// #224 review M-3: a full-stack regression for the real issue. Unlike
+// CaptureRecoveryOnlyFakeOperations (which hands the workflow an already-typed
+// C# result object and never touches JSON), this wires the real
+// DualHardwareCameraAgentOperations codec to a fake transport that returns the
+// Agent's actual terminal result bytes (transaction 020a434c..., same fixture as
+// FoundationTests' wire-format test) as the query response. It exercises the
+// same raw-JSON -> codec -> workflow path that was broken in production:
+// RecoverAsync must decode the "" binding invalidation reason, finalize the
+// Failed/CaptureCameraA terminal, and release the pending gate.
+static async Task CaptureRecoveryOnlyRecoverAsyncDecodesRealAgentFixtureAsync()
+{
+    // Envelope (schemaVersion/marker/requestId/success/resultCode) is synthesized
+    // by this test's fake transport; only the "result" object below is the
+    // Agent's actual terminal result bytes, decoded from the real journal for
+    // transaction 020a434c... (#224, AOPC-31-NOTE 2026-10-06).
+    const string agentTerminalJson =
+        """{"transactionId":"020a434cd48749339e0ff2faa832b820","capturePurpose":"CaptureRecoveryOnly","stitchOutcome":"Pending","a0QualityApproval":"Unapproved","originals":[],"terminalState":"Failed","failureCode":"CaptureCameraA","evidence":{"terminalState":"Failed","identitySnapshot":{"expiresAtUtc":"2026-10-06T05:48:35.1395659+00:00","observedAtUtc":"2026-10-06T05:43:35.1395659+00:00","reasonCode":"same_agent_operator_binding","status":"Ready"},"captureProfileSchemaVersion":"a0.dual-capture-profile.operator-approved.v1","captureProfileApprovalBasis":"operator-approved-capture-recovery-only-v1","cameraModel":"Nikon D810","imageFormat":"JPEG Fine","imageSize":"L","pixelDimensions":"7360x4912","bindingInvalidationReason":"","watchdogStartedAtUtc":"2026-10-06T05:43:35.1413652+00:00","watchdogDeadlineUtc":"2026-10-06T05:46:35.1413652+00:00","completedAtUtc":"2026-10-06T05:43:39.3127834Z","watchdogCompletedInTime":true,"liveViewStopAndCloseConfirmed":true,"exactDeleteConfirmedForEveryRetainedOriginal":false,"bothSpoolsEmptyAfter":false,"automaticRetryCount":0}}""";
+
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var transactionId = Guid.ParseExact("020a434cd48749339e0ff2faa832b820", "N");
+        var transactionDirectory = Path.Combine(root, "transactions", transactionId.ToString("N"));
+
+        // The frozen request this fixture's evidence must match byte-for-byte
+        // (HardwareDualCaptureRecoveryOnlyWorkflow.ValidateTerminal compares
+        // every one of these fields against the terminal evidence). The
+        // identity/timestamps are the same ones the real Agent echoed back.
+        var request = new DualHardwareCaptureRecoveryOnlyRequest(
+            transactionId,
+            transactionDirectory,
+            new DualCameraIdentitySnapshot(
+                DualCameraIdentityStatus.Ready,
+                "same_agent_operator_binding",
+                DateTimeOffset.Parse("2026-10-06T05:43:35.1395659+00:00"),
+                DateTimeOffset.Parse("2026-10-06T05:48:35.1395659+00:00")),
+            ApprovedCaptureRecoveryOnlyProfile(),
+            new HardwareDualCaptureRecoveryOnlyConfirmations(true, true, true, true, true),
+            DateTimeOffset.Parse("2026-10-06T05:43:35.1413652+00:00"),
+            DateTimeOffset.Parse("2026-10-06T05:46:35.1413652+00:00"));
+
+        // Simulate "pending already exists from a prior run": save the durable
+        // snapshot directly instead of going through CaptureAsync, since the
+        // point of this test is RecoverAsync's decode path, not dispatch.
+        new CaptureRecoveryOnlyTransactionSnapshotStore(root).Save(request);
+
+        using var fixtureDocument = JsonDocument.Parse(agentTerminalJson);
+        var transport = new FixedQueryResultHardwareTransport(fixtureDocument.RootElement, transactionId);
+        var operations = new DualHardwareCameraAgentOperations(transport);
+
+        var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+            root, operations, operations, ApprovedCaptureRecoveryOnlyProfile());
+        Check.True(workflow.HasPendingRecovery,
+            "The durably-saved snapshot must be loaded as pending before recovery.");
+
+        var recovered = await workflow.RecoverAsync();
+
+        Check.False(recovered.RecoveryPending,
+            "The real Agent fixture's Failed/CaptureCameraA terminal must clear the same-ID recovery gate.");
+        Check.Equal(DualHardwareCaptureTerminalState.Failed, recovered.TerminalState);
+        Check.Equal(DualCameraFailureCode.CaptureCameraA, recovered.FailureCode);
+        Check.Equal(0, recovered.Originals.Count);
+        Check.Equal(DualBindingInvalidationReason.None, recovered.BindingInvalidationReason);
+        Check.False(workflow.HasPendingRecovery,
+            "RecoverAsync must clear the durable pending snapshot once the real fixture's terminal is validated.");
+        Check.True(workflow.PendingTransactionId is null,
+            "A cleared CaptureRecoveryOnly snapshot must not keep reporting a pending transaction ID.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task CaptureRecoveryOnlySoftwareRunEvidenceContractAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -12933,6 +13018,66 @@ sealed class CaptureRecoveryOnlyFakeOperations(
         }
         throw new InvalidDataException("Focused test JPEG has no start-of-frame marker.");
     }
+}
+
+// Responds to exactly the two operations HardwareDualCaptureRecoveryOnlyWorkflow.
+// RecoverAsync drives through IDualHardwareCaptureRecoveryOnlyOperations:
+// capability preflight, then the same-ID query, which returns the given terminal
+// result verbatim as "result" inside a real codec-shaped response envelope.
+// (Inlines its own envelope JSON instead of reusing BuildDualAgentResponseEnvelopeJson/
+// BuildDualCapabilitiesPayload: those are top-level-statement local functions and
+// cannot be called from a type declared after the top-level statements end.)
+sealed class FixedQueryResultHardwareTransport(
+    JsonElement terminalResult, Guid transactionId) : IHardwareCameraAgentTransport
+{
+    private static readonly JsonSerializerOptions EnvelopeOptions = new(JsonSerializerDefaults.Web);
+
+    public Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
+    {
+        using var document = JsonDocument.Parse(requestJson);
+        var root = document.RootElement;
+        var requestId = root.GetProperty("requestId").GetString()!;
+        var operation = root.GetProperty("operation").GetString();
+        return Task.FromResult(operation switch
+        {
+            DualHardwareCameraAgentProtocol.Operations.GetCapabilities =>
+                BuildEnvelope(requestId, "DualCapabilities", new
+                {
+                    cameraMode = "DualCamera",
+                    protocolVersion = 2,
+                    orderedRequiredAliases = new[] { "CAM-A", "CAM-B" },
+                    supportedOperations = DualHardwareCameraAgentProtocol.Operations.Required
+                        .Concat([DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly])
+                        .ToArray(),
+                    pairJournalDurable = true,
+                    sameTransactionQueryOnly = true,
+                    automaticRetryCount = 0,
+                }, DualHardwareCameraAgentProtocol.SchemaVersion),
+            DualHardwareCameraAgentProtocol.Operations.GetPairTransactionResult =>
+                BuildEnvelope(requestId, "PairTransactionFound", new
+                {
+                    transactionId = transactionId.ToString("N"),
+                    found = true,
+                    result = terminalResult,
+                }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion),
+            _ => throw new InvalidOperationException(
+                $"FixedQueryResultHardwareTransport does not model operation '{operation}'."),
+        });
+    }
+
+    private static string BuildEnvelope(string requestId, string resultCode, object payload, string schemaVersion) =>
+        JsonSerializer.Serialize(
+            new
+            {
+                schemaVersion,
+                simulation = false,
+                marker = DualHardwareCameraAgentProtocol.Marker,
+                requestId,
+                success = true,
+                resultCode,
+                payload,
+            },
+            EnvelopeOptions);
 }
 
 sealed class CountingBindingTransport(
