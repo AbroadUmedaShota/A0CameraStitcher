@@ -44,12 +44,11 @@ bool LabelContains(
         std::string::npos;
 }
 
-// True only when the SDK actually advertised a setting: it is reported
-// available and carries a current label. A D810 reports fileType with
-// available=false and no current_label, which this treats as "not
-// advertised" rather than "advertised and empty".
-bool SettingLabelAdvertised(const SdkCameraStatus::SettingCapability& setting) {
-    return setting.available && setting.current_label.has_value();
+bool LabelEquals(
+    const SdkCameraStatus::SettingCapability& setting,
+    std::string_view expected) {
+    return setting.available && setting.current_label &&
+        NormalizeSettingLabel(*setting.current_label) == expected;
 }
 
 } // namespace
@@ -62,22 +61,24 @@ void RequireReadOnlyDualCaptureProfile(const SdkCameraStatus& status) {
             "dual_live_view_not_off",
             "DualCamera Live View OFF was not confirmed in the capture session");
     }
-    // Some bodies (e.g. Nikon D810) never advertise fileType. When fileType
-    // is advertised, keep the original substring checks (fileType indicates
-    // JPEG and compressionLevel contains "fine"). When it is not advertised,
-    // fall back to requiring compressionLevel's normalized label to be an
-    // exact match for "jpegfine", so combined profiles such as
-    // "RAW + JPEG Fine" (normalized "rawjpegfine") are still rejected.
-    bool jpeg_fine_confirmed = false;
-    if (SettingLabelAdvertised(status.file_type)) {
-        jpeg_fine_confirmed = LabelContains(status.file_type, "jpeg") &&
-            LabelContains(status.compression_level, "fine");
-    } else if (SettingLabelAdvertised(status.compression_level)) {
-        jpeg_fine_confirmed =
-            NormalizeSettingLabel(*status.compression_level.current_label) ==
-            "jpegfine";
-    }
-    if (!jpeg_fine_confirmed) {
+    // Same predicate as the single-camera gate (RequirePcDirectCaptureProfile
+    // in pc_direct_capture.cpp). fileType must either be confirmed JPEG by an
+    // exact label match, or be the specific not-advertised shape some bodies
+    // (e.g. Nikon D810) report for fileType: available=false, no
+    // current_label, and probe_state=="not-advertised". Any other way
+    // fileType fails to confirm JPEG (a probe error such as "read-error" or
+    // "invalid-shape", an advertised capability with no label because it is
+    // numeric, or an advertised label that is not exactly "jpeg" such as
+    // "RAW + JPEG Fine") is rejected. compressionLevel must always be an
+    // exact "JPEG Fine" label match; a substring match would also accept
+    // "RAW + JPEG Fine".
+    const bool file_type_is_jpeg_only = LabelEquals(status.file_type, "jpeg");
+    const bool file_type_is_approved_unavailable =
+        !status.file_type.available &&
+        !status.file_type.current_label &&
+        status.file_type.probe_state == "not-advertised";
+    if ((!file_type_is_jpeg_only && !file_type_is_approved_unavailable) ||
+        !LabelEquals(status.compression_level, "jpegfine")) {
         throw TransportError(
             "dual_jpeg_fine_not_confirmed",
             "DualCamera JPEG Fine was not confirmed in the capture session");

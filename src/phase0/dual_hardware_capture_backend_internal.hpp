@@ -13,13 +13,16 @@ namespace detail {
 //   "dual_jpeg_fine_not_confirmed"     JPEG Fine could not be confirmed.
 //   "dual_image_size_l_not_confirmed"  Image size L could not be confirmed.
 //
-// fileType/compressionLevel handling: when the camera advertises fileType
-// (available and a current label), fileType must indicate JPEG and
-// compressionLevel must contain "fine", matching the single-camera approved
-// profile check. Some bodies (e.g. Nikon D810) do not advertise fileType at
-// all; in that case the gate instead requires compressionLevel's normalized
-// label to be an exact match for "jpegfine" so that combined profiles such
-// as "RAW + JPEG Fine" are still rejected.
+// fileType/compressionLevel handling: this predicate is the same one the
+// single-camera gate uses (RequirePcDirectCaptureProfile in
+// pc_direct_capture.cpp). fileType must either be confirmed JPEG by an exact
+// label match, or be the specific not-advertised shape some bodies (e.g.
+// Nikon D810) report for fileType (available=false, no current_label,
+// probe_state=="not-advertised"); any other way fileType fails to confirm
+// JPEG is rejected. compressionLevel must always be an exact "JPEG Fine"
+// label match. This does not consult or compare against an approved capture
+// profile document; that is a separate mechanism used by the single-camera
+// hardware_camera_agent.cpp path (ValidateApprovedCaptureProfileForShutterSession).
 void RequireReadOnlyDualCaptureProfile(const SdkCameraStatus& status);
 
 } // namespace detail
