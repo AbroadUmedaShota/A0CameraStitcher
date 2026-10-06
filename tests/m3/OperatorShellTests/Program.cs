@@ -823,6 +823,28 @@ catch (Exception exception)
 
 try
 {
+    await EstimateRemainingAgentLifetimeBoundaryConditionsAsync();
+    Console.WriteLine("PASS issue #225 remaining-Agent-lifetime estimate does not break at zero, full-budget, exceeded or unknown-start-time boundaries");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #225 remaining-Agent-lifetime estimate does not break at zero, full-budget, exceeded or unknown-start-time boundaries");
+    Console.Error.WriteLine($"FAIL issue #225 remaining-Agent-lifetime estimate does not break at zero, full-budget, exceeded or unknown-start-time boundaries: {exception}");
+}
+
+try
+{
+    await ReportShutdownBlockedIncludesRetryGuidanceAsync();
+    Console.WriteLine("PASS issue #225 shutdown-blocked message explains the reason and the wait-then-close-again procedure");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #225 shutdown-blocked message explains the reason and the wait-then-close-again procedure");
+    Console.Error.WriteLine($"FAIL issue #225 shutdown-blocked message explains the reason and the wait-then-close-again procedure: {exception}");
+}
+
+try
+{
     await DualCameraAgentLifecycleFakeHostHappyPathAsync();
     Console.WriteLine("PASS HardwareDual Agent lifecycle fake host reserve-start typed success end-to-end");
 }
@@ -1333,7 +1355,7 @@ catch (Exception exception)
     failures.Add("persistent EOF diagnostic and primary preservation contracts");
     Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
 }
-Console.WriteLine($"Operator shell tests: {98 - failures.Count}/98 passed.");
+Console.WriteLine($"Operator shell tests: {100 - failures.Count}/100 passed.");
 return failures.Count == 0 ? 0 : 1;
 
 static async Task PersistentHardwareCameraAgentPipeFailuresAsync()
@@ -7297,6 +7319,9 @@ static async Task ActivatedCaptureHostShutdownWaitsForNaturalExitAsync()
             "A timed-out activated host must retain its live Process handle rather than detach from it.");
         Check.True(firstClose.BlockingCode.Contains("HardwareCameraAgentLaunchException", StringComparison.Ordinal),
             "The bounded natural-exit timeout must surface as a typed blocking outcome.");
+        Check.True(firstClose.BlockingDetail.Contains(
+            "did not exit within the bounded wait", StringComparison.Ordinal),
+            "Issue #225: the operator-facing reason must preserve why the wait was blocking, not just a type name.");
 
         // The synthetic child exits by itself shortly after the five-second bounded
         // wait. This is a second explicit close, not a retry of any native operation.
@@ -7413,6 +7438,90 @@ static async Task ActivatedCaptureHostNaturalNonZeroExitAllowsShutdownAsync()
     {
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_SCENARIO", previousScenario);
         Environment.SetEnvironmentVariable("A0_DUAL_CAMERA_AGENT_TEST_CHILD_TRACE", previousTrace);
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #225: pure boundary coverage for the remaining-Agent-lifetime estimate used by the
+// shutdown-blocked message. Times are injected explicitly (no DateTimeOffset.UtcNow call
+// inside the method under test), so this never depends on wall-clock timing or a real Agent
+// process.
+static Task EstimateRemainingAgentLifetimeBoundaryConditionsAsync()
+{
+    var now = new DateTimeOffset(2026, 10, 6, 12, 0, 0, TimeSpan.Zero);
+
+    Check.True(
+        DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(null, now) is null,
+        "An unknown Agent start time must not fabricate a remaining-time estimate.");
+
+    Check.True(
+        DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(now, now) == DualCameraAgentLifecycle.AgentMaxLifetime,
+        "A just-started Agent (zero elapsed) must report the full budget as remaining.");
+
+    var exactlyAtBudget = now - DualCameraAgentLifecycle.AgentMaxLifetime;
+    Check.True(
+        DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(exactlyAtBudget, now) == TimeSpan.Zero,
+        "An Agent exactly at its budget boundary must report zero, not a negative remaining time.");
+
+    var wellPastBudget = now - DualCameraAgentLifecycle.AgentMaxLifetime - TimeSpan.FromMinutes(5);
+    Check.True(
+        DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(wellPastBudget, now) == TimeSpan.Zero,
+        "An Agent well past its budget must still report zero, not a negative remaining time.");
+
+    var clockSkewedIntoTheFuture = now + TimeSpan.FromSeconds(30);
+    Check.True(
+        DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(clockSkewedIntoTheFuture, now)
+            == DualCameraAgentLifecycle.AgentMaxLifetime,
+        "A start time that reads as being in the future (clock skew) must be clamped to zero " +
+        "elapsed, never reported as more than the full budget remaining.");
+
+    return Task.CompletedTask;
+}
+
+// Issue #225: the shutdown-blocked message must name the wait-then-close-again procedure in
+// every case, and must switch between the "still waiting" and "may already have exited"
+// phrasing at the remaining-time boundary without ever becoming empty or losing the typed
+// status code / detail. This exercises DualBindingViewModel.ReportShutdownBlocked directly;
+// no Agent process is started.
+static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var lifecycle = CreateDualBindingTestLifecycle(root);
+        var binding = new DualBindingViewModel(new DualBindingSessionClient(lifecycle));
+
+        binding.ReportShutdownBlocked(
+            "HardwareCameraAgentLaunchException",
+            "Activated capture host did not exit within the bounded wait.",
+            TimeSpan.FromMinutes(4));
+        Check.True(binding.IsShutdownBlocked, "A blocked outcome must set IsShutdownBlocked.");
+        Check.True(binding.InvalidationText.Contains("もう一度", StringComparison.Ordinal),
+            "The message must tell the operator to close the window again.");
+        Check.True(binding.InvalidationText.Contains("あと約4分", StringComparison.Ordinal),
+            "A positive remaining estimate must be shown as an approximate wait.");
+        Check.True(binding.InvalidationText.Contains(
+            "Activated capture host did not exit within the bounded wait.", StringComparison.Ordinal),
+            "The exception detail must reach the operator-facing text, not just the type-name code.");
+        Check.True(binding.InvalidationText.Contains("HardwareCameraAgentLaunchException", StringComparison.Ordinal),
+            "The existing typed status code must remain visible alongside the new detail.");
+
+        binding.ReportShutdownBlocked("HardwareCameraAgentLaunchException", remainingAgentLifetimeEstimate: TimeSpan.Zero);
+        Check.True(binding.InvalidationText.Contains("もう一度", StringComparison.Ordinal),
+            "The exceeded-budget message must still tell the operator to close the window again.");
+        Check.True(binding.InvalidationText.Contains("終了している可能性があります", StringComparison.Ordinal),
+            "An exhausted or unknown remaining time must fall back to the 'may already have exited' phrasing.");
+
+        binding.ReportShutdownBlocked("HardwareCameraAgentLaunchException");
+        Check.True(binding.InvalidationText.Contains("もう一度", StringComparison.Ordinal),
+            "The no-estimate overload (existing call sites) must still include the retry guidance.");
+        Check.True(binding.InvalidationText.Contains("終了している可能性があります", StringComparison.Ordinal),
+            "A null remaining-time estimate must use the same fallback phrasing as an exhausted budget.");
+
+        await lifecycle.DisposeAsync();
+    }
+    finally
+    {
         Directory.Delete(root, recursive: true);
     }
 }

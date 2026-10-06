@@ -524,7 +524,20 @@ public sealed class DualBindingViewModel : ObservableObject
         };
     }
 
-    public void ReportShutdownBlocked(string blockingCode)
+    /// <summary>
+    /// Reports that the window-close path could not confirm the Agent's exit (issue #225).
+    /// <paramref name="blockingCode"/> is the existing typed status code (unchanged, for
+    /// callers that already match on it). <paramref name="blockingDetail"/> is the
+    /// additional reason text the code alone does not carry. <paramref
+    /// name="remainingAgentLifetimeEstimate"/> is <see
+    /// cref="DualCameraAgentLifecycle.EstimateRemainingAgentLifetime"/>'s result: null or
+    /// <see cref="TimeSpan.Zero"/> both mean "no usable estimate -- the Agent may already
+    /// have exited", never a negative wait.
+    /// </summary>
+    public void ReportShutdownBlocked(
+        string blockingCode,
+        string blockingDetail = "",
+        TimeSpan? remainingAgentLifetimeEstimate = null)
     {
         // A timeout after ActivateCapture must keep the one-way handoff marker:
         // the next explicit window-close attempt must wait again, never send the
@@ -533,10 +546,19 @@ public sealed class DualBindingViewModel : ObservableObject
         ClearSessionSurface(preserveCaptureHostActivationAcknowledgement: true);
         IsShutdownBlocked = true;
         Phase = DualBindingPhase.Invalid;
+        var waitGuidance = remainingAgentLifetimeEstimate is { } remaining && remaining > TimeSpan.Zero
+            ? "カメラ制御（Agent）が自然に終了するまで、あと約" +
+              Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes)) +
+              "分かかる見込みです。終了を待ってから、もう一度ウィンドウを閉じてください。自動では閉じません。"
+            : "カメラ制御（Agent）は終了している可能性があります。もう一度ウィンドウを閉じてください。自動では閉じません。";
+        var statusText = string.IsNullOrWhiteSpace(blockingDetail)
+            ? $"（状態: {blockingCode}）"
+            : $"（状態: {blockingCode}。詳細: {blockingDetail}）";
         InvalidationText =
             "実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。" +
-            "自動再試行やAgentの強制終了は行いません。実機操作を止めたまま技術担当者が確認してください。" +
-            $"（状態: {blockingCode}）";
+            waitGuidance +
+            statusText +
+            "それでも解消しない場合は技術担当者に確認してください。";
         Notify(InvalidationText, "block");
     }
 

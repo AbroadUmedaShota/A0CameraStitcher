@@ -370,7 +370,14 @@ public partial class MainWindow : Window
                 () => _sessionLease?.Dispose());
             if (!outcome.Completed)
             {
-                _viewModel.DualBinding.ReportShutdownBlocked(outcome.BlockingCode);
+                // Issue #225: the Agent's own process start time (read here, not inside
+                // the ViewModel) lets the blocked message estimate how much of the fixed
+                // native lifetime budget is likely left, instead of only naming a status
+                // code the operator cannot act on.
+                var remainingAgentLifetimeEstimate = DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(
+                    _dualAgentLifecycle.CurrentProcessStartTimeUtc, DateTimeOffset.UtcNow);
+                _viewModel.DualBinding.ReportShutdownBlocked(
+                    outcome.BlockingCode, outcome.BlockingDetail, remainingAgentLifetimeEstimate);
                 _shutdownStarted = false;
                 IsEnabled = true;
                 return;

@@ -42,6 +42,18 @@ public sealed class DualCameraAgentLifecycle :
     private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(240);
     private static readonly TimeSpan BindingShutdownExitTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Mirrors the native Agent's fixed self-termination budget: see
+    /// <c>a0::phase0::AgentHostLifetime::kDefaultBudgetMilliseconds</c> in
+    /// src/phase0/include/a0/phase0/agent_host_lifetime.hpp (600000ms). This constant does
+    /// not control the Agent process; the native side owns that budget on its own clock.
+    /// It exists only so the operator-facing shutdown-blocked message can estimate how much
+    /// longer a natural exit may take (issue #225). There is no shared build-time source
+    /// between the C++ and C# sides in this repository, so the two values must be kept
+    /// equal by hand if the native budget ever changes.
+    /// </summary>
+    public static readonly TimeSpan AgentMaxLifetime = TimeSpan.FromMinutes(10);
+
     private readonly string _agentExecutablePath;
     private readonly string _pairJournalRootPath;
     private readonly string _approvedCaptureProfilePath;
@@ -141,6 +153,63 @@ public sealed class DualCameraAgentLifecycle :
     /// longer holds the exclusive hardware lease indefinitely.
     /// </summary>
     public int? LastObservedAgentExitCode { get; private set; }
+
+    /// <summary>
+    /// The current Agent process's own start time (in UTC), used only to let the
+    /// shutdown-blocked UI estimate how much of <see cref="AgentMaxLifetime"/> remains
+    /// (issue #225). Null once there is no process handle or its start time cannot be
+    /// read; callers must treat that the same as "unknown remaining time", never as zero
+    /// elapsed.
+    /// </summary>
+    public DateTimeOffset? CurrentProcessStartTimeUtc
+    {
+        get
+        {
+            var process = Volatile.Read(ref _process);
+            if (process is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return new DateTimeOffset(process.StartTime.ToUniversalTime());
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pure helper (issue #225) for the shutdown-blocked UI: how much of the Agent's fixed
+    /// lifetime budget is likely left, given when it started and the current time. Returns
+    /// null when the start time is unknown -- callers must not treat that as "no time
+    /// remaining" and must not treat it as "fully remaining" either; it means the estimate
+    /// cannot be made at all. Returns <see cref="TimeSpan.Zero"/> both when the budget has
+    /// already elapsed and when it is exactly exhausted, so callers can use a single
+    /// "may already have exited" branch for both. A start time that reads as being in the
+    /// future (clock skew, or a read racing the process's own start) is clamped to zero
+    /// elapsed rather than reported as more than the full budget remaining.
+    /// </summary>
+    public static TimeSpan? EstimateRemainingAgentLifetime(DateTimeOffset? agentStartTimeUtc, DateTimeOffset nowUtc)
+    {
+        if (agentStartTimeUtc is not { } startTime)
+        {
+            return null;
+        }
+
+        var elapsed = nowUtc - startTime;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        var remaining = AgentMaxLifetime - elapsed;
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
 
     public bool IsProcessGenerationAlive(long processGeneration)
     {

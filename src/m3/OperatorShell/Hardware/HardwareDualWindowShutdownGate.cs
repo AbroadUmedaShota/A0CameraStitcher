@@ -23,7 +23,7 @@ public static class HardwareDualWindowShutdownGate
             var refusal = await cancelBindingAsync().ConfigureAwait(true);
             if (refusal is not null)
             {
-                return HardwareDualWindowShutdownOutcome.Blocked(refusal.ResultCode);
+                return HardwareDualWindowShutdownOutcome.Blocked(refusal.ResultCode, refusal.Detail);
             }
 
             await disposeAgentAsync().ConfigureAwait(true);
@@ -34,15 +34,23 @@ public static class HardwareDualWindowShutdownGate
         {
             // No retry and no force-kill occur here. MainWindow remains open and
             // keeps the lease; a later close action is an explicit operator action.
-            return HardwareDualWindowShutdownOutcome.Blocked(exception.GetType().Name);
+            return HardwareDualWindowShutdownOutcome.Blocked(exception.GetType().Name, exception.Message);
         }
     }
 }
 
-public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string BlockingCode)
+/// <summary>
+/// <paramref name="BlockingCode"/> is the existing typed code (an exception type name or a
+/// refusal result code) that tests and other call sites already match on; it is kept
+/// unchanged for compatibility. <paramref name="BlockingDetail"/> is the additional
+/// human-readable reason (an exception message or refusal detail) that <paramref
+/// name="BlockingCode"/> alone does not carry, so the operator-facing message can explain
+/// why, not just show a bare status code.
+/// </summary>
+public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string BlockingCode, string BlockingDetail = "")
 {
     public static HardwareDualWindowShutdownOutcome Success { get; } = new(true, string.Empty);
 
-    public static HardwareDualWindowShutdownOutcome Blocked(string code) =>
-        new(false, string.IsNullOrWhiteSpace(code) ? "BindingCleanupUnconfirmed" : code);
+    public static HardwareDualWindowShutdownOutcome Blocked(string code, string? detail = null) =>
+        new(false, string.IsNullOrWhiteSpace(code) ? "BindingCleanupUnconfirmed" : code, detail ?? string.Empty);
 }
