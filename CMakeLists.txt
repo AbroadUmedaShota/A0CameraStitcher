@@ -66,7 +66,7 @@ add_library(a0_phase0_core
 )
 target_include_directories(a0_phase0_core PUBLIC src/phase0/include src/common/include)
 target_compile_definitions(a0_phase0_core PRIVATE UNICODE _UNICODE NOMINMAX)
-target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 shell32 PortableDeviceGuids windowscodecs)
+target_link_libraries(a0_phase0_core PRIVATE advapi32 bcrypt ole32 setupapi shell32 PortableDeviceGuids windowscodecs)
 
 if(A0_NIKON_SDK_AVAILABLE)
     target_include_directories(a0_phase0_core PRIVATE "${A0_NIKON_INCLUDE_DIR}")
@@ -125,6 +125,40 @@ if(NOT A0_NIKON_SDK_AVAILABLE)
 endif()
 if(MSVC)
     target_compile_options(A0CameraStitcher.MarkerDiagnostic PRIVATE /W4 /permissive- /EHsc /utf-8)
+endif()
+# Audited one-shot recovery of a stranded dual-delegation marker
+# (docs/design/dual-preview-topology-diag.md section 9). Default OFF whenever the
+# licensed SDK is enabled: building it there needs an explicit
+# -DA0_BUILD_MARKER_RECOVERY=ON and the exe SHA-256 recorded in the approval
+# packet. Default ON in the SDK-less stub build, where only that build accepts
+# --test-root/--test-lease (A0_MARKER_RECOVERY_TEST_ROOT) for the contract tests.
+# As with the POC option above, option() keeps a value already in CMakeCache.txt.
+if(A0_NIKON_SDK_AVAILABLE)
+    option(A0_BUILD_MARKER_RECOVERY
+        "Build the audited dual-delegation marker recovery CLI. Defaults OFF when the Nikon SDK is enabled; requires explicit ON plus the exe SHA-256 in the approval packet."
+        OFF)
+else()
+    option(A0_BUILD_MARKER_RECOVERY
+        "Build the audited dual-delegation marker recovery CLI. Defaults ON in the SDK-less stub build."
+        ON)
+endif()
+message(STATUS "A0_BUILD_MARKER_RECOVERY=${A0_BUILD_MARKER_RECOVERY} (A0_NIKON_SDK_AVAILABLE=${A0_NIKON_SDK_AVAILABLE})")
+if(A0_NIKON_SDK_AVAILABLE AND A0_BUILD_MARKER_RECOVERY)
+    message(WARNING
+        "A0_BUILD_MARKER_RECOVERY is ON in an SDK-enabled build: record the SHA-256 of "
+        "A0CameraStitcher.MarkerRecovery.exe in the approval packet before any use. "
+        "The ON value may be a stale cache entry; if it was not chosen for this build, "
+        "reconfigure with -DA0_BUILD_MARKER_RECOVERY=OFF or use a fresh build directory.")
+endif()
+if(A0_BUILD_MARKER_RECOVERY)
+    add_executable(A0CameraStitcher.MarkerRecovery src/phase0/marker_recovery_main.cpp)
+    target_link_libraries(A0CameraStitcher.MarkerRecovery PRIVATE a0_phase0_core)
+    if(NOT A0_NIKON_SDK_AVAILABLE)
+        target_compile_definitions(A0CameraStitcher.MarkerRecovery PRIVATE A0_MARKER_RECOVERY_TEST_ROOT=1)
+    endif()
+    if(MSVC)
+        target_compile_options(A0CameraStitcher.MarkerRecovery PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
 endif()
 add_executable(A0CameraStitcher.SingleWorkerPreview src/phase0/single_worker_preview_main.cpp)
 if(A0_BUILD_DUAL_PREVIEW_POC)
@@ -538,6 +572,18 @@ if(BUILD_TESTING)
     # Read-only marker diagnostic contracts, including the single foreign-session marker case.
     add_test(NAME hardware_process_lease_delegation_diagnostic COMMAND a0_hardware_process_lease_delegation_tests --diagnostic)
     set_tests_properties(hardware_process_lease_delegation_diagnostic PROPERTIES TIMEOUT 30)
+    # Audited marker recovery contracts (design T-h). Stub build only: they use
+    # synthetic markers under a test root, a test lease and injected probes.
+    if(NOT A0_NIKON_SDK_AVAILABLE AND A0_BUILD_MARKER_RECOVERY)
+        add_executable(a0_marker_recovery_tests tests/marker_recovery_tests.cpp)
+        target_link_libraries(a0_marker_recovery_tests PRIVATE a0_phase0_core)
+        add_dependencies(a0_marker_recovery_tests A0CameraStitcher.MarkerRecovery)
+        if(MSVC)
+            target_compile_options(a0_marker_recovery_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        add_test(NAME hardware_process_lease_recovery_contracts COMMAND a0_marker_recovery_tests)
+        set_tests_properties(hardware_process_lease_recovery_contracts PROPERTIES TIMEOUT 120)
+    endif()
     # Dual-worker Live View preview POC test registration (see the
     # A0_BUILD_DUAL_PREVIEW_POC option above). a0_dual_live_worker_poc_tests
     # spawns itself as fake CAM-A/CAM-B workers; the dual_live_session_* tests

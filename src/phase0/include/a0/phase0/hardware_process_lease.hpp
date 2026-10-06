@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -15,6 +16,47 @@ struct DualDelegationMarkerDiagnostic final {
 };
 [[nodiscard]] DualDelegationMarkerDiagnostic InspectDualDelegationMarkerReadOnly(
     const std::filesystem::path &test_marker_root = {});
+
+// Audited one-shot recovery of a single stranded dual-delegation marker
+// (docs/design/dual-preview-topology-diag.md section 9). It never constructs a
+// HardwareProcessLease: the camera-control mutex is taken only inside these
+// functions, and the only change they can make is deleting the one canonical
+// marker whose anonymous SHA-256 a human approved, through the same exclusive
+// handle that re-verified it. Status values are fixed tokens (section 9.9).
+enum class DualDelegationRecoveryProbe : unsigned char { absent, present, unavailable };
+enum class DualDelegationRecoveryTestPoint : unsigned char {
+    between_marker_snapshots,
+    before_exclusive_open,
+    before_disposition,
+};
+// Test seams. The layout is the same in every build so that the library and
+// its callers agree on it; a library compiled with the licensed SDK rejects any
+// non-default value before touching the file system or the mutex, and the
+// SDK-enabled CLI has no argument that can set one.
+struct DualDelegationMarkerRecoveryOptions final {
+    std::filesystem::path test_marker_root;
+    std::string test_lease_name;
+    std::function<DualDelegationRecoveryProbe()> test_camera_probe;
+    std::function<DualDelegationRecoveryProbe()> test_a0_process_probe;
+    std::function<std::chrono::system_clock::time_point()> test_now;
+    std::function<void(DualDelegationRecoveryTestPoint)> test_hook;
+};
+struct DualDelegationMarkerRecoveryResult final {
+    std::string status;
+    std::string anonymous_sha256; // set only once the marker was read
+    unsigned long long size{};
+    bool session_match{};
+};
+// Read-only apart from one appended audit line on success. A
+// `recovery_eligible` result is material for a human decision, not a grant.
+[[nodiscard]] DualDelegationMarkerRecoveryResult DryRunDualDelegationMarkerRecovery(
+    const DualDelegationMarkerRecoveryOptions &options, std::string_view expected_sha256 = {});
+// Deletes the marker at most once per anonymous SHA-256; never retries.
+// `operator_confirmed_foreign_session` must be true exactly when the marker
+// name carries a Windows session ID other than the current one.
+[[nodiscard]] DualDelegationMarkerRecoveryResult ExecuteDualDelegationMarkerRecovery(
+    const DualDelegationMarkerRecoveryOptions &options, std::string_view expected_sha256,
+    bool operator_attested_cameras_disconnected, bool operator_confirmed_foreign_session);
 
 struct WorkerDelegationCloseEvidence final {
     bool live_view_off{};

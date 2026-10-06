@@ -4,13 +4,17 @@
 
 #include <ShlObj.h>
 #include <Windows.h>
+#include <SetupAPI.h>
+#include <TlHelp32.h>
 #include <bcrypt.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <ctime>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -611,6 +615,748 @@ void HardwareProcessLease::DisarmDualDelegation(const DualDelegationCloseEvidenc
 }
 bool HardwareProcessLease::DualDelegationArmed() const noexcept {
     return delegation_armed_;
+}
+
+// Audited one-shot recovery of a stranded dual-delegation marker
+// (docs/design/dual-preview-topology-diag.md section 9). Everything below
+// reuses the marker rules above (WalkMarkerCandidates, ReadDiagnosticSnapshot,
+// ParseDelegationMarker, ProcessAbsent, ExistingSafeDirectoryTree) so the
+// recovery path cannot drift from the lease guard or the read-only diagnostic.
+namespace {
+
+constexpr std::string_view kRecoveryAuditSchema = "a0.marker-recovery-audit.v1";
+// Design 9.7 / P11: both limits are provisional values pending owner review.
+constexpr unsigned long long kRecoveryAuditMaxBytes = 1024ULL * 1024ULL;
+constexpr auto kRecoveryDryRunValidity = std::chrono::minutes(30);
+
+struct RecoveryContext final {
+    std::filesystem::path root;
+    std::filesystem::path audit_dir;
+    std::wstring mutex_name;
+    std::function<DualDelegationRecoveryProbe()> camera_probe;
+    std::function<DualDelegationRecoveryProbe()> a0_process_probe;
+    std::function<std::chrono::system_clock::time_point()> now;
+    std::function<void(DualDelegationRecoveryTestPoint)> hook;
+    void Hook(DualDelegationRecoveryTestPoint point) const {
+        if (hook) hook(point);
+    }
+};
+
+class UniqueFileHandle final {
+  public:
+    explicit UniqueFileHandle(HANDLE handle) noexcept : handle_(handle == INVALID_HANDLE_VALUE ? nullptr : handle) {}
+    ~UniqueFileHandle() { reset(); }
+    UniqueFileHandle(const UniqueFileHandle &) = delete;
+    UniqueFileHandle &operator=(const UniqueFileHandle &) = delete;
+    [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+    void reset() noexcept {
+        if (handle_ != nullptr) CloseHandle(handle_);
+        handle_ = nullptr;
+    }
+
+  private:
+    HANDLE handle_{};
+};
+
+// Camera-control exclusion for the recovery functions only. This is not a
+// lease: it cannot arm, register workers, or hand out a delegation epoch, and
+// no SDK/WPD/worker API accepts it (they require HardwareProcessLease&). It is
+// created and destroyed inside one recovery call on one thread.
+class RecoveryCameraControlHold final {
+  public:
+    explicit RecoveryCameraControlHold(const std::wstring &mutex_name) {
+        handle_ = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
+        if (handle_ == nullptr) {
+            failure_ = "camera_control_busy";
+            return;
+        }
+        const DWORD wait = WaitForSingleObject(handle_, 0);
+        if (wait == WAIT_OBJECT_0) {
+            owned_ = true;
+        } else if (wait == WAIT_ABANDONED) {
+            // The previous owner died while holding the mutex: stop this round.
+            owned_ = true;
+            failure_ = "camera_control_abandoned";
+        } else {
+            failure_ = "camera_control_busy";
+        }
+    }
+    ~RecoveryCameraControlHold() {
+        if (owned_) ReleaseMutex(handle_);
+        if (handle_ != nullptr) CloseHandle(handle_);
+    }
+    RecoveryCameraControlHold(const RecoveryCameraControlHold &) = delete;
+    RecoveryCameraControlHold &operator=(const RecoveryCameraControlHold &) = delete;
+    [[nodiscard]] std::string_view Failure() const noexcept { return failure_; }
+
+  private:
+    HANDLE handle_{};
+    bool owned_{};
+    std::string_view failure_;
+};
+
+wchar_t UpperAscii(wchar_t character) noexcept {
+    return character >= L'a' && character <= L'z' ? static_cast<wchar_t>(character - L'a' + L'A') : character;
+}
+bool ContainsIgnoringAsciiCase(std::wstring_view haystack, std::wstring_view upper_needle) noexcept {
+    if (upper_needle.empty() || upper_needle.size() > haystack.size()) return false;
+    for (std::size_t start = 0; start + upper_needle.size() <= haystack.size(); ++start) {
+        std::size_t matched = 0;
+        while (matched < upper_needle.size() && UpperAscii(haystack[start + matched]) == upper_needle[matched])
+            ++matched;
+        if (matched == upper_needle.size()) return true;
+    }
+    return false;
+}
+bool StartsWithIgnoringAsciiCase(std::wstring_view value, std::wstring_view upper_prefix) noexcept {
+    return value.size() >= upper_prefix.size() &&
+           ContainsIgnoringAsciiCase(value.substr(0, upper_prefix.size()), upper_prefix);
+}
+
+enum class DeviceText : unsigned char { absent, read, failed };
+DeviceText ReadDeviceRegistryText(HDEVINFO devices, SP_DEVINFO_DATA &device, DWORD property, std::wstring &text) {
+    text.clear();
+    std::vector<BYTE> buffer(512);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        DWORD type{}, required{};
+        if (SetupDiGetDeviceRegistryPropertyW(devices, &device, property, &type, buffer.data(),
+                                              static_cast<DWORD>(buffer.size()), &required)) {
+            if (type != REG_SZ && type != REG_MULTI_SZ && type != REG_EXPAND_SZ) return DeviceText::failed;
+            const std::size_t bytes = std::min<std::size_t>(required, buffer.size());
+            text.assign(reinterpret_cast<const wchar_t *>(buffer.data()), bytes / sizeof(wchar_t));
+            std::replace(text.begin(), text.end(), L'\0', L' ');
+            return DeviceText::read;
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_INVALID_DATA) return DeviceText::absent;
+        if (error != ERROR_INSUFFICIENT_BUFFER || required <= buffer.size() || required > 65536U)
+            return DeviceText::failed;
+        buffer.resize(required);
+    }
+    return DeviceText::failed;
+}
+bool ReadDeviceInstanceId(HDEVINFO devices, SP_DEVINFO_DATA &device, std::wstring &instance) {
+    std::vector<wchar_t> buffer(256);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        DWORD required{};
+        if (SetupDiGetDeviceInstanceIdW(devices, &device, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                        &required)) {
+            instance.assign(buffer.data());
+            return true;
+        }
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || required <= buffer.size() || required > 32768U)
+            return false;
+        buffer.resize(required);
+    }
+    return false;
+}
+// P8: any present device node whose instance ID or hardware IDs carry the
+// Nikon USB vendor ID, or whose hardware IDs, friendly name or description
+// mention D810. Deliberately broad: every Nikon USB device stops recovery.
+DualDelegationRecoveryProbe ProbeNikonCameraPresent() {
+    HDEVINFO devices = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (devices == INVALID_HANDLE_VALUE) return DualDelegationRecoveryProbe::unavailable;
+    constexpr DWORD kTextProperties[] = {SPDRP_HARDWAREID, SPDRP_FRIENDLYNAME, SPDRP_DEVICEDESC};
+    auto result = DualDelegationRecoveryProbe::absent;
+    for (DWORD index = 0; result == DualDelegationRecoveryProbe::absent; ++index) {
+        SP_DEVINFO_DATA device{};
+        device.cbSize = sizeof(device);
+        if (!SetupDiEnumDeviceInfo(devices, index, &device)) {
+            if (GetLastError() != ERROR_NO_MORE_ITEMS) result = DualDelegationRecoveryProbe::unavailable;
+            break;
+        }
+        std::wstring instance;
+        if (!ReadDeviceInstanceId(devices, device, instance)) {
+            result = DualDelegationRecoveryProbe::unavailable;
+            break;
+        }
+        bool match = ContainsIgnoringAsciiCase(instance, L"VID_04B0");
+        for (const DWORD property : kTextProperties) {
+            std::wstring text;
+            const auto read = ReadDeviceRegistryText(devices, device, property, text);
+            if (read == DeviceText::failed) {
+                result = DualDelegationRecoveryProbe::unavailable;
+                break;
+            }
+            match = match || ContainsIgnoringAsciiCase(text, L"VID_04B0") || ContainsIgnoringAsciiCase(text, L"D810");
+        }
+        if (result == DualDelegationRecoveryProbe::absent && match) result = DualDelegationRecoveryProbe::present;
+    }
+    SetupDiDestroyDeviceInfoList(devices);
+    return result;
+}
+// P7: any process in any session, other than this one, whose image name
+// starts with "A0CameraStitcher." (case-insensitive).
+DualDelegationRecoveryProbe ProbeOtherA0Processes() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return DualDelegationRecoveryProbe::unavailable;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    auto result = DualDelegationRecoveryProbe::unavailable;
+    if (Process32FirstW(snapshot, &entry)) {
+        const DWORD self = GetCurrentProcessId();
+        result = DualDelegationRecoveryProbe::absent;
+        do {
+            if (entry.th32ProcessID != self && StartsWithIgnoringAsciiCase(entry.szExeFile, L"A0CAMERASTITCHER.")) {
+                result = DualDelegationRecoveryProbe::present;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+        if (result == DualDelegationRecoveryProbe::absent && GetLastError() != ERROR_NO_MORE_FILES)
+            result = DualDelegationRecoveryProbe::unavailable;
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+bool ResolveRecoveryContext(const DualDelegationMarkerRecoveryOptions &options, RecoveryContext &context) {
+    const bool any_test_seam = !options.test_marker_root.empty() || !options.test_lease_name.empty() ||
+        static_cast<bool>(options.test_camera_probe) || static_cast<bool>(options.test_a0_process_probe) ||
+        static_cast<bool>(options.test_now) || static_cast<bool>(options.test_hook);
+    std::string_view lease_name = kProductionLeaseName;
+#if defined(A0_NIKON_SDK_AVAILABLE)
+    // I-14: an SDK-enabled library has no test root, test lease or probe override.
+    if (any_test_seam) return false;
+    context.root = ProductionMarkerRoot();
+#else
+    if (options.test_marker_root.empty()) {
+        // Probe/time/hook overrides are honoured only together with a test root.
+        if (any_test_seam) return false;
+        context.root = ProductionMarkerRoot();
+    } else {
+        lease_name = options.test_lease_name;
+        if (!IsSafeLeaseName(lease_name) || lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name) ||
+            !options.test_marker_root.is_absolute())
+            return false;
+        context.root = options.test_marker_root;
+        context.camera_probe = options.test_camera_probe;
+        context.a0_process_probe = options.test_a0_process_probe;
+        context.now = options.test_now;
+        context.hook = options.test_hook;
+    }
+#endif
+    // The audit directory is the root's sibling, so the root must be a plain,
+    // already-normal path with a final component (no trailing separator).
+    if (!context.root.has_filename() || context.root.lexically_normal().native() != context.root.native() ||
+        context.root.parent_path() == context.root)
+        return false;
+    context.audit_dir = context.root.parent_path() / L"DualDelegationRecovery";
+    context.mutex_name = L"Local\\" + ToWide(lease_name);
+    if (!context.camera_probe) context.camera_probe = ProbeNikonCameraPresent;
+    if (!context.a0_process_probe) context.a0_process_probe = ProbeOtherA0Processes;
+    if (!context.now) context.now = [] { return std::chrono::system_clock::now(); };
+    return true;
+}
+
+// P3: armed-session-<digits>.marker, 1-10 digits, no leading zero except "0",
+// value <= 4294967295, exact lower-case spelling.
+bool CanonicalMarkerName(std::wstring_view name, DWORD &session) noexcept {
+    constexpr std::wstring_view prefix = L"armed-session-";
+    constexpr std::wstring_view suffix = L".marker";
+    if (name.size() <= prefix.size() + suffix.size() || name.substr(0, prefix.size()) != prefix ||
+        name.substr(name.size() - suffix.size()) != suffix)
+        return false;
+    const auto digits = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+    if (digits.size() > 10 || (digits.size() > 1 && digits.front() == L'0')) return false;
+    unsigned long long value{};
+    for (const wchar_t character : digits) {
+        if (character < L'0' || character > L'9') return false;
+        value = value * 10ULL + static_cast<unsigned long long>(character - L'0');
+    }
+    if (value > std::numeric_limits<DWORD>::max()) return false;
+    session = static_cast<DWORD>(value);
+    return true;
+}
+
+std::string Sha256OfText(const std::string &text) {
+    return Sha256Hex(std::vector<unsigned char>(text.begin(), text.end()));
+}
+
+struct RecoveryInspection final {
+    std::string status;
+    std::wstring path;
+    DiagnosticSnapshot snapshot;
+    std::string sha256;
+    bool session_match{};
+};
+// P1-P8 in the design order. `foreign_confirmation` is null for a dry run.
+RecoveryInspection InspectRecoveryCandidate(const RecoveryContext &context, std::string_view expected_sha256,
+                                            const bool *foreign_confirmation) {
+    RecoveryInspection inspection;
+    const auto stop = [&](const char *status) {
+        inspection.status = status;
+        return inspection;
+    };
+    if (!ExistingSafeDirectoryTree(context.root)) return stop("marker_root_untrusted");
+    const auto walk = WalkMarkerCandidates(context.root, 2);
+    if (walk.count == 0) return stop(walk.enumeration_not_found ? "marker_missing" : "marker_unavailable");
+    if (walk.count > 1) return stop("marker_ambiguous");
+    if (!walk.enumeration_clean) return stop("marker_unavailable");
+    DWORD marker_session{};
+    if (!CanonicalMarkerName(walk.first_name, marker_session)) return stop("marker_name_noncanonical");
+    DWORD current_session{};
+    inspection.session_match =
+        ProcessIdToSessionId(GetCurrentProcessId(), &current_session) && current_session == marker_session;
+    inspection.path = (context.root / walk.first_name).wstring();
+    DiagnosticSnapshot first{}, second{};
+    DelegationMarker parsed{};
+    if (!ReadDiagnosticSnapshot(inspection.path, first) || !ParseDelegationMarker(first.contents, parsed))
+        return stop("marker_invalid");
+    context.Hook(DualDelegationRecoveryTestPoint::between_marker_snapshots);
+    if (!ExistingSafeDirectoryTree(context.root) || !ReadDiagnosticSnapshot(inspection.path, second) ||
+        !SameDiagnosticSnapshot(first, second))
+        return stop("marker_changed");
+    inspection.snapshot = second;
+    inspection.sha256 = Sha256OfText(second.contents);
+    if (!expected_sha256.empty() && inspection.sha256 != expected_sha256) return stop("hash_mismatch");
+    // Addendum: a foreign-session marker needs an explicit operator
+    // confirmation, and a confirmation for a same-session marker is a mix-up.
+    if (foreign_confirmation != nullptr && *foreign_confirmation == inspection.session_match)
+        return stop("session_confirmation_mismatch");
+    if (!ProcessAbsent(parsed.owner_pid) || !ProcessAbsent(parsed.worker_a_pid) ||
+        !ProcessAbsent(parsed.worker_b_pid))
+        return stop("process_active_or_unknown");
+    switch (context.a0_process_probe()) {
+    case DualDelegationRecoveryProbe::absent: break;
+    case DualDelegationRecoveryProbe::present: return stop("a0_process_present");
+    default: return stop("process_list_unavailable");
+    }
+    switch (context.camera_probe()) {
+    case DualDelegationRecoveryProbe::absent: break;
+    case DualDelegationRecoveryProbe::present: return stop("camera_present");
+    default: return stop("pnp_unavailable");
+    }
+    return inspection;
+}
+
+long long DaysFromCivil(int year, unsigned month, unsigned day) noexcept {
+    year -= month <= 2 ? 1 : 0;
+    const long long era = (year >= 0 ? year : year - 399) / 400;
+    const auto year_of_era = static_cast<unsigned>(year - era * 400);
+    const unsigned shifted_month = month > 2 ? month - 3 : month + 9;
+    const unsigned day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return era * 146097 + static_cast<long long>(day_of_era) - 719468;
+}
+std::string FormatUtc(std::chrono::system_clock::time_point point) {
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(point);
+    std::tm utc{};
+    if (gmtime_s(&utc, &seconds) != 0) return {};
+    char text[32]{};
+    if (std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc) != 20) return {};
+    return text;
+}
+bool ParseUtc(std::string_view text, std::chrono::system_clock::time_point &point) {
+    if (text.size() != 20 || text[4] != '-' || text[7] != '-' || text[10] != 'T' || text[13] != ':' ||
+        text[16] != ':' || text[19] != 'Z')
+        return false;
+    const auto field = [&](std::size_t offset, std::size_t length, unsigned &value) {
+        value = 0;
+        for (std::size_t index = offset; index < offset + length; ++index) {
+            if (text[index] < '0' || text[index] > '9') return false;
+            value = value * 10U + static_cast<unsigned>(text[index] - '0');
+        }
+        return true;
+    };
+    unsigned year{}, month{}, day{}, hour{}, minute{}, second{};
+    if (!field(0, 4, year) || !field(5, 2, month) || !field(8, 2, day) || !field(11, 2, hour) ||
+        !field(14, 2, minute) || !field(17, 2, second) || year < 1970 || month < 1 || month > 12 || day < 1 ||
+        day > 31 || hour > 23 || minute > 59 || second > 59)
+        return false;
+    const long long total = DaysFromCivil(static_cast<int>(year), month, day) * 86400LL +
+        static_cast<long long>(hour) * 3600LL + static_cast<long long>(minute) * 60LL + second;
+    point = std::chrono::system_clock::time_point(
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(total)));
+    return FormatUtc(point) == text; // rejects impossible dates such as 02-31
+}
+
+struct RecoveryAuditRecord final {
+    std::string record;
+    std::string status;
+    std::string anonymous_sha256;
+    std::string tool_sha256;
+    unsigned long long size{};
+    bool session_match{};
+    bool operator_attested{};
+    std::string utc;
+};
+std::string FormatRecoveryAuditRecord(const RecoveryAuditRecord &record) {
+    // Fixed fields only: no path, PID, nonce, epoch, session number, user or camera identity.
+    return "{\"schema\":\"" + std::string(kRecoveryAuditSchema) + "\",\"record\":\"" + record.record +
+        "\",\"utc\":\"" + record.utc + "\",\"status\":\"" + record.status + "\",\"anonymousSha256\":\"" +
+        record.anonymous_sha256 + "\",\"size\":" + std::to_string(record.size) +
+        ",\"sessionMatch\":" + (record.session_match ? "1" : "0") +
+        ",\"operatorAttested\":" + (record.operator_attested ? "1" : "0") + ",\"toolSha256\":\"" +
+        record.tool_sha256 + "\"}\n";
+}
+bool IsStatusToken(std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char character) {
+               return (character >= 'a' && character <= 'z') || character == '_';
+           });
+}
+bool ParseRecoveryAuditLine(std::string_view line, RecoveryAuditRecord &record) {
+    std::size_t cursor{};
+    const auto literal = [&](std::string_view text) {
+        if (line.substr(cursor, text.size()) != text) return false;
+        cursor += text.size();
+        return true;
+    };
+    const auto quoted = [&](std::string &value) {
+        const auto end = line.find('"', cursor);
+        if (end == std::string_view::npos) return false;
+        value.assign(line.substr(cursor, end - cursor));
+        cursor = end;
+        return true;
+    };
+    const auto flag = [&](bool &value) {
+        if (cursor >= line.size() || (line[cursor] != '0' && line[cursor] != '1')) return false;
+        value = line[cursor++] == '1';
+        return true;
+    };
+    const auto size_field = [&]() {
+        std::size_t end = cursor;
+        while (end < line.size() && end - cursor < 4 && line[end] >= '0' && line[end] <= '9') ++end;
+        if (end == cursor || end - cursor > 3 || (end - cursor > 1 && line[cursor] == '0')) return false;
+        unsigned long long value{};
+        for (auto index = cursor; index < end; ++index)
+            value = value * 10ULL + static_cast<unsigned long long>(line[index] - '0');
+        record.size = value;
+        cursor = end;
+        return true;
+    };
+    std::chrono::system_clock::time_point ignored{};
+    return literal("{\"schema\":\"") && literal(kRecoveryAuditSchema) && literal("\",\"record\":\"") &&
+           quoted(record.record) && literal("\",\"utc\":\"") && quoted(record.utc) &&
+           literal("\",\"status\":\"") && quoted(record.status) && literal("\",\"anonymousSha256\":\"") &&
+           quoted(record.anonymous_sha256) && literal("\",\"size\":") && size_field() &&
+           literal(",\"sessionMatch\":") && flag(record.session_match) && literal(",\"operatorAttested\":") &&
+           flag(record.operator_attested) && literal(",\"toolSha256\":\"") && quoted(record.tool_sha256) &&
+           literal("\"}") && cursor == line.size() &&
+           (record.record == "dry_run" || record.record == "execute_intent" || record.record == "execute_result") &&
+           IsStatusToken(record.status) && IsLowerHex(record.anonymous_sha256, 64) &&
+           IsLowerHex(record.tool_sha256, 64) && record.size >= 1 && record.size <= 255 &&
+           ParseUtc(record.utc, ignored);
+}
+
+// Returns false when the audit exists but cannot be trusted or parsed.
+bool LoadRecoveryAudit(const RecoveryContext &context, std::vector<RecoveryAuditRecord> &records) {
+    records.clear();
+    const DWORD directory_attributes = GetFileAttributesW(context.audit_dir.c_str());
+    if (directory_attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if (!ExistingSafeDirectoryTree(context.audit_dir)) return false;
+    const auto file_path = context.audit_dir / L"audit.jsonl";
+    const DWORD attributes = GetFileAttributesW(file_path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) return false;
+    UniqueFileHandle file(CreateFileW(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!file || GetFileType(file.get()) != FILE_TYPE_DISK || !GetFileInformationByHandle(file.get(), &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        info.nFileSizeHigh != 0 || info.nFileSizeLow > kRecoveryAuditMaxBytes)
+        return false;
+    std::string contents(info.nFileSizeLow, '\0');
+    DWORD read{};
+    if (!contents.empty() &&
+        (!ReadFile(file.get(), contents.data(), info.nFileSizeLow, &read, nullptr) || read != info.nFileSizeLow))
+        return false;
+    if (!contents.empty() && contents.back() != '\n') return false;
+    std::size_t start{};
+    while (start < contents.size()) {
+        const auto end = contents.find('\n', start);
+        RecoveryAuditRecord record;
+        if (!ParseRecoveryAuditLine(std::string_view(contents).substr(start, end - start), record)) return false;
+        records.push_back(std::move(record));
+        start = end + 1;
+    }
+    return true;
+}
+
+bool AppendRecoveryAudit(const RecoveryContext &context, RecoveryAuditRecord record) noexcept {
+    try {
+        record.utc = FormatUtc(context.now());
+        if (record.utc.empty()) return false;
+        const auto line = FormatRecoveryAuditRecord(record);
+        RequireSafeDirectoryTree(context.audit_dir);
+        const auto file_path = context.audit_dir / L"audit.jsonl";
+        // Append-only handle (no FILE_WRITE_DATA), write-through, flushed per line.
+        UniqueFileHandle file(CreateFileW(
+            file_path.c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ, nullptr,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION info{};
+        DWORD written{};
+        return file && GetFileType(file.get()) == FILE_TYPE_DISK && GetFileInformationByHandle(file.get(), &info) &&
+               (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+               info.nNumberOfLinks == 1 && info.nFileSizeHigh == 0 &&
+               info.nFileSizeLow + line.size() <= kRecoveryAuditMaxBytes &&
+               WriteFile(file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr) &&
+               written == line.size() && FlushFileBuffers(file.get());
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string RunningToolSha256() {
+    std::wstring module_path(MAX_PATH, L'\0');
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const DWORD length =
+            GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
+        if (length == 0) return {};
+        if (length < module_path.size()) {
+            module_path.resize(length);
+            break;
+        }
+        if (module_path.size() >= 32768) return {};
+        module_path.resize(module_path.size() * 2);
+    }
+    UniqueFileHandle file(CreateFileW(module_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    LARGE_INTEGER size{};
+    if (!file || !GetFileSizeEx(file.get(), &size) || size.QuadPart < 1 || size.QuadPart > (256LL << 20))
+        return {};
+    std::vector<unsigned char> bytes(static_cast<std::size_t>(size.QuadPart));
+    std::size_t offset{};
+    while (offset < bytes.size()) {
+        const auto chunk = static_cast<DWORD>(std::min<std::size_t>(bytes.size() - offset, 1U << 20));
+        DWORD read{};
+        if (!ReadFile(file.get(), bytes.data() + offset, chunk, &read, nullptr) || read == 0) return {};
+        offset += read;
+    }
+    return Sha256Hex(bytes);
+}
+
+// P11: a matching recovery_eligible dry run from this exact tool within the
+// validity window, and no execute record for the hash anywhere.
+std::string CheckRecoveryDryRunRecord(const RecoveryContext &context, std::string_view expected_sha256,
+                                      const std::string &tool_sha256, const RecoveryInspection *inspection) {
+    std::vector<RecoveryAuditRecord> records;
+    if (!LoadRecoveryAudit(context, records)) return "audit_unavailable";
+    for (const auto &record : records) {
+        if (record.record != "dry_run" && record.anonymous_sha256 == expected_sha256) return "already_executed";
+    }
+    const auto now = context.now();
+    for (const auto &record : records) {
+        if (record.record != "dry_run" || record.status != "recovery_eligible" ||
+            record.anonymous_sha256 != expected_sha256 || record.tool_sha256 != tool_sha256)
+            continue;
+        if (inspection != nullptr && (record.size != inspection->snapshot.contents.size() ||
+                                      record.session_match != inspection->session_match))
+            continue;
+        std::chrono::system_clock::time_point recorded{};
+        if (ParseUtc(record.utc, recorded) && recorded <= now && now - recorded <= kRecoveryDryRunValidity)
+            return {};
+    }
+    return "dry_run_record_missing";
+}
+
+bool SameFinalPath(HANDLE file, const std::wstring &expected) {
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(file, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                             FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length >= buffer.size() && length < 32768U) {
+        buffer.assign(static_cast<std::size_t>(length) + 1, L'\0');
+        length = GetFinalPathNameByHandleW(file, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                           FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    if (length == 0 || length >= buffer.size()) return false;
+    std::wstring_view final_path(buffer.data(), length);
+    if (final_path.substr(0, 8) == L"\\\\?\\UNC\\") return false;
+    if (final_path.substr(0, 4) == L"\\\\?\\") final_path.remove_prefix(4);
+    return CompareStringOrdinal(final_path.data(), static_cast<int>(final_path.size()), expected.data(),
+                                static_cast<int>(expected.size()), TRUE) == CSTR_EQUAL;
+}
+
+// Step 6: re-verify the exact object behind the exclusive handle.
+std::string VerifyExclusiveMarker(HANDLE marker, const RecoveryInspection &inspection,
+                                  std::string_view expected_sha256, std::string &contents) {
+    constexpr const char *changed = "marker_identity_changed";
+    if (!SameFinalPath(marker, inspection.path) || GetFileType(marker) != FILE_TYPE_DISK) return changed;
+    BY_HANDLE_FILE_INFORMATION info{};
+    const auto &before = inspection.snapshot.info;
+    if (!GetFileInformationByHandle(marker, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        info.nNumberOfLinks != 1 || info.nFileSizeHigh != 0 || info.nFileSizeLow < 1 || info.nFileSizeLow > 255 ||
+        info.dwVolumeSerialNumber != before.dwVolumeSerialNumber || info.nFileIndexHigh != before.nFileIndexHigh ||
+        info.nFileIndexLow != before.nFileIndexLow)
+        return changed;
+    LARGE_INTEGER origin{};
+    std::array<char, 256> bytes{};
+    DWORD read{};
+    if (!SetFilePointerEx(marker, origin, nullptr, FILE_BEGIN) ||
+        !ReadFile(marker, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) ||
+        read != info.nFileSizeLow)
+        return changed;
+    contents.assign(bytes.data(), read);
+    DelegationMarker parsed{};
+    if (!ParseDelegationMarker(contents, parsed)) return changed;
+    if (Sha256OfText(contents) != expected_sha256) return "hash_mismatch";
+    if (!ProcessAbsent(parsed.owner_pid) || !ProcessAbsent(parsed.worker_a_pid) ||
+        !ProcessAbsent(parsed.worker_b_pid))
+        return changed;
+    return {};
+}
+
+// Step 7: local evidence copy outside the marker root (it holds the nonce,
+// epoch and PIDs, so it is never committed or exported). An identical copy
+// left by an earlier attempt that stopped before deletion is accepted, so the
+// operator can restart from a fresh dry run.
+bool WriteRecoveryEvidence(const RecoveryContext &context, const std::string &sha256,
+                           const std::string &contents) noexcept {
+    try {
+        RequireSafeDirectoryTree(context.audit_dir);
+        const auto path =
+            context.audit_dir / (L"evidence-" + ToWide(std::string_view(sha256).substr(0, 16)) + L".bak");
+        HANDLE created = CreateFileW(path.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        if (created != INVALID_HANDLE_VALUE) {
+            DWORD written{};
+            const bool ok =
+                WriteFile(created, contents.data(), static_cast<DWORD>(contents.size()), &written, nullptr) &&
+                written == contents.size() && FlushFileBuffers(created);
+            if (!ok) {
+                // Discard only the partial copy this call just created.
+                FILE_DISPOSITION_INFO discard{TRUE};
+                SetFileInformationByHandle(created, FileDispositionInfo, &discard, sizeof(discard));
+            }
+            CloseHandle(created);
+            if (!ok) return false;
+        } else if (GetLastError() != ERROR_FILE_EXISTS) {
+            return false;
+        }
+        DiagnosticSnapshot copy{};
+        return ReadDiagnosticSnapshot(path.wstring(), copy) && copy.contents == contents;
+    } catch (...) {
+        return false;
+    }
+}
+
+void CopyInspection(const RecoveryInspection &inspection, DualDelegationMarkerRecoveryResult &result) {
+    result.anonymous_sha256 = inspection.sha256;
+    result.size = inspection.sha256.empty() ? 0 : inspection.snapshot.contents.size();
+    result.session_match = inspection.session_match;
+}
+
+} // namespace
+
+DualDelegationMarkerRecoveryResult DryRunDualDelegationMarkerRecovery(
+    const DualDelegationMarkerRecoveryOptions &options, std::string_view expected_sha256) {
+    DualDelegationMarkerRecoveryResult result;
+    try {
+        RecoveryContext context;
+        if (!ResolveRecoveryContext(options, context)) {
+            result.status = "marker_root_untrusted";
+            return result;
+        }
+        if (!expected_sha256.empty() && !IsLowerHex(expected_sha256, 64)) {
+            result.status = "hash_mismatch";
+            return result;
+        }
+        const auto inspection = InspectRecoveryCandidate(context, expected_sha256, nullptr);
+        CopyInspection(inspection, result);
+        if (!inspection.status.empty()) {
+            result.status = inspection.status;
+            return result;
+        }
+        {
+            // P9: taken and released at once; a dry run never keeps the mutex.
+            const RecoveryCameraControlHold hold(context.mutex_name);
+            if (!hold.Failure().empty()) {
+                result.status = std::string(hold.Failure());
+                return result;
+            }
+        }
+        RecoveryAuditRecord record;
+        record.record = "dry_run";
+        record.status = "recovery_eligible";
+        record.anonymous_sha256 = result.anonymous_sha256;
+        record.tool_sha256 = RunningToolSha256();
+        record.size = result.size;
+        record.session_match = result.session_match;
+        if (record.tool_sha256.empty() || !AppendRecoveryAudit(context, record)) {
+            result.status = "audit_unavailable";
+            return result;
+        }
+        result.status = "recovery_eligible";
+    } catch (...) {
+        result.status = "marker_unavailable";
+    }
+    return result;
+}
+
+DualDelegationMarkerRecoveryResult ExecuteDualDelegationMarkerRecovery(
+    const DualDelegationMarkerRecoveryOptions &options, std::string_view expected_sha256,
+    bool operator_attested_cameras_disconnected, bool operator_confirmed_foreign_session) {
+    DualDelegationMarkerRecoveryResult result;
+    bool disposition_attempted = false;
+    const auto stop = [&](std::string_view status) {
+        result.status = std::string(status);
+        return result;
+    };
+    try {
+        RecoveryContext context;
+        if (!ResolveRecoveryContext(options, context)) return stop("marker_root_untrusted");
+        if (!IsLowerHex(expected_sha256, 64)) return stop("hash_mismatch");
+        if (!operator_attested_cameras_disconnected) return stop("operator_attestation_missing"); // 1 (P10)
+        const auto tool_sha256 = RunningToolSha256();
+        if (tool_sha256.empty()) return stop("audit_unavailable");
+        if (const auto status = CheckRecoveryDryRunRecord(context, expected_sha256, tool_sha256, nullptr);
+            !status.empty())
+            return stop(status); // 2 (P11)
+        const RecoveryCameraControlHold hold(context.mutex_name); // 3 (P9), held until return
+        if (!hold.Failure().empty()) return stop(hold.Failure());
+        // 4: every precondition is taken again under the hold, including P11.
+        const auto inspection =
+            InspectRecoveryCandidate(context, expected_sha256, &operator_confirmed_foreign_session);
+        CopyInspection(inspection, result);
+        if (!inspection.status.empty()) return stop(inspection.status);
+        if (const auto status = CheckRecoveryDryRunRecord(context, expected_sha256, tool_sha256, &inspection);
+            !status.empty())
+            return stop(status);
+        context.Hook(DualDelegationRecoveryTestPoint::before_exclusive_open);
+        // 5: no sharing at all; a reparse point swapped in is opened as itself.
+        UniqueFileHandle marker(CreateFileW(inspection.path.c_str(), GENERIC_READ | DELETE, 0, nullptr,
+                                            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (!marker) return stop("marker_open_failed");
+        std::string contents;
+        if (const auto status = VerifyExclusiveMarker(marker.get(), inspection, expected_sha256, contents);
+            !status.empty())
+            return stop(status); // 6
+        if (!WriteRecoveryEvidence(context, inspection.sha256, contents)) return stop("evidence_copy_failed"); // 7
+        RecoveryAuditRecord record;
+        record.record = "execute_intent";
+        record.status = "recovery_eligible";
+        record.anonymous_sha256 = inspection.sha256;
+        record.tool_sha256 = tool_sha256;
+        record.size = contents.size();
+        record.session_match = inspection.session_match;
+        record.operator_attested = true;
+        if (!AppendRecoveryAudit(context, record)) return stop("audit_unavailable"); // 8
+        context.Hook(DualDelegationRecoveryTestPoint::before_disposition);
+        // 9: delete through the verified handle only; never by path, never retried.
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        disposition_attempted = true;
+        record.record = "execute_result";
+        if (!SetFileInformationByHandle(marker.get(), FileDispositionInfo, &disposition, sizeof(disposition))) {
+            record.status = "delete_failed";
+            (void)AppendRecoveryAudit(context, record);
+            return stop("delete_failed");
+        }
+        marker.reset(); // 10: the only handle closes, so the deletion completes here.
+        const auto walk = WalkMarkerCandidates(context.root, 1); // 11
+        record.status = walk.count == 0 && walk.enumeration_not_found ? "executed_marker_absent"
+                                                                      : "post_delete_root_not_empty";
+        result.status = record.status;
+        if (!AppendRecoveryAudit(context, record) && result.status == "executed_marker_absent") // 12
+            result.status = "executed_audit_incomplete";
+        return result; // 13: the hold is released on return.
+    } catch (...) {
+        result.status = disposition_attempted ? "executed_audit_incomplete" : "marker_unavailable";
+    }
+    return result;
 }
 
 } // namespace a0::phase0
