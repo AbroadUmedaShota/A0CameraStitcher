@@ -38,6 +38,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("dual hardware Agent v2 reserves starts and queries one pair transaction", DualHardwareAgentV2RoundTripAsync),
     ("dual hardware Agent v2 accepts a safe additive capability", DualHardwareAgentV2AdditiveCapabilitiesAsync),
     ("dual hardware Agent v2 serializes and validates CaptureRecoveryOnly separately", DualHardwareCaptureRecoveryOnlyProtocolAsync),
+    ("dual hardware Agent v2 reads the Agent's exact None binding invalidation wire encoding", DualHardwareCaptureRecoveryOnlyBindingInvalidationReasonWireFormatAsync),
     ("dual hardware Agent v2 rejects retry capability and mismatched journals", DualHardwareAgentV2NegativesAsync),
     ("dual binding accepts exactly two candidates", DualBindingCandidateCardinalityAsync),
     ("dual binding reaches Ready through the five operations", DualBindingFiveOperationsReachReadyAsync),
@@ -845,6 +846,138 @@ static async Task DualHardwareCaptureRecoveryOnlyProtocolAsync()
     await Check.ThrowsAsync<HardwareCameraAgentRemoteException>(() =>
         ordinaryUnavailable.StartReservedPairAsync(ordinary, default));
     Check.Equal(2, ordinaryUnavailableTransport.RequestCount);
+}
+
+static Task DualHardwareCaptureRecoveryOnlyBindingInvalidationReasonWireFormatAsync()
+{
+    // Captured from a real Agent terminal result (transaction 020a434c..., #224,
+    // AOPC-31-NOTE 2026-10-06). The Agent's native wire format writes
+    // DualBindingInvalidationReason::None as an empty string, not the name "None"
+    // (dual_identity_session_binding.cpp / dual_hardware_camera_agent.cpp). Before
+    // the fix, this exact payload made both the query and start response decoders
+    // throw InvalidPayload, which left the operator stuck in same-ID pending
+    // forever even though the journal already recorded a legitimate Failed result.
+    const string agentTerminalJson =
+        """{"transactionId":"020a434cd48749339e0ff2faa832b820","capturePurpose":"CaptureRecoveryOnly","stitchOutcome":"Pending","a0QualityApproval":"Unapproved","originals":[],"terminalState":"Failed","failureCode":"CaptureCameraA","evidence":{"terminalState":"Failed","identitySnapshot":{"expiresAtUtc":"2026-10-06T05:48:35.1395659+00:00","observedAtUtc":"2026-10-06T05:43:35.1395659+00:00","reasonCode":"same_agent_operator_binding","status":"Ready"},"captureProfileSchemaVersion":"a0.dual-capture-profile.operator-approved.v1","captureProfileApprovalBasis":"operator-approved-capture-recovery-only-v1","cameraModel":"Nikon D810","imageFormat":"JPEG Fine","imageSize":"L","pixelDimensions":"7360x4912","bindingInvalidationReason":"","watchdogStartedAtUtc":"2026-10-06T05:43:35.1413652+00:00","watchdogDeadlineUtc":"2026-10-06T05:46:35.1413652+00:00","completedAtUtc":"2026-10-06T05:43:39.3127834Z","watchdogCompletedInTime":true,"liveViewStopAndCloseConfirmed":true,"exactDeleteConfirmedForEveryRetainedOriginal":false,"bothSpoolsEmptyAfter":false,"automaticRetryCount":0}}""";
+
+    var transactionId = Guid.ParseExact("020a434cd48749339e0ff2faa832b820", "N");
+    using (var fixtureDocument = JsonDocument.Parse(agentTerminalJson))
+    {
+        var fixtureResult = fixtureDocument.RootElement;
+
+        var startResponse = DualHardwareResponseJson(
+            "recovery-only-agent-fixture-start", true, "PairDispatchAccepted", new
+            {
+                transactionId = transactionId.ToString("N"),
+                dispatchState = "Completed",
+                result = fixtureResult,
+            }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
+        var start = DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyStartResponse(
+            startResponse, "recovery-only-agent-fixture-start", transactionId);
+        Check.Equal(DualHardwareDispatchState.Completed, start.State);
+        Check.Equal(DualHardwareCaptureTerminalState.Failed, start.Result!.TerminalState);
+        Check.Equal(DualCameraFailureCode.CaptureCameraA, start.Result.FailureCode);
+        Check.Equal(0, start.Result.Originals.Count);
+        Check.Equal(DualBindingInvalidationReason.None, start.Result.Evidence.BindingInvalidationReason);
+
+        var queryResponse = DualHardwareResponseJson(
+            "recovery-only-agent-fixture-query", true, "PairTransactionFound", new
+            {
+                transactionId = transactionId.ToString("N"),
+                found = true,
+                result = fixtureResult,
+            }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
+        var query = DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+            queryResponse, "recovery-only-agent-fixture-query", transactionId);
+        Check.Equal(DualHardwarePairQueryState.Terminal, query.State);
+        Check.Equal(DualHardwareCaptureTerminalState.Failed, query.Result!.TerminalState);
+        Check.Equal(DualCameraFailureCode.CaptureCameraA, query.Result.FailureCode);
+        Check.Equal(0, query.Result.Originals.Count);
+        Check.Equal(DualBindingInvalidationReason.None, query.Result.Evidence.BindingInvalidationReason);
+    }
+
+    // Boundary coverage for the reader: "None" and "SdkError" are readable (as
+    // before the fix), "" and a missing property both collapse to None (the
+    // fix itself), and an unknown name stays a protocol violation -- it must
+    // never silently default to None.
+    var boundaryTransactionId = Guid.NewGuid();
+    foreach (var (token, expected) in new (string? Token, DualBindingInvalidationReason Expected)[]
+    {
+        ("None", DualBindingInvalidationReason.None),
+        ("", DualBindingInvalidationReason.None),
+        (null, DualBindingInvalidationReason.None),
+        ("SdkError", DualBindingInvalidationReason.SdkError),
+    })
+    {
+        var terminalJson = BuildRecoveryOnlyTerminalJson(boundaryTransactionId, token);
+        using var document = JsonDocument.Parse(terminalJson);
+        var response = DualHardwareResponseJson(
+            "recovery-only-binding-boundary", true, "PairTransactionFound", new
+            {
+                transactionId = boundaryTransactionId.ToString("N"),
+                found = true,
+                result = document.RootElement,
+            }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
+        var outcome = DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+            response, "recovery-only-binding-boundary", boundaryTransactionId);
+        Check.Equal(expected, outcome.Result!.Evidence.BindingInvalidationReason);
+    }
+
+    var bogusJson = BuildRecoveryOnlyTerminalJson(boundaryTransactionId, "Bogus");
+    using (var bogusDocument = JsonDocument.Parse(bogusJson))
+    {
+        var bogusResponse = DualHardwareResponseJson(
+            "recovery-only-binding-boundary-bogus", true, "PairTransactionFound", new
+            {
+                transactionId = boundaryTransactionId.ToString("N"),
+                found = true,
+                result = bogusDocument.RootElement,
+            }, DualHardwareCameraAgentProtocol.CaptureRecoveryOnlySchemaVersion);
+        Check.ThrowsHardwareProtocol("InvalidPayload", () =>
+            DualHardwareCameraAgentProtocolCodec.DeserializeCaptureRecoveryOnlyQueryResponse(
+                bogusResponse, "recovery-only-binding-boundary-bogus", boundaryTransactionId));
+    }
+
+    return Task.CompletedTask;
+}
+
+// Minimal CaptureRecoveryOnly terminal (Failed/CaptureCameraA, no originals) with
+// a configurable evidence.bindingInvalidationReason: null omits the property
+// entirely (missing-field case), any other value is written verbatim as a string.
+static string BuildRecoveryOnlyTerminalJson(Guid transactionId, string? bindingInvalidationReasonToken)
+{
+    var bindingSegment = bindingInvalidationReasonToken is null
+        ? string.Empty
+        : $"\"bindingInvalidationReason\":\"{bindingInvalidationReasonToken}\",";
+    return "{" +
+        $"\"transactionId\":\"{transactionId:N}\"," +
+        "\"capturePurpose\":\"CaptureRecoveryOnly\"," +
+        "\"stitchOutcome\":\"Pending\"," +
+        "\"a0QualityApproval\":\"Unapproved\"," +
+        "\"originals\":[]," +
+        "\"terminalState\":\"Failed\"," +
+        "\"failureCode\":\"CaptureCameraA\"," +
+        "\"evidence\":{" +
+            "\"terminalState\":\"Failed\"," +
+            "\"identitySnapshot\":{\"status\":\"Ready\",\"reasonCode\":\"anonymous-test-ready\"," +
+                "\"observedAtUtc\":\"2026-08-14T00:00:00+00:00\",\"expiresAtUtc\":\"2026-08-15T00:00:00+00:00\"}," +
+            "\"captureProfileSchemaVersion\":\"a0.dual-capture-profile.operator-approved.v1\"," +
+            "\"captureProfileApprovalBasis\":\"operator-approved-capture-recovery-only-v1\"," +
+            "\"cameraModel\":\"Nikon D810\"," +
+            "\"imageFormat\":\"JPEG Fine\"," +
+            "\"imageSize\":\"L\"," +
+            "\"pixelDimensions\":\"7360x4912\"," +
+            bindingSegment +
+            "\"watchdogStartedAtUtc\":\"2026-08-14T00:00:00+00:00\"," +
+            "\"watchdogDeadlineUtc\":\"2026-08-14T00:03:00+00:00\"," +
+            "\"completedAtUtc\":\"2026-08-14T00:01:00+00:00\"," +
+            "\"watchdogCompletedInTime\":true," +
+            "\"liveViewStopAndCloseConfirmed\":true," +
+            "\"exactDeleteConfirmedForEveryRetainedOriginal\":true," +
+            "\"bothSpoolsEmptyAfter\":true," +
+            "\"automaticRetryCount\":0" +
+        "}" +
+    "}";
 }
 
 static string DualHardwareCapabilitiesResponseJson(

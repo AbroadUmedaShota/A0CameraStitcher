@@ -7735,6 +7735,37 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(1, unknownOperations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(2, unknownOperations.QueryRecoveryOnlyCalls);
 
+        // Regression for #224: the Agent's real journal can come back Failed/
+        // CaptureCameraA with zero originals (CAM-A never fired). Before the fix,
+        // WPF's wire decoding of this exact shape (bindingInvalidationReason: "")
+        // threw and left same-ID recovery stuck forever. RecoverAsync must still
+        // finalize this terminal result and release the pending gate.
+        var cameraAFailureRoot = Path.Combine(root, "camera-a-failure-recovery");
+        var cameraAFailureOperations = new CaptureRecoveryOnlyFakeOperations(
+            adapter, responseUnknownOnce: true, queryThrowsOnce: true, failCameraAImmediate: true);
+        var cameraAFailureFirstWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+            cameraAFailureRoot, cameraAFailureOperations, cameraAFailureOperations,
+            ApprovedCaptureRecoveryOnlyProfile());
+        var cameraAFailurePending = await cameraAFailureFirstWorkflow.CaptureAsync(
+            DualCameraIdentitySnapshot.AnonymousTestSyntheticReady());
+        Check.True(cameraAFailurePending.RecoveryPending,
+            "An ambiguous dispatch must remain same-ID recovery pending before the terminal journal is readable.");
+        Check.True(cameraAFailureFirstWorkflow.HasPendingRecovery,
+            "A pending CaptureRecoveryOnly snapshot must be durable before restart.");
+        var cameraAFailureRestarted = new HardwareDualCaptureRecoveryOnlyWorkflow(
+            cameraAFailureRoot, cameraAFailureOperations, cameraAFailureOperations,
+            ApprovedCaptureRecoveryOnlyProfile());
+        var cameraAFailureRecovered = await cameraAFailureRestarted.RecoverAsync();
+        Check.False(cameraAFailureRecovered.RecoveryPending,
+            "A Failed/CaptureCameraA terminal journal must clear the same-ID recovery gate.");
+        Check.Equal(DualHardwareCaptureTerminalState.Failed, cameraAFailureRecovered.TerminalState);
+        Check.Equal(DualCameraFailureCode.CaptureCameraA, cameraAFailureRecovered.FailureCode);
+        Check.Equal(0, cameraAFailureRecovered.Originals.Count);
+        Check.False(cameraAFailureRestarted.HasPendingRecovery,
+            "RecoverAsync must clear the durable pending snapshot once the terminal result is validated.");
+        Check.True(cameraAFailureRestarted.PendingTransactionId is null,
+            "A cleared CaptureRecoveryOnly snapshot must not keep reporting a pending transaction ID.");
+
         var invalidIdentityOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var invalidIdentityWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
             Path.Combine(root, "identity-block"), invalidIdentityOperations, invalidIdentityOperations,
@@ -12732,7 +12763,11 @@ sealed class CaptureRecoveryOnlyFakeOperations(
     bool reservedQuery = false,
     bool queryThrowsOnce = false,
     DualHardwarePreflightBlock? reservedPreflightBlock = null,
-    bool closeResponseUnknownOnce = false) : IDualHardwareCaptureOperations, IDualHardwareCaptureRecoveryOnlyOperations
+    bool closeResponseUnknownOnce = false,
+    // CAM-A never fires at all: Failed/CaptureCameraA with zero originals, the
+    // shape seen in the real #224 journal. Distinct from failCameraB, which
+    // keeps a retained CAM-A original and terminalizes as FailedPartial.
+    bool failCameraAImmediate = false) : IDualHardwareCaptureOperations, IDualHardwareCaptureRecoveryOnlyOperations
 {
     private DualHardwareCaptureRecoveryOnlyRequest? _unknownRequest;
     public int ReserveCalls { get; private set; }
@@ -12813,21 +12848,30 @@ sealed class CaptureRecoveryOnlyFakeOperations(
         CancellationToken cancellationToken)
     {
         var originals = new List<DualHardwareOriginalRecord>();
-        var aliases = failCameraB ? new[] { "CAM-A" } : new[] { "CAM-A", "CAM-B" };
-        foreach (var alias in aliases)
+        if (!failCameraAImmediate)
         {
-            var path = Path.Combine(request.TransactionDirectory, alias, "original.jpg");
-            _ = camera;
-            _ = request.TransactionId;
-            _ = cancellationToken;
-            WriteCanonicalJpeg(path);
-            originals.Add(new DualHardwareOriginalRecord(alias, path, true, true));
+            var aliases = failCameraB ? new[] { "CAM-A" } : new[] { "CAM-A", "CAM-B" };
+            foreach (var alias in aliases)
+            {
+                var path = Path.Combine(request.TransactionDirectory, alias, "original.jpg");
+                _ = camera;
+                _ = request.TransactionId;
+                _ = cancellationToken;
+                WriteCanonicalJpeg(path);
+                originals.Add(new DualHardwareOriginalRecord(alias, path, true, true));
+            }
         }
 
-        var terminal = failCameraB
-            ? DualHardwareCaptureTerminalState.FailedPartial
-            : DualHardwareCaptureTerminalState.Succeeded;
-        var failure = failCameraB ? DualCameraFailureCode.HardwarePending : DualCameraFailureCode.None;
+        var terminal = failCameraAImmediate
+            ? DualHardwareCaptureTerminalState.Failed
+            : failCameraB
+                ? DualHardwareCaptureTerminalState.FailedPartial
+                : DualHardwareCaptureTerminalState.Succeeded;
+        var failure = failCameraAImmediate
+            ? DualCameraFailureCode.CaptureCameraA
+            : failCameraB
+                ? DualCameraFailureCode.HardwarePending
+                : DualCameraFailureCode.None;
         var evidence = new DualHardwareCaptureRecoveryOnlyEvidence(
             terminal,
             request.IdentitySnapshot,
@@ -12842,8 +12886,8 @@ sealed class CaptureRecoveryOnlyFakeOperations(
             request.StartedAtUtc.AddSeconds(1),
             true,
             true,
-            !failCameraB,
-            !failCameraB,
+            !failCameraB && !failCameraAImmediate,
+            !failCameraB && !failCameraAImmediate,
             AutomaticRetryCount);
         return new(
             request.TransactionId,

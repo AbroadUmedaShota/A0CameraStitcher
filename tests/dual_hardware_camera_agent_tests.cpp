@@ -1326,6 +1326,13 @@ void TestCaptureRecoveryOnlyContractAndNoRetry() {
         "CaptureRecoveryOnly CAM-A failure must prevent CAM-B and retry");
     CheckCaptureRecoveryOnlyTerminalJson(a_failure_response, "Failed",
         "CaptureRecoveryOnly CAM-A failure response");
+    // Intentional wire format: None is written as an empty string, not the name
+    // "None" (see DualIdentityInvalidationReasonName in
+    // dual_identity_session_binding.cpp). The WPF receiver must keep being able
+    // to read exactly this encoding (#224); pin it here so a future refactor
+    // cannot silently switch to writing "None" without a test noticing.
+    CheckContains(a_failure_response, "\"bindingInvalidationReason\":\"\"",
+        "CaptureRecoveryOnly None binding invalidation reason must stay wire-encoded as an empty string");
     check_durable_replay(a_failure_store_root, a_failure_transaction_id, "Failed", "a-failure");
 
     auto [b_failure_sandbox, b_failure_response, b_failure_backend, b_failure_root,

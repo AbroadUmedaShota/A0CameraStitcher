@@ -161,7 +161,16 @@ public static class DualHardwareCameraAgentProtocolCodec
         RespectRequiredConstructorParameters = true,
         WriteIndented = false,
         MaxDepth = 32,
-        Converters = { new JsonStringEnumConverter(), new DualHardwareTransactionIdConverter() },
+        Converters =
+        {
+            // Must be registered before JsonStringEnumConverter: System.Text.Json
+            // picks the first converter whose CanConvert matches the target type,
+            // and this one is the only one that can read the Agent's "" wire value
+            // for None (see dual_identity_session_binding.cpp).
+            new DualHardwareBindingInvalidationReasonConverter(),
+            new JsonStringEnumConverter(),
+            new DualHardwareTransactionIdConverter(),
+        },
     };
 
     public static DualHardwareCameraAgentRequestEnvelope CreateCapabilitiesRequest(
@@ -754,6 +763,38 @@ public static class DualHardwareCameraAgentProtocolCodec
         string errorCode,
         string message,
         Exception? innerException = null) => new(errorCode, message, innerException);
+}
+
+/// <summary>
+/// Reads the Agent's exact wire encoding of <see cref="DualBindingInvalidationReason"/>:
+/// an empty string for None (see dual_identity_session_binding.cpp and
+/// dual_hardware_camera_agent.cpp), a missing property falling back to the record
+/// default (also None), and every other value by its exact enum name. Case handling
+/// for named values matches the plain <see cref="JsonStringEnumConverter"/> used
+/// everywhere else in this codec so this does not relax what counts as a valid name.
+/// This converter is scoped to <see cref="DualHardwareCameraAgentProtocolCodec"/> only;
+/// DualBindingCameraAgentProtocol's own codec is untouched and keeps falling back to
+/// None itself via Enum.TryParse.
+/// </summary>
+internal sealed class DualHardwareBindingInvalidationReasonConverter : JsonConverter<DualBindingInvalidationReason>
+{
+    public override DualBindingInvalidationReason Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.String)
+            throw new JsonException("A Dual binding invalidation reason must be a JSON string.");
+        var text = reader.GetString();
+        if (string.IsNullOrEmpty(text))
+            return DualBindingInvalidationReason.None;
+        if (Enum.TryParse(text, ignoreCase: true, out DualBindingInvalidationReason value) &&
+            Enum.IsDefined(value))
+            return value;
+        throw new JsonException($"'{text}' is not a valid DualBindingInvalidationReason.");
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer, DualBindingInvalidationReason value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.ToString());
 }
 
 internal sealed class DualHardwareTransactionIdConverter : JsonConverter<Guid>
