@@ -80,6 +80,11 @@ bool LabelEquals(
         NormalizeSettingLabel(*setting.current_label) == expected;
 }
 
+// The fileType/compressionLevel predicate below (file_type_is_jpeg_only /
+// file_type_is_approved_unavailable / the exact-match compressionLevel
+// check) is mirrored by RequireReadOnlyDualCaptureProfile in
+// dual_hardware_capture_backend.cpp for the dual-camera capture path; keep
+// the two in sync if this predicate changes.
 void RequirePcDirectCaptureProfile(const SdkCameraStatus& status) {
     if (!status.live_view_status_available ||
         status.live_view_status != "off") {

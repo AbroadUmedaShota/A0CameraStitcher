@@ -22,25 +22,37 @@ SdkCameraStatus MakeReadOnlyStatus() {
     status.image_size.available = true;
     status.image_size.probe_state = "available";
     status.image_size.cap_type = "enum";
-    status.image_size.value_type = "string";
-    status.image_size.current_label = "Large";
-    // file_type and compression_level are left at their defaults
-    // (available=false, probe_state="not-advertised", no label), matching
-    // the production invariant that available == (probe_state=="available")
-    // and that an unavailable setting carries no value (phase0.cpp
-    // validate_setting). Individual tests set them explicitly.
+    status.image_size.value_type = "packed-string";
+    status.image_size.current_index = 0;
+    status.image_size.current_label = "L(7360*4912)";
+    status.image_size.string_values = {"L(7360*4912)"};
+    // The real-D810 imageSize label and shape above are taken from
+    // docs/evidence/phase0/run-1791263056167-1/sdk-status-summary.json.
+    //
+    // file_type and compression_level are left at their default-constructed
+    // shape (available=false, probe_state="not-advertised", no label). This
+    // is exactly what ReadSettingCapability (nikon_sdk_transport.cpp) returns
+    // when the capability does not exist at all: `if (cap == nullptr) return
+    // result;` with `result` default-constructed, before any probe_state or
+    // current_label field is touched. Individual tests set these settings
+    // explicitly for the shapes they exercise.
     return status;
 }
 
-// A setting the SDK advertised with a single string label (the
-// packed-string/string probe branches in nikon_sdk_transport.cpp).
+// A setting the SDK advertised with a single packed-string label (the
+// kNkMAIDArrayType_PackedString probe branch in ReadSettingCapability,
+// nikon_sdk_transport.cpp), matching the shape real D810 enum settings use
+// (see docs/evidence/phase0/run-1791263056167-1/sdk-status-summary.json,
+// e.g. compressionLevel/imageSize).
 void SetAdvertisedLabel(
     SdkCameraStatus::SettingCapability& setting, std::string_view label) {
     setting.available = true;
     setting.probe_state = "available";
     setting.cap_type = "enum";
-    setting.value_type = "string";
+    setting.value_type = "packed-string";
+    setting.current_index = 0;
     setting.current_label = std::string(label);
+    setting.string_values = {std::string(label)};
 }
 
 // A setting the SDK advertised but that carries no label because it is a
@@ -59,11 +71,16 @@ void SetAdvertisedNumericWithoutLabel(
 // A setting the SDK failed to probe (any ReadSettingCapability failure path
 // other than "the capability does not exist at all"): available=false, no
 // label, but probe_state records the specific failure instead of
-// "not-advertised".
+// "not-advertised". cap_type follows phase0.cpp's validate_setting mapping
+// for these probe_state values (lines ~1799-1805): "unsupported-type" pairs
+// with cap_type "unsupported"; every other probe failure here uses "enum"
+// (one of the two capability types validate_setting accepts for those
+// probe_state values).
 void SetProbeFailure(
     SdkCameraStatus::SettingCapability& setting, std::string_view probe_state) {
     setting.available = false;
     setting.probe_state = std::string(probe_state);
+    setting.cap_type = (probe_state == "unsupported-type") ? "unsupported" : "enum";
 }
 
 std::string RequireProfileFailureCategory(const SdkCameraStatus& status) {
@@ -249,7 +266,11 @@ void TestImageSizeNotConfirmedFailsAfterJpegFineCheck() {
     SetAdvertisedLabel(status.compression_level, "JPEG Fine");
     status.image_size.available = false;
     status.image_size.probe_state = "not-advertised";
+    status.image_size.cap_type = "unsupported";
+    status.image_size.value_type = "unsupported";
+    status.image_size.current_index.reset();
     status.image_size.current_label.reset();
+    status.image_size.string_values.clear();
 
     Check(RequireProfileFailureCategory(status) == "dual_image_size_l_not_confirmed",
         "image size L not confirmed must still be rejected");
@@ -257,12 +278,19 @@ void TestImageSizeNotConfirmedFailsAfterJpegFineCheck() {
 
 // Not exercised as a fixture: a fileType with available=false but a
 // surviving current_label (e.g. "RAW") is impossible to produce through the
-// real SDK probe and is rejected by the production invariant enforced in
-// phase0.cpp's validate_setting ("unavailable SDK setting capability must
-// not include a value"), which every SdkCameraStatus on the capture path is
-// checked against before this gate runs. There is no SettingCapability
-// shape that is both !available and carries a current_label, so this case
-// is not representable as a test fixture.
+// real SDK probe. In ReadSettingCapability (nikon_sdk_transport.cpp
+// ~2388-2548), every branch that assigns a current_label also sets
+// available=true in the same branch (e.g. the packed-string/string
+// branches), and the single catch-all failure path resets `result = {}`
+// before setting probe_state (the ~2543-2548 "fail-closed per setting"
+// comment) rather than leaving a previously-assigned label in place. There
+// is no path through that function returning available=false with a
+// current_label set, so this shape is not representable as a test fixture.
+// (phase0.cpp's validate_setting lambda inside PersistSdkStatusSummary
+// encodes this same "unavailable implies no value" rule, but it is not the
+// reason this shape is unreachable here: that lambda runs only on the
+// sdk-status CLI path, called solely from main.cpp:1036, and is never
+// invoked on the dual-camera capture path this gate runs on.)
 
 } // namespace
 
