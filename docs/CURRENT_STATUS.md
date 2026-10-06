@@ -12,7 +12,7 @@
 - 2 回目（17:47、transaction `d1d8cda50623482d984597cf156469e5`、[CAM-A leg](evidence/phase0/dual-leg-CAM-A-run-1791276431296-2/events.jsonl)、[CAM-B leg](evidence/phase0/dual-leg-CAM-B-run-1791276446458-4/events.jsonl)）: `Succeeded`、27 秒。CAM-A → CAM-B の順に各 1 回撮影し、各原画像を保存・検証してから該当 1 件だけ削除、両カードとも削除後に空を確認。自動再試行 0。原画像は CAM-A 17,983,817 B（SHA-256 `2f0549ac1ee787ce9c59a143d874157bffa4b2e526808521411c456511c842b4`）、CAM-B 18,082,209 B（`d947b9a6504c32aa821b054bad8ca18d18d66f2db7ac9c315168e13d432787f0`）。どちらも `Get-FileHash` で再計算し、アプリ表示と一致（2026-10-06 17:48）。合成は Pending、A0 品質は Unapproved のまま。
 - 画面で「結果を採用して次へ」を押し、採用を記録した。
 - 終了時: 採用の直後にアプリを閉じると「実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。（状態: HardwareCameraAgentLaunchException）」で止まった。終了処理は Agent に何も送らず、撮影ホストの自然終了を 5 秒だけ待つ設計で（`DualCameraAgentLifecycle.cs` の `WaitForActivatedCaptureHostExitAsync`）、Agent の寿命は起動から 10 分固定（`hardware_camera_agent_pipe.cpp`）。撮影がすぐ終わったため寿命の途中だった。両 leg の SDK session・WPD はすでに閉じており、カメラ側に後始末は残っていなかった。10 分経過後に Agent の終了（`Get-Process` で不在）を確かめてから閉じるボタンをもう一度押すと、1 回で閉じた。強制終了はしていない。閉じた後も pending は空、journal は `Succeeded`、原画像 2 枚のサイズと SHA-256 は不変、委譲 marker 0。画面に「待ってもう一度閉じる」旨と理由が出ない表示の問題は別 Issue。
-- 実機の時間: シャッターが切れたのは 2 回目の 1 組だけ。1 回目を ADR-0030 の最大 5 組に数えるかは所有者の判断待ち。
+- 実機の時間: 所有者の決定（2026-10-06）により、1 回目（シャッター 0）も ADR-0030 の最大 5 組に数える。使用 2 組、残り 3 組。
 - 残り: 残りの組（最大 5 組まで）、時間の p95 レビュー、終了時の表示の改善。
 
 ## 2026-10-06 一台実機アプリ撮影の再実施と合格（V-1CAM-005、AOPC-31-NOTE）
