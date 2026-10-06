@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "phase0.summary.v1",
+  "runId": "dual-leg-CAM-B-run-1791276446458-4",
+  "cameraModel": "Nikon D810",
+  "sdkVersion": "Nikon-D810-licensed-dual-session",
+  "transactionCount": 1,
+  "completeCount": 1,
+  "failedCount": 0
+}

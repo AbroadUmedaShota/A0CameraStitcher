@@ -1,0 +1,9 @@
+{"timestamp":"2026-10-06T05:43:36.983Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridWpdBaselineOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:37.000Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridWpdBaselineOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:37.804Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridSpoolEmptyBefore","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:37.805Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridWpdBaselineClosed","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:37.805Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridSdkCardCapture","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:38.854Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridSdkSessionOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:38.855Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridSdkProfileRevalidation","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T05:43:39.310Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"HybridFailed","cameraAlias":"CAM-A","errorDetail":"DualCamera JPEG Fine was not confirmed in the capture session"}
+{"timestamp":"2026-10-06T05:43:39.311Z","runId":"dual-leg-CAM-A-run-1791265416981-2","transactionId":"hybrid-tx-1791265416983-3","state":"FailedPartial","durationMs":2327,"errorCategory":"dual_jpeg_fine_not_confirmed","errorDetail":"DualCamera JPEG Fine was not confirmed in the capture session"}

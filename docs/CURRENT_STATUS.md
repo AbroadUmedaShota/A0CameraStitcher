@@ -1,6 +1,19 @@
 # 現在の開発状況
 
-更新日: 2026-10-06（#216 修正後の一台実機アプリ撮影の合格を追記）、2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-06（二台順次撮影 V-PAIR-001 の初回 1 組の合格を追記。#216 修正後の一台実機アプリ撮影の合格を追記）、2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+
+## 2026-10-06 二台順次撮影の初回 1 組（V-PAIR-001、AOPC-31-NOTE、#221）
+
+- 対象: main `cb3df7d`（#222 二台のシャッター直前確認、#224 結果の読み取り、#218 試験の修正を含む）。SDK 有効 Release の SHA-256 は WPF `5995c7571ad8314c0ac02d1bf8a6e95bec6267c7ef2d62ed5db8b1873de74dc9`、DualCameraAgent `769a17d3ef8694eda503c5f5f3d2f61ace0c109914d67f5716dd2027d5457ff3`。WPF を `--hardware-dual --wpd-camera-map <map> --capture-recovery-only --approved-capture-profile <profile> --dual-identity-proof <proof>` で起動した（`--capture-recovery-run-count` なし = 1 組）。画面操作は所有者の指示で UI Automation から行った。
+- 準備（撮影なし）: D810 を 1 台ずつ接続し、`bind-identity --transport wpd --single-camera-connected-confirmed` で CAM-A（ファームウェア V1.11、一台試験と同じ個体）と CAM-B（V1.14）を登録。2 台接続の `inventory` は bound 2 / unbound 0。承認 profile は固定値 10 項目（`a0.dual-capture-profile.operator-approved.v1`）。`--dual-identity-proof` はこの経路では中身を読まないため、その旨のメモを置いた。`--read-only-sdk-probe`・`--read-only-wpd-probe`・`--read-only-coexistence-probe` は撮影に使ったビルドで 3 つとも `terminalState: Pass`、両カード payload 0（[probes](evidence/phase0/dual-probes-20261006-cb3df7d/probes.jsonl)）。
+- 機体照合: 候補の Live View を見ながら、CAM-A にレンズキャップを付けて映像が覆われた候補を CAM-A、もう一方を CAM-B に割り当てた。照合の有効期限は確定から 5 分で、返答待ちの間に一度失効した。
+- 1 回目（14:43、transaction `020a434cd48749339e0ff2faa832b820`、[CAM-A leg](evidence/phase0/dual-leg-CAM-A-run-1791265416981-2/events.jsonl)）: CAM-A のシャッター直前確認で `dual_jpeg_fine_not_confirmed`。D810 が `fileType` を広告しないため、二台経路の確認が実機で必ず失敗する不具合だった（#222）。シャッター 0、CAM-B 未開始、原画像 0、カード削除 0、自動再試行 0。さらに Agent が `bindingInvalidationReason` の None を空文字で書き WPF が読めなかったため、画面は「結果不明」のまま pending が解けなかった（#224）。
+- #224 修正後、同一 ID の照会で 1 回目は `Failed: CaptureCameraA` として確定し、pending が解除された（シャッターなし）。
+- 2 回目（17:47、transaction `d1d8cda50623482d984597cf156469e5`、[CAM-A leg](evidence/phase0/dual-leg-CAM-A-run-1791276431296-2/events.jsonl)、[CAM-B leg](evidence/phase0/dual-leg-CAM-B-run-1791276446458-4/events.jsonl)）: `Succeeded`、27 秒。CAM-A → CAM-B の順に各 1 回撮影し、各原画像を保存・検証してから該当 1 件だけ削除、両カードとも削除後に空を確認。自動再試行 0。原画像は CAM-A 17,983,817 B（SHA-256 `2f0549ac1ee787ce9c59a143d874157bffa4b2e526808521411c456511c842b4`）、CAM-B 18,082,209 B（`d947b9a6504c32aa821b054bad8ca18d18d66f2db7ac9c315168e13d432787f0`）。どちらも `Get-FileHash` で再計算し、アプリ表示と一致（2026-10-06 17:48）。合成は Pending、A0 品質は Unapproved のまま。
+- 画面で「結果を採用して次へ」を押し、採用を記録した。
+- 終了時: アプリを閉じようとすると「実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。（状態: HardwareCameraAgentLaunchException）」で止まり、終了しなかった。原因は調査中で、強制終了はしていない。
+- 実機の時間: シャッターが切れたのは 2 回目の 1 組だけ。1 回目を ADR-0030 の最大 5 組に数えるかは所有者の判断待ち。
+- 残り: 残りの組（最大 5 組まで）、時間の p95 レビュー、終了時ロックの解消。
 
 ## 2026-10-06 一台実機アプリ撮影の再実施と合格（V-1CAM-005、AOPC-31-NOTE）
 
@@ -129,8 +142,8 @@
 
 | 項目 | ソフトウェアの状態 | 実機での確認 |
 |---|---|---|
-| 1組の撮影と原画像2枚の回収・保存（CaptureRecoveryOnly） | 実装済み。合成は行わない | 受入未完了 |
-| 同じCAM-A/B割当で10組を順番に実行 | 10回runner実装済み。HardwareDualの他の必須引数と併用し、`--capture-recovery-only --capture-recovery-run-count 10`で明示起動。失敗時停止、自動retryなし | 10組の受入・実測p95承認は未完了 |
+| 1組の撮影と原画像2枚の回収・保存（CaptureRecoveryOnly） | 実装済み。合成は行わない | 2026-10-06 に初回 1 組が Succeeded（冒頭の節）。アプリ終了時のロックは調査中 |
+| 同じCAM-A/B割当で最大5組を順番に実行（ADR-0030） | 5回runner実装済み。HardwareDualの他の必須引数と併用し、`--capture-recovery-only --capture-recovery-run-count 5`で明示起動（受け付ける値は5だけ。省略すると1組）。失敗時停止、自動retryなし | 5組の受入・実測p95承認は未完了 |
 | 同じCAM-A/B割当で100組を順番に実行 | 内部制御をWI-0017-SW01で準備。本番CLI/UIの100回開始は未対応で、引き続き拒否する | 耐久受入未完了 |
 | 時間・SHA-256の集計とp95承認記録 | 記録処理は実装済み。100件の記録を扱えることと、100回の撮影を実行できることは別 | 実機実行や承認者の権限をソフトウェア集計だけでは証明しない |
 

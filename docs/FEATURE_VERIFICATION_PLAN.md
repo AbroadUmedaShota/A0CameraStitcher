@@ -44,7 +44,7 @@
 | V-FAULT-001 | 切断・電源異常 | `FailedPartial`、no retry、復旧後は新規transaction | 空カード＋物理切断/電源操作 | Deferred |
 | V-RIG-001 | 二台固定校正 | lens、fixed transform、overlap、seam、crop、baseline residual | D810二台＋承認chart | `HG-0001/0002/0003B`待ち |
 | V-RIG-002 | 二台設置アシスタント | 自動補正可否、調整案内、profile再現性 | D810二台＋固定リグ | Deferred |
-| V-PAIR-001 | 二台順次撮影 | 10件、100/100、誤pair・原本消失・自動retry 0 | D810二台＋各body専用empty card | Partial: software contractはCAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証までSDK有無各CTestで合格。実機は`HG-0003B`待ち |
+| V-PAIR-001 | 二台順次撮影 | 最大5組（ADR-0030、初回1組を含む）、誤pair・原本消失・自動retry 0 | D810二台＋各body専用empty card | Partial: software contractはCAM-A→CAM-B、pair共有180秒watchdog、A失敗時B未開始、B失敗時A原本保持、retry 0、sync非保証までSDK有無各CTestで合格。`HG-0003B`は2026-08-20にsession-local operator binding（ADR-0025）として解消済み。2026-10-06にWPF CaptureRecoveryOnlyで初回1組がSucceeded（[現在の開発状況](CURRENT_STATUS.md)冒頭）。残りの組は未実施 |
 
 ## Setup-assist受入contract
 
