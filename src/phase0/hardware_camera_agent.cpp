@@ -1556,7 +1556,8 @@ void ValidateDistinctProductIdentityMaps(
 bool IsCanonicalOriginalLocation(
     const fs::path& run_root,
     const fs::path& candidate,
-    std::string_view camera_alias) {
+    std::string_view camera_alias,
+    std::string_view expected_transaction_id) {
     const fs::path relative =
         fs::absolute(candidate).lexically_normal().lexically_relative(
             fs::absolute(run_root).lexically_normal());
@@ -1565,7 +1566,14 @@ bool IsCanonicalOriginalLocation(
         components[0] == "." || components[0] == "..") {
         return false;
     }
-    return components[1].native() == std::wstring(camera_alias.begin(), camera_alias.end()) &&
+    // The first segment must be exactly the transaction this original was
+    // produced for, not merely "some non-empty directory name". Without this,
+    // a different transaction's evidence directory under the same run (for
+    // example a stray hybrid-tx-... directory from a mismatched transaction
+    // ID) would be accepted as canonical for this transaction.
+    return components[0].native() ==
+            std::wstring(expected_transaction_id.begin(), expected_transaction_id.end()) &&
+        components[1].native() == std::wstring(camera_alias.begin(), camera_alias.end()) &&
         components[2] == "original.jpg";
 }
 
@@ -1667,12 +1675,13 @@ private:
 LockedVerifiedOriginal ValidateAndLockOriginalBeforeCameraDelete(
     const fs::path& run_root,
     std::string_view camera_alias,
-    const FrameEvidence& frame) {
+    const FrameEvidence& frame,
+    std::string_view expected_transaction_id) {
     ValidateArtifactRunNoReparse(run_root);
     if (!frame.success || frame.camera_alias != camera_alias ||
         !PathIsWithin(run_root, frame.path) ||
         PathChainHasReparsePoint(run_root, frame.path) ||
-        !IsCanonicalOriginalLocation(run_root, frame.path, camera_alias)) {
+        !IsCanonicalOriginalLocation(run_root, frame.path, camera_alias, expected_transaction_id)) {
         throw TransportError(
             "pc_original_scope_invalid",
             "canonical PC original escaped the approved reparse-free artifact run");
@@ -1746,7 +1755,7 @@ bool VerifyJournalOriginal(
     const fs::path run_root = fs::absolute(artifacts_root) / result.run_id;
     const fs::path path = result.retained_original->path;
     if (!PathIsWithin(run_root, path) || PathChainHasReparsePoint(run_root, path) ||
-        !IsCanonicalOriginalLocation(run_root, path, result.camera_alias)) {
+        !IsCanonicalOriginalLocation(run_root, path, result.camera_alias, result.transaction_id)) {
         return false;
     }
     try {
@@ -1845,7 +1854,7 @@ std::optional<RetainedOriginalRecord> RecoverRetainedOriginal(
         const fs::path path = iterator->path();
         if (path.filename() == "original.jpg" && path.parent_path().filename() == journal.camera_alias &&
             PathIsWithin(run_root, path) && !PathChainHasReparsePoint(run_root, path) &&
-            IsCanonicalOriginalLocation(run_root, path, journal.camera_alias)) {
+            IsCanonicalOriginalLocation(run_root, path, journal.camera_alias, journal.transaction_id)) {
             candidates.push_back(path);
         }
     }
@@ -3233,7 +3242,7 @@ SingleCameraCaptureResult ExecuteBoundSingleCapture(
         transaction_deadline,
         [&](const FrameEvidence& frame) {
             locked_original = ValidateAndLockOriginalBeforeCameraDelete(
-                evidence.RunRoot(), request.camera_alias, frame);
+                evidence.RunRoot(), request.camera_alias, frame, request.transaction_id);
             if (before_camera_object_delete) before_camera_object_delete();
         },
         [&] {
@@ -3253,7 +3262,13 @@ SingleCameraCaptureResult ExecuteBoundSingleCapture(
             if (validate_shutter_session_status) {
                 validate_shutter_session_status(status);
             }
-        });
+        },
+        /* cleanup_state */ nullptr,
+        // The single-camera agent's durable transactionId (already validated
+        // as 32 hex characters by the protocol layer) becomes the evidence
+        // directory name, so the artifact path the app computes from its
+        // response and the path the agent actually wrote are the same value.
+        request.transaction_id);
     result.terminal_state = transaction.terminal_state;
     result.error_category = transaction.error_category;
     result.error_detail = transaction.error_detail;

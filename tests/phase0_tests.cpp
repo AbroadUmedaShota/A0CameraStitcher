@@ -2226,6 +2226,86 @@ void TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter() {
     fs::remove_all(root);
 }
 
+void TestHybridCaptureTransactionIdOverride() {
+    // Regression coverage for the 2026-10-05 production bug: the hybrid
+    // executor used to always mint its own "hybrid-tx-..." ID for the
+    // evidence/original directory, while the single-camera hardware Camera
+    // Agent separately reported its own request.transaction_id as the public
+    // transactionId. ExecuteHybridCaptureOnce now accepts an optional
+    // transaction_id_override so the two values can be forced to match; this
+    // covers the override's three observable behaviors in isolation from the
+    // hardware Camera Agent plumbing exercised in
+    // hardware_camera_agent_tests.cpp.
+    const std::string valid_override = "0123456789abcdef0123456789abcdef";
+    Check(valid_override.size() == 32, "test fixture sanity: override id must be 32 characters");
+
+    // (a) A valid override becomes the actual transaction ID and the actual
+    // on-disk original path, not just the reported transactionId.
+    {
+        const auto root = NewTestRoot("hybrid-txid-override-valid");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-txid-override-valid", sdk.SdkVersion());
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, {}, {}, nullptr, valid_override);
+        Check(result.terminal_state == "Complete", "a valid override must not block capture");
+        Check(result.transaction_id == valid_override,
+            "a valid override must become the reported transaction ID verbatim");
+        Check(fs::is_regular_file(evidence.RunRoot() / valid_override / "CAM-A" / "original.jpg"),
+            "a valid override must become the actual evidence/original directory name, "
+            "matching HardwareAgentArtifactLayout.OriginalPath exactly");
+        fs::remove_all(root);
+    }
+
+    // (b) An invalid override fails closed before any transport is opened:
+    // no SDK capture call, no WPD open, and the specific error category the
+    // app can key off of.
+    {
+        const std::vector<std::pair<std::string, std::string>> invalid_overrides{
+            {"empty", ""},
+            {"31 chars", valid_override.substr(0, 31)},
+            {"33 chars", valid_override + "0"},
+            {"uppercase", "0123456789ABCDEF0123456789abcdef"},
+            {"forward slash", "0123456789abcdef0123456789abcd/f"},
+            {"backslash", "0123456789abcdef0123456789abcd\\f"},
+        };
+        for (const auto& [name, override_value] : invalid_overrides) {
+            const auto root = NewTestRoot("hybrid-txid-override-invalid-" + name);
+            HybridWpdFake wpd;
+            HybridSdkFake sdk;
+            EvidenceWriter evidence(root / "artifacts", "run-hybrid-txid-override-invalid", sdk.SdkVersion());
+            const auto result = ExecuteHybridCaptureOnce(
+                wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+                std::nullopt, {}, {}, nullptr, override_value);
+            Check(result.terminal_state == "FailedPartial",
+                name + ": an invalid override must fail closed");
+            Check(result.error_category == "transaction_id_override_invalid",
+                name + ": an invalid override must report the override-specific error category");
+            Check(wpd.opens == 0, name + ": an invalid override must never open the WPD transport");
+            Check(sdk.opens == 0, name + ": an invalid override must never open the SDK transport");
+            Check(sdk.captures == 0, name + ": an invalid override must never issue a shutter/card capture");
+            fs::remove_all(root);
+        }
+    }
+
+    // (c) With no override at all, the auto-generated ID keeps its documented
+    // "hybrid-tx-" prefix and the original still lands under it.
+    {
+        const auto root = NewTestRoot("hybrid-txid-no-override");
+        HybridWpdFake wpd;
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", "run-hybrid-txid-no-override", sdk.SdkVersion());
+        const auto result = ExecuteHybridCaptureOnce(wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a");
+        Check(result.terminal_state == "Complete", "capture without an override must still succeed");
+        Check(result.transaction_id.starts_with("hybrid-tx-"),
+            "without an override the auto-generated transaction ID must keep its documented prefix");
+        Check(fs::is_regular_file(evidence.RunRoot() / result.transaction_id / "CAM-A" / "original.jpg"),
+            "without an override the original must still land under the auto-generated transaction ID");
+        fs::remove_all(root);
+    }
+}
+
 void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
     const std::vector<unsigned char> expected_dimensions_jpeg{
         0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x08, 0x08, 0x13,
@@ -3338,6 +3418,7 @@ int main() {
         TestPairWatchdogStopsBeforeOpen();
         TestCloseFailureRetainsOriginalAndStopsPair();
         TestHybridCaptureOrdersOneCardCaptureAndNoWpdShutter();
+        TestHybridCaptureTransactionIdOverride();
         TestDualCaptureDimensionGateRetainsOriginalAndWpdObject();
         TestHybridPairRunsCamAThenCamBWithoutOverlapOrRetry();
         TestHybridPairRecoveryDetectsInterruptionAfterCamA();

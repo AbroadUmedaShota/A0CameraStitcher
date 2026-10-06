@@ -864,7 +864,14 @@ private:
     std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt,
     const std::function<void(const FrameEvidence&)>& before_camera_object_delete = {},
     const std::function<void()>& before_sdk_capture = {},
-    HybridCaptureCleanupState* cleanup_state = nullptr);
+    HybridCaptureCleanupState* cleanup_state = nullptr,
+    // When present, this becomes the hybrid transaction ID (and therefore the
+    // evidence/original directory name) instead of the auto-generated
+    // "hybrid-tx-..." ID. Used by the single-camera agent so its durable
+    // transactionId and the on-disk original path are the same value. Must be
+    // exactly 32 lowercase hex characters; an invalid override fails closed
+    // before any transport is opened (see phase0.cpp).
+    std::optional<std::string> transaction_id_override = std::nullopt);
 [[nodiscard]] HybridPairResult ExecuteHybridCapturePair(
     ICameraTransport& wpd_session,
     IPostCardObservationTransport& wpd,

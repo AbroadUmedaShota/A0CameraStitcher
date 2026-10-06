@@ -1678,6 +1678,48 @@ void TestDurableJournalRecoveryContracts() {
               recovered_failed.retained_original &&
               recovered_failed.retained_original->sha256 == Sha256Hex(jpeg),
             "terminal FailedPartial query must rediscover a canonical original omitted before journal commit");
+
+        // Regression for the 2026-10-05 production bug (see also
+        // TestExactlyOneBindingAndHybridExecutorReuse): a journal whose own
+        // transactionId is X must not be able to vouch for an original that
+        // physically lives under a different transaction's directory Y, even
+        // when the size and SHA-256 match exactly. IsCanonicalOriginalLocation
+        // now takes the journal's own transaction ID and requires the
+        // original's first path segment to equal it; before that, only the
+        // alias and filename were checked, so a stray original from another
+        // transaction under the same run would have been accepted.
+        const std::string mismatched_txid_journal_id = "66666666666666666666666666666666";
+        const std::string mismatched_txid_run = "run-1700000000000-66";
+        const std::string mismatched_txid_disk_id = "77777777777777777777777777777777";
+        const fs::path mismatched_txid_original = config.artifacts_root /
+            mismatched_txid_run / mismatched_txid_disk_id / "CAM-A" / "original.jpg";
+        fs::create_directories(mismatched_txid_original.parent_path());
+        {
+            std::ofstream output(mismatched_txid_original, std::ios::binary);
+            output.write(
+                reinterpret_cast<const char*>(jpeg.data()),
+                static_cast<std::streamsize>(jpeg.size()));
+        }
+        ReplaceJournal(
+            config.transaction_state_root,
+            mismatched_txid_journal_id,
+            JournalJson(
+                mismatched_txid_journal_id,
+                mismatched_txid_run,
+                "Complete",
+                {},
+                true,
+                mismatched_txid_original.string(),
+                jpeg.size(),
+                Sha256Hex(jpeg),
+                true));
+        const auto mismatched_txid_result =
+            backend.GetTransactionResult(mismatched_txid_journal_id);
+        Check(mismatched_txid_result.error_category == "transaction_original_invalid" &&
+              !mismatched_txid_result.retained_original,
+            "a journal must not be able to vouch for an original filed under a different "
+            "transaction's directory even with matching size and hash; "
+            "actual error_category=" + mismatched_txid_result.error_category);
     } catch (const std::exception& error) {
         ++failures;
         std::cerr << "FAIL: durable journal test threw: " << error.what() << '\n';
@@ -1726,6 +1768,23 @@ void TestExactlyOneBindingAndHybridExecutorReuse() {
             "executor should issue one shutter, exact-object delete, and final empty check");
         Check(result.retained_original && fs::is_regular_file(result.retained_original->path),
             "successful capture should return the verified canonical PC original");
+        // Regression for the 2026-10-05 production bug: the hybrid executor
+        // used to mint its own "hybrid-tx-..." transaction ID for the
+        // evidence directory while the agent reported request.transaction_id
+        // as the public transactionId, so the app (HardwareAgentArtifactLayout
+        // .OriginalPath, which combines artifactsRoot/runId/transactionId/
+        // alias/original.jpg) and the agent disagreed about where the
+        // original lived even though both values individually looked valid.
+        // This asserts the actual on-disk path, not just that some file
+        // exists, so a reintroduced mismatch fails here instead of only on
+        // real hardware.
+        Check(result.retained_original &&
+                  fs::equivalent(
+                      result.retained_original->path,
+                      evidence.RunRoot() / request.transaction_id / "CAM-A" / "original.jpg"),
+            "the retained original must be at run_root/<request transactionId>/<alias>/original.jpg, "
+            "matching HardwareAgentArtifactLayout.OriginalPath exactly; actual=" +
+                (result.retained_original ? result.retained_original->path.string() : std::string("<none>")));
         Check(result.automatic_retry_count == 0,
             "agent capture must report zero automatic retries");
 

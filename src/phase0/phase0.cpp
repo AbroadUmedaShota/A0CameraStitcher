@@ -168,6 +168,24 @@ std::string ControlledErrorDetail(std::string_view value) {
     return result;
 }
 
+// Defensive check for a caller-supplied hybrid transaction ID override (see
+// ExecuteHybridCaptureOnce). Deliberately stricter than merely "is a legal
+// path component": exactly 32 lowercase hex characters, matching the shape
+// the hardware Camera Agent protocol and HardwareAgentArtifactLayout (the
+// .NET app side) already require. The explicit separator checks are belt-
+// and-suspenders on top of the character-class check, which already
+// excludes '/' and '\\'.
+bool IsSafeHybridTransactionIdOverride(std::string_view value) noexcept {
+    if (value.empty() || value.size() != 32) return false;
+    for (const unsigned char ch : value) {
+        const bool is_lowercase_hex_digit =
+            (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        if (!is_lowercase_hex_digit) return false;
+    }
+    return value.find('/') == std::string_view::npos &&
+        value.find('\\') == std::string_view::npos;
+}
+
 std::string JsonUnescape(std::string_view value) {
     std::string result;
     const auto hex_value = [](char character) -> unsigned int {
@@ -1413,13 +1431,34 @@ TransactionResult ExecuteHybridCaptureOnce(
     std::optional<std::chrono::steady_clock::time_point> transaction_deadline,
     const std::function<void(const FrameEvidence&)>& before_camera_object_delete,
     const std::function<void()>& before_sdk_capture,
-    HybridCaptureCleanupState* cleanup_state) {
+    HybridCaptureCleanupState* cleanup_state,
+    std::optional<std::string> transaction_id_override) {
     TransactionResult result;
     if (cleanup_state != nullptr) {
         cleanup_state->wpd_cleanup_confirmed = true;
     }
     result.run_id = evidence.RunId();
-    result.transaction_id = "hybrid-tx-" + NewRunId().substr(4);
+    if (transaction_id_override && !IsSafeHybridTransactionIdOverride(*transaction_id_override)) {
+        // Fail closed before any transport is opened or a shutter command is
+        // sent: an invalid caller-supplied transaction ID must never become
+        // the evidence/original directory name. Deliberately does not fall
+        // back to an auto-generated ID -- that would silently desynchronize
+        // the agent's reported transactionId from the actual evidence path,
+        // which is the exact class of bug this override exists to prevent.
+        result.terminal_state = "FailedPartial";
+        result.error_category = "transaction_id_override_invalid";
+        result.error_detail = ControlledErrorDetail(
+            "hybrid capture transaction ID override failed validation; capture was not started");
+        result.frames.push_back({false, std::string(camera_alias), {}, {}, 0,
+            result.error_category, result.error_detail});
+        evidence.RecordState(
+            "invalid-override", "HybridTransactionIdOverrideInvalid", camera_alias, result.error_detail);
+        evidence.RecordResult(result);
+        return result;
+    }
+    result.transaction_id = transaction_id_override
+        ? *transaction_id_override
+        : "hybrid-tx-" + NewRunId().substr(4);
     const auto started = std::chrono::steady_clock::now();
     const auto deadline = transaction_deadline.value_or(started + timeouts.transaction_watchdog);
     std::string token;
