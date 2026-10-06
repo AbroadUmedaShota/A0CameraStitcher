@@ -766,7 +766,11 @@ public:
         std::string_view camera_alias,
         const std::vector<ImageCandidate>& candidates,
         std::optional<std::chrono::steady_clock::time_point> transaction_deadline = std::nullopt,
-        const std::function<void()>& before_atomic_rename = {});
+        const std::function<void()>& before_atomic_rename = {},
+        // Test-only clock override for transaction_deadline comparisons; when
+        // unset (the default, and every production call site), the real
+        // std::chrono::steady_clock::now() is used and behavior is unchanged.
+        const std::function<std::chrono::steady_clock::time_point()>& steady_now = {});
     [[nodiscard]] FrameEvidence QuarantineUnconfirmed(
         std::string_view transaction_id,
         std::string_view camera_alias,
@@ -871,7 +875,11 @@ private:
     // transactionId and the on-disk original path are the same value. Must be
     // exactly 32 lowercase hex characters; an invalid override fails closed
     // before any transport is opened (see phase0.cpp).
-    std::optional<std::string> transaction_id_override = std::nullopt);
+    std::optional<std::string> transaction_id_override = std::nullopt,
+    // Test-only clock override for watchdog comparisons; when unset (the
+    // default, and every production call site), the real
+    // std::chrono::steady_clock::now() is used and behavior is unchanged.
+    const std::function<std::chrono::steady_clock::time_point()>& steady_now = {});
 [[nodiscard]] HybridPairResult ExecuteHybridCapturePair(
     ICameraTransport& wpd_session,
     IPostCardObservationTransport& wpd,

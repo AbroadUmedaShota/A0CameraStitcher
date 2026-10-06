@@ -312,13 +312,24 @@ public:
     void CaptureToCard(std::chrono::seconds, std::chrono::seconds) override {
         if (!open) throw TransportError("session_not_open", "SDK capture without open");
         ++captures; order += "Scapture;";
-        if (capture_delay_ > std::chrono::milliseconds::zero()) std::this_thread::sleep_for(capture_delay_);
+        // on_capture_delay is the deterministic alternative used by watchdog
+        // tests: it signals "the capture overran" (e.g. advancing an injected
+        // fake clock) without a real sleep_for, so the test does not race a
+        // wall-clock margin against system load. capture_delay_ remains as a
+        // literal real-time delay for callers that want an actual elapsed
+        // wait instead.
+        if (on_capture_delay) {
+            on_capture_delay();
+        } else if (capture_delay_ > std::chrono::milliseconds::zero()) {
+            std::this_thread::sleep_for(capture_delay_);
+        }
         if (capture_fails_ || (fail_capture_number > 0 && captures == fail_capture_number)) {
             throw TransportError("image_event_timeout", "configured SDK card-capture failure");
         }
     }
     bool open{false}; int opens{}; int closes{}; int captures{}; int fail_capture_number{}; int fail_close_number{};
     std::string order;
+    std::function<void()> on_capture_delay;
 private:
     bool close_fails_{};
     bool capture_fails_{};
@@ -2942,13 +2953,23 @@ void TestHybridWatchdogStopsBeforeHardwareOpen() {
 void TestHybridWatchdogClosesSdkAndStopsBeforeWpdRecovery() {
     const auto root = NewTestRoot("hybrid-watchdog-overrun");
     HybridWpdFake wpd;
-    HybridSdkFake sdk(false, false, std::chrono::milliseconds(2100));
+    HybridSdkFake sdk;
     EvidenceWriter evidence(root / "artifacts", "run-hybrid-watchdog-overrun", sdk.SdkVersion());
     Timeouts timeouts;
-    timeouts.transaction_watchdog = std::chrono::seconds(2);
+    // A large configured watchdog keeps every preceding fake transport call
+    // (open/close/etc.) from racing a real deadline under system load. The
+    // overrun itself is simulated deterministically: on_capture_delay jumps
+    // the injected fake clock forward by exactly one watchdog period the
+    // instant the SDK capture call runs, so the watchdog is guaranteed to
+    // have expired by the time the capture returns, independent of how long
+    // the surrounding steps actually took in wall-clock time.
+    timeouts.transaction_watchdog = std::chrono::hours(24);
+    auto current_time = std::chrono::steady_clock::now();
+    sdk.on_capture_delay = [&] { current_time += timeouts.transaction_watchdog; };
 
     const auto result = ExecuteHybridCaptureOnce(
-        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", timeouts);
+        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", timeouts, {}, {},
+        std::nullopt, {}, {}, nullptr, std::nullopt, [&] { return current_time; });
 
     Check(result.terminal_state == "FailedPartial" && result.error_category == "transaction_watchdog",
         "an SDK capture that returns after the watchdog must fail the transaction");
@@ -2970,12 +2991,18 @@ void TestHybridWatchdogStopsCanonicalRenameAndDelete() {
     HybridSdkFake sdk;
     EvidenceWriter evidence(root / "artifacts", "run-hybrid-persist-watchdog", sdk.SdkVersion());
     Timeouts timeouts;
-    timeouts.transaction_watchdog = std::chrono::seconds(2);
+    // Same deterministic-expiry approach as the SDK-overrun watchdog test
+    // above: a large configured watchdog plus a fake clock that only jumps
+    // forward (by exactly one watchdog period) inside before_pc_original_rename,
+    // right as the production code would otherwise be racing a real deadline
+    // against the atomic rename.
+    timeouts.transaction_watchdog = std::chrono::hours(24);
+    auto current_time = std::chrono::steady_clock::now();
 
     const auto result = ExecuteHybridCaptureOnce(
-        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", timeouts, {}, [] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-        });
+        wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", timeouts, {},
+        [&] { current_time += timeouts.transaction_watchdog; },
+        std::nullopt, {}, {}, nullptr, std::nullopt, [&] { return current_time; });
 
     const auto canonical = evidence.RunRoot() / result.transaction_id / "CAM-A" / "original.jpg";
     const auto partial = evidence.RunRoot() / result.transaction_id / "CAM-A" / "original.jpg.partial";

@@ -890,11 +890,15 @@ void EvidenceWriter::RecordCamera(std::string_view camera_alias, std::string_vie
 FrameEvidence EvidenceWriter::PersistExactlyOne(std::string_view transaction_id, std::string_view camera_alias,
                                                  const std::vector<ImageCandidate>& candidates,
                                                  std::optional<std::chrono::steady_clock::time_point> transaction_deadline,
-                                                 const std::function<void()>& before_atomic_rename) {
+                                                 const std::function<void()>& before_atomic_rename,
+                                                 const std::function<std::chrono::steady_clock::time_point()>& steady_now) {
     FrameEvidence frame;
     frame.camera_alias = std::string(camera_alias);
+    const auto now = [&] {
+        return steady_now ? steady_now() : std::chrono::steady_clock::now();
+    };
     const auto deadline_expired = [&] {
-        return transaction_deadline && std::chrono::steady_clock::now() >= *transaction_deadline;
+        return transaction_deadline && now() >= *transaction_deadline;
     };
     const auto watchdog_failure = [&](const fs::path& diagnostic_path) {
         frame.path = diagnostic_path;
@@ -1432,7 +1436,8 @@ TransactionResult ExecuteHybridCaptureOnce(
     const std::function<void(const FrameEvidence&)>& before_camera_object_delete,
     const std::function<void()>& before_sdk_capture,
     HybridCaptureCleanupState* cleanup_state,
-    std::optional<std::string> transaction_id_override) {
+    std::optional<std::string> transaction_id_override,
+    const std::function<std::chrono::steady_clock::time_point()>& steady_now) {
     TransactionResult result;
     if (cleanup_state != nullptr) {
         cleanup_state->wpd_cleanup_confirmed = true;
@@ -1463,7 +1468,14 @@ TransactionResult ExecuteHybridCaptureOnce(
     result.transaction_id = transaction_id_override
         ? *transaction_id_override
         : "hybrid-tx-" + NewRunId().substr(4);
-    const auto started = std::chrono::steady_clock::now();
+    // steady_now defaults to the real clock; every production call site
+    // leaves it unset, so this is a no-op there. Tests use it to make
+    // watchdog-expiry deterministic instead of racing a real sleep against
+    // the configured budget.
+    const auto now = [&] {
+        return steady_now ? steady_now() : std::chrono::steady_clock::now();
+    };
+    const auto started = now();
     const auto deadline = transaction_deadline.value_or(started + timeouts.transaction_watchdog);
     std::string token;
     bool wpd_open = false;
@@ -1479,7 +1491,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridFailed", camera_alias, result.error_detail);
     };
     const auto budget = [&](std::chrono::seconds configured) {
-        const auto remaining_duration = deadline - std::chrono::steady_clock::now();
+        const auto remaining_duration = deadline - now();
         if (remaining_duration <= std::chrono::steady_clock::duration::zero()) {
             throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
         }
@@ -1490,7 +1502,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         return std::min(configured, remaining);
     };
     const auto ensure_active = [&] {
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (now() >= deadline) {
             throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
         }
     };
@@ -1542,7 +1554,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridSdkCaptureCompleted", camera_alias);
         // A failed close is terminal: opening WPD afterwards could overlap a
         // still-owned SDK session.
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (now() >= deadline) {
             sdk_open = false;
             try { sdk_session.Close(timeouts.close); } catch (...) {}
             throw TransportError("transaction_watchdog", "hybrid capture transaction watchdog expired");
@@ -1575,7 +1587,8 @@ TransactionResult ExecuteHybridCaptureOnce(
         evidence.RecordState(result.transaction_id, "HybridRecoveredExactlyOneCandidate", camera_alias);
         evidence.RecordState(result.transaction_id, "HybridPersistPcOriginal", camera_alias);
         result.frames.push_back(evidence.PersistExactlyOne(
-            result.transaction_id, camera_alias, candidates, deadline, before_pc_original_rename));
+            result.transaction_id, camera_alias, candidates, deadline, before_pc_original_rename,
+            steady_now));
         ensure_active();
         if (!FrameCompleted(result.frames.front())) {
             throw TransportError(
@@ -1622,7 +1635,7 @@ TransactionResult ExecuteHybridCaptureOnce(
         if (!token.empty()) wpd.AbandonPostCardObservation(token);
         fail("transport_exception", error.what());
     }
-    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(now() - started);
     evidence.RecordResult(result);
     return result;
 }
