@@ -1,5 +1,6 @@
 using System.IO;
 using System.Security.Cryptography;
+using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.Foundation.Hardware;
 
 namespace A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -319,21 +320,9 @@ public sealed class HardwareOriginalExporter
             original.Sha256,
             "original.jpg",
             expectedPath);
-        if (transactionId.Length != 32 || !transactionId.All(character =>
-                character is >= '0' and <= '9' or >= 'a' and <= 'f'))
-        {
-            throw new InvalidDataException("Export transaction ID is invalid.");
-        }
+        ValidateTransactionId(transactionId);
+        EnsureExportDirectoryIsSafe();
 
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_exportDirectory);
-        Directory.CreateDirectory(_exportDirectory);
-        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_exportDirectory);
-        if ((File.GetAttributes(_exportDirectory) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException("Export directory cannot be a reparse point.");
-        }
-
-        HardwareArtifactVerifier.EnsureRegularFile(original.Path);
         var safeAlias = original.CameraAlias switch
         {
             "CAM-A" => "CAM-A",
@@ -341,10 +330,134 @@ public sealed class HardwareOriginalExporter
             _ => throw new InvalidDataException("Export camera alias is invalid."),
         };
         var baseName = $"A0-single-{now.UtcDateTime:yyyyMMdd-HHmmssfff}-{safeAlias}-{transactionId[..8]}";
+        var (lockedFile, finalPath) = await StageVerifiedOriginalAsync(
+                original.Path, original.SizeBytes, original.Sha256, baseName, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (_afterLockedVerificationForTesting is not null)
+        {
+            await _afterLockedVerificationForTesting(finalPath + ".partial", cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        // The same write-locked, verified file handle is renamed. A competing
+        // path replacement can therefore never become the accepted product JPEG.
+        await using (lockedFile)
+        {
+            WindowsDurableFilePublisher.PublishLocked(
+                lockedFile,
+                finalPath,
+                replaceExisting: false);
+        }
+        return finalPath;
+    }
+
+    /// <summary>
+    /// Exports one or two already-verified CaptureRecoveryOnly dual-camera originals
+    /// (Succeeded: CAM-A and CAM-B; FailedPartial with a CAM-A-only retained original: one
+    /// file) as byte-identical copies. Every original is written, locked, and reread-verified
+    /// before any rename occurs — one failed original can therefore never leave a lone sibling
+    /// published under a final name (see GitHub Issue #226).
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ExportDualOriginalsAsync(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        string transactionId,
+        string transactionDirectory,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(originals);
+        if (originals.Count is not (1 or 2))
+        {
+            throw new InvalidDataException("Export requires one or two retained dual-camera originals.");
+        }
+        if (!originals.Select(original => original.Alias)
+                .SequenceEqual(OrderedDualAliases.Take(originals.Count), StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("Export originals must be exactly CAM-A, then CAM-A/CAM-B in order.");
+        }
+        ValidateTransactionId(transactionId);
+        if (string.IsNullOrWhiteSpace(transactionDirectory) || !Path.IsPathFullyQualified(transactionDirectory))
+        {
+            throw new InvalidDataException("Export transaction directory is invalid.");
+        }
+        EnsureExportDirectoryIsSafe();
+
+        var staged = new List<(FileStream LockedFile, string FinalPath)>(originals.Count);
+        try
+        {
+            foreach (var original in originals)
+            {
+                var expectedPath = Path.GetFullPath(
+                    Path.Combine(transactionDirectory, original.Alias, "original.jpg"));
+                HardwareArtifactVerifier.ValidateExpectedRecord(
+                    original.Path, original.SizeBytes, original.Sha256, "original.jpg", expectedPath);
+
+                var baseName =
+                    $"A0-dual-{now.UtcDateTime:yyyyMMdd-HHmmssfff}-{original.Alias}-{transactionId[..8]}";
+                staged.Add(await StageVerifiedOriginalAsync(
+                        original.Path, original.SizeBytes, original.Sha256, baseName, cancellationToken)
+                    .ConfigureAwait(false));
+            }
+
+            // Only now that every original has been written, locked, and reread-verified do
+            // any of the staged files get their final name.
+            var finalPaths = new List<string>(staged.Count);
+            foreach (var (lockedFile, finalPath) in staged)
+            {
+                WindowsDurableFilePublisher.PublishLocked(lockedFile, finalPath, replaceExisting: false);
+                finalPaths.Add(finalPath);
+            }
+            return finalPaths;
+        }
+        finally
+        {
+            foreach (var (lockedFile, _) in staged)
+            {
+                await lockedFile.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void EnsureExportDirectoryIsSafe()
+    {
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_exportDirectory);
+        Directory.CreateDirectory(_exportDirectory);
+        WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_exportDirectory);
+        if ((File.GetAttributes(_exportDirectory) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException("Export directory cannot be a reparse point.");
+        }
+    }
+
+    private static void ValidateTransactionId(string transactionId)
+    {
+        if (transactionId.Length != 32 || !transactionId.All(character =>
+                character is >= '0' and <= '9' or >= 'a' and <= 'f'))
+        {
+            throw new InvalidDataException("Export transaction ID is invalid.");
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="sourcePath"/> to a uniquely-named ".partial" file under
+    /// <see cref="_exportDirectory"/>, verifies the copy byte-for-byte against the expected
+    /// size/SHA-256 while writing it, then opens and rereads the write-locked result once more
+    /// before handing the still-open, still-locked handle back to the caller. The caller alone
+    /// decides when (or whether) to publish it under its final name.
+    /// </summary>
+    private async Task<(FileStream LockedFile, string FinalPath)> StageVerifiedOriginalAsync(
+        string sourcePath,
+        long expectedSizeBytes,
+        string expectedSha256,
+        string baseName,
+        CancellationToken cancellationToken)
+    {
+        HardwareArtifactVerifier.EnsureRegularFile(sourcePath);
         var finalPath = UniqueDestinationPath(baseName);
         var partialPath = finalPath + ".partial";
 
-        await using (var source = HardwareArtifactVerifier.OpenStableRead(original.Path))
+        await using (var source = HardwareArtifactVerifier.OpenStableRead(sourcePath))
         await using (var destination = new FileStream(
                          partialPath,
                          FileMode.CreateNew,
@@ -358,38 +471,35 @@ public sealed class HardwareOriginalExporter
                 .ConfigureAwait(false);
             await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
             destination.Flush(flushToDisk: true);
-            if (observed.SizeBytes != original.SizeBytes ||
-                !string.Equals(observed.Sha256, original.Sha256, StringComparison.Ordinal))
+            if (observed.SizeBytes != expectedSizeBytes ||
+                !string.Equals(observed.Sha256, expectedSha256, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     $"Original verification failed; diagnostic partial was retained: {partialPath}");
             }
         }
 
-        await using var verifiedStagingFile =
-            WindowsDurableFilePublisher.OpenLockedForVerifiedPublish(partialPath);
-        var stagedRecord = await HardwareArtifactVerifier
-            .InspectJpegAsync(verifiedStagingFile, cancellationToken, (7360, 4912))
-            .ConfigureAwait(false);
-        if (stagedRecord.SizeBytes != original.SizeBytes || stagedRecord.Sha256 != original.Sha256)
+        var lockedFile = WindowsDurableFilePublisher.OpenLockedForVerifiedPublish(partialPath);
+        try
         {
-            throw new InvalidDataException("Export reread verification failed.");
-        }
-
-        if (_afterLockedVerificationForTesting is not null)
-        {
-            await _afterLockedVerificationForTesting(partialPath, cancellationToken)
+            var stagedRecord = await HardwareArtifactVerifier
+                .InspectJpegAsync(lockedFile, cancellationToken, (7360, 4912))
                 .ConfigureAwait(false);
+            if (stagedRecord.SizeBytes != expectedSizeBytes || stagedRecord.Sha256 != expectedSha256)
+            {
+                throw new InvalidDataException("Export reread verification failed.");
+            }
+        }
+        catch
+        {
+            await lockedFile.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
 
-        // The same write-locked, verified file handle is renamed. A competing
-        // path replacement can therefore never become the accepted product JPEG.
-        WindowsDurableFilePublisher.PublishLocked(
-            verifiedStagingFile,
-            finalPath,
-            replaceExisting: false);
-        return finalPath;
+        return (lockedFile, finalPath);
     }
+
+    private static readonly IReadOnlyList<string> OrderedDualAliases = Array.AsReadOnly(["CAM-A", "CAM-B"]);
 
     private string UniqueDestinationPath(string baseName)
     {

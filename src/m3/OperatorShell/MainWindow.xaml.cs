@@ -427,6 +427,33 @@ public partial class MainWindow : Window
         }
     }
 
+    // GitHub Issue #226: CaptureRecoveryOnlyの検証済み原画像は、通常フロー(ChooseExportDirectory_Click)
+    // とは別の保存先を持つ(ViewModel.CanChangeCaptureRecoveryOnlyExportDirectory)。選んだ先が
+    // このPC内かどうかの検証はViewModel側（WindowsLocalPathGuard）で行う。
+    private void ChooseCaptureRecoveryOnlyExportDirectory_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (!_viewModel.CanChangeCaptureRecoveryOnlyExportDirectory)
+        {
+            return;
+        }
+
+        var current = _viewModel.CaptureRecoveryOnlyExportDirectory;
+        var dialog = new OpenFolderDialog
+        {
+            Title = "検証済み原画像の保存先を選択（このPC内のフォルダのみ）",
+            Multiselect = false,
+        };
+        if (!string.IsNullOrWhiteSpace(current) && Directory.Exists(current))
+        {
+            dialog.InitialDirectory = current;
+        }
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            _viewModel.ChangeCaptureRecoveryOnlyExportDirectory(dialog.FolderName);
+        }
+    }
+
     private void ShowTechnicalDetail_Click(object sender, RoutedEventArgs eventArgs) =>
         MessageBox.Show(this, _viewModel.TechnicalDetail, "技術情報（error code・ログ位置）", MessageBoxButton.OK, MessageBoxImage.Information);
 

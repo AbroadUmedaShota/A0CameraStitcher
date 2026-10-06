@@ -99,6 +99,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly RelayCommand _declineSafetyCommand;
     private readonly RelayCommand _toggleLiveViewCommand;
     private readonly AsyncRelayCommand _exportCommand;
+    private readonly AsyncRelayCommand _exportCaptureRecoveryOnlyOriginalsCommand;
     private readonly AsyncRelayCommand _restitchCommand;
     private readonly RelayCommand _showDashboardCommand;
     private readonly RelayCommand _showSetupCommand;
@@ -219,6 +220,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     private string _lastExportPath = "未実行";
     private string _captureRecoveryOnlyTransactionDirectory = string.Empty;
     private string _fixedLocalExportDirectory = string.Empty;
+    // GitHub Issue #226: CaptureRecoveryOnlyの保存先は、通常フロー(_fixedLocalExportDirectory)
+    // とは別管理にする。通常フローの保存先は合成結果の出力先であり、CaptureRecoveryOnlyは
+    // 合成を行わず検証済み原画像だけをbyte-identicalで追加コピーする——意味が異なる操作に
+    // 同じ状態を使うと「どちらのための保存先か」が画面上で混ざる。
+    private string _captureRecoveryOnlyExportDirectory = string.Empty;
+    private string _captureRecoveryOnlyExportResult = "未保存";
+    private IReadOnlyList<CanonicalJpegOriginal> _captureRecoveryOnlyRetainedOriginals = [];
     private bool _cameraInspectionRequired;
     private int _transactionStartCount;
     private CaptureOutcome? _captureOutcome;
@@ -322,6 +330,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         _acceptReviewCommand = new AsyncRelayCommand(AcceptReviewAsync, () => CanAcceptReview, ShowUnexpectedFailure);
         _toggleLiveViewCommand = new RelayCommand(ToggleLiveView, () => CanUseLiveView);
         _exportCommand = new AsyncRelayCommand(ExportAsync, () => CanExport, ShowUnexpectedFailure);
+        _exportCaptureRecoveryOnlyOriginalsCommand = new AsyncRelayCommand(
+            ExportCaptureRecoveryOnlyOriginalsAsync, () => CanExportCaptureRecoveryOnlyOriginals, ShowUnexpectedFailure);
         _restitchCommand = new AsyncRelayCommand(RestitchAsync, () => CanRestitch, ShowUnexpectedFailure);
         _showDashboardCommand = new RelayCommand(() => SelectedPage = "Dashboard", () => CanOpenMaintenance);
         _showSetupCommand = new RelayCommand(() => SelectedPage = "Setup", () => CanOpenMaintenance);
@@ -422,6 +432,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public ICommand AcceptReviewCommand => _acceptReviewCommand;
     public ICommand ToggleLiveViewCommand => _toggleLiveViewCommand;
     public ICommand ExportCommand => _exportCommand;
+    public ICommand ExportCaptureRecoveryOnlyOriginalsCommand => _exportCaptureRecoveryOnlyOriginalsCommand;
     public ICommand RestitchCommand => _restitchCommand;
     public ICommand ShowDashboardCommand => _showDashboardCommand;
     public ICommand ShowSetupCommand => _showSetupCommand;
@@ -558,6 +569,11 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanSelectCamera => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
     public bool CanChangeExportDirectory => !IsCaptureRecoveryOnlyMode && !IsBusy;
+    /// <summary>GitHub Issue #226: CaptureRecoveryOnlyモード専用の保存先選択ゲート。通常フロー
+    /// の<see cref="CanChangeExportDirectory"/>はCaptureRecoveryOnlyを明示的に除外している
+    /// （合成結果向けの保存先であり無関係な操作者フォルダを受け付けてはならない）ため、検証済み
+    /// 原画像の追加コピー用には別のゲートを持つ。</summary>
+    public bool CanChangeCaptureRecoveryOnlyExportDirectory => IsCaptureRecoveryOnlyMode && !IsBusy;
     public string OperatingModeDescription => IsCaptureRecoveryOnlyMode
         ? IsCaptureRecoveryOnlyFiveRunMode
             ? "同じ機体割当でCAM-A→CAM-Bを最大5組撮影し、検証済み原画像を固定ローカルへ保持します。合成とA0品質判定は行いません。"
@@ -890,6 +906,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsStageReviewMode => UiState == OperatorUiState.Review;
     public bool IsStandardStageVisible => !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
     public bool IsHardwareDualStagePendingVisible => IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
+    /// <summary>GitHub Issue #226: the generic 合成結果/単体原画像 export button
+    /// (<see cref="ExportCommand"/>) is meaningless for CaptureRecoveryOnly, which never
+    /// stitches. It is hidden there in favor of the dedicated
+    /// <see cref="ExportCaptureRecoveryOnlyOriginalsCommand"/> panel. Unlike
+    /// <see cref="IsStandardStageVisible"/> this does not also hide the button for ordinary
+    /// HardwareDual, which still exports its stitched result through the generic path.</summary>
+    public bool IsStandardExportVisible => !IsCaptureRecoveryOnlyMode;
     public string HardwareDualStagePendingText =>
         "実機Live Viewは機体照合画面で確認します。\n主画面には模擬画像を表示しません。";
     public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
@@ -1962,6 +1985,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string LastStitchJobId { get => _lastStitchJobId; private set => SetProperty(ref _lastStitchJobId, value); }
     public string LastExportPath { get => _lastExportPath; private set => SetProperty(ref _lastExportPath, value); }
     public int TransactionStartCount { get => _transactionStartCount; private set => SetProperty(ref _transactionStartCount, value); }
+    /// <summary>GitHub Issue #226: result of the dedicated CaptureRecoveryOnly raw-original
+    /// export, kept separate from <see cref="ExportResult"/> — that field already reports the
+    /// automatic save into the fixed Camera Agent transaction folder
+    /// (<see cref="OutputDirectory"/>), which is a different event from this explicit,
+    /// operator-chosen additional copy.</summary>
+    public string CaptureRecoveryOnlyExportResult { get => _captureRecoveryOnlyExportResult; private set => SetProperty(ref _captureRecoveryOnlyExportResult, value); }
 
     public string FixedLocalExportDirectory
     {
@@ -1975,6 +2004,47 @@ public sealed class OperatorShellViewModel : ObservableObject
                 NotifyAllCommands();
             }
         }
+    }
+
+    /// <summary>GitHub Issue #226: the operator-chosen local folder for the CaptureRecoveryOnly
+    /// byte-identical original export. Kept separate from <see cref="FixedLocalExportDirectory"/>
+    /// (see <see cref="CanChangeCaptureRecoveryOnlyExportDirectory"/>).</summary>
+    public string CaptureRecoveryOnlyExportDirectory => _captureRecoveryOnlyExportDirectory;
+
+    public string CaptureRecoveryOnlyExportDirectoryDisplay => string.IsNullOrWhiteSpace(_captureRecoveryOnlyExportDirectory)
+        ? "未選択 — 「選択…」からフォルダを選んでください"
+        : _captureRecoveryOnlyExportDirectory;
+
+    /// <summary>Mirrors <see cref="ChangeExportDirectory"/>'s folder-picker validation (reject
+    /// network shares/removable media/reparse points, this-PC-only) for the CaptureRecoveryOnly
+    /// original export folder.</summary>
+    public void ChangeCaptureRecoveryOnlyExportDirectory(string folder)
+    {
+        if (!CanChangeCaptureRecoveryOnlyExportDirectory || string.IsNullOrWhiteSpace(folder))
+        {
+            return;
+        }
+
+        string normalized;
+        try
+        {
+            normalized = Path.GetFullPath(folder);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+            Directory.CreateDirectory(normalized);
+            WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(normalized);
+        }
+        catch (Exception exception) when (exception is IOException or ArgumentException or NotSupportedException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Notify("この場所は保存先にできません: " + exception.Message, false);
+            return;
+        }
+
+        _captureRecoveryOnlyExportDirectory = normalized;
+        OnPropertyChanged(nameof(CaptureRecoveryOnlyExportDirectory));
+        OnPropertyChanged(nameof(CaptureRecoveryOnlyExportDirectoryDisplay));
+        OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
+        NotifyAllCommands();
+        Notify("検証済み原画像の保存先を設定しました", true);
     }
 
     public string ProfileText => IsCaptureRecoveryOnlyMode
@@ -2123,6 +2193,17 @@ public sealed class OperatorShellViewModel : ObservableObject
         !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode && _availability.LiveView.Allowed;
     public bool CanExport => !IsCaptureRecoveryOnlyMode && _availability.Export.Allowed &&
         (_dualCameraFlow is null || IsSingleCameraMode || Directory.Exists(FixedLocalExportDirectory));
+    /// <summary>GitHub Issue #226: enables the dedicated CaptureRecoveryOnly byte-identical
+    /// original export. Requires a terminal, non-pending outcome with at least one app-verified
+    /// retained original (Succeeded: two; FailedPartial with CAM-A retained: one) and an
+    /// operator-chosen local export folder. <see cref="HasRecoverableCaptureRecoveryOnlyTransaction"/>
+    /// also excludes the rare case where <see cref="_captureRecoveryOnlyRetainedOriginals"/>
+    /// holds originals verified before a same-ID recovery became necessary (still
+    /// RecoveryPending, must not be exported as if final).</summary>
+    public bool CanExportCaptureRecoveryOnlyOriginals =>
+        IsCaptureRecoveryOnlyMode && !IsBusy && !HasRecoverableCaptureRecoveryOnlyTransaction &&
+        _captureRecoveryOnlyRetainedOriginals.Count is 1 or 2 &&
+        !string.IsNullOrWhiteSpace(_captureRecoveryOnlyExportDirectory);
     public bool CanRestitch => !IsCaptureRecoveryOnlyMode && _availability.Restitch.Allowed;
     // _initializationFailed が立っている間は PrepareNewCapture 自体をブロックする。
     // durable journal を一度も読めていない状態で見た目だけ Ready に戻さないための
@@ -2540,6 +2621,11 @@ public sealed class OperatorShellViewModel : ObservableObject
         _acceptedReviewCandidate = null;
         _reviewImagePaths.Clear();
         _reviewOriginalHashes.Clear();
+        // GitHub Issue #226: a new attempt (or a same-ID recovery query still in flight) must
+        // never leave a stale prior result exportable — ApplyCaptureRecoveryOnlyExecution
+        // repopulates this once the outcome of *this* attempt is known.
+        _captureRecoveryOnlyRetainedOriginals = [];
+        OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
         RaiseReviewImageProperties();
         ResetProgress(CapturePlan.Dual());
         SetStep("liveview", "completed");
@@ -2645,6 +2731,14 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "なし"
             : string.Join(" / ", originals.Select(original =>
                 $"{original.Alias}: original.jpg {original.SizeBytes} bytes SHA-256 {original.Sha256[..12]}…"));
+        // GitHub Issue #226: these are the same app-verified originals the Camera Agent just
+        // persisted into the fixed transaction folder — kept here so the operator can
+        // additionally export byte-identical copies of them (ExportCaptureRecoveryOnlyOriginalsAsync).
+        // CanExportCaptureRecoveryOnlyOriginals independently refuses to use them while
+        // HasRecoverableCaptureRecoveryOnlyTransaction is true, so storing them unconditionally
+        // here (including the rare RecoveryPending-with-partial-evidence case) is safe.
+        _captureRecoveryOnlyRetainedOriginals = originals;
+        OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
         foreach (var original in originals)
         {
             _lastCapturedOriginalTimestamps[original.Alias] = DateTimeOffset.UtcNow;
@@ -3209,10 +3303,15 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             _captureRecoveryOnlyOperatorApproved = false;
             _captureRecoveryOnlyTransactionDirectory = string.Empty;
+            // GitHub Issue #226: the prior transaction's originals belong to a now-superseded
+            // result; moving on to prepare the next capture must not leave them exportable.
+            _captureRecoveryOnlyRetainedOriginals = [];
+            CaptureRecoveryOnlyExportResult = "未保存";
             LastExportPath = "未実行";
             OnPropertyChanged(nameof(IsCaptureRecoveryOnlyOperatorApproved));
             OnPropertyChanged(nameof(OutputDirectory));
             OnPropertyChanged(nameof(OutputDirectoryLabel));
+            OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
         }
         RaiseStageFrameProperties();
         RaiseFocusPanelProperties();
@@ -3312,6 +3411,52 @@ public sealed class OperatorShellViewModel : ObservableObject
         Notify(message, true);
         RecalculateAvailability();
         await Task.CompletedTask;
+    }
+
+    /// <summary>GitHub Issue #226: lets the operator additionally copy the app-verified
+    /// CaptureRecoveryOnly original(s) — already saved once by the Camera Agent into the fixed
+    /// transaction folder under <see cref="OutputDirectory"/> — out to a folder of their choice,
+    /// as byte-identical copies. This never touches a camera or Agent, never stitches, and never
+    /// changes the Pending/Unapproved composite/A0-quality state; it reuses the same staged
+    /// write → lock → reread-verify → rename primitives as the single-camera export
+    /// (<see cref="HardwareOriginalExporter"/>).</summary>
+    private async Task ExportCaptureRecoveryOnlyOriginalsAsync()
+    {
+        if (!CanExportCaptureRecoveryOnlyOriginals)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        CaptureRecoveryOnlyExportResult = "検証済み原画像をbyte-identical copyで保存中…";
+        try
+        {
+            var exporter = new HardwareOriginalExporter(_captureRecoveryOnlyExportDirectory);
+            var exportedPaths = await exporter.ExportDualOriginalsAsync(
+                    _captureRecoveryOnlyRetainedOriginals,
+                    LastTransactionId,
+                    _captureRecoveryOnlyTransactionDirectory,
+                    DateTimeOffset.UtcNow,
+                    _lifetimeToken)
+                .ConfigureAwait(true);
+            foreach (var path in exportedPaths)
+            {
+                RecordSavedFile(path);
+            }
+            CaptureRecoveryOnlyExportResult =
+                $"保存完了（検証済み原画像・byte-identical・{exportedPaths.Count}枚）。合成結果ではありません（合成Pending・A0品質Unapproved）。";
+            Notify(CaptureRecoveryOnlyExportResult, true);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            CaptureRecoveryOnlyExportResult = "保存失敗（上書き・自動再試行なし）";
+            TechnicalDetail += $"\ncapture_recovery_only_export_failed: {exception.Message}";
+            Notify("検証済み原画像の保存に失敗しました: " + exception.Message, false);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     private void ApplyCaptureResult(SimulatedWorkflowState result)
@@ -3515,6 +3660,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(CanUseLiveView));
         OnPropertyChanged(nameof(CanExport));
+        OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
+        OnPropertyChanged(nameof(CanChangeCaptureRecoveryOnlyExportDirectory));
         OnPropertyChanged(nameof(CanRestitch));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanOpenHistoricalReview));
@@ -3671,6 +3818,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         _acceptReviewCommand.NotifyCanExecuteChanged();
         _toggleLiveViewCommand.NotifyCanExecuteChanged();
         _exportCommand.NotifyCanExecuteChanged();
+        _exportCaptureRecoveryOnlyOriginalsCommand.NotifyCanExecuteChanged();
         _restitchCommand.NotifyCanExecuteChanged();
         _showDashboardCommand.NotifyCanExecuteChanged();
         _showSetupCommand.NotifyCanExecuteChanged();

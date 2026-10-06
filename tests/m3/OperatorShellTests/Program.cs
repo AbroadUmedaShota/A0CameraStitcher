@@ -561,6 +561,17 @@ catch (Exception exception)
 
 try
 {
+    await HardwareDualOriginalsExportContractsAsync();
+    Console.WriteLine("PASS dual CaptureRecoveryOnly original export rejects bad shapes and never publishes a half-failed pair");
+}
+catch (Exception exception)
+{
+    failures.Add("dual CaptureRecoveryOnly original export rejects bad shapes and never publishes a half-failed pair");
+    Console.Error.WriteLine($"FAIL dual CaptureRecoveryOnly original export rejects bad shapes and never publishes a half-failed pair: {exception}");
+}
+
+try
+{
     await HardwarePreDispatchAndNotFoundRecoveryBoundariesAsync();
     Console.WriteLine("PASS startup closes known pre-dispatch failure but blocks ambiguous missing journal");
 }
@@ -4600,6 +4611,103 @@ static async Task HardwareExportVerificationFailureStaysUnpublishedAsync()
     }
 }
 
+// GitHub Issue #226: HardwareOriginalExporter.ExportDualOriginalsAsync edge cases that the
+// end-to-end CaptureRecoveryOnly WPF scenario (CaptureRecoveryOnlyWorkflowAndWpfPathAsync)
+// does not reach: alias/order violations, provenance (expectedPath) mismatches, a half-failed
+// pair never getting a lone published sibling, repeated export never overwriting a prior one,
+// and an invalid (UNC) destination being rejected through the same WindowsLocalPathGuard the
+// single-camera export already relies on.
+static async Task HardwareDualOriginalsExportContractsAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        // CAM-B alone (without a preceding CAM-A) violates the fixed CAM-A[, CAM-B] order and
+        // must be rejected before anything is written.
+        {
+            var transactionDirectory = Path.Combine(root, "order-violation", "transactions", "11111111111111111111111111111111");
+            var camB = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-B", "original.jpg"), "CAM-B");
+            var exportDirectory = Path.Combine(root, "order-violation-export");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+                [camB], "11111111111111111111111111111111", transactionDirectory, DateTimeOffset.UtcNow));
+            Check.False(
+                Directory.Exists(exportDirectory) && Directory.GetFiles(exportDirectory).Length > 0,
+                "A rejected export must not write any file.");
+        }
+
+        // The original's own recorded Path must match transactionDirectory/<alias>/original.jpg
+        // exactly, the same provenance guarantee HardwareArtifactVerifier.ValidateExpectedRecord
+        // already enforces for the single-camera export.
+        {
+            var transactionDirectory = Path.Combine(root, "mismatch", "transactions", "22222222222222222222222222222222");
+            var elsewhere = Path.Combine(root, "mismatch-elsewhere", "CAM-A", "original.jpg");
+            var camA = WriteCanonicalJpegOriginal(elsewhere, "CAM-A");
+            var exportDirectory = Path.Combine(root, "mismatch-export");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+                [camA], "22222222222222222222222222222222", transactionDirectory, DateTimeOffset.UtcNow));
+        }
+
+        // CAM-A stages, locks, and reread-verifies successfully; CAM-B's on-disk bytes have
+        // since changed (simulating drift between app verification and this explicit export).
+        // The whole call must fail, and CAM-A's staged file must never be renamed to its final
+        // published name -- one failed original must never leave a lone sibling published.
+        {
+            var transactionDirectory = Path.Combine(root, "partial-failure", "transactions", "33333333333333333333333333333333");
+            var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
+            var camBPath = Path.Combine(transactionDirectory, "CAM-B", "original.jpg");
+            var camB = WriteCanonicalJpegOriginal(camBPath, "CAM-B");
+            File.WriteAllBytes(camBPath, [..File.ReadAllBytes(camBPath), 0x00]);
+            var exportDirectory = Path.Combine(root, "partial-failure-export");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+                [camA, camB], "33333333333333333333333333333333", transactionDirectory, DateTimeOffset.UtcNow));
+            Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+            Check.True(
+                Directory.GetFiles(exportDirectory, "*.partial", SearchOption.TopDirectoryOnly).Length >= 1,
+                "The staged (but never published) original(s) must remain as diagnostic .partial files.");
+        }
+
+        // Exporting the same Succeeded pair twice (identical now/alias/transactionId) must
+        // never overwrite the first pair; UniqueDestinationPath allocates a distinct suffix.
+        {
+            var transactionDirectory = Path.Combine(root, "duplicate", "transactions", "44444444444444444444444444444444");
+            var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
+            var camB = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-B", "original.jpg"), "CAM-B");
+            var exportDirectory = Path.Combine(root, "duplicate-export");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+            var now = DateTimeOffset.Parse("2026-10-06T00:00:00Z");
+            var firstPair = await exporter.ExportDualOriginalsAsync(
+                [camA, camB], "44444444444444444444444444444444", transactionDirectory, now);
+            var secondPair = await exporter.ExportDualOriginalsAsync(
+                [camA, camB], "44444444444444444444444444444444", transactionDirectory, now);
+            Check.Equal(4, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+            Check.True(
+                firstPair.Intersect(secondPair, StringComparer.OrdinalIgnoreCase).Count() == 0,
+                "A repeated export must never reuse (overwrite) a prior export's exact file name.");
+            foreach (var path in firstPair.Concat(secondPair))
+            {
+                Check.True(File.Exists(path), $"Every exported path must exist: {path}");
+            }
+        }
+
+        // An invalid (UNC) export destination is rejected through the same
+        // WindowsLocalPathGuard the single-camera export already relies on.
+        {
+            var transactionDirectory = Path.Combine(root, "unc", "transactions", "55555555555555555555555555555555");
+            var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
+            var uncExporter = new HardwareOriginalExporter(@"\\fake-host\share\exports");
+            await Check.ThrowsAsync<InvalidDataException>(() => uncExporter.ExportDualOriginalsAsync(
+                [camA], "55555555555555555555555555555555", transactionDirectory, DateTimeOffset.UtcNow));
+        }
+    }
+    finally
+    {
+        await DeleteHardwareTestRootAsync(root);
+    }
+}
+
 static async Task HardwareSingleExceptionDiagnosticsPreserveStateAsync()
 {
     const string sensitiveMessage =
@@ -6495,6 +6603,16 @@ static HardwareRetainedOriginalRecord WriteJpegRecord(
     };
 }
 
+// GitHub Issue #226: the dual-camera CaptureRecoveryOnly export contract consumes
+// CanonicalJpegOriginal (A0CameraStitcher.M3.Foundation.DualCamera), not the single-camera
+// HardwareRetainedOriginalRecord. Reuses WriteJpegRecord's JPEG bytes instead of duplicating
+// the encoder plumbing.
+static CanonicalJpegOriginal WriteCanonicalJpegOriginal(string path, string alias)
+{
+    var record = WriteJpegRecord(path, alias);
+    return new CanonicalJpegOriginal(alias, record.Path, record.SizeBytes, record.Sha256, 7360, 4912, true);
+}
+
 static HardwarePreviewJpegRecord WritePreviewRecord(string path)
 {
     var original = WriteJpegRecord(path, "CAM-A", preserveOnePixelDimensions: true);
@@ -8032,6 +8150,31 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal("Pending", HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome);
         Check.Equal("Unapproved", HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval);
 
+        // GitHub Issue #226: a Succeeded CaptureRecoveryOnly pair must export both app-verified
+        // originals as byte-identical copies, named with the transaction ID and alias.
+        var happyExportDirectory = Path.Combine(root, "happy-originals-export");
+        var happyExporter = new HardwareOriginalExporter(happyExportDirectory);
+        var happyTransactionDirectory = Path.Combine(workflow.TransactionRoot, happy.TransactionId.ToString("N"));
+        var happyExportedPaths = await happyExporter.ExportDualOriginalsAsync(
+            happy.Originals, happy.TransactionId.ToString("N"), happyTransactionDirectory, DateTimeOffset.UtcNow);
+        Check.Equal(2, happyExportedPaths.Count);
+        foreach (var (original, exportedPath) in happy.Originals.Zip(happyExportedPaths))
+        {
+            Check.True(Path.GetFileName(exportedPath).StartsWith("A0-dual-", StringComparison.Ordinal),
+                "Exported dual originals must use the A0-dual- naming convention.");
+            Check.True(Path.GetFileName(exportedPath).Contains(original.Alias, StringComparison.Ordinal),
+                "Exported dual original file names must disclose their alias.");
+            Check.True(Path.GetFileName(exportedPath).Contains(happy.TransactionId.ToString("N")[..8], StringComparison.Ordinal),
+                "Exported dual original file names must include the transaction ID.");
+            Check.False(File.Exists(exportedPath + ".partial"),
+                "A published export must not leave a diagnostic .partial sibling.");
+            var exportedBytes = File.ReadAllBytes(exportedPath);
+            Check.Equal(original.SizeBytes, exportedBytes.LongLength);
+            Check.Equal(original.Sha256, Convert.ToHexString(SHA256.HashData(exportedBytes)).ToLowerInvariant());
+            Check.True(File.ReadAllBytes(original.Path).SequenceEqual(exportedBytes),
+                "Exported dual original must be byte-identical to the app-verified source original.");
+        }
+
         var unknownRoot = Path.Combine(root, "unknown");
         var unknownOperations = new CaptureRecoveryOnlyFakeOperations(
             adapter, responseUnknownOnce: true, queryThrowsOnce: true);
@@ -8185,6 +8328,21 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(1, partialOperations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(0, partialOperations.AutomaticRetryCount);
 
+        // GitHub Issue #226: FailedPartial with only CAM-A retained must export exactly one
+        // byte-identical original (same primitives as the two-original Succeeded case above).
+        var partialExportDirectory = Path.Combine(root, "partial-originals-export");
+        var partialExporter = new HardwareOriginalExporter(partialExportDirectory);
+        var partialTransactionDirectory = Path.Combine(partialWorkflow.TransactionRoot, partial.TransactionId.ToString("N"));
+        var partialExportedPaths = await partialExporter.ExportDualOriginalsAsync(
+            partial.Originals, partial.TransactionId.ToString("N"), partialTransactionDirectory, DateTimeOffset.UtcNow);
+        Check.Equal(1, partialExportedPaths.Count);
+        Check.True(Path.GetFileName(partialExportedPaths[0]).Contains("CAM-A", StringComparison.Ordinal),
+            "The FailedPartial export must disclose the retained CAM-A alias.");
+        Check.Equal(
+            partial.Originals[0].Sha256,
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(partialExportedPaths[0]))).ToLowerInvariant());
+        Check.Equal(1, Directory.GetFiles(partialExportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+
         var wpfOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var ordinaryProductRoot = Path.Combine(root, "wpf-ordinary-products");
         var ordinaryFlow = new DualCameraProductFlow(
@@ -8278,6 +8436,47 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.True(shell.OutputDirectory.StartsWith(wpfWorkflow.TransactionRoot, StringComparison.OrdinalIgnoreCase),
             "The shown CaptureRecoveryOnly output must be the fixed transaction directory used by the workflow.");
 
+        // GitHub Issue #226: the operator can additionally export the two app-verified
+        // originals as byte-identical copies, separate from the automatic save already
+        // reported above (OutputDirectory/LastExportPath). The generic ExportCommand/CanExport
+        // remain disabled in this mode (see the "must not accept an unrelated operator export
+        // folder" check near the top of this scenario); this is the dedicated path.
+        Check.False(shell.CanExport, "The generic stitched-result export command must stay disabled for CaptureRecoveryOnly.");
+        Check.False(shell.CanExportCaptureRecoveryOnlyOriginals,
+            "No export folder has been chosen yet, so export must stay disabled.");
+        var captureRecoveryOnlyOriginalsExportRoot = Path.Combine(root, "wpf-capture-recovery-only-originals-export");
+        shell.ChangeCaptureRecoveryOnlyExportDirectory(captureRecoveryOnlyOriginalsExportRoot);
+        Check.Equal(
+            Path.GetFullPath(captureRecoveryOnlyOriginalsExportRoot),
+            Path.GetFullPath(shell.CaptureRecoveryOnlyExportDirectory));
+        Check.True(shell.CanExportCaptureRecoveryOnlyOriginals,
+            "A Succeeded CaptureRecoveryOnly outcome with two verified originals and a chosen folder must allow export.");
+        var savedFileCountBeforeExport = shell.SavedFiles.Count;
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            "recovery-only/export-originals", () => WpfCommandState.Create(shell, wpfOperations));
+        Check.True(
+            shell.CaptureRecoveryOnlyExportResult.Contains("byte-identical", StringComparison.Ordinal) &&
+            shell.CaptureRecoveryOnlyExportResult.Contains("2枚", StringComparison.Ordinal),
+            $"A Succeeded export must report two byte-identical originals. Actual: {shell.CaptureRecoveryOnlyExportResult}");
+        Check.True(
+            shell.CaptureRecoveryOnlyExportResult.Contains("合成結果ではありません", StringComparison.Ordinal),
+            "The export result must disclose that this is not the composite result.");
+        var exportedOriginalFiles = Directory.GetFiles(
+            captureRecoveryOnlyOriginalsExportRoot, "*.jpg", SearchOption.TopDirectoryOnly);
+        Check.Equal(2, exportedOriginalFiles.Length);
+        foreach (var exportedPath in exportedOriginalFiles)
+        {
+            Check.False(File.Exists(exportedPath + ".partial"), "A published export must not leave a diagnostic .partial sibling.");
+            var alias = Path.GetFileName(exportedPath).Contains("CAM-A", StringComparison.Ordinal) ? "CAM-A" : "CAM-B";
+            Check.True(Path.GetFileName(exportedPath).Contains("CAM-B", StringComparison.Ordinal) || alias == "CAM-A",
+                "Each exported file name must disclose exactly one known alias.");
+            var sourcePath = Path.Combine(shell.OutputDirectory, alias, "original.jpg");
+            Check.True(
+                File.ReadAllBytes(sourcePath).SequenceEqual(File.ReadAllBytes(exportedPath)),
+                $"Exported {alias} original must be byte-identical to the app-verified source original.");
+        }
+        Check.Equal(savedFileCountBeforeExport + 2, shell.SavedFiles.Count);
+
         var tenRunOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var tenRunWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
             Path.Combine(root, "wpf-five-run-products"), tenRunOperations, tenRunOperations,
@@ -8345,6 +8544,10 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.True(!initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
             "The initial WPF response-unknown run did not leave a same-ID recovery snapshot.");
         Check.Equal(1, initialRecoveryTransport.ActivateCaptureCalls);
+        // GitHub Issue #226: an unresolved same-ID recovery (result unknown) must never be
+        // exportable as if it were a final, app-verified result.
+        Check.False(initialRecoveryShell.CanExportCaptureRecoveryOnlyOriginals,
+            "A RecoveryPending CaptureRecoveryOnly result must not be exportable until a terminal result is confirmed.");
 
         var restartedWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
             wpfRecoveryRoot, wpfRecoveryOperations, wpfRecoveryOperations, ApprovedCaptureRecoveryOnlyProfile());

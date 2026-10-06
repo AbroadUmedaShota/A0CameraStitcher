@@ -142,6 +142,15 @@
                                 <MenuItem Header="このPCのフォルダへ保存(_E)" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
                                           Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                           AutomationProperties.Name="ファイル このPCのフォルダへ保存 確認済みの単体原画像または合成結果を保存" />
+                                <!-- CaptureRecoveryOnly専用(issue #226): 合成はせず検証済み原画像だけを保存する -->
+                                <MenuItem Header="原画像の保存先を指定(_L)..." Click="ChooseCaptureRecoveryOnlyExportDirectory_Click"
+                                          IsEnabled="{Binding CanChangeCaptureRecoveryOnlyExportDirectory}"
+                                          Visibility="{Binding IsCaptureRecoveryOnlyMode, Converter={StaticResource BoolToVisibilityConverter}}"
+                                          AutomationProperties.Name="ファイル 検証済み原画像の保存先を指定 フォルダ選択ダイアログを開く このPC内のみ" />
+                                <MenuItem Header="検証済み原画像をこのPCのフォルダへ保存(_E)" Command="{Binding ExportCaptureRecoveryOnlyOriginalsCommand}"
+                                          IsEnabled="{Binding CanExportCaptureRecoveryOnlyOriginals}"
+                                          Visibility="{Binding IsCaptureRecoveryOnlyMode, Converter={StaticResource BoolToVisibilityConverter}}"
+                                          AutomationProperties.Name="ファイル 検証済み原画像をこのPCのフォルダへbyte-identicalで保存 合成結果ではありません" />
                                 <Separator />
                                 <MenuItem Header="終了(_X)" Click="ExitMenuItem_Click"
                                           AutomationProperties.Name="ファイル 終了 アプリケーションを終了" />
@@ -1268,7 +1277,46 @@
                                                 <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,10,0,0" MinHeight="42"
                                                         FontSize="{StaticResource FontSizeSection}"
                                                         Content="このPCのフォルダへ保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
+                                                        Visibility="{Binding IsStandardExportVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="確認済みの単体原画像または合成結果をこのPCのフォルダへ明示保存" />
+
+                                                <!-- CaptureRecoveryOnly専用: 検証済み原画像(合成結果ではない)を操作者が選んだ
+                                                     フォルダへbyte-identicalで追加保存する(issue #226)。通常フローの保存先
+                                                     (FixedLocalExportDirectory)とは別に保存先を選ぶ。 -->
+                                                <StackPanel Margin="0,10,0,0"
+                                                            Visibility="{Binding IsCaptureRecoveryOnlyMode, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                            AutomationProperties.Name="CaptureRecoveryOnly 検証済み原画像の保存">
+                                                    <TextBlock Text="検証済み原画像の保存先（合成結果ではありません）" Margin="0,0,0,4"
+                                                               Style="{StaticResource MutedTextStyle}"
+                                                               FontSize="{StaticResource FontSizeCompact}" />
+                                                    <DockPanel Margin="0,0,0,8">
+                                                        <Button DockPanel.Dock="Right" Content="選択…" Margin="8,0,0,0" Padding="12,4"
+                                                                Click="ChooseCaptureRecoveryOnlyExportDirectory_Click"
+                                                                IsEnabled="{Binding CanChangeCaptureRecoveryOnlyExportDirectory}"
+                                                                AutomationProperties.Name="検証済み原画像の保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
+                                                        <Border Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
+                                                                BorderThickness="1" Padding="7,5">
+                                                            <TextBlock Text="{Binding CaptureRecoveryOnlyExportDirectoryDisplay}" TextTrimming="CharacterEllipsis"
+                                                                       TextWrapping="NoWrap" ToolTip="{Binding CaptureRecoveryOnlyExportDirectoryDisplay}"
+                                                                       VerticalAlignment="Center"
+                                                                       FontFamily="{StaticResource MonoFontFamily}"
+                                                                       FontSize="{StaticResource FontSizeCompact}"
+                                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                                       AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportDirectoryDisplay, StringFormat='現在の原画像保存先 {0}'}" />
+                                                        </Border>
+                                                    </DockPanel>
+                                                    <Button Style="{StaticResource PrimaryActionButtonStyle}" MinHeight="42"
+                                                            FontSize="{StaticResource FontSizeSection}"
+                                                            Content="検証済み原画像をこのPCのフォルダへ保存" Command="{Binding ExportCaptureRecoveryOnlyOriginalsCommand}"
+                                                            IsEnabled="{Binding CanExportCaptureRecoveryOnlyOriginals}"
+                                                            AutomationProperties.Name="検証済み原画像をこのPCのフォルダへbyte-identicalで明示保存 合成結果ではありません" />
+                                                    <TextBlock Text="{Binding CaptureRecoveryOnlyExportResult}" Margin="0,6,0,0"
+                                                               FontSize="{StaticResource FontSizeCompact}"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportResult, StringFormat='検証済み原画像の保存状況 {0}'}" />
+                                                </StackPanel>
+
                                                 <Grid Margin="0,8,0,0">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
