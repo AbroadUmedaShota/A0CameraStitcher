@@ -1,6 +1,19 @@
 # 現在の開発状況
 
-更新日: 2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-06（#216 修正後の一台実機アプリ撮影の合格を追記）、2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+
+## 2026-10-06 一台実機アプリ撮影の再実施と合格（V-1CAM-005、AOPC-31-NOTE）
+
+- 対象: main `5ae3e0a`（#216 の修正 `b834825` とレビュー対応 `5ae3e0a`）。別 PC（AOPC-31-NOTE、VS2022 BuildTools、.NET SDK 10.0.401）で SDK 有効の Release をビルドした。CameraAgent の SHA-256 は `429c1805e253e37898a513130ef1cd28e20e9a03781d4581523a2c06daddaf71`、Phase0 CLI は `e2ad44d8e040ce8583185b3b720fb7528cf77149a71f54c3bc55667d3184de35`。WPF Release の出力フォルダ直下に CameraAgent を置き、`--hardware-single` で起動した。
+- 準備（撮影なし）: D810 1 台。`inventory` は WPD・SDK とも 1 台。`bind-single-identity-v3 --alias CAM-A --single-camera-connected-confirmed` で `identity-v3-created`（撮影・Live View・設定変更・カード操作 0）。`spool-status`（[run-1791262091401-1](evidence/phase0/run-1791262091401-1/report.md)）は PayloadObjectCount 0 だが、旧 identity map を参照するため `wpd_identity_unbound` で `SpoolState: UNKNOWN`。空の判定はアプリの readiness（identity-v3、spool payload 0）で取った。read-only の `sdk-status`（[run-1791262290305-1](evidence/phase0/run-1791262290305-1/report.md)）で JPEG Fine・L(7360*4912)・exposureMode 3・1/6・F8・ISO 64・WB Preset 1・focusMode 1、設定 write 0 を確認した。`shootingMode=S` はレリーズモードの値で、露出モードではない。
+- 撮影プロファイル: 画面の「観測値を30日プロファイルとして承認」で `single-cam-a-20261006` v1（期限 2026-11-05）を作った。画面操作は所有者の指示で UI Automation から行った。
+- 1 回目（13:54、transaction `8d4966ff75bc44cca2c79592b9e224e8`、[run-1791262442681-1](evidence/phase0/run-1791262442681-1/transaction-events.jsonl)）: `FailedPartial / capture_command_failed`、`SDK command failed: 137`。137 は Maid3d1.h の `kNkMAIDResult_OutOfFocus` で、AF が合焦せずシャッターが切れなかった。撮影前の spool は空、原画像 0、カード削除 0、自動再試行 0。所有者がカメラを合焦できる対象へ向けた。
+- 再承認: 次の readiness は `capture_settings_mismatch`。read-only `sdk-status`（[run-1791263056167-1](evidence/phase0/run-1791263056167-1/report.md)）では、絞りの表示は `8` のままで currentIndex が 8 から 9 に変わっていた。他の設定は同じ。レンズ側の操作で絞りの候補一覧がずれたためと推測する（※未確認）。同じ観測値で再承認し、ID と版は `single-cam-a-20261006` v1 のまま SHA-256 が `d564797dd3a2f0756618dd185f98c8bc65aa15c0b38c9f51e2add27f778432ed` になった。アプリは内容が変わっても同じ ID・版を使う。
+- 2 回目（14:05、transaction `6f89595400034564a213409322190483`、[run-1791263130722-1](evidence/phase0/run-1791263130722-1/transaction-events.jsonl)）: `Complete`。SDK 撮影 1 回 → SDK close → WPD で候補ちょうど 1 件を回収 → PC 原画像を保存・検証（18,112,900 B、SHA-256 `22019cddcf5140cf6dbc1079e0d7424e8b14c15f05bb79038aae0cd1e6bc815f`）→ 該当 1 件だけ削除 → spool 空を確認。自動再試行 0。原画像は `<artifacts>/run-1791263130722-1/6f89595400034564a213409322190483/CAM-A/original.jpg` に着地し、アプリの transaction ID と一致した。
+- アプリ側: 保持原画像は「CAM-A / 18,112,900 bytes / SHA-256確認済み」。「単体原画像を保存」で固定ローカルフォルダへ書き出し、書き出したファイルの SHA-256 を `Get-FileHash` で再計算して原画像と一致を確認した（2026-10-06 14:09）。続けて「採用して次の撮影を準備」で採用し、未確認の保存結果は 0 件になった。前回の `original_reread_failed` は再現しない。
+- 運用上の注意: アプリは CameraAgent を常駐させる（`--serve-once` なし）。アプリを閉じた後も agent プロセスが残った。agent が待機中の間に read-only の `sdk-status` を 2 回実行し、どちらも operator-session lease を取得して SDK session を開閉した。session の重複は記録上ない。
+- 2026-10-05 の run `run-1791195109792-1` の原画像は `hybrid-tx-` 配下にあるため、修正後の agent でも `transaction_original_invalid` になる。必要なら元の PC の artifacts から手動で取り出す。
+- 残り: SingleCamera の実 WPF 100 件受入（#13）、Continuous Live View handoff 10 回（#11）、物理異常系。
 
 ## 2026-10-05 一台実機アプリ撮影の初回（V-1CAM-005、AOPC-20-NOTE）
 

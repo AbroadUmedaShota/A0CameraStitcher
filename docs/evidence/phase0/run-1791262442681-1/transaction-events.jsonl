@@ -1,0 +1,12 @@
+{"timestamp":"2026-10-06T04:54:04.527Z","runId":"run-1791262442681-1","state":"CameraProfile","cameraAlias":"CAM-A","model":"Nikon D810","firmware":"unknown"}
+{"timestamp":"2026-10-06T04:54:04.528Z","runId":"run-1791262442681-1","transactionId":"preflight","state":"HardwareAgentCaptureProfileFrozen","cameraAlias":"CAM-A","errorDetail":"single-cam-a-20261006:v1:52bdc422daa35aebb7d92317747b30d0adad9b9c9dba5e2b1d3034e90fa18033"}
+{"timestamp":"2026-10-06T04:54:07.503Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridWpdBaselineOpen","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:07.517Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridWpdBaselineOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:08.981Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridSpoolEmptyBefore","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:08.982Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridWpdBaselineClosed","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:08.982Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridSdkCardCapture","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:11.642Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridSdkSessionOpened","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:11.642Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridSdkProfileRevalidation","cameraAlias":"CAM-A"}
+{"timestamp":"2026-10-06T04:54:11.689Z","runId":"run-1791262442681-1","transactionId":"preflight","state":"HardwareAgentCaptureProfileRevalidatedInShutterSession","cameraAlias":"CAM-A","errorDetail":"single-cam-a-20261006:v1:52bdc422daa35aebb7d92317747b30d0adad9b9c9dba5e2b1d3034e90fa18033"}
+{"timestamp":"2026-10-06T04:54:16.993Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"HybridFailed","cameraAlias":"CAM-A","errorDetail":"SDK command failed: 137"}
+{"timestamp":"2026-10-06T04:54:16.994Z","runId":"run-1791262442681-1","transactionId":"8d4966ff75bc44cca2c79592b9e224e8","state":"FailedPartial","durationMs":9490,"errorCategory":"capture_command_failed","errorDetail":"SDK command failed: 137"}
