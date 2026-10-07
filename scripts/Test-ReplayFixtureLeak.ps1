@@ -90,6 +90,8 @@ $script:Utf16 = [Text.Encoding]::Unicode
 $script:MaxPhotosPerRoot = 2000
 $script:SyntheticImageNotice = 'A0 replay fixture: synthetic image, not a photograph'
 $script:SyntheticImageMaxBytes = 4096
+# A decoded string shorter than this is a header, not a picture (the array of a JPEG header in code, say).
+$script:MinEmbeddedImageBytes = 64
 
 # Plain English words that are also short account or owner names. A short plain-word needle is
 # skipped only when it equals the account name (the profile path forms cover that) or is listed
@@ -447,7 +449,7 @@ function Get-ImageKind([byte[]]$Bytes) {
 
 function Add-DecodedBytesTargets {
     param($Targets, $Structural, [string]$Name, [string]$Kind, [byte[]]$Bytes, [bool]$NoImageCheck)
-    if (-not $NoImageCheck -and (Get-ImageKind $Bytes)) {
+    if (-not $NoImageCheck -and $Bytes.Length -ge $script:MinEmbeddedImageBytes -and (Get-ImageKind $Bytes)) {
         $Structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = $Name; Line = 0; Label = 'image' })
     }
     $latin1 = $script:Latin1.GetString($Bytes)
@@ -810,10 +812,10 @@ function Invoke-SelfTest {
         & $add 'clean identity' { & $write 'n5.txt' "clean`n" } 'add n5' $false
 
         # M-3: images inside text.
-        $jpegBytes = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 40 + @(0xFF, 0xD9))
+        $jpegBytes = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 100 + @(0xFF, 0xD9))
         $jpegB64 = [Convert]::ToBase64String($jpegBytes)
         & $add 'JPEG as base64 under a *Base64 key' { & $write 'o1.json' "{`"frameJpegBase64`":`"$jpegB64`"}`n" } 'add o1' $true
-        $pngB64 = [Convert]::ToBase64String([byte[]](@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + @(0x41) * 24))
+        $pngB64 = [Convert]::ToBase64String([byte[]](@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + @(0x41) * 80))
         & $add 'PNG as base64 in prose' { & $write 'o2.md' "preview: $pngB64`n" } 'add o2' $true
         & $add 'JPEG as spaced hex' { & $write 'o3.txt' ((($jpegBytes | ForEach-Object { $_.ToString('x2') }) -join ' ') + "`n") } 'add o3' $true
         $textB64 = [Convert]::ToBase64String($script:Utf8.GetBytes('hello world, this is only text.'))
