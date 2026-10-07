@@ -14,6 +14,7 @@ internal static class HardwareReplayContracts
     {
         FixtureFilesAreAnonymizedAndSelfConsistent();
         AnonymizationRulesRejectKnownBadShapes();
+        AnonymizationRulesCloseTheKnownGaps();
         OperatorInputsAndDurableStateLoadThroughProductionReaders();
         await SingleCameraProfileApprovalReproducesTheRealApprovedProfileAsync();
         await SingleCameraReplaySavesThroughViewModelAsync();
@@ -147,6 +148,221 @@ internal static class HardwareReplayContracts
         {
             HardwareReplayFixtures.DeleteTestRoot(folderRoot);
         }
+    }
+
+    // GitHub Issue #241: every gap the security audit found in the scan above gets an invented
+    // input that must now fail it. None of these is a real value (the real ones are compared by
+    // scripts/Test-ReplayFixtureLeak.ps1, never stored). Where the scan must still accept the
+    // synthetic shapes the fixtures use, the accepted counterpart is checked too.
+    private static void AnonymizationRulesCloseTheKnownGaps()
+    {
+        IReadOnlySet<string> allowed = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<string> noNeedles = [];
+
+        IReadOnlyList<string> ScanJson(string sample, IReadOnlyList<string>? needles = null) =>
+            HardwareReplayAnonymizationRules.Scan("sample.json", sample, allowed, isDocumentation: false, needles ?? noNeedles);
+
+        void MustReject(string gap, string sample, IReadOnlyList<string>? needles = null) =>
+            Check.True(ScanJson(sample, needles).Count > 0, $"The anonymization scan missed ({gap}): {sample}");
+
+        void MustAccept(string what, string sample)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count == 0, $"The anonymization scan must accept {what}: {string.Join("; ", problems)}");
+        }
+
+        // M2: shapes the first version of the scan did not know.
+        MustReject("dashed GUID", "{\"id\":\"01234567-89ab-cdef-0123-456789abcdef\"}");
+        MustReject("dashed GUID in braces, upper case", "{\"id\":\"{01234567-89AB-CDEF-0123-456789ABCDEF}\"}");
+        MustReject("dashed GUID starting with f231", "{\"id\":\"f2310123-4567-89ab-cdef-0123456789ab\"}");
+        MustAccept("a dashed form of a synthetic ID", "{\"id\":\"f231a001-0000-0000-0000-0000000000a1\"}");
+        MustReject("e-mail address", "{\"contact\":\"someone@example.invalid\"}");
+        MustReject("yyyyMMdd date", "{\"day\":\"20260615\"}");
+        MustReject("yyyy/MM/dd date", "{\"day\":\"2026/06/15\"}");
+        MustReject("yyyy.MM.dd date", "{\"day\":\"2026.06.15\"}");
+        MustReject("EXIF-form date", "{\"taken\":\"2026:06:15 05:05:32\"}");
+        MustReject("date in another year", "{\"day\":\"2025-01-15\"}");
+        MustReject("yyyyMMdd date in another year", "{\"day\":\"20250115\"}");
+        MustReject("Japanese-form date", "{\"day\":\"2026年6月15日\"}");
+        MustAccept("slash, EXIF and ISO dates inside the shifted month", "{\"b\":\"2026/01/05\",\"c\":\"2026:01:05 05:05:32\",\"d\":\"2026-01-05T05:05:32Z\"}");
+        MustReject("DESKTOP- host name", "{\"note\":\"DESKTOP-ABCDEFG\"}");
+        MustReject("LAPTOP- host name", "{\"note\":\"LAPTOP-1234ABCD\"}");
+        MustReject("WIN- host name", "{\"note\":\"WIN-ABCDEFGHIJK\"}");
+        MustReject("host name under a host key", "{\"computerName\":\"anything\"}");
+        MustReject("account under a user key", "{\"loginUserName\":\"anything\"}");
+        MustReject("owner field", "{\"cameraOwner\":\"anything\"}");
+        MustReject("body serial under a neutral key (letters and digits)", "{\"deviceKey\":\"AB12345\"}");
+        MustReject("body serial under a neutral key (7 digits, quoted)", "{\"id\":\"1234567\"}");
+        MustReject("body serial under a neutral key (7 digits, number)", "{\"id\":1234567}");
+        MustAccept("the image size value and short counters", "{\"pixelDimensions\":\"7360x4912\",\"bytes\":703,\"n\":12345}");
+        MustReject("10-digit epoch seconds", "{\"t\":1700000000}");
+        MustReject("10-digit epoch seconds as text", "{\"t\":\"1700000000\"}");
+        MustReject("16-digit epoch microseconds", "{\"t\":1700000000123456}");
+
+        // "f231" is no longer enough on its own: the whole synthetic shape is required.
+        MustReject("real-looking 32-digit value beginning f231", "{\"transactionId\":\"f231" + "0123456789abcdef0123456789ab\"}");
+        MustReject("32-digit value beginning f231 with a free tail", "{\"transactionId\":\"f231a001000000000000123456789abc\"}");
+        MustReject("real-looking 64-digit value beginning f231", "{\"sha256\":\"f231" + new string('7', 60) + "\"}");
+        MustAccept(
+            "the synthetic IDs the fixtures use",
+            "{\"a\":\"" + HardwareReplayFixtures.SingleTransactionId + "\",\"b\":\"" + HardwareReplayFixtures.DualSucceededTransactionId +
+            "\",\"c\":\"f231" + new string('0', 58) + "f1\"}");
+
+        // Values read from the environment while the test runs (nothing is stored in the repo).
+        var runtimeNeedles = HardwareReplayAnonymizationRules.RuntimeEnvironmentNeedles();
+        void MustHitEnvironment(string what, string value)
+        {
+            var problems = ScanJson("{\"note\":\"seen on " + value + " today\"}", runtimeNeedles);
+            Check.True(problems.Any(problem => problem.Contains("PC name or user profile", StringComparison.Ordinal)),
+                $"The environment check missed {what}.");
+        }
+        var machine = Environment.MachineName;
+        if (machine.Length >= 4) MustHitEnvironment("this PC's name", machine);
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        Check.True(profile.Length >= 4, "The test needs a user profile path to check against.");
+        MustHitEnvironment("this user's profile path", profile.Replace("\\", "\\\\", StringComparison.Ordinal));
+        MustHitEnvironment("this user's profile path with forward slashes", profile.Replace('\\', '/'));
+        if (machine.Length >= 4) MustHitEnvironment("this PC's name in another case", machine.ToUpperInvariant());
+        MustReject("a supplied needle", "{\"note\":\"seen on fictional-host-77 today\"}", ["fictional-host-77"]);
+        MustAccept("text without the supplied needle", "{\"note\":\"seen on another host today\"}");
+
+        // M1: images. Start from a real dummy image of the fixtures and change one thing at a time.
+        var good = HardwareReplayFixtures.ReadJpeg("single-cam-a");
+        Check.True(HardwareReplayJpegContracts.Inspect("good", good).Count == 0, "The unchanged dummy image must pass the structure check.");
+
+        void ImageMustFail(string gap, byte[] bytes) =>
+            Check.True(HardwareReplayJpegContracts.Inspect(gap, bytes).Count > 0, $"The dummy-image check missed: {gap}");
+
+        ImageMustFail("APP1 (EXIF)", InsertSegment(good, 0xE1, Encoding.ASCII.GetBytes("Exif\0\0")));
+        ImageMustFail("APP2 (ICC or similar)", InsertSegment(good, 0xE2, Encoding.ASCII.GetBytes("ICC_PROFILE\0")));
+        ImageMustFail("APP13 (IPTC or similar)", InsertSegment(good, 0xED, Encoding.ASCII.GetBytes("Photoshop 3.0\0")));
+        ImageMustFail("progressive frame header", InsertSegment(good, 0xC2, new byte[15]));
+        ImageMustFail("a second notice", InsertSegment(good, 0xFE, Encoding.ASCII.GetBytes(NoticeOf(good))));
+        ImageMustFail("notice with extra text after it", ReplaceComment(good, NoticeOf(good) + " extra"));
+        ImageMustFail("notice inside other text", ReplaceComment(good, "prefix " + NoticeOf(good)));
+        ImageMustFail("a different COM text", ReplaceComment(good, "a comment"));
+        ImageMustFail("a large table segment", InsertSegment(good, 0xDB, new byte[198]));
+        ImageMustFail("33 bytes of image data", AppendImageData(good, 33));
+        ImageMustFail("not a JPEG", Enumerable.Repeat((byte)'x', 300).ToArray());
+        Check.True(HardwareReplayJpegContracts.Inspect(
+                "limit", WithImageDataLength(good, HardwareReplayJpegContracts.MaxScanDataBytes)).Count == 0,
+            "Exactly the allowed amount of image data must pass.");
+        ImageMustFail("one byte over the limit", WithImageDataLength(good, HardwareReplayJpegContracts.MaxScanDataBytes + 1));
+
+        // M1: the decoded bytes go through the text rules too. These pass the structure check
+        // (few bytes of image data) and are caught only by scanning the decoded result.
+        foreach (var (gap, planted) in new[]
+                 {
+                     ("a serial label in the image data", "Serial 1"),
+                     ("an e-mail address in the image data", "a@b.example"),
+                     ("a PC name in the image data", "DESKTOP-ABCDEFG"),
+                     ("a 7-digit number in the image data", "1234567"),
+                 })
+        {
+            var hidden = WithImageText(good, planted);
+            Check.True(HardwareReplayJpegContracts.Inspect(gap, hidden).Count == 0,
+                $"Sanity: the structure check alone should not see {gap}.");
+            Check.True(HardwareReplayAnonymizationRules.Scan(
+                    "images/single-cam-a.jpg.b64", Convert.ToBase64String(hidden), allowed, isDocumentation: false, noNeedles).Count > 0,
+                $"The decoded image must be scanned: {gap}");
+        }
+
+        // M1: the .b64 route is closed. Wrong places and unreadable content fail instead of being skipped.
+        var goodB64 = Convert.ToBase64String(good);
+        Check.True(HardwareReplayAnonymizationRules.Scan(
+                "images/single-cam-a.jpg.b64", goodB64, allowed, isDocumentation: false, noNeedles).Count == 0,
+            "A valid dummy image in images/ must pass.");
+        foreach (var misplaced in new[] { "dual-camera/hidden.b64", "images/x.png.b64", "images/sub/x.jpg.b64", "x.jpg.b64" })
+        {
+            Check.True(HardwareReplayAnonymizationRules.Scan(misplaced, goodB64, allowed, isDocumentation: false, noNeedles).Count > 0,
+                $"A base64 file outside images/*.jpg.b64 must fail: {misplaced}");
+        }
+        foreach (var unreadable in new[] { "not base64 !!", "", "@@@@" })
+        {
+            Check.True(HardwareReplayAnonymizationRules.Scan(
+                    "images/single-cam-a.jpg.b64", unreadable, allowed, isDocumentation: false, noNeedles).Count > 0,
+                "A .b64 file that is not base64 must fail, not be skipped.");
+        }
+        Check.True(HardwareReplayAnonymizationRules.Scan(
+                "images/other.jpg.b64", Convert.ToBase64String(Encoding.UTF8.GetBytes(new string('x', 300))),
+                allowed, isDocumentation: false, noNeedles).Count > 0,
+            "Base64 of something that is not a dummy JPEG must fail.");
+
+        var folderRoot = HardwareReplayFixtures.NewTestRoot();
+        try
+        {
+            System.IO.Directory.CreateDirectory(Path.Combine(folderRoot, "dual-camera"));
+            File.WriteAllText(Path.Combine(folderRoot, "dual-camera", "hidden.b64"), goodB64);
+            Check.True(HardwareReplayAnonymizationRules.CheckFileSet(folderRoot).Count > 0,
+                "A .b64 file outside images/ must fail the file-set check.");
+            File.Delete(Path.Combine(folderRoot, "dual-camera", "hidden.b64"));
+            System.IO.Directory.CreateDirectory(Path.Combine(folderRoot, "images"));
+            File.WriteAllText(Path.Combine(folderRoot, "images", "note.json"), "{}");
+            Check.True(HardwareReplayAnonymizationRules.CheckFileSet(folderRoot).Count > 0,
+                "Anything but *.jpg.b64 inside images/ must fail the file-set check.");
+        }
+        finally
+        {
+            HardwareReplayFixtures.DeleteTestRoot(folderRoot);
+        }
+    }
+
+    private static string NoticeOf(byte[] jpeg)
+    {
+        var start = SegmentStart(jpeg, 0xFE);
+        var length = (jpeg[start + 2] << 8) | jpeg[start + 3];
+        return Encoding.ASCII.GetString(jpeg, start + 4, length - 2);
+    }
+
+    private static int SegmentStart(byte[] jpeg, byte marker)
+    {
+        for (var index = 2; index + 4 < jpeg.Length;)
+        {
+            if (jpeg[index + 1] == marker) return index;
+            index += 2 + ((jpeg[index + 2] << 8) | jpeg[index + 3]);
+        }
+        throw new InvalidDataException($"The image has no 0x{marker:X2} segment.");
+    }
+
+    private static byte[] Segment(byte marker, byte[] payload)
+    {
+        var length = payload.Length + 2;
+        return [0xFF, marker, (byte)(length >> 8), (byte)(length & 0xFF), .. payload];
+    }
+
+    // Inserts a segment right after SOI.
+    private static byte[] InsertSegment(byte[] jpeg, byte marker, byte[] payload) =>
+        [.. jpeg[..2], .. Segment(marker, payload), .. jpeg[2..]];
+
+    private static byte[] ReplaceComment(byte[] jpeg, string comment)
+    {
+        var start = SegmentStart(jpeg, 0xFE);
+        var length = (jpeg[start + 2] << 8) | jpeg[start + 3];
+        return [.. jpeg[..start], .. Segment(0xFE, Encoding.ASCII.GetBytes(comment)), .. jpeg[(start + 2 + length)..]];
+    }
+
+    private static int ImageDataLength(byte[] jpeg)
+    {
+        var start = SegmentStart(jpeg, 0xDA);
+        var length = (jpeg[start + 2] << 8) | jpeg[start + 3];
+        return jpeg.Length - 2 - (start + 2 + length);
+    }
+
+    private static byte[] AppendImageData(byte[] jpeg, int extra) =>
+        [.. jpeg[..^2], .. new byte[extra], 0xFF, 0xD9];
+
+    private static byte[] WithImageDataLength(byte[] jpeg, int total)
+    {
+        var start = SegmentStart(jpeg, 0xDA);
+        var length = (jpeg[start + 2] << 8) | jpeg[start + 3];
+        return [.. jpeg[..(start + 2 + length)], .. new byte[total], 0xFF, 0xD9];
+    }
+
+    private static byte[] WithImageText(byte[] jpeg, string text)
+    {
+        var start = SegmentStart(jpeg, 0xDA);
+        var length = (jpeg[start + 2] << 8) | jpeg[start + 3];
+        return [.. jpeg[..(start + 2 + length)], .. Encoding.ASCII.GetBytes(text), 0xFF, 0xD9];
     }
 
     private static void OperatorInputsAndDurableStateLoadThroughProductionReaders()

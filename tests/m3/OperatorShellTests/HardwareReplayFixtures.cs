@@ -101,9 +101,20 @@ internal enum ReplayDualScenario
     FailedCameraA,
 }
 
+// Shape checks for the replay fixtures (Issue #231, hardened by #241).
+//
+// This is only a check of shapes. A value whose shape is unremarkable (a 7-character body serial,
+// an approval GUID in a neutral field) cannot be found here; before anything is pushed, the
+// fixtures are also compared against the real values on the operator's PC with
+// scripts/Test-ReplayFixtureLeak.ps1 (see the fixture README). No real value, and no hash of one,
+// is kept in the repository: the only machine-specific values used below are read from the
+// environment while the test runs.
 internal static class HardwareReplayAnonymizationRules
 {
     private static readonly string[] AllowedExtensions = [".md", ".json", ".jsonl", ".b64"];
+
+    // Base64 files are dummy images and nothing else: images/<name>.jpg.b64, directly in images/.
+    private static readonly Regex ImageB64Name = new(@"^images/[^/]+\.jpg\.b64$", RegexOptions.Compiled);
 
     // Forbidden anywhere in a data file. Documentation (README.md) is exempt from the word rules
     // only, because it has to say which categories were removed.
@@ -114,13 +125,47 @@ internal static class HardwareReplayAnonymizationRules
         ("serial number", new Regex("serial", RegexOptions.IgnoreCase)),
         ("USB or PnP identifier", new Regex(@"\b(vid|pid)_[0-9a-f]{4}|usb[\\#]|\\\\\?\\|device ?id|instance ?id|pnp", RegexOptions.IgnoreCase)),
         ("windows account or host name", new Regex(@"\b[A-Z]{2,6}-\d{2}-NOTE\b|\buser name\b", RegexOptions.IgnoreCase)),
+        // Windows' own default names (DESKTOP-xxxxxxx and the like). Case-sensitive on purpose:
+        // "win-x64" style runtime identifiers are not host names.
+        ("default windows host name", new Regex(@"\b(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9]{5,}\b")),
+        ("host, machine, account or owner field", new Regex(
+            "\"[\\w\\-]*(?:computer|machine|host|pc|user|account|login)[\\w\\-]*name[\\w\\-]*\"\\s*:|\"[\\w\\-]*owner[\\w\\-]*\"\\s*:",
+            RegexOptions.IgnoreCase)),
     ];
 
     private static readonly Regex HexRun = new(
         "(?<![0-9a-fA-F])[0-9a-fA-F]{16,}(?![0-9a-fA-F])", RegexOptions.Compiled);
+    private static readonly Regex DashedGuid = new(
+        "(?<![0-9a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F])",
+        RegexOptions.Compiled);
     private static readonly Regex AbsolutePath = new(@"[A-Za-z]:[\\/]+", RegexOptions.Compiled);
-    private static readonly Regex Epoch = new(@"(?<!\d)1[5-9]\d{11}(?!\d)", RegexOptions.Compiled);
-    private static readonly Regex DateText = new(@"\d{4}-\d{2}-\d{2}", RegexOptions.Compiled);
+    private static readonly Regex EmailAddress = new(
+        @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}", RegexOptions.Compiled);
+
+    // Unix epoch in seconds (10 digits), milliseconds (13), microseconds (16) or nanoseconds (19),
+    // 2017 to 2033. The old 13-digit rule is the milliseconds case.
+    private static readonly Regex Epoch = new(@"(?<!\d)1[5-9]\d{8}(?:\d{3}|\d{6}|\d{9})?(?!\d)", RegexOptions.Compiled);
+
+    // yyyyMMdd, yyyy-MM-dd, yyyy/MM/dd, yyyy.MM.dd and the EXIF form yyyy:MM:dd (same separator
+    // twice, or none). Only January 2026, the month the fixtures were shifted into, is allowed.
+    private static readonly Regex DateNumeric = new(
+        @"(?<!\d)((?:19|20)\d{2})([-/:.]?)(0[1-9]|1[0-2])\2(0[1-9]|[12]\d|3[01])(?!\d)", RegexOptions.Compiled);
+    private static readonly Regex DateJapanese = new(
+        @"(?<!\d)((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日", RegexOptions.Compiled);
+
+    // A bare alphanumeric string value with a digit in it (a serial number under a neutral key
+    // name, an ID, a token). Keys are excluded by the lookahead. Explicit allow-list below.
+    private static readonly Regex OpaqueTokenValue = new("\"([0-9A-Za-z]{5,24})\"(?!\\s*:)", RegexOptions.Compiled);
+    private static readonly HashSet<string> AllowedTokenValues = new(StringComparer.Ordinal) { "7360x4912" };
+
+    // A bare run of 6 or more digits (7-digit body serials, long counters). Not part of a longer
+    // word, decimal fraction or hyphenated ID.
+    private static readonly Regex LongDigitRun = new(@"(?<![\w.\-])\d{6,}(?![\w.\-])", RegexOptions.Compiled);
+
+    // The synthetic 32/64-digit values the fixtures use: "f231", four free digits, a run of zeros,
+    // two to four free digits. The whole shape is checked, not the prefix, so a real-looking value
+    // that merely begins with "f231" is rejected.
+    private static readonly Regex SyntheticId = new("^f231[0-9a-f]{4}0+[0-9a-f]{2,4}$", RegexOptions.Compiled);
 
     internal static IReadOnlyList<string> CheckFileSet(string root)
     {
@@ -128,25 +173,141 @@ internal static class HardwareReplayAnonymizationRules
         foreach (var path in System.IO.Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
-            if (!AllowedExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+            var extension = Path.GetExtension(path);
+            if (!AllowedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
                 problems.Add($"{relative}: file type is not allowed in the replay fixtures (images are stored only as .jpg.b64 dummies)");
             if (Path.GetFileName(path).EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
                 Path.GetFileName(path).EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
                 problems.Add($"{relative}: a real image file must never be stored here");
+            var isImageFolder = relative.StartsWith("images/", StringComparison.OrdinalIgnoreCase);
+            if ((extension.Equals(".b64", StringComparison.OrdinalIgnoreCase) || isImageFolder) &&
+                !ImageB64Name.IsMatch(relative))
+                problems.Add($"{relative}: base64 data is allowed only as images/<name>.jpg.b64, and images/ holds nothing else");
         }
         return problems;
     }
 
+    // The PC name and user profile of the machine running the test, read at run time. Nothing here
+    // is stored in the repository.
+    internal static IReadOnlyList<string> RuntimeEnvironmentNeedles()
+    {
+        var needles = new List<string>();
+        void AddName(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value) && value.Trim().Length >= 4) needles.Add(value.Trim());
+        }
+        void AddPath(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            var trimmed = value.Trim().TrimEnd('\\', '/');
+            if (trimmed.Length < 4) return;
+            needles.Add(trimmed);
+            needles.Add(trimmed.Replace('\\', '/'));
+            needles.Add(trimmed.Replace("\\", "\\\\", StringComparison.Ordinal));
+        }
+        AddName(Environment.MachineName);
+        AddName(Environment.UserDomainName);
+        if (Environment.UserName.Length >= 5) AddName(Environment.UserName);
+        AddPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        AddPath(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        AddPath(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+        return needles.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    internal static bool IsSyntheticHex(string lowerCaseValue, IReadOnlySet<string> allowedSha256) =>
+        lowerCaseValue.Length switch
+        {
+            32 => SyntheticId.IsMatch(lowerCaseValue),
+            64 => SyntheticId.IsMatch(lowerCaseValue) || allowedSha256.Contains(lowerCaseValue),
+            _ => false,
+        };
+
+    // name is the path relative to the fixture root, with '/' separators.
     internal static IReadOnlyList<string> Scan(
         string name,
         string text,
         IReadOnlySet<string> allowedSha256,
-        bool isDocumentation)
+        bool isDocumentation,
+        IReadOnlyList<string>? environmentNeedles = null)
+    {
+        environmentNeedles ??= RuntimeEnvironmentNeedles();
+        return name.EndsWith(".b64", StringComparison.OrdinalIgnoreCase)
+            ? ScanBase64Image(name, text, allowedSha256, environmentNeedles)
+            : ScanText(name, text, allowedSha256, isDocumentation, environmentNeedles);
+    }
+
+    // A .b64 file is never skipped: it must be the base64 of a dummy JPEG that passes the
+    // structure check, and the decoded bytes go through the same text rules as any data file.
+    private static List<string> ScanBase64Image(
+        string name,
+        string text,
+        IReadOnlySet<string> allowedSha256,
+        IReadOnlyList<string> environmentNeedles)
     {
         var problems = new List<string>();
-        if (name.EndsWith(".b64", StringComparison.Ordinal)) return problems;
+        if (!ImageB64Name.IsMatch(name))
+            problems.Add($"{name}: base64 data is allowed only as images/<name>.jpg.b64");
 
-        text = ExpandTerminalResultHex(text);
+        byte[] bytes;
+        try
+        {
+            var compact = Regex.Replace(text, @"\s+", string.Empty);
+            if (compact.Length == 0 || !Regex.IsMatch(compact, "^[A-Za-z0-9+/]+={0,2}$"))
+            {
+                problems.Add($"{name}: content is not plain base64");
+                return problems;
+            }
+            bytes = Convert.FromBase64String(compact);
+        }
+        catch (FormatException)
+        {
+            problems.Add($"{name}: content is not valid base64");
+            return problems;
+        }
+
+        problems.AddRange(HardwareReplayJpegContracts.Inspect(name, bytes));
+        // The table bytes of a JPEG are arbitrary, so the digit-run rules would fire on them; they
+        // are applied to the image data, the only place left in a dummy image that is free-form.
+        problems.AddRange(ScanText(
+            name + " (decoded)", PrintableAscii(bytes), allowedSha256, isDocumentation: false,
+            environmentNeedles, isBinary: true));
+        var imageData = HardwareReplayJpegContracts.ImageData(bytes);
+        if (imageData is not null)
+        {
+            foreach (Match match in LongDigitRun.Matches(PrintableAscii(imageData)))
+                problems.Add($"{name} (decoded): {match.Length}-digit number in the image data");
+        }
+        return problems;
+    }
+
+    // Bytes that are not printable ASCII become spaces, so that binary bytes next to a word do not
+    // hide it from word-boundary rules (Latin-1 letters count as word characters).
+    private static string PrintableAscii(byte[] bytes) =>
+        string.Create(bytes.Length, bytes, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+                span[i] = source[i] is >= 0x20 and <= 0x7E ? (char)source[i] : ' ';
+        });
+
+    private static List<string> ScanText(
+        string name,
+        string text,
+        IReadOnlySet<string> allowedSha256,
+        bool isDocumentation,
+        IReadOnlyList<string> environmentNeedles,
+        bool isBinary = false)
+    {
+        var problems = new List<string>();
+        text = ExpandTerminalResultHex(name, text, problems);
+
+        foreach (var needle in environmentNeedles)
+        {
+            if (text.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            {
+                problems.Add($"{name}: contains the PC name or user profile of the machine running this test");
+                break;
+            }
+        }
 
         foreach (Match match in AbsolutePath.Matches(text))
         {
@@ -163,75 +324,206 @@ internal static class HardwareReplayAnonymizationRules
             }
         }
 
+        // Values are never echoed back: a failing run must not copy a real identifier into a log.
         foreach (Match match in HexRun.Matches(text))
         {
-            var value = match.Value.ToLowerInvariant();
-            var allowed = value.Length switch
-            {
-                32 => value.StartsWith("f231", StringComparison.Ordinal),
-                64 => value.StartsWith("f231", StringComparison.Ordinal) || allowedSha256.Contains(value),
-                _ => false,
-            };
-            if (!allowed)
-                problems.Add($"{name}: hexadecimal run of {value.Length} characters is not a synthetic value");
+            if (!IsSyntheticHex(match.Value.ToLowerInvariant(), allowedSha256))
+                problems.Add($"{name}: hexadecimal run of {match.Length} characters at offset {match.Index} is not a synthetic value");
+        }
+        foreach (Match match in DashedGuid.Matches(text))
+        {
+            if (!IsSyntheticHex(match.Value.Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant(), allowedSha256))
+                problems.Add($"{name}: dashed GUID at offset {match.Index} is not a synthetic value");
+        }
+        foreach (Match match in EmailAddress.Matches(text))
+            problems.Add($"{name}: e-mail address at offset {match.Index}");
+
+        // Allowed hex values and GUIDs can contain digit runs that look like dates or epochs; they
+        // were judged as a whole above.
+        var numeric = HexRun.Replace(text, match => new string(' ', match.Length));
+        numeric = DashedGuid.Replace(numeric, match => new string(' ', match.Length));
+
+        foreach (Match match in Epoch.Matches(numeric))
+            problems.Add($"{name}: {match.Length}-digit epoch timestamp at offset {match.Index}");
+
+        foreach (Match match in DateNumeric.Matches(numeric))
+        {
+            if (match.Groups[1].Value != "2026" || match.Groups[3].Value != "01")
+                problems.Add($"{name}: date at offset {match.Index} is outside the shifted fixture month");
+        }
+        foreach (Match match in DateJapanese.Matches(numeric))
+        {
+            if (match.Groups[1].Value != "2026" || int.Parse(match.Groups[2].Value) != 1)
+                problems.Add($"{name}: date at offset {match.Index} is outside the shifted fixture month");
         }
 
-        if (Epoch.IsMatch(text)) problems.Add($"{name}: contains a 13-digit epoch timestamp (real run id shape)");
-
-        foreach (Match match in DateText.Matches(text))
+        if (!isDocumentation && !isBinary)
         {
-            if (!match.Value.StartsWith("2026-01-", StringComparison.Ordinal))
-                problems.Add($"{name}: date {match.Value} is outside the shifted fixture month");
+            foreach (Match match in OpaqueTokenValue.Matches(numeric))
+            {
+                var token = match.Groups[1].Value;
+                if (token.Any(char.IsDigit) && !AllowedTokenValues.Contains(token))
+                    problems.Add($"{name}: opaque identifier-like value of {token.Length} characters at offset {match.Index}");
+            }
+            foreach (Match match in LongDigitRun.Matches(numeric))
+                problems.Add($"{name}: {match.Length}-digit number at offset {match.Index} (serial or counter shape)");
         }
         return problems;
     }
 
     // The pair journal keeps the Agent's terminal result as one long hex string. Scan the text it
     // encodes, not the opaque hex.
-    private static string ExpandTerminalResultHex(string text) =>
+    private static string ExpandTerminalResultHex(string name, string text, List<string> problems) =>
         Regex.Replace(
             text,
             "\"terminalResultHex\"\\s*:\\s*\"([0-9a-fA-F]+)\"",
-            match => "\"terminalResultDecoded\":" + Encoding.UTF8.GetString(Convert.FromHexString(match.Groups[1].Value)));
+            match =>
+            {
+                try
+                {
+                    return "\"terminalResultDecoded\":" + Encoding.UTF8.GetString(Convert.FromHexString(match.Groups[1].Value));
+                }
+                catch (FormatException)
+                {
+                    problems.Add($"{name}: terminalResultHex at offset {match.Index} is not valid hexadecimal");
+                    return string.Empty;
+                }
+            });
 }
 
 internal static class HardwareReplayJpegContracts
 {
+    // The only COM text a dummy image may carry. An explicit list: adding a fixture image means
+    // adding its label here.
+    private static readonly string[] AllowedNotices =
+    [
+        "A0 replay fixture: synthetic image, not a photograph (single CAM-A)",
+        "A0 replay fixture: synthetic image, not a photograph (dual CAM-A)",
+        "A0 replay fixture: synthetic image, not a photograph (dual CAM-B)",
+    ];
+
+    // marker -> allowed value of the segment's own length field (the two length bytes included).
+    // COM (FE) has its own exact-text check. Fixed sizes leave no room for a payload.
+    private static readonly Dictionary<byte, int[]> AllowedSegmentLengths = new()
+    {
+        [0xE0] = [16],
+        [0xDB] = [67],
+        [0xC0] = [17],
+        [0xC4] = [31, 181],
+        [0xDA] = [12],
+    };
+
+    internal const int MaxScanDataBytes = 32;
+
+    // The bytes between the scan header and EOI, or null when the image has no scan header.
+    internal static byte[]? ImageData(byte[] bytes)
+    {
+        var limit = bytes.Length - 2;
+        for (var index = 2; index + 4 <= limit;)
+        {
+            if (bytes[index] != 0xFF) return null;
+            var length = (bytes[index + 2] << 8) | bytes[index + 3];
+            if (length < 2 || index + 2 + length > limit) return null;
+            if (bytes[index + 1] == 0xDA) return bytes[(index + 2 + length)..limit];
+            index += 2 + length;
+        }
+        return null;
+    }
+    internal const int MaxFileBytes = 4096;
+
     internal static void RequireDummyJpeg(string name, byte[] bytes)
     {
-        Check.True(bytes.Length is > 100 and <= 4096,
-            $"{name}: a replay dummy JPEG must be a few hundred bytes, got {bytes.Length}.");
-        Check.True(bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[^2] == 0xFF && bytes[^1] == 0xD9,
-            $"{name}: dummy JPEG must have SOI and EOI markers.");
+        var problems = Inspect(name, bytes);
+        Check.True(problems.Count == 0, string.Join("; ", problems));
+    }
 
-        var sawComment = false;
-        var sawFrame = false;
-        for (var index = 2; index + 4 < bytes.Length;)
+    // Walks the segments of a dummy JPEG and returns every way it differs from the dummy: only
+    // JFIF, the one notice, tables, the frame header and the scan header may appear (an
+    // allow-list, so EXIF/XMP/ICC/any APPn or unknown marker fails), segment sizes are fixed, and
+    // the entropy-coded data is a few bytes at most.
+    internal static IReadOnlyList<string> Inspect(string name, byte[] bytes)
+    {
+        var problems = new List<string>();
+        if (bytes.Length is <= 100 or > MaxFileBytes)
         {
-            Check.True(bytes[index] == 0xFF, $"{name}: JPEG marker structure is invalid.");
-            var marker = bytes[index + 1];
-            if (marker is 0xD9 or 0xDA) break;
-            var length = (bytes[index + 2] << 8) | bytes[index + 3];
-            Check.False(marker == 0xE1,
-                $"{name}: an APP1 (EXIF/XMP) segment must never appear in a dummy image.");
-            if (marker == 0xFE)
+            problems.Add($"{name}: a replay dummy JPEG must be a few hundred bytes, got {bytes.Length}.");
+            return problems;
+        }
+        if (!(bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[^2] == 0xFF && bytes[^1] == 0xD9))
+        {
+            problems.Add($"{name}: dummy JPEG must have SOI and EOI markers.");
+            return problems;
+        }
+
+        var counts = new Dictionary<byte, int>();
+        var limit = bytes.Length - 2; // EOI excluded
+        var index = 2;
+        var reachedScan = false;
+        while (index + 4 <= limit)
+        {
+            if (bytes[index] != 0xFF)
             {
-                var comment = Encoding.ASCII.GetString(bytes, index + 4, length - 2);
-                Check.True(comment.Contains("synthetic image, not a photograph", StringComparison.Ordinal),
-                    $"{name}: the dummy JPEG must carry the synthetic-image notice.");
-                sawComment = true;
+                problems.Add($"{name}: JPEG marker structure is invalid at offset {index}.");
+                return problems;
             }
-            if (marker == 0xC0)
+            var marker = bytes[index + 1];
+            var length = (bytes[index + 2] << 8) | bytes[index + 3];
+            counts[marker] = counts.GetValueOrDefault(marker) + 1;
+            if (marker != 0xFE && !AllowedSegmentLengths.ContainsKey(marker))
             {
-                var height = (bytes[index + 5] << 8) | bytes[index + 6];
-                var width = (bytes[index + 7] << 8) | bytes[index + 8];
-                Check.True(width == 7360 && height == 4912,
-                    $"{name}: dummy JPEG must declare the D810 L size 7360x4912, got {width}x{height}.");
-                sawFrame = true;
+                problems.Add($"{name}: JPEG segment 0x{marker:X2} is not allowed in a dummy image (allowed: E0, FE, DB, C0, C4, DA).");
+                return problems;
+            }
+            if (length < 2 || index + 2 + length > limit)
+            {
+                problems.Add($"{name}: JPEG segment 0x{marker:X2} has an invalid length.");
+                return problems;
+            }
+            if (marker != 0xFE && !AllowedSegmentLengths[marker].Contains(length))
+            {
+                problems.Add($"{name}: JPEG segment 0x{marker:X2} has length {length}, not the fixed size of the dummy.");
+                return problems;
+            }
+
+            switch (marker)
+            {
+                case 0xE0:
+                    if (Encoding.ASCII.GetString(bytes, index + 4, 5) != "JFIF\0")
+                        problems.Add($"{name}: the APP0 segment must be the plain JFIF header.");
+                    break;
+                case 0xFE:
+                    var comment = Encoding.Latin1.GetString(bytes, index + 4, length - 2);
+                    if (!AllowedNotices.Contains(comment, StringComparer.Ordinal))
+                        problems.Add($"{name}: the COM segment must be exactly the synthetic-image notice.");
+                    break;
+                case 0xC0:
+                    var height = (bytes[index + 5] << 8) | bytes[index + 6];
+                    var width = (bytes[index + 7] << 8) | bytes[index + 8];
+                    if (!(width == 7360 && height == 4912))
+                        problems.Add($"{name}: dummy JPEG must declare the D810 L size 7360x4912, got {width}x{height}.");
+                    break;
+            }
+
+            if (marker == 0xDA)
+            {
+                reachedScan = true;
+                var scanBytes = limit - (index + 2 + length);
+                if (scanBytes > MaxScanDataBytes)
+                    problems.Add($"{name}: the image data is {scanBytes} bytes; a dummy image keeps at most {MaxScanDataBytes}.");
+                break;
             }
             index += 2 + length;
         }
-        Check.True(sawComment && sawFrame, $"{name}: dummy JPEG lacks its notice or frame header.");
+
+        if (!reachedScan) problems.Add($"{name}: dummy JPEG has no scan header.");
+        foreach (var (marker, min, max) in new (byte, int, int)[]
+                 { (0xE0, 1, 1), (0xFE, 1, 1), (0xDB, 1, 4), (0xC0, 1, 1), (0xC4, 1, 4), (0xDA, 1, 1) })
+        {
+            var count = counts.GetValueOrDefault(marker);
+            if (count < min || count > max)
+                problems.Add($"{name}: dummy JPEG has {count} segment(s) 0x{marker:X2}, expected {min} to {max}.");
+        }
+        return problems;
     }
 }
 
