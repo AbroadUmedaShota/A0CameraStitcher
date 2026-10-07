@@ -74,13 +74,20 @@ try {
         if ($operatorSummary -notmatch '^Operator shell tests: (\d+)/(\d+) passed\.$') { throw 'M3 operator shell test summary is malformed.' }
         Assert-Condition ([int]$Matches[1] -eq $operatorPassLines.Count -and [int]$Matches[2] -eq $operatorPassLines.Count) 'M3 operator shell test summary does not match emitted PASS lines.'
         # The summary is derived from the PASS lines themselves, so the comparison above cannot catch a check
-        # that stopped reporting. Require at least one PASS per top-level check in the source (the WPF contract
-        # check plus one per top-level try block; some blocks print more than one PASS), and keep the early-exit
-        # UNRUN literal in step with that count.
+        # that stopped reporting. Pin the PASS count to the structure of Program.cs: the WPF contract check (1),
+        # one PASS per top-level try block, and one PASS per top-level RunScenarioAsync call. Every try block
+        # needs its catch, which is checked first so an unbalanced edit is reported as such. A block that
+        # prints two PASS lines or none changes the count, and this derivation has to be updated with it.
+        # The early-exit UNRUN literal reports how many checks did not run; its remaining= is the top-level
+        # try count, not the PASS count.
         $operatorProgramText = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'tests/m3/OperatorShellTests/Program.cs')
-        $operatorSourceCheckCount = 1 + ([regex]::Matches($operatorProgramText, '(?m)^try[ \t]*\r?$')).Count
-        Assert-Condition ($operatorPassLines.Count -ge $operatorSourceCheckCount) "M3 operator shell tests emitted $($operatorPassLines.Count) PASS lines, fewer than the $operatorSourceCheckCount checks in Program.cs."
-        Assert-Condition ($operatorProgramText.Contains("UNRUN runner=normal remaining=$($operatorSourceCheckCount - 1) reason=lifetime-contract-failure")) "The UNRUN remaining count in Program.cs is stale; it must be $($operatorSourceCheckCount - 1)."
+        $tryCount = ([regex]::Matches($operatorProgramText, '(?m)^try[ \t]*\r?$')).Count
+        $catchCount = ([regex]::Matches($operatorProgramText, '(?m)^catch\b')).Count
+        $scenarioCount = ([regex]::Matches($operatorProgramText, '(?m)^if \(await WpfCommandTestRunner\.RunScenarioAsync\(')).Count
+        Assert-Condition ($tryCount -eq $catchCount) "Program.cs top-level try/catch count mismatch ($tryCount/$catchCount)."
+        $operatorSourceCheckCount = 1 + $tryCount + $scenarioCount
+        Assert-Condition ($operatorPassLines.Count -eq $operatorSourceCheckCount) "M3 operator shell tests emitted $($operatorPassLines.Count) PASS lines, expected $operatorSourceCheckCount (1 WPF contract + $tryCount top-level try + $scenarioCount top-level RunScenarioAsync) in Program.cs."
+        Assert-Condition ($operatorProgramText.Contains("UNRUN runner=normal remaining=$tryCount reason=lifetime-contract-failure")) "The UNRUN remaining count in Program.cs is stale; it must be $tryCount (the top-level try count)."
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -139,7 +146,8 @@ try {
     foreach ($hiddenWhileBlocked in @('機体照合の残留リスク', '機体照合を開始する')) {
         $hiddenNode = @($bindingOverlayNode.SelectNodes(('.//*[@*[local-name()="AutomationProperties.Name" and .="{0}"]]' -f $hiddenWhileBlocked))) | Select-Object -First 1
         Assert-Condition ($null -ne $hiddenNode -and $hiddenNode.GetAttribute('Visibility').Contains('DualBinding.IsNotShutdownBlocked')) "The overlay element '$hiddenWhileBlocked' must be hidden while shutdown is blocked (issue #225)."
-    }    $bindingButtons = @($bindingOverlayNode.SelectNodes('.//*[local-name()="Button"]'))
+    }
+    $bindingButtons = @($bindingOverlayNode.SelectNodes('.//*[local-name()="Button"]'))
     Assert-Condition ($bindingButtons.Count -ge 4) "The dual binding overlay must offer its actions as focusable buttons (issue #62); found $($bindingButtons.Count)."
     foreach ($button in $bindingButtons) {
         $automationName = $button.GetAttribute('AutomationProperties.Name')

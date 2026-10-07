@@ -270,13 +270,15 @@ Console.WriteLine(
 var failures = new List<string>();
 // The summary line is derived from what was actually reported, never from a literal. Because that makes
 // "N/N" equal the number of "PASS " lines by construction, scripts/Test-M3Simulated.ps1 separately
-// requires at least one PASS per top-level try block below (plus the WPF contract check), so a block
-// that silently stops reporting is still caught.
+// requires the PASS count to equal the number of checks in this file (the WPF contract check, each
+// top-level try block and each top-level RunScenarioAsync call), so a block that silently stops
+// reporting, or reports an extra PASS, is still caught.
 var passLines = new PassLineCountingWriter(Console.Out);
 Console.SetOut(passLines);
 if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
+    // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
     Console.Error.WriteLine("UNRUN runner=normal remaining=99 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
@@ -7615,7 +7617,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
 
         // B: budget already elapsed. No countdown, no second time, no "early press" sentence.
         binding.ReportShutdownBlocked(code, detail, TimeSpan.Zero, now);
-        Check.Equal("カメラの終了を確認しています", binding.HeadlineText);
+        Check.Equal("もう一度閉じてください", binding.HeadlineText);
         Check.True(headlineChanges > headlineChangesBeforeExceeded,
             "A second blocked report with a different wording must raise HeadlineText even though the phase did not change.");
         var exceeded = RequireCommonGuidance(binding.InvalidationText, "exceeded");
@@ -7714,7 +7716,8 @@ static async Task ShutdownGateBlockedDetailIsSingleLineAndBoundedAsync()
 
     Check.Equal(
         "a b c d e f g",
-        HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\u2028b\u2029c\u0085d\fe\t\tf   g"));    Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
+        HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\u2028b\u2029c\u0085d\fe\t\tf   g"));
+    Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
     Check.Equal("BindingCleanupUnconfirmed", HardwareDualWindowShutdownOutcome.Blocked(" ", "x").BlockingCode);
 }
 
@@ -12944,6 +12947,7 @@ sealed class PassLineCountingWriter(TextWriter inner) : TextWriter
 
     public override void Flush() => inner.Flush();
 }
+
 static class Check
 {
     public static void True(bool condition, string message)

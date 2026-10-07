@@ -315,7 +315,7 @@ public sealed class DualBindingViewModel : ObservableObject
         DualBindingPhase.Ready => "機体照合が完了しました",
         // Window close is waiting on the Agent's own exit; "re-binding" would point at an
         // action that is locked in this state.
-        DualBindingPhase.Invalid when IsShutdownBlocked && _shutdownAgentProbablyExited => "カメラの終了を確認しています",
+        DualBindingPhase.Invalid when IsShutdownBlocked && _shutdownAgentProbablyExited => "もう一度閉じてください",
         DualBindingPhase.Invalid when IsShutdownBlocked => "カメラの終了を待っています",
         _ => "再 binding が必要です",
     };
