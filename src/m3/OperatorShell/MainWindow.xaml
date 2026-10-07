@@ -1762,6 +1762,23 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+
+                <!-- ====================== 終了確認中（issue #228） ======================
+                     ✕ を押してからウィンドウを無効化したまま Camera Agent の自然終了を待つ間（最大 5 秒）、
+                     固まったように見えないよう理由を出す。結果（閉じる／終了待ちの案内）が出たら消える。
+                     機体照合オーバーレイの表示有無に依存しないので、撮影中に ✕ を押した場合も出る。 -->
+                <Grid Grid.Row="0" Grid.RowSpan="4" Panel.ZIndex="11"
+                      Background="{StaticResource ModalScrimBrush}"
+                      Visibility="{Binding DualBinding.IsShutdownConfirming, Converter={StaticResource BoolToVisibilityConverter}}"
+                      AutomationProperties.Name="終了の確認中">
+                    <Border Width="560" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="28"
+                            Background="{StaticResource BarBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
+                            BorderThickness="1" Effect="{StaticResource DropdownShadow}">
+                        <TextBlock Text="{Binding DualBinding.ShutdownConfirmingText}"
+                                   FontSize="{StaticResource FontSizeSection}"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </Border>
+                </Grid>
             </Grid>
         </Viewbox>
     </Grid>

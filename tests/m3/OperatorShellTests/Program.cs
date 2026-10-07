@@ -279,7 +279,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=100 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=101 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -871,6 +871,17 @@ catch (Exception exception)
 {
     failures.Add("issue #225 shutdown gate reports refusal and exception detail as one bounded line with the code intact");
     Console.Error.WriteLine($"FAIL issue #225 shutdown gate reports refusal and exception detail as one bounded line with the code intact: {exception}");
+}
+
+try
+{
+    await ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync();
+    Console.WriteLine("PASS issue #228 window close shows a confirming indicator until the result, on every attempt, without sending to native");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #228 window close shows a confirming indicator until the result, on every attempt, without sending to native");
+    Console.Error.WriteLine($"FAIL issue #228 window close shows a confirming indicator until the result, on every attempt, without sending to native: {exception}");
 }
 
 try
@@ -8057,6 +8068,89 @@ static async Task ShutdownGateBlockedDetailIsSingleLineAndBoundedAsync()
         HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\u2028b\u2029c\u0085d\fe\t\tf   g"));
     Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
     Check.Equal("BindingCleanupUnconfirmed", HardwareDualWindowShutdownOutcome.Blocked(" ", "x").BlockingCode);
+}
+
+// Issue #228: after the operator presses the window's close button the window is disabled while
+// the Agent's natural exit is awaited (up to DualCameraAgentLifecycle.BindingShutdownExitTimeout).
+// The "confirming" indicator must be up for that whole wait, gone once a result (blocked guidance)
+// is on screen, and up again on the next close. This drives the same sequence as
+// MainWindow.OnClosing against an activated binding (the post-handoff state in which the close
+// path must never send to native). The wait is held open by a task this test completes, so no
+// real five seconds pass and no Agent process is started.
+static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
+{
+    var agent = DecodableBindingAgent();
+    var transport = new CountingDualBindingTransport(agent);
+    var client = new DualBindingSessionClient(transport);
+    var binding = new DualBindingViewModel(client, isRequired: true);
+    await CompleteDualBindingAsync(binding);
+    Check.True(await binding.ActivateCaptureAsync(), "The Ready binding must activate before the close path is exercised.");
+    var sendsBeforeClose = transport.SendCount;
+
+    // The words and the bound come from one source.
+    Check.Equal(TimeSpan.FromSeconds(5), DualCameraAgentLifecycle.BindingShutdownExitTimeout);
+    Check.Equal("Camera Agent の終了を確認しています（最大 5 秒）…", DualBindingViewModel.ShutdownConfirmingMessage);
+
+    Check.False(binding.IsShutdownConfirming, "The indicator must not show before a close attempt.");
+    Check.Equal(string.Empty, binding.ShutdownConfirmingText);
+
+    var textChanges = 0;
+    binding.PropertyChanged += (_, args) =>
+    {
+        if (args.PropertyName == nameof(DualBindingViewModel.ShutdownConfirmingText))
+        {
+            textChanges++;
+        }
+    };
+
+    var releaseCount = 0;
+    for (var attempt = 1; attempt <= 2; attempt++)
+    {
+        var label = $"close attempt {attempt}";
+        var exit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var textChangesBefore = textChanges;
+
+        // Same order as MainWindow.OnClosing: indicator first, then the window-disabling wait.
+        binding.BeginShutdownConfirmation();
+        var shutdown = HardwareDualWindowShutdownGate.TryShutdownAsync(
+            () => binding.CancelBindingOnShutdownAsync(),
+            () => new ValueTask(exit.Task),
+            () => releaseCount++);
+
+        Check.False(shutdown.IsCompleted, $"{label}: the wait must still be pending.");
+        Check.True(binding.IsShutdownConfirming, $"{label}: the indicator must be up while the wait is pending.");
+        Check.Equal(DualBindingViewModel.ShutdownConfirmingMessage, binding.ShutdownConfirmingText);
+        Check.True(textChanges > textChangesBefore,
+            $"{label}: the indicator text must change so a live region announces it.");
+
+        if (attempt == 1)
+        {
+            // The Agent does not exit in time: the result is the blocked guidance, and the
+            // indicator goes in the same step the guidance appears.
+            exit.SetException(new TimeoutException("synthetic exit timeout"));
+            var outcome = await shutdown;
+            Check.False(outcome.Completed, $"{label}: an Agent that did not exit must keep the window open.");
+            binding.ReportShutdownBlocked(outcome.BlockingCode, outcome.BlockingDetail, TimeSpan.FromMinutes(4));
+            binding.EndShutdownConfirmation();
+            Check.False(binding.IsShutdownConfirming, $"{label}: the indicator must go once the result is shown.");
+            Check.Equal(string.Empty, binding.ShutdownConfirmingText);
+            Check.True(binding.IsShutdownBlocked && binding.InvalidationText.Length > 0,
+                $"{label}: the blocked guidance must be on screen in place of the indicator.");
+            Check.Equal(0, releaseCount);
+        }
+        else
+        {
+            // The Agent has exited: the close completes, which is the other possible result.
+            exit.SetResult();
+            var outcome = await shutdown;
+            Check.True(outcome.Completed, $"{label}: an exited Agent must let the close complete.");
+            Check.Equal(1, releaseCount);
+        }
+    }
+
+    // Display only: nothing was sent to native through the binding transport during either close
+    // (no CancelBinding after the handoff, no Reserve, no Start), and nothing was killed.
+    Check.Equal(sendsBeforeClose, transport.SendCount);
 }
 
 static DualCameraAgentLifecycle CreateDualBindingTestLifecycle(string root)

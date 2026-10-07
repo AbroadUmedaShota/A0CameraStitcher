@@ -120,6 +120,7 @@ public sealed class DualBindingViewModel : ObservableObject
     private string _noticeText = string.Empty;
     private string _noticeKind = "info";
     private bool _shutdownBlocked;
+    private bool _shutdownConfirming;
     // True only for the "budget already elapsed, the Agent has probably exited" wording of the
     // shutdown-blocked message; it selects the headline (issue #225).
     private bool _shutdownAgentProbablyExited;
@@ -488,6 +489,47 @@ public sealed class DualBindingViewModel : ObservableObject
             }
         }
     }
+
+    /// <summary>
+    /// The window-close indicator text (issue #228): shown from the moment the window is disabled
+    /// until the close attempt has a result. The seconds come from the same bound the lifecycle
+    /// waits with, so the sentence cannot drift from the real wait.
+    /// </summary>
+    public static string ShutdownConfirmingMessage { get; } =
+        "Camera Agent の終了を確認しています（最大 " +
+        ((int)Math.Ceiling(DualCameraAgentLifecycle.BindingShutdownExitTimeout.TotalSeconds))
+            .ToString(CultureInfo.InvariantCulture) +
+        " 秒）…";
+
+    /// <summary>
+    /// True while a window-close attempt is waiting for the Agent's natural exit. Display only:
+    /// it gates no command and sends nothing to native. It is independent of
+    /// <see cref="IsOverlayVisible"/> because ✕ can be pressed after the binding overlay is gone.
+    /// </summary>
+    public bool IsShutdownConfirming
+    {
+        get => _shutdownConfirming;
+        private set
+        {
+            if (SetProperty(ref _shutdownConfirming, value))
+            {
+                OnPropertyChanged(nameof(ShutdownConfirmingText));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The indicator's text: <see cref="ShutdownConfirmingMessage"/> while confirming, empty
+    /// otherwise. The text itself changes (not only the visibility) so a UI Automation live
+    /// region announces each attempt, including a second ✕ after a blocked result.
+    /// </summary>
+    public string ShutdownConfirmingText => IsShutdownConfirming ? ShutdownConfirmingMessage : string.Empty;
+
+    /// <summary>Starts showing the indicator. Call before the window is disabled.</summary>
+    public void BeginShutdownConfirmation() => IsShutdownConfirming = true;
+
+    /// <summary>Hides the indicator once the close attempt has a result.</summary>
+    public void EndShutdownConfirmation() => IsShutdownConfirming = false;
 
     /// <summary>
     /// False while the window-close wait is shown. The residual-risk text and the start-binding

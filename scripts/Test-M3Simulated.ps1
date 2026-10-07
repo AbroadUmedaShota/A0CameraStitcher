@@ -156,6 +156,25 @@ try {
         Assert-Condition ($button.GetAttribute('Focusable') -ne 'False') 'A dual binding overlay button must never be made unfocusable (issue #62).'
     }
     Assert-Condition ($windowText.Contains('AutomationProperties.LiveSetting="Assertive"')) 'The binding invalidation notice must announce itself assertively (issue #62).'
+    # Window-close "confirming" indicator (issue #228). It must not live inside the binding overlay (✕ can be pressed
+    # after that overlay is gone), its text must be the announced live region (an explicit AutomationProperties.Name on
+    # it would replace the text for a screen reader), and the code-behind must raise it before disabling the window.
+    $confirmingNode = @($windowXml.SelectNodes('//*[@*[local-name()="Visibility" and contains(., "DualBinding.IsShutdownConfirming")]]')) | Select-Object -First 1
+    Assert-Condition ($null -ne $confirmingNode) 'The window must bind an indicator to DualBinding.IsShutdownConfirming (issue #228).'
+    Assert-Condition ($null -eq $confirmingNode.SelectSingleNode('ancestor::*[@*[local-name()="AutomationProperties.Name" and contains(., "DualBinding.OverlayAutomationName")]]')) 'The close indicator must not be nested in the binding overlay (issue #228).'
+    $confirmingText = @($confirmingNode.SelectNodes('.//*[@*[local-name()="Text" and contains(., "DualBinding.ShutdownConfirmingText")]]')) | Select-Object -First 1
+    Assert-Condition ($null -ne $confirmingText) 'The close indicator must show DualBinding.ShutdownConfirmingText (issue #228).'
+    Assert-Condition ($confirmingText.GetAttribute('AutomationProperties.LiveSetting') -eq 'Polite') 'The close indicator text must be a polite live region (issue #228).'
+    Assert-Condition ([string]::IsNullOrEmpty($confirmingText.GetAttribute('AutomationProperties.Name'))) 'The close indicator text must not carry an AutomationProperties.Name that would replace it for a screen reader (issue #228).'
+    $mainWindowCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')
+    $closingBegin = $mainWindowCode.IndexOf('private async void OnClosing')
+    $closingText = $mainWindowCode.Substring($closingBegin)
+    $beginIndex = $closingText.IndexOf('BeginShutdownConfirmation()')
+    $disableIndex = $closingText.IndexOf('IsEnabled = false;')
+    $endIndex = $closingText.IndexOf('EndShutdownConfirmation()')
+    $reenableIndex = $closingText.IndexOf('IsEnabled = true;')
+    Assert-Condition ($beginIndex -ge 0 -and $disableIndex -gt $beginIndex) 'OnClosing must show the confirming indicator before it disables the window (issue #228).'
+    Assert-Condition ($endIndex -gt $beginIndex -and $reenableIndex -gt $endIndex) 'OnClosing must hide the confirming indicator before it re-enables the window after a blocked result (issue #228).'
 
     $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
     Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'

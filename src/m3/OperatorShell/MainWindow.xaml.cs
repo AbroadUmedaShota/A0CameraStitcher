@@ -356,6 +356,12 @@ public partial class MainWindow : Window
         }
         _shutdownStarted = true;
         _dualBindingHostLifetimeMonitor?.Stop();
+        if (_dualAgentLifecycle is not null)
+        {
+            // Issue #228: the wait below can take several seconds with the window disabled. Say so
+            // before disabling, so the operator never sees a silent grey window. Display only.
+            _viewModel.DualBinding.BeginShutdownConfirmation();
+        }
         IsEnabled = false;
         _lifetime.Cancel();
         if (_dualAgentLifecycle is not null)
@@ -378,6 +384,9 @@ public partial class MainWindow : Window
                     _dualAgentLifecycle.CurrentProcessStartTimeUtc, DateTimeOffset.UtcNow);
                 _viewModel.DualBinding.ReportShutdownBlocked(
                     outcome.BlockingCode, outcome.BlockingDetail, remainingAgentLifetimeEstimate);
+                // Issue #228: the result is on screen, so the "confirming" indicator goes. On the
+                // completed path below it stays up until Close() takes the window away.
+                _viewModel.DualBinding.EndShutdownConfirmation();
                 _shutdownStarted = false;
                 IsEnabled = true;
                 return;
