@@ -57,3 +57,26 @@ attempted hybridはWPD baseline timeoutとdatetime相関不成立によりReject
 - [Nikon D810使用説明書](https://downloadcenter.nikonimglib.com/ja/products/176/D810.html): ピクチャーコントロールの輪郭強調、明瞭度、コントラスト、明るさ、彩度などを説明。
 - [Nikon Camera Remote SDK information/FAQ](https://sdk.nikonimaging.com/information/en/): D810用Remote SDKの提供とWindows対応履歴を掲載。
 - ローカル隔離したD810用SDKのcapability定義および付属サンプルを参照した。ライセンス対象資料そのものはリポジトリへ含めない。
+
+## 実機応答の既知の性質と fake の対応（Issue #231）
+
+実機で見つかった #216・#222・#224 は、どれも fake と実機の応答の差だった。実機が実際に返した値は匿名化して `tests/fixtures/hardware-replay/` に置き（出所・置換規則・実物と再構成の区別は同フォルダの `README.md`）、アプリの保存経路と Agent の応答生成へ流す試験を足した。次の表は、D810 の性質ごとに「実機の観測」「fake の対応箇所」「状態」を突き合わせたもの。行番号は 2026-10 時点。
+
+| 性質 | 実機の観測 | fake の対応箇所 | 状態 |
+| --- | --- | --- | --- |
+| fileType を広告しない | 承認 profile の `fileType` は `{"available": false}` だけ。SDK の記述子は既定のまま（`capType` unsupported、`probeState` not-advertised、`valueType` unsupported、値もラベルもなし）。`compressionLevel` は packed-string のラベル `JPEG Fine`（index 2）で広告される | C++: `tests/dual_hardware_capture_backend_tests.cpp:19`（`MakeReadOnlyStatus`、fileType は既定の未広告）、`:297`・`:327`（実物の 9 設定を流して二台のシャッター直前検査を通す）。C#: `tests/m3/OperatorShellTests/Program.cs:14145`〜`14192`（`HardwareTestData` の既定設定。本 Issue で未広告へ修正。以前は「広告あり・JPEG」で実機と逆だった）、`tests/m3/OperatorShellTests/HardwareReplayFixtures.cs:465`（実物 profile から作る readiness の設定）、`tests/m3/OperatorShellTests/HardwareReplayRunner.cs:205`（実機の観測からアプリの承認処理が実物と同じ設定を作る） | 対応済み |
+| focus は意味の分からない値 | `focusMode` は `capType` unsigned・`valueType` unsigned・`currentValue` 1。ラベルも index もない。値の意味は推測しない（既存の方針）。承認はこの値の有無だけを条件にする（`src/m3/OperatorShell/Hardware/HardwareSingleCaptureProfileStore.cs:101`） | C#: `Program.cs:14192`（`OpaqueUnsigned(1)`。本 Issue で修正。以前はラベル付き）。C++: `tests/hardware_camera_agent_tests.cpp:695`〜`720`・`:737`（`capType` を実機の unsigned に修正。以前は generic）、`tests/dual_hardware_capture_backend_tests.cpp:327` | 対応済み。残る差: C++ の writer 形 profile の他の設定は `probeState` observed・`valueType` label（実機は available・packed-string）。比較は文字列の完全一致なので試験の意味は保たれ、実機の値そのものは再生試験が持つため、書き換えていない |
+| ファームウェアが 2 台で違う（V1.11 と V1.14） | 1 台目 V1.11、2 台目 V1.14 のまま、3 種の撮影なし probe と二台撮影が通った（#221）。firmware は readiness の表示用の文字列で、撮影の判定には使われない（`src/phase0/hardware_camera_agent.cpp:3552`）。一台撮影の event log の `firmware` は `unknown` | `tests/wpd_dual_read_only_probe_tests.cpp:119`（本 Issue で追加。2 台の firmware を変えても probe が通り、出力に firmware が出ない）。既存の二台 fake は両台に同じ `fixture-firmware`（`tests/nikon_dual_session_adapter_tests.cpp:540`、`tests/wpd_dual_read_only_probe_tests.cpp:25`） | 一部対応。SDK 側の二台 adapter の fake は同一 firmware のまま（未対応。二台の撮影・Agent の経路は firmware を読まず、足しても分岐がないため） |
+| 機体照合は確定から 5 分で失効 | 実物の terminal result の `identitySnapshot` は `expiresAtUtc` − `observedAtUtc` = 5 分。照合を確定してから返答を待つ間に失効した（#221 の 2 回目） | アプリが作る側: `src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs:2829`、判定: `src/m3/Foundation/DualCamera/DualCameraIdentity.cs:30`。再生: `HardwareReplayRunner.cs:449`（実物の照合値で 5 分ちょうどの拒否と 1 秒前の受理を検査）。通常フローの fake の既定は失効しない照合（`DualCameraIdentity.cs:39` の `AnonymousTestSyntheticReady`、`Program.cs` 内 7 箇所の `FixedDualCameraIdentitySnapshotSource`） | 再生側は対応済み。通常フローの既定は未対応（時計を持たない試験が多く、既定を変えるとそれぞれに時計の注入が要るため。5 分の境界は再生試験が持つ） |
+| Agent は起動から 600 秒で終わる | Agent ホストの寿命は 600 秒固定で延長しない（#225）。journal にも応答にも現れず、時計で決まる性質 | native: `src/phase0/include/a0/phase0/agent_host_lifetime.hpp:15`、C#: `src/m3/OperatorShell/Hardware/DualCameraAgentLifecycle.cs:55`。fake: `tests/dual_hardware_camera_agent_pipe_tests.cpp:974`（偽の時計で 600000 ms を再現）、`Program.cs:7855`（C# の定数が native の予算と一致） | 対応済み（既存。fixture にはしない） |
+| `None` は空文字で書かれる | Agent は `DualBindingInvalidationReason::None` を `""` で書く（`src/phase0/dual_identity_session_binding.cpp:29`）。実物の Succeeded と Failed の terminal result はどちらも `"bindingInvalidationReason":""`。アプリ自身の永続 snapshot は名前の `"None"` で、別の書式 | C++: `tests/dual_hardware_camera_agent_tests.cpp:310`（空文字を固定）、`tests/dual_hardware_camera_agent_store_tests.cpp:676`（実物の pair journal を読み戻し、同じ result から同じバイト列を書く）。C#: `HardwareReplayFixtures.cs:242`（実物の result を返す Agent の再生）、`HardwareReplayRunner.cs:318`・`:384`（Succeeded と Failed の流し込み）、`Program.cs` の shell シナリオ。`CaptureRecoveryOnlyFakeOperations` は型付きの結果を直接返し JSON を通らないため空文字を再現しない | 再生側は対応済み。型付き fake は未対応（JSON を経由しない設計のため。JSON を通る試験は上の再生側が持つ） |
+
+### 変異確認（Issue #231 の受入基準）
+
+修正を一時的に外して、再生試験が落ちることを確かめた。確認後に元へ戻し、コミットには含めていない。
+
+| 外した修正 | 外し方 | 落ちた再生試験 |
+| --- | --- | --- |
+| #222（fileType 未広告の許容） | `RequireReadOnlyDualCaptureProfile` を修正前の判定（`fileType` と `compressionLevel` の部分一致）に戻す | `TestReplayRealD810ObservedSettingsAreAccepted` |
+| #216（原画像フォルダ名） | 実行側（`ExecuteBoundSingleCapture` が transaction ID を渡す）と位置検査（先頭フォルダ名の一致）の両方を戻す。片方ずつでも、それぞれの再生試験が落ちる | `TestReplayRealSingleCaptureEventsAndLanding`（着地先と event）、`TestReplayRealSingleCaptureJournalAndResponse`（journal が `hybrid-tx-` フォルダの原画像を保証しない） |
+| #224（`""` の読み取り） | `DualHardwareBindingInvalidationReasonConverter` の登録を外す | 二台の Succeeded・Failed の再生（ワークフロー、画面経由とも） |
