@@ -19,4 +19,12 @@
           Link="native\agent_host_lifetime.hpp"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Anonymized real-device responses replayed by HardwareReplayRunner.cs (issue #231). Copied
+         next to the test binary so the tests need no path search. -->
+    <None Include="$(MSBuildThisFileDirectory)..\..\fixtures\hardware-replay\**\*"
+          Link="fixtures\hardware-replay\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

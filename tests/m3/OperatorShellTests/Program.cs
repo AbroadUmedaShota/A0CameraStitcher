@@ -234,6 +234,26 @@ if (args is ["--hundred-run-core"])
     }
 }
 
+// Focused run of the #231 replay checks (the same contracts the normal run ends with).
+if (args is ["--hardware-replay"])
+{
+    try
+    {
+        await HardwareReplayContracts.RunAsync();
+        Console.WriteLine("PASS replayed real D810 responses save through the single-camera and dual-camera app paths");
+        return await WpfCommandTestRunner.RunFocusedAsync(
+        [
+            ("replayed real Agent terminal results go through the shell CaptureRecoveryOnly capture and save path",
+                CaptureRecoveryOnlyRealAgentReplayThroughShellAsync),
+        ]);
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"FAIL replayed real D810 responses: {exception}");
+        return 1;
+    }
+}
+
 if (args is ["--single-handoff-stop-order"])
 {
     try
@@ -930,12 +950,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 44) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 46) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
-    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 43) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 45) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1138,7 +1158,7 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
-    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 24) == WpfScenarioOutcome.PendingStop)
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 26) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1412,6 +1432,20 @@ catch (Exception exception)
     failures.Add("persistent EOF diagnostic and primary preservation contracts");
     Console.Error.WriteLine($"FAIL persistent EOF diagnostic and primary preservation contracts: {exception}");
 }
+try
+{
+    await HardwareReplayContracts.RunAsync();
+    Console.WriteLine("PASS replayed real D810 responses (anonymized fixtures) save through the single-camera and dual-camera app paths and the fixtures hold no identifiers (#231)");
+}
+catch (Exception exception)
+{
+    failures.Add("replayed real D810 responses (anonymized fixtures) save through the single-camera and dual-camera app paths and the fixtures hold no identifiers (#231)");
+    Console.Error.WriteLine($"FAIL replayed real D810 responses (anonymized fixtures) save through the single-camera and dual-camera app paths and the fixtures hold no identifiers (#231): {exception}");
+}
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "replayed real Agent terminal results (Succeeded pair and Failed/CaptureCameraA) go through the shell CaptureRecoveryOnly capture and save path (#231)",
+    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
+    return 1;
 Console.WriteLine($"Operator shell tests: {passLines.Count}/{passLines.Count + failures.Count} passed.");
 return failures.Count == 0 ? 0 : 1;
 
@@ -8440,6 +8474,109 @@ static async Task CompleteDualBindingAndActivateAsync(DualBindingSessionClient b
     Check.True((await binding.ActivateCaptureAsync()).Succeeded, "The complete binding must be activated before capture.");
 }
 
+// GitHub Issue #231: the real terminal results of the real dual-camera sessions (a
+// Succeeded pair and a Failed/CaptureCameraA attempt, both carrying bindingInvalidationReason "")
+// through the shell's CaptureRecoveryOnly capture and save path. The Agent is replayed; the
+// app-side workflow, codec, verifier and exporter are the production ones.
+static async Task CaptureRecoveryOnlyRealAgentReplayThroughShellAsync()
+{
+    var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(adapterPath), "The replay scenario requires the bundled deterministic JPEG adapter.");
+    var root = CreateHardwareTestRoot();
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+        var unusedOrdinaryOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
+        var ordinaryProductRoot = Path.Combine(root, "replay-ordinary-products");
+        var ordinaryFlow = new DualCameraProductFlow(
+            ordinaryProductRoot,
+            new HardwareDualCaptureSource(
+                unusedOrdinaryOperations,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(ordinaryProductRoot)),
+            new NeverCaptureDualBridge(),
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+
+        OperatorShellViewModel NewShell(
+            string name,
+            ReplayDualHardwareTransport transport,
+            out HardwareDualCaptureRecoveryOnlyWorkflow workflow)
+        {
+            var operations = new DualHardwareCameraAgentOperations(transport);
+            workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                Path.Combine(root, name + "-products"), operations, operations, ApprovedCaptureRecoveryOnlyProfile());
+            return new OperatorShellViewModel(
+                new SimulationFoundationService(Path.Combine(root, name + "-journals")),
+                ordinaryFlow,
+                dualBindingTransport: new CountingBindingTransport(DecodableBindingAgent()),
+                captureRecoveryOnlyWorkflow: workflow);
+        }
+
+        async Task BindAndAcceptAsync(OperatorShellViewModel shell)
+        {
+            await shell.InitializeAsync(CancellationToken.None);
+            shell.IsPhysicalShutterAckAccepted = true;
+            shell.IsExclusiveUseAckAccepted = true;
+            shell.AcceptSafetyCommand.Execute(null);
+            shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+            await CompleteDualBindingAsync(shell.DualBinding);
+            Check.True(shell.CanCapture, "A Ready binding plus explicit acceptance must enable CaptureRecoveryOnly.");
+        }
+
+        // Succeeded: both originals saved, then copied out byte for byte.
+        var succeededTransport = new ReplayDualHardwareTransport(ReplayDualScenario.Succeeded, rebaseTimesToRequest: true);
+        var shell = NewShell("replay-succeeded", succeededTransport, out var succeededWorkflow);
+        await BindAndAcceptAsync(shell);
+        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(10), "replay/succeeded-capture",
+            () => WpfCommandState.Create(shell));
+        Check.True(!shell.IsBusy && shell.UiState == OperatorUiState.Review,
+            $"The replayed real Succeeded terminal must reach review. detail={shell.TechnicalDetail}");
+        Check.True(shell.RetainedOriginals.Contains("CAM-A", StringComparison.Ordinal) &&
+                   shell.RetainedOriginals.Contains("CAM-B", StringComparison.Ordinal),
+            "Both retained originals must be listed.");
+        Check.True(shell.TechnicalDetail.Contains("bindingInvalidationReason=None", StringComparison.Ordinal),
+            "The Agent's empty-string reason must be shown as None (#224).");
+        Check.False(succeededWorkflow.HasPendingRecovery, "A validated Succeeded terminal must not stay pending.");
+
+        var exportFolder = Path.Combine(root, "replay-export");
+        shell.ChangeCaptureRecoveryOnlyExportDirectory(exportFolder);
+        Check.True(shell.CanExportCaptureRecoveryOnlyOriginals, "Two verified originals and a chosen folder must allow saving.");
+        var operationsBeforeExport = succeededTransport.Operations.Count;
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            "replay/succeeded-export", () => WpfCommandState.Create(shell));
+        Check.Equal(operationsBeforeExport, succeededTransport.Operations.Count);
+        Check.True(shell.CaptureRecoveryOnlyExportResult.StartsWith("保存しました: 2枚（CAM-A・CAM-B）", StringComparison.Ordinal),
+            $"Unexpected save result: {shell.CaptureRecoveryOnlyExportResult}");
+        var exportedFiles = Directory.GetFiles(exportFolder, "*.jpg", SearchOption.TopDirectoryOnly)
+            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        Check.Equal(2, exportedFiles.Length);
+        var byAlias = exportedFiles.ToDictionary(
+            path => System.Text.RegularExpressions.Regex.Match(Path.GetFileName(path), @"-(CAM-[AB])-").Groups[1].Value);
+        Check.True(File.ReadAllBytes(byAlias["CAM-A"]).SequenceEqual(HardwareReplayFixtures.ReadJpeg("dual-cam-a")),
+            "The saved CAM-A file must be a byte-identical copy of the replayed original.");
+        Check.True(File.ReadAllBytes(byAlias["CAM-B"]).SequenceEqual(HardwareReplayFixtures.ReadJpeg("dual-cam-b")),
+            "The saved CAM-B file must be a byte-identical copy of the replayed original.");
+
+        // Failed/CaptureCameraA: the shutter never fired, so there is nothing to save and the
+        // same-ID gate must be released (this exact result used to leave the app stuck, #224).
+        var failedTransport = new ReplayDualHardwareTransport(ReplayDualScenario.FailedCameraA, rebaseTimesToRequest: true);
+        var failedShell = NewShell("replay-failed", failedTransport, out var failedWorkflow);
+        await BindAndAcceptAsync(failedShell);
+        await ownedCommands.ExecuteAsync(failedShell.CaptureCommand, TimeSpan.FromSeconds(10), "replay/failed-capture",
+            () => WpfCommandState.Create(failedShell));
+        Check.True(!failedShell.IsBusy && failedShell.UiState != OperatorUiState.Capturing,
+            "The replayed real Failed terminal must end the command.");
+        Check.False(failedWorkflow.HasPendingRecovery,
+            "The real Failed/CaptureCameraA terminal must release the same-ID recovery gate (#224).");
+        Check.True(failedShell.TechnicalDetail.Contains("failure=CaptureCameraA", StringComparison.Ordinal),
+            $"The failure must be named. detail={failedShell.TechnicalDetail}");
+        failedShell.ChangeCaptureRecoveryOnlyExportDirectory(Path.Combine(root, "replay-export-none"));
+        Check.False(failedShell.CanExportCaptureRecoveryOnlyOriginals, "A capture without originals has nothing to save.");
+        Check.Equal(1, failedTransport.Operations.Count(op =>
+            op == DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly));
+    });
+}
+
 static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
 {
     var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
@@ -14120,9 +14257,33 @@ static class HardwareTestData
             CurrentLabel = label,
         };
 
+        // The two shapes the real D810 reports that differ from a plain labelled setting (replayed
+        // from the real session, issue #231): fileType is not advertised at all, and
+        // focusMode is only the opaque unsigned value 1 with no label.
+        static HardwareObservedCameraSetting NotAdvertised() => new()
+        {
+            Available = false,
+            CapType = "unsupported",
+            ProbeState = "not-advertised",
+            ValueType = "unsupported",
+            CurrentValue = null,
+            CurrentIndex = null,
+            CurrentLabel = null,
+        };
+        static HardwareObservedCameraSetting OpaqueUnsigned(uint value) => new()
+        {
+            Available = true,
+            CapType = "unsigned",
+            ProbeState = "available",
+            ValueType = "unsigned",
+            CurrentValue = value,
+            CurrentIndex = null,
+            CurrentLabel = null,
+        };
+
         return new HardwareObservedCameraSettings
         {
-            FileType = Setting("JPEG"),
+            FileType = NotAdvertised(),
             CompressionLevel = Setting("Fine"),
             ImageSize = Setting("Large"),
             ExposureMode = Setting("Manual"),
@@ -14130,7 +14291,7 @@ static class HardwareTestData
             Aperture = Setting("profile-match"),
             Sensitivity = Setting("profile-match"),
             WhiteBalanceMode = Setting("profile-match"),
-            FocusMode = Setting("profile-match"),
+            FocusMode = OpaqueUnsigned(1),
         };
     }
 }
