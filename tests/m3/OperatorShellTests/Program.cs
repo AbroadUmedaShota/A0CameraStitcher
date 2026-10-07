@@ -299,7 +299,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=102 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=103 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -643,6 +643,17 @@ catch (Exception exception)
 {
     failures.Add("hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it");
     Console.Error.WriteLine($"FAIL hardware continuous Live View stop waits for an in-flight frame request instead of cancelling it: {exception}");
+}
+
+try
+{
+    await HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAsync();
+    Console.WriteLine("PASS hardware continuous Live View stop gives up after a bound when the frame request never returns and keeps capture blocked");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware continuous Live View stop gives up after a bound when the frame request never returns and keeps capture blocked");
+    Console.Error.WriteLine($"FAIL hardware continuous Live View stop gives up after a bound when the frame request never returns and keeps capture blocked: {exception}");
 }
 
 try
@@ -4084,6 +4095,109 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
     {
         // 途中のCheckが例外を投げても、held中のフレーム要求を解放せずに残さない。
         // 解放しないとRunContinuousLiveViewLoopAsyncのタスクが待機したままになる。
+        operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// GitHub Issue #141 stage 3a: when the SDK never returns the in-flight frame request, the stop
+// operation must give up waiting after a bound and report "stop unconfirmed" (fail-closed)
+// instead of holding the UI busy until the transport's own response timeout. The bound must
+// not release anything: no stop-live-view is sent while the frame request is still pending,
+// the request is not aborted, and capture stays blocked. Once the frame request returns, a
+// second stop completes normally. Uses a fake clock so no real wait is involved.
+static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-bounded-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        operations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            HoldFrameReadUntilReleased = true,
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            time);
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        await viewModel.StartContinuousLiveViewAsync();
+        Check.True(viewModel.IsContinuousLiveViewActive, "Start must mark the continuous session active.");
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var budget = HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget;
+        Check.True(budget > TimeSpan.FromSeconds(3) && budget <= TimeSpan.FromSeconds(10),
+            "The stop wait bound must exceed the C++ frame budget (3s) and stay well under the 30s response timeout.");
+
+        // The stop wait timer is registered synchronously inside the first call segment, so
+        // advancing the fake clock right after the call returns is deterministic.
+        var stopTask = viewModel.StopContinuousLiveViewAsync();
+        Check.True(viewModel.IsBusy, "The UI must show the stop as in progress.");
+        Check.True(viewModel.LiveViewSummary.StartsWith("停止中", StringComparison.Ordinal),
+            "The UI must show a stopping state while waiting for the frame request.");
+
+        time.Advance(budget - TimeSpan.FromMilliseconds(100));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Check.False(stopTask.IsCompleted, "Stop must keep waiting until the bound elapses.");
+
+        time.Advance(TimeSpan.FromMilliseconds(100));
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Check.False(viewModel.IsBusy, "The UI must not stay busy after the bound elapses.");
+        Check.True(viewModel.IsContinuousLiveViewActive,
+            "An unconfirmed stop must keep the session marked active (fail-closed).");
+        Check.True(viewModel.LiveViewSummary.StartsWith("停止未確認", StringComparison.Ordinal),
+            "The UI must report that the stop could not be confirmed.");
+        Check.True(viewModel.TechnicalDetail.Contains("continuous_live_view_stop_unconfirmed"),
+            "The unconfirmed stop must be recorded in the technical detail.");
+        Check.Equal(0, operations.StopCount);
+        Check.False(operations.CallOrder.Contains("stop"),
+            "stop-live-view must not be sent while the frame request may still be inside the SDK.");
+        Check.False(operations.FrameReadReleaseGate.Task.IsCompleted,
+            "Giving up the wait must not abort the in-flight frame request.");
+        Check.True(operations.LastFrameReadToken is { CanBeCanceled: false },
+            "The in-flight frame request must still carry a non-cancellable token.");
+        Check.True(viewModel.CanStopContinuousLiveView,
+            "The operator must be able to retry the stop.");
+
+        // Capture goes through the same stop; it must stay blocked while the stop is unconfirmed.
+        var captureTask = viewModel.CaptureAsync();
+        for (var step = 0; step < 50 && !captureTask.IsCompleted; step++)
+        {
+            time.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        }
+        await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal(0, operations.CaptureCallCount);
+        Check.Equal(0, operations.StopCount);
+        Check.True(viewModel.IsContinuousLiveViewActive,
+            "A capture attempt with an unconfirmed stop must leave the session active.");
+        Check.False(viewModel.IsBusy, "A blocked capture attempt must release the busy state.");
+
+        // The SDK finally returns the frame: the retried stop completes normally.
+        operations.FrameReadReleaseGate.TrySetResult();
+        await viewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Check.False(viewModel.IsContinuousLiveViewActive, "The retried stop must close the session.");
+        Check.Equal("停止済み（SDK session closed）", viewModel.LiveViewSummary);
+        Check.Equal(1, operations.StopCount);
+        Check.True(viewModel.PreviewImage is null,
+            "A frame that resolves after stop was requested must not update PreviewImage.");
+        Check.Equal(0, operations.CaptureCallCount);
+
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+    }
+    finally
+    {
         operations?.FrameReadReleaseGate.TrySetResult();
         Directory.Delete(root, recursive: true);
     }

@@ -12,6 +12,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 {
     private const int MaximumHistoricalReviewChoices = 25;
     private static readonly TimeSpan MaximumProfileExpiryTimerDelay = TimeSpan.FromHours(1);
+    // 停止操作が、進行中のフレーム要求の完了を待つ上限（GitHub Issue #141）。
+    // C++側 Timeouts::live_view_frame の既定（3秒）に往復とデコードの余裕を足した値で、
+    // SDKが予算を守る限りこの上限には掛からない。超えたら停止を確認できないものとして
+    // 戻り、撮影はブロックされたままになる。C++側の既定を延ばす場合はこちらも見直すこと。
+    internal static readonly TimeSpan LiveViewStopFrameWaitBudget = TimeSpan.FromSeconds(5);
     private readonly IHardwareSingleCameraOperations _operations;
     private readonly IHardwareContinuousLiveViewOperations? _continuousLiveViewOperations;
     private readonly IHardwareSingleAppStateStore _stateStore;
@@ -908,15 +913,35 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
 
         ActivityText = "継続Live Viewを停止し、SDKセッションをclose中…";
+        LiveViewSummary = "停止中（フレーム取得の完了待ち）";
         _continuousLiveViewLoopCancellation?.Cancel();
-        if (_continuousLiveViewLoop is not null)
+        if (_continuousLiveViewLoop is { } frameLoop)
         {
             try
             {
-                await _continuousLiveViewLoop.ConfigureAwait(true);
+                // 進行中のフレーム要求は中断しない（Camera Agentのdelivery-ACK契約を守るため）。
+                // 一方、SDKが応答しない間は完了を待ち続けられないので、待機に上限を置く。
+                // 上限を超えた場合は要求も、Camera Agent側のセッション・カメラ制御lease・
+                // 撮影ブロックも一切手放さず「停止を確認できない」で戻る。
+                // フレーム要求は走ったままで、完了後にもう一度停止を押せる。
+                await frameLoop
+                    .WaitAsync(LiveViewStopFrameWaitBudget, _timeProvider)
+                    .ConfigureAwait(true);
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (TimeoutException) when (!frameLoop.IsCompleted)
+            {
+                _handoffEvidenceCollector?.ObserveLiveViewStopRequested(_continuousLiveViewSessionId);
+                _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
+                LiveViewSummary = "停止未確認: フレーム取得が応答しません";
+                ActivityText = "Live View停止を確認できません。撮影を開始しません。" +
+                    "フレーム取得の完了後、もう一度停止してください。";
+                TechnicalDetail +=
+                    "\ncontinuous_live_view_stop_unconfirmed: frame request still in flight after " +
+                    $"{LiveViewStopFrameWaitBudget.TotalSeconds:0.#}s";
+                return false;
             }
         }
 

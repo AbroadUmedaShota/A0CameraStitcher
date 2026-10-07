@@ -211,6 +211,9 @@ WPD cleanup不明時はSDK API（End含む）を呼ばずAgentを隔離・termin
 - #141: Issue本文の旧10秒予算は現行と異なる。現行は `live_view_frame=3秒` の独立予算と上限検証、
   budget isolation回帰を実装済み。SDK同期frame呼出しを瞬時中断できる保証ではないため、stop/SDK close確認を省略しない。
   実機応答性は別の受入条件であり、open Issueを理由に同じ修正を作り直さない。
+  SDKが予算を無視して固まる場合に備え、停止操作は進行中のフレーム要求を5秒（`LiveViewStopFrameWaitBudget`）まで待ち、
+  超えたら要求を中断せず、stop-live-viewも送らず「停止未確認」で戻る。セッション・lease・撮影ブロックは維持され、
+  フレーム要求の完了後にもう一度停止できる。5秒は実機のフレーム間隔の実測で見直す。
 - #150: native capture profileの最小setting coverage、profile消失時のSDK open前gate、診断の匿名化と成果物鮮度。
   外部profileが「承認済み」という表示だけで撮影を許可しない。
 - #151残件: SDK callback前提、noexcept/例外境界、WPD列挙/cleanupの未監査項目。
