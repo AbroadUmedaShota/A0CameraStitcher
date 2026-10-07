@@ -3296,6 +3296,13 @@ ProductionHardwareCameraAgentConfig ContinuousLiveViewTestConfig(
         return cameras.front().stable_identity;
     };
     config.continuous_live_view_clock_for_testing = std::move(clock);
+    // Issue #217: keep the lease and the dual-delegation marker scan inside
+    // this test's temporary root. Without these seams the product lease name
+    // and the per-user LocalAppData marker root are used, so a marker on the
+    // machine running the suite changes the result.
+    config.continuous_live_view_lease_name_for_testing =
+        "A0CameraStitcher.Phase0.Test.ContinuousLiveView." + NewRunId();
+    config.continuous_live_view_marker_root_for_testing = root / "markers";
     return config;
 }
 
@@ -4356,33 +4363,48 @@ void TestProductionContinuousLiveViewContracts() {
             auto read_entered = read_entered_promise.get_future();
             std::promise<void> release_read_promise;
             auto release_read = release_read_promise.get_future().share();
+            // Issue #217: every cross-thread signal is bounded so a setup
+            // failure is reported as a failed check instead of hanging the
+            // suite until the ctest timeout.
+            constexpr auto kSignalDeadline = std::chrono::seconds(30);
             state->before_read = [&] {
                 read_entered_promise.set_value();
-                release_read.wait();
+                (void)release_read.wait_for(kSignalDeadline);
             };
             ProductionHardwareCameraAgentBackend backend(
                 ContinuousLiveViewTestConfig(root / "backpressure", state));
-            Check(backend.StartContinuousLiveView(ContinuousRequest(
-                      HardwareCameraAgentOperation::start_live_view,
-                      owner_session)).succeeded,
-                "backpressure contract setup must start");
+            const bool backpressure_started = backend.StartContinuousLiveView(
+                ContinuousRequest(
+                    HardwareCameraAgentOperation::start_live_view,
+                    owner_session)).succeeded;
+            Check(backpressure_started, "backpressure contract setup must start");
             auto frame = std::async(std::launch::async, [&] {
                 return backend.ReadContinuousLiveViewFrame(ContinuousRequest(
                     HardwareCameraAgentOperation::read_live_view_frame,
                     owner_session));
             });
-            read_entered.wait();
-            auto heartbeat = std::async(std::launch::async, [&] {
-                return backend.HeartbeatContinuousLiveView(ContinuousRequest(
-                    HardwareCameraAgentOperation::live_view_heartbeat,
-                    owner_session));
-            });
-            Check(heartbeat.wait_for(std::chrono::milliseconds(100)) ==
-                      std::future_status::timeout,
-                "a second Live View command must observe backend backpressure");
-            release_read_promise.set_value();
-            Check(frame.get().succeeded && heartbeat.get().succeeded,
-                "serialized frame and heartbeat commands must both complete after release");
+            const bool read_reached_sdk =
+                read_entered.wait_for(kSignalDeadline) ==
+                std::future_status::ready;
+            Check(read_reached_sdk,
+                "the Live View frame read must reach the SDK within the signal deadline");
+            if (!read_reached_sdk) {
+                // The read never entered the SDK, so before_read cannot run
+                // and the release signal is not needed; drain the future.
+                (void)frame.get();
+            } else {
+                auto heartbeat = std::async(std::launch::async, [&] {
+                    return backend.HeartbeatContinuousLiveView(ContinuousRequest(
+                        HardwareCameraAgentOperation::live_view_heartbeat,
+                        owner_session));
+                });
+                Check(heartbeat.wait_for(std::chrono::milliseconds(100)) ==
+                          std::future_status::timeout,
+                    "a second Live View command must observe backend backpressure");
+                release_read_promise.set_value();
+                Check(frame.get().succeeded && heartbeat.get().succeeded,
+                    "serialized frame and heartbeat commands must both complete after release");
+            }
             Check(backend.StopContinuousLiveView(ContinuousRequest(
                       HardwareCameraAgentOperation::stop_live_view,
                       owner_session)).succeeded,
@@ -4442,6 +4464,91 @@ void TestProductionContinuousLiveViewContracts() {
     } catch (const std::exception& error) {
         ++failures;
         std::cerr << "FAIL: production continuous Live View contract threw: "
+                  << error.what() << '\n';
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(root, cleanup_error);
+}
+
+// GitHub Issue #217: the continuous Live View contract tests must not depend
+// on the per-user dual-delegation marker of the machine running the suite.
+// This test pins the isolation seams themselves: the product default stays
+// untouched, the seams are validated as a pair, and a marker inside the test
+// marker root still fails closed before any SDK access.
+void TestContinuousLiveViewLeaseIsolation() {
+    const fs::path root = fs::temp_directory_path() /
+        ("a0-agent-continuous-live-view-lease-test-" + NewRunId());
+    const std::string owner_session(32, 'a');
+    try {
+        const auto defaults = ProductionHardwareCameraAgentConfig::Defaults();
+        Check(defaults.continuous_live_view_lease_name_for_testing.empty() &&
+                  defaults.continuous_live_view_marker_root_for_testing.empty(),
+            "product defaults must leave the Live View lease isolation seams empty "
+            "so the product lease name and LocalAppData marker root stay in force");
+
+        const auto constructor_rejects = [&](auto mutate, std::string_view name) {
+            auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+            auto config = ContinuousLiveViewTestConfig(root / "pairing", state);
+            mutate(config);
+            bool threw = false;
+            try {
+                ProductionHardwareCameraAgentBackend backend(config);
+                (void)backend;
+            } catch (const std::invalid_argument&) {
+                threw = true;
+            }
+            Check(threw, name);
+        };
+        constructor_rejects(
+            [](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_marker_root_for_testing.clear();
+            },
+            "a test lease name without a test marker root must be rejected");
+        constructor_rejects(
+            [](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_lease_name_for_testing.clear();
+            },
+            "a test marker root without a test lease name must be rejected");
+        constructor_rejects(
+            [](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_sdk_factory_for_testing = {};
+                config.continuous_live_view_identity_resolver_for_testing = {};
+            },
+            "a test lease must never be combined with the real SDK transport");
+
+        auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
+        const auto config = ContinuousLiveViewTestConfig(root / "marker", state);
+        const fs::path marker =
+            config.continuous_live_view_marker_root_for_testing /
+            "armed-session-1.marker";
+        WriteText(marker, "test-only armed marker");
+        ProductionHardwareCameraAgentBackend backend(config);
+        const auto blocked = backend.StartContinuousLiveView(ContinuousRequest(
+            HardwareCameraAgentOperation::start_live_view, owner_session));
+        Check(!blocked.succeeded &&
+                  blocked.error_category == "camera_control_delegation_quarantined" &&
+                  state->enumerate_calls == 0 && state->open_calls == 0 &&
+                  state->start_calls == 0,
+            "an armed marker in the test marker root must fail closed before any SDK access");
+        const auto orphan_read = backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+            HardwareCameraAgentOperation::read_live_view_frame, owner_session));
+        Check(!orphan_read.succeeded &&
+                  orphan_read.error_category == "live_view_session_not_found" &&
+                  state->read_calls == 0,
+            "a rejected start must leave no session to read from");
+
+        fs::remove(marker);
+        const auto started = backend.StartContinuousLiveView(ContinuousRequest(
+            HardwareCameraAgentOperation::start_live_view, owner_session));
+        Check(started.succeeded && state->start_calls == 1,
+            "removing only the test marker must let the same backend start");
+        Check(backend.StopContinuousLiveView(ContinuousRequest(
+                  HardwareCameraAgentOperation::stop_live_view,
+                  owner_session)).succeeded,
+            "the isolated session must stop cleanly");
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: continuous Live View lease isolation threw: "
                   << error.what() << '\n';
     }
     std::error_code cleanup_error;
@@ -4861,6 +4968,7 @@ int main(int argc, char** argv) {
     TestSingleIdentityV3SdkStatusRoutingStopsBeforeSdkOnWpdFailure();
     TestContinuousLiveViewV2Protocol();
     TestProductionContinuousLiveViewContracts();
+    TestContinuousLiveViewLeaseIsolation();
     TestContinuousLiveViewFrameBudgetIsolation();
     TestTimeoutEnvironmentOverrides();
     TestRealEnvironmentVariableWrapsWin32Api();

@@ -490,6 +490,13 @@ struct ProductionHardwareCameraAgentConfig {
         continuous_live_view_identity_resolver_for_testing;
     std::function<std::chrono::steady_clock::time_point()>
         continuous_live_view_clock_for_testing;
+    // Continuous Live View lease isolation seams. Production launchers leave
+    // both empty and keep the production lease name and the per-user marker
+    // root. They must be supplied together, and only with the test SDK
+    // factory, so a test lease can never guard a real SDK transport. The name
+    // must be a test lease name accepted by HardwareProcessLease.
+    std::string continuous_live_view_lease_name_for_testing;
+    std::filesystem::path continuous_live_view_marker_root_for_testing;
 
     [[nodiscard]] static ProductionHardwareCameraAgentConfig Defaults();
 };

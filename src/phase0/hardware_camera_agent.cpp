@@ -3512,6 +3512,19 @@ public:
             throw std::invalid_argument(
                 "continuous Live View test SDK factory and identity resolver must be configured together");
         }
+        const bool lease_name_configured =
+            !config_.continuous_live_view_lease_name_for_testing.empty();
+        const bool marker_root_configured =
+            !config_.continuous_live_view_marker_root_for_testing.empty();
+        if (lease_name_configured != marker_root_configured) {
+            throw std::invalid_argument(
+                "continuous Live View test lease name and marker root must be configured together");
+        }
+        if (lease_name_configured &&
+            !config_.continuous_live_view_sdk_factory_for_testing) {
+            throw std::invalid_argument(
+                "continuous Live View test lease isolation requires the test SDK factory");
+        }
     }
 
     SingleCameraReadinessResult GetSingleReadiness(std::string_view camera_alias) {
@@ -4109,7 +4122,13 @@ public:
             return result;
         }
         try {
-            live_view_lease_ = std::make_unique<HardwareProcessLease>();
+            live_view_lease_ =
+                config_.continuous_live_view_lease_name_for_testing.empty()
+                    ? std::make_unique<HardwareProcessLease>()
+                    : std::make_unique<HardwareProcessLease>(
+                          config_.continuous_live_view_lease_name_for_testing,
+                          std::chrono::milliseconds::zero(),
+                          config_.continuous_live_view_marker_root_for_testing);
             live_view_sdk_ = config_.continuous_live_view_sdk_factory_for_testing
                 ? config_.continuous_live_view_sdk_factory_for_testing()
                 : std::make_unique<NikonContinuousLiveViewSdkTransport>();
