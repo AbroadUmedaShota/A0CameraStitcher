@@ -440,7 +440,7 @@ public partial class MainWindow : Window
         var current = _viewModel.CaptureRecoveryOnlyExportDirectory;
         var dialog = new OpenFolderDialog
         {
-            Title = "検証済み原画像の保存先を選択（このPC内のフォルダのみ）",
+            Title = "原画像の保存先を選択（このPC内のフォルダのみ）",
             Multiselect = false,
         };
         if (!string.IsNullOrWhiteSpace(current) && Directory.Exists(current))

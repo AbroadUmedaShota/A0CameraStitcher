@@ -281,10 +281,30 @@ public static class HardwareArtifactVerifier
         path.StartsWith("//", StringComparison.Ordinal);
 }
 
+/// <summary>
+/// A dual-original export published at least one file and then failed on a later one. The
+/// already-published files are intentionally left in place (no rollback); this exception
+/// carries their paths so the caller can record and report them.
+/// </summary>
+public sealed class DualExportPartiallyPublishedException : IOException
+{
+    public DualExportPartiallyPublishedException(IEnumerable<string> publishedPaths, Exception innerException)
+        : base(
+            "A dual-original export failed after publishing " +
+            $"{publishedPaths.Count()} file(s): {innerException.Message}",
+            innerException)
+    {
+        PublishedPaths = Array.AsReadOnly(publishedPaths.ToArray());
+    }
+
+    public IReadOnlyList<string> PublishedPaths { get; }
+}
+
 public sealed class HardwareOriginalExporter
 {
     private readonly string _exportDirectory;
     private readonly Func<string, CancellationToken, Task>? _afterLockedVerificationForTesting;
+    private readonly Func<int, string, CancellationToken, Task>? _beforeDualPublishForTesting;
 
     public HardwareOriginalExporter(string exportDirectory)
         : this(exportDirectory, afterLockedVerificationForTesting: null)
@@ -293,7 +313,8 @@ public sealed class HardwareOriginalExporter
 
     internal HardwareOriginalExporter(
         string exportDirectory,
-        Func<string, CancellationToken, Task>? afterLockedVerificationForTesting)
+        Func<string, CancellationToken, Task>? afterLockedVerificationForTesting,
+        Func<int, string, CancellationToken, Task>? beforeDualPublishForTesting = null)
     {
         if (string.IsNullOrWhiteSpace(exportDirectory))
         {
@@ -302,6 +323,7 @@ public sealed class HardwareOriginalExporter
 
         _exportDirectory = Path.GetFullPath(exportDirectory);
         _afterLockedVerificationForTesting = afterLockedVerificationForTesting;
+        _beforeDualPublishForTesting = beforeDualPublishForTesting;
     }
 
     public string ExportDirectory => _exportDirectory;
@@ -334,16 +356,18 @@ public sealed class HardwareOriginalExporter
                 original.Path, original.SizeBytes, original.Sha256, baseName, cancellationToken)
             .ConfigureAwait(false);
 
-        if (_afterLockedVerificationForTesting is not null)
-        {
-            await _afterLockedVerificationForTesting(finalPath + ".partial", cancellationToken)
-                .ConfigureAwait(false);
-        }
-
         // The same write-locked, verified file handle is renamed. A competing
         // path replacement can therefore never become the accepted product JPEG.
+        // The handle is owned by this block from the moment staging returns, so a
+        // failing test hook cannot leave it locked.
         await using (lockedFile)
         {
+            if (_afterLockedVerificationForTesting is not null)
+            {
+                await _afterLockedVerificationForTesting(finalPath + ".partial", cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             WindowsDurableFilePublisher.PublishLocked(
                 lockedFile,
                 finalPath,
@@ -355,9 +379,13 @@ public sealed class HardwareOriginalExporter
     /// <summary>
     /// Exports one or two already-verified CaptureRecoveryOnly dual-camera originals
     /// (Succeeded: CAM-A and CAM-B; FailedPartial with a CAM-A-only retained original: one
-    /// file) as byte-identical copies. Every original is written, locked, and reread-verified
-    /// before any rename occurs — one failed original can therefore never leave a lone sibling
-    /// published under a final name (see GitHub Issue #226).
+    /// file) as byte-identical copies. The work runs in two phases. Staging writes, locks, and
+    /// reread-verifies every original without renaming anything, so a failure while staging
+    /// never publishes any file. Publishing then renames the staged files one at a time; if a
+    /// rename fails after at least one earlier file was published, that earlier file stays in
+    /// place (nothing is deleted) and the failure is reported as
+    /// <see cref="DualExportPartiallyPublishedException"/> so the caller can record and show
+    /// exactly which files exist (see GitHub Issue #226).
     /// </summary>
     public async Task<IReadOnlyList<string>> ExportDualOriginalsAsync(
         IReadOnlyList<CanonicalJpegOriginal> originals,
@@ -381,18 +409,32 @@ public sealed class HardwareOriginalExporter
         {
             throw new InvalidDataException("Export transaction directory is invalid.");
         }
+        // The transaction directory is derived by the caller from a trusted root and the
+        // transaction ID; requiring its leaf to be that ID ties the two together here too.
+        if (!string.Equals(
+                Path.GetFileName(Path.TrimEndingDirectorySeparator(transactionDirectory)),
+                transactionId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Export transaction directory does not belong to the transaction ID.");
+        }
+
+        // Validate every original's provenance before any byte is written.
+        foreach (var original in originals)
+        {
+            var expectedPath = Path.GetFullPath(
+                Path.Combine(transactionDirectory, original.Alias, "original.jpg"));
+            HardwareArtifactVerifier.ValidateExpectedRecord(
+                original.Path, original.SizeBytes, original.Sha256, "original.jpg", expectedPath);
+        }
         EnsureExportDirectoryIsSafe();
 
         var staged = new List<(FileStream LockedFile, string FinalPath)>(originals.Count);
+        var finalPaths = new List<string>(originals.Count);
         try
         {
             foreach (var original in originals)
             {
-                var expectedPath = Path.GetFullPath(
-                    Path.Combine(transactionDirectory, original.Alias, "original.jpg"));
-                HardwareArtifactVerifier.ValidateExpectedRecord(
-                    original.Path, original.SizeBytes, original.Sha256, "original.jpg", expectedPath);
-
                 var baseName =
                     $"A0-dual-{now.UtcDateTime:yyyyMMdd-HHmmssfff}-{original.Alias}-{transactionId[..8]}";
                 staged.Add(await StageVerifiedOriginalAsync(
@@ -402,24 +444,53 @@ public sealed class HardwareOriginalExporter
 
             // Only now that every original has been written, locked, and reread-verified do
             // any of the staged files get their final name.
-            var finalPaths = new List<string>(staged.Count);
             foreach (var (lockedFile, finalPath) in staged)
             {
-                WindowsDurableFilePublisher.PublishLocked(lockedFile, finalPath, replaceExisting: false);
+                try
+                {
+                    if (_beforeDualPublishForTesting is not null)
+                    {
+                        await _beforeDualPublishForTesting(finalPaths.Count, finalPath, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    WindowsDurableFilePublisher.PublishLocked(lockedFile, finalPath, replaceExisting: false);
+                }
+                catch (Exception exception) when (finalPaths.Count > 0 && exception is not OutOfMemoryException)
+                {
+                    throw new DualExportPartiallyPublishedException(finalPaths, exception);
+                }
                 finalPaths.Add(finalPath);
             }
             return finalPaths;
         }
         finally
         {
-            foreach (var (lockedFile, _) in staged)
+            foreach (var (lockedFile, finalPath) in staged)
             {
                 await lockedFile.DisposeAsync().ConfigureAwait(false);
+                if (!finalPaths.Contains(finalPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    DeleteUnpublishedStagedFile(finalPath + ".partial");
+                }
             }
         }
     }
 
-    private void EnsureExportDirectoryIsSafe()
+    // Best effort: a staged file that was verified but never published is not diagnostic
+    // evidence of a failed copy, so it should not be left behind in the operator's folder.
+    private static void DeleteUnpublishedStagedFile(string partialPath)
+    {
+        try
+        {
+            File.Delete(partialPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Leaving the file is harmless; it cannot be mistaken for a published original.
+        }
+    }
+
+    internal void EnsureExportDirectoryIsSafe()
     {
         WindowsLocalPathGuard.EnsureExistingChainIsLocalAndNotReparse(_exportDirectory);
         Directory.CreateDirectory(_exportDirectory);
