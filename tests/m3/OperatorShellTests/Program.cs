@@ -299,10 +299,20 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=104 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=105 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
+try
+{
+    RunSyncOnStaRenderThread(LiveRegionContracts.Run);
+    Console.WriteLine("PASS LiveSetting text regions raise LiveRegionChanged on a text change, and not on empty text, an unchanged text, Off, or before the window is shown (#238)");
+}
+catch (Exception exception)
+{
+    failures.Add("LiveSetting text regions raise LiveRegionChanged on a text change, and not on empty text, an unchanged text, Off, or before the window is shown (#238)");
+    Console.Error.WriteLine($"FAIL LiveSetting text regions raise LiveRegionChanged on a text change, and not on empty text, an unchanged text, Off, or before the window is shown (#238): {exception}");
+}
 try
 {
     await PersistentHardwareCameraAgentPipeFailuresAsync();
