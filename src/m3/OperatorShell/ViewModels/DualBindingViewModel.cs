@@ -309,6 +309,9 @@ public sealed class DualBindingViewModel : ObservableObject
         DualBindingPhase.Collecting => "表示中のカメラを CAM-A / CAM-B に割り当ててください",
         DualBindingPhase.Summary => "割当を確認してください",
         DualBindingPhase.Ready => "機体照合が完了しました",
+        // Window close is waiting on the Agent's own exit; "re-binding" would point at an
+        // action that is locked in this state.
+        DualBindingPhase.Invalid when IsShutdownBlocked => "カメラの終了を待っています",
         _ => "再 binding が必要です",
     };
 
@@ -473,6 +476,7 @@ public sealed class DualBindingViewModel : ObservableObject
         {
             if (SetProperty(ref _shutdownBlocked, value))
             {
+                OnPropertyChanged(nameof(HeadlineText));
                 NotifyCommandsChanged();
             }
         }
@@ -526,18 +530,21 @@ public sealed class DualBindingViewModel : ObservableObject
 
     /// <summary>
     /// Reports that the window-close path could not confirm the Agent's exit (issue #225).
-    /// <paramref name="blockingCode"/> is the existing typed status code (unchanged, for
-    /// callers that already match on it). <paramref name="blockingDetail"/> is the
-    /// additional reason text the code alone does not carry. <paramref
-    /// name="remainingAgentLifetimeEstimate"/> is <see
-    /// cref="DualCameraAgentLifecycle.EstimateRemainingAgentLifetime"/>'s result: null or
-    /// <see cref="TimeSpan.Zero"/> both mean "no usable estimate -- the Agent may already
-    /// have exited", never a negative wait.
+    /// <paramref name="blockingCode"/> and <paramref name="blockingDetail"/> are technical
+    /// information for support staff; both are sanitized (single line, bounded) and shown
+    /// last, under a "technical staff" label. <paramref name="remainingAgentLifetimeEstimate"/>
+    /// is <see cref="DualCameraAgentLifecycle.EstimateRemainingAgentLifetime"/>'s result and
+    /// selects one of three wordings: positive = still waiting (with an approximate end time),
+    /// <see cref="TimeSpan.Zero"/> = the budget has elapsed so the Agent has probably exited,
+    /// null = the remaining time cannot be determined. <paramref name="nowUtc"/> exists so the
+    /// end-time hint is deterministic in tests; production callers omit it.
+    /// Display only: nothing here sends to native, starts or ends a process, or retries.
     /// </summary>
     public void ReportShutdownBlocked(
         string blockingCode,
         string blockingDetail = "",
-        TimeSpan? remainingAgentLifetimeEstimate = null)
+        TimeSpan? remainingAgentLifetimeEstimate = null,
+        DateTimeOffset? nowUtc = null)
     {
         // A timeout after ActivateCapture must keep the one-way handoff marker:
         // the next explicit window-close attempt must wait again, never send the
@@ -546,20 +553,66 @@ public sealed class DualBindingViewModel : ObservableObject
         ClearSessionSurface(preserveCaptureHostActivationAcknowledgement: true);
         IsShutdownBlocked = true;
         Phase = DualBindingPhase.Invalid;
-        var waitGuidance = remainingAgentLifetimeEstimate is { } remaining && remaining > TimeSpan.Zero
-            ? "カメラ制御（Agent）が自然に終了するまで、あと約" +
-              Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes)) +
-              "分かかる見込みです。終了を待ってから、もう一度ウィンドウを閉じてください。自動では閉じません。"
-            : "カメラ制御（Agent）は終了している可能性があります。もう一度ウィンドウを閉じてください。自動では閉じません。";
-        var statusText = string.IsNullOrWhiteSpace(blockingDetail)
-            ? $"（状態: {blockingCode}）"
-            : $"（状態: {blockingCode}。詳細: {blockingDetail}）";
-        InvalidationText =
-            "実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。" +
-            waitGuidance +
-            statusText +
-            "それでも解消しない場合は技術担当者に確認してください。";
+        InvalidationText = BuildShutdownBlockedText(
+            blockingCode, blockingDetail, remainingAgentLifetimeEstimate, nowUtc ?? DateTimeOffset.UtcNow);
         Notify(InvalidationText, "block");
+    }
+
+    /// <summary>
+    /// How long past the displayed estimate the operator is told to wait before escalating.
+    /// Operator guidance only; unrelated to the Agent's own lifetime budget.
+    /// </summary>
+    private const int ShutdownEscalationMinutes = 10;
+
+    private static string BuildShutdownBlockedText(
+        string blockingCode,
+        string blockingDetail,
+        TimeSpan? remainingAgentLifetimeEstimate,
+        DateTimeOffset nowUtc)
+    {
+        const string KeepHandsOff = "カメラに触らず、他のカメラアプリも使わないでください。";
+        const string RetryIsHarmless = "早すぎる再試行は無害で、撮影結果と採用の記録は変わりません。";
+        const string NoForcedAction = "自動再試行や Camera Agent の強制終了は行いません。";
+        const string CloseAgain = "画面右上の ✕ でもう一度閉じてください。";
+
+        string guidance;
+        if (remainingAgentLifetimeEstimate is { } remaining && remaining > TimeSpan.Zero)
+        {
+            var minutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+            var estimatedEnd = (nowUtc + remaining).ToLocalTime()
+                .ToString("HH:mm", CultureInfo.InvariantCulture);
+            guidance =
+                "Camera Agent が自動で終了するのを待っています。" +
+                $"あと約{minutes}分（目安 {estimatedEnd} ごろ）かかる見込みです。" +
+                KeepHandsOff +
+                "目安の時刻を過ぎたら、" + CloseAgain +
+                RetryIsHarmless + NoForcedAction +
+                $"目安の時刻から {ShutdownEscalationMinutes} 分過ぎても閉じられない場合は、技術担当者に連絡してください。";
+        }
+        else if (remainingAgentLifetimeEstimate is { })
+        {
+            guidance =
+                "Camera Agent はすでに終了している可能性があります。" +
+                KeepHandsOff + CloseAgain +
+                RetryIsHarmless + NoForcedAction +
+                "もう一度閉じても解消しない場合は、技術担当者に連絡してください。";
+        }
+        else
+        {
+            guidance =
+                "Camera Agent が終了するのを待っています。終了までの残り時間は確認できません。" +
+                KeepHandsOff +
+                "しばらく待ってから、" + CloseAgain +
+                RetryIsHarmless + NoForcedAction +
+                "しばらく待っても閉じられない場合は、技術担当者に連絡してください。";
+        }
+
+        var code = A0CameraStitcher.M3.OperatorShell.Hardware.HardwareDualWindowShutdownOutcome.SanitizeDetail(blockingCode);
+        var detail = A0CameraStitcher.M3.OperatorShell.Hardware.HardwareDualWindowShutdownOutcome.SanitizeDetail(blockingDetail);
+        var technical = detail.Length == 0
+            ? $"技術担当者向け: 状態 {code}"
+            : $"技術担当者向け: 状態 {code} / 詳細 {detail}";
+        return guidance + "\n" + technical;
     }
 
     /// <summary>

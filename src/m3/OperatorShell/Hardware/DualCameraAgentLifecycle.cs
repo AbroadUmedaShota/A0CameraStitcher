@@ -49,8 +49,8 @@ public sealed class DualCameraAgentLifecycle :
     /// not control the Agent process; the native side owns that budget on its own clock.
     /// It exists only so the operator-facing shutdown-blocked message can estimate how much
     /// longer a natural exit may take (issue #225). There is no shared build-time source
-    /// between the C++ and C# sides in this repository, so the two values must be kept
-    /// equal by hand if the native budget ever changes.
+    /// between the C++ and C# sides in this repository, so the two values are kept equal by
+    /// hand; OperatorShellTests reads the native header and fails if they diverge.
     /// </summary>
     public static readonly TimeSpan AgentMaxLifetime = TimeSpan.FromMinutes(10);
 
@@ -158,8 +158,10 @@ public sealed class DualCameraAgentLifecycle :
     /// The current Agent process's own start time (in UTC), used only to let the
     /// shutdown-blocked UI estimate how much of <see cref="AgentMaxLifetime"/> remains
     /// (issue #225). Null once there is no process handle or its start time cannot be
-    /// read; callers must treat that the same as "unknown remaining time", never as zero
-    /// elapsed.
+    /// read; callers must treat that as "unknown remaining time", never as zero elapsed.
+    /// This is a wall-clock reading, while the native budget runs on a monotonic clock that
+    /// starts slightly after process start; a system clock change or that startup gap makes
+    /// the estimate approximate, which is why the UI presents it as a guide ("約", "目安").
     /// </summary>
     public DateTimeOffset? CurrentProcessStartTimeUtc
     {
@@ -176,8 +178,12 @@ public sealed class DualCameraAgentLifecycle :
                 return new DateTimeOffset(process.StartTime.ToUniversalTime());
             }
             catch (Exception exception) when (
-                exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                exception is InvalidOperationException or ObjectDisposedException or
+                System.ComponentModel.Win32Exception)
             {
+                // A handle disposed concurrently by DisposeAsync reads as "unknown", the
+                // same as IsProcessGenerationAlive; this getter runs from the async-void
+                // window-close handler, where an escaped exception would crash the app.
                 return null;
             }
         }
@@ -185,14 +191,14 @@ public sealed class DualCameraAgentLifecycle :
 
     /// <summary>
     /// Pure helper (issue #225) for the shutdown-blocked UI: how much of the Agent's fixed
-    /// lifetime budget is likely left, given when it started and the current time. Returns
-    /// null when the start time is unknown -- callers must not treat that as "no time
-    /// remaining" and must not treat it as "fully remaining" either; it means the estimate
-    /// cannot be made at all. Returns <see cref="TimeSpan.Zero"/> both when the budget has
-    /// already elapsed and when it is exactly exhausted, so callers can use a single
-    /// "may already have exited" branch for both. A start time that reads as being in the
-    /// future (clock skew, or a read racing the process's own start) is clamped to zero
-    /// elapsed rather than reported as more than the full budget remaining.
+    /// lifetime budget is likely left, given when it started and the current time. The three
+    /// outcomes stay distinct because the UI words them differently: a positive value is the
+    /// remaining wait; <see cref="TimeSpan.Zero"/> means the budget has already elapsed (or is
+    /// exactly exhausted), so the Agent has probably exited; null means the start time is
+    /// unknown and no estimate can be made -- it is neither "no time remaining" nor "fully
+    /// remaining". A start time that reads as being in the future (clock skew, or a read racing
+    /// the process's own start) is clamped to zero elapsed rather than reported as more than the
+    /// full budget remaining.
     /// </summary>
     public static TimeSpan? EstimateRemainingAgentLifetime(DateTimeOffset? agentStartTimeUtc, DateTimeOffset nowUtc)
     {

@@ -1518,7 +1518,7 @@
                                 <TextBlock Text="{Binding DualBinding.InvalidationText}" TextWrapping="Wrap"
                                            Foreground="{StaticResource BlockerBrush}"
                                            AutomationProperties.LiveSetting="Assertive"
-                                           AutomationProperties.Name="再bindingが必要な理由" />
+                                           AutomationProperties.Name="機体照合の状態の説明" />
                             </Border>
 
                             <!-- 候補の選択。ListBox にしているのは矢印キーだけで候補を移動でき、
