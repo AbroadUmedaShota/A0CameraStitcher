@@ -15,6 +15,7 @@ internal static class HardwareReplayContracts
         FixtureFilesAreAnonymizedAndSelfConsistent();
         AnonymizationRulesRejectKnownBadShapes();
         AnonymizationRulesCloseTheKnownGaps();
+        AnonymizationRulesCloseTheGapsOfTheSecondAudit();
         OperatorInputsAndDurableStateLoadThroughProductionReaders();
         await SingleCameraProfileApprovalReproducesTheRealApprovedProfileAsync();
         await SingleCameraReplaySavesThroughViewModelAsync();
@@ -305,6 +306,186 @@ internal static class HardwareReplayContracts
         {
             HardwareReplayFixtures.DeleteTestRoot(folderRoot);
         }
+    }
+
+    // GitHub Issue #243: the gaps the second security audit found (the file names, images inside
+    // JSON strings, digit runs next to letters, the date forms and the JPEG tables). Every input is
+    // invented. Where a rule is narrowed, the synthetic shapes the fixtures use must still pass.
+    private static void AnonymizationRulesCloseTheGapsOfTheSecondAudit()
+    {
+        IReadOnlySet<string> allowed = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<string> noNeedles = [];
+
+        IReadOnlyList<string> ScanJson(string sample, IReadOnlyList<string>? needles = null) =>
+            HardwareReplayAnonymizationRules.Scan("sample.json", sample, allowed, isDocumentation: false, needles ?? noNeedles);
+
+        void MustReject(string gap, string sample, string? messagePart = null)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count > 0, $"The anonymization scan missed ({gap}): {sample}");
+            if (messagePart is not null)
+                Check.True(problems.Any(problem => problem.Contains(messagePart, StringComparison.Ordinal)),
+                    $"The anonymization scan rejected ({gap}) for another reason than '{messagePart}': {string.Join("; ", problems)}");
+        }
+
+        void MustAccept(string what, string sample)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count == 0, $"The anonymization scan must accept {what}: {string.Join("; ", problems)}");
+        }
+
+        // M-2: the names of the files are published too.
+        var folderRoot = HardwareReplayFixtures.NewTestRoot();
+        try
+        {
+            foreach (var (gap, relative) in new[]
+                     {
+                         ("13-digit epoch in a file name", "single-camera/events-1700000000123.json"),
+                         ("10-digit epoch in a directory name", "dual-camera/1700000000/events.json"),
+                         ("hexadecimal run in a file name", "single-camera/0123456789abcdef0123.json"),
+                         ("32-digit hexadecimal ID in a directory name", "0123456789abcdef0123456789abcdef/x.json"),
+                         ("date in a file name", "single-camera/events-2025-06-15.json"),
+                         ("compact date in a file name", "single-camera/events-20250615.json"),
+                         ("7-digit number in a file name", "single-camera/cam1234567.json"),
+                         ("e-mail address in a file name", "single-camera/someone@example.invalid.json"),
+                     })
+            {
+                var path = Path.Combine(folderRoot, relative.Replace('/', Path.DirectorySeparatorChar));
+                System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, "{}");
+                var problems = HardwareReplayAnonymizationRules.CheckFileSet(folderRoot, noNeedles);
+                Check.True(problems.Any(problem => problem.Contains("(file name)", StringComparison.Ordinal)),
+                    $"The file-set check missed ({gap}).");
+                File.Delete(path);
+                System.IO.Directory.Delete(Path.GetDirectoryName(path)!, recursive: false);
+            }
+            foreach (var relative in new[]
+                     {
+                         "single-camera/transaction.json",
+                         "dual-camera/failed-cam-a/pair-journal.json",
+                         "dual-camera/succeeded/diagnostics-cam-a.events.jsonl",
+                         "images/single-cam-a.jpg.b64",
+                         "single-camera/events-2026-01-05.json",
+                         "f231a0010000000000000000000000a1/x.json",
+                     })
+            {
+                Check.True(
+                    HardwareReplayAnonymizationRules.ScanRelativePath(relative, noNeedles).Count == 0,
+                    $"The file-name check must accept {relative}.");
+            }
+            var named = Path.Combine(folderRoot, "dual-camera");
+            System.IO.Directory.CreateDirectory(named);
+            File.WriteAllText(Path.Combine(named, "fictional-host-77.json"), "{}");
+            Check.True(
+                HardwareReplayAnonymizationRules.CheckFileSet(folderRoot, ["fictional-host-77"])
+                    .Any(problem => problem.Contains("PC name or user profile", StringComparison.Ordinal)),
+                "The PC name of this machine must be looked for in the file names too.");
+        }
+        finally
+        {
+            HardwareReplayFixtures.DeleteTestRoot(folderRoot);
+        }
+
+        // M-3: base64 inside JSON strings. Start from a dummy image of the fixtures.
+        var good = HardwareReplayFixtures.ReadJpeg("single-cam-a");
+        var goodB64 = Convert.ToBase64String(good);
+        var notAnImage = Convert.ToBase64String(Encoding.UTF8.GetBytes(new string('x', 120)));
+        var fakeJpeg = new byte[300];
+        fakeJpeg[0] = 0xFF; fakeJpeg[1] = 0xD8; fakeJpeg[2] = 0xFF; fakeJpeg[3] = 0xE0;
+        fakeJpeg[^2] = 0xFF; fakeJpeg[^1] = 0xD9;
+        var fakeJpegB64 = Convert.ToBase64String(fakeJpeg);
+        MustAccept("a dummy image under a *Base64 key", "{\"frameJpegBase64\":\"" + goodB64 + "\"}");
+        MustAccept("a dummy image under a *Base64 key (other spelling)", "{\"frameBase64\":\"" + goodB64 + "\"}");
+        MustAccept("an empty value under a *Base64 key", "{\"frameBase64\":\"\",\"other\":null}");
+        MustAccept("a dummy image with JSON-escaped slashes", "{\"frameBase64\":\"" + goodB64.Replace("/", "\\/", StringComparison.Ordinal) + "\"}");
+        MustAccept("a dummy image under a neutral key", "{\"frame\":\"" + goodB64 + "\"}");
+        MustReject("a JPEG-looking image under a *Base64 key", "{\"frameJpegBase64\":\"" + fakeJpegB64 + "\"}", "embedded base64");
+        MustReject("a JPEG-looking image under a neutral key", "{\"preview\":\"" + fakeJpegB64 + "\"}", "embedded base64");
+        MustReject("a short value under a *Base64 key", "{\"thumbBase64\":\"AAAA\"}");
+        MustReject("text that is not an image under a *Base64 key", "{\"frameBase64\":\"" + notAnImage + "\"}");
+        MustReject("text that is not an image in a long neutral value", "{\"note\":\"" + notAnImage + "\"}");
+        MustReject("a number under a *Base64 key", "{\"frameBase64\":12345}", "must be a string");
+        MustReject("a URL-safe base64 image", "{\"x\":\"" + fakeJpegB64.Replace('+', '-').Replace('/', '_') + "\"}");
+        MustReject("a base64 image wrapped at 76 characters",
+            "{\"x\":\"" + string.Join("\\n", Enumerable.Range(0, (fakeJpegB64.Length + 75) / 76)
+                .Select(i => fakeJpegB64.Substring(i * 76, Math.Min(76, fakeJpegB64.Length - i * 76)))) + "\"}");
+        MustReject("a base64 string that cannot be decoded", "{\"x\":\"" + new string('A', 65) + "\"}");
+        MustReject("a dummy image with one more byte of text in the image data",
+            "{\"frameBase64\":\"" + Convert.ToBase64String(WithImageText(good, "Serial 1")) + "\"}");
+        MustAccept("a long prose value with spaces", "{\"detail\":\"" + string.Join(' ', Enumerable.Repeat("camera", 14)) + "\"}");
+        MustAccept("a 64-digit synthetic hexadecimal value", "{\"sha256\":\"f231" + new string('0', 58) + "f1\"}");
+
+        // M-4: a digit run next to a letter or a hyphen, and the synthetic IDs as whole shapes.
+        MustReject("body serial with a prefix", "{\"id\":\"CAM-A-1234567\"}", "7-digit number");
+        MustReject("body serial glued to letters before", "{\"id\":\"SN1234567\"}", "7-digit number");
+        MustReject("body serial glued to letters after", "{\"id\":\"1234567ABC\"}", "7-digit number");
+        MustReject("digit run behind a hyphen", "{\"id\":\"cam-1234567-x\"}", "7-digit number");
+        MustReject("a run ID with a prefix", "{\"id\":\"x-run-231001-1\"}", "6-digit number");
+        MustReject("a run ID with a letter behind", "{\"id\":\"run-231001-1x\"}", "6-digit number");
+        MustReject("a run ID with a longer number", "{\"id\":\"run-2310011-1\"}", "7-digit number");
+        MustReject("a run ID with a longer counter", "{\"id\":\"run-231001-12\"}", "6-digit number");
+        MustReject("a run ID with another number behind", "{\"id\":\"hybrid-tx-231002-3-1234567\"}", "6-digit number");
+        MustReject("a run ID outside the 231 range", "{\"id\":\"run-241001-1\"}", "6-digit number");
+        MustReject("an sdkVersion-like value under another key", "{\"note\":\"0x3010000+windows-wpd-1\"}", "7-digit number");
+        MustReject("an sdkVersion that is not one of the known values", "{\"sdkVersion\":\"0x3010000+other\"}", "7-digit number");
+        MustAccept(
+            "the synthetic run IDs",
+            "{\"runId\":\"run-231001-1\",\"tx\":\"hybrid-tx-231002-3\",\"a\":\"dual-leg-CAM-A-run-231002-2\"," +
+            "\"b\":\"dual-leg-CAM-B-run-231003-4\",\"p\":\"C:\\\\a0-replay-fixture\\\\run-231001-1\\\\hybrid-tx-231002-5\\\\CAM-A\"}");
+        MustAccept(
+            "the sdkVersion values the Agent wrote",
+            "{\"sdkVersion\": \"0x3010000+windows-wpd-1;access=read-write;qos=impersonation;command-target=functional\"," +
+            "\"sdkVersion\":\"Nikon-D810-licensed-dual-session\"}");
+        MustAccept("a decimal fraction and a fractional-second time", "{\"ratio\":1234567.5,\"t\":\"2026-01-05T05:05:32.3127834Z\"}");
+
+        // M-5 is the local script's; L-2: the shapes the first versions did not read.
+        MustReject("date as M/d/yyyy", "{\"day\":\"6/15/2026\"}", "date at offset");
+        MustReject("date as d.M.yyyy", "{\"day\":\"15.06.2026\"}", "date at offset");
+        MustReject("date as d/M/yyyy in another year", "{\"day\":\"15/1/2025\"}", "date at offset");
+        MustReject("date as RFC 1123", "{\"day\":\"Mon, 15 Jun 2026 05:05:32 GMT\"}", "date at offset");
+        MustReject("date with a month name first", "{\"day\":\"June 15, 2026\"}", "date at offset");
+        MustReject("date with one-digit parts", "{\"day\":\"2026-6-15\"}", "date at offset");
+        MustReject("date with one-digit parts and slashes", "{\"day\":\"2026/6/5\"}", "date at offset");
+        MustReject("a camera file name with a date and time", "{\"file\":\"DSC_20260615050532\"}", "date and time at offset");
+        MustAccept("one-digit and RFC 1123 dates inside the shifted month",
+            "{\"a\":\"1/5/2026\",\"b\":\"5.1.2026\",\"c\":\"2026-1-5\",\"d\":\"Thu, 15 Jan 2026 05:05:32 GMT\",\"e\":\"Jan 15, 2026\"}");
+        MustReject("Windows SID", "{\"u\":\"S-1-5-21-12-34-56\"}", "Windows SID");
+        MustReject("Windows SID with a relative ID", "{\"u\":\"S-1-5-21-12-34-56-1001\"}", "Windows SID");
+        MustReject("UNC server name with doubled backslashes", "{\"p\":\"\\\\\\\\fileserver\\\\share\\\\x\"}", "UNC path");
+        MustReject("UNC server name", "{\"p\":\"\\\\fileserver\\share\"}", "UNC path");
+        MustReject("UNC server name with slashes", "{\"p\":\"//fileserver/share/x\"}", "UNC path");
+        MustAccept("a double slash inside a value and the synthetic path", "{\"u\":\"key:value//x/y\",\"p\":\"C:\\\\a0-replay-fixture\\\\x\"}");
+        MustReject("lower-case DESKTOP- host name", "{\"n\":\"desktop-abcdefg\"}", "host name");
+        MustReject("mixed-case DESKTOP- host name", "{\"n\":\"Desktop-AbCdEfG\"}", "host name");
+        MustReject("lower-case WIN- host name", "{\"n\":\"win-abcdefghijk\"}", "host name");
+        MustAccept("runtime identifiers", "{\"a\":\"win-x64\",\"b\":\"win-arm64\"}");
+        MustReject("an artist key", "{\"artist\":\"anything\"}", "artist, author, host or account field");
+        MustReject("a host key", "{\"host\":\"anything\"}", "artist, author, host or account field");
+        MustReject("an author key in capitals", "{\"AUTHOR\":\"anything\"}", "artist, author, host or account field");
+        MustReject("a copyright key", "{\"imageCopyright\":\"anything\"}", "artist, author, host or account field");
+        MustAccept("a key that only contains 'host'", "{\"ghost\":\"anything\"}");
+
+        // L-2: the tables and headers of the dummy image are compared byte for byte.
+        void ImageMustFail(string gap, byte[] bytes) =>
+            Check.True(HardwareReplayJpegContracts.Inspect(gap, bytes).Count > 0, $"The dummy-image check missed: {gap}");
+
+        byte[] WithByteChanged(byte marker, int offsetInPayload)
+        {
+            var copy = (byte[])good.Clone();
+            copy[SegmentStart(copy, marker) + 4 + offsetInPayload] ^= 0x01;
+            return copy;
+        }
+
+        Check.True(HardwareReplayJpegContracts.Inspect("good", good).Count == 0, "The unchanged dummy image must pass the structure check.");
+        ImageMustFail("one byte changed in a quantization table", WithByteChanged(0xDB, 10));
+        ImageMustFail("one byte changed in the last byte of a quantization table", WithByteChanged(0xDB, 64));
+        ImageMustFail("one byte changed in a Huffman table", WithByteChanged(0xC4, 5));
+        ImageMustFail("one byte changed in a Huffman value list", WithByteChanged(0xC4, 20));
+        ImageMustFail("one byte changed in the JFIF header", WithByteChanged(0xE0, 9));
+        ImageMustFail("one byte changed in the frame header", WithByteChanged(0xC0, 9));
+        ImageMustFail("one byte changed in the scan header", WithByteChanged(0xDA, 3));
+        var firstTable = good[(SegmentStart(good, 0xDB) + 4)..(SegmentStart(good, 0xDB) + 4 + 65)];
+        ImageMustFail("a repeated quantization table", InsertSegment(good, 0xDB, firstTable));
     }
 
     private static string NoticeOf(byte[] jpeg)
