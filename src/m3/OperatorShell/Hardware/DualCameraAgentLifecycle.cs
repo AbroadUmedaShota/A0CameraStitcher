@@ -40,8 +40,9 @@ public sealed class DualCameraAgentLifecycle :
     // longer than the native shared 180s dispatch watchdog so the client never times
     // out a call before the Agent's own watchdog would already have resolved it.
     private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(240);
-    // Public so the window-close "confirming" indicator (issue #228) states the same bound this
-    // wait uses instead of a second copy of the number.
+    // Upper bound of the child-process exit wait only. Before activation a cancel-binding round
+    // trip (connect and response limits above) runs ahead of it. Public for logs and diagnostics;
+    // the window-close indicator (issue #228) deliberately states no duration.
     public static readonly TimeSpan BindingShutdownExitTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>

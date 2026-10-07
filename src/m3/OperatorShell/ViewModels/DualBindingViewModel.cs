@@ -491,15 +491,18 @@ public sealed class DualBindingViewModel : ObservableObject
     }
 
     /// <summary>
-    /// The window-close indicator text (issue #228): shown from the moment the window is disabled
-    /// until the close attempt has a result. The seconds come from the same bound the lifecycle
-    /// waits with, so the sentence cannot drift from the real wait.
+    /// The window-close indicator headline (issue #228): shown from the moment the window is
+    /// disabled until the close attempt has a result. It states no duration on purpose: before
+    /// activation the close first runs a cancel-binding round trip (connect and response limits
+    /// are much longer than the Agent exit wait), so a number here would not hold.
     /// </summary>
-    public static string ShutdownConfirmingMessage { get; } =
-        "Camera Agent の終了を確認しています（最大 " +
-        ((int)Math.Ceiling(DualCameraAgentLifecycle.BindingShutdownExitTimeout.TotalSeconds))
-            .ToString(CultureInfo.InvariantCulture) +
-        " 秒）…";
+    public const string ShutdownConfirmingMessage = "Camera Agent の終了を確認しています";
+
+    /// <summary>
+    /// The window-close indicator second line: what happens next, and that nothing is asked of
+    /// the operator.
+    /// </summary>
+    public const string ShutdownConfirmingDetailMessage = "確認できればこのウィンドウは閉じます。操作は不要です。";
 
     /// <summary>
     /// True while a window-close attempt is waiting for the Agent's natural exit. Display only:
@@ -514,16 +517,23 @@ public sealed class DualBindingViewModel : ObservableObject
             if (SetProperty(ref _shutdownConfirming, value))
             {
                 OnPropertyChanged(nameof(ShutdownConfirmingText));
+                OnPropertyChanged(nameof(ShutdownConfirmingDetailText));
             }
         }
     }
 
     /// <summary>
-    /// The indicator's text: <see cref="ShutdownConfirmingMessage"/> while confirming, empty
+    /// The indicator's headline: <see cref="ShutdownConfirmingMessage"/> while confirming, empty
     /// otherwise. The text itself changes (not only the visibility) so a UI Automation live
     /// region announces each attempt, including a second ✕ after a blocked result.
     /// </summary>
     public string ShutdownConfirmingText => IsShutdownConfirming ? ShutdownConfirmingMessage : string.Empty;
+
+    /// <summary>
+    /// The indicator's second line: <see cref="ShutdownConfirmingDetailMessage"/> while
+    /// confirming, empty otherwise (same live-region reasoning as <see cref="ShutdownConfirmingText"/>).
+    /// </summary>
+    public string ShutdownConfirmingDetailText => IsShutdownConfirming ? ShutdownConfirmingDetailMessage : string.Empty;
 
     /// <summary>Starts showing the indicator. Call before the window is disabled.</summary>
     public void BeginShutdownConfirmation() => IsShutdownConfirming = true;

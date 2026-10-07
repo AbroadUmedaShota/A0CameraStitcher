@@ -166,6 +166,15 @@ try {
     Assert-Condition ($null -ne $confirmingText) 'The close indicator must show DualBinding.ShutdownConfirmingText (issue #228).'
     Assert-Condition ($confirmingText.GetAttribute('AutomationProperties.LiveSetting') -eq 'Polite') 'The close indicator text must be a polite live region (issue #228).'
     Assert-Condition ([string]::IsNullOrEmpty($confirmingText.GetAttribute('AutomationProperties.Name'))) 'The close indicator text must not carry an AutomationProperties.Name that would replace it for a screen reader (issue #228).'
+    Assert-Condition ($confirmingText.GetAttribute('TextWrapping') -eq 'Wrap') 'The close indicator headline must wrap (issue #228).'
+    Assert-Condition ($confirmingText.GetAttribute('FontSize') -eq '{StaticResource FontSizeDialogTitle}' -and $confirmingText.GetAttribute('FontWeight') -eq 'Bold') 'The close indicator headline must use the existing dialog title size and Bold, with no new token (issue #228).'
+    $confirmingDetail = @($confirmingNode.SelectNodes('.//*[@*[local-name()="Text" and contains(., "DualBinding.ShutdownConfirmingDetailText")]]')) | Select-Object -First 1
+    Assert-Condition ($null -ne $confirmingDetail) 'The close indicator must show DualBinding.ShutdownConfirmingDetailText as a second line (issue #228).'
+    Assert-Condition ($confirmingDetail.GetAttribute('AutomationProperties.LiveSetting') -eq 'Polite') 'The close indicator second line must be a polite live region (issue #228).'
+    Assert-Condition ([string]::IsNullOrEmpty($confirmingDetail.GetAttribute('AutomationProperties.Name'))) 'The close indicator second line must not carry an AutomationProperties.Name (issue #228).'
+    Assert-Condition ($confirmingDetail.GetAttribute('TextWrapping') -eq 'Wrap') 'The close indicator second line must wrap (issue #228).'
+    Assert-Condition ($confirmingDetail.GetAttribute('Style') -eq '{StaticResource MutedTextStyle}' -and $confirmingDetail.GetAttribute('FontSize') -eq '{StaticResource FontSizeLabel}') 'The close indicator second line must use MutedTextStyle and FontSizeLabel (issue #228).'
+    Assert-Condition ($null -eq $confirmingNode.SelectSingleNode('.//*[@*[local-name()="Text" and contains(., "秒")]]')) 'The close indicator must not state a number of seconds (issue #228).'
     $mainWindowCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')
     $closingBegin = $mainWindowCode.IndexOf('private async void OnClosing')
     $closingText = $mainWindowCode.Substring($closingBegin)

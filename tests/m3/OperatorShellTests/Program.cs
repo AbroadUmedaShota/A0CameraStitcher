@@ -8087,12 +8087,17 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
     Check.True(await binding.ActivateCaptureAsync(), "The Ready binding must activate before the close path is exercised.");
     var sendsBeforeClose = transport.SendCount;
 
-    // The words and the bound come from one source.
-    Check.Equal(TimeSpan.FromSeconds(5), DualCameraAgentLifecycle.BindingShutdownExitTimeout);
-    Check.Equal("Camera Agent の終了を確認しています（最大 5 秒）…", DualBindingViewModel.ShutdownConfirmingMessage);
+    // The wording promises no duration (before activation a cancel-binding round trip precedes
+    // the Agent exit wait), and says that nothing is asked of the operator.
+    Check.Equal("Camera Agent の終了を確認しています", DualBindingViewModel.ShutdownConfirmingMessage);
+    Check.Equal("確認できればこのウィンドウは閉じます。操作は不要です。", DualBindingViewModel.ShutdownConfirmingDetailMessage);
+    Check.False(DualBindingViewModel.ShutdownConfirmingMessage.Contains("秒", StringComparison.Ordinal)
+        || DualBindingViewModel.ShutdownConfirmingDetailMessage.Contains("秒", StringComparison.Ordinal),
+        "The indicator wording must not state a number of seconds.");
 
     Check.False(binding.IsShutdownConfirming, "The indicator must not show before a close attempt.");
     Check.Equal(string.Empty, binding.ShutdownConfirmingText);
+    Check.Equal(string.Empty, binding.ShutdownConfirmingDetailText);
 
     var textChanges = 0;
     binding.PropertyChanged += (_, args) =>
@@ -8120,6 +8125,7 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
         Check.False(shutdown.IsCompleted, $"{label}: the wait must still be pending.");
         Check.True(binding.IsShutdownConfirming, $"{label}: the indicator must be up while the wait is pending.");
         Check.Equal(DualBindingViewModel.ShutdownConfirmingMessage, binding.ShutdownConfirmingText);
+        Check.Equal(DualBindingViewModel.ShutdownConfirmingDetailMessage, binding.ShutdownConfirmingDetailText);
         Check.True(textChanges > textChangesBefore,
             $"{label}: the indicator text must change so a live region announces it.");
 
@@ -8134,6 +8140,7 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
             binding.EndShutdownConfirmation();
             Check.False(binding.IsShutdownConfirming, $"{label}: the indicator must go once the result is shown.");
             Check.Equal(string.Empty, binding.ShutdownConfirmingText);
+            Check.Equal(string.Empty, binding.ShutdownConfirmingDetailText);
             Check.True(binding.IsShutdownBlocked && binding.InvalidationText.Length > 0,
                 $"{label}: the blocked guidance must be on screen in place of the indicator.");
             Check.Equal(0, releaseCount);
@@ -8148,8 +8155,9 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
         }
     }
 
-    // Display only: nothing was sent to native through the binding transport during either close
-    // (no CancelBinding after the handoff, no Reserve, no Start), and nothing was killed.
+    // Display only: nothing was sent through the binding transport during either close
+    // (CancelBinding included). Reserve/Start and kill are confirmed in
+    // ActivatedCaptureHostShutdownWaitsForNaturalExitAsync.
     Check.Equal(sendsBeforeClose, transport.SendCount);
 }
 
