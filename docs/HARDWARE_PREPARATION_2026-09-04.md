@@ -214,6 +214,9 @@ WPD cleanup不明時はSDK API（End含む）を呼ばずAgentを隔離・termin
   SDKが予算を無視して固まる場合に備え、停止操作は進行中のフレーム要求を5秒（`LiveViewStopFrameWaitBudget`）まで待ち、
   超えたら要求を中断せず、stop-live-viewも送らず「停止未確認」で戻る。セッション・lease・撮影ブロックは維持され、
   フレーム要求の完了後にもう一度停止できる。5秒は実機のフレーム間隔の実測で見直す。
+  この5秒は `live_view_frame` の既定（3秒）が前提で、環境変数 `A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS`
+  で最大20秒まで延ばせる。4秒以上にすると往復とデコードの余裕が無くなり、5秒以上にすると予算どおりの動作でも
+  停止が「停止未確認」になりうる。その設定で運用する場合は `LiveViewStopFrameWaitBudget` も合わせて見直す。
 - #150: native capture profileの最小setting coverage、profile消失時のSDK open前gate、診断の匿名化と成果物鮮度。
   外部profileが「承認済み」という表示だけで撮影を許可しない。
 - #151残件: SDK callback前提、noexcept/例外境界、WPD列挙/cleanupの未監査項目。

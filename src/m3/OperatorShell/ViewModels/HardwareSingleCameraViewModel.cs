@@ -13,9 +13,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private const int MaximumHistoricalReviewChoices = 25;
     private static readonly TimeSpan MaximumProfileExpiryTimerDelay = TimeSpan.FromHours(1);
     // 停止操作が、進行中のフレーム要求の完了を待つ上限（GitHub Issue #141）。
-    // C++側 Timeouts::live_view_frame の既定（3秒）に往復とデコードの余裕を足した値で、
-    // SDKが予算を守る限りこの上限には掛からない。超えたら停止を確認できないものとして
-    // 戻り、撮影はブロックされたままになる。C++側の既定を延ばす場合はこちらも見直すこと。
+    // C++側 Timeouts::live_view_frame の既定（3秒）に往復とデコードの余裕を足した値。
+    // 既定値のままSDKが予算を守る限り、この上限には掛からない。超えたら停止を確認できない
+    // ものとして戻り、撮影はブロックされたままになる。
+    // A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS で live_view_frame を最大20秒まで
+    // 延ばせるが、4秒以上にすると往復とデコードの余裕が無くなり、SDKが予算どおりに
+    // 動いていてもフレーム取得が予算いっぱいまで掛かる場面で停止が「停止未確認」になる。
+    // 5秒以上にすると、予算どおりの動作でも上限を超えうる。その設定にする場合は
+    // こちらも合わせて見直すこと。
     internal static readonly TimeSpan LiveViewStopFrameWaitBudget = TimeSpan.FromSeconds(5);
     private readonly IHardwareSingleCameraOperations _operations;
     private readonly IHardwareContinuousLiveViewOperations? _continuousLiveViewOperations;
@@ -917,6 +922,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _continuousLiveViewLoopCancellation?.Cancel();
         if (_continuousLiveViewLoop is { } frameLoop)
         {
+            // 待機がタイムアウトした直後にループが完了している場合がある（応答が上限ちょうどに
+            // 返り、タイマー側の継続よりループ側の継続が先に走るとき）。完了済みなら通常の
+            // 停止経路へ進めるので、タイムアウト例外そのものではなくループの完了状態で判定する。
+            var frameLoopFinished = true;
+            var finishedAfterTimeout = false;
             try
             {
                 // 進行中のフレーム要求は中断しない（Camera Agentのdelivery-ACK契約を守るため）。
@@ -931,7 +941,13 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             catch (OperationCanceledException)
             {
             }
-            catch (TimeoutException) when (!frameLoop.IsCompleted)
+            catch (TimeoutException)
+            {
+                frameLoopFinished = frameLoop.IsCompleted;
+                finishedAfterTimeout = frameLoopFinished;
+            }
+
+            if (!frameLoopFinished)
             {
                 _handoffEvidenceCollector?.ObserveLiveViewStopRequested(_continuousLiveViewSessionId);
                 _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
@@ -942,6 +958,19 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                     "\ncontinuous_live_view_stop_unconfirmed: frame request still in flight after " +
                     $"{LiveViewStopFrameWaitBudget.TotalSeconds:0.#}s";
                 return false;
+            }
+
+            if (finishedAfterTimeout)
+            {
+                // タイムアウトの競合で待機側が例外を返しただけなので、ループ自身の結果
+                // （例外で終わっていた場合はその例外）を従来どおり呼び出し元へ伝える。
+                try
+                {
+                    await frameLoop.ConfigureAwait(true);
+                }
+                catch (OperationCanceledException)
+                {
+                }
             }
         }
 

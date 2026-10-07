@@ -299,7 +299,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=103 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=104 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -654,6 +654,17 @@ catch (Exception exception)
 {
     failures.Add("hardware continuous Live View stop gives up after a bound when the frame request never returns and keeps capture blocked");
     Console.Error.WriteLine($"FAIL hardware continuous Live View stop gives up after a bound when the frame request never returns and keeps capture blocked: {exception}");
+}
+
+try
+{
+    await HardwareContinuousLiveViewStopProceedsWhenFrameLoopFinishesAtTheBoundAsync();
+    Console.WriteLine("PASS hardware continuous Live View stop proceeds normally when the frame loop finishes just as the wait bound elapses");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware continuous Live View stop proceeds normally when the frame loop finishes just as the wait bound elapses");
+    Console.Error.WriteLine($"FAIL hardware continuous Live View stop proceeds normally when the frame loop finishes just as the wait bound elapses: {exception}");
 }
 
 try
@@ -4170,6 +4181,10 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
             "The operator must be able to retry the stop.");
 
         // Capture goes through the same stop; it must stay blocked while the stop is unconfirmed.
+        // CaptureAsync returns early when CanCapture is false, which would make the checks below
+        // pass without ever reaching the stop path, so assert the capture is actually attempted.
+        Check.True(viewModel.CanCapture,
+            "Capture must be attemptable during continuous Live View so that the handoff reaches the stop path.");
         var captureTask = viewModel.CaptureAsync();
         for (var step = 0; step < 50 && !captureTask.IsCompleted; step++)
         {
@@ -4177,6 +4192,7 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         }
         await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal(2, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
         Check.Equal(0, operations.CaptureCallCount);
         Check.Equal(0, operations.StopCount);
         Check.True(viewModel.IsContinuousLiveViewActive,
@@ -4192,6 +4208,81 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
         Check.True(viewModel.PreviewImage is null,
             "A frame that resolves after stop was requested must not update PreviewImage.");
         Check.Equal(0, operations.CaptureCallCount);
+
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+    }
+    finally
+    {
+        operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// GitHub Issue #141: race between the stop wait bound and the frame loop finishing. The wait
+// timer fails the WaitAsync task with TimeoutException, and its continuation is queued on the
+// UI context. When the frame loop's own continuation was queued first (the response arrived
+// at about the bound), the loop has already finished by the time the stop continuation runs.
+// The stop must then treat the loop as finished and send stop-live-view, instead of letting
+// the TimeoutException escape or reporting an unconfirmed stop. A context that only queues
+// posted callbacks makes the ordering deterministic: loop continuation, then timer
+// continuation, then both run in that order.
+static async Task HardwareContinuousLiveViewStopProceedsWhenFrameLoopFinishesAtTheBoundAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-bound-race-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        operations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            HoldFrameReadUntilReleased = true,
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var viewModel = new HardwareSingleCameraViewModel(
+            operations,
+            new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            time);
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+
+        var context = new QueuedPostSynchronizationContext();
+        var startTask = context.RunAsync(() => viewModel.StartContinuousLiveViewAsync());
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await context.DrainUntilCompletedAsync(startTask, TimeSpan.FromSeconds(2));
+        Check.True(viewModel.IsContinuousLiveViewActive, "Start must mark the continuous session active.");
+
+        var stopTask = context.RunAsync(() => viewModel.StopContinuousLiveViewAsync());
+        Check.False(stopTask.IsCompleted, "Stop must wait for the in-flight frame request.");
+        var baseline = context.PostCount;
+
+        // 1) The frame request ends; the loop's continuation is queued on the context but not run.
+        operations.FrameReadReleaseGate.TrySetCanceled();
+        await context.WaitForPostCountAsync(baseline + 1, TimeSpan.FromSeconds(2));
+        Check.False(stopTask.IsCompleted, "The queued loop continuation must not have run yet.");
+
+        // 2) The wait bound elapses; the stop continuation is queued behind the loop's one.
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await context.WaitForPostCountAsync(baseline + 2, TimeSpan.FromSeconds(2));
+        Check.False(stopTask.IsCompleted, "The queued stop continuation must not have run yet.");
+
+        // 3) Run both: the loop finishes first, then the stop sees the timeout with a finished loop.
+        context.Drain();
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Check.True(stopTask.IsCompletedSuccessfully,
+            "A timeout that coincides with the loop finishing must not surface as an error.");
+        Check.False(viewModel.IsBusy, "The UI must not stay busy after the stop.");
+        Check.Equal(1, operations.StopCount);
+        Check.False(viewModel.IsContinuousLiveViewActive, "The stop must close the session.");
+        Check.Equal("停止済み（SDK session closed）", viewModel.LiveViewSummary);
+        Check.False(viewModel.TechnicalDetail.Contains("continuous_live_view_stop_unconfirmed"),
+            "A finished frame loop must not be reported as an unconfirmed stop.");
 
         await viewModel.ShutdownAsync();
         viewModel.Dispose();
@@ -13327,6 +13418,61 @@ sealed class HeldWpfContinuationContext : SynchronizationContext
         SetSynchronizationContext(this);
         try { while (_queue.TryDequeue(out var item)) item.Item1(item.Item2); }
         finally { SetSynchronizationContext(previous); }
+    }
+}
+
+// Queues every posted callback so the test decides when and in what order continuations run.
+// Task-returning calls made through RunAsync capture this context at their first await.
+sealed class QueuedPostSynchronizationContext : SynchronizationContext
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(SendOrPostCallback, object?)> _queue = new();
+    private int _postCount;
+
+    public int PostCount => Volatile.Read(ref _postCount);
+
+    public override void Post(SendOrPostCallback callback, object? state)
+    {
+        _queue.Enqueue((callback, state));
+        Interlocked.Increment(ref _postCount);
+    }
+
+    public Task RunAsync(Func<Task> start)
+    {
+        var previous = Current;
+        SetSynchronizationContext(this);
+        try { return start(); }
+        finally { SetSynchronizationContext(previous); }
+    }
+
+    public void Drain()
+    {
+        var previous = Current;
+        SetSynchronizationContext(this);
+        try { while (_queue.TryDequeue(out var item)) item.Item1(item.Item2); }
+        finally { SetSynchronizationContext(previous); }
+    }
+
+    public async Task DrainUntilCompletedAsync(Task task, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (!task.IsCompleted)
+        {
+            Drain();
+            if (task.IsCompleted) break;
+            if (deadline.Elapsed > timeout) throw new TimeoutException("The task did not complete while draining the context.");
+            await Task.Delay(TimeSpan.FromMilliseconds(5));
+        }
+        await task;
+    }
+
+    public async Task WaitForPostCountAsync(int count, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (PostCount < count)
+        {
+            if (deadline.Elapsed > timeout) throw new TimeoutException($"Expected {count} posts, observed {PostCount}.");
+            await Task.Delay(TimeSpan.FromMilliseconds(1));
+        }
     }
 }
 
