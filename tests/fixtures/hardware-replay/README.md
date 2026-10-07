@@ -2,7 +2,59 @@
 
 実機（Nikon D810）が実際に返した応答を匿名化して置き、アプリの保存経路と Agent の応答生成へ流すための golden fixture。#216（原画像フォルダ名）・#222（fileType を広告しない）・#224（bindingInvalidationReason の空文字）はどれも「fake と実機の応答の差」で、SDK なし構成の ctest と `Test-M3Simulated.ps1` では出なかった。ここの値は fake を作るときの正解として使う。
 
-このフォルダの内容は公開される。実機の識別子（シリアル番号・WPD の機体 ID・PnP ID・ユーザー名・ローカルの絶対パス）と撮影した原画像は置かない。試験は識別子の形（32/64 桁 16 進、13 桁エポック、ユーザー領域のパス、PnP ID 形式、シリアル風の文字列、許可外の日付）を毎回検査するが、これは形の検査にすぎない。本体シリアルなど形では検出できない値は試験で保証できないため、push 前に元データから抜いた実値とローカルで照合する（#241）。
+このフォルダの内容は公開される。実機の識別子（シリアル番号・WPD の機体 ID・PnP ID・ユーザー名・PC 名・ローカルの絶対パス）と撮影した原画像は置かない。守りは 2 段で、役割が違う。
+
+| 段 | 何を見るか | どこで動くか | 保証できないこと |
+| --- | --- | --- | --- |
+| 形の検査 | 識別子の「形」 | 試験（C# の `HardwareReplayAnonymizationRules.Scan`）。fixture を直すたび、ctest と `Test-M3Simulated.ps1` のたびに動く | 形が目立たない値（7 文字の本体シリアル、中立な名前の欄に入った承認 GUID など）は見つけられない |
+| push 前のローカル照合 | 操作 PC 上の実値との一致 | 手元で `scripts/Test-ReplayFixtureLeak.ps1` を実行（下記）。CI では動かせない（実値が手元にしかない） | 実値を読めない PC では何も保証できない（その場合は検証不能で止まる） |
+
+形の検査が通っても、push してよい証拠にはならない。公開リポジトリへの push は取り消せないので、ローカル照合を通してから push する。
+
+## 形の検査（試験が毎回行う）
+
+`HardwareReplayAnonymizationRules.Scan` が fixture の全ファイルに対して行う。
+
+- ファイルの種類: `.md` `.json` `.jsonl` と、`images/*.jpg.b64`（`images/` 直下の `*.jpg.b64` だけ）のみ。実画像ファイルは置けない。`.b64` を他の場所・名前に置くと落ちる（検査を飛ばさない）
+- ダミー画像（全 `.b64`）: 復号して JPEG の構造を検査する。許可するセグメントは JFIF（E0）・注記（FE）・量子化表（DB）・フレームヘッダ（C0）・ハフマン表（C4）・スキャンヘッダ（DA）だけで、長さは固定。EXIF（E1）・ICC・APPn・未知のマーカーは落ちる。COM（注記）は決まった全文（`A0 replay fixture: synthetic image, not a photograph (<ラベル>)`）と完全一致、画像データは 32 バイト以下、宣言サイズは 7360×4912。復号した中身にも下記のテキスト規則をかける
+- 絶対パス: 合成ルート `C:/a0-replay-fixture/` 以外は落ちる
+- 16 進の連なり（16 桁以上）: 合成値の「形全体」か、ダミー画像の SHA-256 だけ許す。合成値の形は `f231` + 4 桁 + 0 の連なり + 2〜4 桁（32 桁または 64 桁）。`f231` で始まるだけの値は落ちる。ダッシュ付き GUID も同じ基準
+- 日付: 2026 年 1 月だけ許す。`yyyy-MM-dd`・`yyyy/MM/dd`・`yyyy.MM.dd`・EXIF の `yyyy:MM:dd`・`yyyyMMdd`・和文の日付をすべて見る
+- エポック秒: 10 桁（秒）・13 桁（ミリ秒）・16 桁・19 桁
+- メールアドレス
+- 語の規則（README を除く）: `serial`・`appdata`・ユーザー領域のパス・PnP/USB の ID 形式・`XX-99-NOTE` 形の PC 名・Windows の既定のホスト名（`DESKTOP-` など）・ホスト名やアカウント名や所有者の欄名
+- 中立な名前の欄に入った識別子風の値（README を除く）: 数字を含む英数字 5〜24 文字の文字列値、6 桁以上の数字。許可は `7360x4912` だけ（明示のリスト）
+- 試験を実行している PC の名前とユーザープロファイルのパス: 試験の実行時に `Environment` から読んで照合する。値はリポジトリに置かない
+
+検査が効くことは、規則ごとに架空の値を入れた自己試験（`HardwareReplayRunner.cs` の `AnonymizationRulesRejectKnownBadShapes` と `AnonymizationRulesCloseTheKnownGaps`）で確かめる。失敗メッセージには値を出さず、位置（オフセット）だけを出す。
+
+## push 前のローカル照合（必須）
+
+fixture やそれを説明する文書を push する前に、**実値を持っている操作 PC で** 次を実行する。
+
+```powershell
+pwsh -NoProfile -File scripts/Test-ReplayFixtureLeak.ps1 -Base origin/main
+```
+
+- `-Base` は push の起点（既定は現在のブランチの upstream、無ければ `origin/main`）。`<Base>..HEAD` の **全 commit** を見る。履歴ごと公開されるので、途中の commit に入れて後で消した値も対象になる
+- 実値の読み込み元（実行時に読み、メモリ上だけで使う。ディスクにもリポジトリにも書かない）
+  - `%LOCALAPPDATA%\A0CameraStitcher\` の記録（ID・ハッシュ・run ID・承認参照・サイズ・日付・パス）
+  - 同フォルダの原画像の EXIF（所有者・シリアル・日付・固有 ID・メーカーノート）、SHA-256、サイズ
+  - レジストリ（Nikon の USB と WPD の機器キー）、登録された所有者
+  - 環境（PC 名・ユーザープロファイルのパス）
+- 照合範囲: commit メッセージ、追加行、追加行の中の hex と base64 の復号結果（`terminalResultHex` を含む）、`.b64` の復号結果。各値は、そのまま・ダッシュ付き GUID・UTF-8 の hex・base64 の 3 通りの桁合わせでも探す。範囲内のバイナリファイルは一致として報告する。`-IncludeChangedFiles` を付けると、範囲が触ったファイルの HEAD 時点の全文も見る
+- 出力はラベル（`カテゴリ#番号`）と場所（commit・ファイル・行）だけで、値は出さない
+- 終了コード: `0` = 一致なし。`1` = 一致あり（push しない。ラベルから、どの種類の値がどこにあるか分かる）。`2` = 検証不能（実値の読み込み元が無い、needle が作れない、エラー）。**`2` は「問題なし」ではない。push しない**
+- 一致の扱い: 実際の採取日が地の文に出た、などの誤検出はありうるが、実値かどうかは必ず人が見て判断する。実値なら、push 前の自分の commit を作り直して消す（消す commit を追加するだけでは履歴に残る）。誤検出のまま通す場合は、理由を Issue かレビューに残す
+- 動作確認: `pwsh -NoProfile -File scripts/Test-ReplayFixtureLeak.ps1 -SelfTest`（架空の値だけの一時リポジトリで、一致する場合・しない場合・検証不能の場合を確かめる。操作 PC でなくても動く）
+- 実値を持たない PC（CI を含む）では `2` になる。その PC からは fixture や関連文書を push しない
+
+この手順は、fixture・`docs/`・`tests/` のどれかを含む push の前に必ず行う。実行結果（件数とラベルだけ）は PR や Issue の報告に書いてよい。
+
+## 日付と、すでに公開されている値の扱い
+
+- 日付を一律にずらすのは、時刻の間隔や 5 分の期限を壊さず再現するための正規化で、**秘匿のためではない**。ずらし幅を上の表に書いているので、ずらした日付から実際の採取日は復元できる。日付を伏せたい値は fixture に入れない
+- すでに `main` に公開されている値（PC 名、実 transaction ID・run ID・原画像の SHA-256 など。`docs/CURRENT_STATUS.md`、`docs/evidence/phase0/`、既存の試験にある）は、**非機密として扱う**（取り消せないため、履歴の書き換えはしない）。ただし今後は fixture と文書に追記しない。新しく足した行にそれらが出ると、ローカル照合が一致として報告する。※要確認（推奨案。扱いの最終決定は人が行う）
 
 ## 元データの出所
 
@@ -59,7 +111,7 @@ fixture は匿名化した値のまま置き、次の項目だけ試験が差し
 ## どの試験が使うか
 
 - C#（`tests/m3/OperatorShellTests/HardwareReplayRunner.cs`、`HardwareReplayFixtures.cs`、`Program.cs` 末尾の 1 試験と 1 シナリオ。`--hardware-replay` で単独実行できる）
-  - 匿名化の検査: 許可した拡張子だけ・実画像ファイルなし、絶対パスは合成ルートのみ、32/64 桁 16 進は合成値かダミー JPEG の SHA-256 のみ、13 桁エポック・ユーザー領域・シリアル・PnP ID 形式なし、日付は 2026-01 内だけ。検査が効くことを、偽の識別子を使った例で確かめる
+  - 匿名化の検査（形の検査。上の「形の検査」）。検査が効くことを、規則ごとに架空の値を使った例で確かめる
   - 実物の承認 profile から app の承認処理が同じ設定を作ること、一台撮影の保存（`HardwareSingleCameraViewModel`）、旧配置（`hybrid-tx-` フォルダ）の拒否
   - 二台撮影の Succeeded と Failed を `HardwareDualCaptureRecoveryOnlyWorkflow` と `HardwareOriginalExporter.ExportDualOriginalsAsync`、画面経由（`OperatorShellViewModel` の CaptureRecoveryOnly 保存）に流す
 - C++（SDK なし構成の ctest）

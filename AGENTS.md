@@ -42,5 +42,6 @@ Chat summaries are source material, not current specification. Unresolved busine
 
 - Every hardware claim needs a repeatable test record.
 - Record camera identity using redacted aliases in committed fixtures.
+- Before pushing fixtures or documents derived from real sessions, run `scripts/Test-ReplayFixtureLeak.ps1` on the operator PC (see `tests/fixtures/hardware-replay/README.md`). Exit 2 means it could not verify; do not push.
 - Phase 0 completion requires the evidence listed in `docs/PHASE0_TEST_PLAN.md`.
 - A human must approve the transport decision before integrated MVP implementation starts.
