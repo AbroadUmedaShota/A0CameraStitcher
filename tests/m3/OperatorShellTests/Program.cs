@@ -279,7 +279,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=99 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=100 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -919,7 +919,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 43) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 44) == WpfScenarioOutcome.PendingStop)
+    return 1;
+
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 43) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -4635,7 +4640,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             var camB = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-B", "original.jpg"), "CAM-B");
             var exportDirectory = Path.Combine(root, "order-violation-export");
             var exporter = new HardwareOriginalExporter(exportDirectory);
-            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
                 [camB], "11111111111111111111111111111111", transactionDirectory, DateTimeOffset.UtcNow));
             Check.False(
                 Directory.Exists(exportDirectory) && Directory.GetFiles(exportDirectory).Length > 0,
@@ -4651,7 +4656,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             var camA = WriteCanonicalJpegOriginal(elsewhere, "CAM-A");
             var exportDirectory = Path.Combine(root, "mismatch-export");
             var exporter = new HardwareOriginalExporter(exportDirectory);
-            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
                 [camA], "22222222222222222222222222222222", transactionDirectory, DateTimeOffset.UtcNow));
         }
 
@@ -4667,7 +4672,8 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             File.WriteAllBytes(camBPath, [..File.ReadAllBytes(camBPath), 0x00]);
             var exportDirectory = Path.Combine(root, "partial-failure-export");
             var exporter = new HardwareOriginalExporter(exportDirectory);
-            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+            // Bytes that no longer match the recorded size/SHA-256 are a source-side failure.
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
                 [camA, camB], "33333333333333333333333333333333", transactionDirectory, DateTimeOffset.UtcNow));
             Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
             // CAM-A staged and verified but was never published: that unpublished partial is
@@ -4687,7 +4693,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
                 Path.Combine(root, "validate-first-elsewhere", "CAM-B", "original.jpg"), "CAM-B");
             var exportDirectory = Path.Combine(root, "validate-first-export");
             var exporter = new HardwareOriginalExporter(exportDirectory);
-            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
                 [camA, camBElsewhere], "66666666666666666666666666666666", transactionDirectory, DateTimeOffset.UtcNow));
             Check.Equal(
                 0,
@@ -4701,7 +4707,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
             var exportDirectory = Path.Combine(root, "id-mismatch-export");
             var exporter = new HardwareOriginalExporter(exportDirectory);
-            await Check.ThrowsAsync<InvalidDataException>(() => exporter.ExportDualOriginalsAsync(
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
                 [camA], "88888888888888888888888888888888", transactionDirectory, DateTimeOffset.UtcNow));
             await exporter.ExportDualOriginalsAsync(
                 [camA], "77777777777777777777777777777777", transactionDirectory + Path.DirectorySeparatorChar,
@@ -4750,6 +4756,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             var camB = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-B", "original.jpg"), "CAM-B");
             var exportDirectory = Path.Combine(root, "second-rename-fails-export");
             var hookCounts = new List<int>();
+            string? secondBlocker = null;
             var exporter = new HardwareOriginalExporter(
                 exportDirectory,
                 afterLockedVerificationForTesting: null,
@@ -4759,6 +4766,7 @@ static async Task HardwareDualOriginalsExportContractsAsync()
                     if (publishedCount == 1)
                     {
                         // Occupy the second file's final name so its non-replacing rename fails.
+                        secondBlocker = finalPath;
                         File.WriteAllText(finalPath, "pre-existing file");
                     }
                     return Task.CompletedTask;
@@ -4783,6 +4791,90 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             Check.Equal(2, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
             Check.Equal(0, Directory.GetFiles(exportDirectory, "*.partial", SearchOption.TopDirectoryOnly).Length);
             Check.True(partial.InnerException is not null, "The original rename failure must be preserved as the inner exception.");
+            // The file that blocked the second rename is somebody else's: it must be untouched.
+            Check.True(secondBlocker is not null, "The second-rename blocker must have been created.");
+            Check.Equal("pre-existing file", File.ReadAllText(secondBlocker!));
+        }
+
+        // LOW-1: an unpublished staged file is deleted through its own locked handle, not through
+        // its path. If the path was swapped for an unrelated file in the meantime, that file
+        // must survive, and the file the exporter actually staged must still be removed.
+        {
+            var transactionDirectory = Path.Combine(root, "handle-delete", "transactions", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
+            var camB = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-B", "original.jpg"), "CAM-B");
+            var exportDirectory = Path.Combine(root, "handle-delete-export");
+            string? swappedPartial = null;
+            var exporter = new HardwareOriginalExporter(
+                exportDirectory,
+                afterLockedVerificationForTesting: null,
+                (publishedCount, finalPath, _) =>
+                {
+                    swappedPartial = finalPath + ".partial";
+                    File.Move(swappedPartial, swappedPartial + ".staged-original");
+                    File.WriteAllText(swappedPartial, "unrelated bystander");
+                    throw new IOException("synthetic failure before the first rename");
+                });
+            await Check.ThrowsAsync<IOException>(() => exporter.ExportDualOriginalsAsync(
+                [camA, camB], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", transactionDirectory, DateTimeOffset.UtcNow));
+            Check.True(swappedPartial is not null, "The swap hook must have run.");
+            Check.Equal("unrelated bystander", File.ReadAllText(swappedPartial!));
+            Check.False(File.Exists(swappedPartial + ".staged-original"),
+                "The exact staged file must be removed through its handle.");
+            Check.Equal(1, Directory.GetFileSystemEntries(exportDirectory).Length);
+        }
+
+        // A source whose original.jpg is missing is a source-side failure that writes nothing.
+        {
+            var transactionDirectory = Path.Combine(root, "source-missing", "transactions", "cccccccccccccccccccccccccccccccc");
+            var camAPath = Path.Combine(transactionDirectory, "CAM-A", "original.jpg");
+            var camA = WriteCanonicalJpegOriginal(camAPath, "CAM-A");
+            File.Delete(camAPath);
+            var exportDirectory = Path.Combine(root, "source-missing-export");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportDualOriginalsAsync(
+                [camA], "cccccccccccccccccccccccccccccccc", transactionDirectory, DateTimeOffset.UtcNow));
+            Check.Equal(0, Directory.GetFileSystemEntries(exportDirectory).Length);
+        }
+
+        // A file that no longer matches its original when it is read back from the export
+        // folder is a destination-side mismatch, never reported as a source failure -- whether
+        // its size/hash differs or it no longer parses as a JPEG at all.
+        foreach (var (label, tamper) in new (string, Func<string, Task>)[]
+                 {
+                     ("appended-end-marker", async path =>
+                     {
+                         // Still a complete JPEG, but a different size and SHA-256.
+                         await using var stream = new FileStream(path, FileMode.Append, FileAccess.Write);
+                         await stream.WriteAsync(new byte[] { 0xFF, 0xD9 });
+                     }),
+                     ("garbage", path => File.WriteAllBytesAsync(path, [0x00, 0x01, 0x02, 0x03])),
+                 })
+        {
+            var transactionId = label == "appended-end-marker"
+                ? "dddddddddddddddddddddddddddddddd"
+                : "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            var transactionDirectory = Path.Combine(root, "reread-" + label, "transactions", transactionId);
+            var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
+            var exportDirectory = Path.Combine(root, "reread-" + label + "-export");
+            var exporter = new HardwareOriginalExporter(
+                exportDirectory,
+                afterLockedVerificationForTesting: null,
+                beforeDualPublishForTesting: null,
+                afterStagedWriteForTesting: (partialPath, _) => tamper(partialPath));
+            Exception? failure = null;
+            try
+            {
+                await exporter.ExportDualOriginalsAsync([camA], transactionId, transactionDirectory, DateTimeOffset.UtcNow);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+            Check.True(failure is ExportVerificationMismatchException,
+                $"{label}: a read-back mismatch must be typed as ExportVerificationMismatchException. Actual: {failure?.GetType().Name ?? "none"}");
+            Check.False(failure is ExportSourceUnavailableException, $"{label}: a read-back mismatch is not a source failure.");
+            Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
         }
 
         // Exporting the same Succeeded pair twice (identical now/alias/transactionId) must
@@ -4814,8 +4906,20 @@ static async Task HardwareDualOriginalsExportContractsAsync()
             var transactionDirectory = Path.Combine(root, "unc", "transactions", "55555555555555555555555555555555");
             var camA = WriteCanonicalJpegOriginal(Path.Combine(transactionDirectory, "CAM-A", "original.jpg"), "CAM-A");
             var uncExporter = new HardwareOriginalExporter(@"\\fake-host\share\exports");
-            await Check.ThrowsAsync<InvalidDataException>(() => uncExporter.ExportDualOriginalsAsync(
-                [camA], "55555555555555555555555555555555", transactionDirectory, DateTimeOffset.UtcNow));
+            Exception? uncFailure = null;
+            try
+            {
+                await uncExporter.ExportDualOriginalsAsync(
+                    [camA], "55555555555555555555555555555555", transactionDirectory, DateTimeOffset.UtcNow);
+            }
+            catch (Exception exception)
+            {
+                uncFailure = exception;
+            }
+            Check.True(uncFailure is InvalidDataException,
+                $"An unusable export destination must be rejected. Actual: {uncFailure?.GetType().Name ?? "none"}");
+            Check.False(uncFailure is ExportSourceUnavailableException,
+                "An unusable export destination is a destination-side failure, not a source failure.");
         }
     }
     finally
@@ -8625,9 +8729,6 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         }
         Check.Equal(savedFileCountBeforeExport + 2, shell.SavedFiles.Count);
 
-        await CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
-            root, adapter, ordinaryFlow, ownedCommands, shell, wpfOperations, bindingTransport);
-
         var tenRunOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var tenRunWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
             Path.Combine(root, "wpf-five-run-products"), tenRunOperations, tenRunOperations,
@@ -8709,9 +8810,16 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             "The initial WPF response-unknown run did not leave a same-ID recovery snapshot.");
         Check.Equal(1, initialRecoveryTransport.ActivateCaptureCalls);
         // GitHub Issue #226: an unresolved same-ID recovery (result unknown) must never be
-        // exportable as if it were a final, app-verified result.
+        // exportable as if it were a final, app-verified result. A folder is chosen first so
+        // that the pending result, not the missing folder, is what keeps the export disabled.
+        initialRecoveryShell.ChangeCaptureRecoveryOnlyExportDirectory(
+            Path.Combine(root, "wpf-same-id-recovery-export"));
+        Check.True(initialRecoveryShell.CaptureRecoveryOnlyExportDirectory.Length > 0,
+            "The recovery-pending shell needs a chosen export folder for this check to be meaningful.");
         Check.False(initialRecoveryShell.CanExportCaptureRecoveryOnlyOriginals,
             "A RecoveryPending CaptureRecoveryOnly result must not be exportable until a terminal result is confirmed.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText,
+            initialRecoveryShell.CaptureRecoveryOnlyExportDisabledReason);
 
         var restartedWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
             wpfRecoveryRoot, wpfRecoveryOperations, wpfRecoveryOperations, ApprovedCaptureRecoveryOnlyProfile());
@@ -8764,27 +8872,30 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
     });
 }
 
-static (int Reserve, int Start, int Query, int Ordinary, int Close, int Preflight, int Activate) AgentCallSnapshot(
+static (int Reserve, int Start, int Query, int Ordinary, int Close, int Preflight, int Activate, int Sends) AgentCallSnapshot(
     CaptureRecoveryOnlyFakeOperations operations,
     CountingBindingTransport transport) =>
     (operations.ReserveCalls, operations.CaptureRecoveryOnlyStartCalls, operations.QueryRecoveryOnlyCalls,
      operations.OrdinaryStartCalls, operations.CloseCalls, operations.CapabilityPreflightCalls,
-     transport.ActivateCaptureCalls);
+     transport.ActivateCaptureCalls, transport.TotalSendCalls);
 
-// GitHub Issue #226: builds a CaptureRecoveryOnly shell and runs exactly one capture so the
-// export scenarios below start from a real terminal (or RecoveryPending) outcome.
+// GitHub Issue #226: builds a CaptureRecoveryOnly shell with a Ready binding that has not
+// captured anything yet.
 static async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperations Operations, CountingBindingTransport Transport)>
-    CaptureOnceForOriginalsExportAsync(
+    CreateOriginalsExportShellAsync(
         string root,
         string name,
         M2OfflineStitcherProcessAdapter adapter,
         DualCameraProductFlow ordinaryFlow,
-        OwnedWpfCommandScope ownedCommands,
         bool failCameraB = false,
-        bool corruptCameraBOriginal = false)
+        bool corruptCameraBOriginal = false,
+        bool failCameraAImmediate = false)
 {
     var operations = new CaptureRecoveryOnlyFakeOperations(
-        adapter, failCameraB: failCameraB, corruptCameraBOriginal: corruptCameraBOriginal);
+        adapter,
+        failCameraB: failCameraB,
+        failCameraAImmediate: failCameraAImmediate,
+        corruptCameraBOriginal: corruptCameraBOriginal);
     var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
         Path.Combine(root, name + "-products"), operations, operations, ApprovedCaptureRecoveryOnlyProfile());
     var transport = new CountingBindingTransport(DecodableBindingAgent());
@@ -8799,6 +8910,24 @@ static async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperatio
     shell.AcceptSafetyCommand.Execute(null);
     shell.IsCaptureRecoveryOnlyOperatorApproved = true;
     await CompleteDualBindingAsync(shell.DualBinding);
+    return (shell, operations, transport);
+}
+
+// Builds the shell above and runs exactly one capture so the export scenarios start from a
+// real terminal (or RecoveryPending) outcome.
+static async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperations Operations, CountingBindingTransport Transport)>
+    CaptureOnceForOriginalsExportAsync(
+        string root,
+        string name,
+        M2OfflineStitcherProcessAdapter adapter,
+        DualCameraProductFlow ordinaryFlow,
+        OwnedWpfCommandScope ownedCommands,
+        bool failCameraB = false,
+        bool corruptCameraBOriginal = false,
+        bool failCameraAImmediate = false)
+{
+    var (shell, operations, transport) = await CreateOriginalsExportShellAsync(
+        root, name, adapter, ordinaryFlow, failCameraB, corruptCameraBOriginal, failCameraAImmediate);
     await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(5), $"recovery-only/{name}",
         () => WpfCommandState.Create(shell, operations));
     Check.False(shell.IsBusy, $"{name}: the capture must have finished.");
@@ -8806,25 +8935,85 @@ static async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperatio
 }
 
 // GitHub Issue #226 review (M1-M4, M6 and the screen-text findings): the CaptureRecoveryOnly
-// original export driven through the ViewModel, not only through the exporter.
-static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
+// original export driven through the ViewModel, not only through the exporter. Independent of
+// the WPF-path scenario: it builds its own fake Agent operations, product flow and shells.
+static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync()
+{
+    var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(adapterPath), "The export ViewModel scenarios require the bundled deterministic JPEG adapter.");
+    var root = CreateHardwareTestRoot();
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+        var flowOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
+        var productRoot = Path.Combine(root, "ordinary-products");
+        var ordinaryFlow = new DualCameraProductFlow(
+            productRoot,
+            new HardwareDualCaptureSource(
+                flowOperations,
+                recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
+            new NeverCaptureDualBridge(),
+            new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+        await RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(root, adapter, ordinaryFlow, ownedCommands);
+    });
+}
+
+static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
     string root,
     M2OfflineStitcherProcessAdapter adapter,
     DualCameraProductFlow ordinaryFlow,
-    OwnedWpfCommandScope ownedCommands,
-    OperatorShellViewModel baselineShell,
-    CaptureRecoveryOnlyFakeOperations baselineOperations,
-    CountingBindingTransport baselineTransport)
+    OwnedWpfCommandScope ownedCommands)
 {
-    var rejectedText = OperatorShellViewModel.CaptureRecoveryOnlyExportFolderRejectedText;
+    var failureTail = OperatorShellViewModel.CaptureRecoveryOnlyExportFailureTechnicalText;
+
+    // Before any capture: a normal wait, shown in the muted style rather than as a problem.
+    {
+        var (idleShell, _, _) = await CreateOriginalsExportShellAsync(root, "idle", adapter, ordinaryFlow);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportNoResultYetText,
+            idleShell.CaptureRecoveryOnlyExportDisabledReason);
+        Check.True(idleShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
+            "Waiting for the first capture must use the muted style.");
+        Check.True(idleShell.HasCaptureRecoveryOnlyExportDisabledReason, "The waiting reason must still be shown.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportNotSavedText, idleShell.CaptureRecoveryOnlyExportResult);
+        Check.False(idleShell.CaptureRecoveryOnlyExportResult.Contains("未保存", StringComparison.Ordinal),
+            "The initial result must say it plainly.");
+        idleShell.ChangeCaptureRecoveryOnlyExportDirectory(Path.Combine(root, "idle-export"));
+        Check.True(idleShell.CaptureRecoveryOnlyExportDirectory.Length > 0, "A folder can be chosen before the first capture.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportNoResultYetText,
+            idleShell.CaptureRecoveryOnlyExportDisabledReason);
+        Check.False(idleShell.CanExportCaptureRecoveryOnlyOriginals, "Nothing has been captured yet.");
+    }
+
+    // A capture that delivered no image at all is a different state from "not captured yet".
+    {
+        var (noneShell, _, _) = await CaptureOnceForOriginalsExportAsync(
+            root, "zero-originals", adapter, ordinaryFlow, ownedCommands, failCameraAImmediate: true);
+        noneShell.ChangeCaptureRecoveryOnlyExportDirectory(Path.Combine(root, "zero-originals-export"));
+        Check.False(noneShell.CanExportCaptureRecoveryOnlyOriginals, "A capture without originals has nothing to save.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportNoOriginalsText,
+            noneShell.CaptureRecoveryOnlyExportDisabledReason);
+        Check.False(noneShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
+            "A capture that returned no image is not a calm waiting state.");
+        Check.Equal("この撮影では保存できる原画像がありません（カメラから画像を受け取れませんでした）。",
+            OperatorShellViewModel.CaptureRecoveryOnlyExportNoOriginalsText);
+    }
 
     // M2: only a fully-qualified, local, non-reparse folder is accepted. The removable-drive
     // case is covered by the WindowsLocalPathGuard.IsSupportedLocalDrive(Removable) check
     // earlier in this suite; this part proves the ViewModel front door refuses the rest and
-    // keeps the previously chosen folder.
+    // keeps the previously chosen folder, and that the reason stays under the folder field
+    // until a folder is accepted.
+    var (baselineShell, baselineOperations, baselineTransport) = await CaptureOnceForOriginalsExportAsync(
+        root, "m2-folder", adapter, ordinaryFlow, ownedCommands);
+    var baselineCallsBefore = AgentCallSnapshot(baselineOperations, baselineTransport);
     {
-        var chosen = baselineShell.CaptureRecoveryOnlyExportDirectory;
-        Check.True(chosen.Length > 0, "The baseline shell must already have a chosen export folder.");
+        Check.Equal(string.Empty, baselineShell.CaptureRecoveryOnlyExportDirectory);
+        Check.False(baselineShell.HasCaptureRecoveryOnlyExportFolderError, "No folder has been rejected yet.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFolderNotChosenText,
+            baselineShell.CaptureRecoveryOnlyExportDisabledReason);
+        Check.False(baselineShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
+            "A missing folder after a finished capture is something to act on, not a calm wait.");
         var relative = "a0-relative-export-" + Guid.NewGuid().ToString("N");
         var usedLetters = DriveInfo.GetDrives().Select(drive => char.ToUpperInvariant(drive.Name[0])).ToHashSet();
         var unusedLetter = "ZYXWVUTSRQPONMLKJIHGFED".First(letter => !usedLetters.Contains(letter));
@@ -8842,31 +9031,64 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                 link,
                 Path.Combine(link, "child"),
             };
-            foreach (var folder in rejected)
+            void RejectAll(string expectedFolderText)
             {
-                baselineShell.Notify("reset", true);
-                baselineShell.ChangeCaptureRecoveryOnlyExportDirectory(folder);
-                Check.Equal(chosen, baselineShell.CaptureRecoveryOnlyExportDirectory);
-                Check.Equal(rejectedText, baselineShell.NoticeText);
-                Check.Equal("warn", baselineShell.NoticeKind);
+                foreach (var folder in rejected)
+                {
+                    baselineShell.Notify("reset", true);
+                    var before = baselineShell.CaptureRecoveryOnlyExportDirectory;
+                    baselineShell.ChangeCaptureRecoveryOnlyExportDirectory(folder);
+                    Check.Equal(before, baselineShell.CaptureRecoveryOnlyExportDirectory);
+                    Check.Equal(
+                        OperatorShellViewModel.CaptureRecoveryOnlyExportFolderRejectedNoticeText,
+                        baselineShell.NoticeText);
+                    Check.Equal("warn", baselineShell.NoticeKind);
+                    // The reason stays under the folder field after the toast is gone.
+                    Check.True(baselineShell.HasCaptureRecoveryOnlyExportFolderError,
+                        "A rejected folder must leave its reason under the folder field.");
+                    Check.Equal(
+                        $"選んだフォルダは保存先にできませんでした。保存先は {expectedFolderText} のままです。" +
+                        "このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
+                        "ネットワーク上のフォルダ、USB メモリ、ショートカット先のフォルダは使えません。",
+                        baselineShell.CaptureRecoveryOnlyExportFolderError);
+                }
             }
+
+            // While no folder has been chosen the line says so.
+            RejectAll("未選択");
             Check.False(Directory.Exists(Path.GetFullPath(relative)),
                 "A relative folder must be refused before it is resolved against the current directory.");
             Check.False(Directory.Exists(Path.Combine(linkTarget, "child")),
                 "A folder below a reparse point must not be created.");
             Check.True(baselineShell.TechnicalDetail.Contains("capture_recovery_only_export_folder_rejected", StringComparison.Ordinal),
                 "The reason for a rejected folder must be recorded in the technical detail.");
+
+            // A valid choice clears the line; later rejections name the folder that stays.
+            var chosenFolder = Path.Combine(root, "m2-chosen");
+            baselineShell.ChangeCaptureRecoveryOnlyExportDirectory(chosenFolder);
+            var chosen = baselineShell.CaptureRecoveryOnlyExportDirectory;
+            Check.Equal(Path.GetFullPath(chosenFolder), Path.GetFullPath(chosen));
+            Check.False(baselineShell.HasCaptureRecoveryOnlyExportFolderError,
+                "Choosing a usable folder must clear the earlier reason.");
+            Check.Equal(string.Empty, baselineShell.CaptureRecoveryOnlyExportFolderError);
+            RejectAll(chosen);
+            Check.Equal(chosen, baselineShell.CaptureRecoveryOnlyExportDirectory);
         }
         finally
         {
             Directory.Delete(link, recursive: false);
         }
 
-        // A folder that does not exist yet is created (same as the single-camera export).
+        // A folder that does not exist yet is created (same as the single-camera export), and
+        // accepting it clears the reason left by the rejected choices above.
+        Check.True(baselineShell.HasCaptureRecoveryOnlyExportFolderError, "The last rejection's reason must still be shown.");
         var fresh = Path.Combine(root, "m2-new-folder", "nested");
         baselineShell.ChangeCaptureRecoveryOnlyExportDirectory(fresh);
         Check.True(Directory.Exists(fresh), "A not-yet-existing local folder must be created.");
         Check.Equal(Path.GetFullPath(fresh), Path.GetFullPath(baselineShell.CaptureRecoveryOnlyExportDirectory));
+        Check.False(baselineShell.HasCaptureRecoveryOnlyExportFolderError, "An accepted folder must clear the reason.");
+        // Choosing a folder never touches the camera or the Agent.
+        Check.Equal(baselineCallsBefore, AgentCallSnapshot(baselineOperations, baselineTransport));
     }
 
     // M1: a RecoveryPending outcome that still holds a verified CAM-A original (CAM-B failed
@@ -8890,7 +9112,9 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         var callsBefore = AgentCallSnapshot(pendingOperations, pendingTransport);
         await ((AsyncRelayCommand)pendingShell.ExportCaptureRecoveryOnlyOriginalsCommand).ExecuteAsync(null);
         Check.Equal(0, Directory.GetFiles(pendingFolder, "*", SearchOption.AllDirectories).Length);
-        Check.Equal("未保存", pendingShell.CaptureRecoveryOnlyExportResult);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportNotSavedText, pendingShell.CaptureRecoveryOnlyExportResult);
+        Check.False(pendingShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
+            "A pending result is not the calm waiting state.");
         Check.Equal(callsBefore, AgentCallSnapshot(pendingOperations, pendingTransport));
     }
 
@@ -8907,7 +9131,7 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             "recovery-only/partial-vm-export", () => WpfCommandState.Create(partialShell));
         Check.True(
             partialShell.CaptureRecoveryOnlyExportResult.StartsWith(
-                "保存しました: 1枚（CAM-A のみ。CAM-B は撮影できませんでした）。合成していない原画像です。保存先: ",
+                "保存しました: 1枚（CAM-A のみ。CAM-B の画像は受け取れませんでした）。合成していない原画像です。保存先: ",
                 StringComparison.Ordinal),
             $"A one-original export must say that CAM-B was not captured. Actual: {partialShell.CaptureRecoveryOnlyExportResult}");
         var exported = Directory.GetFiles(partialFolder, "*.jpg", SearchOption.TopDirectoryOnly);
@@ -8929,10 +9153,16 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         shell.ChangeCaptureRecoveryOnlyExportDirectory(folder);
         var savedBefore = shell.SavedFiles.Count;
         var callsBefore = AgentCallSnapshot(operations, transport);
-        var failureTail = OperatorShellViewModel.CaptureRecoveryOnlyExportFailureTechnicalText;
+
+        // The capture is done and a folder is chosen: the button is on and no reason is shown.
+        Check.True(shell.CanExportCaptureRecoveryOnlyOriginals, "The scenario starts from an exportable result.");
+        Check.Equal(string.Empty, shell.CaptureRecoveryOnlyExportDisabledReason);
 
         // (a) Failure right after staging completed, before any rename: nothing is published.
+        // A write-side I/O failure is a destination-side failure and says so, without claiming
+        // that a read-back did not match.
         var observedAtHook = (Jpg: -1, Partial: -1);
+        var duringExport = (Reason: "unset", Result: "unset", CanExport: true);
         shell.CaptureRecoveryOnlyExportBeforePublishForTesting = (publishedCount, _, _) =>
         {
             if (publishedCount == 0)
@@ -8940,6 +9170,10 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                 observedAtHook = (
                     Directory.GetFiles(folder, "*.jpg").Length,
                     Directory.GetFiles(folder, "*.partial").Length);
+                duringExport = (
+                    shell.CaptureRecoveryOnlyExportDisabledReason,
+                    shell.CaptureRecoveryOnlyExportResult,
+                    shell.CanExportCaptureRecoveryOnlyOriginals);
                 throw new IOException("synthetic-english-failure-marker " + folder);
             }
             return Task.CompletedTask;
@@ -8947,19 +9181,69 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
             "recovery-only/m3-stage-failure", () => WpfCommandState.Create(shell, operations));
         Check.Equal((Jpg: 0, Partial: 2), observedAtHook);
+        // While saving, the reason line is empty and the result field says that it is saving.
+        Check.Equal(string.Empty, duringExport.Reason);
+        Check.Equal("原画像を保存しています…", duringExport.Result);
+        Check.False(duringExport.CanExport, "The export must not be re-enterable while it runs.");
         var stageFailure = shell.CaptureRecoveryOnlyExportResult;
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportVerificationFailedText + "\n" + failureTail, stageFailure);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportDestinationFailedText + "\n" + failureTail, stageFailure);
+        Check.Equal(
+            "保存できませんでした。保存先のフォルダへの書き込みが最後まで完了しませんでした。" +
+            "空き容量を確認して、もう一度保存してください。続けて失敗する場合は技術担当者に連絡してください。" +
+            "撮影した原画像はアプリ内に残っています。\n技術担当者向け: 技術情報に記録しました",
+            stageFailure);
+        Check.False(stageFailure.Contains("一致しませんでした", StringComparison.Ordinal),
+            "A write-side failure must not claim that a read-back mismatched.");
         Check.False(stageFailure.Contains("保存しました", StringComparison.Ordinal), "A failed export must not show the success text.");
         Check.False(stageFailure.Contains("途中まで", StringComparison.Ordinal), "Nothing was published, so no partial-file notice applies.");
         Check.False(stageFailure.Contains("synthetic-english-failure-marker", StringComparison.Ordinal),
             "The exception text must stay out of the operator-facing result.");
         Check.True(shell.TechnicalDetail.Contains("synthetic-english-failure-marker", StringComparison.Ordinal),
             "The exception text must be recorded in the technical detail.");
-        Check.Equal(stageFailure, shell.NoticeText);
+        // The notice is short; the explanation lives in the result field.
+        Check.Equal("原画像を保存できませんでした。理由はパネルの結果欄をご覧ください。", shell.NoticeText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFailedNoticeText, shell.NoticeText);
         Check.Equal("warn", shell.NoticeKind);
         Check.Equal(savedBefore, shell.SavedFiles.Count);
         Check.Equal(0, Directory.GetFileSystemEntries(folder).Length);
         Check.False(shell.HasCaptureRecoveryOnlyExportedFiles, "A failure must not list exported file names.");
+        Check.Equal(string.Empty, shell.CaptureRecoveryOnlyExportDisabledReason);
+
+        // (a2) A read-back mismatch is also a destination-side failure and gets the same text.
+        shell.CaptureRecoveryOnlyExportBeforePublishForTesting = (publishedCount, _, _) =>
+            publishedCount == 0
+                ? throw new ExportVerificationMismatchException("synthetic-readback-mismatch")
+                : Task.CompletedTask;
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            "recovery-only/m3-readback-mismatch", () => WpfCommandState.Create(shell, operations));
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportDestinationFailedText + "\n" + failureTail,
+            shell.CaptureRecoveryOnlyExportResult);
+        Check.True(shell.TechnicalDetail.Contains("synthetic-readback-mismatch", StringComparison.Ordinal),
+            "The mismatch text must be recorded in the technical detail.");
+        Check.Equal(0, Directory.GetFileSystemEntries(folder).Length);
+
+        // (a3) A failure on the source side gets its own text: nothing was written, trying
+        // again cannot help, and it must not promise that the original is still in the app.
+        shell.CaptureRecoveryOnlyExportBeforePublishForTesting = (publishedCount, _, _) =>
+            publishedCount == 0
+                ? throw new ExportSourceUnavailableException("synthetic-source-failure")
+                : Task.CompletedTask;
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            "recovery-only/m3-source-failure", () => WpfCommandState.Create(shell, operations));
+        var sourceFailure = shell.CaptureRecoveryOnlyExportResult;
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText + "\n" + failureTail, sourceFailure);
+        Check.Equal(
+            "保存できませんでした。アプリ内に保管した原画像を確認できませんでした。この撮影の原画像はここからは保存できません。" +
+            "アプリ内の保管場所のファイルは消さずに、技術担当者に連絡してください。\n技術担当者向け: 技術情報に記録しました",
+            sourceFailure);
+        Check.False(sourceFailure.Contains("アプリ内に残っています", StringComparison.Ordinal),
+            "A source-side failure must not promise that the original is still in the app.");
+        Check.False(sourceFailure.Contains("もう一度保存してください", StringComparison.Ordinal),
+            "Pressing again cannot fix a source-side failure.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFailedNoticeText, shell.NoticeText);
+        Check.True(shell.TechnicalDetail.Contains("synthetic-source-failure", StringComparison.Ordinal),
+            "The source failure text must be recorded in the technical detail.");
+        Check.Equal(0, Directory.GetFileSystemEntries(folder).Length);
 
         // (b) The second rename fails after the first file was published: no success text, the
         // published file is recorded and named, and nothing else is recorded.
@@ -8983,16 +9267,25 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.Equal(1, published.Length);
         Check.True(Path.GetFileName(published[0]).Contains("-CAM-A-", StringComparison.Ordinal),
             "The file left behind must be the CAM-A original.");
-        Check.True(partialResult.StartsWith("保存できませんでした。", StringComparison.Ordinal) &&
-                   !partialResult.Contains("保存しました", StringComparison.Ordinal),
-            $"A partially published export must not be shown as a success. Actual: {partialResult}");
-        Check.True(
-            partialResult.Contains(
-                $"保存先のフォルダに、途中まで保存された画像が1枚残っています（{Path.GetFileName(published[0])}）。" +
-                "もう一度保存すると、別の名前で2枚そろえて保存します。", StringComparison.Ordinal),
-            $"The left-behind file must be named in the result. Actual: {partialResult}");
+        // A partial success says what worked and what did not, without the failure wording of
+        // a failed save, and the aliases come from what was actually published.
+        Check.Equal(
+            $"一部だけ保存できました。CAM-A の画像は正しく保存しました（{Path.GetFileName(published[0])}）。" +
+            "CAM-B の画像は保存できませんでした。\n" +
+            "もう一度保存すると、CAM-A と CAM-B の2枚を別の名前でそろえて保存します。" +
+            "先に保存した CAM-A のファイルはそのまま使えます。\n" +
+            "撮影した原画像はアプリ内に残っています。\n" +
+            "技術担当者向け: 技術情報に記録しました",
+            partialResult);
+        Check.False(partialResult.StartsWith("保存できませんでした。", StringComparison.Ordinal),
+            "A partial success must not open with the failed-save sentence.");
+        Check.False(partialResult.Contains("一致しませんでした", StringComparison.Ordinal),
+            "The partial-success text must not claim a read-back mismatch.");
         Check.True(partialResult.EndsWith(failureTail, StringComparison.Ordinal), "The technical-detail pointer must come last.");
-        Check.Equal(partialResult, shell.NoticeText);
+        Check.Equal("一部だけ保存できました。パネルの結果欄をご覧ください。", shell.NoticeText);
+        Check.Equal("warn", shell.NoticeKind);
+        Check.Equal(Path.GetFileName(published[0]), shell.CaptureRecoveryOnlyExportedFilesText);
+        Check.True(shell.HasCaptureRecoveryOnlyExportedFiles, "The published file name belongs in the file list.");
         Check.Equal(savedBefore + 1, shell.SavedFiles.Count);
         Check.True(shell.SavedFiles.Any(saved => string.Equals(saved.Path, published[0], StringComparison.OrdinalIgnoreCase)),
             "The published first file must be recorded as saved.");
@@ -9000,6 +9293,9 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.True(
             File.ReadAllBytes(Path.Combine(shell.OutputDirectory, "CAM-A", "original.jpg")).SequenceEqual(File.ReadAllBytes(published[0])),
             "The left-behind file must be a byte-identical CAM-A original.");
+
+        // The file that blocked the second rename is someone else's and must be untouched.
+        Check.Equal("pre-existing file", File.ReadAllText(blocker!));
 
         // Pressing again saves a new, separately-named pair next to what is already there.
         File.Delete(blocker!);
@@ -9011,6 +9307,10 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             $"A repeated export must succeed. Actual: {shell.CaptureRecoveryOnlyExportResult}");
         Check.Equal(3, Directory.GetFiles(folder, "*.jpg", SearchOption.TopDirectoryOnly).Length);
         Check.Equal(savedBefore + 3, shell.SavedFiles.Count);
+        // The success notice is the saved sentence itself (not shortened).
+        Check.True(shell.CaptureRecoveryOnlyExportResult.StartsWith(shell.NoticeText, StringComparison.Ordinal),
+            "A successful export keeps the full saved sentence in its notice.");
+        Check.Equal("ok", shell.NoticeKind);
 
         // (c) A folder that cannot be used any more (here: replaced by a file) gets its own text.
         Directory.Delete(folder, recursive: true);
@@ -9022,6 +9322,7 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             Check.Equal(
                 OperatorShellViewModel.CaptureRecoveryOnlyExportFolderUnusableText + "\n" + failureTail,
                 shell.CaptureRecoveryOnlyExportResult);
+            Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFailedNoticeText, shell.NoticeText);
             Check.Equal(savedBefore + 3, shell.SavedFiles.Count);
         }
         finally
@@ -9033,10 +9334,33 @@ static async Task CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.Equal(callsBefore, AgentCallSnapshot(operations, transport));
     }
 
-    // The baseline shell was only used for folder-selection checks above; saving through it
-    // elsewhere in the scenario already proved the operation counters stay put.
+    // A real source-side failure (no injected exception): the app's own CAM-A original is gone.
+    // The operator is told it cannot be saved from here and nothing is written or invented.
+    {
+        var (shell, operations, transport) = await CaptureOnceForOriginalsExportAsync(
+            root, "source-missing", adapter, ordinaryFlow, ownedCommands);
+        var folder = Path.Combine(root, "source-missing-export");
+        shell.ChangeCaptureRecoveryOnlyExportDirectory(folder);
+        Check.True(shell.CanExportCaptureRecoveryOnlyOriginals, "The scenario starts from an exportable result.");
+        var callsBefore = AgentCallSnapshot(operations, transport);
+        var savedBefore = shell.SavedFiles.Count;
+        File.Delete(Path.Combine(shell.OutputDirectory, "CAM-A", "original.jpg"));
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            "recovery-only/source-missing-export", () => WpfCommandState.Create(shell, operations));
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText + "\n" + failureTail,
+            shell.CaptureRecoveryOnlyExportResult);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFailedNoticeText, shell.NoticeText);
+        Check.Equal(0, Directory.GetFileSystemEntries(folder).Length);
+        Check.Equal(savedBefore, shell.SavedFiles.Count);
+        Check.False(shell.HasCaptureRecoveryOnlyExportedFiles, "A failure must not list exported file names.");
+        Check.Equal(callsBefore, AgentCallSnapshot(operations, transport));
+    }
+
+    // Selecting folders and exporting never touched the camera or the Agent for the shell that
+    // only chose folders, and its single capture is the only one that ever ran.
     Check.Equal(1, baselineOperations.CaptureRecoveryOnlyStartCalls);
     Check.Equal(1, baselineTransport.ActivateCaptureCalls);
+    Check.Equal(baselineCallsBefore, AgentCallSnapshot(baselineOperations, baselineTransport));
 }
 
 // #224 review M-3: a full-stack regression for the real issue. Unlike
@@ -14065,8 +14389,12 @@ sealed class CountingBindingTransport(
 {
     public int ActivateCaptureCalls { get; private set; }
 
+    /// <summary>Every request that reached the transport, whatever its operation.</summary>
+    public int TotalSendCalls { get; private set; }
+
     public Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
     {
+        TotalSendCalls++;
         using var document = JsonDocument.Parse(requestJson);
         var operation = document.RootElement.GetProperty("operation").GetString();
         if (operation == DualBindingCameraAgentProtocol.Operations.ActivateCapture)

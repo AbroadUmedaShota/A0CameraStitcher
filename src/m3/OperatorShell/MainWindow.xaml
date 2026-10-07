@@ -1,4 +1,4 @@
-﻿<Window x:Class="A0CameraStitcher.M3.OperatorShell.MainWindow"
+<Window x:Class="A0CameraStitcher.M3.OperatorShell.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
@@ -1309,6 +1309,13 @@
                                                                        AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportDirectoryDisplay, StringFormat='現在の原画像保存先 {0}'}" />
                                                         </Border>
                                                     </DockPanel>
+                                                    <TextBlock Text="{Binding CaptureRecoveryOnlyExportFolderError}" Margin="0,-4,0,8"
+                                                               TextWrapping="Wrap"
+                                                               FontSize="{StaticResource FontSizeCompact}"
+                                                               Foreground="{StaticResource CautionBrush}"
+                                                               Visibility="{Binding HasCaptureRecoveryOnlyExportFolderError, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportFolderError, StringFormat='保存先を選べなかった理由 {0}'}" />
                                                     <Button Style="{StaticResource PrimaryActionButtonStyle}" MinHeight="42"
                                                             FontSize="{StaticResource FontSizeSection}"
                                                             Content="原画像をこのPCのフォルダへ保存" Command="{Binding ExportCaptureRecoveryOnlyOriginalsCommand}"
@@ -1318,10 +1325,21 @@
                                                     <TextBlock Text="{Binding CaptureRecoveryOnlyExportDisabledReason}" Margin="0,6,0,0"
                                                                TextWrapping="Wrap"
                                                                FontSize="{StaticResource FontSizeCompact}"
-                                                               Foreground="{StaticResource CautionBrush}"
                                                                Visibility="{Binding HasCaptureRecoveryOnlyExportDisabledReason, Converter={StaticResource BoolToVisibilityConverter}}"
                                                                AutomationProperties.LiveSetting="Polite"
-                                                               AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportDisabledReason, StringFormat='原画像を保存できない理由 {0}'}" />
+                                                               AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportDisabledReason, StringFormat='原画像を保存できない理由 {0}'}">
+                                                        <!-- 撮影前の待ち状態は注意色にせず、通常の補足と同じ控えめな色にする。 -->
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource MutedTextStyle}">
+                                                                <Setter Property="Foreground" Value="{StaticResource CautionBrush}" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsCaptureRecoveryOnlyExportDisabledReasonMuted}" Value="True">
+                                                                        <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
                                                     <TextBlock Text="{Binding CaptureRecoveryOnlyExportResult}" Margin="0,6,0,0"
                                                                TextWrapping="Wrap"
                                                                FontSize="{StaticResource FontSizeCompact}"

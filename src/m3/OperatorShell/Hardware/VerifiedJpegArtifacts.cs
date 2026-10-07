@@ -300,11 +300,39 @@ public sealed class DualExportPartiallyPublishedException : IOException
     public IReadOnlyList<string> PublishedPaths { get; }
 }
 
+/// <summary>
+/// The retained original in the app's own storage could not be used as an export source. This
+/// is raised only for checks on the source side, before or while it is read: the provenance of
+/// the record, the shape of the request, a missing or unreadable original.jpg, or bytes that no
+/// longer match the recorded size/SHA-256. Nothing is published when it is raised. Callers use
+/// the type to tell this apart from a failure on the destination side.
+/// </summary>
+public sealed class ExportSourceUnavailableException : IOException
+{
+    public ExportSourceUnavailableException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
+/// The file written to the export folder did not match the original when it was read back.
+/// This is a destination-side failure (the source was already verified while it was copied).
+/// </summary>
+public sealed class ExportVerificationMismatchException : IOException
+{
+    public ExportVerificationMismatchException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}
+
 public sealed class HardwareOriginalExporter
 {
     private readonly string _exportDirectory;
     private readonly Func<string, CancellationToken, Task>? _afterLockedVerificationForTesting;
     private readonly Func<int, string, CancellationToken, Task>? _beforeDualPublishForTesting;
+    private readonly Func<string, CancellationToken, Task>? _afterStagedWriteForTesting;
 
     public HardwareOriginalExporter(string exportDirectory)
         : this(exportDirectory, afterLockedVerificationForTesting: null)
@@ -314,7 +342,8 @@ public sealed class HardwareOriginalExporter
     internal HardwareOriginalExporter(
         string exportDirectory,
         Func<string, CancellationToken, Task>? afterLockedVerificationForTesting,
-        Func<int, string, CancellationToken, Task>? beforeDualPublishForTesting = null)
+        Func<int, string, CancellationToken, Task>? beforeDualPublishForTesting = null,
+        Func<string, CancellationToken, Task>? afterStagedWriteForTesting = null)
     {
         if (string.IsNullOrWhiteSpace(exportDirectory))
         {
@@ -324,6 +353,7 @@ public sealed class HardwareOriginalExporter
         _exportDirectory = Path.GetFullPath(exportDirectory);
         _afterLockedVerificationForTesting = afterLockedVerificationForTesting;
         _beforeDualPublishForTesting = beforeDualPublishForTesting;
+        _afterStagedWriteForTesting = afterStagedWriteForTesting;
     }
 
     public string ExportDirectory => _exportDirectory;
@@ -395,37 +425,15 @@ public sealed class HardwareOriginalExporter
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(originals);
-        if (originals.Count is not (1 or 2))
+        try
         {
-            throw new InvalidDataException("Export requires one or two retained dual-camera originals.");
+            ValidateDualExportRequest(originals, transactionId, transactionDirectory);
         }
-        if (!originals.Select(original => original.Alias)
-                .SequenceEqual(OrderedDualAliases.Take(originals.Count), StringComparer.Ordinal))
+        catch (InvalidDataException exception)
         {
-            throw new InvalidDataException("Export originals must be exactly CAM-A, then CAM-A/CAM-B in order.");
-        }
-        ValidateTransactionId(transactionId);
-        if (string.IsNullOrWhiteSpace(transactionDirectory) || !Path.IsPathFullyQualified(transactionDirectory))
-        {
-            throw new InvalidDataException("Export transaction directory is invalid.");
-        }
-        // The transaction directory is derived by the caller from a trusted root and the
-        // transaction ID; requiring its leaf to be that ID ties the two together here too.
-        if (!string.Equals(
-                Path.GetFileName(Path.TrimEndingDirectorySeparator(transactionDirectory)),
-                transactionId,
-                StringComparison.Ordinal))
-        {
-            throw new InvalidDataException("Export transaction directory does not belong to the transaction ID.");
-        }
-
-        // Validate every original's provenance before any byte is written.
-        foreach (var original in originals)
-        {
-            var expectedPath = Path.GetFullPath(
-                Path.Combine(transactionDirectory, original.Alias, "original.jpg"));
-            HardwareArtifactVerifier.ValidateExpectedRecord(
-                original.Path, original.SizeBytes, original.Sha256, "original.jpg", expectedPath);
+            // Everything checked here concerns the retained originals and the request built
+            // from them, not the export folder.
+            throw new ExportSourceUnavailableException(exception.Message, exception);
         }
         EnsureExportDirectoryIsSafe();
 
@@ -467,22 +475,63 @@ public sealed class HardwareOriginalExporter
         {
             foreach (var (lockedFile, finalPath) in staged)
             {
-                await lockedFile.DisposeAsync().ConfigureAwait(false);
                 if (!finalPaths.Contains(finalPath, StringComparer.OrdinalIgnoreCase))
                 {
-                    DeleteUnpublishedStagedFile(finalPath + ".partial");
+                    DeleteUnpublishedStagedFile(lockedFile);
                 }
+                await lockedFile.DisposeAsync().ConfigureAwait(false);
             }
         }
     }
 
+    private static void ValidateDualExportRequest(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        string transactionId,
+        string transactionDirectory)
+    {
+        if (originals.Count is not (1 or 2))
+        {
+            throw new InvalidDataException("Export requires one or two retained dual-camera originals.");
+        }
+        if (!originals.Select(original => original.Alias)
+                .SequenceEqual(OrderedDualAliases.Take(originals.Count), StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("Export originals must be exactly CAM-A, then CAM-A/CAM-B in order.");
+        }
+        ValidateTransactionId(transactionId);
+        if (string.IsNullOrWhiteSpace(transactionDirectory) || !Path.IsPathFullyQualified(transactionDirectory))
+        {
+            throw new InvalidDataException("Export transaction directory is invalid.");
+        }
+        // The transaction directory is derived by the caller from a trusted root and the
+        // transaction ID; requiring its leaf to be that ID ties the two together here too.
+        if (!string.Equals(
+                Path.GetFileName(Path.TrimEndingDirectorySeparator(transactionDirectory)),
+                transactionId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Export transaction directory does not belong to the transaction ID.");
+        }
+
+        // Validate every original's provenance before any byte is written.
+        foreach (var original in originals)
+        {
+            var expectedPath = Path.GetFullPath(
+                Path.Combine(transactionDirectory, original.Alias, "original.jpg"));
+            HardwareArtifactVerifier.ValidateExpectedRecord(
+                original.Path, original.SizeBytes, original.Sha256, "original.jpg", expectedPath);
+        }
+    }
+
     // Best effort: a staged file that was verified but never published is not diagnostic
-    // evidence of a failed copy, so it should not be left behind in the operator's folder.
-    private static void DeleteUnpublishedStagedFile(string partialPath)
+    // evidence of a failed copy, so it should not be left behind in the operator's folder. The
+    // exact locked handle is marked for deletion (not the path), so a path that was replaced in
+    // the meantime can never be the file that is removed; the file goes when the handle closes.
+    private static void DeleteUnpublishedStagedFile(FileStream lockedFile)
     {
         try
         {
-            File.Delete(partialPath);
+            WindowsDurableFilePublisher.DeleteLocked(lockedFile);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -524,11 +573,25 @@ public sealed class HardwareOriginalExporter
         string baseName,
         CancellationToken cancellationToken)
     {
-        HardwareArtifactVerifier.EnsureRegularFile(sourcePath);
+        // Failures on the source side (the retained original is missing, unreadable, not the
+        // recorded JPEG any more) are typed apart from failures on the destination side, so the
+        // caller can tell the operator which side to look at.
         var finalPath = UniqueDestinationPath(baseName);
         var partialPath = finalPath + ".partial";
 
-        await using (var source = HardwareArtifactVerifier.OpenStableRead(sourcePath))
+        FileStream sourceStream;
+        try
+        {
+            HardwareArtifactVerifier.EnsureRegularFile(sourcePath);
+            sourceStream = HardwareArtifactVerifier.OpenStableRead(sourcePath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+            or InvalidDataException or NotSupportedException or ArgumentException)
+        {
+            throw new ExportSourceUnavailableException(exception.Message, exception);
+        }
+
+        await using (sourceStream)
         await using (var destination = new FileStream(
                          partialPath,
                          FileMode.CreateNew,
@@ -537,28 +600,54 @@ public sealed class HardwareOriginalExporter
                          bufferSize: 128 * 1024,
                          FileOptions.Asynchronous | FileOptions.WriteThrough))
         {
-            var observed = await HardwareArtifactVerifier
-                .InspectJpegAsync(source, cancellationToken, (7360, 4912), destination)
-                .ConfigureAwait(false);
+            (long SizeBytes, string Sha256) observed;
+            try
+            {
+                observed = await HardwareArtifactVerifier
+                    .InspectJpegAsync(sourceStream, cancellationToken, (7360, 4912), destination)
+                    .ConfigureAwait(false);
+            }
+            catch (InvalidDataException exception)
+            {
+                // InspectJpegAsync raises InvalidDataException only for the bytes it reads from
+                // the source (truncated, malformed or wrong-size JPEG); a write failure on the
+                // destination surfaces as IOException and stays untyped.
+                throw new ExportSourceUnavailableException(exception.Message, exception);
+            }
             await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
             destination.Flush(flushToDisk: true);
             if (observed.SizeBytes != expectedSizeBytes ||
                 !string.Equals(observed.Sha256, expectedSha256, StringComparison.Ordinal))
             {
-                throw new InvalidDataException(
+                throw new ExportSourceUnavailableException(
                     $"Original verification failed; diagnostic partial was retained: {partialPath}");
             }
+        }
+
+        if (_afterStagedWriteForTesting is not null)
+        {
+            await _afterStagedWriteForTesting(partialPath, cancellationToken).ConfigureAwait(false);
         }
 
         var lockedFile = WindowsDurableFilePublisher.OpenLockedForVerifiedPublish(partialPath);
         try
         {
-            var stagedRecord = await HardwareArtifactVerifier
-                .InspectJpegAsync(lockedFile, cancellationToken, (7360, 4912))
-                .ConfigureAwait(false);
+            (long SizeBytes, string Sha256) stagedRecord;
+            try
+            {
+                stagedRecord = await HardwareArtifactVerifier
+                    .InspectJpegAsync(lockedFile, cancellationToken, (7360, 4912))
+                    .ConfigureAwait(false);
+            }
+            catch (InvalidDataException exception)
+            {
+                // The source just matched its record, so a written file that no longer parses
+                // as the same JPEG is a destination-side mismatch.
+                throw new ExportVerificationMismatchException("Export reread verification failed.", exception);
+            }
             if (stagedRecord.SizeBytes != expectedSizeBytes || stagedRecord.Sha256 != expectedSha256)
             {
-                throw new InvalidDataException("Export reread verification failed.");
+                throw new ExportVerificationMismatchException("Export reread verification failed.");
             }
         }
         catch

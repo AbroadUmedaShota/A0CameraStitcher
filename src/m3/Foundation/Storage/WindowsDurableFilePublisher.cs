@@ -16,6 +16,7 @@ internal static partial class WindowsDurableFilePublisher
     private const uint FileFlagWriteThrough = 0x80000000;
     private const uint OpenExisting = 3;
     private const int FileRenameInfo = 3;
+    private const int FileDispositionInfo = 4;
     private const uint MoveFileReplaceExisting = 0x00000001;
     private const uint MoveFileWriteThrough = 0x00000008;
 
@@ -81,6 +82,37 @@ internal static partial class WindowsDurableFilePublisher
             verifiedStagingFile.SafeFileHandle,
             Path.GetFullPath(destinationPath),
             replaceExisting);
+    }
+
+    /// <summary>
+    /// Marks the exact locked staging handle for deletion; the file disappears when the last
+    /// handle closes. Unlike deleting by path, a path that was replaced in the meantime can
+    /// never be the file that gets removed. The handle must have been opened with DELETE access
+    /// (<see cref="OpenLockedForVerifiedPublish"/>).
+    /// </summary>
+    public static void DeleteLocked(FileStream lockedStagingFile)
+    {
+        ArgumentNullException.ThrowIfNull(lockedStagingFile);
+        var buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.WriteInt32(buffer, 1);
+            if (!SetFileInformationByHandle(
+                    lockedStagingFile.SafeFileHandle,
+                    FileDispositionInfo,
+                    buffer,
+                    sizeof(int)))
+            {
+                var error = Marshal.GetLastPInvokeError();
+                throw new IOException(
+                    "Windows did not mark the exact verified staging handle for deletion.",
+                    new Win32Exception(error));
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     public static void Publish(string sourcePath, string destinationPath, bool replaceExisting)

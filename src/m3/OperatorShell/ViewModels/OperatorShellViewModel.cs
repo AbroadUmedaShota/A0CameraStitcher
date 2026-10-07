@@ -225,7 +225,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     // 合成を行わず検証済み原画像だけをbyte-identicalで追加コピーする——意味が異なる操作に
     // 同じ状態を使うと「どちらのための保存先か」が画面上で混ざる。
     private string _captureRecoveryOnlyExportDirectory = string.Empty;
-    private string _captureRecoveryOnlyExportResult = "未保存";
+    private string _captureRecoveryOnlyExportResult = CaptureRecoveryOnlyExportNotSavedText;
+    private string _captureRecoveryOnlyExportFolderError = string.Empty;
     private string _captureRecoveryOnlyExportedFilesText = string.Empty;
     private bool _isExportingCaptureRecoveryOnlyOriginals;
     // GitHub Issue #226: what the export may use, fixed once per terminal outcome. The transaction
@@ -582,8 +583,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanChangeCaptureRecoveryOnlyExportDirectory => IsCaptureRecoveryOnlyMode && !IsBusy;
     public string OperatingModeDescription => IsCaptureRecoveryOnlyMode
         ? IsCaptureRecoveryOnlyFiveRunMode
-            ? "同じ機体割当でCAM-A→CAM-Bを最大5組撮影し、検証済み原画像を固定ローカルへ保持します。合成とA0品質判定は行いません。"
-            : "CAM-A→CAM-Bを順次撮影し、検証済み原画像2枚だけを固定ローカルへ保持します。合成とA0品質判定は行いません。"
+            ? "同じ機体割当でCAM-A→CAM-Bを最大5組撮影し、撮影した原画像をアプリ内に保管します。合成とA0品質判定は行いません。"
+            : "CAM-A→CAM-Bを順に撮影し、撮影した原画像2枚をアプリ内に保管します。合成とA0品質判定は行いません。"
         : IsSingleCameraMode
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
@@ -2055,6 +2056,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         _captureRecoveryOnlyExportDirectory = normalized;
+        SetCaptureRecoveryOnlyExportFolderError(string.Empty);
         OnPropertyChanged(nameof(CaptureRecoveryOnlyExportDirectory));
         OnPropertyChanged(nameof(CaptureRecoveryOnlyExportDirectoryDisplay));
         RaiseCaptureRecoveryOnlyExportStateChanged();
@@ -2063,16 +2065,38 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
 
     // The operator sees only the plain-language guidance; the exception text stays in the
-    // technical detail.
+    // technical detail. The guidance stays under the folder field until a folder is accepted,
+    // because the toast alone disappears while the field still shows the old folder.
     private void RejectCaptureRecoveryOnlyExportDirectory(string technicalReason)
     {
         TechnicalDetail += $"\ncapture_recovery_only_export_folder_rejected: {technicalReason}";
-        Notify(CaptureRecoveryOnlyExportFolderRejectedText, false);
+        SetCaptureRecoveryOnlyExportFolderError(BuildCaptureRecoveryOnlyExportFolderRejectedText(
+            _captureRecoveryOnlyExportDirectory));
+        Notify(CaptureRecoveryOnlyExportFolderRejectedNoticeText, false);
     }
 
-    internal const string CaptureRecoveryOnlyExportFolderRejectedText =
-        "このフォルダは保存先にできません。このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
+    /// <summary>One line shown under the export folder field after a rejected folder choice;
+    /// empty until a choice is rejected and again after the next accepted choice.</summary>
+    public string CaptureRecoveryOnlyExportFolderError => _captureRecoveryOnlyExportFolderError;
+
+    public bool HasCaptureRecoveryOnlyExportFolderError => _captureRecoveryOnlyExportFolderError.Length > 0;
+
+    private void SetCaptureRecoveryOnlyExportFolderError(string text)
+    {
+        if (SetProperty(ref _captureRecoveryOnlyExportFolderError, text, nameof(CaptureRecoveryOnlyExportFolderError)))
+        {
+            OnPropertyChanged(nameof(HasCaptureRecoveryOnlyExportFolderError));
+        }
+    }
+
+    internal static string BuildCaptureRecoveryOnlyExportFolderRejectedText(string currentFolder) =>
+        "選んだフォルダは保存先にできませんでした。保存先は " +
+        (string.IsNullOrWhiteSpace(currentFolder) ? "未選択" : currentFolder) +
+        " のままです。このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
         "ネットワーク上のフォルダ、USB メモリ、ショートカット先のフォルダは使えません。";
+
+    internal const string CaptureRecoveryOnlyExportFolderRejectedNoticeText =
+        "選んだフォルダは保存先にできませんでした。理由は保存先の欄の下をご覧ください。";
 
     public string ProfileText => IsCaptureRecoveryOnlyMode
         ? "撮影・回収のみ / 合成保留 / A0品質未承認"
@@ -2138,7 +2162,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? "合成・A0品質・実シャッター同期は未承認です。フォーカスはこの画面では判定しません。"
         : FormatNotices(OperatorWarningSeverity.Caution, "注意する点はありません");
     public string InfoText => IsCaptureRecoveryOnlyMode
-        ? "機体照合画面のLive Viewは割当確認専用です。保存対象は検証済み原画像です。"
+        ? "機体照合画面のLive Viewは割当確認専用です。保存されるのは撮影した原画像（合成なし）です。"
         : FormatNotices(OperatorWarningSeverity.Info, "原画像はPCに保持 ／ ライブ表示は原画像ではありません ／ 2台のシャッター時刻差は保証しません");
     private bool HasRecoverableHardwareDualTransaction =>
         !IsSingleCameraMode &&
@@ -2240,9 +2264,10 @@ public sealed class OperatorShellViewModel : ObservableObject
         "先に『選択…』で保存先のフォルダを選んでください。";
     internal const string CaptureRecoveryOnlyExportPendingText =
         "撮影結果がまだ確定していないため保存できません。同じ撮影IDの結果確認が終わると保存できるようになります。";
+    internal const string CaptureRecoveryOnlyExportNoResultYetText =
+        "撮影が終わると、ここから原画像を保存できます。保存先のフォルダは今のうちに選んでおけます。";
     internal const string CaptureRecoveryOnlyExportNoOriginalsText =
-        "保存できる原画像がありません（カメラから画像を受け取れませんでした）。";
-    internal const string CaptureRecoveryOnlyExportBusyText = "保存中です。終わるまでお待ちください。";
+        "この撮影では保存できる原画像がありません（カメラから画像を受け取れませんでした）。";
     internal const string CaptureRecoveryOnlyExportOtherBusyText = "処理中です。終わるまでお待ちください。";
     internal const string CaptureRecoveryOnlyExportUnconfirmedText =
         "撮影結果を確認できないため保存できません。技術担当者に連絡してください。";
@@ -2257,9 +2282,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 return string.Empty;
             }
+            // While saving, the result field already says "saving"; a second line would repeat it.
             if (_isExportingCaptureRecoveryOnlyOriginals)
             {
-                return CaptureRecoveryOnlyExportBusyText;
+                return string.Empty;
             }
             if (IsBusy)
             {
@@ -2268,6 +2294,12 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (HasRecoverableCaptureRecoveryOnlyTransaction || _captureRecoveryOnlyExportSource?.RecoveryPending == true)
             {
                 return CaptureRecoveryOnlyExportPendingText;
+            }
+            // No outcome yet (start-up, right after preparing a new capture, or before a
+            // transaction ID exists) is a normal waiting state, not a problem.
+            if (_captureRecoveryOnlyExportSource is null && _captureOutcome is null)
+            {
+                return CaptureRecoveryOnlyExportNoResultYetText;
             }
             if (_captureRecoveryOnlyExportSource is not { Originals.Count: > 0 })
             {
@@ -2283,6 +2315,14 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public bool HasCaptureRecoveryOnlyExportDisabledReason =>
         !string.IsNullOrEmpty(CaptureRecoveryOnlyExportDisabledReason);
+
+    /// <summary>True while the reason is the normal "nothing captured yet" wait, which the
+    /// screen shows in the muted style instead of the caution colour.</summary>
+    public bool IsCaptureRecoveryOnlyExportDisabledReasonMuted =>
+        string.Equals(
+            CaptureRecoveryOnlyExportDisabledReason,
+            CaptureRecoveryOnlyExportNoResultYetText,
+            StringComparison.Ordinal);
 
     public string CaptureRecoveryOnlyExportPanelTitle => "撮影した原画像の保存（合成はしていません）";
 
@@ -2336,6 +2376,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanExportCaptureRecoveryOnlyOriginals));
         OnPropertyChanged(nameof(CaptureRecoveryOnlyExportDisabledReason));
         OnPropertyChanged(nameof(HasCaptureRecoveryOnlyExportDisabledReason));
+        OnPropertyChanged(nameof(IsCaptureRecoveryOnlyExportDisabledReasonMuted));
     }
     public bool CanRestitch => !IsCaptureRecoveryOnlyMode && _availability.Restitch.Allowed;
     // _initializationFailed が立っている間は PrepareNewCapture 自体をブロックする。
@@ -3608,22 +3649,29 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 RecordSavedFile(path);
             }
-            var names = string.Join("、", exception.PublishedPaths.Select(Path.GetFileName));
             ReportCaptureRecoveryOnlyExportFailure(
-                CaptureRecoveryOnlyExportVerificationFailedText +
-                $"保存先のフォルダに、途中まで保存された画像が{exception.PublishedPaths.Count}枚残っています（{names}）。" +
-                "もう一度保存すると、別の名前で2枚そろえて保存します。",
-                exception);
+                BuildCaptureRecoveryOnlyExportPartiallyPublishedText(source.Originals, exception.PublishedPaths),
+                exception,
+                string.Join("\n", exception.PublishedPaths.Select(Path.GetFileName)),
+                CaptureRecoveryOnlyExportPartiallyPublishedNoticeText);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
         {
+            // The application is closing: say so in the result field and let the caller's own
+            // shutdown continue, as the capture path does.
             SetCaptureRecoveryOnlyExportResult(
                 "保存を中断しました。もう一度保存してください。撮影した原画像はアプリ内に残っています。", string.Empty);
-            throw;
+        }
+        catch (ExportSourceUnavailableException exception)
+        {
+            ReportCaptureRecoveryOnlyExportFailure(CaptureRecoveryOnlyExportSourceFailedText, exception);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            ReportCaptureRecoveryOnlyExportFailure(CaptureRecoveryOnlyExportVerificationFailedText, exception);
+            // Everything else happened while writing to, locking or reading back from the
+            // chosen folder (I/O errors, full disk, access denied, name collisions, a read-back
+            // mismatch, no free file name).
+            ReportCaptureRecoveryOnlyExportFailure(CaptureRecoveryOnlyExportDestinationFailedText, exception);
         }
         finally
         {
@@ -3635,23 +3683,57 @@ public sealed class OperatorShellViewModel : ObservableObject
     internal const string CaptureRecoveryOnlyExportFolderUnusableText =
         "保存できませんでした。保存先のフォルダが使えません。『選択…』で、このPC内の別のフォルダを選び直してから、" +
         "もう一度保存してください。撮影した原画像はアプリ内に残っています。";
-    internal const string CaptureRecoveryOnlyExportVerificationFailedText =
-        "保存できませんでした。書き込んだ画像を読み直したところ、元の原画像と一致しませんでした。" +
+    // The app's own copy could not be checked or read: nothing was written, and pressing again
+    // cannot help, so the text does not promise the original is still there.
+    internal const string CaptureRecoveryOnlyExportSourceFailedText =
+        "保存できませんでした。アプリ内に保管した原画像を確認できませんでした。この撮影の原画像はここからは保存できません。" +
+        "アプリ内の保管場所のファイルは消さずに、技術担当者に連絡してください。";
+    // Writing to the chosen folder did not finish (full disk, access denied, a name collision,
+    // a failed read-back, ...): trying again may work, and the app's copy is untouched.
+    internal const string CaptureRecoveryOnlyExportDestinationFailedText =
+        "保存できませんでした。保存先のフォルダへの書き込みが最後まで完了しませんでした。" +
         "空き容量を確認して、もう一度保存してください。続けて失敗する場合は技術担当者に連絡してください。" +
         "撮影した原画像はアプリ内に残っています。";
+    internal const string CaptureRecoveryOnlyExportPartiallyPublishedNoticeText =
+        "一部だけ保存できました。パネルの結果欄をご覧ください。";
+    internal const string CaptureRecoveryOnlyExportFailedNoticeText =
+        "原画像を保存できませんでした。理由はパネルの結果欄をご覧ください。";
+    internal const string CaptureRecoveryOnlyExportNotSavedText = "まだ保存していません";
     internal const string CaptureRecoveryOnlyExportFailureTechnicalText = "技術担当者向け: 技術情報に記録しました";
     internal const string CaptureRecoveryOnlyExportSuccessTechnicalText =
         "技術情報: 元の原画像と同一（SHA-256 一致）／合成 Pending・A0 品質 Unapproved";
     internal const string CaptureRecoveryOnlyExportAgainText = "もう一度押すと、同じ画像を別の名前で追加保存します。";
 
-    // Plain-language failure text stays in the result field (and the notice); the exception
-    // text — English and path-bearing — goes to the technical detail only.
-    private void ReportCaptureRecoveryOnlyExportFailure(string operatorText, Exception exception)
+    // Plain-language failure text stays in the result field; the notice only points to it. The
+    // exception text — English and path-bearing — goes to the technical detail only.
+    private void ReportCaptureRecoveryOnlyExportFailure(
+        string operatorText,
+        Exception exception,
+        string exportedFilesText = "",
+        string noticeText = CaptureRecoveryOnlyExportFailedNoticeText)
     {
         TechnicalDetail += $"\ncapture_recovery_only_export_failed: {exception.GetType().Name}: {exception.Message}";
-        var text = operatorText + "\n" + CaptureRecoveryOnlyExportFailureTechnicalText;
-        SetCaptureRecoveryOnlyExportResult(text, string.Empty);
-        Notify(text, false);
+        SetCaptureRecoveryOnlyExportResult(
+            operatorText + "\n" + CaptureRecoveryOnlyExportFailureTechnicalText, exportedFilesText);
+        Notify(noticeText, false);
+    }
+
+    // The first files of a two-original export are already in the folder when a later rename
+    // fails. The aliases come from the published paths' position in the fixed CAM-A, CAM-B order.
+    private static string BuildCaptureRecoveryOnlyExportPartiallyPublishedText(
+        IReadOnlyList<CanonicalJpegOriginal> originals,
+        IReadOnlyList<string> publishedPaths)
+    {
+        var published = originals.Take(publishedPaths.Count).Select(original => original.Alias).ToArray();
+        var failed = originals.Skip(publishedPaths.Count).Select(original => original.Alias).ToArray();
+        var publishedLabel = string.Join(" と ", published);
+        var names = string.Join("、", publishedPaths.Select(Path.GetFileName));
+        return $"一部だけ保存できました。{publishedLabel} の画像は正しく保存しました（{names}）。" +
+               $"{string.Join(" と ", failed)} の画像は保存できませんでした。\n" +
+               $"もう一度保存すると、{string.Join(" と ", originals.Select(original => original.Alias))} の" +
+               $"{originals.Count}枚を別の名前でそろえて保存します。" +
+               $"先に保存した {publishedLabel} のファイルはそのまま使えます。\n" +
+               "撮影した原画像はアプリ内に残っています。";
     }
 
     private static string BuildCaptureRecoveryOnlyExportSavedText(
@@ -3660,7 +3742,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         var aliases = originals.Select(original => original.Alias).ToArray();
         var count = aliases.Length == 1 && aliases[0] == "CAM-A"
-            ? "1枚（CAM-A のみ。CAM-B は撮影できませんでした）"
+            ? "1枚（CAM-A のみ。CAM-B の画像は受け取れませんでした）"
             : $"{aliases.Length}枚（{string.Join("・", aliases)}）";
         return $"保存しました: {count}。合成していない原画像です。保存先: {exportDirectory}\n" +
                CaptureRecoveryOnlyExportAgainText;
@@ -3675,7 +3757,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
-    private void ResetCaptureRecoveryOnlyExportResult() => SetCaptureRecoveryOnlyExportResult("未保存", string.Empty);
+    private void ResetCaptureRecoveryOnlyExportResult() =>
+        SetCaptureRecoveryOnlyExportResult(CaptureRecoveryOnlyExportNotSavedText, string.Empty);
 
     /// <summary>Test seam: called before each rename of the dual-original export with the number
     /// of files already published (0 = right after staging completed) and the file about to be
