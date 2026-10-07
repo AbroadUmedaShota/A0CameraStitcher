@@ -76,7 +76,7 @@
                                            FontSize="{StaticResource FontSizeCompact}" FontWeight="Medium"
                                            Foreground="{StaticResource AccentBrightBrush}" VerticalAlignment="Center"
                                            AutomationProperties.Name="状態チップ Ready状態と撮影可否"
-                                           AutomationProperties.LiveSetting="Polite" />
+                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             </StackPanel>
                         </Border>
 
@@ -335,7 +335,7 @@
                         <TextBlock DockPanel.Dock="Right" Margin="0,0,10,0" VerticalAlignment="Center"
                                    Style="{StaticResource MonoTextStyle}"
                                    Text="{Binding ActivityText}" TextTrimming="CharacterEllipsis" MaxWidth="300"
-                                   AutomationProperties.LiveSetting="Polite"
+                                   AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                    AutomationProperties.Name="現在の進行状況" />
                     </DockPanel>
                 </Border>
@@ -567,7 +567,7 @@
                                                                FontFamily="{StaticResource MonoFontFamily}"
                                                                FontSize="{StaticResource FontSizeSmall}"
                                                                Foreground="{StaticResource CautionBrush}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="非ライブ側 鮮度バッジ 経過秒" />
                                                 </Border>
                                             </Grid>
@@ -723,7 +723,7 @@
                                                                FontFamily="{StaticResource MonoFontFamily}"
                                                                FontSize="{StaticResource FontSizeTiny}"
                                                                Foreground="{StaticResource CautionBrush}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="拡大エリア 鮮度バッジ 非ライブ側静止画" />
                                                 </Border>
                                             </Grid>
@@ -782,7 +782,7 @@
                                             <TextBlock Text="{Binding NoticeText}" FontWeight="Medium"
                                                        FontSize="{StaticResource FontSizeBase}"
                                                        Foreground="{StaticResource AccentOnStrongBrush}"
-                                                       AutomationProperties.LiveSetting="Polite" />
+                                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                         </Border>
 
                                         <!-- 撮影・合成の進行中はステージ全面を覆う。ここで手を出せる操作は無い、と示すため。 -->
@@ -793,7 +793,7 @@
                                                 <TextBlock Text="{Binding StageProcessingPlaceholderText}" TextAlignment="Center"
                                                            Style="{StaticResource MutedTextStyle}"
                                                            FontSize="{StaticResource FontSizeLabel}"
-                                                           AutomationProperties.LiveSetting="Polite"
+                                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                            AutomationProperties.Name="ステージ 撮影シーケンス実行中プレースホルダ" />
                                                 <ItemsControl ItemsSource="{Binding ProgressSteps}" Margin="0,18,0,0"
                                                               AutomationProperties.Name="撮影の進行状況 ライブ表示停止からCAM-A撮影CAM-A原画像の確認CAM-B撮影CAM-B原画像の確認合成までの現在位置">
@@ -871,11 +871,11 @@
                                         <TextBlock Text="{Binding TiltRollDegreesText}" VerticalAlignment="Center"
                                                    FontFamily="{StaticResource MonoFontFamily}"
                                                    FontSize="{StaticResource FontSizeReading}" FontWeight="Medium"
-                                                   AutomationProperties.LiveSetting="Polite"
+                                                   AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                    AutomationProperties.Name="傾き読み値 面内回転ROLL角 検出不能時は数値を出さない" />
                                         <TextBlock Text="{Binding TiltToleranceChipText}" Margin="12,0,0,0" VerticalAlignment="Center"
                                                    Style="{StaticResource MonoTextStyle}"
-                                                   AutomationProperties.LiveSetting="Polite"
+                                                   AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                    AutomationProperties.Name="許容範囲チップ 許容値未設定なら判定を出さない" />
                                         <TextBlock Text="PITCHは対象外" Margin="12,0,0,0" VerticalAlignment="Center"
                                                    Style="{StaticResource MonoTextStyle}" />
@@ -1004,7 +1004,7 @@
 
                                             <TextBlock Text="{Binding FocusResultText}" Margin="0,8,0,0"
                                                        Style="{StaticResource MutedTextStyle}"
-                                                       AutomationProperties.LiveSetting="Polite"
+                                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                        AutomationProperties.Name="AF実行結果 合焦OK NG 実行時刻 使用した□位置" />
 
                                             <DockPanel Margin="0,10,0,0" LastChildFill="False">
@@ -1056,7 +1056,7 @@
                                                     <TextBlock Text="{Binding SetupStatusText}" VerticalAlignment="Center"
                                                                FontSize="{StaticResource FontSizeBody}" FontWeight="Medium"
                                                                Foreground="{StaticResource AccentBrightBrush}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="設置判定 三状態" />
                                                 </Border>
                                             </DockPanel>
@@ -1088,7 +1088,7 @@
                                             <TextBlock Text="{Binding OperatingModeDescription}" Margin="0,8,0,0"
                                                        FontSize="{StaticResource FontSizeCompact}"
                                                        Style="{StaticResource MutedTextStyle}"
-                                                       AutomationProperties.LiveSetting="Polite" />
+                                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                             <TextBlock Text="{Binding OutputDirectoryLabel}" Margin="0,10,0,0"
                                                        Style="{StaticResource MutedTextStyle}"
                                                        FontSize="{StaticResource FontSizeCompact}" />
@@ -1212,7 +1212,7 @@
                                                 <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"
-                                                           AutomationProperties.LiveSetting="Polite" />
+                                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                                 <TextBlock Text="{Binding CaptureWithAutoFocusUnavailableReason}" Margin="0,4,0,0" TextWrapping="Wrap"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource InfoBrush}"
@@ -1225,7 +1225,7 @@
                                                         AutomationProperties.Name="アクションゾーン state2 自動進捗ストリップ">
                                                 <TextBlock Text="{Binding OverallStateText}" FontWeight="Medium"
                                                            FontSize="{StaticResource FontSizeLabel}"
-                                                           AutomationProperties.LiveSetting="Polite"
+                                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                            AutomationProperties.Name="自動進捗 現在の全体状態" />
                                                 <TextBlock Text="この間は他の操作はできません。" Margin="0,6,0,0"
                                                            Style="{StaticResource MutedTextStyle}"
@@ -1237,7 +1237,7 @@
                                                         AutomationProperties.Name="アクションゾーン state3 結果パネル">
                                                 <TextBlock Text="{Binding StatusMessage}" FontWeight="Medium"
                                                            FontSize="{StaticResource FontSizeBody}"
-                                                           AutomationProperties.LiveSetting="Assertive"
+                                                           AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True"
                                                            AutomationProperties.Name="撮影と失敗の共通結果" />
                                                 <Grid Margin="0,10,0,0">
                                                     <Grid.ColumnDefinitions>
@@ -1314,7 +1314,7 @@
                                                                FontSize="{StaticResource FontSizeCompact}"
                                                                Foreground="{StaticResource CautionBrush}"
                                                                Visibility="{Binding HasCaptureRecoveryOnlyExportFolderError, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportFolderError, StringFormat='保存先を選べなかった理由 {0}'}" />
                                                     <Button Style="{StaticResource PrimaryActionButtonStyle}" MinHeight="42"
                                                             FontSize="{StaticResource FontSizeSection}"
@@ -1326,7 +1326,7 @@
                                                                TextWrapping="Wrap"
                                                                FontSize="{StaticResource FontSizeCompact}"
                                                                Visibility="{Binding HasCaptureRecoveryOnlyExportDisabledReason, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportDisabledReason, StringFormat='原画像を保存できない理由 {0}'}">
                                                         <!-- 撮影前の待ち状態は注意色にせず、通常の補足と同じ控えめな色にする。 -->
                                                         <TextBlock.Style>
@@ -1344,7 +1344,7 @@
                                                                TextWrapping="Wrap"
                                                                FontSize="{StaticResource FontSizeCompact}"
                                                                Foreground="{StaticResource TextSecondaryBrush}"
-                                                               AutomationProperties.LiveSetting="Polite"
+                                                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                                                AutomationProperties.Name="{Binding CaptureRecoveryOnlyExportResult, StringFormat='原画像の保存結果 {0}'}" />
                                                     <TextBlock Text="{Binding CaptureRecoveryOnlyExportedFilesText}" Margin="0,4,0,0"
                                                                TextWrapping="Wrap"
@@ -1391,13 +1391,13 @@
                                                 <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding BlockerText}" Margin="0,0,0,4"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource BlockerBrush}"
-                                                           AutomationProperties.LiveSetting="Assertive" />
+                                                           AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True" />
                                                 <TextBlock Grid.Row="1" Text="Caution" Style="{StaticResource SeverityTagStyle}"
                                                            Foreground="{StaticResource CautionBrush}" Margin="0,0,8,4" />
                                                 <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CautionText}" Margin="0,0,0,4"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"
-                                                           AutomationProperties.LiveSetting="Polite" />
+                                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                                 <TextBlock Grid.Row="2" Text="Info" Style="{StaticResource SeverityTagStyle}"
                                                            Foreground="{StaticResource InfoBrush}" Margin="0,0,8,0" />
                                                 <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding InfoText}"
@@ -1570,7 +1570,7 @@
                             <DockPanel LastChildFill="False">
                                 <TextBlock DockPanel.Dock="Left" Text="{Binding DualBinding.HeadlineText}" FontWeight="Bold"
                                            FontSize="{StaticResource FontSizeDialogTitle}"
-                                           AutomationProperties.LiveSetting="Polite" />
+                                           AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                 <Border DockPanel.Dock="Right" Padding="8,2" VerticalAlignment="Center"
                                         BorderThickness="1">
                                     <Border.Style>
@@ -1604,7 +1604,7 @@
                                     Visibility="{Binding DualBinding.IsInvalidationVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <TextBlock Text="{Binding DualBinding.InvalidationText}" TextWrapping="Wrap"
                                            Foreground="{StaticResource BlockerBrush}"
-                                           AutomationProperties.LiveSetting="Assertive"
+                                           AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True"
                                            AutomationProperties.Name="機体照合の状態の説明" />
                             </Border>
 
@@ -1697,7 +1697,7 @@
                             <TextBlock Margin="0,12,0,0" TextWrapping="Wrap"
                                        Text="{Binding DualBinding.NoticeText}"
                                        Visibility="{Binding DualBinding.IsNoticeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                       AutomationProperties.LiveSetting="Polite"
+                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True"
                                        AutomationProperties.Name="機体照合の通知">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock" BasedOn="{StaticResource MutedTextStyle}">
@@ -1778,11 +1778,11 @@
                             <TextBlock Text="{Binding DualBinding.ShutdownConfirmingText}"
                                        FontWeight="Bold" TextWrapping="Wrap"
                                        FontSize="{StaticResource FontSizeDialogTitle}"
-                                       AutomationProperties.LiveSetting="Polite" />
+                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             <TextBlock Margin="0,12,0,0" Text="{Binding DualBinding.ShutdownConfirmingDetailText}"
                                        Style="{StaticResource MutedTextStyle}" TextWrapping="Wrap"
                                        FontSize="{StaticResource FontSizeLabel}"
-                                       AutomationProperties.LiveSetting="Polite" />
+                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                         </StackPanel>
                     </Border>
                 </Grid>

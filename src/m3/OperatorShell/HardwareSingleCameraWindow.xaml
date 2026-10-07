@@ -1,6 +1,7 @@
 <Window x:Class="A0CameraStitcher.M3.OperatorShell.HardwareSingleCameraWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls"
         Title="A0 Camera Stitcher — HARDWARE / 一台構成"
         AutomationProperties.Name="A0 Camera Stitcher HARDWARE SingleCamera operator window"
         Width="1260" Height="860" MinWidth="1020" MinHeight="700"
@@ -16,7 +17,7 @@
             <DockPanel>
                 <StackPanel DockPanel.Dock="Right" HorizontalAlignment="Right" MaxWidth="520">
                     <TextBlock Text="{Binding ActivityText}" Foreground="White" FontSize="16" FontWeight="SemiBold"
-                               TextAlignment="Right" AutomationProperties.LiveSetting="Assertive" />
+                               TextAlignment="Right" AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True" />
                     <TextBlock Text="{Binding AgentAvailabilityText}" Foreground="#FFD4E9F8" TextAlignment="Right" />
                 </StackPanel>
                 <StackPanel>
@@ -72,7 +73,7 @@
                                 <TextBlock Text="read-only状態確認" Style="{StaticResource SectionTitleStyle}" />
                                 <TextBlock DockPanel.Dock="Right" Text="{Binding ReadinessSummary}" FontSize="18" FontWeight="Bold" />
                             </DockPanel>
-                            <TextBlock Text="{Binding ReadinessDetail}" Margin="0,8,0,10" AutomationProperties.LiveSetting="Polite" />
+                            <TextBlock Text="{Binding ReadinessDetail}" Margin="0,8,0,10" AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             <Border Padding="9" Margin="0,0,0,10" Background="#FFF1F3F5">
                                 <TextBlock Text="{Binding ObservedSettingsText}" AutomationProperties.Name="read-only observed camera settings" />
                             </Border>
@@ -134,7 +135,7 @@
                     <Border Padding="14" Background="#FFFFE8E8" BorderBrush="#FFB3261E" BorderThickness="2">
                         <StackPanel>
                             <TextBlock Text="赤 / Blocker" FontWeight="Bold" Foreground="#FF8E1712" />
-                            <TextBlock Text="{Binding BlockerText}" Margin="0,5,0,0" AutomationProperties.LiveSetting="Assertive" />
+                            <TextBlock Text="{Binding BlockerText}" Margin="0,5,0,0" AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True" />
                         </StackPanel>
                     </Border>
                     <Border Margin="0,10,0,0" Padding="14" Background="#FFFFF4D6" BorderBrush="#FFB77900" BorderThickness="2">
@@ -183,7 +184,7 @@
                                     Margin="0,14,0,0" HorizontalAlignment="Stretch"
                                     AutomationProperties.Name="検証済み単体原画像をbyte identicalで明示保存" />
                             <TextBlock Text="{Binding ReviewStatus}" Margin="0,12,0,4" TextWrapping="Wrap"
-                                       AutomationProperties.LiveSetting="Polite" />
+                                       AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             <Button Content="採用して次の撮影を準備" Command="{Binding AcceptReviewCommand}"
                                     IsEnabled="{Binding CanAcceptReview}" HorizontalAlignment="Stretch"
                                     AutomationProperties.Name="再検証済み単体原画像を採用して次の撮影を準備" />

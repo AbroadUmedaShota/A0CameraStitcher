@@ -254,6 +254,33 @@ try {
         Assert-Condition ($dualCompositionText.Contains($marker)) "HardwareDual production composition is missing fail-closed marker: $marker"
     }
 
+    # Issue #238: AutomationProperties.LiveSetting only declares a live region; WPF does not raise LiveRegionChanged
+    # when its text changes. Every live region must therefore opt in to the LiveRegion.Announce attached property
+    # (which raises the event from the peer), and Announce is only meaningful on a region that has a LiveSetting.
+    $liveRegionSourcePath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Controls/LiveRegion.cs'
+    Assert-Condition (Test-Path -LiteralPath $liveRegionSourcePath -PathType Leaf) 'LiveRegion.cs must exist to raise LiveRegionChanged for live regions (issue #238).'
+    $liveRegionSourceText = Get-Content -Raw -LiteralPath $liveRegionSourcePath
+    Assert-Condition ($liveRegionSourceText.Contains('RaiseAutomationEvent(AutomationEvents.LiveRegionChanged)')) 'LiveRegion must raise AutomationEvents.LiveRegionChanged from the peer (issue #238).'
+    foreach ($liveRegionWindow in @(
+            @{ Name = 'MainWindow.xaml'; Xml = $windowXml; MinimumCount = 24 },
+            @{ Name = 'HardwareSingleCameraWindow.xaml'; Xml = $hardwareWindowXml; MinimumCount = 4 })) {
+        $liveRegionXml = $liveRegionWindow.Xml
+        Assert-Condition ($liveRegionXml.DocumentElement.GetAttribute('xmlns:controls') -eq 'clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls') "$($liveRegionWindow.Name) must map the controls prefix to the LiveRegion namespace (issue #238)."
+        $liveNodes = @($liveRegionXml.SelectNodes('//*[@*[local-name()="AutomationProperties.LiveSetting"]]'))
+        Assert-Condition ($liveNodes.Count -ge $liveRegionWindow.MinimumCount) "$($liveRegionWindow.Name) has $($liveNodes.Count) LiveSetting elements, expected at least $($liveRegionWindow.MinimumCount) (issue #238)."
+        foreach ($liveNode in $liveNodes) {
+            $liveSetting = $liveNode.GetAttribute('AutomationProperties.LiveSetting')
+            if ($liveSetting -eq 'Off') { continue }
+            $liveBinding = @($liveNode.Attributes | Where-Object { $_.Name -eq 'Text' }) | Select-Object -First 1
+            $liveDescription = "$($liveRegionWindow.Name) <$($liveNode.LocalName) Text=$($liveBinding.Value)>"
+            Assert-Condition ($liveNode.LocalName -eq 'TextBlock') "$liveDescription has LiveSetting but is not a TextBlock, which LiveRegion.Announce cannot observe (issue #238)."
+            Assert-Condition ($liveNode.GetAttribute('controls:LiveRegion.Announce') -eq 'True') "$liveDescription has LiveSetting=$liveSetting without controls:LiveRegion.Announce=""True"", so a text change is not announced (issue #238)."
+        }
+        $announceNodes = @($liveRegionXml.SelectNodes('//*[@*[local-name()="LiveRegion.Announce"]]'))
+        foreach ($announceNode in $announceNodes) {
+            Assert-Condition (-not [string]::IsNullOrEmpty($announceNode.GetAttribute('AutomationProperties.LiveSetting'))) "$($liveRegionWindow.Name) has LiveRegion.Announce on an element without AutomationProperties.LiveSetting (issue #238)."
+        }
+    }
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0
 }
