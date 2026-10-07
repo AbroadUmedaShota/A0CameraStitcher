@@ -3525,6 +3525,27 @@ public:
             throw std::invalid_argument(
                 "continuous Live View test lease isolation requires the test SDK factory");
         }
+        // Fail early on identities the lease layer would refuse at start. The
+        // lease layer remains the last guard; this only moves the failure to
+        // construction and also refuses the production marker root.
+        if (lease_name_configured) {
+            if (!IsHardwareProcessTestLeaseName(
+                    config_.continuous_live_view_lease_name_for_testing)) {
+                throw std::invalid_argument(
+                    "continuous Live View test lease name must be a test lease name; the production lease name is not accepted");
+            }
+            bool production_marker_root = true;
+            try {
+                production_marker_root = IsProductionDualDelegationMarkerRoot(
+                    config_.continuous_live_view_marker_root_for_testing);
+            } catch (const std::exception&) {
+                production_marker_root = true;
+            }
+            if (production_marker_root) {
+                throw std::invalid_argument(
+                    "continuous Live View test marker root must not be the production marker root or unverifiable");
+            }
+        }
     }
 
     SingleCameraReadinessResult GetSingleReadiness(std::string_view camera_alias) {

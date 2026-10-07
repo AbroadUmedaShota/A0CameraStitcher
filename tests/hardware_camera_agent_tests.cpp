@@ -106,6 +106,28 @@ void Check(bool condition, std::string_view message) {
     }
 }
 
+// Issue #240: one-shot cross-thread signal whose waits are always bounded, so
+// a broken ordering assumption is reported as a failed check instead of
+// hanging the suite until the ctest timeout. Signal() may be called more than
+// once.
+constexpr auto kHandshakeDeadline = std::chrono::seconds(30);
+
+class Handshake final {
+  public:
+    void Signal() {
+        std::call_once(once_, [this] { promise_.set_value(); });
+    }
+    [[nodiscard]] bool WaitFor(std::chrono::milliseconds limit) const {
+        return future_.wait_for(limit) == std::future_status::ready;
+    }
+    [[nodiscard]] bool Wait() const { return WaitFor(kHandshakeDeadline); }
+
+  private:
+    std::promise<void> promise_;
+    std::shared_future<void> future_{promise_.get_future().share()};
+    std::once_flag once_;
+};
+
 std::vector<unsigned char> FullSizeOriginalJpeg(
     std::uint16_t width = 7360U,
     std::uint16_t height = 4912U) {
@@ -1250,13 +1272,11 @@ void TestDurableJournalRecoveryContracts() {
         config.sdk_identity_map = root / "sdk-map.json";
         config.wpd_identity_map = root / "wpd-map.json";
         config.transaction_state_root = root / "transactions";
-        std::promise<void> initial_read_promise;
-        auto initial_read = initial_read_promise.get_future();
-        std::promise<void> continue_query_promise;
-        auto continue_query = continue_query_promise.get_future();
+        Handshake initial_read;
+        Handshake continue_query;
         config.after_initial_active_journal_read_for_testing = [&] {
-            initial_read_promise.set_value();
-            continue_query.wait();
+            initial_read.Signal();
+            (void)continue_query.Wait();
         };
         ProductionHardwareCameraAgentBackend backend(config);
 
@@ -1267,26 +1287,26 @@ void TestDurableJournalRecoveryContracts() {
             race_id,
             JournalJson(race_id, race_run, "InProgress"));
 
-        std::promise<void> lease_acquired_promise;
-        auto lease_acquired = lease_acquired_promise.get_future();
-        std::promise<void> release_lease_promise;
-        auto release_lease = release_lease_promise.get_future();
+        Handshake lease_acquired;
+        Handshake release_lease;
         std::thread capture_owner([&] {
             HardwareProcessLease lease(
                 "A0CameraStitcher.CameraAgent.Transaction.v1." + race_id);
-            lease_acquired_promise.set_value();
-            release_lease.wait();
+            lease_acquired.Signal();
+            (void)release_lease.Wait();
         });
-        lease_acquired.wait();
+        Check(lease_acquired.Wait(),
+            "the transaction lease owner must acquire the lease within the handshake deadline");
         auto query = std::async(std::launch::async, [&] {
             return backend.GetTransactionResult(race_id);
         });
-        initial_read.wait();
+        Check(initial_read.Wait(),
+            "the get-result query must reach the initial journal read hook within the handshake deadline");
         ReplaceJournal(
             config.transaction_state_root,
             race_id,
             JournalJson(race_id, race_run, "FailedPartial", "capture_failed"));
-        release_lease_promise.set_value();
+        release_lease.Signal();
         // Join before waking the query thread: join() synchronizes-with the
         // owner thread's completion, so the lease destructor's ReleaseMutex is
         // guaranteed to have finished. Waking the query first lets it reach the
@@ -1294,7 +1314,7 @@ void TestDurableJournalRecoveryContracts() {
         // takes the camera_control_busy path instead of the post-acquisition
         // reread this assertion exists to exercise.
         capture_owner.join();
-        continue_query_promise.set_value();
+        continue_query.Signal();
         const auto raced_result = query.get();
         Check(raced_result.terminal_state == "FailedPartial" &&
               raced_result.error_category == "capture_failed",
@@ -1311,22 +1331,21 @@ void TestDurableJournalRecoveryContracts() {
             config.transaction_state_root,
             reserved_id,
             JournalJson(reserved_id, "run-1700000000000-12", "Reserved"));
-        std::promise<void> reserved_owner_ready_promise;
-        auto reserved_owner_ready = reserved_owner_ready_promise.get_future();
-        std::promise<void> release_reserved_owner_promise;
-        auto release_reserved_owner = release_reserved_owner_promise.get_future();
+        Handshake reserved_owner_ready;
+        Handshake release_reserved_owner;
         std::thread reserved_owner([&] {
             HardwareProcessLease lease(
                 "A0CameraStitcher.CameraAgent.Transaction.v1." + reserved_id);
-            reserved_owner_ready_promise.set_value();
-            release_reserved_owner.wait();
+            reserved_owner_ready.Signal();
+            (void)release_reserved_owner.Wait();
         });
-        reserved_owner_ready.wait();
+        Check(reserved_owner_ready.Wait(),
+            "the Reserved transaction lease owner must acquire the lease within the handshake deadline");
         const auto active_reserved = no_hook_backend.GetTransactionResult(reserved_id);
         Check(active_reserved.terminal_state == "Reserved" &&
               active_reserved.error_category == "transaction_reserved",
             "active Reserved transaction must not be downgraded before camera lease acquisition");
-        release_reserved_owner_promise.set_value();
+        release_reserved_owner.Signal();
         reserved_owner.join();
         const auto abandoned_reserved = no_hook_backend.GetTransactionResult(reserved_id);
         Check(abandoned_reserved.terminal_state == "FailedPartial" &&
@@ -1362,16 +1381,12 @@ void TestDurableJournalRecoveryContracts() {
         WriteText(
             reservation_race_config.wpd_identity_map,
             "{\"CAM-A\":\"wpd-one\",\"CAM-B\":null}");
-        std::promise<void> reservation_directory_created_promise;
-        auto reservation_directory_created =
-            reservation_directory_created_promise.get_future();
-        std::promise<void> allow_reservation_journal_promise;
-        auto allow_reservation_journal =
-            allow_reservation_journal_promise.get_future();
+        Handshake reservation_directory_created;
+        Handshake allow_reservation_journal;
         reservation_race_config
             .after_transaction_reservation_directory_created_for_testing = [&] {
-                reservation_directory_created_promise.set_value();
-                allow_reservation_journal.wait();
+                reservation_directory_created.Signal();
+                (void)allow_reservation_journal.Wait();
             };
         ProductionHardwareCameraAgentBackend reservation_capture_backend(
             reservation_race_config);
@@ -1401,7 +1416,8 @@ void TestDurableJournalRecoveryContracts() {
         auto reservation_capture = std::async(std::launch::async, [&] {
             return reservation_capture_backend.CaptureSingle(reservation_request);
         });
-        reservation_directory_created.wait();
+        Check(reservation_directory_created.Wait(),
+            "the reservation owner must reach the directory-created hook within the handshake deadline");
         HardwareCameraAgentDispatcher reservation_query_dispatcher(
             reservation_query_backend);
         const std::string active_reservation_response =
@@ -1418,7 +1434,7 @@ void TestDurableJournalRecoveryContracts() {
                   "transaction_reservation_incomplete") == std::string::npos,
             "live owner between reservation-directory creation and initial journal commit must remain TransactionReserved, never false terminal; response=" +
                 active_reservation_response);
-        allow_reservation_journal_promise.set_value();
+        allow_reservation_journal.Signal();
         const auto reservation_capture_result = reservation_capture.get();
         Check(!reservation_capture_result.succeeded &&
               reservation_capture_result.error_category == "identity_map_invalid",
@@ -4600,32 +4616,39 @@ void TestProductionContinuousLiveViewContracts() {
                     HardwareCameraAgentOperation::start_live_view,
                     owner_session)).succeeded;
             Check(backpressure_started, "backpressure contract setup must start");
-            auto frame = std::async(std::launch::async, [&] {
-                return backend.ReadContinuousLiveViewFrame(ContinuousRequest(
-                    HardwareCameraAgentOperation::read_live_view_frame,
-                    owner_session));
-            });
-            const bool read_reached_sdk =
-                read_entered.wait_for(kSignalDeadline) ==
-                std::future_status::ready;
-            Check(read_reached_sdk,
-                "the Live View frame read must reach the SDK within the signal deadline");
-            if (!read_reached_sdk) {
-                // The read never entered the SDK, so before_read cannot run
-                // and the release signal is not needed; drain the future.
-                (void)frame.get();
-            } else {
-                auto heartbeat = std::async(std::launch::async, [&] {
-                    return backend.HeartbeatContinuousLiveView(ContinuousRequest(
-                        HardwareCameraAgentOperation::live_view_heartbeat,
+            // Issue #240: without a started session there is nothing to read
+            // from, so the read is not launched and the suite does not wait
+            // out the signal deadline for a setup that already failed.
+            if (backpressure_started) {
+                auto frame = std::async(std::launch::async, [&] {
+                    return backend.ReadContinuousLiveViewFrame(ContinuousRequest(
+                        HardwareCameraAgentOperation::read_live_view_frame,
                         owner_session));
                 });
-                Check(heartbeat.wait_for(std::chrono::milliseconds(100)) ==
-                          std::future_status::timeout,
-                    "a second Live View command must observe backend backpressure");
-                release_read_promise.set_value();
-                Check(frame.get().succeeded && heartbeat.get().succeeded,
-                    "serialized frame and heartbeat commands must both complete after release");
+                const bool read_reached_sdk =
+                    read_entered.wait_for(kSignalDeadline) ==
+                    std::future_status::ready;
+                Check(read_reached_sdk,
+                    "the Live View frame read must reach the SDK within the signal deadline");
+                if (!read_reached_sdk) {
+                    // The read can still enter before_read after the deadline.
+                    // before_read then waits at most kSignalDeadline for the
+                    // release signal and returns, so draining the future ends
+                    // within about one more deadline without a release.
+                    (void)frame.get();
+                } else {
+                    auto heartbeat = std::async(std::launch::async, [&] {
+                        return backend.HeartbeatContinuousLiveView(ContinuousRequest(
+                            HardwareCameraAgentOperation::live_view_heartbeat,
+                            owner_session));
+                    });
+                    Check(heartbeat.wait_for(std::chrono::milliseconds(100)) ==
+                              std::future_status::timeout,
+                        "a second Live View command must observe backend backpressure");
+                    release_read_promise.set_value();
+                    Check(frame.get().succeeded && heartbeat.get().succeeded,
+                        "serialized frame and heartbeat commands must both complete after release");
+                }
             }
             Check(backend.StopContinuousLiveView(ContinuousRequest(
                       HardwareCameraAgentOperation::stop_live_view,
@@ -4696,7 +4719,9 @@ void TestProductionContinuousLiveViewContracts() {
 // on the per-user dual-delegation marker of the machine running the suite.
 // This test pins the isolation seams themselves: the product default stays
 // untouched, the seams are validated as a pair, and a marker inside the test
-// marker root still fails closed before any SDK access.
+// marker root still fails closed before any SDK access. Issue #240 adds the
+// construction-time rejection of production identities and pins the lease
+// layer's refusal of the production lease name with a test marker root.
 void TestContinuousLiveViewLeaseIsolation() {
     const fs::path root = fs::temp_directory_path() /
         ("a0-agent-continuous-live-view-lease-test-" + NewRunId());
@@ -4708,35 +4733,138 @@ void TestContinuousLiveViewLeaseIsolation() {
             "product defaults must leave the Live View lease isolation seams empty "
             "so the product lease name and LocalAppData marker root stay in force");
 
-        const auto constructor_rejects = [&](auto mutate, std::string_view name) {
+        // Each rejection must be the invalid_argument raised for that exact
+        // reason, so an unrelated invalid_argument cannot satisfy the check.
+        const auto constructor_rejects = [&](auto mutate,
+                                             std::string_view expected_fragment,
+                                             std::string_view name) {
             auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
             auto config = ContinuousLiveViewTestConfig(root / "pairing", state);
             mutate(config);
             bool threw = false;
+            std::string message;
             try {
                 ProductionHardwareCameraAgentBackend backend(config);
                 (void)backend;
-            } catch (const std::invalid_argument&) {
+            } catch (const std::invalid_argument& error) {
                 threw = true;
+                message = error.what();
             }
-            Check(threw, name);
+            Check(threw && message.find(expected_fragment) != std::string::npos,
+                std::string(name) + "; message=" + message);
         };
         constructor_rejects(
             [](ProductionHardwareCameraAgentConfig& config) {
                 config.continuous_live_view_marker_root_for_testing.clear();
             },
+            "must be configured together",
             "a test lease name without a test marker root must be rejected");
         constructor_rejects(
             [](ProductionHardwareCameraAgentConfig& config) {
                 config.continuous_live_view_lease_name_for_testing.clear();
             },
+            "must be configured together",
             "a test marker root without a test lease name must be rejected");
         constructor_rejects(
             [](ProductionHardwareCameraAgentConfig& config) {
                 config.continuous_live_view_sdk_factory_for_testing = {};
                 config.continuous_live_view_identity_resolver_for_testing = {};
             },
+            "requires the test SDK factory",
             "a test lease must never be combined with the real SDK transport");
+
+        // Issue #240: identities that are not test identities are refused at
+        // construction instead of at the first start.
+        constexpr std::string_view kProductionLeaseName =
+            "A0CameraStitcher.Phase0.CameraControl.v1";
+        Check(!IsHardwareProcessTestLeaseName(kProductionLeaseName) &&
+                  !IsHardwareProcessTestLeaseName("") &&
+                  !IsHardwareProcessTestLeaseName("A0CameraStitcher.Phase0.Tes") &&
+                  IsHardwareProcessTestLeaseName("A0.Poc.TestLease.x") &&
+                  IsHardwareProcessTestLeaseName(
+                      "A0CameraStitcher.Phase0.Test.ContinuousLiveView.x"),
+            "only the documented test lease name prefixes may be classified as test lease names");
+        constructor_rejects(
+            [&](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_lease_name_for_testing =
+                    std::string(kProductionLeaseName);
+            },
+            "must be a test lease name",
+            "the production lease name must be rejected at construction");
+        constructor_rejects(
+            [](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_lease_name_for_testing =
+                    "A0CameraStitcher.Other.NotATestLease";
+            },
+            "must be a test lease name",
+            "a lease name outside the test prefixes must be rejected at construction");
+
+        std::wstring local_app_data(MAX_PATH, L'\0');
+        const DWORD local_app_data_size = GetEnvironmentVariableW(
+            L"LOCALAPPDATA", local_app_data.data(),
+            static_cast<DWORD>(local_app_data.size()));
+        const bool local_app_data_known =
+            local_app_data_size > 0 && local_app_data_size < local_app_data.size();
+        Check(local_app_data_known,
+            "LOCALAPPDATA must be resolvable to pin the production marker root rejection");
+        if (local_app_data_known) {
+            local_app_data.resize(local_app_data_size);
+            const fs::path production_root = fs::path(local_app_data) /
+                L"A0CameraStitcher" / L"Phase0" / L"DualDelegation";
+            // Only the string is compared; nothing under this path is read,
+            // created, or written by these checks.
+            Check(IsProductionDualDelegationMarkerRoot(production_root) &&
+                      IsProductionDualDelegationMarkerRoot(
+                          production_root.wstring() + L"\\") &&
+                      IsProductionDualDelegationMarkerRoot(
+                          fs::path(production_root.generic_wstring())) &&
+                      IsProductionDualDelegationMarkerRoot(
+                          fs::path(local_app_data) / L"a0camerastitcher" /
+                          L"PHASE0" / L"dualdelegation") &&
+                      !IsProductionDualDelegationMarkerRoot(fs::path{}) &&
+                      !IsProductionDualDelegationMarkerRoot(
+                          production_root / L"nested") &&
+                      !IsProductionDualDelegationMarkerRoot(root / "markers"),
+                "the production marker root predicate must match only the production root");
+            constructor_rejects(
+                [&](ProductionHardwareCameraAgentConfig& config) {
+                    config.continuous_live_view_marker_root_for_testing =
+                        production_root;
+                },
+                "production marker root",
+                "the production marker root must be rejected at construction");
+            constructor_rejects(
+                [&](ProductionHardwareCameraAgentConfig& config) {
+                    config.continuous_live_view_lease_name_for_testing =
+                        std::string(kProductionLeaseName);
+                    config.continuous_live_view_marker_root_for_testing =
+                        production_root;
+                },
+                "must be a test lease name",
+                "the production lease name and marker root together must be rejected at construction");
+        }
+
+        // The construction check is an early failure, not the safety rule.
+        // Pin the last guard in the lease layer itself: a test marker root
+        // with the production lease name must never be accepted. The marker
+        // root here is under the temporary test root.
+        {
+            std::string category;
+            bool lease_layer_threw = false;
+            try {
+                HardwareProcessLease lease(
+                    kProductionLeaseName,
+                    std::chrono::milliseconds::zero(),
+                    root / "lease-layer-wall");
+                (void)lease;
+            } catch (const TransportError& error) {
+                lease_layer_threw = true;
+                category = error.Category();
+            }
+            Check(lease_layer_threw && category == "camera_control_marker_failed",
+                "the lease layer must refuse the production lease name with a test marker root; category=" +
+                    category);
+        }
 
         auto state = std::make_shared<FakeContinuousLiveViewSdkState>();
         const auto config = ContinuousLiveViewTestConfig(root / "marker", state);

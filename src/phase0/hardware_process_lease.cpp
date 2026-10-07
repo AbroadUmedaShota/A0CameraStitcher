@@ -195,6 +195,26 @@ std::string WindowsError(std::string_view operation, DWORD error) {
 
 } // namespace
 
+bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept {
+    return IsTestLeaseName(lease_name);
+}
+
+bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root) {
+    const auto normalize = [](const std::filesystem::path &path) {
+        std::wstring text = path.lexically_normal().wstring();
+        std::replace(text.begin(), text.end(), L'/', L'\\');
+        while (!text.empty() && text.back() == L'\\')
+            text.pop_back();
+        return text;
+    };
+    const std::wstring candidate = normalize(marker_root);
+    if (candidate.empty())
+        return false;
+    const std::wstring production = normalize(ProductionMarkerRoot());
+    return CompareStringOrdinal(candidate.c_str(), static_cast<int>(candidate.size()), production.c_str(),
+                                static_cast<int>(production.size()), TRUE) == CSTR_EQUAL;
+}
+
 HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chrono::milliseconds wait)
     : HardwareProcessLease(lease_name, wait, {}) {
 }

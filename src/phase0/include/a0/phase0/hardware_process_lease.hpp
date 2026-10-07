@@ -35,6 +35,18 @@ struct DualDelegationCloseEvidence final {
     }
 };
 
+// Pure predicates for callers that must refuse production lease identities
+// before constructing a lease. They never relax what the constructor enforces.
+//
+// True when `lease_name` is a test lease name, the only kind that may be paired
+// with a test marker root. The production lease name is not a test name.
+[[nodiscard]] bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept;
+// True when `marker_root` designates the per-user production dual-delegation
+// marker root (compared ignoring case and separator style). Throws
+// TransportError when the production root cannot be resolved, so callers fail
+// closed instead of treating an unverifiable root as safe.
+[[nodiscard]] bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root);
+
 // Serializes all real-camera Phase 0 commands across processes in the current
 // interactive Windows logon session. Cross-session/service enforcement is an
 // installation policy concern. Per-transport session guards are still needed.
