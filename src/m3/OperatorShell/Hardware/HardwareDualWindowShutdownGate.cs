@@ -40,17 +40,21 @@ public static class HardwareDualWindowShutdownGate
 }
 
 /// <summary>
-/// <paramref name="BlockingCode"/> is the existing typed code (an exception type name or a
-/// refusal result code) that tests and other call sites already match on; it is kept
-/// unchanged for compatibility. <paramref name="BlockingDetail"/> is the additional
-/// human-readable reason (an exception message or refusal detail) that <paramref
-/// name="BlockingCode"/> alone does not carry. It is shown to the operator, so
-/// <see cref="Blocked"/> always passes it through <see cref="SanitizeDetail"/>: an exception
-/// message can be multi-line and can embed local paths.
+/// <paramref name="BlockingCode"/> is the typed code (an exception type name or a refusal result
+/// code) that tests and other call sites match on. <see cref="Blocked"/> passes it through
+/// <see cref="SanitizeForOperatorDisplay"/> as well because it is shown on the operator screen
+/// too; a regular code is a short single-line identifier, so that pass leaves it unchanged.
+/// <paramref name="BlockingDetail"/> is the additional human-readable reason (an exception
+/// message or refusal detail) that <paramref name="BlockingCode"/> alone does not carry. An
+/// exception message can be multi-line and can embed local paths, so <see cref="Blocked"/>
+/// sanitizes it the same way.
 /// </summary>
 public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string BlockingCode, string BlockingDetail = "")
 {
-    /// <summary>Upper bound, in characters, of detail text shown on the operator screen.</summary>
+    /// <summary>
+    /// Upper bound, in characters, of the code and the detail text each as shown on the
+    /// operator screen.
+    /// </summary>
     public const int MaxDetailLength = 160;
 
     public static HardwareDualWindowShutdownOutcome Success { get; } = new(true, string.Empty);
@@ -58,15 +62,16 @@ public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string Bl
     public static HardwareDualWindowShutdownOutcome Blocked(string code, string? detail = null) =>
         new(
             false,
-            string.IsNullOrWhiteSpace(code) ? "BindingCleanupUnconfirmed" : SanitizeDetail(code),
-            SanitizeDetail(detail));
+            string.IsNullOrWhiteSpace(code) ? "BindingCleanupUnconfirmed" : SanitizeForOperatorDisplay(code),
+            SanitizeForOperatorDisplay(detail));
 
     /// <summary>
-    /// Collapses text to a single line and bounds it to <see cref="MaxDetailLength"/>
-    /// characters (an ellipsis marks a cut), so a raw exception message cannot flood or
-    /// reshape the operator-facing text. Idempotent.
+    /// Collapses text to a single line (every line terminator .NET recognizes, including
+    /// U+2028, U+2029, U+0085 and form feed, plus tabs and runs of spaces become one space) and
+    /// bounds it to <see cref="MaxDetailLength"/> characters (an ellipsis marks a cut), so a raw
+    /// exception message cannot flood or reshape the operator-facing text. Idempotent.
     /// </summary>
-    public static string SanitizeDetail(string? value)
+    public static string SanitizeForOperatorDisplay(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -75,8 +80,8 @@ public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string Bl
 
         var singleLine = string.Join(
             ' ',
-            value.Split(
-                ['\r', '\n', '\t'],
+            value.ReplaceLineEndings(" ").Replace('\t', ' ').Split(
+                ' ',
                 StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         if (singleLine.Length <= MaxDetailLength)
         {

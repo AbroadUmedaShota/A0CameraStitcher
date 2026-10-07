@@ -1476,7 +1476,7 @@
                 <Grid Grid.Row="0" Grid.RowSpan="4" Panel.ZIndex="9"
                       Background="{StaticResource ModalScrimBrush}"
                       Visibility="{Binding DualBinding.IsOverlayVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                      AutomationProperties.Name="機体照合（CAM-A / CAM-B の割当）">
+                      AutomationProperties.Name="{Binding DualBinding.OverlayAutomationName}">
                     <Border Width="760" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="28"
                             Background="{StaticResource BarBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
                             BorderThickness="1" Effect="{StaticResource DropdownShadow}">
@@ -1510,6 +1510,7 @@
                             <TextBlock Margin="0,14,0,0" Style="{StaticResource MutedTextStyle}"
                                        FontSize="{StaticResource FontSizeLabel}" LineHeight="20" TextWrapping="Wrap"
                                        Text="{Binding DualBinding.ResidualRiskText, Mode=OneTime}"
+                                       Visibility="{Binding DualBinding.IsNotShutdownBlocked, Converter={StaticResource BoolToVisibilityConverter}}"
                                        AutomationProperties.Name="機体照合の残留リスク" />
 
                             <Border Margin="0,14,0,0" Padding="10" BorderThickness="1"
@@ -1599,6 +1600,7 @@
                             <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,14,0,0" MinHeight="46"
                                     Content="機体照合を開始"
                                     Command="{Binding DualBinding.BeginBindingCommand}"
+                                    Visibility="{Binding DualBinding.IsNotShutdownBlocked, Converter={StaticResource BoolToVisibilityConverter}}"
                                     AutomationProperties.Name="機体照合を開始する" />
                             <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,10,0,0" MinHeight="46"
                                     Content="この割当で確定する"

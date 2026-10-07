@@ -73,6 +73,14 @@ try {
         Assert-Condition ($null -ne $operatorSummary) 'M3 operator shell test summary is missing.'
         if ($operatorSummary -notmatch '^Operator shell tests: (\d+)/(\d+) passed\.$') { throw 'M3 operator shell test summary is malformed.' }
         Assert-Condition ([int]$Matches[1] -eq $operatorPassLines.Count -and [int]$Matches[2] -eq $operatorPassLines.Count) 'M3 operator shell test summary does not match emitted PASS lines.'
+        # The summary is derived from the PASS lines themselves, so the comparison above cannot catch a check
+        # that stopped reporting. Require at least one PASS per top-level check in the source (the WPF contract
+        # check plus one per top-level try block; some blocks print more than one PASS), and keep the early-exit
+        # UNRUN literal in step with that count.
+        $operatorProgramText = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'tests/m3/OperatorShellTests/Program.cs')
+        $operatorSourceCheckCount = 1 + ([regex]::Matches($operatorProgramText, '(?m)^try[ \t]*\r?$')).Count
+        Assert-Condition ($operatorPassLines.Count -ge $operatorSourceCheckCount) "M3 operator shell tests emitted $($operatorPassLines.Count) PASS lines, fewer than the $operatorSourceCheckCount checks in Program.cs."
+        Assert-Condition ($operatorProgramText.Contains("UNRUN runner=normal remaining=$($operatorSourceCheckCount - 1) reason=lifetime-contract-failure")) "The UNRUN remaining count in Program.cs is stale; it must be $($operatorSourceCheckCount - 1)."
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
@@ -116,15 +124,22 @@ try {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required target reticle / loupe binding/marker (issue #30): $marker"
     }
     # 機体照合オーバーレイ（issue #62・ADR-0025）
-    foreach ($marker in @('機体照合（CAM-A / CAM-B の割当）', 'DualBinding.IsOverlayVisible', 'DualBinding.ShowCandidateCommand', 'DualBinding.AssignCameraACommand', 'DualBinding.AssignCameraBCommand', 'DualBinding.CompleteBindingCommand', 'DualBinding.ResidualRiskText', 'DualBinding.InvalidationText', '機体照合を表示（模擬）')) {
+    foreach ($marker in @('機体照合（CAM-A / CAM-B の割当）', 'DualBinding.IsOverlayVisible', 'DualBinding.ShowCandidateCommand', 'DualBinding.AssignCameraACommand', 'DualBinding.AssignCameraBCommand', 'DualBinding.CompleteBindingCommand', 'DualBinding.ResidualRiskText', 'DualBinding.InvalidationText', 'DualBinding.OverlayAutomationName', 'DualBinding.IsNotShutdownBlocked', '機体照合を表示（模擬）')) {
         Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required dual binding overlay binding/marker (issue #62): $marker"
     }
     # キーボードだけで到達できることと、読み上げ名が付いていることを markup 段で固定する。
     # WPF の Button は既定で Focusable かつ IsTabStop なので、守るべきなのは
     # 「それを打ち消していないこと」と「名前が付いていること」の2点。
-    $bindingOverlayNode = @($windowXml.SelectNodes('//*[@*[local-name()="AutomationProperties.Name" and contains(., "機体照合（CAM-A / CAM-B の割当）")]]')) | Select-Object -First 1
+    # The root name follows the state (issue #225): the assignment wording lives in the view model next to
+    # the window-close wording, and the root binds to it.
+    $bindingOverlayNode = @($windowXml.SelectNodes('//*[@*[local-name()="AutomationProperties.Name" and contains(., "DualBinding.OverlayAutomationName")]]')) | Select-Object -First 1
     Assert-Condition ($null -ne $bindingOverlayNode) 'The dual binding overlay must expose an accessibility name on its root (issue #62).'
-    $bindingButtons = @($bindingOverlayNode.SelectNodes('.//*[local-name()="Button"]'))
+    Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/ViewModels/DualBindingViewModel.cs')).Contains('"機体照合（CAM-A / CAM-B の割当）"')) 'The dual binding view model must keep the assignment wording of the overlay accessibility name (issue #62).'
+    # While window close waits for the Agent (issue #225), the residual-risk text and the start button are hidden.
+    foreach ($hiddenWhileBlocked in @('機体照合の残留リスク', '機体照合を開始する')) {
+        $hiddenNode = @($bindingOverlayNode.SelectNodes(('.//*[@*[local-name()="AutomationProperties.Name" and .="{0}"]]' -f $hiddenWhileBlocked))) | Select-Object -First 1
+        Assert-Condition ($null -ne $hiddenNode -and $hiddenNode.GetAttribute('Visibility').Contains('DualBinding.IsNotShutdownBlocked')) "The overlay element '$hiddenWhileBlocked' must be hidden while shutdown is blocked (issue #225)."
+    }    $bindingButtons = @($bindingOverlayNode.SelectNodes('.//*[local-name()="Button"]'))
     Assert-Condition ($bindingButtons.Count -ge 4) "The dual binding overlay must offer its actions as focusable buttons (issue #62); found $($bindingButtons.Count)."
     foreach ($button in $bindingButtons) {
         $automationName = $button.GetAttribute('AutomationProperties.Name')

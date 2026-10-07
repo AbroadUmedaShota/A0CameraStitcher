@@ -11,4 +11,12 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\m3\OperatorShell\A0CameraStitcher.M3.OperatorShell.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copied next to the test binary so the test can compare the C# AgentMaxLifetime with the
+         native Agent budget without searching parent directories (issue #225). -->
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\src\phase0\include\a0\phase0\agent_host_lifetime.hpp"
+          Link="native\agent_host_lifetime.hpp"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

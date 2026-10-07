@@ -268,15 +268,16 @@ Console.WriteLine(
     $", RenderCapability.Tier={RenderCapability.Tier >> 16}");
 
 var failures = new List<string>();
-// The summary line is derived from what was actually reported, never from a literal:
-// scripts/Test-M3Simulated.ps1 requires "N/N" to equal the number of "PASS " lines, and a
-// hand-kept total drifts every time a test is added or removed.
+// The summary line is derived from what was actually reported, never from a literal. Because that makes
+// "N/N" equal the number of "PASS " lines by construction, scripts/Test-M3Simulated.ps1 separately
+// requires at least one PASS per top-level try block below (plus the WPF contract check), so a block
+// that silently stops reporting is still caught.
 var passLines = new PassLineCountingWriter(Console.Out);
 Console.SetOut(passLines);
 if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
-    Console.Error.WriteLine("UNRUN runner=normal remaining=95 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=99 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -7349,6 +7350,10 @@ static async Task ActivatedCaptureHostShutdownWaitsForNaturalExitAsync()
         Check.True(firstClose.BlockingDetail.Contains(
             "did not exit within the bounded wait", StringComparison.Ordinal),
             "Issue #225: the operator-facing reason must preserve why the wait was blocking, not just a type name.");
+        var startedAt = lifecycle.CurrentProcessStartTimeUtc;
+        Check.True(startedAt is { } s && s <= DateTimeOffset.UtcNow &&
+            DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(s, DateTimeOffset.UtcNow) > TimeSpan.Zero,
+            "Issue #225: a retained activated host must expose its start time so the blocked message can show the remaining wait.");
 
         // The synthetic child exits by itself shortly after the five-second bounded
         // wait. This is a second explicit close, not a retry of any native operation.
@@ -7471,27 +7476,17 @@ static async Task ActivatedCaptureHostNaturalNonZeroExitAllowsShutdownAsync()
 
 // Issue #225 (review M-5): the C# AgentMaxLifetime and the native Agent's budget are two
 // hand-kept copies of one number. Pin the C# value, then read the native header so a change
-// on either side fails here instead of silently skewing the operator's wait estimate.
+// on either side fails here instead of silently skewing the operator's wait estimate. The header
+// is copied next to the test binary by the test project (native\agent_host_lifetime.hpp).
 static Task AgentMaxLifetimeMatchesNativeBudget()
 {
     Check.Equal(TimeSpan.FromMinutes(10), DualCameraAgentLifecycle.AgentMaxLifetime);
 
-    string? headerPath = null;
-    for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
-    {
-        var candidate = Path.Combine(
-            directory.FullName, "src", "phase0", "include", "a0", "phase0", "agent_host_lifetime.hpp");
-        if (File.Exists(candidate))
-        {
-            headerPath = candidate;
-            break;
-        }
-    }
-
-    Check.True(headerPath is not null,
-        "agent_host_lifetime.hpp was not found above the test output directory; the native budget cannot be compared.");
+    var headerPath = Path.Combine(AppContext.BaseDirectory, "native", "agent_host_lifetime.hpp");
+    Check.True(File.Exists(headerPath),
+        $"agent_host_lifetime.hpp was not copied to {headerPath}; the native budget cannot be compared.");
     var match = System.Text.RegularExpressions.Regex.Match(
-        File.ReadAllText(headerPath!), @"kDefaultBudgetMilliseconds\s*=\s*(\d+)");
+        File.ReadAllText(headerPath), @"kDefaultBudgetMilliseconds\s*=\s*(\d+)");
     Check.True(match.Success, "kDefaultBudgetMilliseconds was not found in agent_host_lifetime.hpp.");
     Check.Equal(
         DualCameraAgentLifecycle.AgentMaxLifetime,
@@ -7536,11 +7531,11 @@ static Task EstimateRemainingAgentLifetimeBoundaryConditionsAsync()
 }
 
 // Issue #225: the shutdown-blocked message has three wordings -- still waiting (positive
-// estimate), probably exited (zero) and unknown (null). Each must keep the safety
-// statements (hands off the camera, no automatic retry or forced kill, early retry is
-// harmless), name the way to close again, give the escalation path, and put the sanitized
-// technical information last under its own label. This exercises
-// DualBindingViewModel.ReportShutdownBlocked directly; no Agent process is started.
+// estimate), probably exited (zero) and unknown remaining time (null, treated as the full
+// ten-minute budget). Each is five paragraphs: situation and time, what not to do, what to do
+// with the reassurance, the contact path, and the sanitized technical line last. The word
+// "再試行" must not appear at all (it collided with the operator's own second close). This
+// exercises DualBindingViewModel.ReportShutdownBlocked directly; no Agent process is started.
 static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -7548,71 +7543,121 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
     try
     {
         var binding = new DualBindingViewModel(new DualBindingSessionClient(lifecycle));
+        var headlineChanges = 0;
+        binding.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(DualBindingViewModel.HeadlineText))
+            {
+                headlineChanges++;
+            }
+        };
+        Check.True(binding.IsNotShutdownBlocked, "The residual-risk text and start button are shown before any blocked report.");
+        Check.Equal("機体照合（CAM-A / CAM-B の割当）", binding.OverlayAutomationName);
+
+        // A whole minute, so the round-up to the next minute does not move the expected times.
         var now = new DateTimeOffset(2026, 10, 6, 3, 0, 0, TimeSpan.Zero);
         const string code = "HardwareCameraAgentLaunchException";
         const string detail = "Activated capture host did not exit within the bounded wait.";
+        string Hm(DateTimeOffset value) => value.ToLocalTime()
+            .ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
 
-        void RequireCommonGuidance(string text, string label)
+        string[] RequireCommonGuidance(string text, string label)
         {
-            Check.True(text.Contains("カメラに触らず、他のカメラアプリも使わない", StringComparison.Ordinal),
-                $"{label}: the hands-off instruction is missing.");
-            Check.True(text.Contains("画面右上の ✕ でもう一度閉じてください", StringComparison.Ordinal),
-                $"{label}: the way to close again is missing.");
-            Check.True(text.Contains("早すぎる再試行は無害", StringComparison.Ordinal),
-                $"{label}: the early-retry-is-harmless statement is missing.");
-            Check.True(text.Contains("自動再試行や Camera Agent の強制終了は行いません", StringComparison.Ordinal),
-                $"{label}: the no-forced-action statement is missing.");
-            Check.True(text.Contains("技術担当者に連絡してください", StringComparison.Ordinal),
-                $"{label}: the escalation path is missing.");
+            Check.False(text.Contains("再試行", StringComparison.Ordinal),
+                $"{label}: the word 再試行 must not appear; it collides with the operator closing again.");
             Check.False(text.Contains("実機セッション", StringComparison.Ordinal),
                 $"{label}: the old real-device-session wording must not return.");
             var lines = text.Split('\n');
-            Check.Equal(2, lines.Length);
-            Check.True(lines[1].StartsWith("技術担当者向け:", StringComparison.Ordinal) &&
-                lines[1].Contains(code, StringComparison.Ordinal) &&
-                lines[1].Contains(detail, StringComparison.Ordinal),
+            Check.Equal(5, lines.Length);
+            Check.True(lines[1].Contains("カメラに触らず、他のカメラアプリも使わないでください", StringComparison.Ordinal),
+                $"{label}: the hands-off instruction must be its own paragraph.");
+            Check.True(lines[2].Contains("画面右上の ✕ でもう一度閉じてください", StringComparison.Ordinal) &&
+                lines[2].Contains("撮影結果と採用の記録は変わりません", StringComparison.Ordinal) &&
+                lines[2].Contains("この画面が自動でやり直したり、Camera Agent を強制終了したりすることはありません", StringComparison.Ordinal),
+                $"{label}: the close-again paragraph must carry the steps and both reassurances.");
+            Check.True(lines[3].Contains("技術担当者に連絡してください", StringComparison.Ordinal),
+                $"{label}: the escalation paragraph is missing.");
+            Check.True(lines[4].StartsWith("技術担当者向け:", StringComparison.Ordinal) &&
+                lines[4].Contains(code, StringComparison.Ordinal) &&
+                lines[4].Contains(detail, StringComparison.Ordinal),
                 $"{label}: the technical line must come last and carry both the status code and the detail.");
-            Check.False(lines[0].Contains(detail, StringComparison.Ordinal) ||
-                lines[0].Contains(code, StringComparison.Ordinal),
+            Check.False(string.Join('\n', lines[..4]).Contains(detail, StringComparison.Ordinal) ||
+                string.Join('\n', lines[..4]).Contains(code, StringComparison.Ordinal),
                 $"{label}: technical information must not appear in the operator guidance.");
+            Check.Equal(DualBindingViewModel.ShutdownBlockedNoticeText, binding.NoticeText);
+            Check.Equal("block", binding.NoticeKind);
+            Check.False(binding.NoticeText.Contains(lines[0], StringComparison.Ordinal),
+                $"{label}: the notice must not repeat the guidance already shown above it.");
+            Check.True(binding.IsShutdownBlocked && !binding.IsNotShutdownBlocked,
+                $"{label}: the residual-risk text and start button must be hidden while shutdown is blocked.");
+            Check.Equal("機体照合（カメラの終了待ち）", binding.OverlayAutomationName);
+            return lines;
         }
 
+        // A: still waiting. Times are rounded up to the minute and the escalation time is the
+        // displayed time plus ten minutes, both computed here instead of left to the reader.
         binding.ReportShutdownBlocked(code, detail, TimeSpan.FromMinutes(4), now);
-        Check.True(binding.IsShutdownBlocked, "A blocked outcome must set IsShutdownBlocked.");
         Check.Equal("カメラの終了を待っています", binding.HeadlineText);
-        var waiting = binding.InvalidationText;
-        RequireCommonGuidance(waiting, "waiting");
-        Check.True(waiting.Contains("あと約4分", StringComparison.Ordinal),
-            "A positive remaining estimate must be shown as an approximate wait.");
-        var expectedEnd = (now + TimeSpan.FromMinutes(4)).ToLocalTime()
-            .ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-        Check.True(waiting.Contains($"目安 {expectedEnd} ごろ", StringComparison.Ordinal),
-            "The approximate end time (HH:mm, local) must accompany the remaining minutes.");
-        Check.True(waiting.Contains("目安の時刻から 10 分過ぎても閉じられない場合", StringComparison.Ordinal),
-            "The escalation threshold must be anchored to the displayed end time.");
+        var waiting = RequireCommonGuidance(binding.InvalidationText, "waiting");
+        var waitingEnd = now + TimeSpan.FromMinutes(4);
+        Check.Equal(
+            $"Camera Agent が自動で終了するのを待っています。あと約4分、{Hm(waitingEnd)} ごろに終わる見込みです。",
+            waiting[0]);
+        Check.True(waiting[1].StartsWith("その間は", StringComparison.Ordinal),
+            "waiting: the hands-off paragraph must say it applies during the wait.");
+        Check.True(waiting[2].StartsWith($"{Hm(waitingEnd)} を過ぎたら、", StringComparison.Ordinal) &&
+            waiting[2].Contains("早めに押しても問題はなく、撮影結果と採用の記録は変わりません。", StringComparison.Ordinal),
+            "waiting: the close-again time is the displayed end time and an early press is called harmless.");
+        Check.Equal(
+            $"{Hm(waitingEnd + TimeSpan.FromMinutes(10))} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
+            waiting[3]);
+        var headlineChangesBeforeExceeded = headlineChanges;
 
+        // B: budget already elapsed. No countdown, no second time, no "early press" sentence.
         binding.ReportShutdownBlocked(code, detail, TimeSpan.Zero, now);
-        var exceeded = binding.InvalidationText;
-        RequireCommonGuidance(exceeded, "exceeded");
-        Check.True(exceeded.Contains("すでに終了している可能性があります", StringComparison.Ordinal),
-            "An exhausted budget must say the Agent has probably exited.");
-        Check.False(exceeded.Contains("あと約", StringComparison.Ordinal) ||
-            exceeded.Contains("残り時間は確認できません", StringComparison.Ordinal),
-            "An exhausted budget is neither still-waiting nor unknown.");
+        Check.Equal("カメラの終了を確認しています", binding.HeadlineText);
+        Check.True(headlineChanges > headlineChangesBeforeExceeded,
+            "A second blocked report with a different wording must raise HeadlineText even though the phase did not change.");
+        var exceeded = RequireCommonGuidance(binding.InvalidationText, "exceeded");
+        Check.Equal("Camera Agent はすでに終了している可能性があります。", exceeded[0]);
+        Check.True(exceeded[2].Contains("撮影結果と採用の記録は変わりません。", StringComparison.Ordinal) &&
+            !exceeded[2].Contains("早めに押しても", StringComparison.Ordinal),
+            "exceeded: the harmless-early-press sentence belongs to the waiting wording only.");
+        Check.Equal("もう一度閉じても閉じられない場合は、技術担当者に連絡してください。", exceeded[3]);
+        Check.False(binding.InvalidationText.Contains("あと約", StringComparison.Ordinal) ||
+            binding.InvalidationText.Contains("残り時間は確認できません", StringComparison.Ordinal),
+            "exceeded: an exhausted budget is neither still-waiting nor unknown.");
 
+        // C: start time unknown. The Agent cannot outlive its ten-minute budget, so this is the
+        // waiting wording with the full budget assumed.
         binding.ReportShutdownBlocked(code, detail, null, now);
-        var unknown = binding.InvalidationText;
-        RequireCommonGuidance(unknown, "unknown");
-        Check.True(unknown.Contains("残り時間は確認できません", StringComparison.Ordinal) &&
-            unknown.Contains("しばらく待ってから", StringComparison.Ordinal),
-            "An unknown remaining time must say so and ask the operator to wait before closing again.");
-        Check.False(unknown.Contains("すでに終了している可能性があります", StringComparison.Ordinal) ||
-            unknown.Contains("あと約", StringComparison.Ordinal),
-            "An unknown remaining time must not be presented as exceeded or as a countdown.");
+        Check.Equal("カメラの終了を待っています", binding.HeadlineText);
+        var unknown = RequireCommonGuidance(binding.InvalidationText, "unknown");
+        var unknownEnd = now + DualCameraAgentLifecycle.AgentMaxLifetime;
+        Check.Equal(
+            "Camera Agent が自動で終了するのを待っています。" +
+            $"残り時間は確認できませんが、長くても 10 分ほどで終わる見込みです（目安 {Hm(unknownEnd)} ごろ）。",
+            unknown[0]);
+        Check.True(unknown[2].StartsWith($"{Hm(unknownEnd)} を過ぎたら、", StringComparison.Ordinal) &&
+            unknown[2].Contains("早めに押しても問題はなく", StringComparison.Ordinal),
+            "unknown: the close-again paragraph must match the waiting wording.");
+        Check.Equal(
+            $"{Hm(unknownEnd + TimeSpan.FromMinutes(10))} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
+            unknown[3]);
+        Check.False(binding.InvalidationText.Contains("しばらく", StringComparison.Ordinal) ||
+            binding.InvalidationText.Contains("すでに終了している可能性があります", StringComparison.Ordinal),
+            "unknown: it must be neither the vague wait nor the exceeded wording.");
+
+        // A time with leftover seconds is rounded up so the operator is never told a minute too early.
+        var secondsIntoMinute = now + TimeSpan.FromSeconds(20);
+        binding.ReportShutdownBlocked(code, detail, TimeSpan.FromMinutes(4), secondsIntoMinute);
+        Check.True(binding.InvalidationText.Contains(
+            $"あと約4分、{Hm(now + TimeSpan.FromMinutes(5))} ごろに終わる見込みです。", StringComparison.Ordinal),
+            "The estimated end time must be rounded up to the next whole minute.");
 
         var longDetail = "first line\r\nC:\\Users\\operator\\" + new string('x', 400);
         binding.ReportShutdownBlocked(code, longDetail, TimeSpan.FromMinutes(1), now);
-        Check.Equal(2, binding.InvalidationText.Split('\n').Length);
+        Check.Equal(5, binding.InvalidationText.Split('\n').Length);
         Check.False(binding.InvalidationText.Contains(new string('x', 200), StringComparison.Ordinal),
             "An over-long detail must be cut, not shown whole.");
 
@@ -7664,10 +7709,12 @@ static async Task ShutdownGateBlockedDetailIsSingleLineAndBoundedAsync()
         Check.True(outcome.BlockingDetail.StartsWith("first line second line", StringComparison.Ordinal),
             "The leading text must survive; only line breaks are collapsed.");
         Check.True(outcome.BlockingDetail.EndsWith('…'), "A cut detail must end with an ellipsis.");
-        Check.Equal(outcome.BlockingDetail, HardwareDualWindowShutdownOutcome.SanitizeDetail(outcome.BlockingDetail));
+        Check.Equal(outcome.BlockingDetail, HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay(outcome.BlockingDetail));
     }
 
-    Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
+    Check.Equal(
+        "a b c d e f g",
+        HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\u2028b\u2029c\u0085d\fe\t\tf   g"));    Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
     Check.Equal("BindingCleanupUnconfirmed", HardwareDualWindowShutdownOutcome.Blocked(" ", "x").BlockingCode);
 }
 
@@ -12897,7 +12944,6 @@ sealed class PassLineCountingWriter(TextWriter inner) : TextWriter
 
     public override void Flush() => inner.Flush();
 }
-
 static class Check
 {
     public static void True(bool condition, string message)
