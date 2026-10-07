@@ -112,6 +112,25 @@ void CheckNoIdentifiersOrRetries(const std::string& json) {
         "serialized WPD probe output must explicitly report no retries or identifiers");
 }
 
+// GitHub Issue #231: the two bodies of the real dual-camera session ran different firmware (one
+// V1.11, one V1.14). The read-only WPD probe must pass for such a pair and must not echo firmware
+// into its output; the other fixtures here give both bodies the same string, which is exactly the
+// difference between the fake and the real rig.
+void TestBodiesWithDifferentFirmwareStillPass() {
+    const CameraInfo body_a{"D810", "V1.11", "photo", std::string(kCamA)};
+    const CameraInfo body_b{"D810", "V1.14", "photo", std::string(kCamB)};
+    RecordingWpdProbeTransport transport;
+    transport.inventories = {{body_a, body_b}, {body_b, body_a}, {body_a, body_b}};
+
+    const auto result = RunDualWpdReadOnlyProbe(transport, Map(), 5s);
+    Check(result.error == DualWpdReadOnlyProbeError::None &&
+          result.terminal_state == DualWpdReadOnlyProbeTerminalState::Pass &&
+          result.wpd_d810_count == 2 && result.topology_stable,
+        "two bodies with different firmware must pass the read-only WPD probe");
+    const auto json = SerializeDualWpdReadOnlyProbeResult(result);
+    Check(json.find("V1.11") == std::string::npos && json.find("V1.14") == std::string::npos,
+        "firmware strings must not appear in the serialized WPD probe output");
+}
 void TestPassUsesStrictReadOnlySequenceAndFixedAnonymousJson() {
     RecordingWpdProbeTransport transport;
     transport.inventories = {
@@ -344,6 +363,7 @@ void TestFailuresCloseOrReportUnconfirmedWithoutRetry() {
 int main() {
     try {
         TestPassUsesStrictReadOnlySequenceAndFixedAnonymousJson();
+        TestBodiesWithDifferentFirmwareStillPass();
         TestCountsAndMapFailuresStopBeforeCardAccess();
         TestNonEmptyCardsAndTopologyChangesStopWithoutRetry();
         TestFailuresCloseOrReportUnconfirmedWithoutRetry();

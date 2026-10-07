@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include "m6_child_diagnostics.hpp"
 #include "hardware_camera_agent_profile_internal.hpp"
+#include "hardware_replay_fixtures.hpp"
 
 #include <algorithm>
 #include <array>
@@ -687,6 +688,8 @@ std::string SelectedSettingsProfileJson(std::string_view settings) {
 }
 
 // Literal expectations are independent of observed status and the comparator.
+// focusMode uses the shape the real D810 reports (capType unsigned, opaque value 1, no label);
+// see tests/fixtures/hardware-replay and docs/D810_PC_CONTROL_CAPABILITIES.md.
 // The C# writer omits null current* fields and all but available for fileType.
 // Explicit nulls below are a separate parser-coverage fixture.
 std::string WriterShapedSettingsProfileJson() {
@@ -699,7 +702,7 @@ std::string WriterShapedSettingsProfileJson() {
         R"("aperture":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"8"},)"
         R"("sensitivity":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"64"},)"
         R"("whiteBalanceMode":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentIndex":0,"currentLabel":"Preset 1"},)"
-        R"("focusMode":{"available":true,"capType":"generic","probeState":"available","valueType":"unsigned","currentValue":1})");
+        R"("focusMode":{"available":true,"capType":"unsigned","probeState":"available","valueType":"unsigned","currentValue":1})");
 }
 
 std::string AllAttributesSettingsProfileJson() {
@@ -712,7 +715,7 @@ std::string AllAttributesSettingsProfileJson() {
         R"("aperture":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"8"},)"
         R"("sensitivity":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"64"},)"
         R"("whiteBalanceMode":{"available":true,"capType":"enum","probeState":"observed","valueType":"label","currentValue":null,"currentIndex":0,"currentLabel":"Preset 1"},)"
-        R"("focusMode":{"available":true,"capType":"generic","probeState":"available","valueType":"unsigned","currentValue":1,"currentIndex":null,"currentLabel":null})");
+        R"("focusMode":{"available":true,"capType":"unsigned","probeState":"available","valueType":"unsigned","currentValue":1,"currentIndex":null,"currentLabel":null})");
 }
 
 SdkCameraStatus MatchingSelectedSettingsStatus() {
@@ -733,7 +736,7 @@ SdkCameraStatus MatchingSelectedSettingsStatus() {
         std::nullopt, 0U, "64", {}, {}};
     status.wb_mode = {true, "enum", "observed", "label",
         std::nullopt, 0U, "Preset 1", {}, {}};
-    status.focus_mode = {true, "generic", "available", "unsigned",
+    status.focus_mode = {true, "unsigned", "available", "unsigned",
         1U, std::nullopt, std::nullopt, {}, {}};
     return status;
 }
@@ -2053,6 +2056,225 @@ void TestExactlyOneBindingAndHybridExecutorReuse() {
     }
     std::error_code cleanup_error;
     fs::remove_all(root, cleanup_error);
+}
+
+// ---- GitHub Issue #231: replay of the real single-camera session --------------------------
+//
+// The fixtures are the anonymized records of the one-camera capture that passed on the
+// real D810 after #216: the Agent's event log, its transaction journal, and its response. The
+// two tests below hold the code that produced them to those records.
+
+// Events carrying the app's transaction ID, as comparable strings: every field but the clock
+// readings (timestamp, durationMs), keys sorted, so that a field that appears or disappears on
+// either side shows up as a difference.
+std::vector<std::string> ComparableEvents(
+    const std::vector<replay::Json>& events, std::string_view transaction_id) {
+    std::vector<std::string> comparable;
+    for (const auto& event : events) {
+        if (!replay::HasField(event, "transactionId") ||
+            replay::Field(event, "transactionId").string != transaction_id) {
+            continue;
+        }
+        std::string line;
+        for (const auto& [name, value] : event.object) {
+            if (name == "timestamp" || name == "durationMs") continue;
+            line += name + "=" + value.string + ";";
+        }
+        comparable.push_back(std::move(line));
+    }
+    return comparable;
+}
+
+std::string JoinForDiagnostics(const std::vector<std::string>& lines) {
+    std::string joined;
+    for (const auto& line : lines) joined += "\n  " + line;
+    return joined;
+}
+
+// #216 on the executor side: the real Agent filed the original under the app transaction ID, and
+// every event of that transaction carries it. Before the fix the executor minted its own
+// hybrid-tx-... ID, so the folder, the events and the path the app expects all disagreed.
+void TestReplayRealSingleCaptureEventsAndLanding() {
+    const fs::path root = fs::temp_directory_path() / ("a0-agent-replay-events-" + NewRunId());
+    try {
+        const std::string transaction_id(replay::kSingleTransactionId);
+        const std::string run_id(replay::kSingleRunId);
+        IdentityMap sdk_map(root / "sdk-map.json");
+        IdentityMap wpd_map(root / "wpd-map.json");
+        sdk_map.Bind("CAM-A", "sdk-one");
+        wpd_map.Bind("CAM-A", "wpd-one");
+        const std::vector<CameraInfo> sdk_cameras{{"Nikon D810", "fw", "M", "sdk-one"}};
+        const std::vector<CameraInfo> wpd_cameras{{"Nikon D810", "fw", "M", "wpd-one"}};
+
+        HardwareCameraAgentRequest request;
+        request.operation = HardwareCameraAgentOperation::capture_single;
+        request.transaction_id = transaction_id;
+        request.camera_alias = "CAM-A";
+        request.exclusive_camera_control_confirmed = true;
+        request.dedicated_spool_scope_confirmed = true;
+        request.exact_object_delete_confirmed = true;
+
+        // The camera hands over the dummy that stands in for the real photograph, so the Persisted
+        // event can be compared byte for byte.
+        const std::vector<unsigned char> dummy = replay::ReadFixtureJpeg("single-cam-a");
+        HybridWpdFake wpd;
+        wpd.observed_candidates = {{"private-name.jpg", dummy, true, "exact-object"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", run_id, "fake-combined");
+        const auto result = ExecuteBoundSingleCapture(
+            request, sdk_cameras, wpd_cameras, sdk_map, wpd_map,
+            wpd, wpd, sdk, sdk, evidence, ConfirmedLiveViewOffStatus(),
+            ConfirmedLiveViewOffProbe());
+        Check(result.succeeded && result.terminal_state == "Complete",
+            "the replayed capture must complete; error=" + result.error_category);
+
+        const fs::path expected_original =
+            evidence.RunRoot() / transaction_id / "CAM-A" / "original.jpg";
+        std::error_code equivalent_error;
+        Check(result.retained_original &&
+                  fs::equivalent(result.retained_original->path, expected_original, equivalent_error),
+            "the original must land at <run>/<app transaction ID>/CAM-A/original.jpg as in the real "
+            "session; actual=" +
+                (result.retained_original ? result.retained_original->path.string() : std::string("<none>")));
+
+        // The same relative layout as the real run journal records.
+        const replay::Json journal =
+            replay::ParseJson(replay::ReadFixtureText("single-camera/transaction.json"));
+        const std::string recorded = replay::Field(journal, "originalPath").string;
+        const std::string tail = run_id + "\\" + transaction_id + "\\CAM-A\\original.jpg";
+        Check(recorded.size() > tail.size() &&
+                  recorded.compare(recorded.size() - tail.size(), tail.size(), tail) == 0,
+            "the real journal must record <run>\\<transaction>\\CAM-A\\original.jpg");
+
+        std::ifstream events_file(evidence.RunRoot() / "events.jsonl", std::ios::binary);
+        std::vector<replay::Json> fake_events;
+        for (std::string line; std::getline(events_file, line);) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) fake_events.push_back(replay::ParseJson(line));
+        }
+        const auto golden =
+            ComparableEvents(replay::ReadFixtureJsonLines("single-camera/events.jsonl"), transaction_id);
+        const auto produced = ComparableEvents(fake_events, transaction_id);
+        Check(!golden.empty() && golden == produced,
+            "the events of one transaction must match the real session, field for field.\n"
+            "real:" + JoinForDiagnostics(golden) + "\nproduced:" + JoinForDiagnostics(produced));
+
+        std::error_code remove_error;
+        fs::remove_all(root, remove_error);
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: real single-capture events replay threw: " << error.what() << '\n';
+        std::error_code cleanup_error;
+        fs::remove_all(root, cleanup_error);
+    }
+}
+
+// #216 on the recovery side, and the shape of the real wire response: the real journal is read
+// back by the Agent recovery code and answered with exactly the bytes the app received; a
+// journal that vouches for an original under a hybrid-tx-... folder is refused.
+void TestReplayRealSingleCaptureJournalAndResponse() {
+    const fs::path root = fs::temp_directory_path() / ("a0-agent-replay-journal-" + NewRunId());
+    try {
+        ProductionHardwareCameraAgentConfig config;
+        config.artifacts_root = root / "artifacts";
+        config.reports_root = root / "reports";
+        config.sdk_identity_map = root / "sdk-map.json";
+        config.wpd_identity_map = root / "wpd-map.json";
+        config.transaction_state_root = root / "transactions";
+        ProductionHardwareCameraAgentBackend backend(config);
+
+        const std::string transaction_id(replay::kSingleTransactionId);
+        const std::string run_id(replay::kSingleRunId);
+        const std::vector<unsigned char> dummy = replay::ReadFixtureJpeg("single-cam-a");
+        const std::string dummy_sha = Sha256Hex(dummy);
+
+        const std::string fixture_original =
+            "C:\\a0-replay-fixture\\phase0\\camera-agent\\artifacts\\" + run_id + "\\" +
+            transaction_id + "\\CAM-A\\original.jpg";
+        const auto write_original = [&](const fs::path& path) {
+            fs::create_directories(path.parent_path());
+            std::ofstream output(path, std::ios::binary);
+            output.write(reinterpret_cast<const char*>(dummy.data()),
+                static_cast<std::streamsize>(dummy.size()));
+        };
+        const auto journal_with_original = [&](const fs::path& path) {
+            std::string text = replay::TrimTrailingNewlines(
+                replay::ReadFixtureText("single-camera/transaction.json"));
+            const std::string escaped_fixture = JsonEscapeForTest(fixture_original);
+            const auto at = text.find(escaped_fixture);
+            Check(at != std::string::npos, "the real journal must hold the fixture original path");
+            if (at != std::string::npos) {
+                text.replace(at, escaped_fixture.size(), JsonEscapeForTest(path.string()));
+            }
+            return text;
+        };
+
+        // (a) the real layout: answered, verified, and byte-identical on the wire
+        const fs::path landed = config.artifacts_root / run_id / transaction_id / "CAM-A" / "original.jpg";
+        write_original(landed);
+        ReplaceJournal(config.transaction_state_root, transaction_id, journal_with_original(landed));
+        const auto recovered = backend.GetTransactionResult(transaction_id);
+        Check(recovered.succeeded && recovered.terminal_state == "Complete" &&
+                  recovered.error_category.empty(),
+            "the real journal must be read back as a completed capture; state=" +
+                recovered.terminal_state + " error=" + recovered.error_category);
+        Check(recovered.retained_original && recovered.retained_original->sha256 == dummy_sha &&
+                  recovered.retained_original->size == dummy.size(),
+            "the retained original must be verified against the size and hash in the real journal");
+
+        HardwareCameraAgentDispatcher dispatcher(backend);
+        const std::string response = dispatcher.Handle(Envelope(
+            "get-transaction-result", "{\"transactionId\":\"" + transaction_id + "\"}"));
+        std::string golden = replay::TrimTrailingNewlines(
+            replay::ReadFixtureText("single-camera/agent-capture-response.json"));
+        const std::string replay_request_id = "\"requestId\":\"req-replay-1\"";
+        const auto request_id = golden.find(replay_request_id);
+        Check(request_id != std::string::npos, "the golden response must carry the replay request ID");
+        if (request_id != std::string::npos) {
+            golden.replace(request_id, replay_request_id.size(), "\"requestId\":\"req-1\"");
+        }
+        const std::string escaped_fixture = JsonEscapeForTest(fixture_original);
+        const auto path_at = golden.find(escaped_fixture);
+        if (path_at != std::string::npos) {
+            golden.replace(path_at, escaped_fixture.size(), JsonEscapeForTest(landed.string()));
+        }
+        Check(response == golden,
+            "the Agent answer for the real journal must equal the real response the app received.\n"
+            "real:     " + golden + "\nproduced: " + response);
+
+        // (b) the pre-#216 layout: the journal names an original under the executor own
+        // hybrid-tx-... folder. The folder name comes from the real dual-leg diagnostics.
+        std::string legacy_folder;
+        for (const auto& event : replay::ReadFixtureJsonLines("dual-camera/succeeded/diagnostics-cam-a.events.jsonl")) {
+            if (replay::HasField(event, "transactionId") &&
+                replay::Field(event, "transactionId").string.starts_with("hybrid-tx-")) {
+                legacy_folder = replay::Field(event, "transactionId").string;
+                break;
+            }
+        }
+        Check(!legacy_folder.empty(), "the real dual diagnostics must name a hybrid-tx folder");
+        const std::string legacy_id = "f231a0020000000000000000000000a2";
+        const fs::path legacy_original = config.artifacts_root / run_id / legacy_folder / "CAM-A" / "original.jpg";
+        write_original(legacy_original);
+        std::string legacy_journal = journal_with_original(legacy_original);
+        // Only the journal own ID changes (its first occurrence); the path keeps the legacy folder.
+        const auto id_at = legacy_journal.find(transaction_id);
+        Check(id_at != std::string::npos, "the real journal must hold its transaction ID");
+        if (id_at != std::string::npos) legacy_journal.replace(id_at, transaction_id.size(), legacy_id);
+        ReplaceJournal(config.transaction_state_root, legacy_id, legacy_journal);
+        const auto legacy = backend.GetTransactionResult(legacy_id);
+        Check(!legacy.retained_original && legacy.error_category == "transaction_original_invalid",
+            "an original filed under a hybrid-tx-... folder must not be vouched for by the journal; "
+            "error_category=" + legacy.error_category);
+
+        std::error_code remove_error;
+        fs::remove_all(root, remove_error);
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: real single-capture journal replay threw: " << error.what() << '\n';
+        std::error_code cleanup_error;
+        fs::remove_all(root, cleanup_error);
+    }
 }
 
 void TestProfileSnapshotAndStrictIdentityMapGates() {
@@ -4955,6 +5177,8 @@ int main(int argc, char** argv) {
     TestM6ExceptionBoundaryAndEmptyPipeResponse();
     TestDurableJournalRecoveryContracts();
     TestExactlyOneBindingAndHybridExecutorReuse();
+    TestReplayRealSingleCaptureEventsAndLanding();
+    TestReplayRealSingleCaptureJournalAndResponse();
     TestProfileSnapshotAndStrictIdentityMapGates();
     TestSelectedProfileComparisonDirectContracts();
     TestSelectedProfileComparisonInShutterSession();

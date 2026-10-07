@@ -1,5 +1,6 @@
 #include "a0/phase0/phase0.hpp"
 #include "dual_hardware_capture_backend_internal.hpp"
+#include "hardware_replay_fixtures.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -292,6 +293,73 @@ void TestImageSizeNotConfirmedFailsAfterJpegFineCheck() {
 // sdk-status CLI path, called solely from main.cpp:1036, and is never
 // invoked on the dual-camera capture path this gate runs on.)
 
+
+void ApplyObservedSetting(
+    SdkCameraStatus::SettingCapability& setting, const replay::Json& observed) {
+    setting.available = replay::Field(observed, "available").boolean;
+    if (replay::HasField(observed, "capType")) setting.cap_type = replay::Field(observed, "capType").string;
+    if (replay::HasField(observed, "probeState")) {
+        setting.probe_state = replay::Field(observed, "probeState").string;
+    }
+    if (replay::HasField(observed, "valueType")) {
+        setting.value_type = replay::Field(observed, "valueType").string;
+    }
+    if (replay::HasField(observed, "currentValue")) {
+        setting.current_value = static_cast<std::uint32_t>(
+            std::stoul(replay::Field(observed, "currentValue").string));
+    }
+    if (replay::HasField(observed, "currentIndex")) {
+        setting.current_index = static_cast<std::uint32_t>(
+            std::stoul(replay::Field(observed, "currentIndex").string));
+    }
+    if (replay::HasField(observed, "currentLabel")) {
+        setting.current_label = replay::Field(observed, "currentLabel").string;
+        setting.string_values = {*setting.current_label};
+    }
+}
+
+// GitHub Issue #231 (replay of #222): the settings the real D810 reported when its first
+// dual-camera attempt stopped at dual_jpeg_fine_not_confirmed. The nine settings come from the
+// real approved profile (the app stores exactly what the body reported); fileType is the shape
+// the body really returns, {"available": false} with every other descriptor left at its
+// "not advertised" default. Before the #222 fix this status was rejected, so a body that is
+// perfectly configured could never take the pair.
+void TestReplayRealD810ObservedSettingsAreAccepted() {
+    const replay::Json profile =
+        replay::ParseJson(replay::ReadFixtureText("single-camera/approved-capture-profile.json"));
+    const replay::Json& expected = replay::Field(profile, "expectedSettings");
+
+    SdkCameraStatus status;
+    status.live_view_status_available = true;
+    status.live_view_status = "off";
+    ApplyObservedSetting(status.file_type, replay::Field(expected, "fileType"));
+    ApplyObservedSetting(status.compression_level, replay::Field(expected, "compressionLevel"));
+    ApplyObservedSetting(status.image_size, replay::Field(expected, "imageSize"));
+    ApplyObservedSetting(status.exposure_mode, replay::Field(expected, "exposureMode"));
+    ApplyObservedSetting(status.shutter_speed, replay::Field(expected, "shutterSpeed"));
+    ApplyObservedSetting(status.aperture, replay::Field(expected, "aperture"));
+    ApplyObservedSetting(status.sensitivity, replay::Field(expected, "sensitivity"));
+    ApplyObservedSetting(status.wb_mode, replay::Field(expected, "whiteBalanceMode"));
+    ApplyObservedSetting(status.focus_mode, replay::Field(expected, "focusMode"));
+
+    // The facts about the real body this test stands on.
+    Check(!status.file_type.available && status.file_type.probe_state == "not-advertised" &&
+              !status.file_type.current_label && !status.file_type.current_value &&
+              !status.file_type.current_index,
+        "the real D810 does not advertise fileType at all");
+    Check(status.compression_level.available && status.compression_level.current_label == "JPEG Fine",
+        "the real D810 reports compressionLevel as the label JPEG Fine");
+    Check(status.image_size.current_label == "L(7360*4912)",
+        "the real D810 reports imageSize as L(7360*4912)");
+    Check(status.focus_mode.available && status.focus_mode.current_value == 1U &&
+              !status.focus_mode.current_label,
+        "the real D810 reports focusMode only as the opaque unsigned value 1");
+
+    CheckPasses(status,
+        "the settings the real D810 reported (fileType not advertised, compressionLevel JPEG Fine, "
+        "imageSize L) must pass the dual-camera shutter gate");
+}
+
 } // namespace
 
 int main() {
@@ -309,6 +377,7 @@ int main() {
         TestAdvertisedCombinedRawPlusJpegFileTypeWithPlainFineCompressionFails();
         TestLiveViewNotOffFailsBeforeJpegFineCheck();
         TestImageSizeNotConfirmedFailsAfterJpegFineCheck();
+        TestReplayRealD810ObservedSettingsAreAccepted();
         std::cout << "Dual hardware capture backend contracts passed\n";
         return 0;
     } catch (const std::exception& error) {

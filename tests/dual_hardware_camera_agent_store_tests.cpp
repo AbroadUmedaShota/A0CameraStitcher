@@ -1,4 +1,5 @@
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
+#include "hardware_replay_fixtures.hpp"
 
 #include <Windows.h>
 
@@ -667,6 +668,54 @@ void TestReserveRecoversFromInterruptedReservation() {
     }
 }
 
+// GitHub Issue #231 (replay of #224): the two real pair journals of the dual-camera
+// session, one Succeeded and one Failed at CAM-A. The store reads each real file back to the
+// exact terminal result the app was sent, and writing the same result produces the same bytes the
+// real Agent wrote. Both results carry bindingInvalidationReason "" (None as an empty string),
+// the wire form the app failed to read before #224.
+void TestReplayRealPairJournals() {
+    struct Scenario {
+        std::string folder;
+        std::string transaction_id;
+        DualHardwarePairJournalState state;
+    };
+    const std::vector<Scenario> scenarios{
+        {"succeeded", std::string(replay::kDualSucceededTransactionId),
+            DualHardwarePairJournalState::succeeded},
+        {"failed-cam-a", std::string(replay::kDualFailedTransactionId),
+            DualHardwarePairJournalState::failed},
+    };
+    for (const auto& scenario : scenarios) {
+        const std::string journal = replay::TrimTrailingNewlines(
+            replay::ReadFixtureText("dual-camera/" + scenario.folder + "/pair-journal.json"));
+        const std::string decoded = replay::DecodeTerminalResult(journal);
+        Check(decoded.find("\"bindingInvalidationReason\":\"\"") != std::string::npos,
+            scenario.folder + ": the real terminal result writes None as an empty string");
+        Check(replay::TrimTrailingNewlines(replay::ReadFixtureText(
+                  "dual-camera/" + scenario.folder + "/terminal-result.decoded.json")) == decoded,
+            scenario.folder + ": the decoded copy must be the journal bytes");
+
+        TempSandbox reading_sandbox;
+        const fs::path reading_root = reading_sandbox.Child("real-journal");
+        fs::create_directories(reading_root / "terminal");
+        WriteText(TerminalPath(reading_root, scenario.transaction_id), journal);
+        DualHardwarePairJournalStore reader(reading_root);
+        const auto record = reader.Query(scenario.transaction_id);
+        Check(record.has_value() && record->state == scenario.state &&
+                  record->automatic_retry_count == 0 && record->terminal_result_json == decoded,
+            scenario.folder + ": the store must read the real journal back to the exact terminal result");
+
+        TempSandbox writing_sandbox;
+        const fs::path writing_root = writing_sandbox.Child("rewritten-journal");
+        DualHardwarePairJournalStore writer(writing_root);
+        (void)writer.Reserve(scenario.transaction_id);
+        (void)writer.BeginDispatch(scenario.transaction_id);
+        (void)writer.CompleteTerminal(scenario.transaction_id, scenario.state, decoded);
+        Check(ReadText(TerminalPath(writing_root, scenario.transaction_id)) == journal,
+            scenario.folder + ": writing the real terminal result must reproduce the real journal bytes");
+    }
+}
+
 int main() {
     try {
         TestReserveAndRestartQuery();
@@ -677,6 +726,7 @@ int main() {
         TestIdsAndRootScopeAreStrict();
         TestMalformedOversizedAndNonRegularJournalsFailClosed();
         TestReparsePointsAreRejected();
+        TestReplayRealPairJournals();
     } catch (const std::exception& error) {
         ++failures;
         std::cerr << "FAIL: Dual pair journal store test threw: "
