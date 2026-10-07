@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "a0.hardware-dual-capture-recovery-only-snapshot.v1",
+  "recoveryIntent": "QueryTerminal",
+  "pendingRequest": null,
+  "bindingInvalidationReason": "None"
+}
