@@ -57,7 +57,7 @@ git switch -c codex/issue-3-team-governance origin/codex/main-feature-integratio
 [AGENTS.md](AGENTS.md) の Safety And Data と同じ規則です。
 
 - カメラの serial number — committed fixture では redacted alias を使う
-- 実機の記録から作った fixture や文書は、push の前に操作 PC で `scripts/Test-ReplayFixtureLeak.ps1` を通す（手順は [tests/fixtures/hardware-replay/README.md](tests/fixtures/hardware-replay/README.md)）。終了コード 2（検証不能）は push しない
+- この公開リポジトリへの push はすべて、push の前に操作 PC で `scripts/Test-ReplayFixtureLeak.ps1` のローカル照合を通す（手順は [tests/fixtures/hardware-replay/README.md](tests/fixtures/hardware-replay/README.md)）。終了コード 2（検証不能）は push しない
 - credential、API key、`.env`
 - Nikon SDK の配布物（archive、header、`.dll` / `.lib`）
 - licensed binary

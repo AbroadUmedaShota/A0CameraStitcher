@@ -6,12 +6,12 @@
 
 | 段 | 何を見るか | どこで動くか | 保証できないこと |
 | --- | --- | --- | --- |
-| 形の検査 | 識別子の「形」 | 試験（C# の `HardwareReplayAnonymizationRules.Scan`）。fixture を直すたび、ctest と `Test-M3Simulated.ps1` のたびに動く | 形が目立たない値（7 文字の本体シリアル、中立な名前の欄に入った承認 GUID など）は見つけられない |
+| 形の検査 | 識別子の「形」 | 試験（C# の `HardwareReplayAnonymizationRules.Scan`）。`OperatorShellTests` の中にあるので、`Test-M3Simulated.ps1` を実行したときだけ動く。ctest には C# の試験が登録されていないため、ctest では動かない | 形が目立たない値（7 文字の本体シリアル、中立な名前の欄に入った承認 GUID など）は見つけられない |
 | push 前のローカル照合 | 操作 PC 上の実値との一致 | 手元で `scripts/Test-ReplayFixtureLeak.ps1` を実行（下記）。CI では動かせない（実値が手元にしかない） | 実値を読めない PC では何も保証できない（その場合は検証不能で止まる） |
 
 形の検査が通っても、push してよい証拠にはならない。公開リポジトリへの push は取り消せないので、ローカル照合を通してから push する。
 
-## 形の検査（試験が毎回行う）
+## 形の検査（`Test-M3Simulated.ps1` の試験が行う）
 
 `HardwareReplayAnonymizationRules.Scan` が fixture の全ファイルに対して行う。
 
@@ -30,7 +30,7 @@
 
 ## push 前のローカル照合（必須）
 
-fixture やそれを説明する文書を push する前に、**実値を持っている操作 PC で** 次を実行する。
+この公開リポジトリへの push はすべて、push の前に **実値を持っている操作 PC で** 次を実行する。
 
 ```powershell
 pwsh -NoProfile -File scripts/Test-ReplayFixtureLeak.ps1 -Base origin/main
@@ -42,19 +42,21 @@ pwsh -NoProfile -File scripts/Test-ReplayFixtureLeak.ps1 -Base origin/main
   - 同フォルダの原画像の EXIF（所有者・シリアル・日付・固有 ID・メーカーノート）、SHA-256、サイズ
   - レジストリ（Nikon の USB と WPD の機器キー）、登録された所有者
   - 環境（PC 名・ユーザープロファイルのパス）
-- 照合範囲: commit メッセージ、追加行、追加行の中の hex と base64 の復号結果（`terminalResultHex` を含む）、`.b64` の復号結果。各値は、そのまま・ダッシュ付き GUID・UTF-8 の hex・base64 の 3 通りの桁合わせでも探す。範囲内のバイナリファイルは一致として報告する。`-IncludeChangedFiles` を付けると、範囲が触ったファイルの HEAD 時点の全文も見る
+- 照合範囲: commit メッセージ、追加行、追加行の中の hex と base64 の復号結果（`terminalResultHex` を含む）、`.b64` の復号結果。各値は、そのまま・ダッシュ付き GUID・UTF-8 の hex・base64 の 3 通りの桁合わせでも探す。ただし 6 文字未満の値は hex と base64 の形を作らず、6〜7 文字の値は base64 の桁合わせの一部を作らない。範囲内のバイナリファイルは一致として報告する。`-IncludeChangedFiles` を付けると、範囲が追加・変更したファイルの全文も見る。読むのは HEAD の内容ではなく作業ツリーのファイルで、未コミットの変更を含む（HEAD と作業ツリーが違うとき、HEAD の内容は見ない）
 - 出力はラベル（`カテゴリ#番号`）と場所（commit・ファイル・行）だけで、値は出さない
 - 終了コード: `0` = 一致なし。`1` = 一致あり（push しない。ラベルから、どの種類の値がどこにあるか分かる）。`2` = 検証不能（実値の読み込み元が無い、needle が作れない、エラー）。**`2` は「問題なし」ではない。push しない**
 - 一致の扱い: 実際の採取日が地の文に出た、などの誤検出はありうるが、実値かどうかは必ず人が見て判断する。実値なら、push 前の自分の commit を作り直して消す（消す commit を追加するだけでは履歴に残る）。誤検出のまま通す場合は、理由を Issue かレビューに残す
 - 動作確認: `pwsh -NoProfile -File scripts/Test-ReplayFixtureLeak.ps1 -SelfTest`（架空の値だけの一時リポジトリで、一致する場合・しない場合・検証不能の場合を確かめる。操作 PC でなくても動く）
-- 実値を持たない PC（CI を含む）では `2` になる。その PC からは fixture や関連文書を push しない
+- 実値を持たない PC（CI を含む）では `2` になる。その PC からは push しない
+- 照合には既知の穴がある。Issue #243 を参照。fixture を足す前に塞ぐ
 
-この手順は、fixture・`docs/`・`tests/` のどれかを含む push の前に必ず行う。実行結果（件数とラベルだけ）は PR や Issue の報告に書いてよい。
+この手順は、変更の中身を問わず、この公開リポジトリへの push の前に必ず行う。Issue・PR に貼ってよいのは、カテゴリ別の件数と exit code だけ。一致の位置（commit・ファイル・行）や絶対パスは貼らない。
 
 ## 日付と、すでに公開されている値の扱い
 
 - 日付を一律にずらすのは、時刻の間隔や 5 分の期限を壊さず再現するための正規化で、**秘匿のためではない**。ずらし幅を上の表に書いているので、ずらした日付から実際の採取日は復元できる。日付を伏せたい値は fixture に入れない
-- すでに `main` に公開されている値（PC 名、実 transaction ID・run ID・原画像の SHA-256 など。`docs/CURRENT_STATUS.md`、`docs/evidence/phase0/`、既存の試験にある）は、**非機密として扱う**（取り消せないため、履歴の書き換えはしない）。ただし今後は fixture と文書に追記しない。新しく足した行にそれらが出ると、ローカル照合が一致として報告する。※要確認（推奨案。扱いの最終決定は人が行う）
+- `main` に既に公開されている値（PC 名・実日付・エポック・transaction ID・原画像の SHA-256・サイズ・profile ID・run ID。`docs/CURRENT_STATUS.md`、`docs/evidence/phase0/`、既存の試験にある）は、取り消せない既知の露出として扱う。履歴は書き換えない。fixture にも文書にも再掲・追記しない。新しく足した行にそれらが出ると、ローカル照合が一致として報告する。Issue・PR・commit メッセージも同じ扱いで、PC は別名（例: 操作 PC-1）で書く
+- 現行ファイルに残っている実値を、通常の commit で合成値に置き換えるかどうか: ※要確認（人が判断する）
 
 ## 元データの出所
 
