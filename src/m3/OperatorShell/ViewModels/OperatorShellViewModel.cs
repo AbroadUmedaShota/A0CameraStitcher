@@ -588,12 +588,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         : IsSingleCameraMode
         ? $"{SelectedCamera}だけを撮影し、合成せず検証済み単体原画像を保存します。他方のD810は接続しません。"
         : "CAM-A→CAM-Bを順次撮影し、両原画像を合成します。一台欠けても自動で一台構成へ変更しません。";
+    // 結果確認待ち（同じ撮影IDの再確認）の間、主ボタンは撮影ではなく結果確認だけを行う
+    // （RunCaptureAsync は recoverPending で RecoverAsync を呼び、Reserve/Start を送らない）。
+    // 表示と読み上げ名もその動きに合わせる。
+    internal const string CaptureRecoveryOnlyRecoverButtonText = "同じ撮影IDの結果を確認する（撮影しません）";
+    internal const string CaptureRecoveryOnlyRecoverButtonAutomationName = "主ボタン " + CaptureRecoveryOnlyRecoverButtonText;
     public string CaptureButtonText => IsCaptureRecoveryOnlyMode
-        ? IsCaptureRecoveryOnlyFiveRunMode
+        ? HasRecoverableCaptureRecoveryOnlyTransaction
+            ? CaptureRecoveryOnlyRecoverButtonText
+        : IsCaptureRecoveryOnlyFiveRunMode
             ? "2台を順次撮影・回収する（最大5回）"
             : "2台を順次撮影・回収する（1回）"
         : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
-    public string CaptureButtonAutomationName => IsCaptureRecoveryOnlyFiveRunMode
+    public string CaptureButtonAutomationName => HasRecoverableCaptureRecoveryOnlyTransaction
+        ? CaptureRecoveryOnlyRecoverButtonAutomationName
+        : IsCaptureRecoveryOnlyFiveRunMode
         ? "主ボタン 専用確認済みでCAM-AからCAM-Bを最大5組 実シャッター最大10回 撮影回収する 自動再試行なし"
         : IsCaptureRecoveryOnlyMode
             ? "主ボタン 専用確認済みでCAM-AからCAM-Bを1組 実シャッター2回 撮影回収する 自動再試行なし"
@@ -928,7 +937,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string StageProcessingPlaceholderText => StageProcessingPlaceholderMessage;
     public string StagePreviewNoteText => StagePreviewNoteMessage;
     public string StageReviewBadgeText => IsCaptureRecoveryOnlyMode
-        ? "検証済み原画像（合成保留）"
+        ? "撮影した原画像（合成なし）"
         : IsSingleCameraMode ? "検証済み原本" : "合成結果";
     public string CaptureAvailabilityText => CanCapture ? "撮影可" : "撮影不可";
     public string ReadyStatusChipText => $"{OverallStateText} / {CaptureAvailabilityText}";
@@ -2090,9 +2099,11 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
 
     internal static string BuildCaptureRecoveryOnlyExportFolderRejectedText(string currentFolder) =>
-        "選んだフォルダは保存先にできませんでした。保存先は " +
-        (string.IsNullOrWhiteSpace(currentFolder) ? "未選択" : currentFolder) +
-        " のままです。このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
+        "選んだフォルダは保存先にできませんでした。" +
+        (string.IsNullOrWhiteSpace(currentFolder)
+            ? "保存先はまだ選ばれていません。"
+            : $"保存先は {currentFolder} のままです。") +
+        "このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
         "ネットワーク上のフォルダ、USB メモリ、ショートカット先のフォルダは使えません。";
 
     internal const string CaptureRecoveryOnlyExportFolderRejectedNoticeText =
@@ -2262,8 +2273,12 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     internal const string CaptureRecoveryOnlyExportFolderNotChosenText =
         "先に『選択…』で保存先のフォルダを選んでください。";
+    // The main button reads CaptureRecoveryOnlyRecoverButtonText while this reason is shown. It sits
+    // on the capture screen, which the result panel leaves through the "撮り直しの準備へ" button.
     internal const string CaptureRecoveryOnlyExportPendingText =
-        "撮影結果がまだ確定していないため保存できません。同じ撮影IDの結果確認が終わると保存できるようになります。";
+        "撮影結果がまだ確定していないため保存できません。「撮り直しの準備へ」で撮影画面に戻り、" +
+        "「同じ撮影IDの結果を確認する」を押すと、新しい撮影はせずに同じ撮影IDの結果だけを確認します。" +
+        "確認が終わると保存できるようになります。";
     internal const string CaptureRecoveryOnlyExportNoResultYetText =
         "撮影が終わると、ここから原画像を保存できます。保存先のフォルダは今のうちに選んでおけます。";
     internal const string CaptureRecoveryOnlyExportNoOriginalsText =
@@ -2316,12 +2331,17 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool HasCaptureRecoveryOnlyExportDisabledReason =>
         !string.IsNullOrEmpty(CaptureRecoveryOnlyExportDisabledReason);
 
-    /// <summary>True while the reason is the normal "nothing captured yet" wait, which the
-    /// screen shows in the muted style instead of the caution colour.</summary>
+    /// <summary>True while the reason is a normal wait ("nothing captured yet", or a capture or
+    /// save still running), which the screen shows in the muted style instead of the caution
+    /// colour.</summary>
     public bool IsCaptureRecoveryOnlyExportDisabledReasonMuted =>
         string.Equals(
             CaptureRecoveryOnlyExportDisabledReason,
             CaptureRecoveryOnlyExportNoResultYetText,
+            StringComparison.Ordinal) ||
+        string.Equals(
+            CaptureRecoveryOnlyExportDisabledReason,
+            CaptureRecoveryOnlyExportOtherBusyText,
             StringComparison.Ordinal);
 
     public string CaptureRecoveryOnlyExportPanelTitle => "撮影した原画像の保存（合成はしていません）";
@@ -2889,6 +2909,17 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
+    internal const string CaptureRecoveryOnlyStoppedWithoutOriginalsText =
+        "撮影・回収を途中で停止しました。カメラから受け取れた原画像はありません。";
+
+    // The terminal-state enum name stays in the technical detail; the operator only needs to
+    // know whether any original reached the PC.
+    internal static string BuildCaptureRecoveryOnlyStoppedText(IReadOnlyList<string> retainedAliases) =>
+        retainedAliases.Count == 0
+            ? CaptureRecoveryOnlyStoppedWithoutOriginalsText
+            : "撮影・回収を途中で停止しました。カメラから受け取れた原画像（" +
+              string.Join("・", retainedAliases) + "）はアプリ内に保持しています。";
+
     private void ApplyCaptureRecoveryOnlyExecution(HardwareDualCaptureRecoveryOnlyExecution outcome)
     {
         if (outcome.BindingInvalidationReason != DualBindingInvalidationReason.None)
@@ -2972,12 +3003,12 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "原画像2枚の撮影・回収・再検証が完了しました。合成は実施せず、A0品質は未承認です。"
             : outcome.RecoveryPending
                 ? "結果が確定していません。新しい撮影や自動再試行は行わず、同じ撮影IDだけを再確認します。"
-                : $"撮影・回収を{outcome.TerminalState}で停止しました。取得済み原画像は保持しています。";
+                : BuildCaptureRecoveryOnlyStoppedText(originals.Select(original => original.Alias).ToArray());
         TechnicalDetail =
             $"capturePurpose={HardwareDualCaptureRecoveryOnlyExecution.CapturePurpose} / " +
             $"stitchOutcome={HardwareDualCaptureRecoveryOnlyExecution.StitchOutcome} / " +
             $"a0QualityApproval={HardwareDualCaptureRecoveryOnlyExecution.A0QualityApproval} / " +
-            $"automatic retry count: {outcome.AutomaticRetryCount} / failure={outcome.FailureCode} / " +
+            $"automatic retry count: {outcome.AutomaticRetryCount} / terminalState={outcome.TerminalState} / failure={outcome.FailureCode} / " +
             $"bindingInvalidationReason={outcome.BindingInvalidationReason} / " +
             $"failureReason={outcome.FailureReason ?? "(none)"}";
         OnPropertyChanged(nameof(StageCompositeFreshnessText));
@@ -3640,7 +3671,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             SetCaptureRecoveryOnlyExportResult(
                 saved + "\n" + CaptureRecoveryOnlyExportSuccessTechnicalText,
                 string.Join("\n", exportedPaths.Select(Path.GetFileName)));
-            Notify(saved, true);
+            // The result field carries the folder and the "save again" note; the toast only points to it.
+            Notify(BuildCaptureRecoveryOnlyExportSavedNoticeText(source.Originals), true);
         }
         catch (DualExportPartiallyPublishedException exception)
         {
@@ -3727,13 +3759,22 @@ public sealed class OperatorShellViewModel : ObservableObject
         var published = originals.Take(publishedPaths.Count).Select(original => original.Alias).ToArray();
         var failed = originals.Skip(publishedPaths.Count).Select(original => original.Alias).ToArray();
         var publishedLabel = string.Join(" と ", published);
-        var names = string.Join("、", publishedPaths.Select(Path.GetFileName));
-        return $"一部だけ保存できました。{publishedLabel} の画像は正しく保存しました（{names}）。" +
+        // The saved file names are listed once, in the file list under the result.
+        return $"一部だけ保存できました。{publishedLabel} の画像は正しく保存しました。" +
                $"{string.Join(" と ", failed)} の画像は保存できませんでした。\n" +
                $"もう一度保存すると、{string.Join(" と ", originals.Select(original => original.Alias))} の" +
                $"{originals.Count}枚を別の名前でそろえて保存します。" +
                $"先に保存した {publishedLabel} のファイルはそのまま使えます。\n" +
                "撮影した原画像はアプリ内に残っています。";
+    }
+
+    internal static string BuildCaptureRecoveryOnlyExportSavedNoticeText(IReadOnlyList<CanonicalJpegOriginal> originals)
+    {
+        var aliases = originals.Select(original => original.Alias).ToArray();
+        var count = aliases.Length == 1
+            ? $"1枚（{aliases[0]} のみ）"
+            : $"{aliases.Length}枚";
+        return $"原画像を{count}保存しました。保存先はパネルの結果欄をご覧ください。";
     }
 
     private static string BuildCaptureRecoveryOnlyExportSavedText(
@@ -3959,6 +4000,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             hasExportableResult,
             canRestitch);
         OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CaptureButtonText));
+        OnPropertyChanged(nameof(CaptureButtonAutomationName));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
         OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
         OnPropertyChanged(nameof(CaptureAvailabilityText));

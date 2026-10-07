@@ -9076,8 +9076,22 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         await CompleteDualBindingAsync(restartedRecoveryShell.DualBinding);
         Check.True(restartedRecoveryShell.CanCapture,
             "The pending same-ID recovery may resume only after the fresh binding is Ready.");
+        // GitHub Issue #237: after a restart the pending ID shows the recovery wording from the start.
+        Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", restartedRecoveryShell.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+            restartedRecoveryShell.CaptureButtonAutomationName);
+        var reserveBeforeRestartedPress = wpfRecoveryOperations.ReserveCalls;
+        var startBeforeRestartedPress = wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls;
+        var startCountBeforeRestartedPress = restartedRecoveryShell.TransactionStartCount;
         await ownedCommands.ExecuteAsync(restartedRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/restarted-recovery",
             () => WpfCommandState.Create(restartedRecoveryShell, wpfRecoveryOperations));
+        Check.Equal(reserveBeforeRestartedPress, wpfRecoveryOperations.ReserveCalls);
+        Check.Equal(startBeforeRestartedPress, wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(startCountBeforeRestartedPress, restartedRecoveryShell.TransactionStartCount);
+        // Once the ID is resolved the main button goes back to the new-capture wording.
+        Check.Equal("2台を順次撮影・回収する（1回）", restartedRecoveryShell.CaptureButtonText);
+        Check.False(restartedRecoveryShell.CaptureButtonAutomationName.Contains("撮影しません", StringComparison.Ordinal),
+            "A resolved ID must restore the capture wording of the accessible name.");
         Check.True(!restartedRecoveryShell.IsBusy && restartedRecoveryShell.UiState == OperatorUiState.Review,
             "The re-bound WPF same-ID recovery did not reach review.");
         Check.Equal(1, restartedRecoveryTransport.ActivateCaptureCalls);
@@ -9224,6 +9238,26 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.False(idleShell.CanExportCaptureRecoveryOnlyOriginals, "Nothing has been captured yet.");
     }
 
+    // While a capture is running the reason is "処理中です…": a normal wait in the muted style.
+    {
+        var (busyShell, busyOperations, _) = await CreateOriginalsExportShellAsync(root, "busy-reason", adapter, ordinaryFlow);
+        var busyReasons = new List<(string Reason, bool Muted)>();
+        busyShell.PropertyChanged += (_, eventArgs) =>
+        {
+            if (busyShell.IsBusy && eventArgs.PropertyName == nameof(OperatorShellViewModel.CaptureRecoveryOnlyExportDisabledReason))
+            {
+                busyReasons.Add((busyShell.CaptureRecoveryOnlyExportDisabledReason,
+                    busyShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted));
+            }
+        };
+        await ownedCommands.ExecuteAsync(busyShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/busy-reason",
+            () => WpfCommandState.Create(busyShell, busyOperations));
+        Check.True(busyReasons.Count > 0, "The reason must be observable while the capture is running.");
+        Check.True(
+            busyReasons.All(entry => entry.Reason == OperatorShellViewModel.CaptureRecoveryOnlyExportOtherBusyText && entry.Muted),
+            "While a capture runs, the busy reason must use the muted style, not the caution colour.");
+    }
+
     // A capture that delivered no image at all is a different state from "not captured yet".
     {
         var (noneShell, _, _) = await CaptureOnceForOriginalsExportAsync(
@@ -9234,6 +9268,12 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             noneShell.CaptureRecoveryOnlyExportDisabledReason);
         Check.False(noneShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
             "A capture that returned no image is not a calm waiting state.");
+        // The status line agrees with the save panel and carries no English enum name.
+        Check.Equal("撮影・回収を途中で停止しました。カメラから受け取れた原画像はありません。", noneShell.StatusMessage);
+        Check.False(noneShell.StatusMessage.Contains("取得済み原画像は保持", StringComparison.Ordinal),
+            "A stop with no original must not claim retained originals.");
+        Check.True(noneShell.TechnicalDetail.Contains("terminalState=", StringComparison.Ordinal),
+            "The terminal state name belongs in the technical detail.");
         Check.Equal("この撮影では保存できる原画像がありません（カメラから画像を受け取れませんでした）。",
             OperatorShellViewModel.CaptureRecoveryOnlyExportNoOriginalsText);
     }
@@ -9270,7 +9310,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                 link,
                 Path.Combine(link, "child"),
             };
-            void RejectAll(string expectedFolderText)
+            void RejectAll(string expectedFolderSentence)
             {
                 foreach (var folder in rejected)
                 {
@@ -9286,7 +9326,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                     Check.True(baselineShell.HasCaptureRecoveryOnlyExportFolderError,
                         "A rejected folder must leave its reason under the folder field.");
                     Check.Equal(
-                        $"選んだフォルダは保存先にできませんでした。保存先は {expectedFolderText} のままです。" +
+                        $"選んだフォルダは保存先にできませんでした。{expectedFolderSentence}" +
                         "このPCの内蔵ドライブ（例: C: や D:）にあるフォルダを選んでください。" +
                         "ネットワーク上のフォルダ、USB メモリ、ショートカット先のフォルダは使えません。",
                         baselineShell.CaptureRecoveryOnlyExportFolderError);
@@ -9294,7 +9334,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             }
 
             // While no folder has been chosen the line says so.
-            RejectAll("未選択");
+            RejectAll("保存先はまだ選ばれていません。");
             Check.False(Directory.Exists(Path.GetFullPath(relative)),
                 "A relative folder must be refused before it is resolved against the current directory.");
             Check.False(Directory.Exists(Path.Combine(linkTarget, "child")),
@@ -9310,7 +9350,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             Check.False(baselineShell.HasCaptureRecoveryOnlyExportFolderError,
                 "Choosing a usable folder must clear the earlier reason.");
             Check.Equal(string.Empty, baselineShell.CaptureRecoveryOnlyExportFolderError);
-            RejectAll(chosen);
+            RejectAll($"保存先は {chosen} のままです。");
             Check.Equal(chosen, baselineShell.CaptureRecoveryOnlyExportDirectory);
         }
         finally
@@ -9355,6 +9395,39 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.False(pendingShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted,
             "A pending result is not the calm waiting state.");
         Check.Equal(callsBefore, AgentCallSnapshot(pendingOperations, pendingTransport));
+
+        // GitHub Issue #237: while the same-ID recovery is outstanding, the main button says it
+        // only re-checks that ID, and the panel reason names the next step.
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, pendingShell.CaptureButtonText);
+        Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", pendingShell.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+            pendingShell.CaptureButtonAutomationName);
+        Check.True(pendingShell.CaptureButtonAutomationName.Contains("同じ撮影IDの結果を確認する（撮影しません）", StringComparison.Ordinal),
+            "The accessible name must carry the same wording as the visible label.");
+        Check.False(pendingShell.CaptureButtonText.Contains("2台を順次撮影", StringComparison.Ordinal),
+            "A pending recovery must not offer the new-capture label.");
+        Check.True(OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText.Contains(
+                "新しい撮影はせずに同じ撮影IDの結果だけを確認します。確認が終わると保存できるようになります。",
+                StringComparison.Ordinal),
+            "The pending reason must say what the next button press does.");
+        Check.True(pendingShell.PrepareNewCaptureCommand.CanExecute(null),
+            "The result panel must offer the way back to the capture screen named in the pending reason.");
+        pendingShell.PrepareNewCaptureCommand.Execute(null);
+        Check.True(pendingShell.CanCapture, "The main button must be pressable again after preparing.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, pendingShell.CaptureButtonText);
+        var beforeRecoveryPress = (
+            pendingOperations.ReserveCalls, pendingOperations.CaptureRecoveryOnlyStartCalls,
+            pendingOperations.OrdinaryStartCalls, pendingOperations.CapabilityPreflightCalls);
+        var queriesBeforeRecoveryPress = pendingOperations.QueryRecoveryOnlyCalls;
+        var startCountBeforeRecoveryPress = pendingShell.TransactionStartCount;
+        await ownedCommands.ExecuteAsync(pendingShell.CaptureCommand, TimeSpan.FromSeconds(5),
+            "recovery-only/m1-recover-press", () => WpfCommandState.Create(pendingShell, pendingOperations));
+        // Pressing the relabelled button asks the same ID only: no Reserve, Start or preflight is sent.
+        Check.Equal(beforeRecoveryPress, (
+            pendingOperations.ReserveCalls, pendingOperations.CaptureRecoveryOnlyStartCalls,
+            pendingOperations.OrdinaryStartCalls, pendingOperations.CapabilityPreflightCalls));
+        Check.Equal(queriesBeforeRecoveryPress + 1, pendingOperations.QueryRecoveryOnlyCalls);
+        Check.Equal(startCountBeforeRecoveryPress, pendingShell.TransactionStartCount);
     }
 
     // FailedPartial with only CAM-A retained, exported through the ViewModel.
@@ -9362,6 +9435,9 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         var (partialShell, _, _) = await CaptureOnceForOriginalsExportAsync(
             root, "partial-vm", adapter, ordinaryFlow, ownedCommands, failCameraB: true);
         Check.Equal(OperatorUiState.FailedPartial, partialShell.UiState);
+        Check.Equal(
+            "撮影・回収を途中で停止しました。カメラから受け取れた原画像（CAM-A）はアプリ内に保持しています。",
+            partialShell.StatusMessage);
         var partialFolder = Path.Combine(root, "partial-vm-export");
         partialShell.ChangeCaptureRecoveryOnlyExportDirectory(partialFolder);
         Check.True(partialShell.CanExportCaptureRecoveryOnlyOriginals,
@@ -9373,7 +9449,8 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                 "保存しました: 1枚（CAM-A のみ。CAM-B の画像は受け取れませんでした）。合成していない原画像です。保存先: ",
                 StringComparison.Ordinal),
             $"A one-original export must say that CAM-B was not captured. Actual: {partialShell.CaptureRecoveryOnlyExportResult}");
-        var exported = Directory.GetFiles(partialFolder, "*.jpg", SearchOption.TopDirectoryOnly);
+        Check.Equal("原画像を1枚（CAM-A のみ）保存しました。保存先はパネルの結果欄をご覧ください。", partialShell.NoticeText);
+        var exported =Directory.GetFiles(partialFolder, "*.jpg", SearchOption.TopDirectoryOnly);
         Check.Equal(1, exported.Length);
         Check.True(Path.GetFileName(exported[0]).Contains("-CAM-A-", StringComparison.Ordinal),
             "The single exported file must be the CAM-A original.");
@@ -9509,13 +9586,16 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         // A partial success says what worked and what did not, without the failure wording of
         // a failed save, and the aliases come from what was actually published.
         Check.Equal(
-            $"一部だけ保存できました。CAM-A の画像は正しく保存しました（{Path.GetFileName(published[0])}）。" +
+            "一部だけ保存できました。CAM-A の画像は正しく保存しました。" +
             "CAM-B の画像は保存できませんでした。\n" +
             "もう一度保存すると、CAM-A と CAM-B の2枚を別の名前でそろえて保存します。" +
             "先に保存した CAM-A のファイルはそのまま使えます。\n" +
             "撮影した原画像はアプリ内に残っています。\n" +
             "技術担当者向け: 技術情報に記録しました",
             partialResult);
+        // The file name appears once, in the file list, not also inside the sentence.
+        Check.False(partialResult.Contains(Path.GetFileName(published[0]), StringComparison.Ordinal),
+            "The saved file name must not be repeated in the result sentence.");
         Check.False(partialResult.StartsWith("保存できませんでした。", StringComparison.Ordinal),
             "A partial success must not open with the failed-save sentence.");
         Check.False(partialResult.Contains("一致しませんでした", StringComparison.Ordinal),
@@ -9546,9 +9626,10 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             $"A repeated export must succeed. Actual: {shell.CaptureRecoveryOnlyExportResult}");
         Check.Equal(3, Directory.GetFiles(folder, "*.jpg", SearchOption.TopDirectoryOnly).Length);
         Check.Equal(savedBefore + 3, shell.SavedFiles.Count);
-        // The success notice is the saved sentence itself (not shortened).
-        Check.True(shell.CaptureRecoveryOnlyExportResult.StartsWith(shell.NoticeText, StringComparison.Ordinal),
-            "A successful export keeps the full saved sentence in its notice.");
+        // The success notice is short and points to the result field, which holds the folder.
+        Check.Equal("原画像を2枚保存しました。保存先はパネルの結果欄をご覧ください。", shell.NoticeText);
+        Check.False(shell.NoticeText.Contains(folder, StringComparison.OrdinalIgnoreCase),
+            "The success notice must not repeat the folder path.");
         Check.Equal("ok", shell.NoticeKind);
 
         // (c) A folder that cannot be used any more (here: replaced by a file) gets its own text.
