@@ -10,7 +10,7 @@ PR #202のSDRAM事前確認・匿名診断追加はsoftware-only CIと独立レ�
 
 総合状態は`in-progress`です。2026-08-26にNikon D810一台、`SingleCamera`、`CAM-A`のCamera Agent撮影経路でone-shot 1/1、10/10 characterization、Product Ownerによるp95 `14.643秒`承認、100/100耐久を完了しました。111件の原画像再検証も合格し、原画像消失・誤削除・曖昧採用・自動retry・復旧不能停止は各0件です。ただし、実WPF画面からの100回操作、撮影を挟むContinuous Live View handoff 10回、物理USB切断・保存先障害は未検証であり、SingleCamera全体の判定は`Partial`です。詳細は[SingleCamera実機結果](docs/SINGLE_CAMERA_HARDWARE_RESULTS_2026-08-26.md)を参照してください。DualCameraは二台前提を維持し、実capture backendと同一Agent内CAM-A/B割当は実装済みですが、実機one-shot／10回／承認後100回が未完了のため`HardwarePending`のままです。
 
-DualCameraのsoftware側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`、durable pair store、同一Agent session内の明示CAM-A/B割当、実SDK撮影→SDK完全終了→WPD回収・検証・exact-object cleanupを順次行うproduction backendを実装済みです。通常の合成経路とは別に、承認済み外部profileを厳密読込する`CaptureRecoveryOnly`をWPFへ接続し、CAM-A→CAM-B各最大一回、自動retry 0、曖昧時same-ID照会だけ、B失敗時A原本保持、合成`Pending`・A0品質`Unapproved`をsoftware contractとして検証しています。これは実機二台撮影の合格証拠ではなく、実WPF one-shotまでは撮影可能状態を主張しません。
+DualCameraのsoftware側では、Dual専用schema `a0.camera-agent.hardware-dual.v2`、durable pair store、同一Agent session内の明示CAM-A/B割当、実SDK撮影→SDK完全終了→WPD回収・検証・exact-object cleanupを順次行うproduction backendを実装済みです。通常の合成経路とは別に、承認済み外部profileを厳密読込する`CaptureRecoveryOnly`をWPFへ接続し、CAM-A→CAM-B各最大一回、自動retry 0、曖昧時same-ID照会だけ、B失敗時A原本保持、合成`Pending`・A0品質`Unapproved`をsoftware contractとして検証しています。2026-10-06に実WPFで初回1組が`Succeeded`になりましたが（[現在の開発状況](docs/CURRENT_STATUS.md)）、最大5組の受入（#227）が済むまでは二台撮影の合格を主張しません。
 
 第三者向けの現在地、5分デモ、主張可能範囲は[Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)に集約しています。一台の実Camera Agent撮影・回収・耐久は合格しましたが、実WPF UI受入は未完了です。二台順次撮影の安全なsoftware contractは提示可能である一方、実機二台撮影とA0品質の受入は未完了です。
 
@@ -63,7 +63,7 @@ build\Debug\A0CameraStitcher.Phase0.exe wpd-status --alias CAM-A
 build\Debug\A0CameraStitcher.Phase0.exe spool-status --alias CAM-A
 build\Debug\A0CameraStitcher.Phase0.exe wpd-correlation-status --alias CAM-A
 build\Debug\A0CameraStitcher.Phase0.exe live-view --alias CAM-A --duration-seconds 300
-build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 10 --frames 1
+build\Debug\A0CameraStitcher.Phase0.exe live-view-handoff --alias CAM-A --count 5 --frames 1
 ```
 
 readinessは実機確認用です。上記のパスと期待hashは、使用を承認された候補の記録に置き換え、実機確認の条件が揃っている場合だけ実行してください。未指定・不一致ならPnP/SDK/WPDを呼ぶ前に`BLOCKED`で終了します。Debug/Releaseを自動選択しません。実行ファイルからその場で自己計算したhashだけでは最新版の証明になりません。詳細とfake-only回帰は[readinessの使用方法](docs/PHASE0_READINESS.md#実行ファイルを明示するreadiness)を参照してください。
@@ -80,12 +80,11 @@ build\Debug\A0CameraStitcher.Phase0.exe verify-dual-identity # legacy map diagno
 build\Debug\A0CameraStitcher.Phase0.exe verify-dual-spools
 ```
 
-`HG-0003B`承認provider、CAM-A/B local proof、each alias exactly once、二台の専用empty spool、全安全確認が揃った後だけ、実機pairを次の順で段階実行します。
+`HG-0003B`承認provider、CAM-A/B local proof、each alias exactly once、二台の専用empty spool、全安全確認が揃った後だけ、Phase 0 CLIで実機pairを実行できます。`--count`が受け付けるのは1〜5です（ADR-0030。範囲外は引数の検証で拒否）。この経路の二台identity検証は上記のとおり既定で`identity_strategy_unresolved`になるため、二台の製品経路の受入には使いません。二台の正規経路は下の「M3 application shell」にあるWPF `--hardware-dual --capture-recovery-only`です。
 
 ```powershell
 build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 1 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
-build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 10 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
-build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 100 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
+build\Debug\A0CameraStitcher.Phase0.exe hybrid-capture-pair --count 5 --exclusive-camera-control-confirmed --dedicated-spool-scope-confirmed --dual-dedicated-spools-confirmed --exact-object-delete-confirmed
 ```
 
 `hybrid-capture-pair`は最初に共通のdual identity検証を必ず実行し、SDK/WPD各2台、CAM-A/B各1、unbound 0でなければ匿名の事前確認証跡を残し、card accessとcaptureを行わずexit 5で停止します。合格後は各pairを一つの180秒watchdogで管理し、CAM-Aのverified PC originalとexact cleanupが完了した後だけCAM-Bを開始します。A/Bいずれかの失敗で直ちに停止し、自動retryは0です。匿名summaryは全attempted pairの所要時間sample数とnearest-rank p50/p95/maxをmsで保存しますが、Phase 0の合否には使いません。二台は順次撮影であり、実シャッター同期は保証しません。
@@ -110,7 +109,7 @@ build\Debug\A0CameraStitcher.Phase0.exe report --run-id <表示されたrun-id>
 
 `hybrid-fault-single`は空spoolでone-shotが合格した後だけ使用します。SDK one captureとSDK close後、WPD recovery open前にoperator gateを出し、`usb-disconnect`または`power-off`を一回だけ試験します。異常後は`FailedPartial`、delete/retry 0、新規transactionでのみ復旧する契約です。
 
-2026-08-09のoperator判断により、物理的な電源再投入・再起動と実`power-off`復旧subtestはPhase 0の必須合否から除外しました。`power-off` CLIとfake contractは安全回帰用に残します。USB切断、software process再起動、二台identity、接続順・port確認、empty spool、1/10/100 pairはスキップしません。
+2026-08-09のoperator判断により、物理的な電源再投入・再起動と実`power-off`復旧subtestはPhase 0の必須合否から除外しました。`power-off` CLIとfake contractは安全回帰用に残します。USB切断、software process再起動、二台identity、接続順・port確認、empty spool、1/10/100 pairはスキップしません（回数は2026-09-21のADR-0030で最大5へ変更）。
 
 旧`capture-single`、`capture-pair`、`stability`はfake contract専用です。`--transport sdk`または`wpd`はcamera sessionを開く前に拒否し、実機経路は確認付き`hybrid-capture-single`と`hybrid-capture-pair`だけに限定します。実SDK/WPDへ触れるコマンドはoperator-session-wide named OS leaseを保持するため、同じWindowsログオンsession内の別processとの同時実行もfail closedになります。別ユーザーsessionやserviceからの起動はMVP運用外とし、installer／運用policyで禁止します。
 
@@ -158,6 +157,23 @@ Live View再開と最終stopを伴う5 transactionです。初回を含む最大
 匿名時系列証跡が必要で、欠落・破損・途中終了はPassになりません。
 
 Camera Agentは`%LOCALAPPDATA%\A0CameraStitcher\camera-agent\approved-single-capture-profile.json`が存在し、CAM-A、期限、read-only observed settingsが一致する場合だけ`Ready`にします。WPFの「観測値を30日プロファイルとして承認」は現在の観測値をlocal profileへ保存しますが、camera settingは変更しません。identity-v3は`%LOCALAPPDATA%\A0CameraStitcher\phase0\single-identity-v3.json`です。これらはsoftware boundaryであり、製品撮影合格の主張ではありません。wire、journal、profile schemaの詳細は[Hardware Camera Agent v1](docs/HARDWARE_CAMERA_AGENT_V1.md)を参照してください。
+
+### 実機二台（CaptureRecoveryOnly）
+
+二台の正規経路は、WPFをコマンドラインから起動する方法だけです。起動モード選択画面からは開けません。Agentは既定でWPFの実行ファイルと同じフォルダの`A0CameraStitcher.DualCameraAgent.exe`を使います（`--camera-agent`で同じフォルダ内の別名を指定できます）。一台と同じく`NIKON_D810_SDK_MODULE_PATH`の設定が必要です。
+
+```powershell
+.\A0CameraStitcher.M3.OperatorShell.exe --hardware-dual --wpd-camera-map <camera-map-wpd.json> --capture-recovery-only --approved-capture-profile <承認profile.json> --dual-identity-proof <proofファイル>
+```
+
+- `--capture-recovery-run-count`を付けなければ1組です。付ける場合に受け付ける値は`5`だけで、同じCAM-A/B割当のまま最大5組を順に実行します。5組モードは一度開始すると同じ起動中に再開できません。
+- `--wpd-camera-map`は、D810を1台ずつ接続してPhase 0 CLIの`bind-identity --alias CAM-A|CAM-B --transport wpd --single-camera-connected-confirmed`で作るmapです。`CAM-A`と`CAM-B`の2項目だけを持ち、値は互いに異なる必要があります。
+- `--approved-capture-profile`は`a0.dual-capture-profile.operator-approved.v1`の承認profileで、画面からは作れません。正準サンプルは`tests/m3/OperatorShellTests/Program.cs`にあります。
+- `--dual-identity-proof`はこの経路ではパスだけを受け取り、中身を検証しません。何を置くべきかは※要確認です。
+- 撮影の前に、`A0CameraStitcher.DualCameraAgent.exe`の`--read-only-sdk-probe` → プロセス終了の確認 → `--read-only-wpd-probe --wpd-camera-map <map>` → `--read-only-coexistence-probe --wpd-camera-map <map>`を順に実行し、すべて`terminalState: Pass`であることを確かめます（[Phase 0試験計画](docs/PHASE0_TEST_PLAN.md)のP0-B1）。WPFはprobeの合否を確認しないため、手順として守ります。
+- 機体照合（CAM-A/Bの割当）は確定から5分で失効し、Agentは起動から10分で自然終了します。照合を確定したら続けて撮影し、閉じるときはAgentの終了を待ちます。
+- 結果は合成`Pending`、A0品質`Unapproved`です。合成と合成JPEGのexportは行いません。2026-10-06の実機結果は[現在の開発状況](docs/CURRENT_STATUS.md)を参照してください。
+- 撮影した原画像（CAM-A・CAM-B）を操作者が選んだこのPC内のフォルダへ保存する機能は#226で実装済みです。保存するのは撮影した原画像そのもので、合成JPEGのexportとは別です。実機での受入は#227で行います。
 
 ## 公式根拠
 

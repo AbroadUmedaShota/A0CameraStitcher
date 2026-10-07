@@ -15,7 +15,7 @@
     {"path":"docs/REFERENCE_CONVERSATION.md","kind":"superseded-reference-history","requirement_ids":[]},
     {"path":"docs/OPERATOR_UI_SPEC.md","kind":"operator-ui-contract","requirement_ids":["FR-UI-001","FR-UI-002","FR-UI-003"]},
     {"path":"docs/CURRENT_STATUS.md","kind":"current-status-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
-    {"path":"src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
+    {"path":"src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
     {"path":"src/m3/OperatorShell/App.xaml.cs","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]},
     {"path":"src/phase0/include/a0/phase0/agent_host_lifetime.hpp","kind":"implementation-observation","requirement_ids":["FR-CAP-002","FR-CAP-007"]}
   ],

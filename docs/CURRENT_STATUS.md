@@ -1,6 +1,6 @@
 # 現在の開発状況
 
-更新日: 2026-10-06（二台順次撮影 V-PAIR-001 の初回 1 組の合格を追記。#216 修正後の一台実機アプリ撮影の合格を追記）、2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
+更新日: 2026-10-07（#221 の 1 回目を数える所有者決定を反映。Partial・Deferred・次の安全な順番に残っていた 10 回・100 回の記述を ADR-0030 の最大 5 回に揃えた。過去の実績の記録は変えていない、#232）、2026-10-06（二台順次撮影 V-PAIR-001 の初回 1 組の合格を追記。#216 修正後の一台実機アプリ撮影の合格を追記）、2026-10-05（一台実機アプリ撮影の初回と原画像パス不一致を追記。計装 A の完了を追記。run-05 の結果・ADR-0031 の凍結・次の作業順を追記。main 着地前レビューを追記。2026-10-02 に AOPC-20-NOTE での最初の実機記録を追記。T1・T2 は 2026-10-01 に `codex/dual-live-worker-poc-20260922` へ commit 済み。以下の 2026-09-23 節は当時の記録）
 
 ## 2026-10-06 二台順次撮影の初回 1 組（V-PAIR-001、AOPC-31-NOTE、#221）
 
@@ -12,7 +12,7 @@
 - 2 回目（17:47、transaction `d1d8cda50623482d984597cf156469e5`、[CAM-A leg](evidence/phase0/dual-leg-CAM-A-run-1791276431296-2/events.jsonl)、[CAM-B leg](evidence/phase0/dual-leg-CAM-B-run-1791276446458-4/events.jsonl)）: `Succeeded`、27 秒。CAM-A → CAM-B の順に各 1 回撮影し、各原画像を保存・検証してから該当 1 件だけ削除、両カードとも削除後に空を確認。自動再試行 0。原画像は CAM-A 17,983,817 B（SHA-256 `2f0549ac1ee787ce9c59a143d874157bffa4b2e526808521411c456511c842b4`）、CAM-B 18,082,209 B（`d947b9a6504c32aa821b054bad8ca18d18d66f2db7ac9c315168e13d432787f0`）。どちらも `Get-FileHash` で再計算し、アプリ表示と一致（2026-10-06 17:48）。合成は Pending、A0 品質は Unapproved のまま。
 - 画面で「結果を採用して次へ」を押し、採用を記録した。
 - 終了時: 採用の直後にアプリを閉じると「実機セッションの終了を確認できないため、この画面と実機の排他を保持しています。（状態: HardwareCameraAgentLaunchException）」で止まった。終了処理は Agent に何も送らず、撮影ホストの自然終了を 5 秒だけ待つ設計で（`DualCameraAgentLifecycle.cs` の `WaitForActivatedCaptureHostExitAsync`）、Agent の寿命は起動から 10 分固定（`hardware_camera_agent_pipe.cpp`）。撮影がすぐ終わったため寿命の途中だった。両 leg の SDK session・WPD はすでに閉じており、カメラ側に後始末は残っていなかった。10 分経過後に Agent の終了（`Get-Process` で不在）を確かめてから閉じるボタンをもう一度押すと、1 回で閉じた。強制終了はしていない。閉じた後も pending は空、journal は `Succeeded`、原画像 2 枚のサイズと SHA-256 は不変、委譲 marker 0。画面に「待ってもう一度閉じる」旨と理由が出ない表示の問題は別 Issue。
-- 実機の時間: 所有者の決定（2026-10-06）により、1 回目（シャッター 0）も ADR-0030 の最大 5 組に数える。使用 2 組、残り 3 組。
+- 実機の時間: 所有者の決定（2026-10-06）により、1 回目（シャッター 0）も ADR-0030 の最大 5 組に数える。使用 2 組、残り 3 組。シャッターが切れたのは 2 回目の 1 組だけ。1 回目の失敗と合否（NFR-REL-001 の「最初の失敗で停止」）の関係は ADR-0032（#230、草案・未承認・main 未着地）で確定する。
 - 残り: 残りの組（最大 5 組まで）、時間の p95 レビュー。終了時の表示の改善は #225 で対応済み（実機確認待ち）。
 
 ## 2026-10-06 一台実機アプリ撮影の再実施と合格（V-1CAM-005、AOPC-31-NOTE）
@@ -27,6 +27,7 @@
 - 運用上の注意: アプリは CameraAgent を常駐させる（`--serve-once` なし）。アプリを閉じた後も agent プロセスが残った。agent が待機中の間に read-only の `sdk-status` を 2 回実行し、どちらも operator-session lease を取得して SDK session を開閉した。session の重複は記録上ない。
 - 2026-10-05 の run `run-1791195109792-1` の原画像は `hybrid-tx-` 配下にあるため、修正後の agent でも `transaction_original_invalid` になる。必要なら元の PC の artifacts から手動で取り出す。
 - 残り: SingleCamera の実 WPF 100 件受入（#13）、Continuous Live View handoff 10 回（#11）、物理異常系。
+- 2026-10-07 追記（#232）: 回数は ADR-0030 で最大 5 回に置き換わっている。一台の受入系列（最大 5 回、保存の確認を含む）と USB 抜去は #227、handoff は #11（最大 5 回へ書き換え予定）で扱う。#13 の 100 件は ADR-0030 で置き換わったため、閉じるか合成を含む統合受入へ移すかを #232 で提案した。数え方と合格線は ADR-0032（#230、草案・未承認・main 未着地）で確定する。#225（終了時の案内）・#226（二台の原画像の保存）は main に着地済み。実機での確認は #227。
 
 ## 2026-10-05 一台実機アプリ撮影の初回（V-1CAM-005、AOPC-20-NOTE）
 
@@ -144,7 +145,7 @@
 |---|---|---|
 | 1組の撮影と原画像2枚の回収・保存（CaptureRecoveryOnly） | 実装済み。合成は行わない | 2026-10-06 に初回 1 組が Succeeded（冒頭の節） |
 | 同じCAM-A/B割当で最大5組を順番に実行（ADR-0030） | 5回runner実装済み。HardwareDualの他の必須引数と併用し、`--capture-recovery-only --capture-recovery-run-count 5`で明示起動（受け付ける値は5だけ。省略すると1組）。失敗時停止、自動retryなし | 5組の受入・実測p95承認は未完了 |
-| 同じCAM-A/B割当で100組を順番に実行 | 内部制御をWI-0017-SW01で準備。本番CLI/UIの100回開始は未対応で、引き続き拒否する | 耐久受入未完了 |
+| 同じCAM-A/B割当で100組を順番に実行 | 内部制御をWI-0017-SW01で準備。本番CLI/UIの100回開始は未対応で、引き続き拒否する | ADR-0030 により今回の受入から除外（100 組の耐久は主張しない） |
 | 時間・SHA-256の集計とp95承認記録 | 記録処理は実装済み。100件の記録を扱えることと、100回の撮影を実行できることは別 | 実機実行や承認者の権限をソフトウェア集計だけでは証明しない |
 
 根拠は[現行5回実行処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs)、[WPFからの操作](../src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs)、[集計・承認記録処理](../src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyRunEvidence.cs)。2026-09-11までの記載はPR #183統合後の`main`の`56f3cb36182812969126a34cd12137105bf3840c`を読み取り照合したもので、新たな実機操作の結果ではない。
@@ -204,31 +205,33 @@
 ## Partial
 
 - setting readback: native MAID command-traceとSingle identity-v3対応`sdk-status` process-routing software contractは実装・fresh test済み。identity-v3登録後の実D810 v5再実行、focus値の意味、FileType未広告の扱いは未検証／未確定。
-- Live View: standaloneは合格だが、実撮影を含むContinuous Live View handoff 10回は未実施。
+- Live View: standaloneは合格だが、実撮影を含むContinuous Live View handoff（ADR-0030により最大5回、#11）は未実施。
 - identity: 旧SDK CAM-A復元証拠はephemeral source ID使用のため無効。SingleCamera CAM-AはWPD digest＋exactly-one current SDK/WPDのidentity-v3を実装し、操作者報告の一台登録はPassした。旧v2 mapへ自動fallbackせず、欠落・破損・digest不一致・0台／複数台をstatus open前に拒否する。二台接続時のSDK Name/Interface v2衝突によりCAM-A/Bを恒久identityで区別できないことと、旧v2 mapの明示migration/invalidationは旧経路の制約として保持する。現在のDual laneでは恒久SDK body identityを採用しない。`HG-0003B`の意思決定はADR-0025のsession-local operator bindingとして解消済みであり、binding core・protocol・WPFはsoftware実装済み、二台実機受入は未完了である。Single identity-v3をDualへ流用しない。
 - setup/correction: parameter contractとWI-0022Cのsynthetic measurement seamは合格。proposalは測定値・fixture/profile provenanceを保持し、profile envelope外を拒否し、profileを変更しない。実写A0品質、承認済みDual profile、実機性能は未検証である。
 - M3P: requirements 2.6.0のfresh software contractは合格したが、実D810、actual JPEG、実WPF画面操作の統合証拠ではない。旧Dual UI Automationは保持し、screen reader、keyboard/focus、Single実画面walkthroughは残る。
-- SingleCamera製品mode: 実D810のCamera Agent撮影、actual JPEG、one-shot、10回p95、100件耐久は合格済み。実WPF操作、10回handoff、UI経由fixed-local export、物理異常系は未検証である。
+- SingleCamera製品mode: 実D810のCamera Agent撮影、actual JPEG、one-shot、10回p95、100件耐久は合格済み（2026-08-26、ADR-0030以前の実績）。実WPF操作とUI経由fixed-local exportは2026-10-06に一回撮影で合格した（V-1CAM-005、#216）。最大5回の受入系列（#227）、handoff（最大5回、#11）、物理異常系は未検証である。
 
 ## Deferred / Waiting
 
 | 項目 | 理由 | 再開条件 |
 |---|---|---|
 | M1A one-shot、10/10 | 2026-08-26に完了 | one-shot 1/1、10/10、p95承認、Camera Agent経路100/100を実績として維持 |
-| M1A fault、handoff | software recoveryは合格。物理USB切断とContinuous Live View handoff 10回は未実施 | 実機操作者の明示確認後に残試験を個別実施 |
-| M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、10回runnerは実装済み。100回runnerは未実装。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | 実機pair-level preflight、coexistence probe、one-shotの受入後に10回を実測する。100回はrunner実装・検証、host lifetimeの適合確認、10回結果・p95承認を満たしてから実施する。DualCameraの実機受入は未完了 |
+| M1A fault、handoff | software recoveryは合格。物理USB切断とContinuous Live View handoff（最大5回）は未実施 | 実機操作者の明示確認後に残試験を個別実施（USB抜去は#227、handoffは#11） |
+| M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、5回runnerは実装済み。100回runnerは未実装で、ADR-0030により今回の受入には使わない。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | 2026-10-06にone-shotを含む2組を使用（1組目はソフト起因のFailed、2組目はSucceeded）。残り3組とUSB抜去を#227で行う。数え方と合格線はADR-0032（#230、草案・未承認・main未着地）で確定する。DualCameraの実機受入は未完了 |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
-| SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。実WPF 100件とLive View handoffは未完了 | WPF end-to-end one-shot後、UI操作・export・状態表示を含む100件受入 |
+| SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。WPF end-to-end one-shotは2026-10-06に合格。最大5回の受入系列とLive View handoffは未完了 | UI操作・export・状態表示を含む最大5回の受入系列（#227）。旧計画の実WPF 100件（#13）はADR-0030で置き換わった |
 | 配布 | native dependency再配布未承認 | `HG-0005` |
 
 90 payloadを検出した旧カード状態は履歴として保持する。2026-08-26の実績は別の専用empty spoolで取得しており、旧カードへ削除・formatを行ったことを意味しない。今後もUSB切断、電源操作、保存障害は自動実行しない。
 
 ## 次の安全な順番
 
-1. SingleCameraの残作業を、Continuous Live View handoff 10回、実WPF end-to-end、物理異常系へ限定する
-2. DualCameraは実機開始条件を再確認し、CaptureRecoveryOnly one-shotを独立した実機ゲートとして受入する
-3. one-shot受入後、実装済み10回runnerで実D810二台の10組とp50/p95/maxを記録する
-4. 100回runnerの実装・ソフトウェア検証とhost lifetimeの適合確認を完了し、10回結果・p95の承認後に100組と残るfault matrixを実施する。runner開発自体は実機や本人回答待ちを開始条件にしない
+2026-10-07時点の作業順の正本はロードマップ #235。以下はADR-0030に合わせた要約。
+
+1. ADR-0032（#230、草案・未承認・main 未着地）で試行の数え方・USB抜去・保存の合格線を所有者が確定する
+2. SingleCameraは、WPFからの最大5回の受入系列（保存の確認を含む）とUSB抜去を#227で、Continuous Live View handoff（最大5回）を#11で行う
+3. DualCameraは、CaptureRecoveryOnlyの残り3組（各組で原画像 2 枚の書き出しを含む。書き出しは #226 で main に着地済み、実機確認は未実施）とUSB抜去を#227で行い、全時間値・最大値を記録する。p95は5標本の記述統計に限る
+4. 100回runnerと100組の耐久はADR-0030により今回の範囲外とする
 5. `HG-0001/0002`承認後にA0合成品質へ進む。CaptureRecoveryOnlyの合格を合成品質の合格に代用しない
 
 ## Human gates

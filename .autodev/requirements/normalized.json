@@ -81,7 +81,7 @@
       "source_refs": [
         "docs/CURRENT_STATUS.md",
         "docs/PHASE0_TEST_PLAN.md",
-        "src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyTenRunCoordinator.cs",
+        "src/m3/OperatorShell/Hardware/CaptureRecoveryOnlyFiveRunCoordinator.cs",
         "src/m3/OperatorShell/App.xaml.cs",
         "src/phase0/include/a0/phase0/agent_host_lifetime.hpp"
       ]
