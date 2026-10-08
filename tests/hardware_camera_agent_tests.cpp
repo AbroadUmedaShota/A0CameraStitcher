@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <ShlObj.h>
 #include "m6_child_diagnostics.hpp"
 #include "hardware_camera_agent_profile_internal.hpp"
 #include "hardware_replay_fixtures.hpp"
@@ -4799,40 +4800,66 @@ void TestContinuousLiveViewLeaseIsolation() {
             "must be a test lease name",
             "a lease name outside the test prefixes must be rejected at construction");
 
-        std::wstring local_app_data(MAX_PATH, L'\0');
-        const DWORD local_app_data_size = GetEnvironmentVariableW(
-            L"LOCALAPPDATA", local_app_data.data(),
-            static_cast<DWORD>(local_app_data.size()));
-        const bool local_app_data_known =
-            local_app_data_size > 0 && local_app_data_size < local_app_data.size();
+        // The production data root is built with the API the lease uses; the
+        // LOCALAPPDATA environment variable can be redirected and is not the
+        // source of truth for the production marker root.
+        std::wstring local_app_data;
+        {
+            PWSTR known_folder{};
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT,
+                                               nullptr, &known_folder)) &&
+                known_folder != nullptr) {
+                local_app_data = known_folder;
+            }
+            CoTaskMemFree(known_folder);
+        }
+        const bool local_app_data_known = !local_app_data.empty();
         Check(local_app_data_known,
-            "LOCALAPPDATA must be resolvable to pin the production marker root rejection");
+            "the LocalAppData known folder must be resolvable to pin the production marker root rejection");
         if (local_app_data_known) {
-            local_app_data.resize(local_app_data_size);
-            const fs::path production_root = fs::path(local_app_data) /
-                L"A0CameraStitcher" / L"Phase0" / L"DualDelegation";
-            // Only the string is compared; nothing under this path is read,
-            // created, or written by these checks.
-            Check(IsProductionDualDelegationMarkerRoot(production_root) &&
-                      IsProductionDualDelegationMarkerRoot(
+            const fs::path data_root = fs::path(local_app_data) / L"A0CameraStitcher";
+            const fs::path production_root = data_root / L"Phase0" / L"DualDelegation";
+            // The predicate only opens existing directories to read their
+            // identity; nothing under these paths is created, written, or
+            // deleted by these checks.
+            Check(MarkerRootMayTouchProductionData(production_root) &&
+                      MarkerRootMayTouchProductionData(
                           production_root.wstring() + L"\\") &&
-                      IsProductionDualDelegationMarkerRoot(
+                      MarkerRootMayTouchProductionData(
                           fs::path(production_root.generic_wstring())) &&
-                      IsProductionDualDelegationMarkerRoot(
+                      MarkerRootMayTouchProductionData(
                           fs::path(local_app_data) / L"a0camerastitcher" /
                           L"PHASE0" / L"dualdelegation") &&
-                      !IsProductionDualDelegationMarkerRoot(fs::path{}) &&
-                      !IsProductionDualDelegationMarkerRoot(
-                          production_root / L"nested") &&
-                      !IsProductionDualDelegationMarkerRoot(root / "markers"),
-                "the production marker root predicate must match only the production root");
+                      MarkerRootMayTouchProductionData(production_root / L"nested") &&
+                      MarkerRootMayTouchProductionData(data_root) &&
+                      MarkerRootMayTouchProductionData(
+                          data_root / L"DualDelegationRecovery") &&
+                      !MarkerRootMayTouchProductionData(fs::path{}) &&
+                      !MarkerRootMayTouchProductionData(
+                          fs::path(local_app_data) / L"A0CameraStitcherOther") &&
+                      !MarkerRootMayTouchProductionData(root / "markers"),
+                "the production root predicate must match the production data root and what is inside it, and nothing else");
             constructor_rejects(
                 [&](ProductionHardwareCameraAgentConfig& config) {
                     config.continuous_live_view_marker_root_for_testing =
                         production_root;
                 },
-                "production marker root",
+                "production data root",
                 "the production marker root must be rejected at construction");
+            constructor_rejects(
+                [&](ProductionHardwareCameraAgentConfig& config) {
+                    config.continuous_live_view_marker_root_for_testing =
+                        production_root / L"nested";
+                },
+                "production data root",
+                "a directory inside the production marker root must be rejected at construction");
+            constructor_rejects(
+                [&](ProductionHardwareCameraAgentConfig& config) {
+                    config.continuous_live_view_marker_root_for_testing =
+                        data_root / L"DualDelegationRecovery";
+                },
+                "production data root",
+                "a directory inside the production data root must be rejected at construction");
             constructor_rejects(
                 [&](ProductionHardwareCameraAgentConfig& config) {
                     config.continuous_live_view_lease_name_for_testing =
@@ -4843,7 +4870,15 @@ void TestContinuousLiveViewLeaseIsolation() {
                 "must be a test lease name",
                 "the production lease name and marker root together must be rejected at construction");
         }
-
+        // A relative root cannot be verified and is refused as unverifiable at
+        // construction, before the backend is built.
+        constructor_rejects(
+            [](ProductionHardwareCameraAgentConfig& config) {
+                config.continuous_live_view_marker_root_for_testing =
+                    fs::path(L"relative-marker-root");
+            },
+            "or unverifiable",
+            "a relative test marker root must be rejected at construction");
         // The construction check is an early failure, not the safety rule.
         // Pin the last guard in the lease layer itself: a test marker root
         // with the production lease name must never be accepted. The marker

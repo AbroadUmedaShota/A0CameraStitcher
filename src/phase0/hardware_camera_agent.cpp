@@ -3526,8 +3526,12 @@ public:
                 "continuous Live View test lease isolation requires the test SDK factory");
         }
         // Fail early on identities the lease layer would refuse at start. The
-        // lease layer remains the last guard; this only moves the failure to
-        // construction and also refuses the production marker root.
+        // lease layer refuses the same identities (the production lease name
+        // with a test marker root, and a test marker root that is the production
+        // data root, inside it, an alias of either, or unverifiable) and remains
+        // the last guard; this only moves the failure to construction. A root
+        // that is not an absolute drive-letter path, such as a relative one, is
+        // unverifiable and is refused here as well.
         if (lease_name_configured) {
             if (!IsHardwareProcessTestLeaseName(
                     config_.continuous_live_view_lease_name_for_testing)) {
@@ -3536,14 +3540,14 @@ public:
             }
             bool production_marker_root = true;
             try {
-                production_marker_root = IsProductionDualDelegationMarkerRoot(
+                production_marker_root = MarkerRootMayTouchProductionData(
                     config_.continuous_live_view_marker_root_for_testing);
             } catch (const std::exception&) {
                 production_marker_root = true;
             }
             if (production_marker_root) {
                 throw std::invalid_argument(
-                    "continuous Live View test marker root must not be the production marker root or unverifiable");
+                    "continuous Live View test marker root must not be the production data root, inside it, or unverifiable");
             }
         }
     }

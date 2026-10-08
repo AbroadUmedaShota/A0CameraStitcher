@@ -41,29 +41,34 @@ struct DualDelegationCloseEvidence final {
 // True when `lease_name` is a test lease name, the only kind that may be paired
 // with a test marker root. The production lease name is not a test name.
 [[nodiscard]] bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept;
-// True when `marker_root` is, or cannot be shown to differ from, the per-user
-// production dual-delegation marker root. An empty path is not a root and
-// yields false. Throws TransportError when the production root cannot be
-// resolved, so callers fail closed instead of treating an unverifiable root as
-// safe. The comparison follows `DualDelegationMarkerRootMayAlias`: aliases that
-// resolve to an existing directory (8.3 short names, trailing dots and spaces,
-// subst drives, junctions) are matched by volume/file ID and final path, and a
-// name that does not exist yet is refused when it contains `~`, `:` or ends in
-// a dot or space. Limits: the check is made at one point in time, so the lease
-// repeats it after taking the mutex; a root that is replaced between that check
-// and its use is still stopped only by the lease layer's reparse-point
-// rejection. Alias hardening is tracked in #246.
-[[nodiscard]] bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root);
-// Pure alias test behind IsProductionDualDelegationMarkerRoot, with the
+// True when `marker_root` is the per-user production data root
+// (`%LOCALAPPDATA%\A0CameraStitcher`, which holds the production dual-delegation
+// marker root and the recovery records beside it), lies inside it, or cannot be
+// shown to lie outside it. An empty path is not a root and yields false. Throws
+// TransportError when LocalAppData cannot be resolved, so callers fail closed
+// instead of treating an unverifiable root as safe. The comparison follows
+// `MarkerRootMayOverlap`: names that resolve to an existing directory (8.3 short
+// names, trailing dots and spaces, subst drives, junctions) are matched by
+// volume/file ID and final path, and a name that does not exist yet is refused
+// when it contains `~` or `:` or ends in a dot or space.
+//
+// Limits. The check is made at one point in time and the lease repeats it after
+// taking the mutex. A junction or symlink swapped in later is stopped by the
+// lease layer's reparse-point rejection. A drive letter that is re-mapped (for
+// example by subst) after the last check is not detected. Even for a junction,
+// a swap between the last check and the directory or marker write can let one
+// write land through it before the rejection.
+[[nodiscard]] bool MarkerRootMayTouchProductionData(const std::filesystem::path &marker_root);
+// Pure overlap test behind MarkerRootMayTouchProductionData, with the
 // reference root supplied by the caller. It only opens directories to read
 // their identity; it never creates, writes, or deletes anything. True when
-// `candidate` equals `reference` after normalization, resolves to the same
-// directory, or cannot be verified (not an absolute drive-letter path, a
-// drive or ancestor that cannot be opened, or a name that does not exist yet
-// and looks like an alias). An empty `candidate` yields false.
-[[nodiscard]] bool DualDelegationMarkerRootMayAlias(const std::filesystem::path &candidate,
-                                                    const std::filesystem::path &reference);
-
+// `candidate` equals `reference` or lies beneath it after normalization,
+// resolves to such a directory, or cannot be verified (not an absolute
+// drive-letter path, a drive or ancestor that cannot be opened, or a name that
+// does not exist yet and looks like an alias). An empty `candidate` yields
+// false; a sibling or an ancestor of `reference` yields false.
+[[nodiscard]] bool MarkerRootMayOverlap(const std::filesystem::path &candidate,
+                                        const std::filesystem::path &reference);
 // Serializes all real-camera Phase 0 commands across processes in the current
 // interactive Windows logon session. Cross-session/service enforcement is an
 // installation policy concern. Per-transport session guards are still needed.

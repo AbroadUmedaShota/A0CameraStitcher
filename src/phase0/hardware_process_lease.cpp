@@ -11,7 +11,6 @@
 #include <cctype>
 #include <charconv>
 #include <cstring>
-#include <cwctype>
 #include <filesystem>
 #include <iterator>
 #include <limits>
@@ -68,14 +67,18 @@ void RequireSafeDirectoryTree(const std::filesystem::path &root) {
                                  "marker ancestor is not a trusted directory");
     }
 }
-std::filesystem::path ProductionMarkerRoot() {
+// Per-user directory that holds every record of the product
+// (%LOCALAPPDATA%\A0CameraStitcher), including the marker root below.
+std::filesystem::path ProductionDataRoot() {
     PWSTR raw{};
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &raw)) || raw == nullptr)
         throw TransportError("camera_control_marker_failed", "could not resolve LocalAppData");
-    std::filesystem::path root =
-        std::filesystem::path(raw) / L"A0CameraStitcher" / L"Phase0" / L"DualDelegation";
+    std::filesystem::path root = std::filesystem::path(raw) / L"A0CameraStitcher";
     CoTaskMemFree(raw);
     return root;
+}
+std::filesystem::path ProductionMarkerRoot() {
+    return ProductionDataRoot() / L"Phase0" / L"DualDelegation";
 }
 std::wstring MarkerPath(const std::filesystem::path &root) {
     DWORD sid{};
@@ -201,6 +204,29 @@ bool EqualsIgnoreCase(const std::wstring &a, const std::wstring &b) noexcept {
     return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()), b.c_str(), static_cast<int>(b.size()),
                                 TRUE) == CSTR_EQUAL;
 }
+// True when `path` is `reference` or lies beneath it, compared ignoring case and
+// only on whole path components ("C:\ab" is not beneath "C:\a").
+bool IsSameOrBeneath(const std::wstring &path, const std::wstring &reference) noexcept {
+    if (reference.empty() || path.size() < reference.size())
+        return false;
+    const int prefix = static_cast<int>(reference.size());
+    if (CompareStringOrdinal(path.c_str(), prefix, reference.c_str(), prefix, TRUE) != CSTR_EQUAL)
+        return false;
+    return path.size() == reference.size() || reference.back() == L'\\' || path[reference.size()] == L'\\';
+}
+bool IsAsciiLetter(wchar_t character) noexcept {
+    return (character >= L'A' && character <= L'Z') || (character >= L'a' && character <= L'z');
+}
+struct ScopedHandle final {
+    HANDLE value{INVALID_HANDLE_VALUE};
+    explicit ScopedHandle(HANDLE handle) noexcept : value(handle) {}
+    ~ScopedHandle() {
+        if (value != INVALID_HANDLE_VALUE && value != nullptr)
+            CloseHandle(value);
+    }
+    ScopedHandle(const ScopedHandle &) = delete;
+    ScopedHandle &operator=(const ScopedHandle &) = delete;
+};
 bool IsNotFoundError(DWORD error) noexcept {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
@@ -225,7 +251,7 @@ std::optional<std::filesystem::path> NormalizedDrivePath(const std::filesystem::
         text.push_back(L'\\');
     std::filesystem::path result(text);
     const std::wstring drive = result.root_name().wstring();
-    if (drive.size() != 2 || drive[1] != L':' || std::iswalpha(drive[0]) == 0 || !result.has_root_directory())
+    if (drive.size() != 2 || drive[1] != L':' || !IsAsciiLetter(drive[0]) || !result.has_root_directory())
         return std::nullopt;
     return result;
 }
@@ -291,6 +317,8 @@ struct ResolvedMarkerRoot final {
     std::vector<std::wstring> missing;
     // Set only when the whole path exists.
     std::optional<DirectoryIdentity> identity;
+    // Win32 error behind a false return.
+    DWORD error{};
 };
 // Opens (never creates) the longest existing prefix of `absolute`. Returns
 // false when that cannot be established, e.g. the drive is absent or an
@@ -304,21 +332,25 @@ bool ResolveMarkerRoot(const std::filesystem::path &absolute, ResolvedMarkerRoot
         std::filesystem::path prefix = absolute.root_path();
         for (std::size_t index = 0; index < keep; ++index)
             prefix /= parts[index];
-        HANDLE handle = CreateFileW(prefix.c_str(), FILE_READ_ATTRIBUTES,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) {
-            if (keep > 0 && IsNotFoundError(GetLastError()))
+        const ScopedHandle handle(CreateFileW(prefix.c_str(), FILE_READ_ATTRIBUTES,
+                                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                              OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (handle.value == INVALID_HANDLE_VALUE) {
+            out.error = GetLastError();
+            if (keep > 0 && IsNotFoundError(out.error))
                 continue;
             return false;
         }
         std::wstring final_path;
         DirectoryIdentity identity;
-        const bool path_ok = QueryFinalPath(handle, final_path);
-        const bool identity_ok = QueryDirectoryIdentity(handle, identity);
-        CloseHandle(handle);
-        if (!path_ok)
+        const bool path_ok = QueryFinalPath(handle.value, final_path);
+        if (!path_ok) {
+            out.error = GetLastError();
+            if (out.error == 0)
+                out.error = ERROR_BAD_PATHNAME;
             return false;
+        }
+        const bool identity_ok = QueryDirectoryIdentity(handle.value, identity);
         out.missing.assign(parts.begin() + static_cast<std::ptrdiff_t>(keep), parts.end());
         out.resolved = final_path;
         for (const auto &name : out.missing)
@@ -331,21 +363,65 @@ bool ResolveMarkerRoot(const std::filesystem::path &absolute, ResolvedMarkerRoot
     return false;
 }
 
+enum class RootOverlap { none, within_reference, alias_prone_name, unverifiable };
+struct RootOverlapResult final {
+    RootOverlap kind{RootOverlap::none};
+    // Win32 error behind `unverifiable`, 0 when there is none.
+    DWORD error{};
+};
+RootOverlapResult CheckMarkerRootOverlap(const std::filesystem::path &candidate,
+                                         const std::filesystem::path &reference) {
+    if (candidate.empty())
+        return {};
+    const auto candidate_path = NormalizedDrivePath(candidate);
+    const auto reference_path = NormalizedDrivePath(reference);
+    if (!candidate_path || !reference_path)
+        return {RootOverlap::unverifiable, ERROR_BAD_PATHNAME};
+    if (IsSameOrBeneath(candidate_path->wstring(), reference_path->wstring()))
+        return {RootOverlap::within_reference, 0};
+    ResolvedMarkerRoot resolved_candidate, resolved_reference;
+    if (!ResolveMarkerRoot(*candidate_path, resolved_candidate))
+        return {RootOverlap::unverifiable, resolved_candidate.error};
+    if (!ResolveMarkerRoot(*reference_path, resolved_reference))
+        return {RootOverlap::unverifiable, resolved_reference.error};
+    if (std::any_of(resolved_candidate.missing.begin(), resolved_candidate.missing.end(), IsAliasProneName))
+        return {RootOverlap::alias_prone_name, 0};
+    if (resolved_candidate.identity && resolved_reference.identity &&
+        *resolved_candidate.identity == *resolved_reference.identity)
+        return {RootOverlap::within_reference, 0};
+    if (IsSameOrBeneath(resolved_candidate.resolved, resolved_reference.resolved))
+        return {RootOverlap::within_reference, 0};
+    return {};
+}
+
 // Marker roots handed to the lease for tests must never designate the
-// production root, by name or by alias. Called only when a test root is
-// supplied; the default production path never reaches it.
-void RejectProductionAliasedTestRoot(const std::filesystem::path &test_marker_root) {
-    bool alias = true;
+// production data root or anything inside it, by name or by alias. Called only
+// when a test root is supplied; the default production path never reaches it.
+// The reason is carried in the message so a rejected caller can tell a wrong
+// location from an unusual name from a root that could not be checked.
+void RejectProductionDataTestRoot(const std::filesystem::path &test_marker_root) {
+    RootOverlapResult result{RootOverlap::unverifiable, ERROR_OUTOFMEMORY};
     try {
-        alias = IsProductionDualDelegationMarkerRoot(test_marker_root);
+        result = CheckMarkerRootOverlap(test_marker_root, ProductionDataRoot());
     } catch (const TransportError &) {
         throw;
     } catch (const std::exception &) {
-        alias = true;
     }
-    if (alias)
+    switch (result.kind) {
+    case RootOverlap::none:
+        return;
+    case RootOverlap::within_reference:
         throw TransportError("camera_control_marker_failed",
-                             "test marker root must not be the production marker root or unverifiable");
+                             "test marker root must not be the production data root or inside it");
+    case RootOverlap::alias_prone_name:
+        throw TransportError("camera_control_marker_failed",
+                             "test marker root has a name that may be an alias of another directory");
+    case RootOverlap::unverifiable:
+        break;
+    }
+    throw TransportError("camera_control_marker_failed",
+                         "test marker root could not be verified: " +
+                             WindowsError("root verification", result.error));
 }
 
 } // namespace
@@ -354,34 +430,15 @@ bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept {
     return IsTestLeaseName(lease_name);
 }
 
-bool DualDelegationMarkerRootMayAlias(const std::filesystem::path &candidate,
-                                      const std::filesystem::path &reference) {
-    if (candidate.empty())
-        return false;
-    const auto candidate_path = NormalizedDrivePath(candidate);
-    const auto reference_path = NormalizedDrivePath(reference);
-    if (!candidate_path || !reference_path)
-        return true;
-    if (EqualsIgnoreCase(candidate_path->wstring(), reference_path->wstring()))
-        return true;
-    ResolvedMarkerRoot resolved_candidate, resolved_reference;
-    if (!ResolveMarkerRoot(*candidate_path, resolved_candidate) ||
-        !ResolveMarkerRoot(*reference_path, resolved_reference))
-        return true;
-    if (std::any_of(resolved_candidate.missing.begin(), resolved_candidate.missing.end(), IsAliasProneName))
-        return true;
-    if (resolved_candidate.identity && resolved_reference.identity &&
-        *resolved_candidate.identity == *resolved_reference.identity)
-        return true;
-    return EqualsIgnoreCase(resolved_candidate.resolved, resolved_reference.resolved);
+bool MarkerRootMayOverlap(const std::filesystem::path &candidate, const std::filesystem::path &reference) {
+    return CheckMarkerRootOverlap(candidate, reference).kind != RootOverlap::none;
 }
 
-bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root) {
+bool MarkerRootMayTouchProductionData(const std::filesystem::path &marker_root) {
     if (marker_root.empty())
         return false;
-    return DualDelegationMarkerRootMayAlias(marker_root, ProductionMarkerRoot());
+    return MarkerRootMayOverlap(marker_root, ProductionDataRoot());
 }
-
 HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chrono::milliseconds wait)
     : HardwareProcessLease(lease_name, wait, {}) {
 }
@@ -396,13 +453,14 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
 
     if (!test_marker_root.empty() && (lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name)))
         throw TransportError("camera_control_marker_failed", "test marker root requires test lease name");
-    // The reverse pairing -- a test lease name with the production marker root
-    // or an alias of it -- is refused here, before any directory is created or
-    // scanned. Only a supplied test root reaches this check; the production
-    // default (empty root) is unchanged.
+    // The reverse pairing -- a test lease name with the production data root
+    // (which holds the production marker root), anything inside it, or an alias
+    // of either -- is refused here, before any directory is created or scanned.
+    // Only a supplied test root reaches this check; the production default
+    // (empty root) is unchanged.
     const bool test_root_supplied = !test_marker_root.empty();
     if (test_root_supplied)
-        RejectProductionAliasedTestRoot(test_marker_root);
+        RejectProductionDataTestRoot(test_marker_root);
     durable_marker_enabled_ = lease_name == kProductionLeaseName || !test_marker_root.empty();
     if (durable_marker_enabled_) {
         const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
@@ -434,7 +492,7 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
                 // falling back to the original same-session-only check.
                 const auto root = std::filesystem::path(marker_path_).parent_path();
                 if (test_root_supplied)
-                    RejectProductionAliasedTestRoot(root);
+                    RejectProductionDataTestRoot(root);
                 RequireSafeDirectoryTree(root);
                 RejectAnyArmedSessionMarker(root);
                 RejectMarker(marker_path_);
@@ -737,14 +795,15 @@ bool HardwareProcessLease::ValidateWorkerDelegation(void *inherited_parent_proce
         if (!IsSafeLeaseName(lease_name) || epoch.empty() || !IsLowerHex(epoch, 32) ||
             (!test_marker_root.empty() && (lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name))))
             return false;
-        // A test lease name with the production marker root (or an alias of it,
-        // or a root that cannot be verified) is refused; a throw lands in the
-        // catch below and fails closed.
-        if (!test_marker_root.empty() && IsProductionDualDelegationMarkerRoot(test_marker_root))
-            return false;
 #if defined(A0_NIKON_SDK_AVAILABLE)
         if (lease_name != kProductionLeaseName || !test_marker_root.empty()) return false;
 #endif
+        // A test lease name with the production data root, anything inside it,
+        // an alias of either, or a root that cannot be verified is refused; a
+        // throw lands in the catch below and fails closed. This is after the SDK
+        // build's refusal of every test root so that build does no file I/O here.
+        if (!test_marker_root.empty() && MarkerRootMayTouchProductionData(test_marker_root))
+            return false;
         const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);
         const DWORD parent_pid = GetProcessId(parent);
         if (!parent_pid || parent_pid == GetCurrentProcessId() || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT)
