@@ -89,6 +89,8 @@ internal static class DualCameraProductComposition
 
         public DualCameraIdentitySnapshot IdentitySnapshot => DualCameraIdentitySnapshot.HardwarePending();
 
+        public bool IsAvailable => false;
+
         public Task<DualCameraProductState> CaptureAndStitchAsync(
             DualCameraCaptureRequest request,
             CancellationToken cancellationToken = default) =>

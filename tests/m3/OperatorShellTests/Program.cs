@@ -259,7 +259,7 @@ if (args is ["--stale-ordinary-recovery-only"])
 {
     return await WpfCommandTestRunner.RunFocusedAsync(
     [
-        ("CaptureRecoveryOnly ignores a stale ordinary response-unknown transaction and still requires approval and binding re-verification (#253)",
+        ("CaptureRecoveryOnly does not treat a stale ordinary response-unknown transaction as its own recovery and still requires approval and binding re-verification (#253)",
             CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync),
     ]);
 }
@@ -1606,7 +1606,7 @@ if (await WpfCommandTestRunner.RunScenarioAsync(
     CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 3) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
-    "CaptureRecoveryOnly ignores a stale ordinary response-unknown transaction and still requires approval and binding re-verification (#253)",
+    "CaptureRecoveryOnly does not treat a stale ordinary response-unknown transaction as its own recovery and still requires approval and binding re-verification (#253)",
     CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 2) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
@@ -9933,7 +9933,10 @@ static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
                     recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
                 new NeverCaptureDualBridge(),
                 new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
-            Check.Equal(withStaleOrdinary, ordinaryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown);
+            Check.True(
+                withStaleOrdinary == (ordinaryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown),
+                $"The ordinary flow must report the stale response-unknown transaction exactly when one was saved (saved={withStaleOrdinary}, " +
+                $"reported={ordinaryFlow.Current?.FailureCode.ToString() ?? "none"}).");
             var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
                 productRoot, operations, operations, ApprovedCaptureRecoveryOnlyProfile());
             Check.False(workflow.HasPendingRecovery,
@@ -10007,6 +10010,7 @@ static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
         await PressCaptureAsync(d.Shell, "stale-ordinary/approved-bound");
         Console.WriteLine(Observe("approved-bound", d.Shell, dCan, d.Operations, d.Transport));
 
+        // A and B (stale ordinary state present) stay blocked either way: before approval/binding, and since #256 also after.
         Check.False(aCan, "Stale ordinary state must not enable CaptureRecoveryOnly before approval and binding.");
         Check.Equal(0, a.Operations.ReserveCalls);
         Check.Equal(0, a.Operations.CaptureRecoveryOnlyStartCalls);
@@ -10020,7 +10024,6 @@ static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
         Check.Equal(0, b.Transport.ActivateCaptureCalls);
 
         Check.True(cCan, "Nothing has told the shell about the topology change yet.");
-        // A and B (stale ordinary state present) stay blocked either way: before approval/binding, and since #256 also after.
         Check.Equal(0, c.Operations.ReserveCalls);
         Check.Equal(0, c.Operations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(0, c.Operations.OrdinaryStartCalls);
@@ -10080,14 +10083,15 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
             Path.Combine(productRoot, "recovery-state", "pending-transaction.json");
 
         static string ExpectedBlockerText(Guid transactionId) =>
-            $"前回の通常撮影（撮影ID {transactionId:N}）の結果が確定していないため、新しい撮影はできません。撮影は開始していません。" +
+            $"前回の通常撮影（撮影ID {transactionId:N}）の結果が確定していないため、新しい撮影はできません。新しい撮影は開始していません。" +
             "この記録は消さずに残しています。結果の確認は通常の二台撮影の画面で行うため、技術担当者に連絡してください。";
 
         async Task<OperatorShellViewModel> NewApprovedShellAsync(
             string name,
             IDualCameraProductFlow ordinaryFlow,
             IHardwareDualCaptureRecoveryOnlyWorkflow workflow,
-            CountingBindingTransport transport)
+            CountingBindingTransport transport,
+            bool completeBinding = true)
         {
             var shell = new OperatorShellViewModel(
                 new SimulationFoundationService(Path.Combine(root, name + "-journals")),
@@ -10100,7 +10104,8 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
             shell.AcceptSafetyCommand.Execute(null);
             Check.True(shell.IsCaptureRecoveryOnlyMode, "The scenario must run in CaptureRecoveryOnly mode.");
             shell.IsCaptureRecoveryOnlyOperatorApproved = true;
-            await CompleteDualBindingAsync(shell.DualBinding);
+            if (completeBinding)
+                await CompleteDualBindingAsync(shell.DualBinding);
             return shell;
         }
 
@@ -10216,7 +10221,19 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
                 productRoot, operations, operations, ApprovedCaptureRecoveryOnlyProfile());
             Check.True(secondWorkflow.HasPendingRecovery, "CaptureRecoveryOnly's own pending ID must survive the restart.");
             var secondTransport = new CountingBindingTransport(DecodableBindingAgent());
-            var secondShell = await NewApprovedShellAsync("own-pending-second", secondFlow, secondWorkflow, secondTransport);
+            var secondShell = await NewApprovedShellAsync(
+                "own-pending-second", secondFlow, secondWorkflow, secondTransport, completeBinding: false);
+
+            // Before the binding is Ready, CaptureRecoveryOnly's own same-ID check is not yet possible, and the
+            // operator's next step is the binding, not the ordinary blocker (which would need a technician). The
+            // main button already reads as the same-ID check. This is the branch guarded by
+            // "&& !HasRecoverableCaptureRecoveryOnlyTransaction" in the reason chain.
+            Check.False(secondShell.DualBinding.IsReady, "The binding must not be Ready yet in this step.");
+            Check.False(secondShell.CanCapture, "The same-ID check needs a Ready binding.");
+            Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", secondShell.CaptureButtonText);
+            Check.Equal("機体照合（CAM-A / CAM-B の割当）が未完了です — 撮影禁止", secondShell.CaptureDisabledReason);
+            await CompleteDualBindingAsync(secondShell.DualBinding);
+
             var canBefore = secondShell.CanCapture;
             var reasonBefore = secondShell.CaptureDisabledReason;
             var buttonBefore = secondShell.CaptureButtonText;
@@ -10238,8 +10255,35 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
             Check.Equal(0, operations.OrdinaryStartCalls);
             Check.False(secondWorkflow.HasPendingRecovery, "The same-ID check must resolve CaptureRecoveryOnly's own pending ID.");
             Check.True(kept, "The ordinary pending file must be left exactly as it was by the recovery.");
-            Check.False(secondShell.CanCapture, "The unconfirmed ordinary result must still block a new capture afterwards.");
-            Check.Equal(ExpectedBlockerText(staleId), secondShell.CaptureDisabledReason);
+
+            // Back on the capture screen (the result panel is left through "撮り直しの準備へ"), with the approval and a
+            // Ready binding given again: only the ordinary unconfirmed result may keep a new capture blocked now.
+            // (In Review the capture availability is closed anyway, so the checks above cannot show that.)
+            await ExecuteNativeCommandAsync(secondShell.PrepareNewCaptureCommand);
+            secondShell.IsCaptureRecoveryOnlyOperatorApproved = true;
+            if (!secondShell.DualBinding.IsReady)
+                await CompleteDualBindingAsync(secondShell.DualBinding);
+            var reserveAfterCheck = operations.ReserveCalls;
+            var startAfterCheck = operations.CaptureRecoveryOnlyStartCalls;
+            var backOnCaptureScreen = secondShell.UiState;
+            var backCan = secondShell.CanCapture;
+            var backCommand = secondShell.CaptureCommand.CanExecute(null);
+            var backReason = secondShell.CaptureDisabledReason;
+            await PressCaptureAsync(secondShell, "ordinary-unconfirmed/own-pending-back-on-capture-screen");
+            Console.WriteLine(
+                $"OBS256 own-pending-back: UiState={backOnCaptureScreen} CanCapture={backCan} MainCmd={backCommand} " +
+                $"Approved={secondShell.IsCaptureRecoveryOnlyOperatorApproved} BindingReady={secondShell.DualBinding.IsReady} " +
+                $"Reserve={operations.ReserveCalls} Start={operations.CaptureRecoveryOnlyStartCalls} Reason={backReason}");
+            Check.True(backOnCaptureScreen is OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection,
+                $"The shell must be back on the capture screen, got {backOnCaptureScreen}.");
+            Check.False(secondWorkflow.HasPendingRecovery, "CaptureRecoveryOnly must have nothing pending of its own any more.");
+            Check.True(secondShell.IsCaptureRecoveryOnlyOperatorApproved && secondShell.DualBinding.IsReady,
+                "Approval and a Ready binding must be in place so that the ordinary result is the only reason left.");
+            Check.False(backCan, "The unconfirmed ordinary result must still block a new capture afterwards.");
+            Check.False(backCommand, "The main button command must be disabled on the capture screen.");
+            Check.Equal(ExpectedBlockerText(staleId), backReason);
+            Check.Equal(reserveAfterCheck, operations.ReserveCalls);
+            Check.Equal(startAfterCheck, operations.CaptureRecoveryOnlyStartCalls);
         }
 
         // C: the blocker appears while the Agent response of a pressed new capture is awaited (#254 re-check). The
@@ -10308,6 +10352,53 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
             Check.Equal(1, transport.ActivateCaptureCalls);
             Check.Equal(OperatorUiState.Review, shell.UiState);
             Check.False(File.Exists(OrdinaryPendingPath(productRoot)), "A clean run must not create an ordinary pending file.");
+        }
+
+        // E: the ordinary flow cannot be composed (the M2 adapter is missing), so it cannot report the record that is
+        // on disk. The missing report must not read as "nothing pending": new captures stay blocked, with a reason
+        // that does not claim a transaction ID, and the file is left as it was.
+        {
+            var productRoot = Path.Combine(root, "unavailable-products");
+            var pendingId = SaveOrdinaryPending(productRoot);
+            var pendingBytesBefore = File.ReadAllBytes(OrdinaryPendingPath(productRoot));
+            var operations = new CaptureRecoveryOnlyFakeOperations(adapter);
+            var previousAdapterPath = Environment.GetEnvironmentVariable("A0_M2_ADAPTER_PATH");
+            IDualCameraProductFlow unavailableFlow;
+            try
+            {
+                Environment.SetEnvironmentVariable(
+                    "A0_M2_ADAPTER_PATH", Path.Combine(root, "missing-adapter", "A0CameraStitcher.M2Adapter.exe"));
+                unavailableFlow = DualCameraProductComposition.Create(productRoot, DualCameraExecutionEnvironment.HardwareDual);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("A0_M2_ADAPTER_PATH", previousAdapterPath);
+            }
+            Check.False(unavailableFlow.IsAvailable, "The composition without the M2 adapter must report an unavailable flow.");
+            Check.True(unavailableFlow.Current is null, "An unavailable flow cannot report the record on disk.");
+            var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                productRoot, operations, operations, ApprovedCaptureRecoveryOnlyProfile());
+            var transport = new CountingBindingTransport(DecodableBindingAgent());
+            var shell = await NewApprovedShellAsync("unavailable", unavailableFlow, workflow, transport);
+            var canBefore = shell.CanCapture;
+            var sendsBefore = transport.TotalSendCalls;
+            await PressCaptureAsync(shell, "ordinary-unconfirmed/unavailable-press");
+            var kept = File.ReadAllBytes(OrdinaryPendingPath(productRoot)).SequenceEqual(pendingBytesBefore);
+            Console.WriteLine(Observe("unavailable", shell, operations, transport, canBefore, kept));
+
+            Check.True(shell.IsCaptureRecoveryOnlyOperatorApproved && shell.DualBinding.IsReady,
+                "The scenario needs approval and a Ready binding for the unavailable flow to be the only reason.");
+            Check.False(canBefore, "An unavailable ordinary flow must block a new CaptureRecoveryOnly capture.");
+            Check.False(shell.CaptureCommand.CanExecute(null), "The main button command must be disabled.");
+            Check.Equal(OperatorShellViewModel.OrdinaryFlowUnverifiableBlockerText, shell.CaptureDisabledReason);
+            Check.False(shell.CaptureDisabledReason.Contains(pendingId.ToString("N"), StringComparison.Ordinal),
+                "The reason must not name a transaction ID that nothing reported.");
+            Check.Equal(0, operations.ReserveCalls);
+            Check.Equal(0, operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, operations.OrdinaryStartCalls);
+            Check.Equal(0, transport.ActivateCaptureCalls);
+            Check.Equal(sendsBefore, transport.TotalSendCalls);
+            Check.True(kept, "The ordinary pending file must be left exactly as it was.");
         }
     });
 }
@@ -17546,7 +17637,10 @@ sealed class ToggleableRecoveryOnlyWorkflow(IHardwareDualCaptureRecoveryOnlyWork
 }
 
 /// <summary>GitHub Issue #256: forwards everything to a real ordinary flow, but lets a test replace what
-/// <see cref="Current"/> reports, to model the ordinary flow's state changing while the shell waits for the Agent.</summary>
+/// <see cref="Current"/> reports, to model the ordinary flow's state changing while the shell waits for the Agent.
+/// In production CaptureRecoveryOnly never changes the ordinary flow's Current, so this is not a path the product
+/// can take: it is a regression guard that the new-capture condition shared by CanCapture and the re-check after the
+/// Agent wait (CaptureRecoveryOnlyNewCaptureConditionsMet) contains the ordinary-result condition.</summary>
 sealed class OverridableCurrentOrdinaryFlow(IDualCameraProductFlow inner) : IDualCameraProductFlow
 {
     public DualCameraProductState? OverrideCurrent { get; set; }
@@ -17568,6 +17662,8 @@ sealed class OverridableCurrentOrdinaryFlow(IDualCameraProductFlow inner) : IDua
     public DualCameraExecutionEnvironment ExecutionEnvironment => inner.ExecutionEnvironment;
 
     public DualCameraIdentitySnapshot IdentitySnapshot => inner.IdentitySnapshot;
+
+    public bool IsAvailable => inner.IsAvailable;
 
     public Task<DualCameraProductState> CaptureAndStitchAsync(
         DualCameraCaptureRequest request, CancellationToken cancellationToken = default) =>

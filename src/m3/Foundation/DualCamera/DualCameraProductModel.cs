@@ -352,6 +352,11 @@ public interface IDualCameraProductFlow
 
     DualCameraIdentitySnapshot IdentitySnapshot { get; }
 
+    /// <summary>False when the flow could not be composed (for example the M2 adapter is missing) and every
+    /// operation fails. An unavailable flow cannot report a restored transaction in <see cref="Current"/>, so a
+    /// caller that gates on that state must not read an empty <see cref="Current"/> as "nothing pending".</summary>
+    bool IsAvailable => true;
+
     Task<DualCameraProductState> CaptureAndStitchAsync(
         DualCameraCaptureRequest request,
         CancellationToken cancellationToken = default);
