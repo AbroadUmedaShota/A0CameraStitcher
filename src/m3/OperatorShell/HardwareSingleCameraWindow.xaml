@@ -57,13 +57,13 @@
                             <TextBlock Text="各項目をオペレーターが確認してください。撮影開始時に3項目をtransactionへ固定します。" Margin="0,5,0,10" />
                             <CheckBox Content="物理シャッターと他のカメラアプリを使わず、Camera Agentを排他使用する"
                                       IsChecked="{Binding ExclusiveCameraControlConfirmed}" IsEnabled="{Binding CanChangeConfirmations}"
-                                      Margin="0,4" AutomationProperties.Name="camera control排他使用を確認" />
+                                      Margin="0,4" />
                             <CheckBox Content="選択したD810の専用カードがsingle-slot spoolで、payload objectが0件である"
                                       IsChecked="{Binding DedicatedSpoolScopeConfirmed}" IsEnabled="{Binding CanChangeConfirmations}"
-                                      Margin="0,4" AutomationProperties.Name="専用empty spoolを確認" />
+                                      Margin="0,4" />
                             <CheckBox Content="PC原画像の検証後、今回復元したexact objectだけを削除することを確認した"
                                       IsChecked="{Binding ExactObjectDeleteConfirmed}" IsEnabled="{Binding CanChangeConfirmations}"
-                                      Margin="0,4" AutomationProperties.Name="exact object delete契約を確認" />
+                                      Margin="0,4" />
                         </StackPanel>
                     </Border>
 
@@ -78,10 +78,10 @@
                                 <TextBlock Text="{Binding ObservedSettingsText}" AutomationProperties.Name="read-only observed camera settings" />
                             </Border>
                             <Button Content="状態を確認" Command="{Binding CheckReadinessCommand}" IsEnabled="{Binding CanCheckReadiness}"
-                                    HorizontalAlignment="Left" AutomationProperties.Name="一台実機のread-only readinessを確認" />
+                                    HorizontalAlignment="Left" AutomationProperties.Name="状態を確認 一台実機の読み取り専用の準備状態を確認する" />
                             <Button Content="観測値を30日プロファイルとして承認" Command="{Binding ApproveProfileCommand}"
                                     IsEnabled="{Binding CanApproveProfile}" HorizontalAlignment="Left"
-                                    AutomationProperties.Name="CAM-Aのread-only設定を一台用profileとして承認" />
+                                    AutomationProperties.Name="観測値を30日プロファイルとして承認 CAM-Aの読み取り専用設定を一台用のプロファイルとして承認する" />
                             <TextBlock Text="設定値は表示・照合のみ。カメラ設定writeは実装していません。" Foreground="#FF56616B" />
                         </StackPanel>
                     </Border>
@@ -123,10 +123,10 @@
                             <TextBlock Text="1操作で選択カメラを一回だけ撮影し、PC original永続化とexact cleanupまで実行します。" Margin="0,6,0,10" />
                             <Button Content="選択した1台を撮影" Command="{Binding CaptureCommand}" IsEnabled="{Binding CanCapture}"
                                     Padding="18,13" FontSize="18" FontWeight="Bold" HorizontalAlignment="Stretch"
-                                    AutomationProperties.Name="安全確認済みの一台実機transactionを一回開始" />
+                                    AutomationProperties.Name="選択した1台を撮影 安全確認済みの一台実機の撮影を一回開始する" />
                             <Button Content="未確定transactionの結果を確認" Command="{Binding RecoverTransactionCommand}"
                                     IsEnabled="{Binding CanRecoverTransaction}" HorizontalAlignment="Stretch"
-                                    AutomationProperties.Name="同一transactionの結果だけを再照会し再撮影しない" />
+                                    AutomationProperties.Name="未確定transactionの結果を確認 同じ撮影IDの結果だけを再照会し再撮影はしない" />
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -201,16 +201,16 @@
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">
                                 <Button Content="前へ" Command="{Binding PreviousHistoricalReviewPageCommand}"
                                         IsEnabled="{Binding CanPreviousHistoricalReviewPage}"
-                                        AutomationProperties.Name="未確認の保存結果の前ページ" />
+                                        AutomationProperties.Name="前へ 未確認の保存結果の前のページを表示する" />
                                 <TextBlock Text="{Binding HistoricalReviewPageText}" VerticalAlignment="Center"
                                            Margin="10,0" AutomationProperties.Name="未確認の保存結果のページ" />
                                 <Button Content="次へ" Command="{Binding NextHistoricalReviewPageCommand}"
                                         IsEnabled="{Binding CanNextHistoricalReviewPage}"
-                                        AutomationProperties.Name="未確認の保存結果の次ページ" />
+                                        AutomationProperties.Name="次へ 未確認の保存結果の次のページを表示する" />
                             </StackPanel>
                             <Button Content="選択した保存結果を開く" Command="{Binding ReopenHistoricalReviewCommand}"
                                     IsEnabled="{Binding CanReopenHistoricalReview}" HorizontalAlignment="Stretch"
-                                    AutomationProperties.Name="未確認の保存結果を再検証して開く" />
+                                    AutomationProperties.Name="選択した保存結果を開く 再検証してから開く" />
                         </StackPanel>
                     </Border>
 

@@ -233,7 +233,7 @@ try {
     foreach ($marker in @('CaptureWithAutoFocusCommand', 'CanCaptureWithAutoFocus', 'RunCaptureWithAutoFocusAsync', 'SimulatePreCaptureAutoFocus', 'IsActionZonePreparing', 'IsActionZoneProcessing', 'IsActionZoneReview', 'ProgressWatchdogText', 'RecordPreCaptureAutoFocusOutcome')) {
         Assert-Condition ($viewModelText.Contains($marker)) "Operator shell is missing required action zone / 撮影+AF marker (issue #33): $marker"
     }
-    foreach ($marker in @('アクションゾーン 状態駆動 設置判定撮影 自動進捗 結果', '従ボタン 撮影+AF', 'A→Bの順に撮影し、完了後に合成へ進みます', 'アクションゾーン state1 準備中 設置判定と撮影ボタン', 'アクションゾーン state2 自動進捗ストリップ', 'アクションゾーン state3 結果パネル')) {
+    foreach ($marker in @('アクションゾーン 状態駆動 設置判定撮影 自動進捗 結果', '従ボタン 撮影 + AF', 'A→Bの順に撮影し、完了後に合成へ進みます', 'アクションゾーン state1 準備中 設置判定と撮影ボタン', 'アクションゾーン state2 自動進捗ストリップ', 'アクションゾーン state3 結果パネル')) {
         Assert-Condition ($windowText.Contains($marker)) "Operator shell window is missing required action zone binding/marker (issue #33): $marker"
     }
     Assert-Condition (-not $windowText.Contains('アクションゾーン 撮影と結果 暫定配置')) 'Issue #33 must replace the provisional single-block アクションゾーン layout with the state-driven 3-way one.'
@@ -404,6 +404,63 @@ try {
     $singleExportName = $singleExportButtons[0].GetAttribute('AutomationProperties.Name')
     Assert-Condition ($singleExportName.StartsWith($singleExportLabel)) "The single export button's accessible name '$singleExportName' must start with its label '$singleExportLabel' (issue #229)."
     Assert-Condition (-not ($singleExportName -match '[A-Za-z]{3,}')) "The single export button's accessible name '$singleExportName' must not carry English words (issue #229)."
+    # Issue #249 (WCAG 2.5.3 Label in Name): the accessible name of a control must contain the text it shows, or voice
+    # control by that text does not reach it. A fixed AutomationProperties.Name is compared with the fixed label
+    # (Content / Header / nested Text) after dropping what is not spoken: the access key marker "(_X)" or "_", a
+    # trailing ellipsis, and leading symbol glyphs. A control whose label is bound must bind its name too; the view
+    # model tests (AssertAccessibleNamesContainVisibleLabels in OperatorShellTests) check those state by state. A
+    # static text with a fixed Text must not hide it behind a different fixed name either.
+    $normalizeLabel = {
+        param([string]$text)
+        $label = [regex]::Replace($text, '\(_.\)', '')
+        $label = $label.Replace('_', '')
+        $label = [regex]::Replace($label, '(\.\.\.|…)\s*$', '')
+        $label = [regex]::Replace($label, '^[^\p{L}\p{N}]+', '')
+        $label.Trim()
+    }
+    $labelledControlNames = @('Button', 'CheckBox', 'RadioButton', 'ToggleButton', 'MenuItem')
+    $labelInNameFailures = New-Object System.Collections.Generic.List[string]
+    $labelInNameChecked = 0
+    foreach ($labelFile in @('MainWindow.xaml', 'HardwareSingleCameraWindow.xaml', 'LaunchWindow.xaml', 'ReviewImageWindow.xaml', 'HistoricalReviewWindow.xaml')) {
+        [xml]$labelXml = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot "src/m3/OperatorShell/$labelFile")
+        foreach ($labelNode in @($labelXml.SelectNodes('//*[@*[local-name()="AutomationProperties.Name"]]'))) {
+            $accessibleName = $labelNode.GetAttribute('AutomationProperties.Name')
+            $isControl = $labelledControlNames -contains $labelNode.LocalName
+            $visibleTexts = @()
+            foreach ($attributeName in @('Content', 'Header', 'Text')) {
+                if ($labelNode.HasAttribute($attributeName)) { $visibleTexts += $labelNode.GetAttribute($attributeName) }
+            }
+            if ($isControl -and $labelNode.LocalName -ne 'MenuItem') {
+                foreach ($nested in @($labelNode.SelectNodes('.//*[@Text or @Content]'))) {
+                    foreach ($attributeName in @('Content', 'Text')) {
+                        if ($nested.HasAttribute($attributeName)) { $visibleTexts += $nested.GetAttribute($attributeName) }
+                    }
+                }
+            }
+            if ($visibleTexts.Count -eq 0 -or (-not $isControl -and -not $labelNode.HasAttribute('Text'))) { continue }
+            $where = "$labelFile <$($labelNode.LocalName)> name='$accessibleName'"
+            if ($accessibleName.Contains('{')) { continue }
+            foreach ($visibleText in $visibleTexts) {
+                if ($visibleText.Contains('{')) {
+                    if ($isControl) { $labelInNameFailures.Add("$where has a fixed name but a bound label '$visibleText'; bind the name to the view model so that it follows the label.") }
+                    continue
+                }
+                $label = & $normalizeLabel $visibleText
+                if ($label.Length -eq 0) { continue }
+                $labelInNameChecked++
+                if (-not $accessibleName.Contains($label)) { $labelInNameFailures.Add("$where does not contain its visible label '$label'.") }
+            }
+        }
+    }
+    Assert-Condition ($labelInNameFailures.Count -eq 0) ("Accessible names must contain the visible label (WCAG 2.5.3, issue #249):$([Environment]::NewLine)" + ($labelInNameFailures -join [Environment]::NewLine))
+    Assert-Condition ($labelInNameChecked -ge 40) "The label-in-name check compared only $labelInNameChecked labels; it must keep reaching the windows' controls (issue #249)."
+    Assert-Condition ($windowText.Contains('AutomationProperties.Name="{Binding CaptureWithAutoFocusUnavailableReason, StringFormat=') -and -not $windowText.Contains('撮影+AF 実機モードでは実行不可 理由')) 'The 撮影+AF reason row must bind its accessible name to its text instead of replacing it with a fixed name (issue #249).'
+    # Long reasons and status sentences must wrap instead of being cut off (issue #249).
+    foreach ($wrappedBinding in @('CaptureDisabledReason', 'StatusMessage', 'BlockerText', 'CautionText', 'InfoText', 'CaptureWithAutoFocusUnavailableReason')) {
+        $wrappedNode = @($windowXml.SelectNodes(('//*[local-name()="TextBlock"][@Text="{{Binding {0}}}"]' -f $wrappedBinding))) | Select-Object -First 1
+        Assert-Condition ($null -ne $wrappedNode -and $wrappedNode.GetAttribute('TextWrapping') -eq 'Wrap') "The TextBlock showing $wrappedBinding must set TextWrapping=Wrap so that a long sentence is not cut off (issue #249)."
+    }
+    Assert-Condition ($viewModelText.Contains('IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !CanCaptureWithAutoFocus;')) 'The 撮影+AF reason row must be shown whenever the main button is pressable but 撮影+AF is not (issue #249).'
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0
 }

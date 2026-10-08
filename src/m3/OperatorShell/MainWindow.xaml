@@ -96,7 +96,7 @@
                                 FontSize="{StaticResource FontSizeCompact}"
                                 Foreground="{StaticResource CautionBrush}" BorderBrush="{StaticResource CautionBorderBrush}"
                                 Visibility="{Binding IsSafetyAckPending, Converter={StaticResource BoolToVisibilityConverter}}"
-                                AutomationProperties.Name="排他同意が未了 押すと同意画面を開く" />
+                                AutomationProperties.Name="{Binding SafetyAckAutomationName}" />
 
                         <Button DockPanel.Dock="Right" Style="{StaticResource CloseCaptionButtonStyle}"
                                 Content="✕" Click="CloseWindow_Click"
@@ -159,23 +159,23 @@
                                     <MenuItem Header="1台構成（SingleCamera）" IsCheckable="True"
                                               IsChecked="{Binding IsSingleCameraModeChecked, Mode=TwoWay}"
                                               IsEnabled="{Binding CanChangeOperatingMode}"
-                                              AutomationProperties.Name="運用構成 1台構成 SingleCameraを選択" />
+                                              AutomationProperties.Name="1台構成（SingleCamera） 運用構成として選択" />
                                     <MenuItem Header="2台構成（DualCamera）" IsCheckable="True"
                                               IsChecked="{Binding IsDualCameraModeChecked, Mode=TwoWay}"
                                               IsEnabled="{Binding CanChangeOperatingMode}"
-                                              AutomationProperties.Name="運用構成 2台構成 DualCameraを選択" />
+                                              AutomationProperties.Name="2台構成（DualCamera） 運用構成として選択" />
                                 </MenuItem>
                                 <MenuItem Header="カメラ設定を表示（read-only）(_S)" Command="{Binding ShowCameraSettingsCommand}" IsEnabled="{Binding CanOpenMaintenance}"
-                                          AutomationProperties.Name="カメラ カメラ設定read-only表示 保守画面へ移動" />
+                                          AutomationProperties.Name="カメラ設定を表示（read-only） 保守画面へ移動" />
                                 <!-- 観測値の30日profile承認: このSIMULATEDシェル（OperatorShellViewModel）には
                                      承認フローそのものが実装されていない（30日profile承認は別ウィンドウの
                                      HardwareSingleCameraViewModelが保持する機能）。存在しない機能を偽装せず、
                                      既存コードの慣例（校正未実装ボタン等）と同じ disabled プレースホルダとして
                                      構成のみ用意する。 -->
                                 <MenuItem Header="観測値の30日profile承認（本シェルでは未実装）" IsEnabled="False"
-                                          AutomationProperties.Name="カメラ 観測値の30日profile承認 本画面では未実装" />
+                                          AutomationProperties.Name="観測値の30日profile承認（本シェルでは未実装）" />
                                 <MenuItem Header="{Binding DualCameraIdentityStatusText}" IsEnabled="False"
-                                          AutomationProperties.Name="カメラ identity状態 読み取り専用表示" />
+                                          AutomationProperties.Name="{Binding DualCameraIdentityStatusAutomationName}" />
                                 <!-- Simulationでは機体照合の流れだけを確認する表示切替。
                                      HardwareDualでは実機割当そのものだが、起動時から必須なのでこの項目は無効になる。 -->
                                 <MenuItem Header="{Binding BindingMenuHeader}" Command="{Binding ShowBindingDemoCommand}"
@@ -198,10 +198,10 @@
                                 <MenuItem Header="拡大エリア倍率" AutomationProperties.Name="表示 拡大エリア倍率切替 100パーセント 200パーセント">
                                     <MenuItem Header="100%" IsCheckable="True"
                                               IsChecked="{Binding IsLoupeZoom100Checked, Mode=TwoWay}"
-                                              AutomationProperties.Name="拡大エリア倍率 100パーセントを選択" />
+                                              AutomationProperties.Name="100% 拡大エリアの倍率を選択" />
                                     <MenuItem Header="200%" IsCheckable="True"
                                               IsChecked="{Binding IsLoupeZoom200Checked, Mode=TwoWay}"
-                                              AutomationProperties.Name="拡大エリア倍率 200パーセントを選択" />
+                                              AutomationProperties.Name="200% 拡大エリアの倍率を選択" />
                                 </MenuItem>
                                 <Separator />
                                 <MenuItem Header="傾き読み値の表示" IsCheckable="True" IsChecked="{Binding IsTiltReadingVisible, Mode=TwoWay}"
@@ -212,13 +212,13 @@
                                 <MenuItem Header="設置・校正(_S)" Command="{Binding ShowSetupCommand}" IsEnabled="{Binding CanOpenMaintenance}"
                                           AutomationProperties.Name="ツール 設置・校正 保守画面へ移動" />
                                 <MenuItem Header="再合成（別job）(_R)" Command="{Binding RestitchCommand}" IsEnabled="{Binding CanRestitch}"
-                                          AutomationProperties.Name="ツール 再合成 別job" />
+                                          AutomationProperties.Name="再合成（別job）" />
                                 <MenuItem Header="保存・診断(_D)" Command="{Binding ShowDiagnosticsCommand}" IsEnabled="{Binding CanOpenMaintenance}"
                                           AutomationProperties.Name="ツール 保存・診断 保守画面へ移動" />
                             </MenuItem>
                             <MenuItem Header="ヘルプ(_H)" AutomationProperties.Name="ヘルプメニュー 技術情報 バージョン">
                                 <MenuItem Header="技術情報（error code・ログ位置）(_T)" Click="ShowTechnicalDetail_Click"
-                                          AutomationProperties.Name="ヘルプ 技術情報 error code ログ位置" />
+                                          AutomationProperties.Name="技術情報（error code・ログ位置）" />
                                 <MenuItem Header="バージョン(_V)" Click="ShowVersion_Click"
                                           AutomationProperties.Name="ヘルプ バージョン" />
                             </MenuItem>
@@ -229,7 +229,7 @@
                                 Content="{Binding ResetButtonText}" Command="{Binding ResetViewCommand}"
                                 Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
                                 FontSize="{StaticResource FontSizeBody}"
-                                AutomationProperties.Name="表示設定のリセット 2回押しで確定">
+                                AutomationProperties.Name="{Binding ResetButtonAutomationName}">
                             <Button.Style>
                                 <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
                                     <Style.Triggers>
@@ -246,7 +246,7 @@
                         <ToggleButton x:Name="GridSettingsToggle" DockPanel.Dock="Right" Margin="0,0,8,0" MinHeight="22"
                                       VerticalAlignment="Center"
                                       Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                      AutomationProperties.Name="グリッド設定を開く 列数と行数の指定">
+                                      AutomationProperties.Name="{Binding GridSettingsToggleAutomationName}">
                             <ToggleButton.Style>
                                 <Style TargetType="ToggleButton">
                                     <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
@@ -293,7 +293,7 @@
                                         <CheckBox DockPanel.Dock="Right" Content="表示する" VerticalAlignment="Center"
                                                   IsChecked="{Binding IsGridOverlayEnabled, Mode=TwoWay}"
                                                   FontSize="{StaticResource FontSizeCompact}"
-                                                  AutomationProperties.Name="方眼グリッドの表示切替" />
+                                                  AutomationProperties.Name="表示する 方眼グリッドの表示と非表示を切り替える" />
                                     </DockPanel>
                                     <Grid Margin="0,10,0,0">
                                         <Grid.ColumnDefinitions>
@@ -385,13 +385,12 @@
                                     <Button DockPanel.Dock="Right" Margin="0,0,14,0" Padding="10,4"
                                             Content="{Binding LiveViewButtonText}" Command="{Binding ToggleLiveViewCommand}"
                                             IsEnabled="{Binding CanUseLiveView}"
-                                            AutomationProperties.Name="ライブ表示の開始と停止" />
+                                            AutomationProperties.Name="{Binding LiveViewButtonAutomationName}" />
                                 </DockPanel>
 
                                 <TextBlock Grid.Row="0" Text="撮影・回収のみ（実機プレビューは機体照合画面で確認）"
                                            Style="{StaticResource SectionTitleStyle}"
-                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
-                                           AutomationProperties.Name="撮影回収専用モード 実機プレビューは機体照合画面だけで使用" />
+                                           Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
 
                                 <!-- カメラ状態行: 接続・機体照合・設定・カードの確認結果を常時見せる -->
                                 <Grid Grid.Row="1" Margin="0,10,0,0">
@@ -460,7 +459,7 @@
                                                           Margin="0,8,0,0" AutomationProperties.Name="結果確認 表示画像 合成結果 左原画像 右原画像" />
                                                 <Button Content="拡大して確認" Click="OnOpenReviewImage" IsEnabled="{Binding ReviewImageAvailable}"
                                                         Margin="0,6,0,0" Padding="12,4"
-                                                        AutomationProperties.Name="結果確認 選択した検証済み画像を全体 100パーセント つなぎ目目安で開く" />
+                                                        AutomationProperties.Name="拡大して確認 選択した検証済み画像を全体 100パーセント つなぎ目目安で開く" />
                                                 <TextBlock Text="{Binding ReviewStatusText}" TextAlignment="Center" Margin="0,6,0,0" Style="{StaticResource MutedTextStyle}" />
                                             </StackPanel>
                                         </Grid>
@@ -953,7 +952,7 @@
                                                         IsEnabled="{Binding CanExecuteAutoFocus}" Padding="14,0" MinHeight="34"
                                                         FontSize="{StaticResource FontSizeSection}" FontWeight="Medium"
                                                         Visibility="{Binding ShowAutoFocusButton, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                        AutomationProperties.Name="共通ターゲット□の位置でコントラストAFを実行" />
+                                                        AutomationProperties.Name="AF実行 共通ターゲット□の位置でコントラストAFを実行" />
                                                 <TextBlock DockPanel.Dock="Left" Text="MF" Margin="12,0,0,0" VerticalAlignment="Center"
                                                            Style="{StaticResource MutedTextStyle}" />
                                                 <Grid DockPanel.Dock="Right" Height="32">
@@ -996,7 +995,7 @@
                                             <Button Content="{Binding SwitchLiveCameraButtonText}" Command="{Binding SwitchLiveCameraToTargetDomainCommand}"
                                                     Margin="0,10,0,0" HorizontalAlignment="Stretch"
                                                     Visibility="{Binding ShowSwitchLiveCameraButton, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                    AutomationProperties.Name="共通ターゲット□が非ライブ側カメラの担当域 ワンクリックでLive View切替 自動切替はしない" />
+                                                    AutomationProperties.Name="{Binding SwitchLiveCameraButtonAutomationName}" />
 
                                             <TextBlock Text="{Binding FocusResultText}" Margin="0,8,0,0"
                                                        Style="{StaticResource MutedTextStyle}"
@@ -1007,7 +1006,7 @@
                                                 <TextBlock DockPanel.Dock="Left" Text="フォーカスピーキング" VerticalAlignment="Center"
                                                            Style="{StaticResource MutedTextStyle}" />
                                                 <Button DockPanel.Dock="Right" Content="{Binding PeakingButtonText}" Command="{Binding TogglePeakingCommand}"
-                                                        AutomationProperties.Name="フォーカスピーキング LVフレームへのエッジ強調オーバーレイ preview専用 ON OFF切替" />
+                                                        AutomationProperties.Name="{Binding PeakingButtonAutomationName}" />
                                             </DockPanel>
 
                                             <!-- ピント固定は撮影のゲートにしない。未固定でも撮影はできる（Caution 止まり）。 -->
@@ -1061,9 +1060,9 @@
                                                 <TextBlock DockPanel.Dock="Left" Text="予定する自動補正" VerticalAlignment="Center"
                                                            Style="{StaticResource MutedTextStyle}" TextWrapping="NoWrap" />
                                             </DockPanel>
-                                            <TextBlock Text="{Binding CorrectionText}" Margin="0,4,0,0"
+                                            <TextBlock Text="{Binding CorrectionText}" TextWrapping="Wrap" Margin="0,4,0,0"
                                                        FontSize="{StaticResource FontSizeBody}" />
-                                            <TextBlock Text="{Binding PhysicalAdjustmentText}" Margin="0,8,0,0"
+                                            <TextBlock Text="{Binding PhysicalAdjustmentText}" TextWrapping="Wrap" Margin="0,8,0,0"
                                                        FontSize="{StaticResource FontSizeBody}"
                                                        Foreground="{StaticResource CautionBrush}"
                                                        AutomationProperties.Name="必要な物理調整" />
@@ -1093,7 +1092,7 @@
                                                         Click="ChooseExportDirectory_Click"
                                                         IsEnabled="{Binding CanChangeExportDirectory}"
                                                         Visibility="{Binding IsStandardStageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                        AutomationProperties.Name="操作者が選ぶ保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
+                                                        AutomationProperties.Name="選択 操作者が選ぶ保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
                                                 <Border Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
                                                         BorderThickness="1" Padding="7,5">
                                                     <TextBlock Text="{Binding OutputDirectory}" TextTrimming="CharacterEllipsis"
@@ -1185,7 +1184,7 @@
                                                     <!-- 従ボタン（小）: 撮影+AF。各カメラの撮影直前へAF段を挿入し、NGならシャッターへ進まずfail-closed停止する -->
                                                     <Button Grid.Column="2" Command="{Binding CaptureWithAutoFocusCommand}"
                                                             IsEnabled="{Binding CanCaptureWithAutoFocus}" Padding="4"
-                                                            AutomationProperties.Name="従ボタン 撮影+AF 各カメラの撮影直前にAFを実行してから撮影 AF失敗時はfail-closedで停止し自動リトライしない">
+                                                            AutomationProperties.Name="従ボタン 撮影 + AF AF→撮影 各カメラの撮影直前にAFを実行してから撮影 AFに失敗したら撮影せず停止し自動では再試行しない">
                                                         <StackPanel>
                                                             <TextBlock Text="撮影 + AF" TextAlignment="Center"
                                                                        FontSize="{StaticResource FontSizeLabel}"
@@ -1206,7 +1205,7 @@
                                                            Foreground="{StaticResource CautionBrush}"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
-                                                <TextBlock Text="{Binding CaptureDisabledReason}" Margin="0,6,0,0"
+                                                <TextBlock Text="{Binding CaptureDisabledReason}" TextWrapping="Wrap" Margin="0,6,0,0"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"
                                                            AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
@@ -1214,7 +1213,7 @@
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource InfoBrush}"
                                                            Visibility="{Binding IsCaptureWithAutoFocusUnavailableReasonVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                           AutomationProperties.Name="撮影+AF 実機モードでは実行不可 理由" />
+                                                           AutomationProperties.Name="{Binding CaptureWithAutoFocusUnavailableReason, StringFormat='撮影+AFを使えない理由 {0}'}" />
                                             </StackPanel>
 
                                             <!-- state 2: Capturing/Stitching。進捗本体はステージ側オーバーレイへ出す。 -->
@@ -1231,7 +1230,7 @@
                                             <!-- state 3: Review/FailedPartial/Degraded: 結果パネル -->
                                             <StackPanel Visibility="{Binding IsActionZoneReview, Converter={StaticResource BoolToVisibilityConverter}}"
                                                         AutomationProperties.Name="アクションゾーン state3 結果パネル">
-                                                <TextBlock Text="{Binding StatusMessage}" FontWeight="Medium"
+                                                <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" FontWeight="Medium"
                                                            FontSize="{StaticResource FontSizeBody}"
                                                            AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True" />
                                                 <Grid Margin="0,10,0,0">
@@ -1273,7 +1272,7 @@
                                                         FontSize="{StaticResource FontSizeSection}"
                                                         Content="このPCのフォルダへ保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
                                                         Visibility="{Binding IsStandardExportVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                        AutomationProperties.Name="確認済みの単体原画像または合成結果をこのPCのフォルダへ明示保存" />
+                                                        AutomationProperties.Name="このPCのフォルダへ保存 確認済みの単体原画像または合成結果を明示的に保存する" />
 
                                                 <!-- CaptureRecoveryOnly専用: 撮影した原画像(合成結果ではない)を操作者が選んだ
                                                      フォルダへそのまま保存する(issue #226)。通常フローの保存先
@@ -1292,7 +1291,7 @@
                                                         <Button DockPanel.Dock="Right" Content="選択…" Margin="8,0,0,0" Padding="12,4"
                                                                 Click="ChooseCaptureRecoveryOnlyExportDirectory_Click"
                                                                 IsEnabled="{Binding CanChangeCaptureRecoveryOnlyExportDirectory}"
-                                                                AutomationProperties.Name="原画像の保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
+                                                                AutomationProperties.Name="選択 原画像の保存先フォルダ このPC内のみ フォルダ選択ダイアログを開く" />
                                                         <Border Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderStrongBrush}"
                                                                 BorderThickness="1" Padding="7,5">
                                                             <TextBlock Text="{Binding CaptureRecoveryOnlyExportDirectoryDisplay}" TextTrimming="CharacterEllipsis"
@@ -1363,7 +1362,7 @@
                                                     <Button Grid.Row="0" Grid.Column="0" Content="{Binding PrepareNewCaptureText}" Command="{Binding PrepareNewCaptureCommand}"
                                                             IsEnabled="{Binding CanPrepareNewCapture}"
                                                             FontSize="{StaticResource FontSizeBody}"
-                                                            AutomationProperties.Name="撮り直しの準備へ 旧原画像をアプリ内に保管したまま撮影を開始しない" />
+                                                            AutomationProperties.Name="{Binding PrepareNewCaptureAutomationName}" />
                                                     <Button Grid.Row="0" Grid.Column="2" Content="{Binding ReviewPrimaryActionText}" Command="{Binding AcceptReviewCommand}"
                                                             IsEnabled="{Binding CanAcceptReview}" FontSize="{StaticResource FontSizeBody}"
                                                             AutomationProperties.Name="{Binding ReviewPrimaryActionAutomationName}" />
@@ -1390,26 +1389,25 @@
                                                 </Grid.RowDefinitions>
                                                 <TextBlock Grid.Row="0" Text="Blocker" Style="{StaticResource SeverityTagStyle}"
                                                            Foreground="{StaticResource BlockerBrush}" Margin="0,0,8,4" />
-                                                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding BlockerText}" Margin="0,0,0,4"
+                                                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding BlockerText}" TextWrapping="Wrap" Margin="0,0,0,4"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource BlockerBrush}"
                                                            AutomationProperties.LiveSetting="Assertive" controls:LiveRegion.Announce="True" />
                                                 <TextBlock Grid.Row="1" Text="Caution" Style="{StaticResource SeverityTagStyle}"
                                                            Foreground="{StaticResource CautionBrush}" Margin="0,0,8,4" />
-                                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CautionText}" Margin="0,0,0,4"
+                                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CautionText}" TextWrapping="Wrap" Margin="0,0,0,4"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource CautionBrush}"
                                                            AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                                                 <TextBlock Grid.Row="2" Text="Info" Style="{StaticResource SeverityTagStyle}"
                                                            Foreground="{StaticResource InfoBrush}" Margin="0,0,8,0" />
-                                                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding InfoText}"
+                                                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding InfoText}" TextWrapping="Wrap"
                                                            FontSize="{StaticResource FontSizeCompact}"
                                                            Foreground="{StaticResource InfoBrush}" />
                                             </Grid>
                                             <TextBlock Margin="0,8,0,0" FontSize="{StaticResource FontSizeCompact}"
                                                        Foreground="{StaticResource TextMutedBrush}"
-                                                       Text="NO AUTO RETRY ／ 撮影失敗（再開不可）は再開・再試行しません。自動再試行回数は0回固定です。"
-                                                       AutomationProperties.Name="No automatic retry warning" />
+                                                       Text="NO AUTO RETRY ／ 撮影失敗（再開不可）は再開・再試行しません。自動再試行回数は0回固定です。" />
                                         </StackPanel>
                                     </Border>
                                     </ScrollViewer>
@@ -1661,10 +1659,10 @@
                                          Visibility="{Binding DualBinding.IsCandidateStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <Button Margin="0,0,4,0" MinHeight="46" Content="表示中を CAM-A にする"
                                         Command="{Binding DualBinding.AssignCameraACommand}"
-                                        AutomationProperties.Name="表示中の候補を CAM-A に割り当てる" />
+                                        AutomationProperties.Name="表示中を CAM-A にする 表示中の候補を CAM-A に割り当てる" />
                                 <Button Margin="4,0,0,0" MinHeight="46" Content="表示中を CAM-B にする"
                                         Command="{Binding DualBinding.AssignCameraBCommand}"
-                                        AutomationProperties.Name="表示中の候補を CAM-B に割り当てる" />
+                                        AutomationProperties.Name="表示中を CAM-B にする 表示中の候補を CAM-B に割り当てる" />
                             </UniformGrid>
 
                             <!-- 確定前の確認。ここを飛ばすと「押したら終わっていた」になる。 -->
@@ -1694,7 +1692,7 @@
                                     Content="この割当で確定する"
                                     Command="{Binding DualBinding.CompleteBindingCommand}"
                                     Visibility="{Binding DualBinding.IsSummaryVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                    AutomationProperties.Name="この割当で機体照合を確定する" />
+                                    AutomationProperties.Name="この割当で確定する 機体照合を確定する" />
 
                             <TextBlock Margin="0,12,0,0" TextWrapping="Wrap"
                                        Text="{Binding DualBinding.NoticeText}"
@@ -1744,23 +1742,21 @@
                                     BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1">
                                 <CheckBox IsChecked="{Binding IsPhysicalShutterAckAccepted, Mode=TwoWay}"
                                           Content="撮影中に物理シャッターを操作しません"
-                                          FontSize="{StaticResource FontSizeSection}"
-                                          AutomationProperties.Name="物理シャッターを操作しないことに同意" />
+                                          FontSize="{StaticResource FontSizeSection}" />
                             </Border>
                             <Border Margin="0,10,0,0" Padding="12" Background="{StaticResource CardBrush}"
                                     BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1">
                                 <CheckBox IsChecked="{Binding IsExclusiveUseAckAccepted, Mode=TwoWay}"
                                           Content="他のカメラ撮影ソフトでカメラを占有しません"
-                                          FontSize="{StaticResource FontSizeSection}"
-                                          AutomationProperties.Name="他のカメラアプリでカメラを占有しないことに同意" />
+                                          FontSize="{StaticResource FontSizeSection}" />
                             </Border>
 
                             <Button Style="{StaticResource PrimaryActionButtonStyle}" Margin="0,18,0,0" MinHeight="46"
                                     Content="同意して開始" Command="{Binding AcceptSafetyCommand}"
-                                    AutomationProperties.Name="物理シャッターと他アプリを使わないことに同意" />
+                                    AutomationProperties.Name="同意して開始 物理シャッターと他アプリを使わないことに同意して始める" />
                             <Button Margin="0,10,0,0" Content="同意しない（操作を行わない）" Command="{Binding DeclineSafetyCommand}"
                                     HorizontalAlignment="Center" FontSize="{StaticResource FontSizeBody}"
-                                    AutomationProperties.Name="排他使用へ同意しない" />
+                                    AutomationProperties.Name="同意しない（操作を行わない） 排他使用に同意しない" />
                         </StackPanel>
                     </Border>
                 </Grid>

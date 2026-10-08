@@ -30,7 +30,7 @@
                     <TextBlock Text="登録済みCAM-AまたはCAM-Bの一台だけを使用します。撮影、有限Live View、結果復旧、単体原画像の明示保存を行います。" Margin="0,8,0,12" />
                     <TextBlock Text="二台接続はblocker / 合成は対象外 / 設定writeなし" FontWeight="Bold" Foreground="#FF8E1712" Margin="0,0,0,12" />
                     <Button x:Name="HardwareSingleButton" Content="SingleCameraを開始" Click="OnHardwareSingleClick" Padding="18,12" FontSize="17" FontWeight="Bold"
-                            AutomationProperties.Name="実機一台構成を明示選択" />
+                            AutomationProperties.Name="SingleCameraを開始 実機一台構成を明示的に選んで開始する" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="2" Style="{StaticResource CardStyle}" BorderBrush="#FFB06A00" BorderThickness="2">
@@ -39,7 +39,7 @@
                     <TextBlock Text="HardwareDual契約を使用します。production identity/provider未接続のため現在は撮影不可です。" Margin="0,8,0,12" />
                     <TextBlock Text="HardwarePending / fallbackなし" FontWeight="Bold" Foreground="#FF8E1712" Margin="0,0,0,12" />
                     <Button Content="HardwareDual状態を表示" Click="OnHardwareDualClick" Padding="18,12" FontSize="17"
-                            AutomationProperties.Name="実機二台構成を明示選択しHardwarePendingを表示" />
+                            AutomationProperties.Name="HardwareDual状態を表示 実機二台構成を明示的に選び、撮影不可の状態を表示する" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="4" Style="{StaticResource CardStyle}" BorderBrush="#FF8E1712" BorderThickness="2">
@@ -48,7 +48,7 @@
                     <TextBlock Text="一台／二台の操作設計とdurable transactionを、実カメラ・SDK・WPDへ接続せず確認します。" Margin="0,8,0,12" />
                     <TextBlock Text="製品撮影ではありません" FontWeight="Bold" Foreground="#FF8E1712" Margin="0,0,0,12" />
                     <Button Content="シミュレーションを開始" Click="OnSimulatedClick" Padding="18,12" FontSize="17"
-                            AutomationProperties.Name="実機未接続シミュレーションを明示選択" />
+                            AutomationProperties.Name="シミュレーションを開始 実機未接続の模擬動作を明示的に選んで開始する" />
                 </StackPanel>
             </Border>
         </Grid>
