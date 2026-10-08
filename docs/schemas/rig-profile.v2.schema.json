@@ -1,0 +1,456 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/rig-profile.v2.schema.json",
+  "title": "A0 Camera Stitcher rig profile 2.0.0 (proposal)",
+  "description": "Proposed document-plane rig profile for two D810 cameras (docs/DECISIONS.md ADR-0034, status Proposed; design in docs/design/rig-profile-v2.md). Each camera carries its own lens model and a document-to-image projection, and the output raster is specified in document millimetres and DPI so that lens correction and placement compose into one inverse mapping with a single resampling. Schema 1.1.0 (rig-profile.schema.json) is retained for tests only. A draft is either an all-null template or a calibration result awaiting approval; it never carries the owner decisions (output raster, correction envelope, quality contract, approval record). Cross-field arithmetic is enforced by the runtime profile validator, not by JSON Schema: region ordering, output pixel counts as ceil(width_um * dpi / 25400), projective denominators positive over the output region, approval and validity ordering against the assessment time, and targetMax <= autoCorrectionMax.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "profileId",
+    "conventions",
+    "cameraModel",
+    "documentPlane",
+    "cameras",
+    "calibration",
+    "outputRaster",
+    "correctionEnvelope",
+    "qualityContract",
+    "approval"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "2.0.0" },
+    "status": { "enum": ["draft", "approved"] },
+    "profileId": {
+      "description": "Identifier of this exact profile content. A changed or re-approved profile gets a new profileId; there is no separate revision field.",
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "conventions": {
+      "description": "Fixed conventions, stated in every profile so that a reader does not have to infer them. See docs/design/rig-profile-v2.md sections 2 to 6.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["documentPlane", "cameraPixel", "matrix", "exifOrientation"],
+      "properties": {
+        "documentPlane": { "const": "mm-origin-sheet-top-left-x-right-y-down" },
+        "cameraPixel": { "const": "stored-order-sample-at-integer-index" },
+        "matrix": { "const": "row-major-column-vector" },
+        "exifOrientation": { "const": "ignored" }
+      }
+    },
+    "cameraModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manufacturer", "model", "sensorWidthPixels", "sensorHeightPixels"],
+      "properties": {
+        "manufacturer": { "const": "Nikon" },
+        "model": { "const": "D810" },
+        "sensorWidthPixels": { "const": 7360 },
+        "sensorHeightPixels": { "const": 4912 }
+      }
+    },
+    "documentPlane": {
+      "description": "The rig's document plane in output orientation (HG-0002 rig decision). Sheet dimensions are the ISO 216 A0 size for the orientation, so product code reads them from the profile instead of holding its own constants.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["paper", "orientation", "sheetWidthMm", "sheetHeightMm", "cameraOrder"],
+      "properties": {
+        "paper": { "const": "ISO-216-A0" },
+        "orientation": { "enum": ["landscape", "portrait"] },
+        "sheetWidthMm": { "type": "number" },
+        "sheetHeightMm": { "type": "number" },
+        "cameraOrder": {
+          "description": "Order of the cameras along document X (left/right) or Y (top/bottom); the feather direction.",
+          "enum": ["CAM-A-left-CAM-B-right", "CAM-A-top-CAM-B-bottom"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "required": ["orientation"], "properties": { "orientation": { "const": "landscape" } } },
+          "then": { "type": "object", "properties": { "sheetWidthMm": { "const": 1189 }, "sheetHeightMm": { "const": 841 } } }
+        },
+        {
+          "if": { "type": "object", "required": ["orientation"], "properties": { "orientation": { "const": "portrait" } } },
+          "then": { "type": "object", "properties": { "sheetWidthMm": { "const": 841 }, "sheetHeightMm": { "const": 1189 } } }
+        }
+      ]
+    },
+    "cameras": {
+      "description": "Keyed by alias so that CAM-A and CAM-B cannot be swapped or duplicated.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["CAM-A", "CAM-B"],
+      "properties": {
+        "CAM-A": { "$ref": "#/$defs/camera" },
+        "CAM-B": { "$ref": "#/$defs/camera" }
+      }
+    },
+    "calibration": {
+      "description": "Provenance of the projection values. Informational for the stitcher; nothing here is applied to pixels.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["method", "chartId", "provenanceId", "measuredAt", "tool", "inputSha256", "fitResidualPixels", "rigMeasurements"],
+      "properties": {
+        "method": { "const": "chart-fiducial-planar" },
+        "chartId": { "$ref": "#/$defs/identifier" },
+        "provenanceId": { "$ref": "#/$defs/identifier" },
+        "measuredAt": { "$ref": "#/$defs/utcSeconds" },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["toolId", "version"],
+          "properties": {
+            "toolId": { "$ref": "#/$defs/identifier" },
+            "version": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        "inputSha256": {
+          "description": "SHA-256 of the calibration input images. Recorded, never the images themselves.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["CAM-A", "CAM-B"],
+          "properties": {
+            "CAM-A": { "$ref": "#/$defs/sha256" },
+            "CAM-B": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "fitResidualPixels": {
+          "description": "Fiducial reprojection residual of the fit, in raw camera pixels. A measurement, not a threshold.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["CAM-A", "CAM-B"],
+          "properties": {
+            "CAM-A": { "$ref": "#/$defs/residual" },
+            "CAM-B": { "$ref": "#/$defs/residual" }
+          }
+        },
+        "rigMeasurements": {
+          "description": "Hand measurements of the rig taken at calibration time. May be null in a draft; required numbers once approved.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baselineMm", "overlapMm", "cameraToDocumentMm", "lensFocalLengthMm"],
+          "properties": {
+            "baselineMm": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "overlapMm": { "type": ["number", "null"], "minimum": 0 },
+            "cameraToDocumentMm": { "$ref": "#/$defs/perCameraPositiveOrNull" },
+            "lensFocalLengthMm": { "$ref": "#/$defs/perCameraPositiveOrNull" }
+          }
+        }
+      }
+    },
+    "outputRaster": {
+      "description": "Owner decision (HG-0001). Output pixel (i, j) samples document point (left + (i + 0.5) * 25.4 / dpi, top + (j + 0.5) * 25.4 / dpi). Runtime requires left < right, top < bottom, widthPixels = ceil((right - left) in micrometres * dpi / 25400) and the same for height.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["dpi", "regionMm", "widthPixels", "heightPixels"],
+      "properties": {
+        "dpi": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "regionMm": {
+          "description": "Output rectangle on the document plane, inside the sheet. Values are multiples of 1 micrometre.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["left", "top", "right", "bottom"],
+          "properties": {
+            "left": { "type": "number", "minimum": 0, "multipleOf": 0.001 },
+            "top": { "type": "number", "minimum": 0, "multipleOf": 0.001 },
+            "right": { "type": "number", "exclusiveMinimum": 0, "multipleOf": 0.001 },
+            "bottom": { "type": "number", "exclusiveMinimum": 0, "multipleOf": 0.001 }
+          }
+        },
+        "widthPixels": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "heightPixels": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "correctionEnvelope": {
+      "description": "Owner decision (HG-0001/HG-0002). Bounds of the transient per-capture correction of ADR-0021. Pixel values are output raster pixels at outputRaster.dpi. Runtime requires targetMax <= autoCorrectionMax for every metric.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["minimumOverlapMm", "registrationErrorOutputPixels", "rotationErrorDegrees", "scaleDifferencePercent", "exposureDifferenceEv", "colorDeltaE"],
+      "properties": {
+        "minimumOverlapMm": { "type": "number", "minimum": 0 },
+        "registrationErrorOutputPixels": { "$ref": "#/$defs/envelopeMetric" },
+        "rotationErrorDegrees": { "$ref": "#/$defs/envelopeMetric" },
+        "scaleDifferencePercent": { "$ref": "#/$defs/envelopeMetric" },
+        "exposureDifferenceEv": { "$ref": "#/$defs/envelopeMetric" },
+        "colorDeltaE": { "$ref": "#/$defs/envelopeMetric" }
+      }
+    },
+    "qualityContract": {
+      "description": "Owner decision (HG-0001). Pixel values are output raster pixels at outputRaster.dpi.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["seamErrorOutputPixelsMax", "registrationErrorOutputPixelsMax", "colorDeltaEMax"],
+      "properties": {
+        "seamErrorOutputPixelsMax": { "type": "number", "minimum": 0 },
+        "registrationErrorOutputPixelsMax": { "type": "number", "minimum": 0 },
+        "colorDeltaEMax": { "type": "number", "minimum": 0 }
+      }
+    },
+    "approval": {
+      "description": "Owner approval record. decisionRef points to the recorded decision (for example an Issue comment); no personal name is stored. Runtime requires measuredAt <= approvedAt <= assessedAt < validUntil.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["decisionRef", "approvedAt", "validUntil"],
+      "properties": {
+        "decisionRef": { "$ref": "#/$defs/identifier" },
+        "approvedAt": { "$ref": "#/$defs/utcSeconds" },
+        "validUntil": { "$ref": "#/$defs/utcSeconds" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "required": ["status"], "properties": { "status": { "const": "draft" } } },
+      "then": {
+        "type": "object",
+        "properties": {
+          "outputRaster": { "const": null },
+          "correctionEnvelope": { "const": null },
+          "qualityContract": { "const": null },
+          "approval": { "const": null }
+        },
+        "anyOf": [
+          {
+            "description": "Template: no calibration values at all.",
+            "type": "object",
+            "properties": {
+              "documentPlane": { "const": null },
+              "calibration": { "const": null },
+              "cameras": {
+                "type": "object",
+                "properties": {
+                  "CAM-A": { "type": "object", "properties": { "projection": { "const": null } } },
+                  "CAM-B": { "type": "object", "properties": { "projection": { "const": null } } }
+                }
+              }
+            }
+          },
+          {
+            "description": "Calibration result awaiting approval: every calibration value present, no owner decision.",
+            "type": "object",
+            "properties": {
+              "documentPlane": { "type": "object" },
+              "calibration": { "type": "object" },
+              "cameras": {
+                "type": "object",
+                "properties": {
+                  "CAM-A": { "type": "object", "properties": { "projection": { "type": "object" } } },
+                  "CAM-B": { "type": "object", "properties": { "projection": { "type": "object" } } }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": { "type": "object", "required": ["status"], "properties": { "status": { "const": "approved" } } },
+      "then": {
+        "type": "object",
+        "properties": {
+          "profileId": { "type": "string" },
+          "documentPlane": { "type": "object" },
+          "cameras": {
+            "type": "object",
+            "properties": {
+              "CAM-A": { "type": "object", "properties": { "projection": { "type": "object" } } },
+              "CAM-B": { "type": "object", "properties": { "projection": { "type": "object" } } }
+            }
+          },
+          "calibration": {
+            "type": "object",
+            "properties": {
+              "rigMeasurements": {
+                "type": "object",
+                "properties": {
+                  "baselineMm": { "type": "number" },
+                  "overlapMm": { "type": "number" },
+                  "cameraToDocumentMm": {
+                    "type": "object",
+                    "properties": { "CAM-A": { "type": "number" }, "CAM-B": { "type": "number" } }
+                  },
+                  "lensFocalLengthMm": {
+                    "type": "object",
+                    "properties": { "CAM-A": { "type": "number" }, "CAM-B": { "type": "number" } }
+                  }
+                }
+              }
+            }
+          },
+          "outputRaster": { "type": "object" },
+          "correctionEnvelope": { "type": "object" },
+          "qualityContract": { "type": "object" },
+          "approval": { "type": "object" }
+        }
+      }
+    },
+    {
+      "description": "The output region must lie inside a landscape A0 sheet.",
+      "if": {
+        "type": "object",
+        "required": ["documentPlane", "outputRaster"],
+        "properties": {
+          "documentPlane": { "type": "object", "required": ["orientation"], "properties": { "orientation": { "const": "landscape" } } },
+          "outputRaster": { "type": "object" }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "outputRaster": {
+            "type": "object",
+            "properties": {
+              "regionMm": {
+                "type": "object",
+                "properties": {
+                  "left": { "exclusiveMaximum": 1189 },
+                  "right": { "maximum": 1189 },
+                  "top": { "exclusiveMaximum": 841 },
+                  "bottom": { "maximum": 841 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "The output region must lie inside a portrait A0 sheet.",
+      "if": {
+        "type": "object",
+        "required": ["documentPlane", "outputRaster"],
+        "properties": {
+          "documentPlane": { "type": "object", "required": ["orientation"], "properties": { "orientation": { "const": "portrait" } } },
+          "outputRaster": { "type": "object" }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "outputRaster": {
+            "type": "object",
+            "properties": {
+              "regionMm": {
+                "type": "object",
+                "properties": {
+                  "left": { "exclusiveMaximum": 841 },
+                  "right": { "maximum": 841 },
+                  "top": { "exclusiveMaximum": 1189 },
+                  "bottom": { "maximum": 1189 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "utcSeconds": {
+      "description": "UTC, whole seconds, Z suffix only, so that the text is already canonical.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "residual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rms", "max"],
+      "properties": {
+        "rms": { "type": "number", "minimum": 0 },
+        "max": { "type": "number", "minimum": 0 }
+      }
+    },
+    "perCameraPositiveOrNull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["CAM-A", "CAM-B"],
+      "properties": {
+        "CAM-A": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "CAM-B": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+      }
+    },
+    "envelopeMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetMax", "autoCorrectionMax"],
+      "properties": {
+        "targetMax": { "type": "number", "minimum": 0 },
+        "autoCorrectionMax": { "type": "number", "minimum": 0 }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["physicalIdentity", "projection"],
+      "properties": {
+        "physicalIdentity": { "const": null, "description": "Never store a serial number or transport identity in a profile." },
+        "projection": { "$ref": "#/$defs/projection" }
+      }
+    },
+    "projection": {
+      "description": "Applied values: document mm -> undistorted image pixel (documentToImage), then Brown-Conrady distortion on normalized coordinates, then raw pixel via the intrinsics. All five distortion coefficients are required; there is no implicit zero.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["intrinsics", "distortion", "documentToImage"],
+      "properties": {
+        "intrinsics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fxPixels", "fyPixels", "cxPixels", "cyPixels"],
+          "properties": {
+            "fxPixels": { "type": "number", "exclusiveMinimum": 0 },
+            "fyPixels": { "type": "number", "exclusiveMinimum": 0 },
+            "cxPixels": { "type": "number" },
+            "cyPixels": { "type": "number" }
+          }
+        },
+        "distortion": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model", "k1", "k2", "k3", "p1", "p2"],
+          "properties": {
+            "model": { "const": "brown-conrady-k1k2k3-p1p2" },
+            "k1": { "type": "number" },
+            "k2": { "type": "number" },
+            "k3": { "type": "number" },
+            "p1": { "type": "number" },
+            "p2": { "type": "number" }
+          }
+        },
+        "documentToImage": {
+          "description": "3x3 homography, rows in order, column-vector convention: [u, v, w]^T = H [X, Y, 1]^T with (X, Y) in document mm and (u/w, v/w) in undistorted image pixels. Normalized so that H[2][2] = 1.",
+          "type": "array",
+          "minItems": 3,
+          "prefixItems": [
+            { "$ref": "#/$defs/matrixRow" },
+            { "$ref": "#/$defs/matrixRow" },
+            { "$ref": "#/$defs/matrixLastRow" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "matrixRow": {
+      "type": "array",
+      "minItems": 3,
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "items": false
+    },
+    "matrixLastRow": {
+      "type": "array",
+      "minItems": 3,
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "const": 1 }],
+      "items": false
+    }
+  }
+}

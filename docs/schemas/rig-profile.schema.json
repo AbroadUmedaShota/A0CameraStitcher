@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://a0-camera-stitcher.local/schemas/rig-profile.schema.json",
   "title": "A0 Camera Stitcher rig profile",
-  "description": "Shape and type contract for a human-approved D810 two-camera rig profile. Draft profiles intentionally keep unapproved values null. Cross-field ordering, assessment-time expiry, and supported-version trust are enforced by the production profile validator and setup assessment, not by JSON Schema alone.",
+  "description": "Shape and type contract for a human-approved D810 two-camera rig profile. Draft profiles intentionally keep unapproved values null. Cross-field ordering, assessment-time expiry, and supported-version trust are enforced by the production profile validator and setup assessment, not by JSON Schema alone. Under the ADR-0034 proposal this 1.1.0 contract is retained for tests only and no real rig is approved under it; real rigs use rig profile 2.0.0 (rig-profile.v2.schema.json).",
   "type": "object",
   "additionalProperties": false,
   "required": [
