@@ -366,18 +366,44 @@ try {
     Assert-Condition ($restitchButtons.Count -eq 1) "MainWindow.xaml must have exactly one re-stitch button, found $($restitchButtons.Count) (issue #242)."
     $restitchButton = $restitchButtons[0]
     Assert-Condition ($restitchButton.GetAttribute('Visibility') -like '*IsRestitchButtonVisible*') 'The re-stitch button must bind its Visibility to IsRestitchButtonVisible so that it is hidden where it can never apply (issue #242).'
-    $gridCellOf = {
+    # A cell range covers Grid.Row..Row+RowSpan-1 and Grid.Column..Column+ColumnSpan-1, so a button that spans into
+    # another button's cell is caught as well. Missing attributes mean row 0, column 0, span 1.
+    $gridCellsOf = {
         param($node)
-        $row = $node.GetAttribute('Grid.Row'); if ([string]::IsNullOrEmpty($row)) { $row = '0' }
-        $column = $node.GetAttribute('Grid.Column'); if ([string]::IsNullOrEmpty($column)) { $column = '0' }
-        "$row,$column"
+        $intAttribute = {
+            param($name, $default)
+            $text = $node.GetAttribute($name)
+            if ([string]::IsNullOrEmpty($text)) { $default } else { [int]$text }
+        }
+        $row = & $intAttribute 'Grid.Row' 0
+        $column = & $intAttribute 'Grid.Column' 0
+        $rowSpan = & $intAttribute 'Grid.RowSpan' 1
+        $columnSpan = & $intAttribute 'Grid.ColumnSpan' 1
+        foreach ($cellRow in $row..($row + $rowSpan - 1)) {
+            foreach ($cellColumn in $column..($column + $columnSpan - 1)) { "$cellRow,$cellColumn" }
+        }
     }
-    $restitchCell = & $gridCellOf $restitchButton
+    Assert-Condition ([string]::IsNullOrEmpty($restitchButton.GetAttribute('Grid.ColumnSpan'))) 'The re-stitch button must stay within its own column; spanning the row makes it wider than the buttons above it (issue #242).'
+    $restitchCells = @(& $gridCellsOf $restitchButton)
     $siblingButtons = @($restitchButton.ParentNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -eq 'Button' -and -not [object]::ReferenceEquals($_, $restitchButton) })
     Assert-Condition ($siblingButtons.Count -ge 2) 'The re-stitch button must share its Grid with the prepare-new-capture and accept buttons (issue #242).'
     foreach ($siblingButton in $siblingButtons) {
-        Assert-Condition ((& $gridCellOf $siblingButton) -ne $restitchCell) "Button '$($siblingButton.GetAttribute('Content'))' shares Grid cell ($restitchCell) with the re-stitch button; one covers the other (issue #242)."
+        $sharedCells = @(& $gridCellsOf $siblingButton | Where-Object { $restitchCells -contains $_ })
+        Assert-Condition ($sharedCells.Count -eq 0) "Button '$($siblingButton.GetAttribute('Content'))' covers Grid cell ($($sharedCells -join '; ')) of the re-stitch button; one covers the other (issue #242)."
     }
+    # Issues #229 and #242 review: the accessible name of these two buttons starts with the visible label
+    # (WCAG 2.5.3, label in name) and is Japanese. The result panel's accept button follows its label, which
+    # changes with the mode, so its name is bound to the view model instead of being fixed.
+    $acceptReviewButtons = @($windowXml.SelectNodes('//*[local-name()="Button"][@Command="{Binding AcceptReviewCommand}"]'))
+    Assert-Condition ($acceptReviewButtons.Count -eq 1) "MainWindow.xaml must have exactly one button bound to AcceptReviewCommand, found $($acceptReviewButtons.Count) (issue #242)."
+    Assert-Condition ($acceptReviewButtons[0].GetAttribute('Content') -eq '{Binding ReviewPrimaryActionText}' -and $acceptReviewButtons[0].GetAttribute('AutomationProperties.Name') -eq '{Binding ReviewPrimaryActionAutomationName}') 'The accept button must bind its accessible name to ReviewPrimaryActionAutomationName so that it starts with the changing label (issue #242).'
+    Assert-Condition (-not $windowText.Contains('固定ローカルへ保持')) 'MainWindow.xaml must call the app''s own store 保管, not 固定ローカルへ保持 (issue #242).'
+    $singleExportButtons = @($hardwareWindowXml.SelectNodes('//*[local-name()="Button"][@Command="{Binding ExportCommand}"]'))
+    Assert-Condition ($singleExportButtons.Count -eq 1) "HardwareSingleCameraWindow.xaml must have exactly one button bound to ExportCommand, found $($singleExportButtons.Count) (issue #229)."
+    $singleExportLabel = $singleExportButtons[0].GetAttribute('Content')
+    $singleExportName = $singleExportButtons[0].GetAttribute('AutomationProperties.Name')
+    Assert-Condition ($singleExportName.StartsWith($singleExportLabel)) "The single export button's accessible name '$singleExportName' must start with its label '$singleExportLabel' (issue #229)."
+    Assert-Condition (-not ($singleExportName -match '[A-Za-z]{3,}')) "The single export button's accessible name '$singleExportName' must not carry English words (issue #229)."
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0
 }

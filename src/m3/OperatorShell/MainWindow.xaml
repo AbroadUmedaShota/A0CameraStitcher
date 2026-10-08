@@ -755,7 +755,7 @@
                                                            Text="このメイン画面には実機Live Viewを表示しません。CAM-A / CAM-Bの目視割当は、機体照合画面で1台ずつ確認します。" />
                                                 <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" TextAlignment="Center"
                                                            Foreground="{StaticResource CautionBrush}"
-                                                           Text="合成・A0品質判定・実シャッター同期保証は本試験の対象外です。確認対象は、撮影後に検証して固定ローカルへ保持した原画像2枚です。" />
+                                                           Text="合成・A0品質判定・実シャッター同期保証は本試験の対象外です。確認対象は、撮影後に検証してアプリ内に保管した原画像2枚です。" />
                                             </StackPanel>
                                         </Border>
 
@@ -1365,9 +1365,9 @@
                                                             AutomationProperties.Name="撮り直しの準備へ 旧原画像をアプリ内に保管したまま撮影を開始しない" />
                                                     <Button Grid.Row="0" Grid.Column="2" Content="{Binding ReviewPrimaryActionText}" Command="{Binding AcceptReviewCommand}"
                                                             IsEnabled="{Binding CanAcceptReview}" FontSize="{StaticResource FontSizeBody}"
-                                                            AutomationProperties.Name="結果を採用して次へ 人の確認を記録後のみ撮影準備へ進む" />
-                                                    <!-- 再合成は2台の通常経路だけの操作。撮り直しの準備へと同じ枠に重ねず、別の段に置く。 -->
-                                                    <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                                                            AutomationProperties.Name="{Binding ReviewPrimaryActionAutomationName}" />
+                                                    <!-- 再合成は2台の通常経路だけの操作。撮り直しの準備へと同じ枠に重ねず、別の段に置き、左列の幅に収める。 -->
+                                                    <Button Grid.Row="1" Grid.Column="0" Margin="0,8,0,0"
                                                             Content="撮影済み画像で再合成" Command="{Binding RestitchCommand}"
                                                             IsEnabled="{Binding CanRestitch}"
                                                             Visibility="{Binding IsRestitchButtonVisible, Converter={StaticResource BoolToVisibilityConverter}}"

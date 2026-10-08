@@ -6748,13 +6748,31 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal("2台を順次撮影する（確認なし）", recoveryViewModel.CaptureButtonText);
         Check.False(recoveryViewModel.CaptureButtonAutomationName.Contains("撮影しません", StringComparison.Ordinal),
             "A new capture must keep the capture wording of the accessible name.");
+        Check.Equal("準備完了。確認ダイアログなしで一度だけ開始します。", recoveryViewModel.CaptureDisabledReason);
+        var newCaptureProgress = new List<string>();
+        recoveryViewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(OperatorShellViewModel.StatusMessage))
+            {
+                newCaptureProgress.Add(recoveryViewModel.StatusMessage);
+            }
+            else if (args.PropertyName == nameof(OperatorShellViewModel.CaptureResult))
+            {
+                newCaptureProgress.Add(recoveryViewModel.CaptureResult);
+            }
+        };
         await ExecuteNativeCommandAsync(recoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
             "HardwareDual WPF response-unknown state was not retained.");
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, recoveryViewModel.CaptureButtonText);
+        // The running texts of a new capture still say that two cameras are shot.
+        Check.True(newCaptureProgress.Contains("DualCamera撮影処理中"),
+            "A new capture must show the capture wording in the result row while it runs.");
+        Check.True(newCaptureProgress.Contains("CAM-A→CAM-Bを一回ずつ撮影し、それぞれの原画像を確認します。"),
+            "A new capture must show the capture wording in the status text while it runs.");
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonText, recoveryViewModel.CaptureButtonText);
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", recoveryViewModel.CaptureButtonText);
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             recoveryViewModel.CaptureButtonAutomationName);
         recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
         var restartedRecoveryFlow = new DualCameraProductFlow(
@@ -6776,12 +6794,36 @@ static async Task FormalDualCameraWpfFlowAsync()
         restartedRecoveryViewModel.AcceptSafetyCommand.Execute(null);
         Check.True(restartedRecoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after restart with current identity Pending.");
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", restartedRecoveryViewModel.CaptureButtonText);
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             restartedRecoveryViewModel.CaptureButtonAutomationName);
+        // GitHub Issue #242 review: the reason line and the running texts of the re-check say that
+        // nothing is shot and that a complete result carries on to the composite.
+        Check.Equal("この撮影IDの結果を確認します。新しい撮影は始めません。結果がそろっていれば合成まで進みます。",
+            restartedRecoveryViewModel.CaptureDisabledReason);
+        var recheckProgress = new List<string>();
+        restartedRecoveryViewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(OperatorShellViewModel.StatusMessage))
+            {
+                recheckProgress.Add(restartedRecoveryViewModel.StatusMessage);
+            }
+            else if (args.PropertyName == nameof(OperatorShellViewModel.CaptureResult))
+            {
+                recheckProgress.Add(restartedRecoveryViewModel.CaptureResult);
+            }
+        };
         await ExecuteNativeCommandAsync(restartedRecoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !restartedRecoveryViewModel.IsBusy && restartedRecoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
             "HardwareDual WPF saved transaction recovery did not finish after restart.");
+        Check.True(recheckProgress.Contains("同じ撮影IDの結果を確認中（撮影しません）"),
+            "While the stored ID is re-checked, the result row must say that nothing is shot.");
+        Check.True(recheckProgress.Contains("新しい撮影は行わず、同じ撮影IDの結果を確認します。結果がそろっていれば、そのまま合成まで進みます。"),
+            "While the stored ID is re-checked, the status text must say that nothing is shot.");
+        Check.False(
+            recheckProgress.Contains("DualCamera撮影処理中") ||
+            recheckProgress.Contains("CAM-A→CAM-Bを一回ずつ撮影し、それぞれの原画像を確認します。"),
+            "A re-check must not show the capture wording of a new capture.");
         Check.Equal(1, requestProviderCalls);
         Check.Equal(0, restartedRecoveryViewModel.TransactionStartCount);
         Check.Equal(1, recoveryOperations.ReserveCalls);
@@ -7223,6 +7265,7 @@ static async Task SingleCameraWorkflowAsync()
                 restitchVisibilityChanges++;
             }
         };
+        Check.Equal("採用して次へ 人の確認を記録後のみ撮影準備へ進む", viewModel.ReviewPrimaryActionAutomationName);
         Check.True(viewModel.IsRestitchButtonVisible, "Positive control: the two-camera mode shows the re-stitch button.");
         viewModel.SelectedOperatingMode = "1台構成";
         viewModel.SelectedCamera = "CAM-B";
@@ -7230,6 +7273,11 @@ static async Task SingleCameraWorkflowAsync()
         Check.True(viewModel.IsSingleCameraMode, "The operator must explicitly select Single mode.");
         Check.False(viewModel.IsRestitchButtonVisible, "One camera has nothing to stitch, so the button is not shown.");
         Check.True(restitchVisibilityChanges > 0, "Switching the mode must update the re-stitch button.");
+        // The accept button's spoken name starts with its visible label (WCAG 2.5.3) and follows it.
+        Check.Equal("原画像を確認して次へ", viewModel.ReviewPrimaryActionText);
+        Check.Equal("原画像を確認して次へ 人の確認を記録後のみ撮影準備へ進む", viewModel.ReviewPrimaryActionAutomationName);
+        // The label is only on screen in the result panel; RaiseReviewProperties raises the label
+        // and the spoken name together there.
         Check.True(viewModel.CaptureButtonText.Contains("CAM-B", StringComparison.Ordinal), "The capture action must name the selected body.");
         Check.True(viewModel.CameraAStatus.Contains("構成対象外", StringComparison.Ordinal), "Inactive CAM-A must be shown as outside the plan.");
         Check.False(viewModel.CanCapture, "Safety acknowledgment remains mandatory in Single mode.");
@@ -10297,10 +10345,27 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         // GitHub Issue #242: the status text says what the main button can do; nothing runs by itself.
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText, initialRecoveryShell.StatusMessage);
         Check.True(
-            initialRecoveryShell.StatusMessage.Contains("主ボタンで同じ撮影IDの結果だけを確認できます", StringComparison.Ordinal) &&
+            initialRecoveryShell.StatusMessage.Contains("を押すと、新しい撮影も自動再試行もせずに結果だけを確認します", StringComparison.Ordinal) &&
             !initialRecoveryShell.StatusMessage.Contains("再確認します", StringComparison.Ordinal),
             "The status text must not read as if the check starts by itself.");
-        Check.Equal("結果不明（同じ撮影IDのみ再確認可）", initialRecoveryShell.CaptureResult);
+        // The result panel has no main button, so the text names the two steps by the labels the
+        // operator will see: the panel's own button, then the main button of the capture screen.
+        Check.False(initialRecoveryShell.IsActionZonePreparing,
+            "The unconfirmed result is shown in the result panel, where the main button is not.");
+        Check.True(initialRecoveryShell.PrepareNewCaptureCommand.CanExecute(null),
+            "The result panel must offer the way back to the capture screen.");
+        Check.True(
+            initialRecoveryShell.StatusMessage.Contains("「" + initialRecoveryShell.PrepareNewCaptureText + "」", StringComparison.Ordinal),
+            "The status text must name the result panel's button by its label.");
+        Check.True(
+            OperatorShellViewModel.SameTransactionRecheckButtonText.StartsWith("同じ撮影IDの結果を確認する", StringComparison.Ordinal) &&
+            initialRecoveryShell.StatusMessage.Contains("「同じ撮影IDの結果を確認する」", StringComparison.Ordinal),
+            "The status text must name the main button by the start of its label.");
+        Check.False(initialRecoveryShell.StatusMessage.Contains("主ボタン", StringComparison.Ordinal),
+            "The status text must not name a button that is not on this screen.");
+        Check.Equal("結果不明（同じ撮影IDの結果だけを確認できます）", initialRecoveryShell.CaptureResult);
+        Check.False(initialRecoveryShell.CaptureResult.Contains("主ボタン", StringComparison.Ordinal),
+            "The result row must not name a button either.");
         Check.Equal(1, initialRecoveryShell.TransactionStartCount);
 
         var restartedWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
@@ -10321,7 +10386,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             "The pending same-ID recovery may resume only after the fresh binding is Ready.");
         // GitHub Issue #237: after a restart the pending ID shows the recovery wording from the start.
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", restartedRecoveryShell.CaptureButtonText);
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             restartedRecoveryShell.CaptureButtonAutomationName);
         var reserveBeforeRestartedPress = wpfRecoveryOperations.ReserveCalls;
         var startBeforeRestartedPress = wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls;
@@ -10382,10 +10447,15 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         pendingFiveShell.PrepareNewCaptureCommand.Execute(null);
         Check.True(pendingFiveShell.CanCapture, "The main button must be pressable again after preparing.");
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", pendingFiveShell.CaptureButtonText);
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             pendingFiveShell.CaptureButtonAutomationName);
         Check.False(pendingFiveShell.CaptureButtonText.Contains("最大5回", StringComparison.Ordinal),
             "A pending ID must not offer the five-run label.");
+        Check.Equal("この撮影IDの結果だけを再確認します。新しい撮影は始めません。", pendingFiveShell.CaptureDisabledReason);
+        // CaptureRecoveryOnly never stitches: the re-stitch button is not on its result panel, so it
+        // cannot cover the way back to the capture screen.
+        Check.True(pendingFiveShell.IsCaptureRecoveryOnlyMode && !pendingFiveShell.IsRestitchButtonVisible,
+            "CaptureRecoveryOnly must not show the re-stitch button.");
         Check.False(pendingFiveShell.CanCaptureWithAutoFocus,
             "撮影 + AF must stay off while the five-run's main button only re-checks the same ID.");
         Check.False(pendingFiveShell.CaptureWithAutoFocusCommand.CanExecute(null),
@@ -10606,6 +10676,28 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             Check.False(text.Contains("保持", StringComparison.Ordinal),
                 $"The app's own store is called 保管 (or 残っています), not 保持. Actual: {text}");
         }
+        // The result panel has no main button: the texts that point to the re-check name the two
+        // steps by the labels the operator sees (the panel's own button, then the main button).
+        Check.True(
+            OperatorShellViewModel.SameTransactionRecheckButtonText.StartsWith("同じ撮影IDの結果を確認する", StringComparison.Ordinal),
+            "The main button's label must start with the name the texts use for it.");
+        foreach (var text in new[]
+                 {
+                     OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyInterruptedStatusText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText,
+                 })
+        {
+            Check.True(
+                text.Contains("「撮り直しの準備へ」", StringComparison.Ordinal) &&
+                text.Contains("「同じ撮影IDの結果を確認する」", StringComparison.Ordinal) &&
+                !text.Contains("主ボタン", StringComparison.Ordinal),
+                $"A text shown where the main button is not must name both steps by their labels. Actual: {text}");
+        }
+        Check.True(
+            OperatorShellViewModel.CaptureRecoveryOnlyInterruptedStatusText.Contains("自動再試行もせずに", StringComparison.Ordinal) &&
+            !OperatorShellViewModel.CaptureRecoveryOnlyInterruptedStatusText.Contains("次回", StringComparison.Ordinal),
+            "The interrupted text must promise no automatic retry and must not rely on a later session.");
         Check.Equal("この撮影では保存できる原画像がありません（カメラから画像を受け取れませんでした）。",
             OperatorShellViewModel.CaptureRecoveryOnlyExportNoOriginalsText);
     }
@@ -10730,9 +10822,9 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
 
         // GitHub Issue #237: while the same-ID recovery is outstanding, the main button says it
         // only re-checks that ID, and the panel reason names the next step.
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, pendingShell.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonText, pendingShell.CaptureButtonText);
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", pendingShell.CaptureButtonText);
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             pendingShell.CaptureButtonAutomationName);
         Check.True(pendingShell.CaptureButtonAutomationName.Contains("同じ撮影IDの結果を確認する（撮影しません）", StringComparison.Ordinal),
             "The accessible name must carry the same wording as the visible label.");
@@ -10746,7 +10838,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             "The result panel must offer the way back to the capture screen named in the pending reason.");
         pendingShell.PrepareNewCaptureCommand.Execute(null);
         Check.True(pendingShell.CanCapture, "The main button must be pressable again after preparing.");
-        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, pendingShell.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonText, pendingShell.CaptureButtonText);
         var beforeRecoveryPress = (
             pendingOperations.ReserveCalls, pendingOperations.CaptureRecoveryOnlyStartCalls,
             pendingOperations.OrdinaryStartCalls, pendingOperations.CapabilityPreflightCalls);
@@ -10773,7 +10865,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.Equal(
             "撮影・回収を途中で停止しました。カメラから受け取れた原画像（CAM-A）はアプリ内に保管しています。",
             partialShell.StatusMessage);
-        Check.Equal("途中で停止（原画像 1 枚を保管・詳細は技術情報）", partialShell.CaptureResult);
+        Check.Equal("途中で停止（原画像1枚を保管・詳細は技術情報）", partialShell.CaptureResult);
         Check.Equal(OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedResultText(1), partialShell.CaptureResult);
         var partialFolder = Path.Combine(root, "partial-vm-export");
         partialShell.ChangeCaptureRecoveryOnlyExportDirectory(partialFolder);

@@ -592,17 +592,17 @@ public sealed class OperatorShellViewModel : ObservableObject
     // CaptureRecoveryOnly は RunCaptureAsync が recoverPending で RecoverAsync を呼び、Reserve/Start を
     // 送らない。通常の HardwareDual は RunFormalDualCameraCaptureAsync が RecoverAndStitchAsync だけを
     // 呼び、現在の撮影入力を取りに行かない。どちらも表示と読み上げ名をその動きに合わせる。
-    internal const string CaptureRecoveryOnlyRecoverButtonText = "同じ撮影IDの結果を確認する（撮影しません）";
-    internal const string CaptureRecoveryOnlyRecoverButtonAutomationName = "主ボタン " + CaptureRecoveryOnlyRecoverButtonText;
+    internal const string SameTransactionRecheckButtonText = "同じ撮影IDの結果を確認する（撮影しません）";
+    internal const string SameTransactionRecheckButtonAutomationName = "主ボタン " + SameTransactionRecheckButtonText;
     public string CaptureButtonText => IsMainButtonRecheckingSameTransaction
-        ? CaptureRecoveryOnlyRecoverButtonText
+        ? SameTransactionRecheckButtonText
         : IsCaptureRecoveryOnlyMode
         ? IsCaptureRecoveryOnlyFiveRunMode
             ? "2台を順次撮影・回収する（最大5回）"
             : "2台を順次撮影・回収する（1回）"
         : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
     public string CaptureButtonAutomationName => IsMainButtonRecheckingSameTransaction
-        ? CaptureRecoveryOnlyRecoverButtonAutomationName
+        ? SameTransactionRecheckButtonAutomationName
         : IsCaptureRecoveryOnlyFiveRunMode
         ? "主ボタン 専用確認済みでCAM-AからCAM-Bを最大5組 実シャッター最大10回 撮影回収する 自動再試行なし"
         : IsCaptureRecoveryOnlyMode
@@ -2220,8 +2220,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string CaptureDisabledReason => _isPreCaptureAutoFocusRunning
         ? "撮影+AF: 各カメラの撮影直前AFを実行中です。完了までお待ちください。"
         : CanCapture
-        ? HasRecoverableHardwareDualTransaction || HasRecoverableCaptureRecoveryOnlyTransaction
-            ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
+        ? IsMainButtonRecheckingSameTransaction
+            ? IsCaptureRecoveryOnlyMode
+                ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
+                : "この撮影IDの結果を確認します。新しい撮影は始めません。結果がそろっていれば合成まで進みます。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
         // binding が先に来る。identity が Pending でも、操作者にとっては「まず割当を終わらせる」
         // が次の一手なので、そちらを名指しする。
@@ -2286,7 +2288,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     internal const string CaptureRecoveryOnlyExportFolderNotChosenText =
         "先に『選択…』で保存先のフォルダを選んでください。";
-    // The main button reads CaptureRecoveryOnlyRecoverButtonText while this reason is shown. It sits
+    // The main button reads SameTransactionRecheckButtonText while this reason is shown. It sits
     // on the capture screen, which the result panel leaves through the "撮り直しの準備へ" button.
     internal const string CaptureRecoveryOnlyExportPendingText =
         "撮影結果がまだ確定していないため保存できません。「撮り直しの準備へ」で撮影画面に戻り、" +
@@ -2508,6 +2510,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string ReviewPrimaryActionText => IsCaptureRecoveryOnlyMode || IsSingleCameraMode
         ? "原画像を確認して次へ"
         : "採用して次へ";
+    // The spoken name starts with the visible label (WCAG 2.5.3) and then says what the button does.
+    public string ReviewPrimaryActionAutomationName =>
+        ReviewPrimaryActionText + " 人の確認を記録後のみ撮影準備へ進む";
     public string PrepareNewCaptureText => "撮り直しの準備へ";
     public bool CanOpenMaintenance => !IsCaptureRecoveryOnlyMode && _availability.OpenMaintenance.Allowed;
 
@@ -2914,8 +2919,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             UiState = OperatorUiState.FailedPartial;
             CaptureResult = "中断（結果不明）";
             StitchResult = "保留（CaptureRecoveryOnly）";
-            ExportResult = "取得済み原画像がある場合はアプリ内に保管";
-            StatusMessage = "終了操作で中断しました。自動再試行せず、次回は同じ撮影IDの結果だけを確認します。";
+            ExportResult = "受け取れた原画像があればアプリ内に保管しています";
+            StatusMessage = CaptureRecoveryOnlyInterruptedStatusText;
             TechnicalDetail = "capturePurpose=CaptureRecoveryOnly / stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0";
         }
         finally
@@ -2932,9 +2937,17 @@ public sealed class OperatorShellViewModel : ObservableObject
     internal const string CaptureRecoveryOnlyStoppedWithoutOriginalsText =
         "撮影・回収を途中で停止しました。カメラから受け取れた原画像はありません。";
 
-    // Says what the operator can do next; nothing runs by itself after this text is shown.
+    // Says what the operator can do next; nothing runs by itself after this text is shown. The
+    // result panel does not show the main button, so the text names the two steps: the button of
+    // the result panel that returns to the capture screen, then the main button found there.
     internal const string CaptureRecoveryOnlyUnconfirmedStatusText =
-        "結果が確定していません。主ボタンで同じ撮影IDの結果だけを確認できます（新しい撮影や自動再試行はしません）。";
+        "結果が確定していません。「撮り直しの準備へ」で撮影画面に戻り、「同じ撮影IDの結果を確認する」を押すと、" +
+        "新しい撮影も自動再試行もせずに結果だけを確認します。";
+
+    // Shown when the app's closing stopped the run; the same two steps apply.
+    internal const string CaptureRecoveryOnlyInterruptedStatusText =
+        "終了操作で中断しました。「撮り直しの準備へ」で撮影画面に戻り、「同じ撮影IDの結果を確認する」を押すと、" +
+        "新しい撮影も自動再試行もせずに結果だけを確認します。";
 
     // The terminal-state and failure-code names stay in the technical detail; the operator only
     // needs to know whether any original reached the PC.
@@ -2948,7 +2961,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     internal static string BuildCaptureRecoveryOnlyStoppedResultText(int retainedCount) =>
         retainedCount == 0
             ? "途中で停止（受け取れた原画像なし・詳細は技術情報）"
-            : $"途中で停止（原画像 {retainedCount} 枚を保管・詳細は技術情報）";
+            : $"途中で停止（原画像{retainedCount}枚を保管・詳細は技術情報）";
 
     private void ApplyCaptureRecoveryOnlyExecution(HardwareDualCaptureRecoveryOnlyExecution outcome)
     {
@@ -3013,7 +3026,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         CaptureResult = outcome.Succeeded
             ? "CAM-A/CAM-B JPEG 7360×4912・SHA-256再検証済み"
             : outcome.RecoveryPending
-                ? "結果不明（同じ撮影IDのみ再確認可）"
+                ? "結果不明（同じ撮影IDの結果だけを確認できます）"
                 : BuildCaptureRecoveryOnlyStoppedResultText(originals.Count);
         StitchResult = "Pending（未実施・A0品質未承認）";
         ExportResult = originals.Count == 0
@@ -3058,7 +3071,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             TransactionStartCount++;
         }
-        CaptureResult = "DualCamera撮影処理中";
+        CaptureResult = recoveringUnknownTransaction
+            ? "同じ撮影IDの結果を確認中（撮影しません）"
+            : "DualCamera撮影処理中";
         StitchResult = "未実行";
         ExportResult = "未実行";
         _captureOutcome = null;
@@ -3072,7 +3087,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         ResetProgress(CapturePlan.Dual());
         SetStep("liveview", scenario == "Live View停止失敗" ? "current" : "completed");
         UiState = OperatorUiState.Capturing;
-        StatusMessage = "CAM-A→CAM-Bを一回ずつ撮影し、それぞれの原画像を確認します。";
+        StatusMessage = recoveringUnknownTransaction
+            ? "新しい撮影は行わず、同じ撮影IDの結果を確認します。結果がそろっていれば、そのまま合成まで進みます。"
+            : "CAM-A→CAM-Bを一回ずつ撮影し、それぞれの原画像を確認します。";
         try
         {
             DualCameraCaptureRequest? request = null;
@@ -4056,6 +4073,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(ReviewStatusText));
         OnPropertyChanged(nameof(ReviewPrimaryActionText));
+        OnPropertyChanged(nameof(ReviewPrimaryActionAutomationName));
         OnPropertyChanged(nameof(PrepareNewCaptureText));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanAcceptReview));
