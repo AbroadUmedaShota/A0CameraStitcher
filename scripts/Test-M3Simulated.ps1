@@ -262,15 +262,21 @@ try {
     $liveRegionSourceText = Get-Content -Raw -LiteralPath $liveRegionSourcePath
     Assert-Condition ($liveRegionSourceText.Contains('RaiseAutomationEvent(AutomationEvents.LiveRegionChanged)')) 'LiveRegion must raise AutomationEvents.LiveRegionChanged from the peer (issue #238).'
     foreach ($liveRegionWindow in @(
-            @{ Name = 'MainWindow.xaml'; Xml = $windowXml; MinimumCount = 24 },
+            @{ Name = 'MainWindow.xaml'; Xml = $windowXml; MinimumCount = 20 },
             @{ Name = 'HardwareSingleCameraWindow.xaml'; Xml = $hardwareWindowXml; MinimumCount = 4 })) {
         $liveRegionXml = $liveRegionWindow.Xml
         Assert-Condition ($liveRegionXml.DocumentElement.GetAttribute('xmlns:controls') -eq 'clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls') "$($liveRegionWindow.Name) must map the controls prefix to the LiveRegion namespace (issue #238)."
         $liveNodes = @($liveRegionXml.SelectNodes('//*[@*[local-name()="AutomationProperties.LiveSetting"]]'))
-        Assert-Condition ($liveNodes.Count -ge $liveRegionWindow.MinimumCount) "$($liveRegionWindow.Name) has $($liveNodes.Count) LiveSetting elements, expected at least $($liveRegionWindow.MinimumCount) (issue #238)."
+        # MinimumCount counts the regions that announce (LiveSetting other than Off). Elements that change every
+        # second or duplicate a persistent region are deliberately Off and are not counted (issue #238).
+        $announcingLiveNodes = @($liveNodes | Where-Object { $_.GetAttribute('AutomationProperties.LiveSetting') -ne 'Off' })
+        Assert-Condition ($announcingLiveNodes.Count -ge $liveRegionWindow.MinimumCount) "$($liveRegionWindow.Name) has $($announcingLiveNodes.Count) announcing LiveSetting elements, expected at least $($liveRegionWindow.MinimumCount) (issue #238)."
         foreach ($liveNode in $liveNodes) {
             $liveSetting = $liveNode.GetAttribute('AutomationProperties.LiveSetting')
-            if ($liveSetting -eq 'Off') { continue }
+            if ($liveSetting -eq 'Off') {
+                Assert-Condition ([string]::IsNullOrEmpty($liveNode.GetAttribute('controls:LiveRegion.Announce'))) "$($liveRegionWindow.Name) <$($liveNode.LocalName)> has LiveSetting=Off together with LiveRegion.Announce; remove Announce (issue #238)."
+                continue
+            }
             $liveBinding = @($liveNode.Attributes | Where-Object { $_.Name -eq 'Text' }) | Select-Object -First 1
             $liveDescription = "$($liveRegionWindow.Name) <$($liveNode.LocalName) Text=$($liveBinding.Value)>"
             Assert-Condition ($liveNode.LocalName -eq 'TextBlock') "$liveDescription has LiveSetting but is not a TextBlock, which LiveRegion.Announce cannot observe (issue #238)."
@@ -279,6 +285,10 @@ try {
         $announceNodes = @($liveRegionXml.SelectNodes('//*[@*[local-name()="LiveRegion.Announce"]]'))
         foreach ($announceNode in $announceNodes) {
             Assert-Condition (-not [string]::IsNullOrEmpty($announceNode.GetAttribute('AutomationProperties.LiveSetting'))) "$($liveRegionWindow.Name) has LiveRegion.Announce on an element without AutomationProperties.LiveSetting (issue #238)."
+            # WPF returns a fixed AutomationProperties.Name in preference to the Text, so a fixed Name on a live region
+            # makes the screen reader read the label instead of the changed text. Only a Name bound to the text is allowed.
+            $announceName = $announceNode.GetAttribute('AutomationProperties.Name')
+            Assert-Condition ([string]::IsNullOrEmpty($announceName) -or $announceName.StartsWith('{Binding')) "$($liveRegionWindow.Name) <$($announceNode.LocalName) Text=$($announceNode.GetAttribute('Text'))> has a fixed AutomationProperties.Name ""$announceName"" on a LiveRegion.Announce element; delete it or bind it to the text (issue #238)."
         }
     }
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
