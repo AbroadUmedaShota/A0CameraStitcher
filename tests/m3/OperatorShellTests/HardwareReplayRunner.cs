@@ -16,6 +16,7 @@ internal static class HardwareReplayContracts
         AnonymizationRulesRejectKnownBadShapes();
         AnonymizationRulesCloseTheKnownGaps();
         AnonymizationRulesCloseTheGapsOfTheSecondAudit();
+        AnonymizationRulesCloseTheGapsOfTheThirdAudit();
         OperatorInputsAndDurableStateLoadThroughProductionReaders();
         await SingleCameraProfileApprovalReproducesTheRealApprovedProfileAsync();
         await SingleCameraReplaySavesThroughViewModelAsync();
@@ -45,6 +46,12 @@ internal static class HardwareReplayContracts
         var shas = jpegs.ToDictionary(item => item.Key, item => HardwareReplayFixtures.Sha256(item.Value));
         Check.Equal(3, shas.Values.Distinct().Count());
         IReadOnlySet<string> allowedSha = new HashSet<string>(shas.Values, StringComparer.Ordinal);
+
+        // The images are pinned by SHA-256 (#247): the structure check leaves a few bytes of image
+        // data free, so a dummy image is accepted only as exactly one of these three.
+        Check.Equal(3, HardwareReplayJpegContracts.PinnedSha256.Count);
+        foreach (var (name, sha) in shas)
+            Check.Equal(HardwareReplayJpegContracts.PinnedSha256[name], sha);
 
         var problems = new List<string>();
         var scanned = 0;
@@ -486,6 +493,120 @@ internal static class HardwareReplayContracts
         ImageMustFail("one byte changed in the scan header", WithByteChanged(0xDA, 3));
         var firstTable = good[(SegmentStart(good, 0xDB) + 4)..(SegmentStart(good, 0xDB) + 4 + 65)];
         ImageMustFail("a repeated quantization table", InsertSegment(good, 0xDB, firstTable));
+    }
+
+    // GitHub Issue #247: the LOW findings of the third audit (a number with a file extension, dates
+    // with a month name between hyphens, the dummy images pinned by hash, data URIs, and the file
+    // names kept out of the failure messages). Every input is invented.
+    private static void AnonymizationRulesCloseTheGapsOfTheThirdAudit()
+    {
+        IReadOnlySet<string> allowed = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<string> noNeedles = [];
+
+        IReadOnlyList<string> ScanJson(string sample) =>
+            HardwareReplayAnonymizationRules.Scan("sample.json", sample, allowed, isDocumentation: false, noNeedles);
+
+        void MustReject(string gap, string sample, string? messagePart = null)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count > 0, $"The anonymization scan missed ({gap}): {sample}");
+            if (messagePart is not null)
+                Check.True(problems.Any(problem => problem.Contains(messagePart, StringComparison.Ordinal)),
+                    $"The anonymization scan rejected ({gap}) for another reason than '{messagePart}': {string.Join("; ", problems)}");
+        }
+
+        void MustAccept(string what, string sample)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count == 0, $"The anonymization scan must accept {what}: {string.Join("; ", problems)}");
+        }
+
+        // L8: a dot next to the digits is a decimal point only when a digit sits on its other side.
+        MustReject("a number followed by a file extension", "{\"file\":\"3012345.jpg\"}", "7-digit number");
+        MustReject("a number at the end of a sentence", "{\"note\":\"see 1234567.\"}", "7-digit number");
+        MustReject("a number behind a dot and a letter", "{\"file\":\"x.3012345\"}", "7-digit number");
+        MustAccept("a decimal fraction on either side", "{\"ratio\":1234567.5,\"small\":0.1234567}");
+        MustAccept("fractional seconds", "{\"t\":\"2026-01-05T05:05:32.3127834Z\"}");
+
+        // L11: a month name between hyphens, slashes or dots.
+        MustReject("date as d-MMM-yyyy", "{\"day\":\"15-Jun-2026\"}", "date at offset");
+        MustReject("date as d/MMM/yyyy", "{\"day\":\"15/Jun/2026\"}", "date at offset");
+        MustReject("date as d.MMM.yyyy", "{\"day\":\"15.Jun.2026\"}", "date at offset");
+        MustReject("date as MMM-d-yyyy", "{\"day\":\"Jun-15-2026\"}", "date at offset");
+        MustReject("date as d-MMM-yyyy in another year", "{\"day\":\"15-Jan-2025\"}", "date at offset");
+        MustAccept("January 2026 with a month name between hyphens and slashes", "{\"a\":\"15-Jan-2026\",\"b\":\"15/Jan/2026\"}");
+
+        // L10: the dummy images are pinned by SHA-256. A few bytes of image data are free in the
+        // structure check, so another image that passes it is still rejected.
+        var good = HardwareReplayFixtures.ReadJpeg("single-cam-a");
+        var goodB64 = Convert.ToBase64String(good);
+        var altered = WithImageText(good, "ab");
+        Check.True(HardwareReplayJpegContracts.Inspect("altered", altered).Count == 0, "Sanity: the altered image passes the structure check.");
+        Check.True(HardwareReplayJpegContracts.IsPinned(good), "The dummy image must be pinned.");
+        Check.True(!HardwareReplayJpegContracts.IsPinned(altered), "An image with other image data must not be pinned.");
+        var alteredB64 = Convert.ToBase64String(altered);
+        var fromFile = HardwareReplayAnonymizationRules.Scan("images/single-cam-a.jpg.b64", alteredB64, allowed, isDocumentation: false, noNeedles);
+        Check.True(fromFile.Any(problem => problem.Contains("pinned", StringComparison.Ordinal)),
+            "A .b64 dummy image with other image data must be rejected as not pinned.");
+        MustReject("a dummy image with other image data under a *Base64 key", "{\"frameBase64\":\"" + alteredB64 + "\"}", "pinned");
+        MustAccept("the pinned dummy image under a *Base64 key", "{\"frameBase64\":\"" + goodB64 + "\"}");
+
+        // L9: a data URI is read by its base64 part.
+        var fakeJpeg = new byte[300];
+        fakeJpeg[0] = 0xFF; fakeJpeg[1] = 0xD8; fakeJpeg[2] = 0xFF; fakeJpeg[3] = 0xE0;
+        fakeJpeg[^2] = 0xFF; fakeJpeg[^1] = 0xD9;
+        MustAccept("the pinned dummy image as a data URI", "{\"src\":\"data:image/jpeg;base64," + goodB64 + "\"}");
+        MustReject("a JPEG-looking image as a data URI", "{\"src\":\"data:image/jpeg;base64," + Convert.ToBase64String(fakeJpeg) + "\"}", "embedded base64");
+        MustReject("a pinned-looking image with other data as a data URI", "{\"src\":\"data:image/jpeg;base64," + alteredB64 + "\"}", "pinned");
+
+        // L4: a file name that fails a rule is not copied into the failure message.
+        var folderRoot = HardwareReplayFixtures.NewTestRoot();
+        try
+        {
+            foreach (var (gap, relative, value) in new[]
+                     {
+                         ("digit run", "single-camera/cam1234567.json", "1234567"),
+                         ("epoch in a directory name", "dual-camera/1700000000/events.json", "1700000000"),
+                         ("hexadecimal run", "single-camera/0123456789abcdef0123.json", "0123456789abcdef0123"),
+                         ("numeric date", "single-camera/events-2025-06-15.json", "2025-06-15"),
+                         ("date with a month name", "single-camera/events-15-Jun-2025.json", "15-Jun-2025"),
+                         ("e-mail address", "single-camera/someone@example.invalid.json", "someone@example.invalid"),
+                         ("file type", "single-camera/x1234567.png", "1234567"),
+                     })
+            {
+                var path = Path.Combine(folderRoot, relative.Replace('/', Path.DirectorySeparatorChar));
+                System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, "{}");
+                var problems = HardwareReplayAnonymizationRules.CheckFileSet(folderRoot, noNeedles);
+                Check.True(problems.Count > 0, $"The file-set check missed ({gap}).");
+                Check.True(problems.All(problem => !problem.Contains(value, StringComparison.Ordinal)),
+                    $"A failure message must not show the part of the file name that failed ({gap}).");
+                File.Delete(path);
+                System.IO.Directory.Delete(Path.GetDirectoryName(path)!, recursive: false);
+            }
+
+            var named = Path.Combine(folderRoot, "dual-camera");
+            System.IO.Directory.CreateDirectory(named);
+            File.WriteAllText(Path.Combine(named, "fictional-host-77.json"), "{}");
+            var environmentProblems = HardwareReplayAnonymizationRules.CheckFileSet(folderRoot, ["fictional-host-77"]);
+            Check.True(environmentProblems.Count > 0, "The PC name must still be found in a file name.");
+            Check.True(environmentProblems.All(problem => !problem.Contains("fictional-host-77", StringComparison.Ordinal)),
+                "A failure message must not show the PC name found in a file name.");
+        }
+        finally
+        {
+            HardwareReplayFixtures.DeleteTestRoot(folderRoot);
+        }
+
+        var contentProblems = HardwareReplayAnonymizationRules.Scan(
+            "single-camera/cam1234567.json", "{\"serial\":\"x\"}", allowed, isDocumentation: false, noNeedles);
+        Check.True(contentProblems.Count > 0, "The content rules must still fire.");
+        Check.True(contentProblems.All(problem => !problem.Contains("1234567", StringComparison.Ordinal)),
+            "A content failure message must not show the digits of the file name.");
+        var plainProblems = HardwareReplayAnonymizationRules.Scan(
+            "single-camera/transaction.json", "{\"serial\":\"x\"}", allowed, isDocumentation: false, noNeedles);
+        Check.True(plainProblems.Any(problem => problem.StartsWith("single-camera/transaction.json:", StringComparison.Ordinal)),
+            "An ordinary file name must stay readable in the failure message.");
     }
 
     private static string NoticeOf(byte[] jpeg)

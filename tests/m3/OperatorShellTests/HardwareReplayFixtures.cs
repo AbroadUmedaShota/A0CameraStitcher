@@ -175,9 +175,11 @@ internal static class HardwareReplayAnonymizationRules
     private static readonly HashSet<string> AllowedTokenValues = new(StringComparer.Ordinal) { "7360x4912" };
 
     // A run of 6 or more digits (7-digit body serials, long counters), also when a letter or a
-    // hyphen touches it (CAM-A-1234567, SN1234567). Only a digit or a dot next to it (a longer
-    // number, a decimal fraction) keeps it out. The synthetic shapes below are removed first.
-    private static readonly Regex LongDigitRun = new(@"(?<![0-9.])\d{6,}(?![0-9.])", RegexOptions.Compiled);
+    // hyphen touches it (CAM-A-1234567, SN1234567). Only a digit next to it (a longer number), or a
+    // dot with a digit on its other side (a decimal fraction), keeps it out. A dot alone does not:
+    // 3012345.jpg is a number with a file extension, 1234567.5 is a fraction (#247). The
+    // synthetic shapes below are removed first.
+    private static readonly Regex LongDigitRun = new(@"(?<![0-9])(?<![0-9]\.)\d{6,}(?![0-9])(?!\.[0-9])", RegexOptions.Compiled);
 
     private static readonly Regex PathDigitRun = new(@"(?<![0-9])\d{6,}(?![0-9])", RegexOptions.Compiled);
 
@@ -201,9 +203,13 @@ internal static class HardwareReplayAnonymizationRules
     private static readonly Regex DateYearLast = new(
         @"(?<![\d.])(\d{1,2})([/.\-])(\d{1,2})\2((?:19|20)\d{2})(?!\d)", RegexOptions.Compiled);
     private const string MonthNames = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
+    // The parts are separated by white space, a hyphen, a slash or a dot (15 Jun 2026, 15-Jun-2026,
+    // 15/Jun/2026, Jun.15.2026).
+    private const string MonthNameSeparator = @"[\s\-/.]+";
     private static readonly Regex DateMonthName = new(
-        @"(?<![A-Za-z0-9])(?:(\d{1,2})(?:st|nd|rd|th)?\s+(" + MonthNames + @")[a-z]*\.?,?\s+((?:19|20)\d{2})|(" + MonthNames +
-        @")[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{2}))(?![A-Za-z0-9])",
+        @"(?<![A-Za-z0-9])(?:(\d{1,2})(?:st|nd|rd|th)?" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?,?" + MonthNameSeparator +
+        @"((?:19|20)\d{2})|(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator + @"(\d{1,2})(?:st|nd|rd|th)?,?" + MonthNameSeparator +
+        @"((?:19|20)\d{2}))(?![A-Za-z0-9])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex DateTimeCompact = new(
         @"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d[0-5]\d(?:\d{3})?(?!\d)", RegexOptions.Compiled);
@@ -233,25 +239,62 @@ internal static class HardwareReplayAnonymizationRules
         foreach (var path in System.IO.Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+            // The messages name the file, and the name may hold the value that is wrong (#247).
+            var shown = HideValues(relative, environmentNeedles);
             problems.AddRange(ScanRelativePath(relative, environmentNeedles));
             var extension = Path.GetExtension(path);
             if (!AllowedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
-                problems.Add($"{relative}: file type is not allowed in the replay fixtures (images are stored only as .jpg.b64 dummies)");
+                problems.Add($"{shown}: file type is not allowed in the replay fixtures (images are stored only as .jpg.b64 dummies)");
             if (Path.GetFileName(path).EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
                 Path.GetFileName(path).EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
-                problems.Add($"{relative}: a real image file must never be stored here");
+                problems.Add($"{shown}: a real image file must never be stored here");
             var isImageFolder = relative.StartsWith("images/", StringComparison.OrdinalIgnoreCase);
             if ((extension.Equals(".b64", StringComparison.OrdinalIgnoreCase) || isImageFolder) &&
                 !ImageB64Name.IsMatch(relative))
-                problems.Add($"{relative}: base64 data is allowed only as images/<name>.jpg.b64, and images/ holds nothing else");
+                problems.Add($"{shown}: base64 data is allowed only as images/<name>.jpg.b64, and images/ holds nothing else");
         }
         return problems;
+    }
+
+    // The relative path with every part that one of the path rules matches (hex run, GUID, e-mail,
+    // epoch, date, digit run, PC name or profile of this machine) replaced by "***", for the
+    // messages: a file name that fails a rule must not be copied into a log (#247).
+    internal static string HideValues(string relative, IReadOnlyList<string> environmentNeedles)
+    {
+        var hidden = new bool[relative.Length];
+        void Mark(int index, int length)
+        {
+            for (var i = index; i < index + length && i < hidden.Length; i++) hidden[i] = true;
+        }
+        Regex[] patterns =
+        [
+            HexRun, DashedGuid, EmailAddress, Epoch, DateNumeric, DateJapanese, DateYearFirstLoose, DateYearLast,
+            DateMonthName, DateTimeCompact, PathDigitRun,
+        ];
+        foreach (var pattern in patterns)
+        {
+            foreach (Match match in pattern.Matches(relative)) Mark(match.Index, match.Length);
+        }
+        foreach (var needle in environmentNeedles)
+        {
+            if (needle.Length == 0) continue;
+            for (var at = relative.IndexOf(needle, StringComparison.OrdinalIgnoreCase); at >= 0;
+                 at = relative.IndexOf(needle, at + 1, StringComparison.OrdinalIgnoreCase))
+                Mark(at, needle.Length);
+        }
+        var builder = new StringBuilder();
+        for (var i = 0; i < relative.Length; i++)
+        {
+            if (!hidden[i]) builder.Append(relative[i]);
+            else if (i == 0 || !hidden[i - 1]) builder.Append("***");
+        }
+        return builder.ToString();
     }
 
     // Directory names count as well, so every part of the relative path is covered by the text.
     internal static IReadOnlyList<string> ScanRelativePath(string relative, IReadOnlyList<string> environmentNeedles)
     {
-        var label = relative + " (file name)";
+        var label = HideValues(relative, environmentNeedles) + " (file name)";
         var problems = new List<string>();
         problems.AddRange(ScanEnvironment(label, relative, environmentNeedles));
         problems.AddRange(ScanShapes(label, relative, new HashSet<string>(StringComparer.Ordinal), checkLooseValues: false));
@@ -309,9 +352,14 @@ internal static class HardwareReplayAnonymizationRules
         IReadOnlyList<string>? environmentNeedles = null)
     {
         environmentNeedles ??= RuntimeEnvironmentNeedles();
-        return name.EndsWith(".b64", StringComparison.OrdinalIgnoreCase)
+        var problems = name.EndsWith(".b64", StringComparison.OrdinalIgnoreCase)
             ? ScanBase64Image(name, text, allowedSha256, environmentNeedles)
             : ScanText(name, text, allowedSha256, isDocumentation, environmentNeedles);
+        // Every message starts with the file name, which may hold the value that is wrong (#247).
+        var shown = HideValues(name, environmentNeedles);
+        return shown == name
+            ? problems
+            : problems.Select(problem => problem.Replace(name, shown, StringComparison.Ordinal)).ToList();
     }
 
     // A .b64 file is never skipped: it must be the base64 of a dummy JPEG that passes the
@@ -357,6 +405,8 @@ internal static class HardwareReplayAnonymizationRules
     {
         var problems = new List<string>();
         problems.AddRange(HardwareReplayJpegContracts.Inspect(name, bytes));
+        if (!HardwareReplayJpegContracts.IsPinned(bytes))
+            problems.Add($"{name}: the dummy image is not one of the three pinned images (SHA-256 differs)");
         // The table bytes of a JPEG are arbitrary, so the digit-run rules would fire on them; they
         // are applied to the image data, the only place left in a dummy image that is free-form.
         problems.AddRange(ScanText(
@@ -520,6 +570,9 @@ internal static class HardwareReplayAnonymizationRules
         return problems;
     }
 
+    private static readonly Regex DataUriBase64 = new(
+        @"^data:[A-Za-z0-9.+/\-]*(?:;[A-Za-z0-9=.+\-]+)*;base64,(.*)$", RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
     private static readonly Regex Base64Alphabet = new("^[A-Za-z0-9+/_\\-]+={0,2}$", RegexOptions.Compiled);
     private static readonly Regex HexOnly = new("^[0-9a-fA-F]+$", RegexOptions.Compiled);
 
@@ -563,8 +616,11 @@ internal static class HardwareReplayAnonymizationRules
             while (next < text.Length && char.IsWhiteSpace(text[next])) next++;
             if (next < text.Length && text[next] == ':') continue;
 
-            // Only line breaks may sit inside (wrapped base64); a space means prose.
-            var compact = Regex.Replace(UnescapeJsonString(group.Value), @"[\r\n]+", string.Empty);
+            // Only line breaks may sit inside (wrapped base64); a space means prose. A data URI is
+            // read by its base64 part (#247).
+            var value = UnescapeJsonString(group.Value);
+            var dataUri = DataUriBase64.Match(value);
+            var compact = Regex.Replace(dataUri.Success ? dataUri.Groups[1].Value : value, @"[\r\n]+", string.Empty);
             if (compact.Length < EmbeddedBase64MinLength || !Base64Alphabet.IsMatch(compact) || HexOnly.IsMatch(compact)) continue;
             var found = CheckEmbeddedImage(
                 name, $"base64-like string of {compact.Length} characters at offset {group.Index}", compact, allowedSha256, environmentNeedles);
@@ -685,6 +741,19 @@ internal static class HardwareReplayJpegContracts
         [0xDA] = ["03010002110311003F00"],
     };
     internal const int MaxScanDataBytes = 32;
+
+    // The three dummy images by their SHA-256 (#247). The structure check leaves up to
+    // MaxScanDataBytes of image data free, so a dummy image is accepted only as one of these three
+    // byte strings. Changing a dummy image means changing its hash here.
+    internal static readonly IReadOnlyDictionary<string, string> PinnedSha256 = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["single-cam-a"] = "7be3a2b90fdc9e6d8c7bcc87985aa7893f3192e8562a941f6b9b05c89b3e79c6",
+        ["dual-cam-a"] = "febcdb554f3a14f918f2cae41130d254edd38f9c207b16f24e787249a2981b19",
+        ["dual-cam-b"] = "7c6ff5ee413bf1eca56ecef055fbfe58e42af688c1c04d60342038af701a0eda",
+    };
+
+    internal static bool IsPinned(byte[] bytes) =>
+        PinnedSha256.Values.Contains(Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), StringComparer.Ordinal);
 
     // The bytes between the scan header and EOI, or null when the image has no scan header.
     internal static byte[]? ImageData(byte[] bytes)
