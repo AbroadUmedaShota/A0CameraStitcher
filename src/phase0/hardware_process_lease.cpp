@@ -10,8 +10,12 @@
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <cstring>
+#include <cwctype>
 #include <filesystem>
+#include <iterator>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -193,26 +197,189 @@ std::string WindowsError(std::string_view operation, DWORD error) {
     return message.str();
 }
 
+bool EqualsIgnoreCase(const std::wstring &a, const std::wstring &b) noexcept {
+    return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()), b.c_str(), static_cast<int>(b.size()),
+                                TRUE) == CSTR_EQUAL;
+}
+bool IsNotFoundError(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+// A name that does not exist yet cannot be resolved through the file system, so
+// a name that the file system would rewrite when it is created or opened (8.3
+// short-name syntax, an alternate data stream selector, a trailing dot or
+// space) is treated as a possible alias instead of a new directory.
+bool IsAliasProneName(const std::wstring &name) noexcept {
+    return name.empty() || name.find_first_of(L"~:") != std::wstring::npos || name.back() == L'.' ||
+           name.back() == L' ';
+}
+
+// Lexically normalized absolute drive-letter path without a trailing
+// separator, or nullopt for anything else (relative, drive-relative, UNC,
+// device or extended-length prefixes), which the caller treats as unverifiable.
+std::optional<std::filesystem::path> NormalizedDrivePath(const std::filesystem::path &path) {
+    std::wstring text = path.lexically_normal().wstring();
+    std::replace(text.begin(), text.end(), L'/', L'\\');
+    while (!text.empty() && text.back() == L'\\')
+        text.pop_back();
+    if (text.size() == 2 && text[1] == L':')
+        text.push_back(L'\\');
+    std::filesystem::path result(text);
+    const std::wstring drive = result.root_name().wstring();
+    if (drive.size() != 2 || drive[1] != L':' || std::iswalpha(drive[0]) == 0 || !result.has_root_directory())
+        return std::nullopt;
+    return result;
+}
+
+struct DirectoryIdentity final {
+    bool extended{};
+    ULONGLONG volume{};
+    std::array<BYTE, 16> id{};
+    bool operator==(const DirectoryIdentity &) const = default;
+};
+bool QueryDirectoryIdentity(HANDLE handle, DirectoryIdentity &identity) noexcept {
+    FILE_ID_INFO extended{};
+    if (GetFileInformationByHandleEx(handle, FileIdInfo, &extended, sizeof(extended))) {
+        identity.extended = true;
+        identity.volume = extended.VolumeSerialNumber;
+        std::copy(std::begin(extended.FileId.Identifier), std::end(extended.FileId.Identifier),
+                  identity.id.begin());
+        return true;
+    }
+    BY_HANDLE_FILE_INFORMATION basic{};
+    if (GetFileInformationByHandle(handle, &basic)) {
+        identity.extended = false;
+        identity.volume = basic.dwVolumeSerialNumber;
+        identity.id = {};
+        std::memcpy(identity.id.data(), &basic.nFileIndexHigh, sizeof(basic.nFileIndexHigh));
+        std::memcpy(identity.id.data() + sizeof(basic.nFileIndexHigh), &basic.nFileIndexLow,
+                    sizeof(basic.nFileIndexLow));
+        return true;
+    }
+    return false;
+}
+// Final path of an open handle with 8.3 names expanded and subst drives and
+// junctions resolved, without the `\\?\` prefix and without a trailing
+// separator.
+bool QueryFinalPath(HANDLE handle, std::wstring &out) {
+    constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    std::wstring buffer(512, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()), flags);
+    if (length >= buffer.size()) {
+        buffer.assign(static_cast<std::size_t>(length) + 1, L'\0');
+        length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()), flags);
+    }
+    if (length == 0 || length >= buffer.size())
+        return false;
+    buffer.resize(length);
+    constexpr std::wstring_view unc_prefix = L"\\\\?\\UNC\\";
+    constexpr std::wstring_view device_prefix = L"\\\\?\\";
+    const std::wstring_view view(buffer);
+    if (view.starts_with(unc_prefix))
+        out = L"\\\\" + std::wstring(view.substr(unc_prefix.size()));
+    else if (view.starts_with(device_prefix) && view.size() >= 6 && view[5] == L':')
+        out = std::wstring(view.substr(device_prefix.size()));
+    else
+        out = buffer;
+    while (!out.empty() && out.back() == L'\\')
+        out.pop_back();
+    return !out.empty();
+}
+
+struct ResolvedMarkerRoot final {
+    // Final path of the longest existing prefix plus the names that do not exist.
+    std::wstring resolved;
+    std::vector<std::wstring> missing;
+    // Set only when the whole path exists.
+    std::optional<DirectoryIdentity> identity;
+};
+// Opens (never creates) the longest existing prefix of `absolute`. Returns
+// false when that cannot be established, e.g. the drive is absent or an
+// ancestor cannot be opened for a reason other than "not found"; the caller
+// treats that as unverifiable and fails closed.
+bool ResolveMarkerRoot(const std::filesystem::path &absolute, ResolvedMarkerRoot &out) {
+    std::vector<std::wstring> parts;
+    for (const auto &part : absolute.relative_path())
+        parts.push_back(part.wstring());
+    for (std::size_t keep = parts.size() + 1; keep-- > 0;) {
+        std::filesystem::path prefix = absolute.root_path();
+        for (std::size_t index = 0; index < keep; ++index)
+            prefix /= parts[index];
+        HANDLE handle = CreateFileW(prefix.c_str(), FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            if (keep > 0 && IsNotFoundError(GetLastError()))
+                continue;
+            return false;
+        }
+        std::wstring final_path;
+        DirectoryIdentity identity;
+        const bool path_ok = QueryFinalPath(handle, final_path);
+        const bool identity_ok = QueryDirectoryIdentity(handle, identity);
+        CloseHandle(handle);
+        if (!path_ok)
+            return false;
+        out.missing.assign(parts.begin() + static_cast<std::ptrdiff_t>(keep), parts.end());
+        out.resolved = final_path;
+        for (const auto &name : out.missing)
+            out.resolved += L"\\" + name;
+        out.identity.reset();
+        if (keep == parts.size() && identity_ok)
+            out.identity = identity;
+        return true;
+    }
+    return false;
+}
+
+// Marker roots handed to the lease for tests must never designate the
+// production root, by name or by alias. Called only when a test root is
+// supplied; the default production path never reaches it.
+void RejectProductionAliasedTestRoot(const std::filesystem::path &test_marker_root) {
+    bool alias = true;
+    try {
+        alias = IsProductionDualDelegationMarkerRoot(test_marker_root);
+    } catch (const TransportError &) {
+        throw;
+    } catch (const std::exception &) {
+        alias = true;
+    }
+    if (alias)
+        throw TransportError("camera_control_marker_failed",
+                             "test marker root must not be the production marker root or unverifiable");
+}
+
 } // namespace
 
 bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept {
     return IsTestLeaseName(lease_name);
 }
 
-bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root) {
-    const auto normalize = [](const std::filesystem::path &path) {
-        std::wstring text = path.lexically_normal().wstring();
-        std::replace(text.begin(), text.end(), L'/', L'\\');
-        while (!text.empty() && text.back() == L'\\')
-            text.pop_back();
-        return text;
-    };
-    const std::wstring candidate = normalize(marker_root);
+bool DualDelegationMarkerRootMayAlias(const std::filesystem::path &candidate,
+                                      const std::filesystem::path &reference) {
     if (candidate.empty())
         return false;
-    const std::wstring production = normalize(ProductionMarkerRoot());
-    return CompareStringOrdinal(candidate.c_str(), static_cast<int>(candidate.size()), production.c_str(),
-                                static_cast<int>(production.size()), TRUE) == CSTR_EQUAL;
+    const auto candidate_path = NormalizedDrivePath(candidate);
+    const auto reference_path = NormalizedDrivePath(reference);
+    if (!candidate_path || !reference_path)
+        return true;
+    if (EqualsIgnoreCase(candidate_path->wstring(), reference_path->wstring()))
+        return true;
+    ResolvedMarkerRoot resolved_candidate, resolved_reference;
+    if (!ResolveMarkerRoot(*candidate_path, resolved_candidate) ||
+        !ResolveMarkerRoot(*reference_path, resolved_reference))
+        return true;
+    if (std::any_of(resolved_candidate.missing.begin(), resolved_candidate.missing.end(), IsAliasProneName))
+        return true;
+    if (resolved_candidate.identity && resolved_reference.identity &&
+        *resolved_candidate.identity == *resolved_reference.identity)
+        return true;
+    return EqualsIgnoreCase(resolved_candidate.resolved, resolved_reference.resolved);
+}
+
+bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root) {
+    if (marker_root.empty())
+        return false;
+    return DualDelegationMarkerRootMayAlias(marker_root, ProductionMarkerRoot());
 }
 
 HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chrono::milliseconds wait)
@@ -229,6 +396,13 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
 
     if (!test_marker_root.empty() && (lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name)))
         throw TransportError("camera_control_marker_failed", "test marker root requires test lease name");
+    // The reverse pairing -- a test lease name with the production marker root
+    // or an alias of it -- is refused here, before any directory is created or
+    // scanned. Only a supplied test root reaches this check; the production
+    // default (empty root) is unchanged.
+    const bool test_root_supplied = !test_marker_root.empty();
+    if (test_root_supplied)
+        RejectProductionAliasedTestRoot(test_marker_root);
     durable_marker_enabled_ = lease_name == kProductionLeaseName || !test_marker_root.empty();
     if (durable_marker_enabled_) {
         const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
@@ -259,6 +433,8 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
                 // then reject on ANY matching marker from ANY session before
                 // falling back to the original same-session-only check.
                 const auto root = std::filesystem::path(marker_path_).parent_path();
+                if (test_root_supplied)
+                    RejectProductionAliasedTestRoot(root);
                 RequireSafeDirectoryTree(root);
                 RejectAnyArmedSessionMarker(root);
                 RejectMarker(marker_path_);
@@ -560,6 +736,11 @@ bool HardwareProcessLease::ValidateWorkerDelegation(void *inherited_parent_proce
     try {
         if (!IsSafeLeaseName(lease_name) || epoch.empty() || !IsLowerHex(epoch, 32) ||
             (!test_marker_root.empty() && (lease_name == kProductionLeaseName || !IsTestLeaseName(lease_name))))
+            return false;
+        // A test lease name with the production marker root (or an alias of it,
+        // or a root that cannot be verified) is refused; a throw lands in the
+        // catch below and fails closed.
+        if (!test_marker_root.empty() && IsProductionDualDelegationMarkerRoot(test_marker_root))
             return false;
 #if defined(A0_NIKON_SDK_AVAILABLE)
         if (lease_name != kProductionLeaseName || !test_marker_root.empty()) return false;

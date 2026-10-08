@@ -41,14 +41,28 @@ struct DualDelegationCloseEvidence final {
 // True when `lease_name` is a test lease name, the only kind that may be paired
 // with a test marker root. The production lease name is not a test name.
 [[nodiscard]] bool IsHardwareProcessTestLeaseName(std::string_view lease_name) noexcept;
-// True when `marker_root` designates the per-user production dual-delegation
-// marker root (compared ignoring case and separator style). Throws
-// TransportError when the production root cannot be resolved, so callers fail
-// closed instead of treating an unverifiable root as safe. The comparison is on
-// strings: 8.3 short names, trailing dots, and subst aliases are not detected.
-// Junctions and symlinks are stopped by the lease layer's reparse-point
+// True when `marker_root` is, or cannot be shown to differ from, the per-user
+// production dual-delegation marker root. An empty path is not a root and
+// yields false. Throws TransportError when the production root cannot be
+// resolved, so callers fail closed instead of treating an unverifiable root as
+// safe. The comparison follows `DualDelegationMarkerRootMayAlias`: aliases that
+// resolve to an existing directory (8.3 short names, trailing dots and spaces,
+// subst drives, junctions) are matched by volume/file ID and final path, and a
+// name that does not exist yet is refused when it contains `~`, `:` or ends in
+// a dot or space. Limits: the check is made at one point in time, so the lease
+// repeats it after taking the mutex; a root that is replaced between that check
+// and its use is still stopped only by the lease layer's reparse-point
 // rejection. Alias hardening is tracked in #246.
 [[nodiscard]] bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root);
+// Pure alias test behind IsProductionDualDelegationMarkerRoot, with the
+// reference root supplied by the caller. It only opens directories to read
+// their identity; it never creates, writes, or deletes anything. True when
+// `candidate` equals `reference` after normalization, resolves to the same
+// directory, or cannot be verified (not an absolute drive-letter path, a
+// drive or ancestor that cannot be opened, or a name that does not exist yet
+// and looks like an alias). An empty `candidate` yields false.
+[[nodiscard]] bool DualDelegationMarkerRootMayAlias(const std::filesystem::path &candidate,
+                                                    const std::filesystem::path &reference);
 
 // Serializes all real-camera Phase 0 commands across processes in the current
 // interactive Windows logon session. Cross-session/service enforcement is an
