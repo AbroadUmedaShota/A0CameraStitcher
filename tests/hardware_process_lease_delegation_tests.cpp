@@ -339,13 +339,15 @@ bool LeaseRejectsAsMarkerFailure(const std::string &n, const std::filesystem::pa
 }
 // Lower-cases with the invariant locale (not the user's code page), so the
 // case-variant spellings below mean the same thing on every machine.
-std::filesystem::path LowerCased(const std::filesystem::path &path) {
-    const std::wstring text = path.wstring();
+std::wstring LowerInvariant(const std::wstring &text) {
     std::wstring lowered(text.size(), L'\0');
     const int written = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, text.c_str(),
                                       static_cast<int>(text.size()), lowered.data(),
                                       static_cast<int>(lowered.size()), nullptr, nullptr, 0);
-    return written == static_cast<int>(text.size()) ? std::filesystem::path(lowered) : path;
+    return written == static_cast<int>(text.size()) ? lowered : text;
+}
+std::filesystem::path LowerCased(const std::filesystem::path &path) {
+    return LowerInvariant(path.wstring());
 }
 bool EnvironmentFlag(const wchar_t *name) {
     wchar_t value[8]{};
@@ -387,10 +389,8 @@ int RemoveStaleTestDrives() {
         for (const wchar_t *cursor = buffer.data(); cursor < end && *cursor != 0;
              cursor += std::wcslen(cursor) + 1) {
             const std::wstring target(cursor);
-            std::wstring folded = target;
-            CharLowerBuffW(folded.data(), static_cast<DWORD>(folded.size()));
-            std::wstring marker(kSubstTargetMarker);
-            CharLowerBuffW(marker.data(), static_cast<DWORD>(marker.size()));
+            const std::wstring folded = LowerInvariant(target);
+            const std::wstring marker = LowerInvariant(std::wstring(kSubstTargetMarker));
             if (!target.starts_with(L"\\??\\") || folded.find(marker) == std::wstring::npos) continue;
             if (DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_RAW_TARGET_PATH | DDD_EXACT_MATCH_ON_REMOVE |
                                      kNoBroadcast,
@@ -611,6 +611,47 @@ int RunAliasHardeningTests() {
         notes += "junction case not run: mklink /J failed; ";
     }
 
+    // A root whose own name ends in a space or in two or more dots. Win32 trims
+    // such a character only from the last name of a path, so the identity check
+    // sees the ordinary directory "tsp" while a marker or a child written below
+    // the root goes through the junction named "tsp " (or "tsp.."). The junction
+    // is created with a trailing separator so that the name is kept as written,
+    // and removed with an extended-length path so that it is not trimmed.
+    const auto trimmed_twin = scratch / L"tsp";
+    if (!std::filesystem::create_directory(trimmed_twin)) return 2;
+    Check(!overlaps(trimmed_twin, reference), "an ordinary directory beside the trailing-name junctions must not overlap");
+    const auto reference_is_untouched = [&reference] {
+        std::error_code error;
+        bool untouched = true;
+        for (const auto &entry : std::filesystem::directory_iterator(reference, error)) {
+            (void)entry;
+            untouched = false;
+        }
+        return !error && untouched;
+    };
+    for (const wchar_t *const trailing : {L"tsp ", L"tsp.."}) {
+        const auto trailing_root = scratch / trailing;
+        if (!CreateJunctionFixture(scratch / (std::wstring(trailing) + L"\\"), reference)) {
+            notes += "trailing-name junction case not run: mklink /J failed; ";
+            continue;
+        }
+        Check(overlaps(trailing_root, reference), "a junction whose name ends in a space or dots must overlap");
+        Check(overlaps(trailing_root / L"sub", reference), "a child of such a junction must overlap");
+        Check(LeaseRejectsAsMarkerFailure(name, trailing_root),
+              "a junction whose name ends in a space or dots must be refused by the lease layer");
+        Check(LeaseRejectsAsMarkerFailure(name, trailing_root / L"sub"),
+              "a child of such a junction must be refused by the lease layer");
+        Check(reference_is_untouched(), "refusing a trailing-name junction must not write into its target");
+        RemoveDirectoryW((L"\\\\?\\" + scratch.wstring() + L"\\" + trailing).c_str());
+        Check(GetFileAttributesW((L"\\\\?\\" + scratch.wstring() + L"\\" + trailing).c_str()) == INVALID_FILE_ATTRIBUTES,
+              "the trailing-name junction must be removed after its cases");
+    }
+    // The name rule holds for a name that does not exist as well.
+    Check(overlaps(scratch / L"absent-tail " / L"sub", reference), "an absent name ending in a space must overlap");
+    Check(overlaps(scratch / L"absent-tail.." / L"sub", reference), "an absent name ending in dots must overlap");
+    Check(!overlaps(scratch / L"absent-tail", reference), "a plain absent name must not overlap");
+    std::filesystem::remove(trimmed_twin, ignored);
+
     // subst-style drive mapped onto the reference's parent.
     if (skip_subst) {
         notes += "subst case not run: A0_LEASE_TEST_SKIP_SUBST=1; ";
@@ -727,7 +768,9 @@ int RunAliasHardeningTests() {
               << ",\"stale_drives_removed\":" << stale_removed
               << ",\"notes\":\"" << notes << "\"}\n";
     return 0;
-}// Defense in depth (CWE-73, external control of file name/path) for the only
+}
+
+// Defense in depth (CWE-73, external control of file name/path) for the only
 // entry point that lets argv reach HardwareProcessLease's constructor as a
 // lease name and marker root: a production-shaped lease name paired with an
 // empty root would otherwise fall through to the *production* marker root

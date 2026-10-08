@@ -234,6 +234,13 @@ bool IsNotFoundError(DWORD error) noexcept {
 // a name that the file system would rewrite when it is created or opened (8.3
 // short-name syntax, an alternate data stream selector, a trailing dot or
 // space) is treated as a possible alias instead of a new directory.
+// True for a name that ends in a dot or space or contains a colon. This holds
+// for a name that exists as well: the file system rewrites such a name only when
+// it is the last name of a path, not when it is an inner name.
+bool HasTrimmedOrStreamName(const std::wstring &name) noexcept {
+    return !name.empty() &&
+           (name.back() == L'.' || name.back() == L' ' || name.find(L':') != std::wstring::npos);
+}
 bool IsAliasProneName(const std::wstring &name) noexcept {
     return name.empty() || name.find_first_of(L"~:") != std::wstring::npos || name.back() == L'.' ||
            name.back() == L' ';
@@ -379,6 +386,15 @@ RootOverlapResult CheckMarkerRootOverlap(const std::filesystem::path &candidate,
         return {RootOverlap::unverifiable, ERROR_BAD_PATHNAME};
     if (IsSameOrBeneath(candidate_path->wstring(), reference_path->wstring()))
         return {RootOverlap::within_reference, 0};
+    // Win32 trims a trailing dot or space only from the last name of a path. The
+    // identity check above opens the root as the last name ("foo"), but every
+    // later use appends a file or a child name, which turns the root name into an
+    // inner name that is kept as written ("foo "). The two can be different
+    // directories, so such a name is refused whether or not it exists.
+    for (const auto &part : candidate_path->relative_path()) {
+        if (HasTrimmedOrStreamName(part.wstring()))
+            return {RootOverlap::alias_prone_name, 0};
+    }
     ResolvedMarkerRoot resolved_candidate, resolved_reference;
     if (!ResolveMarkerRoot(*candidate_path, resolved_candidate))
         return {RootOverlap::unverifiable, resolved_candidate.error};

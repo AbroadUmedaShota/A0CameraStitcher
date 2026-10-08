@@ -44,29 +44,40 @@ struct DualDelegationCloseEvidence final {
 // True when `marker_root` is the per-user production data root
 // (`%LOCALAPPDATA%\A0CameraStitcher`, which holds the production dual-delegation
 // marker root and the recovery records beside it), lies inside it, or cannot be
-// shown to lie outside it. An empty path is not a root and yields false. Throws
-// TransportError when LocalAppData cannot be resolved, so callers fail closed
-// instead of treating an unverifiable root as safe. The comparison follows
-// `MarkerRootMayOverlap`: names that resolve to an existing directory (8.3 short
-// names, trailing dots and spaces, subst drives, junctions) are matched by
-// volume/file ID and final path, and a name that does not exist yet is refused
-// when it contains `~` or `:` or ends in a dot or space.
+// shown to lie outside it. An empty path yields false: this function says
+// nothing about whether an empty root is acceptable, so do not use it to decide
+// that. Throws TransportError when LocalAppData cannot be resolved, so callers
+// fail closed instead of treating an unverifiable root as safe. The comparison
+// follows `MarkerRootMayOverlap`: names that resolve to an existing directory
+// (8.3 short names, subst drives, junctions) are matched by volume/file ID and
+// final path; a name that does not exist yet is refused when it contains `~`;
+// and any name, existing or not, that contains `:` or ends in a dot or space is
+// refused (see `MarkerRootMayOverlap`).
 //
 // Limits. The check is made at one point in time and the lease repeats it after
-// taking the mutex. A junction or symlink swapped in later is stopped by the
-// lease layer's reparse-point rejection. A drive letter that is re-mapped (for
-// example by subst) after the last check is not detected. Even for a junction,
-// a swap between the last check and the directory or marker write can let one
-// write land through it before the rejection.
+// taking the mutex. A drive letter that is re-mapped (for example by subst)
+// after the last check is not detected. A swap between the last check and the
+// directory or marker write can let one write land through a junction or
+// symlink before the lease layer's reparse-point rejection stops it. That
+// rejection is not a backstop for a root whose own name ends in a dot or space:
+// Win32 trims such a trailing character only from the last name of a path, so
+// the reparse check sees `foo` while the marker is written through `foo `. That
+// spelling is closed by the name rule above, not by the reparse check. A volume
+// mounted on a folder inside the data root and then addressed through its own
+// drive letter is not detected, because the final path comes back on the drive
+// letter side; the production marker root itself refuses reparse points, so it
+// cannot sit there. Only the current user's LocalAppData is checked.
 [[nodiscard]] bool MarkerRootMayTouchProductionData(const std::filesystem::path &marker_root);
 // Pure overlap test behind MarkerRootMayTouchProductionData, with the
 // reference root supplied by the caller. It only opens directories to read
 // their identity; it never creates, writes, or deletes anything. True when
 // `candidate` equals `reference` or lies beneath it after normalization,
 // resolves to such a directory, or cannot be verified (not an absolute
-// drive-letter path, a drive or ancestor that cannot be opened, or a name that
-// does not exist yet and looks like an alias). An empty `candidate` yields
-// false; a sibling or an ancestor of `reference` yields false.
+// drive-letter path, a drive or ancestor that cannot be opened, a name that
+// does not exist yet and contains `~`, or any name in `candidate`, existing or
+// not, that contains `:` or ends in a dot or space). An empty `candidate`
+// yields false, so this must not be used to decide whether an empty root is
+// acceptable; a sibling or an ancestor of `reference` yields false.
 [[nodiscard]] bool MarkerRootMayOverlap(const std::filesystem::path &candidate,
                                         const std::filesystem::path &reference);
 // Serializes all real-camera Phase 0 commands across processes in the current
