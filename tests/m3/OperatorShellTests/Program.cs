@@ -4462,11 +4462,22 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
         Check.False(viewModel.IsBusy, "A blocked capture press must not leave the UI busy.");
 
+        // Pressing stop again while the same request is still in flight waits out the budget once
+        // more and is unconfirmed again. It must not register a second observer for that request.
+        var stopAgainTask = viewModel.StopContinuousLiveViewAsync();
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await stopAgainTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed && viewModel.IsContinuousLiveViewActive,
+            "A second stop with the request still in flight is unconfirmed again.");
+        Check.Equal(0, operations.StopCount);
+
         // The frame request returns: the display changes to "can stop again", capture stays blocked.
         operations.FrameReadReleaseGate.TrySetResult();
         await WaitUntilAsync(
             () => viewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
             "The display must switch to 'can stop again' once the frame request returned.");
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_frame_request_completed_after_unconfirmed_stop").Length - 1);
         Check.True(viewModel.ActivityText.Contains("もう一度", StringComparison.Ordinal) &&
             viewModel.ActivityText.Contains("撮影を開始しません", StringComparison.Ordinal),
             "The activity text must ask for another stop and repeat that capture does not start.");
@@ -4763,6 +4774,18 @@ static async Task HardwareSingleShutdownTellsTheOperatorWhileWaitingForTheFrameR
         Check.Equal(string.Empty, viewModel.ShutdownFrameWaitText);
         Check.True(viewModel.IsShutdownConfirming,
             "The indicator stays up for the operations' own dispose that follows, until the window closes.");
+
+        // The frame request was released while the close was still waiting for it, i.e. after the
+        // unconfirmed stop inside ShutdownAsync registered its observer. While the indicator is up
+        // it is the only notice: the observer must not write "frame request done, stop again".
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        Check.False(viewModel.ActivityText.Contains("フレーム取得が完了しました", StringComparison.Ordinal),
+            "The close indicator is the only notice while closing; ActivityText must not announce 'stop again'.");
+        Check.False(viewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
+            "The close indicator is the only notice while closing; LiveViewSummary must not announce 'stop again'.");
+        Check.False(viewModel.TechnicalDetail.Contains(
+            "continuous_live_view_frame_request_completed_after_unconfirmed_stop", StringComparison.Ordinal),
+            "The observer must not write to TechnicalDetail while the close indicator is up.");
         viewModel.Dispose();
     }
     finally
@@ -8796,6 +8819,17 @@ static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknow
         Check.False(late[0].Contains(passed, StringComparison.Ordinal) || late[2].Contains(passed, StringComparison.Ordinal),
             "The 'time has passed' sentence belongs at the head of the contact paragraph only.");
 
+        // Past the contact time too: the paragraph says both times have passed and no longer
+        // asks the operator to wait for the contact time. Exactly at that time is not past it.
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10));
+        Check.Equal(passed + contact, binding.InvalidationText.Split('\n')[3]);
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1));
+        var escalated = binding.InvalidationText.Split('\n');
+        Check.Equal(5, escalated.Length);
+        Check.Equal(passedEscalation, escalated[3]);
+        Check.True(escalated[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
+            "Past the contact time the held end time is still the one shown at the top.");
+
         // A known remaining time is a different wording and clears what was held.
         binding.ReportShutdownBlocked(code, "detail", TimeSpan.FromMinutes(2), first + TimeSpan.FromMinutes(20));
         Check.False(binding.InvalidationText.Contains(passed, StringComparison.Ordinal),
@@ -8819,17 +8853,6 @@ static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknow
         await lifecycle.DisposeAsync();
         Directory.Delete(root, recursive: true);
     }
-        // Past the contact time too: the paragraph says both times have passed and no longer
-        // asks the operator to wait for the contact time. Exactly at that time is not past it.
-        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10));
-        Check.Equal(passed + contact, binding.InvalidationText.Split('\n')[3]);
-        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1));
-        var escalated = binding.InvalidationText.Split('\n');
-        Check.Equal(5, escalated.Length);
-        Check.Equal(passedEscalation, escalated[3]);
-        Check.True(escalated[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
-            "Past the contact time the held end time is still the one shown at the top.");
-
 }
 
 // Issue #225 (review M-3, LOW): the gate hands the UI a BlockingDetail from an exception

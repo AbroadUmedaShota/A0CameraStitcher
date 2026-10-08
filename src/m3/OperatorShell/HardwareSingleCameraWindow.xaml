@@ -257,7 +257,7 @@
                                Foreground="#FF56616B"
                                AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                     <TextBlock Margin="0,12,0,0" Text="{Binding ShutdownFrameWaitText}" TextWrapping="Wrap"
-                               Foreground="#FF8E1712" FontWeight="SemiBold"
+                               Foreground="#FF774E00" FontWeight="SemiBold"
                                AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                 </StackPanel>
             </Border>

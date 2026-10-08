@@ -57,6 +57,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private bool _continuousLiveViewStopUnconfirmed;
     private bool _isShutdownConfirming;
     private bool _isShutdownWaitingForFrame;
+    // The frame loop already observed after an unconfirmed stop; pressing stop again while the
+    // same request is still in flight must not register a second observer.
+    private Task? _observedUnconfirmedFrameLoop;
     private string? _continuousLiveViewSessionId;
     private CancellationTokenSource? _continuousLiveViewLoopCancellation;
     private Task? _continuousLiveViewLoop;
@@ -982,7 +985,12 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 TechnicalDetail +=
                     "\ncontinuous_live_view_stop_unconfirmed: frame request still in flight after " +
                     $"{LiveViewStopFrameWaitBudget.TotalSeconds:0.#}s";
-                _ = ObserveFrameLoopCompletionAfterUnconfirmedStopAsync(frameLoop);
+                if (!ReferenceEquals(_observedUnconfirmedFrameLoop, frameLoop))
+                {
+                    _observedUnconfirmedFrameLoop = frameLoop;
+                    _ = ObserveFrameLoopCompletionAfterUnconfirmedStopAsync(frameLoop);
+                }
+
                 return false;
             }
 
@@ -1062,8 +1070,9 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     // operator when pressing stop again becomes useful. When the request finally returns (or
     // fails), switch the display from "waiting" to "can stop again". Display only: it sends
     // nothing, stops nothing, and leaves capture blocked until a stop is actually confirmed.
-    // Skipped when a newer stop is already running (it owns the display) and when the session
-    // has gone away or the loop belongs to an older session.
+    // Skipped when a newer stop is already running (it owns the display), while the window close
+    // indicator is up (it is the only notice then), and when the session has gone away or the
+    // loop belongs to an older session.
     private async Task ObserveFrameLoopCompletionAfterUnconfirmedStopAsync(Task frameLoop)
     {
         try
@@ -1075,8 +1084,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             // The loop reported its own failure; only the fact that it ended matters here.
         }
 
+        if (ReferenceEquals(_observedUnconfirmedFrameLoop, frameLoop))
+        {
+            _observedUnconfirmedFrameLoop = null;
+        }
+
         if (_disposed ||
             IsBusy ||
+            IsShutdownConfirming ||
             !IsContinuousLiveViewStopUnconfirmed ||
             !ReferenceEquals(_continuousLiveViewLoop, frameLoop))
         {
@@ -1983,13 +1998,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
     /// <summary>The window-close indicator second line: why it can take a while, and what to leave alone.</summary>
     public const string ShutdownConfirmingDetailMessage =
+        "確認できればこのウィンドウは閉じます。操作は不要です。" +
         "カメラの応答が遅い場合は、閉じるまでに時間がかかることがあります。" +
-        "確認できればこのウィンドウは自動で閉じます。カメラには触らず、他のカメラアプリも使わないでください。";
+        "その間はカメラに触らず、他のカメラアプリも使わないでください。";
 
     /// <summary>Shown in addition while the close waits for a frame request that has not returned.</summary>
     public const string ShutdownFrameWaitMessage =
         "Live View のフレーム取得がまだ終わっていません。終わるまで待ってから閉じます。" +
-        "Camera Agent を強制終了することはありません。";
+        "この画面が Camera Agent を強制終了することはありません。";
 
     /// <summary>
     /// True from the moment a window close starts waiting for the Camera Agent until the window is

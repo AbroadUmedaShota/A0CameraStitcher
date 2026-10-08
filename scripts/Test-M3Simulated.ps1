@@ -289,7 +289,11 @@ try {
     $hardwareWindowCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/HardwareSingleCameraWindow.xaml.cs')
     $hardwareClosingBegin = $hardwareWindowCode.IndexOf('private async void OnClosing')
     Assert-Condition ($hardwareClosingBegin -ge 0) 'The SingleCamera window must keep its OnClosing handler (issue #244).'
-    $hardwareClosingText = $hardwareWindowCode.Substring($hardwareClosingBegin)
+    # Bound the scan to OnClosing's own body (up to the next member, as for MainWindow); OnClosing is the last member
+    # today, in which case the rest of the file is its body.
+    $hardwareClosingRest = $hardwareWindowCode.Substring($hardwareClosingBegin + 1)
+    $hardwareClosingEnd = [regex]::Match($hardwareClosingRest, '\r?\n    (private|public|internal|protected)\s')
+    $hardwareClosingText = if ($hardwareClosingEnd.Success) { $hardwareClosingRest.Substring(0, $hardwareClosingEnd.Index) } else { $hardwareClosingRest }
     $hardwareBeginIndex = $hardwareClosingText.IndexOf('BeginShutdownConfirmation()')
     Assert-Condition ($hardwareBeginIndex -ge 0 -and ([regex]::Matches($hardwareClosingText, [regex]::Escape('BeginShutdownConfirmation()'))).Count -eq 1) 'The SingleCamera OnClosing must raise the close indicator exactly once (issue #244).'
     Assert-Condition ($hardwareBeginIndex -lt $hardwareClosingText.IndexOf('IsEnabled = false;')) 'The SingleCamera OnClosing must raise the close indicator before it disables the window (issue #244).'
