@@ -201,7 +201,7 @@ try {
     $closingEnd = [regex]::Match($closingRest, '\r?\n    (private|public|internal|protected)\s')
     Assert-Condition $closingEnd.Success 'The member after OnClosing could not be found to bound the scan (issue #239).'
     $closingText = $closingRest.Substring(0, $closingEnd.Index)
-    foreach ($closingToken in @('HardwareDualWindowCloseSequence.RunAsync(', 'BeginShutdownConfirmation()', 'EndShutdownConfirmation()', 'CancelBindingOnShutdownAsync()', 'ReportShutdownBlocked(', 'IsEnabled = false', 'IsEnabled = true', '_lifetime.Cancel()', '_dualBindingHostLifetimeMonitor?.Stop()', '_dualBindingHostLifetimeMonitor?.Start()')) {
+    foreach ($closingToken in @('HardwareDualWindowCloseSequence.RunAsync(', 'BeginShutdownConfirmation()', 'EndShutdownConfirmation()', 'CancelBindingOnShutdownAsync()', 'ReportShutdownBlocked(', 'IsEnabled = false', 'IsEnabled = true', '_shutdownStarted = true', '_shutdownStarted = false', '_lifetime.Cancel()', '_dualBindingHostLifetimeMonitor?.Stop()', '_dualBindingHostLifetimeMonitor?.Start()')) {
         $closingTokenCount = ([regex]::Matches($closingText, [regex]::Escape($closingToken))).Count
         Assert-Condition ($closingTokenCount -eq 1) "OnClosing must contain '$closingToken' exactly once; found $closingTokenCount (issues #228, #239)."
     }
