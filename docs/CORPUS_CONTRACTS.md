@@ -45,6 +45,14 @@ oracleは期待結果を製品実行より前に宣言し、次をすべて`fals
 
 例はcontract sensitivity専用で、正常specを`Accept`、宣言済みdamageを含むspecを`Reject`とする。A0品質の数値閾値や、実画像の合否を定義していない。
 
+## 印刷用の版下（print master）
+
+vector specは、印刷して撮影に使うチャートの版下（SVG）を`printMaster`で指せる。現在はpilot用の2系統（Issue #276）で、`pilot-chart-development-v1.json`（split `development`、版`A0CS-PILOT-DEV v1`）と`pilot-chart-holdout-v1.json`（split `locked-holdout`、版`A0CS-PILOT-HOLD v1`）がある。版下は`samples/public/pilot-chart/`に置く。
+
+`printMaster`には版のID・版、作った先のsplit、版下のpathとSHA-256、A0の寸法、重なり帯（#43のv0.1候補）、基準点の一覧を書く。検証は、版下のハッシュ、`841mm` x `1189mm`と`viewBox 0 0 841 1189`、版のIDとVERSIONの印字、SVGの基準点と一覧の一致、最小の重なり帯に入る基準点の数、非対称の基準点、画像や外部リソースの埋め込みが無いこと、manifestで作った先のsplitに置かれていること、版どうしでID・ハッシュ・基準点の配置が重ならないことを確かめる。
+
+印刷用PDFは派生物としてcommitしない。作り方と印刷仕様は[PILOT_CHART.md](PILOT_CHART.md)。
+
 ## 自動検証
 
 ```powershell
