@@ -2904,15 +2904,14 @@ public sealed class OperatorShellViewModel : ObservableObject
                         ExportResult = "集約証跡未作成（Hardware Pending）";
                     }
 
-                    // The coordinator's detail is English and diagnostic. While the last ID is unconfirmed the
-                    // operator needs the next step instead, so the detail moves to the technical detail.
-                    var lastIdUnconfirmed = run.LastOutcome is { RecoveryPending: true };
-                    StatusMessage = lastIdUnconfirmed ? CaptureRecoveryOnlyUnconfirmedStatusText : run.Detail;
+                    // The coordinator's detail is English and diagnostic, so the operator gets the status text
+                    // for how the series ended (GitHub Issue #251) and the detail moves to the technical detail.
+                    StatusMessage = CaptureRecoveryOnlyFiveRunStatusText.Build(run);
                     TechnicalDetail =
                         $"runId={runId} / requested=5 / attempted={run.AttemptedCount} / " +
                         $"status={run.Status} / capturePurpose=CaptureRecoveryOnly / " +
-                        "stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0" +
-                        (lastIdUnconfirmed ? $" / detail={run.Detail}" : string.Empty);
+                        "stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0 / " +
+                        $"detail={run.Detail}";
                     return;
                 }
 
