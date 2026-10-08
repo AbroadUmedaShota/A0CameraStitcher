@@ -346,6 +346,38 @@ try {
             Assert-Condition ([string]::IsNullOrEmpty($announceName) -or $announceName.StartsWith('{Binding')) "$($liveRegionWindow.Name) <$($announceNode.LocalName) Text=$($announceNode.GetAttribute('Text'))> has a fixed AutomationProperties.Name ""$announceName"" on a LiveRegion.Announce element; delete it or bind it to the text (issue #238)."
         }
     }
+    # Issue #242: the main capture button is shown only while the action zone is in its preparing state. During a run
+    # the progress strip replaces it, which is why the re-check wording cannot flash on it when the stored ID is set mid-run.
+    foreach ($commandName in @('CaptureCommand', 'CaptureWithAutoFocusCommand')) {
+        $captureButtons = @($windowXml.SelectNodes("//*[local-name()='Button'][@Command='{Binding $commandName}']"))
+        Assert-Condition ($captureButtons.Count -eq 1) "MainWindow.xaml must have exactly one button bound to $commandName, found $($captureButtons.Count) (issue #242)."
+        $ancestor = $captureButtons[0].ParentNode
+        $underPreparingZone = $false
+        while ($null -ne $ancestor -and $ancestor.NodeType -eq 'Element') {
+            if ($ancestor.GetAttribute('Visibility') -like '*IsActionZonePreparing*') { $underPreparingZone = $true; break }
+            $ancestor = $ancestor.ParentNode
+        }
+        Assert-Condition $underPreparingZone "The button bound to $commandName must sit under the element whose Visibility is bound to IsActionZonePreparing (issue #242)."
+    }
+    # Issue #242: in the result panel the re-stitch button and the prepare-new-capture button used to sit in the
+    # same Grid cell, so one covered the other. They must occupy different cells, and the re-stitch button is only
+    # shown on the ordinary two-camera path.
+    $restitchButtons = @($windowXml.SelectNodes('//*[local-name()="Button"][@Command="{Binding RestitchCommand}"]'))
+    Assert-Condition ($restitchButtons.Count -eq 1) "MainWindow.xaml must have exactly one re-stitch button, found $($restitchButtons.Count) (issue #242)."
+    $restitchButton = $restitchButtons[0]
+    Assert-Condition ($restitchButton.GetAttribute('Visibility') -like '*IsRestitchButtonVisible*') 'The re-stitch button must bind its Visibility to IsRestitchButtonVisible so that it is hidden where it can never apply (issue #242).'
+    $gridCellOf = {
+        param($node)
+        $row = $node.GetAttribute('Grid.Row'); if ([string]::IsNullOrEmpty($row)) { $row = '0' }
+        $column = $node.GetAttribute('Grid.Column'); if ([string]::IsNullOrEmpty($column)) { $column = '0' }
+        "$row,$column"
+    }
+    $restitchCell = & $gridCellOf $restitchButton
+    $siblingButtons = @($restitchButton.ParentNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -eq 'Button' -and -not [object]::ReferenceEquals($_, $restitchButton) })
+    Assert-Condition ($siblingButtons.Count -ge 2) 'The re-stitch button must share its Grid with the prepare-new-capture and accept buttons (issue #242).'
+    foreach ($siblingButton in $siblingButtons) {
+        Assert-Condition ((& $gridCellOf $siblingButton) -ne $restitchCell) "Button '$($siblingButton.GetAttribute('Content'))' shares Grid cell ($restitchCell) with the re-stitch button; one covers the other (issue #242)."
+    }
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0
 }

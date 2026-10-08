@@ -1254,7 +1254,7 @@
                                                     <TextBlock Grid.Row="1" Text="撮影" />
                                                     <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureResult}" Margin="10,0,0,3"
                                                                Foreground="{StaticResource TextSecondaryBrush}" />
-                                                    <TextBlock Grid.Row="2" Text="保持原画像" />
+                                                    <TextBlock Grid.Row="2" Text="保管した原画像" />
                                                     <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RetainedOriginals}" Margin="10,0,0,3"
                                                                Foreground="{StaticResource TextSecondaryBrush}" />
                                                     <TextBlock Grid.Row="3" Text="{Binding ProcessingResultLabel}" />
@@ -1355,16 +1355,23 @@
                                                         <ColumnDefinition Width="8" />
                                                         <ColumnDefinition Width="*" />
                                                     </Grid.ColumnDefinitions>
-                                                    <Button Grid.Column="0" Content="撮影済み画像で再合成" Command="{Binding RestitchCommand}"
-                                                            IsEnabled="{Binding CanRestitch}"
-                                                            FontSize="{StaticResource FontSizeBody}" />
-                                                    <Button Grid.Column="0" Content="{Binding PrepareNewCaptureText}" Command="{Binding PrepareNewCaptureCommand}"
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <Button Grid.Row="0" Grid.Column="0" Content="{Binding PrepareNewCaptureText}" Command="{Binding PrepareNewCaptureCommand}"
                                                             IsEnabled="{Binding CanPrepareNewCapture}"
                                                             FontSize="{StaticResource FontSizeBody}"
-                                                            AutomationProperties.Name="撮り直しの準備へ 旧原画像を保持し撮影を開始しない" />
-                                                    <Button Grid.Column="2" Content="{Binding ReviewPrimaryActionText}" Command="{Binding AcceptReviewCommand}"
+                                                            AutomationProperties.Name="撮り直しの準備へ 旧原画像をアプリ内に保管したまま撮影を開始しない" />
+                                                    <Button Grid.Row="0" Grid.Column="2" Content="{Binding ReviewPrimaryActionText}" Command="{Binding AcceptReviewCommand}"
                                                             IsEnabled="{Binding CanAcceptReview}" FontSize="{StaticResource FontSizeBody}"
                                                             AutomationProperties.Name="結果を採用して次へ 人の確認を記録後のみ撮影準備へ進む" />
+                                                    <!-- 再合成は2台の通常経路だけの操作。撮り直しの準備へと同じ枠に重ねず、別の段に置く。 -->
+                                                    <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                                                            Content="撮影済み画像で再合成" Command="{Binding RestitchCommand}"
+                                                            IsEnabled="{Binding CanRestitch}"
+                                                            Visibility="{Binding IsRestitchButtonVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                            FontSize="{StaticResource FontSizeBody}" />
                                                 </Grid>
                                             </StackPanel>
 

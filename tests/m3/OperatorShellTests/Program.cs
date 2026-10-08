@@ -3370,7 +3370,7 @@ static async Task HardwareSingleHappyPathAsync()
             File.ReadAllBytes(capturedOriginalPath!).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
             "Hardware export must be byte-identical to the canonical original.");
         Check.True(
-            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-B）。", StringComparison.Ordinal) &&
+            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-", StringComparison.Ordinal) &&
             viewModel.ExportSummary.Contains(HardwareSingleCameraViewModel.ExportSuccessTechnicalText, StringComparison.Ordinal),
             $"The UI must report the saved original and its provenance. Actual: {viewModel.ExportSummary}");
         Check.True(await store.LoadPendingAsync() is not null, "A terminal result must remain durable until explicit operator preparation.");
@@ -6201,6 +6201,7 @@ static async Task DualCameraRegressionAsync()
         await viewModel.InitializeAsync(CancellationToken.None);
         Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the safe default for the existing workflow.");
         Check.True(viewModel.CaptureButtonText.Contains("2台", StringComparison.Ordinal), "The dual action must remain explicit.");
+        Check.True(viewModel.IsRestitchButtonVisible, "The ordinary two-camera path owns the re-stitch button.");
         Check.True(viewModel.BindingMenuHeader.Contains("模擬", StringComparison.Ordinal),
             "The simulated shell must keep its binding demonstration labeled as simulated.");
         Check.True(viewModel.MenuBarAutomationName.Contains("表示", StringComparison.Ordinal) &&
@@ -6545,10 +6546,19 @@ static async Task FormalDualCameraWpfFlowAsync()
         await recoveryViewModel.InitializeAsync(CancellationToken.None);
         recoveryViewModel.AcceptSafetyCommand.Execute(null);
         await CompleteDualBindingAsync(recoveryViewModel.DualBinding);
+        // GitHub Issue #242: a new capture reads as a capture; once the response is unknown the
+        // main button only re-checks that ID (RecoverAndStitchAsync) and says so.
+        Check.Equal("2台を順次撮影する（確認なし）", recoveryViewModel.CaptureButtonText);
+        Check.False(recoveryViewModel.CaptureButtonAutomationName.Contains("撮影しません", StringComparison.Ordinal),
+            "A new capture must keep the capture wording of the accessible name.");
         await ExecuteNativeCommandAsync(recoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !recoveryViewModel.IsBusy && recoveryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
             "HardwareDual WPF response-unknown state was not retained.");
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonText, recoveryViewModel.CaptureButtonText);
+        Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", recoveryViewModel.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+            recoveryViewModel.CaptureButtonAutomationName);
         recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
         var restartedRecoveryFlow = new DualCameraProductFlow(
             recoveryProductRoot,
@@ -6568,6 +6578,9 @@ static async Task FormalDualCameraWpfFlowAsync()
         await restartedRecoveryViewModel.InitializeAsync(CancellationToken.None);
         restartedRecoveryViewModel.AcceptSafetyCommand.Execute(null);
         Check.True(restartedRecoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after restart with current identity Pending.");
+        Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", restartedRecoveryViewModel.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+            restartedRecoveryViewModel.CaptureButtonAutomationName);
         await ExecuteNativeCommandAsync(restartedRecoveryViewModel.CaptureCommand);
         await WaitUntilAsync(
             () => !restartedRecoveryViewModel.IsBusy && restartedRecoveryFlow.Current?.FailureCode == DualCameraFailureCode.None,
@@ -6578,6 +6591,11 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal(1, recoveryOperations.StartCalls);
         Check.Equal(2, recoveryOperations.QueryCalls);
         Check.Equal(OperatorUiState.Review, restartedRecoveryViewModel.UiState);
+        // Pressing the re-check button asked the stored ID only: no new request was built, and once
+        // it is resolved the main button goes back to the capture wording.
+        Check.Equal("2台を順次撮影する（確認なし）", restartedRecoveryViewModel.CaptureButtonText);
+        Check.False(restartedRecoveryViewModel.CaptureButtonAutomationName.Contains("撮影しません", StringComparison.Ordinal),
+            "A resolved ID must restore the capture wording of the accessible name.");
         var recoveryStatePath = Path.Combine(
             recoveryProductRoot,
             "recovery-state",
@@ -7000,10 +7018,21 @@ static async Task SingleCameraWorkflowAsync()
     {
         var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
         await viewModel.InitializeAsync(CancellationToken.None);
+        var restitchVisibilityChanges = 0;
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(OperatorShellViewModel.IsRestitchButtonVisible))
+            {
+                restitchVisibilityChanges++;
+            }
+        };
+        Check.True(viewModel.IsRestitchButtonVisible, "Positive control: the two-camera mode shows the re-stitch button.");
         viewModel.SelectedOperatingMode = "1台構成";
         viewModel.SelectedCamera = "CAM-B";
 
         Check.True(viewModel.IsSingleCameraMode, "The operator must explicitly select Single mode.");
+        Check.False(viewModel.IsRestitchButtonVisible, "One camera has nothing to stitch, so the button is not shown.");
+        Check.True(restitchVisibilityChanges > 0, "Switching the mode must update the re-stitch button.");
         Check.True(viewModel.CaptureButtonText.Contains("CAM-B", StringComparison.Ordinal), "The capture action must name the selected body.");
         Check.True(viewModel.CameraAStatus.Contains("構成対象外", StringComparison.Ordinal), "Inactive CAM-A must be shown as outside the plan.");
         Check.False(viewModel.CanCapture, "Safety acknowledgment remains mandatory in Single mode.");
@@ -10039,8 +10068,21 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         initialRecoveryShell.AcceptSafetyCommand.Execute(null);
         initialRecoveryShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(initialRecoveryShell.DualBinding);
+        // GitHub Issue #242: while a new capture is running, the workflow already holds the ID as
+        // pending. The re-check wording must not be on screen then: the action zone shows the
+        // progress strip, not the main button.
+        (bool Pending, bool ZonePreparing, bool ZoneProcessing, bool Busy)? duringCapture = null;
+        wpfRecoveryOperations.OnCaptureRecoveryOnlyStart = () =>
+            duringCapture = (
+                initialWpfRecovery.HasPendingRecovery,
+                initialRecoveryShell.IsActionZonePreparing,
+                initialRecoveryShell.IsActionZoneProcessing,
+                initialRecoveryShell.IsBusy);
         await ownedCommands.ExecuteAsync(initialRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/response-unknown",
             () => WpfCommandState.Create(initialRecoveryShell, wpfRecoveryOperations));
+        wpfRecoveryOperations.OnCaptureRecoveryOnlyStart = null;
+        Check.True(duringCapture is { Pending: true, ZonePreparing: false, ZoneProcessing: true, Busy: true },
+            $"During a new capture the main button must not be shown. Actual: {duringCapture}");
         Check.True(!initialRecoveryShell.IsBusy && initialWpfRecovery.HasPendingRecovery,
             "The initial WPF response-unknown run did not leave a same-ID recovery snapshot.");
         Check.Equal(1, initialRecoveryTransport.ActivateCaptureCalls);
@@ -10055,6 +10097,14 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             "A RecoveryPending CaptureRecoveryOnly result must not be exportable until a terminal result is confirmed.");
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText,
             initialRecoveryShell.CaptureRecoveryOnlyExportDisabledReason);
+        // GitHub Issue #242: the status text says what the main button can do; nothing runs by itself.
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText, initialRecoveryShell.StatusMessage);
+        Check.True(
+            initialRecoveryShell.StatusMessage.Contains("主ボタンで同じ撮影IDの結果だけを確認できます", StringComparison.Ordinal) &&
+            !initialRecoveryShell.StatusMessage.Contains("再確認します", StringComparison.Ordinal),
+            "The status text must not read as if the check starts by itself.");
+        Check.Equal("結果不明（同じ撮影IDのみ再確認可）", initialRecoveryShell.CaptureResult);
+        Check.Equal(1, initialRecoveryShell.TransactionStartCount);
 
         var restartedWpfRecovery = new HardwareDualCaptureRecoveryOnlyWorkflow(
             wpfRecoveryRoot, wpfRecoveryOperations, wpfRecoveryOperations, ApprovedCaptureRecoveryOnlyProfile());
@@ -10094,6 +10144,69 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(1, wpfRecoveryOperations.ReserveCalls);
         Check.Equal(1, wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(2, wpfRecoveryOperations.QueryRecoveryOnlyCalls);
+
+        // GitHub Issue #242: the five-run mode shows the same re-check wording while its ID is
+        // unconfirmed, and pressing the button asks the same ID only.
+        var pendingFiveOperations = new CaptureRecoveryOnlyFakeOperations(
+            adapter, responseUnknownOnce: true, queryThrowsOnce: true);
+        var pendingFiveWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+            Path.Combine(root, "wpf-five-run-pending"), pendingFiveOperations, pendingFiveOperations,
+            ApprovedCaptureRecoveryOnlyProfile());
+        var pendingFiveTransport = new CountingBindingTransport(DecodableBindingAgent());
+        // No ordinary flow here: with a HardwareDual flow the focus panel, and with it the
+        // 撮影 + AF button, is always off, which would make the AF checks below hold for any state.
+        var pendingFiveShell = new OperatorShellViewModel(
+            new SimulationFoundationService(Path.Combine(root, "wpf-five-run-pending-journals")),
+            dualCameraFlow: null,
+            dualBindingTransport: pendingFiveTransport,
+            captureRecoveryOnlyWorkflow: pendingFiveWorkflow,
+            captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
+                pendingFiveWorkflow,
+                new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "wpf-five-run-pending-evidence"))));
+        await pendingFiveShell.InitializeAsync(CancellationToken.None);
+        pendingFiveShell.IsPhysicalShutterAckAccepted = true;
+        pendingFiveShell.IsExclusiveUseAckAccepted = true;
+        pendingFiveShell.AcceptSafetyCommand.Execute(null);
+        await CompleteDualBindingAsync(pendingFiveShell.DualBinding);
+        pendingFiveShell.IsCaptureRecoveryOnlyOperatorApproved = true;
+        Check.True(pendingFiveShell.IsCaptureRecoveryOnlyFiveRunMode, "The scenario needs the five-run mode.");
+        Check.Equal("2台を順次撮影・回収する（最大5回）", pendingFiveShell.CaptureButtonText);
+        Check.True(pendingFiveShell.CanCapture && pendingFiveShell.CanCaptureWithAutoFocus,
+            "Positive control: a new capture offered on a simulated shell also offers 撮影 + AF.");
+        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-pending",
+            () => WpfCommandState.Create(pendingFiveShell, pendingFiveOperations));
+        Check.True(!pendingFiveShell.IsBusy && pendingFiveWorkflow.HasPendingRecovery,
+            "The five-run's first pair must stop with an unconfirmed ID.");
+        Check.Equal(1, pendingFiveOperations.ReserveCalls);
+        Check.Equal(1, pendingFiveOperations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText, pendingFiveShell.StatusMessage);
+        Check.True(pendingFiveShell.PrepareNewCaptureCommand.CanExecute(null),
+            "The result panel must offer the way back to the capture screen.");
+        pendingFiveShell.PrepareNewCaptureCommand.Execute(null);
+        Check.True(pendingFiveShell.CanCapture, "The main button must be pressable again after preparing.");
+        Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", pendingFiveShell.CaptureButtonText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyRecoverButtonAutomationName,
+            pendingFiveShell.CaptureButtonAutomationName);
+        Check.False(pendingFiveShell.CaptureButtonText.Contains("最大5回", StringComparison.Ordinal),
+            "A pending ID must not offer the five-run label.");
+        Check.False(pendingFiveShell.CanCaptureWithAutoFocus,
+            "撮影 + AF must stay off while the five-run's main button only re-checks the same ID.");
+        Check.False(pendingFiveShell.CaptureWithAutoFocusCommand.CanExecute(null),
+            "The 撮影 + AF command must be disabled while the main button only re-checks the same ID.");
+        var pendingFiveReserve = pendingFiveOperations.ReserveCalls;
+        var pendingFiveStart = pendingFiveOperations.CaptureRecoveryOnlyStartCalls;
+        var pendingFiveQueries = pendingFiveOperations.QueryRecoveryOnlyCalls;
+        var pendingFiveStartCount = pendingFiveShell.TransactionStartCount;
+        var pendingFiveActivations = pendingFiveTransport.ActivateCaptureCalls;
+        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-pending-press",
+            () => WpfCommandState.Create(pendingFiveShell, pendingFiveOperations));
+        Check.Equal(pendingFiveReserve, pendingFiveOperations.ReserveCalls);
+        Check.Equal(pendingFiveStart, pendingFiveOperations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(pendingFiveQueries + 1, pendingFiveOperations.QueryRecoveryOnlyCalls);
+        Check.Equal(pendingFiveStartCount, pendingFiveShell.TransactionStartCount);
+        Check.False(pendingFiveWorkflow.HasPendingRecovery, "The press must resolve the stored ID.");
+        Check.False(pendingFiveShell.CaptureButtonText.Contains("撮影しません", StringComparison.Ordinal),
+            "A resolved ID must restore the capture wording.");
 
         var refusedOperations = new CaptureRecoveryOnlyFakeOperations(adapter);
         var refusalWorkflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
@@ -10270,6 +10383,32 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             "A stop with no original must not claim retained originals.");
         Check.True(noneShell.TechnicalDetail.Contains("terminalState=", StringComparison.Ordinal),
             "The terminal state name belongs in the technical detail.");
+        // GitHub Issue #242: the "撮影" row of the result list carries the same plain wording, without
+        // the terminal-state or failure-code names.
+        Check.Equal("途中で停止（受け取れた原画像なし・詳細は技術情報）", noneShell.CaptureResult);
+        Check.Equal(OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedResultText(0), noneShell.CaptureResult);
+        Check.False(
+            noneShell.CaptureResult.Contains("FailedPartial", StringComparison.Ordinal) ||
+            noneShell.CaptureResult.Contains(": ", StringComparison.Ordinal),
+            "The result row must not show a terminal-state name or a failure code.");
+        // One word for "kept in the app" in the texts this screen shows after a stop or a failed save.
+        foreach (var text in new[]
+                 {
+                     OperatorShellViewModel.CaptureRecoveryOnlyStoppedWithoutOriginalsText,
+                     OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedText(["CAM-A"]),
+                     OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedText(["CAM-A", "CAM-B"]),
+                     OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedResultText(0),
+                     OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedResultText(2),
+                     OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyExportFolderUnusableText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText,
+                     OperatorShellViewModel.CaptureRecoveryOnlyExportDestinationFailedText,
+                 })
+        {
+            Check.False(text.Contains("保持", StringComparison.Ordinal),
+                $"The app's own store is called 保管 (or 残っています), not 保持. Actual: {text}");
+        }
         Check.Equal("この撮影では保存できる原画像がありません（カメラから画像を受け取れませんでした）。",
             OperatorShellViewModel.CaptureRecoveryOnlyExportNoOriginalsText);
     }
@@ -10403,7 +10542,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.False(pendingShell.CaptureButtonText.Contains("2台を順次撮影", StringComparison.Ordinal),
             "A pending recovery must not offer the new-capture label.");
         Check.True(OperatorShellViewModel.CaptureRecoveryOnlyExportPendingText.Contains(
-                "新しい撮影はせずに同じ撮影IDの結果だけを確認します。確認が終わると保存できるようになります。",
+                "「同じ撮影IDの結果を確認する」を押してください（新しい撮影はしません）。確認が終わると保存できます。",
                 StringComparison.Ordinal),
             "The pending reason must say what the next button press does.");
         Check.True(pendingShell.PrepareNewCaptureCommand.CanExecute(null),
@@ -10416,6 +10555,9 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             pendingOperations.OrdinaryStartCalls, pendingOperations.CapabilityPreflightCalls);
         var queriesBeforeRecoveryPress = pendingOperations.QueryRecoveryOnlyCalls;
         var startCountBeforeRecoveryPress = pendingShell.TransactionStartCount;
+        // Positive control: the earlier new capture did move the counter, so an unchanged value
+        // after the press means that no capture was started.
+        Check.Equal(1, startCountBeforeRecoveryPress);
         await ownedCommands.ExecuteAsync(pendingShell.CaptureCommand, TimeSpan.FromSeconds(5),
             "recovery-only/m1-recover-press", () => WpfCommandState.Create(pendingShell, pendingOperations));
         // Pressing the relabelled button asks the same ID only: no Reserve, Start or preflight is sent.
@@ -10432,8 +10574,10 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             root, "partial-vm", adapter, ordinaryFlow, ownedCommands, failCameraB: true);
         Check.Equal(OperatorUiState.FailedPartial, partialShell.UiState);
         Check.Equal(
-            "撮影・回収を途中で停止しました。カメラから受け取れた原画像（CAM-A）はアプリ内に保持しています。",
+            "撮影・回収を途中で停止しました。カメラから受け取れた原画像（CAM-A）はアプリ内に保管しています。",
             partialShell.StatusMessage);
+        Check.Equal("途中で停止（原画像 1 枚を保管・詳細は技術情報）", partialShell.CaptureResult);
+        Check.Equal(OperatorShellViewModel.BuildCaptureRecoveryOnlyStoppedResultText(1), partialShell.CaptureResult);
         var partialFolder = Path.Combine(root, "partial-vm-export");
         partialShell.ChangeCaptureRecoveryOnlyExportDirectory(partialFolder);
         Check.True(partialShell.CanExportCaptureRecoveryOnlyOriginals,
@@ -10446,7 +10590,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                 StringComparison.Ordinal),
             $"A one-original export must say that CAM-B was not captured. Actual: {partialShell.CaptureRecoveryOnlyExportResult}");
         Check.Equal("原画像を1枚（CAM-A のみ）保存しました。保存先はパネルの結果欄をご覧ください。", partialShell.NoticeText);
-        var exported =Directory.GetFiles(partialFolder, "*.jpg", SearchOption.TopDirectoryOnly);
+        var exported = Directory.GetFiles(partialFolder, "*.jpg", SearchOption.TopDirectoryOnly);
         Check.Equal(1, exported.Length);
         Check.True(Path.GetFileName(exported[0]).Contains("-CAM-A-", StringComparison.Ordinal),
             "The single exported file must be the CAM-A original.");
@@ -10584,7 +10728,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         Check.Equal(
             "一部だけ保存できました。CAM-A の画像は正しく保存しました。" +
             "CAM-B の画像は保存できませんでした。\n" +
-            "もう一度保存すると、CAM-A と CAM-B の2枚を別の名前でそろえて保存します。" +
+            "もう一度保存すると、CAM-A・CAM-B の2枚を別の名前でそろえて保存します。" +
             "先に保存した CAM-A のファイルはそのまま使えます。\n" +
             "撮影した原画像はアプリ内に残っています。\n" +
             "技術担当者向け: 技術情報に記録しました",
@@ -15557,6 +15701,10 @@ sealed class CaptureRecoveryOnlyFakeOperations(
     public int CloseCalls { get; private set; }
     public int AutomaticRetryCount => 0;
 
+    // Runs inside the capture start, after the workflow stored the pending ID and before the
+    // result is known: lets a test look at what the shell shows in that moment (GitHub Issue #242).
+    public Action? OnCaptureRecoveryOnlyStart { get; set; }
+
     public Task<bool> ReservePairTransactionAsync(Guid transactionId, CancellationToken cancellationToken)
     {
         ReserveCalls++;
@@ -15598,6 +15746,7 @@ sealed class CaptureRecoveryOnlyFakeOperations(
         CancellationToken cancellationToken)
     {
         CaptureRecoveryOnlyStartCalls++;
+        OnCaptureRecoveryOnlyStart?.Invoke();
         if (responseUnknownOnce)
         {
             _unknownRequest = request;
