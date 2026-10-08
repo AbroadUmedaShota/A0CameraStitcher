@@ -29,8 +29,10 @@
   and UTF-16LE), JSON, URL and HTML escapes restored, and the lines joined without line breaks and
   indentation (so a value wrapped over two lines, or a base64 string wrapped at 76 characters, is
   still found). A decoded base64 or hex string that starts like an image (JPEG, PNG, GIF, TIFF,
-  WebP) is reported as a hit; a .b64 file is accepted as an image only when it is a small dummy
-  carrying the synthetic-image notice. Binary files in the range are reported as hits.
+  WebP) is reported as a hit, unless it is one of the three pinned fixture dummy images (by SHA-256,
+  the same list as PinnedSha256 in the C# fixture check) that sits in tests/fixtures/hardware-replay/images/.
+  A .b64 file is accepted only as such a pinned dummy at that path; any other .b64 file is a hit.
+  Binary files in the range are reported as hits.
   -IncludeChangedFiles also compares the whole working tree content of every file the range
   touches.
 
@@ -88,13 +90,24 @@ $script:Latin1 = [Text.Encoding]::Latin1
 $script:Utf16 = [Text.Encoding]::Unicode
 # More photographs than this under one folder cannot be read completely: report it (exit 2).
 $script:MaxPhotosPerRoot = 2000
+# The notice the fixture dummy images carry (the self test builds its invented dummies with it; the
+# check itself does not accept an image because of the notice).
 $script:SyntheticImageNotice = 'A0 replay fixture: synthetic image, not a photograph'
-$script:SyntheticImageMaxBytes = 4096
+# The only images the check accepts: the three fixture dummies, by SHA-256, and only as
+# tests/fixtures/hardware-replay/images/<name>.jpg.b64. This is a copy of PinnedSha256 in
+# tests/m3/OperatorShellTests/HardwareReplayFixtures.cs; the OperatorShellTests compare the two
+# copies, so changing a dummy image means changing both places.
+$script:PinnedImageSha256 = @(
+    '7be3a2b90fdc9e6d8c7bcc87985aa7893f3192e8562a941f6b9b05c89b3e79c6'   # single-cam-a
+    'febcdb554f3a14f918f2cae41130d254edd38f9c207b16f24e787249a2981b19'   # dual-cam-a
+    '7c6ff5ee413bf1eca56ecef055fbfe58e42af688c1c04d60342038af701a0eda'   # dual-cam-b
+)
+$script:PinnedImageDirectory = 'tests/fixtures/hardware-replay/images/'
 # A decoded string shorter than this is a header, not a picture (the array of a JPEG header in code, say).
 # It stays below one line of wrapped base64 (48 bytes at 64 columns, 57 at 76) so that each line of a
 # wrapped picture is still checked on its own when joining the lines shifts the start of the picture.
 $script:MinEmbeddedImageBytes = 32
-# Hashes of the fixture dummy images at Head (set for each range; see Get-HeadDummyImageHashes).
+# Hashes of the pinned dummy images that sit at the pinned path at Head (set for each range; see Get-HeadPinnedImageHashes).
 $script:AllowedImageSha256 = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
 # Plain English words that are also short account or owner names. A short plain-word needle is
@@ -163,11 +176,21 @@ function Add-SerialNeedle {
     if ($trimmed -ne $Value) { Add-Needle $Set $trimmed $Category }
 }
 
+# The name of a USB / WPD device instance. A name with an '&' is an ID Windows made up because the
+# device has no serial number (6&1a2b3c4d&0&1): it is compared like a serial, but it does not say
+# which camera body it is, so it has a category of its own and does not count as a body serial.
+function Add-UsbInstanceNeedle {
+    param($Set, [string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return }
+    $category = if ($Value.Contains('&')) { 'usb-instance' } else { 'usb-serial' }
+    Add-SerialNeedle $Set $Value $category
+}
+
 # Registry key names of Nikon USB / WPD devices: the serial sits after VID_04B0&PID_xxxx.
 function Add-DeviceNameNeedles {
     param($Set, [string]$Name)
     if ($Name -match '(?i)VID_04B0&PID_[0-9A-F]{4}[#\\]([^#\\]+)') {
-        Add-SerialNeedle $Set $Matches[1] 'usb-serial'
+        Add-UsbInstanceNeedle $Set $Matches[1]
         Add-Needle $Set $Name 'wpd-devicekey'
         return $true
     }
@@ -258,7 +281,8 @@ function Add-ExifNeedles {
             0xA420 { Add-Needle $Set (Get-ExifAscii $buf $e) 'exif-id' }
             0xA430 { Add-Needle $Set (Get-ExifAscii $buf $e) 'exif-owner' }
             0xA431 { Add-SerialNeedle $Set (Get-ExifAscii $buf $e) 'exif-serial' }
-            0xA435 { Add-SerialNeedle $Set (Get-ExifAscii $buf $e) 'exif-serial' }
+            # The lens, not the body: compared, but not counted as a body serial number.
+            0xA435 { Add-SerialNeedle $Set (Get-ExifAscii $buf $e) 'exif-lensserial' }
             0x9286 {
                 if ($e.Total -gt 8) { Add-Needle $Set ($script:Latin1.GetString($buf, $e.Off + 8, $e.Total - 8).Replace([string][char]0, '').Trim()) 'exif-owner' }
             }
@@ -374,7 +398,7 @@ function Get-LocalNeedles {
             Add-Needle $set $k.PSChildName 'nikon-vidpid'
             foreach ($c in Get-ChildItem $k.PSPath -ErrorAction SilentlyContinue) {
                 $usbCount++
-                Add-SerialNeedle $set $c.PSChildName 'usb-serial'
+                Add-UsbInstanceNeedle $set $c.PSChildName
                 Add-Needle $set ($k.PSChildName + '\' + $c.PSChildName) 'usb-instanceid'
                 Add-Needle $set ($k.PSChildName + '#' + $c.PSChildName) 'usb-instanceid'
             }
@@ -487,26 +511,34 @@ function Get-ImageKind([byte[]]$Bytes) {
     return $null
 }
 
-# SHA-256 (lower case hex) of the dummy images that sit in the tree at Head as images/*.jpg.b64 and
-# pass the same test as a .b64 file in the range (small, with the synthetic-image notice). A decoded
-# image with one of these hashes is a fixture dummy, not a photograph, wherever it is embedded.
-function Get-HeadDummyImageHashes {
+# The same condition as the C# fixture check (HardwareReplayAnonymizationRules): an image is accepted
+# only when its SHA-256 is one of the pinned ones AND the file sits directly in the fixture image
+# folder as <name>.jpg.b64. The case is significant (git paths are).
+function Test-PinnedImagePath([string]$Path) {
+    return $Path -cmatch ('^' + [regex]::Escape($script:PinnedImageDirectory) + '[^/]+\.jpg\.b64$')
+}
+
+function Test-PinnedImageBytes([byte[]]$Bytes) {
+    $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant()
+    return $script:PinnedImageSha256 -contains $sha
+}
+
+# SHA-256 (upper case hex) of the pinned dummy images that sit at the pinned path in the tree at
+# Head. A decoded image with one of these hashes is a fixture dummy, not a photograph, wherever it is
+# embedded. A small image with the synthetic-image notice, or any image in another folder, is not
+# on this list.
+function Get-HeadPinnedImageHashes {
     param([string]$Root, [string]$Head)
     $hashes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($p in @(Invoke-Git $Root @('ls-tree', '-r', '--name-only', $Head))) {
-        if (([string]$p) -notmatch '(^|/)images/[^/]+\.jpg\.b64$') { continue }
+        if (-not (Test-PinnedImagePath ([string]$p))) { continue }
         $content = (Invoke-Git $Root @('show', '--no-textconv', '--no-ext-diff', "${Head}:$p")) -join ''
         try { $bytes = [Convert]::FromBase64String(($content -replace '\s', '')) } catch { continue }
-        if ((Get-ImageKind $bytes) -and (Test-DummyImage $bytes)) {
+        if ((Get-ImageKind $bytes) -and (Test-PinnedImageBytes $bytes)) {
             $null = $hashes.Add([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)))
         }
     }
     return , $hashes
-}
-
-# A small image that carries the synthetic-image notice.
-function Test-DummyImage([byte[]]$Bytes) {
-    return ($Bytes.Length -le $script:SyntheticImageMaxBytes) -and $script:Latin1.GetString($Bytes).Contains($script:SyntheticImageNotice)
 }
 
 function Add-DecodedBytesTargets {
@@ -680,7 +712,7 @@ function Get-PublishTargets {
     param([string]$Root, [string]$Base, [string]$Head, [bool]$IncludeChangedFiles)
     $targets = [System.Collections.Generic.List[object]]::new()
     $structural = [System.Collections.Generic.List[object]]::new()
-    $script:AllowedImageSha256 = Get-HeadDummyImageHashes $Root $Head
+    $script:AllowedImageSha256 = Get-HeadPinnedImageHashes $Root $Head
     $commits = @(Invoke-Git $Root @('rev-list', '--reverse', "$Base..$Head"))
     Write-Host "commits in range $Base..$Head : $($commits.Count)"
     $merges = @(Invoke-Git $Root @('rev-list', '--merges', "$Base..$Head"))
@@ -731,16 +763,18 @@ function Get-PublishTargets {
         }
         & $flush
 
-        # .b64 files are multi-line: decode the whole file as of this commit. A file that decodes
-        # to an image is accepted only as a small dummy that carries the synthetic-image notice.
+        # .b64 files are multi-line: decode the whole file as of this commit. A .b64 file is accepted
+        # only as one of the pinned dummy images (by SHA-256) at the pinned path, like the C# check;
+        # any other .b64 file is a hit (an image as 'image', anything else as 'b64').
         foreach ($p in $b64Paths) {
             $content = (Invoke-Git $Root @('show', '--no-textconv', '--no-ext-diff', "${c}:$p")) -join ''
             try { $bytes = [Convert]::FromBase64String(($content -replace '\s', '')) } catch {
                 $structural.Add([pscustomobject]@{ Scope = 'unreadable-b64'; Target = "$short $p"; Line = 0; Label = 'b64' }); continue
             }
-            if (Get-ImageKind $bytes) {
-                $dummy = Test-DummyImage $bytes
-                if (-not $dummy) { $structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = "$short $p"; Line = 0; Label = 'image' }) }
+            $pinned = (Test-PinnedImagePath $p) -and (Get-ImageKind $bytes) -and (Test-PinnedImageBytes $bytes)
+            if (-not $pinned) {
+                if (Get-ImageKind $bytes) { $structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = "$short $p"; Line = 0; Label = 'image' }) }
+                else { $structural.Add([pscustomobject]@{ Scope = 'b64-not-pinned'; Target = "$short $p"; Line = 0; Label = 'b64' }) }
             }
             Add-Target $targets "b64-file-latin1 $short $p" ($script:Latin1.GetString($bytes)) $null 'decoded-b64'
             Add-Target $targets "b64-file-utf16le $short $p" ($script:Utf16.GetString($bytes)) $null 'decoded-b64'
@@ -751,7 +785,9 @@ function Get-PublishTargets {
     if ($IncludeChangedFiles -and $commits.Count -gt 0) {
         # Three dots: what the push adds on top of the common ancestor. Two dots would also list the
         # files that only Base changed, and read files that are not part of this push.
-        foreach ($p in @(Invoke-Git $Root @('diff', '--no-textconv', '--no-ext-diff', '--name-only', '--diff-filter=AM', "$Base...$Head"))) {
+        # --no-renames: a file renamed and changed in the same commit would otherwise be listed as a
+        # rename and be dropped by the A / M filter, and its whole content would not be compared.
+        foreach ($p in @(Invoke-Git $Root @('diff', '--no-textconv', '--no-ext-diff', '--no-renames', '--name-only', '--diff-filter=AM', "$Base...$Head"))) {
             $full = Join-Path $Root $p
             if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
             $bytes = [IO.File]::ReadAllBytes($full)
@@ -834,6 +870,12 @@ function Invoke-LeakCheck {
         [string]$Root, [string]$Base, [string]$Head, [string]$SourceRoot, [string[]]$ExtraNeedle,
         [string[]]$ExtraPhotoRoot, [bool]$IncludeChangedFiles, [bool]$NoLocalSources,
         [bool]$SelfTestIsolation = $false)
+
+    # Without the pinned image hashes every image would be a hit or, worse, none could be judged.
+    if (@($script:PinnedImageSha256).Count -eq 0 -or @($script:PinnedImageSha256 | Where-Object { $_ -notmatch '^[0-9a-f]{64}$' }).Count -gt 0) {
+        Write-Host 'CANNOT VERIFY: the pinned image hashes of this script are missing or malformed. Do not push.'
+        return [pscustomobject]@{ Exit = 2; Hits = @(); Needles = 0; BodySerials = 0 }
+    }
 
     $set = New-NeedleSet
     $cannotVerify = $null
@@ -935,19 +977,29 @@ function Invoke-Entry {
 # ------------------------------------------------------------------ self test (invented values only)
 
 # A JPEG with just enough structure for the EXIF reader: APP1 with a body serial number
-# (BodySerialNumber, tag A431) in the Exif IFD. The value is invented.
+# (BodySerialNumber, tag A431) in the Exif IFD, and optionally a lens serial number (tag A435).
+# The values are invented and at least 4 bytes long with the terminating zero (a shorter value would
+# be stored inside the entry).
 function New-SelfTestJpeg {
-    param([string]$Serial)
-    $ascii = [byte[]](@($script:Latin1.GetBytes($Serial)) + @([byte]0))
+    param([string]$Serial, [string]$LensSerial = '')
+    $values = [System.Collections.Generic.List[object]]::new()
+    if ($Serial) { $values.Add([pscustomobject]@{ Tag = 0xA431; Bytes = [byte[]](@($script:Latin1.GetBytes($Serial)) + @([byte]0)) }) }
+    if ($LensSerial) { $values.Add([pscustomobject]@{ Tag = 0xA435; Bytes = [byte[]](@($script:Latin1.GetBytes($LensSerial)) + @([byte]0)) }) }
     $tiff = [System.Collections.Generic.List[byte]]::new()
     $tiff.AddRange([byte[]](0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00))             # II, 42, IFD0 at 8
     $tiff.AddRange([byte[]](0x01, 0x00, 0x69, 0x87, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x00, 0x00, 0x00))  # 1 entry: ExifIFD at 26
     $tiff.AddRange([byte[]](0x00, 0x00, 0x00, 0x00))                                       # no next IFD
-    $tiff.AddRange([byte[]](0x01, 0x00, 0x31, 0xA4, 0x02, 0x00))                           # Exif IFD: 1 entry, A431, ASCII
-    $tiff.AddRange([byte[]]([BitConverter]::GetBytes([int]$ascii.Length)))
-    $tiff.AddRange([byte[]]([BitConverter]::GetBytes([int]44)))                            # value offset
-    $tiff.AddRange([byte[]](0x00, 0x00, 0x00, 0x00))
-    $tiff.AddRange($ascii)
+    $tiff.AddRange([byte[]]([BitConverter]::GetBytes([uint16]$values.Count)))              # Exif IFD at 26: the entries
+    $valueOffset = 26 + 2 + 12 * $values.Count + 4
+    foreach ($v in $values) {
+        $tiff.AddRange([byte[]]([BitConverter]::GetBytes([uint16]$v.Tag)))
+        $tiff.AddRange([byte[]](0x02, 0x00))                                               # ASCII
+        $tiff.AddRange([byte[]]([BitConverter]::GetBytes([int]$v.Bytes.Length)))
+        $tiff.AddRange([byte[]]([BitConverter]::GetBytes([int]$valueOffset)))
+        $valueOffset += $v.Bytes.Length
+    }
+    $tiff.AddRange([byte[]](0x00, 0x00, 0x00, 0x00))                                       # no next IFD
+    foreach ($v in $values) { $tiff.AddRange($v.Bytes) }
     $payload = [byte[]](@(0x45, 0x78, 0x69, 0x66, 0x00, 0x00) + $tiff.ToArray())
     $len = $payload.Length + 2
     return [byte[]](@(0xFF, 0xD8, 0xFF, 0xE1, [byte]($len -shr 8), [byte]($len -band 0xFF)) + $payload + @(0xFF, 0xD9))
@@ -992,6 +1044,10 @@ function Invoke-SelfTest {
     $needle = 'zz-selftest-needle-0001'
     $digits = '7654321'
     $failures = [System.Collections.Generic.List[string]]::new()
+    # The pinned image hashes are those of the real fixture dummies, which an invented image cannot
+    # match. The self test replaces them with the hash of its own invented dummy and puts them back.
+    $savedPinned = $script:PinnedImageSha256
+    $pinnedDir = $script:PinnedImageDirectory.TrimEnd('/')
     try {
         $git = { $o = & git -C $tmp @args 2>&1; if ($LASTEXITCODE -ne 0) { throw "git $($args[0]) failed: $($o -join ' ')" } }
         & $git init -q
@@ -1055,18 +1111,35 @@ function Invoke-SelfTest {
         $textB64 = [Convert]::ToBase64String($script:Utf8.GetBytes('hello world, this is only text.'))
         & $add 'base64 of plain text without the needle' { & $write 'o4.json' "{`"v`":`"$textB64`"}`n" } 'add o4' $false
         $dummy = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 14 + $script:Latin1.GetBytes($script:SyntheticImageNotice) + @(0xFF, 0xD9))
-        & $add 'a small dummy image in a .b64 file' { & $write 'images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5' $false
+        $script:PinnedImageSha256 = @([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($dummy)).ToLowerInvariant())
+        # #260: an image is accepted only as a pinned dummy (by SHA-256) in the fixture image folder. Being small
+        # and carrying the notice is not enough, and neither is another folder called images/.
+        $otherDummy = [byte[]]$dummy.Clone(); $otherDummy[10] = 0x42
+        $bigNotice = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 5000 + $script:Latin1.GetBytes($script:SyntheticImageNotice) + @(0xFF, 0xD9))
+        & $add 'the pinned dummy image in the fixture image folder' { & $write "$pinnedDir/dummy.jpg.b64" ([Convert]::ToBase64String($dummy) + "`n") } 'add o5' $false
+        & $add 'the pinned dummy image in another images folder' { & $write 'images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5a' $true
+        & $add 'the pinned dummy image in docs/images' { & $write 'docs/images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5b' $true
+        & $add 'a small image with the notice but not pinned, in the fixture image folder' { & $write "$pinnedDir/small.jpg.b64" ([Convert]::ToBase64String($otherDummy) + "`n") } 'add o5c' $true
+        & $add 'an image with the notice over 4096 bytes in the fixture image folder' { & $write "$pinnedDir/big.jpg.b64" ([Convert]::ToBase64String($bigNotice) + "`n") } 'add o5d' $true
+        & $add 'a small image with the notice but not pinned, in docs/images' { & $write 'docs/images/small.jpg.b64' ([Convert]::ToBase64String($otherDummy) + "`n") } 'add o5e' $true
+        & $add 'text in a .b64 file in the fixture image folder' { & $write "$pinnedDir/text.jpg.b64" ([Convert]::ToBase64String($script:Utf8.GetBytes('only some harmless text')) + "`n") } 'add o5f' $true
         $real = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 600 + @(0xFF, 0xD9))
         & $add 'an image without the notice in a .b64 file' { & $write 'images/real.jpg.b64' ([Convert]::ToBase64String($real) + "`n") } 'add o6' $true
+        & $add 'an image without the notice in the fixture image folder' { & $write "$pinnedDir/real.jpg.b64" ([Convert]::ToBase64String($real) + "`n") } 'add o6a' $true
+        $realB64 = [Convert]::ToBase64String($real)
+        & $add 'an image without the notice that sits in the fixture image folder at Base, embedded' { & $write 'o6b.json' "{`"frameJpegBase64`":`"$realB64`"}`n" } 'add o6b' $true
+        $smallB64 = [Convert]::ToBase64String($otherDummy)
+        & $add 'an image with the notice that sits in docs/images at Base, embedded' { & $write 'o6c.json' "{`"frameJpegBase64`":`"$smallB64`"}`n" } 'add o6c' $true
+        $bigNoticeB64 = [Convert]::ToBase64String($bigNotice)
+        & $add 'an image with the notice over 4096 bytes, embedded' { & $write 'o6d.json' "{`"frameJpegBase64`":`"$bigNoticeB64`"}`n" } 'add o6d' $true
         $big = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 2000 + @(0xFF, 0xD9))
         $bigWrapped = [Convert]::ToBase64String($big, [Base64FormattingOptions]::InsertLineBreaks)
         & $add 'JPEG wrapped at 76 columns after a heading line' { & $write 'o7.md' "Frame`n`n``````text`n$bigWrapped`n```````n" } 'add o7' $true
 
-        # L6: an image whose SHA-256 is that of a dummy under images/*.jpg.b64 at Head is no hit, wherever
-        # it is embedded; any other image still is.
+        # L6: an image whose SHA-256 is that of a pinned dummy in the fixture image folder at Head is no hit,
+        # wherever it is embedded; any other image still is.
         $dummyB64 = [Convert]::ToBase64String($dummy)
         & $add 'the fixture dummy image under a *Base64 key' { & $write 'q1.json' "{`"frameJpegBase64`":`"$dummyB64`"}`n" } 'add q1' $false
-        $otherDummy = [byte[]]$dummy.Clone(); $otherDummy[10] = 0x42
         $otherDummyB64 = [Convert]::ToBase64String($otherDummy)
         & $add 'a dummy-like image with one other byte under a *Base64 key' { & $write 'q2.json' "{`"frameJpegBase64`":`"$otherDummyB64`"}`n" } 'add q2' $true
         $dummyHex = [Convert]::ToHexString($dummy)
@@ -1210,6 +1283,34 @@ function Invoke-SelfTest {
         if ($cap.Result.Exit -ne 0) { $failures.Add("two camera bodies in the records and two body serials must give exit 0 (got $($cap.Result.Exit))") }
         Remove-Item -LiteralPath $photo2
 
+        # #260 LOW-2: the serial of the lens (EXIF A435) is compared, but it is not a camera body. One photograph
+        # with a body serial and a lens serial, and records that name two bodies: still one body, so exit 2.
+        [IO.File]::WriteAllBytes($photo, (New-SelfTestJpeg '0012345' '0098765'))
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'name 2 camera bodies') { $failures.Add("a lens serial must not count as a second camera body (got exit $($cap.Result.Exit))") }
+        $local = Get-LocalNeedles $source @() $true $true
+        $lens = @($local.Set.List | Where-Object { $_.Category -eq 'exif-lensserial' } | ForEach-Object { $_.Value })
+        $bodyOnly = @($local.Set.List | Where-Object { $_.Category -eq 'exif-serial' } | ForEach-Object { $_.Value })
+        if (($lens -notcontains '0098765') -or ($lens -notcontains '98765')) { $failures.Add('the lens serial must stay a needle, in a category of its own') }
+        if ($bodyOnly -contains '0098765' -or $bodyOnly -notcontains '0012345') { $failures.Add('the lens serial must not be filed as a body serial') }
+        $lensHits = [System.Collections.Generic.List[object]]::new()
+        $lensTargets = [System.Collections.Generic.List[object]]::new()
+        Add-Target $lensTargets 'lens serial in text' 'lens 0098765 here' $null 'added-line'
+        Find-NeedleHits (New-Variants $local.Set) $lensTargets $lensHits
+        if (@($lensHits | Where-Object { $_.Label -like 'exif-lensserial#*' }).Count -eq 0) { $failures.Add('a lens serial in the published text must still be found') }
+        # A photograph with a lens serial only has no body serial at all.
+        [IO.File]::WriteAllBytes($photo, (New-SelfTestJpeg '' '0098765'))
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'No body serial') { $failures.Add("a lens serial alone must not count as a body serial number (got exit $($cap.Result.Exit))") }
+        # A made-up USB instance ID (with '&') is compared, but it is no body serial either; a serial is.
+        $set = New-NeedleSet
+        Add-UsbInstanceNeedle $set '6&1a2b3c4d&0&1'
+        if ((Get-BodySerialCount $set) -ne 0 -or @($set.List | Where-Object { $_.Category -eq 'usb-instance' }).Count -lt 1) { $failures.Add('a USB instance ID with an ampersand must be a needle of its own category and no body serial') }
+        $null = Add-DeviceNameNeedles $set 'usb#vid_04b0&pid_0000#7&2b3c4d5e&0&2#{00000000-0000-0000-0000-000000000000}'
+        if ((Get-BodySerialCount $set) -ne 0 -or @($set.List | Where-Object { $_.Value -eq '7&2b3c4d5e&0&2' -and $_.Category -eq 'usb-instance' }).Count -ne 1) { $failures.Add('a WPD key with an instance ID instead of a serial must give no body serial') }
+        Add-UsbInstanceNeedle $set '0054321'
+        if ((Get-BodySerialCount $set) -lt 1) { $failures.Add('a USB instance name without an ampersand is a serial number') }
+
         # M-1 (d): -NoLocalSources outside the self test is refused.
         $out = & { Invoke-Entry -Base $first -Head $removed -RepositoryRoot $tmp -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
                 -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $false } 6>&1
@@ -1303,10 +1404,76 @@ function Invoke-SelfTest {
         $r = Invoke-LeakCheck -Root $tmp7 -Base $base7 -Head $head7 -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
             -IncludeChangedFiles $true -NoLocalSources $true 6>$null
         if ($r.Exit -ne 1) { $failures.Add("-IncludeChangedFiles must still read a file the push adds (got exit $($r.Exit))") }
+
+        # #260 LOW-3: a file renamed and changed in the same commit is still read in full. The needle sits in
+        # a line that did not change, so the added lines of the commit do not hold it; only the whole file does.
+        $tmpL3 = "$tmp-l3"
+        New-SelfTestRepo $tmpL3
+        $lines = (1..12 | ForEach-Object { "stable line $_" }) + "kept value $needle" + (13..20 | ForEach-Object { "stable line $_" })
+        [IO.File]::WriteAllText((Join-Path $tmpL3 'old.txt'), (($lines -join "`n") + "`n"), $script:Utf8)
+        $seedL3 = Add-SelfTestCommit $tmpL3 'seed'
+        $null = Invoke-SelfTestGit $tmpL3 @('mv', 'old.txt', 'new.txt')
+        [IO.File]::WriteAllText((Join-Path $tmpL3 'new.txt'), ((($lines -replace '^stable line 5$', 'changed line five') -join "`n") + "`n"), $script:Utf8)
+        $renameHead = Add-SelfTestCommit $tmpL3 'rename and change'
+        $r = Invoke-LeakCheck -Root $tmpL3 -Base $seedL3 -Head $renameHead -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+            -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 0) { $failures.Add("self test setup: the renamed file must not hold the needle in an added line (got exit $($r.Exit))") }
+        $r = Invoke-LeakCheck -Root $tmpL3 -Base $seedL3 -Head $renameHead -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+            -IncludeChangedFiles $true -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 1) { $failures.Add("-IncludeChangedFiles must read the whole content of a file renamed and changed in one commit (got exit $($r.Exit))") }
+
+        # #260 MEDIUM-1: the path counts as well as the hash. The pinned dummy image outside the fixture image
+        # folder is a hit (as a file and as an embedded copy); in the folder it is not (as a file and as a copy).
+        $tmpM1 = "$tmp-m1"
+        New-SelfTestRepo $tmpM1
+        [IO.File]::WriteAllText((Join-Path $tmpM1 'seed.txt'), "seed`n", $script:Utf8)
+        $seedM1 = Add-SelfTestCommit $tmpM1 'seed'
+        $dummyLine = [Convert]::ToBase64String($dummy) + "`n"
+        $writeM1 = { param([string]$Rel, [string]$Text) $p = Join-Path $tmpM1 $Rel; New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null; [IO.File]::WriteAllText($p, $Text, $script:Utf8) }
+        & $writeM1 'docs/images/p.jpg.b64' $dummyLine
+        $outsideHead = Add-SelfTestCommit $tmpM1 'dummy outside the folder'
+        & $writeM1 'e1.json' "{`"frameJpegBase64`":`"$($dummyLine.Trim())`"}`n"
+        $embedOutsideHead = Add-SelfTestCommit $tmpM1 'embedded copy, dummy only outside the folder'
+        & $writeM1 "$pinnedDir/p.jpg.b64" $dummyLine
+        $insideHead = Add-SelfTestCommit $tmpM1 'dummy in the folder'
+        & $writeM1 'e2.json' "{`"frameJpegBase64`":`"$($dummyLine.Trim())`"}`n"
+        $embedInsideHead = Add-SelfTestCommit $tmpM1 'embedded copy, dummy in the folder'
+        foreach ($case in @(
+                @{ Name = 'the pinned dummy image as a file outside the fixture image folder'; Base = $seedM1; Head = $outsideHead; Exit = 1 },
+                @{ Name = 'an embedded copy when the pinned dummy image is only outside the fixture image folder'; Base = $outsideHead; Head = $embedOutsideHead; Exit = 1 },
+                @{ Name = 'the pinned dummy image as a file in the fixture image folder'; Base = $embedOutsideHead; Head = $insideHead; Exit = 0 },
+                @{ Name = 'an embedded copy when the pinned dummy image is in the fixture image folder'; Base = $insideHead; Head = $embedInsideHead; Exit = 0 })) {
+            $r = Invoke-LeakCheck -Root $tmpM1 -Base $case.Base -Head $case.Head -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+            if ($r.Exit -ne $case.Exit) { $failures.Add("$($case.Name): expected exit $($case.Exit), got $($r.Exit)") }
+        }
+        # The pinned hashes of the script itself: without them (or malformed) nothing can be judged, so exit 2.
+        foreach ($bad in @('', 'abc', ('z' * 64))) {
+            $script:PinnedImageSha256 = if ($bad -eq '') { @() } else { @($bad) }
+            $r = Invoke-LeakCheck -Root $tmpM1 -Base $seedM1 -Head $outsideHead -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+            if ($r.Exit -ne 2) { $failures.Add("missing or malformed pinned image hashes must give exit 2 (got $($r.Exit))") }
+        }
+        $script:PinnedImageSha256 = $savedPinned
+        if (@($savedPinned).Count -lt 1 -or @($savedPinned | Where-Object { $_ -notmatch '^[0-9a-f]{64}$' }).Count -gt 0) { $failures.Add('the pinned image hashes of the script must be 64 digit lower case hex') }
+
+        # #260 LOW-1: a path that holds the hex form of a needle is not printed with it.
+        $hexName = [Convert]::ToHexString($script:Utf8.GetBytes($needle))
+        $hex16Name = [Convert]::ToHexString($script:Utf16.GetBytes($needle))
+        # (The content hits too, so that the location of the hit, which holds the path, is printed.)
+        [IO.File]::WriteAllText((Join-Path $tmp2 "h8-$hexName.md"), "id $digits only`n", $script:Utf8)
+        [IO.File]::WriteAllText((Join-Path $tmp2 "h16-$hex16Name.md"), "id $digits only`n", $script:Utf8)
+        $hexHead = Add-SelfTestCommit $tmp2 'add hex names'
+        $cap = Invoke-CheckCaptured @{ Root = $tmp2; Base = $hideHead; Head = $hexHead; SourceRoot = ''; ExtraNeedle = @($needle, $digits); ExtraPhotoRoot = @()
+                                       IncludeChangedFiles = $false; NoLocalSources = $true }
+        if ($cap.Result.Exit -ne 1) { $failures.Add("a needle written as hex in a file name must give exit 1 (got $($cap.Result.Exit))") }
+        if ($cap.Text.IndexOf($hexName, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $cap.Text.IndexOf($hex16Name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $failures.Add('a path printed for a hit must not show the hex form of the needle') }
+        if ($cap.Text -notmatch 'h8-\*\*\*\.md' -or $cap.Text -notmatch 'h16-\*\*\*\.md') { $failures.Add('the hex form of a needle in a printed path must be replaced by asterisks') }
     }
     finally {
+        $script:PinnedImageSha256 = $savedPinned
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-        foreach ($extra in "$tmp-r2", "$tmp-l7") {
+        foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3") {
             if (Test-Path -LiteralPath $extra) { Remove-Item -LiteralPath $extra -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
