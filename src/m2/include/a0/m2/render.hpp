@@ -159,8 +159,11 @@ struct PairRenderResult {
 // Renders the cropped union of CAM-A and the inverse-mapped CAM-B, linearly
 // feathering the geometric overlap. Deterministic: the same buffers and
 // parameters always produce the same bytes. Throws std::invalid_argument when
-// the transform is invalid, the canvas is unsupported, or an output pixel is
-// covered by neither camera.
+// the transform is not invertible or its projective denominator changes sign
+// over the CAM-B rectangle (ValidateProjectiveDomain), a buffer length differs
+// from width * height * 3, the canvas is unsupported, or an output pixel is
+// covered by neither camera. These preconditions are checked here, so callers
+// other than the stitcher need not repeat them.
 PairRenderResult RenderPair(
     const BgrImage& camera_a,
     const BgrImage& camera_b,

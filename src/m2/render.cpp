@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -243,11 +244,28 @@ PairCanvasPlan PlanPairCanvas(
     };
 }
 
+namespace {
+
+void ValidateBufferSize(const BgrImage& image, const char* alias) {
+    if (image.bgr.size() != static_cast<std::size_t>(PixelCount(image.width, image.height) * 3)) {
+        throw std::invalid_argument(std::string(alias) + " BGR buffer size does not match its dimensions");
+    }
+}
+
+} // namespace
+
 PairRenderResult RenderPair(
     const BgrImage& camera_a,
     const BgrImage& camera_b,
     const PairRenderParameters& parameters) {
     const auto inverse_b = Invert(parameters.camera_b_to_camera_a);
+    // The CAM-B skip band below is only correct for a transform whose projective
+    // denominator keeps one sign over the CAM-B rectangle, and SampleBilinear
+    // indexes the buffers without a bounds check. Both are verified here so a
+    // direct caller cannot get a wrong image or an out-of-range read.
+    ValidateProjectiveDomain(parameters.camera_b_to_camera_a, camera_b.width, camera_b.height);
+    ValidateBufferSize(camera_a, "CAM-A");
+    ValidateBufferSize(camera_b, "CAM-B");
     const PairCanvasPlan plan = PlanPairCanvas(
         camera_a.width, camera_a.height, camera_b.width, camera_b.height, parameters);
     const Bounds& a_bounds = plan.a_bounds;

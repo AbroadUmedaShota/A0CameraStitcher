@@ -220,7 +220,8 @@ add_library(a0_m2_render
 )
 target_include_directories(a0_m2_render PUBLIC src/m2/include)
 include(cmake/a0_link_isolation.cmake)
-a0_assert_no_link_dependency(a0_m2_render)
+# Deferred so that link dependencies added after this point are also checked.
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_render)
 if(MSVC)
     target_compile_options(a0_m2_render PRIVATE /W4 /permissive- /EHsc)
 else()
@@ -670,7 +671,7 @@ if(BUILD_TESTING)
 
     add_executable(m2_render_contracts tests/render_tests.cpp)
     target_link_libraries(m2_render_contracts PRIVATE a0_m2_render)
-    a0_assert_no_link_dependency(m2_render_contracts)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_render_contracts)
     if(MSVC)
         target_compile_options(m2_render_contracts PRIVATE /W4 /permissive- /EHsc)
     else()

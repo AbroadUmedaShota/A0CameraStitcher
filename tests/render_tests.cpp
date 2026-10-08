@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -193,6 +194,37 @@ void TestFailClosedGeometry() {
         "a non-finite transform must be rejected");
 }
 
+// RenderPair must verify its own preconditions: callers other than the stitcher
+// (evaluation and measurement tools) call it directly.
+void TestRenderPairChecksItsPreconditions() {
+    const auto a = Solid(16, 8, 1, 2, 3);
+    const auto b = Solid(16, 8, 3, 2, 1);
+    // The denominator 0.2 * x - 1 is negative at x = 0 and positive at x = 16.
+    Check(RejectionMessage([&] {
+              (void)RenderPair(a, b, PairRenderParameters{
+                  {1, 0, 0, 0, 1, 0, 0.2, 0, -1}, StitchLayout::camera_a_left_camera_b_right, {}});
+          }).find("projective denominator crosses the input image") != std::string::npos,
+        "a transform whose denominator changes sign over CAM-B must be rejected");
+    auto short_b = b;
+    short_b.bgr.pop_back();
+    Check(RejectionMessage([&] {
+              (void)RenderPair(a, short_b, Translation(12.0, 0.0, StitchLayout::camera_a_left_camera_b_right, {}));
+          }).find("CAM-B BGR buffer size") != std::string::npos,
+        "a CAM-B buffer shorter than width * height * 3 must be rejected");
+    auto short_a = a;
+    short_a.bgr.resize(short_a.bgr.size() / 2);
+    Check(RejectionMessage([&] {
+              (void)RenderPair(short_a, b, Translation(12.0, 0.0, StitchLayout::camera_a_left_camera_b_right, {}));
+          }).find("CAM-A BGR buffer size") != std::string::npos,
+        "a CAM-A buffer shorter than width * height * 3 must be rejected");
+    auto long_b = b;
+    long_b.bgr.push_back(0);
+    Check(!RejectionMessage([&] {
+              (void)RenderPair(a, long_b, Translation(12.0, 0.0, StitchLayout::camera_a_left_camera_b_right, {}));
+          }).empty(),
+        "a buffer longer than width * height * 3 must also be rejected");
+}
+
 void TestCanvasPlan() {
     const auto plan = PlanPairCanvas(
         16, 8, 16, 8, Translation(-5.5, 0.0, StitchLayout::camera_a_left_camera_b_right, {1, 0, 2, 0}));
@@ -260,6 +292,20 @@ void TestExecutableDoesNotImportJpegOrCryptoLibraries() {
             imported.push_back(name);
         }
     }
+    // Delay-loaded imports live in a separate directory and would otherwise
+    // escape the check above.
+    const auto& delay_directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+    if (delay_directory.VirtualAddress != 0) {
+        const auto* delay_descriptor =
+            reinterpret_cast<const IMAGE_DELAYLOAD_DESCRIPTOR*>(base + delay_directory.VirtualAddress);
+        for (; delay_descriptor->DllNameRVA != 0; ++delay_descriptor) {
+            std::string name(reinterpret_cast<const char*>(base + delay_descriptor->DllNameRVA));
+            std::transform(name.begin(), name.end(), name.begin(), [](const unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            imported.push_back(name);
+        }
+    }
     Check(!imported.empty(), "the import table of the test executable must list at least the C runtime");
     for (const auto& name : imported) {
         Check(name != "ole32.dll" && name != "windowscodecs.dll" && name != "bcrypt.dll",
@@ -277,6 +323,7 @@ int main() {
         TestLayoutSelectsFeatherAxis();
         TestRenderPinsTexturedOutput();
         TestFailClosedGeometry();
+        TestRenderPairChecksItsPreconditions();
         TestCanvasPlan();
         TestMatrixHelpers();
         TestBilinearSampling();
