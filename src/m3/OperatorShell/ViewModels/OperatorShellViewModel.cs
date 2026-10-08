@@ -2228,6 +2228,25 @@ public sealed class OperatorShellViewModel : ObservableObject
     private bool HasRecoverableCaptureRecoveryOnlyTransaction =>
         IsCaptureRecoveryOnlyMode && _captureRecoveryOnlyWorkflow!.HasPendingRecovery;
 
+    // GitHub Issue #256: the ordinary response-unknown transaction above is the only record that the
+    // shutter may have fired in an older ordinary session. CaptureRecoveryOnly cannot recover it (its own
+    // workflow does not know it), and must not discard it, so it only blocks NEW captures here. CaptureRecoveryOnly's
+    // own same-ID recovery is not affected: it is gated by HasRecoverableCaptureRecoveryOnlyTransaction.
+    private bool HasUnconfirmedOrdinaryTransactionBlockingNewCapture =>
+        IsCaptureRecoveryOnlyMode &&
+        !IsSingleCameraMode &&
+        _dualCameraFlow is
+        {
+            ExecutionEnvironment: DualCameraExecutionEnvironment.HardwareDual,
+            Current: { FailureCode: DualCameraFailureCode.AgentResponseUnknown },
+        };
+
+    internal static string BuildUnconfirmedOrdinaryTransactionBlockerText(Guid transactionId) =>
+        "前回の通常撮影" +
+        (transactionId == Guid.Empty ? string.Empty : $"（撮影ID {transactionId:N}）") +
+        "の結果が確定していないため、新しい撮影はできません。撮影は開始していません。" +
+        "この記録は消さずに残しています。結果の確認は通常の二台撮影の画面で行うため、技術担当者に連絡してください。";
+
     /// <summary>True while pressing the main button only re-checks the stored transaction ID. It
     /// follows the routing of <see cref="RunCaptureAsync"/>: CaptureRecoveryOnly mode asks its
     /// workflow, every other dual mode asks the ordinary HardwareDual flow.</summary>
@@ -2260,6 +2279,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     // 再確認は文言を選ぶために条件を個別にも確かめ、最後にこの式で取りこぼしを拾う。
     private bool CaptureRecoveryOnlyNewCaptureConditionsMet =>
         IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
+        !HasUnconfirmedOrdinaryTransactionBlockingNewCapture &&
         _captureRecoveryOnlyFiveRunCoordinator?.HasStarted != true &&
         _captureRecoveryOnlyWorkflow!.CanStartNewCapture;
 
@@ -2276,6 +2296,10 @@ public sealed class OperatorShellViewModel : ObservableObject
                 ? "この撮影IDの結果だけを再確認します。新しい撮影は始めません。"
                 : "この撮影IDの結果を確認します。新しい撮影は始めません。結果がそろっていれば合成まで進みます。"
             : "準備完了。確認ダイアログなしで一度だけ開始します。"
+        // 通常経路の未確定結果（#256）は、割当や承認では解消できない。先に出して無駄な操作をさせない。
+        // CaptureRecoveryOnly 自身の同一ID照会は塞がないので、その間は従来の並びに任せる。
+        : HasUnconfirmedOrdinaryTransactionBlockingNewCapture && !HasRecoverableCaptureRecoveryOnlyTransaction
+            ? BuildUnconfirmedOrdinaryTransactionBlockerText(_dualCameraFlow!.Current!.TransactionId)
         // binding が先に来る。identity が Pending でも、操作者にとっては「まず割当を終わらせる」
         // が次の一手なので、そちらを名指しする。
         : DualBinding.IsRequired && !DualBinding.IsReady
