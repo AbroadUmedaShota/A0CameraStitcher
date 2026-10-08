@@ -1,8 +1,13 @@
 using System.Globalization;
 using System.IO;
 using System.Windows;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Threading;
+using System.Xml.Linq;
+using A0CameraStitcher.M3.OperatorShell.Controls;
 using A0CameraStitcher.M3.OperatorShell;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
 using A0CameraStitcher.M3.OperatorShell.ViewModels;
@@ -76,6 +81,11 @@ internal static class ShutdownGuidanceLayoutContracts
                     card.ActualHeight + 2 * MinimumCanvasMargin <= canvas.ActualHeight,
                     $"{name}: the card is {card.ActualHeight} tall on a {canvas.ActualHeight} canvas; " +
                     $"it must leave {MinimumCanvasMargin} above and below.");
+                // A card taller than half the canvas is no longer a notice on top of the screen; it is
+                // the screen. The longest wording must stay below that.
+                Require(
+                    card.ActualHeight <= canvas.ActualHeight / 2,
+                    $"{name}: the card is {card.ActualHeight} tall; it must not exceed half of the {canvas.ActualHeight} canvas.");
                 // The guidance block's own height grows with its lines; its measured desired height
                 // must fit inside what it was given, so no line is clipped.
                 Require(
@@ -86,6 +96,7 @@ internal static class ShutdownGuidanceLayoutContracts
             }
 
             MeasureVerticalTab();
+            await RequireRepeatedCloseAttemptIsAnnouncedAsync(window, viewModel, canvas, now);
         }
         finally
         {
@@ -93,6 +104,176 @@ internal static class ShutdownGuidanceLayoutContracts
             await Task.Yield();
             Directory.Delete(root, recursive: true);
         }
+
+        await MeasureSingleCameraOverlayAtMinimumWindowSizeAsync();
+    }
+
+    // Pressing close again reports the same texts. WPF raises no change notification for an unchanged
+    // property, so unless the report passes through an empty value a screen reader is silent on every
+    // attempt after the first. Both regions that carry the report are checked on the real MainWindow:
+    // the guidance (assertive) and the short notice under the buttons (polite).
+    private static async Task RequireRepeatedCloseAttemptIsAnnouncedAsync(
+        MainWindow window,
+        OperatorShellViewModel viewModel,
+        Grid canvas,
+        DateTimeOffset now)
+    {
+        var originalListenerExists = LiveRegion.ListenerExists;
+        var originalRaise = LiveRegion.RaiseLiveRegionChanged;
+        var raised = new List<AutomationPeer>();
+        LiveRegion.ListenerExists = static () => true;
+        LiveRegion.RaiseLiveRegionChanged = peer => raised.Add(peer);
+        try
+        {
+            // Loaded has to have run for the regions to announce at all.
+            await window.Dispatcher.InvokeAsync(static () => { }, DispatcherPriority.ApplicationIdle);
+            Require(window.IsLoaded, "The window must be loaded before announcements are observed.");
+
+            var binding = viewModel.DualBinding;
+            const string code = "HardwareCameraAgentLaunchException";
+            binding.ReportShutdownBlocked(code, "detail", TimeSpan.FromMinutes(4), now);
+            window.UpdateLayout();
+            var guidance = FindAnnouncedRegion(canvas, binding.InvalidationText);
+            var notice = FindAnnouncedRegion(canvas, binding.NoticeText);
+            Require(raised.Count(peer => OwnerOf(peer, guidance)) >= 1,
+                "The first blocked report must announce the guidance.");
+            Require(raised.Count(peer => OwnerOf(peer, notice)) >= 1,
+                "The first blocked report must announce the notice.");
+
+            for (var attempt = 2; attempt <= 3; attempt++)
+            {
+                raised.Clear();
+                binding.ReportShutdownBlocked(code, "detail", TimeSpan.FromMinutes(4), now);
+                window.UpdateLayout();
+                Require(raised.Count(peer => OwnerOf(peer, guidance)) == 1,
+                    $"Attempt {attempt}: an identical blocked report must announce the guidance again, once; " +
+                    $"raised {raised.Count(peer => OwnerOf(peer, guidance))}.");
+                Require(raised.Count(peer => OwnerOf(peer, notice)) == 1,
+                    $"Attempt {attempt}: an identical blocked report must announce the notice again, once; " +
+                    $"raised {raised.Count(peer => OwnerOf(peer, notice))}.");
+                Require(binding.InvalidationText.Length > 0 && binding.NoticeText.Length > 0,
+                    $"Attempt {attempt}: the texts must end up shown, not left empty by the pass through an empty value.");
+            }
+        }
+        finally
+        {
+            LiveRegion.ListenerExists = originalListenerExists;
+            LiveRegion.RaiseLiveRegionChanged = originalRaise;
+        }
+
+        static bool OwnerOf(AutomationPeer peer, TextBlock region) =>
+            peer is UIElementAutomationPeer { Owner: var owner } && ReferenceEquals(owner, region);
+
+        static TextBlock FindAnnouncedRegion(DependencyObject root, string text) =>
+            FindDescendants<TextBlock>(root).Single(block => block.Text == text && LiveRegion.GetAnnounce(block));
+    }
+
+    // Issue #244: the SingleCamera window shows its own close indicator, three lines in a 620-wide
+    // card over the whole window. The window's smallest size is 1020x700, so that is where the card
+    // is most likely to be cut off. HardwareSingleCameraWindow cannot be constructed here (it takes
+    // the exclusive session lease and opens the operator's real storage), so the overlay element is
+    // read from the window's own XAML and hosted in a window of the same size, bound to the real
+    // texts with all three lines showing. The XAML is located from the build output; this is a layout
+    // check only.
+    private static async Task MeasureSingleCameraOverlayAtMinimumWindowSizeAsync()
+    {
+        const string OverlayName = "終了の確認中";
+        var xamlPath = FindSourceFile("src/m3/OperatorShell/HardwareSingleCameraWindow.xaml");
+        var windowXml = XDocument.Load(xamlPath);
+        var overlay = windowXml.Descendants().Single(element =>
+            element.Attributes().Any(attribute =>
+                attribute.Name.LocalName == "AutomationProperties.Name" && attribute.Value == OverlayName));
+        var minWidth = double.Parse(windowXml.Root!.Attribute("MinWidth")!.Value, CultureInfo.InvariantCulture);
+        var minHeight = double.Parse(windowXml.Root!.Attribute("MinHeight")!.Value, CultureInfo.InvariantCulture);
+        Require(minWidth == 1020 && minHeight == 700,
+            $"The window minimum size is expected to be 1020x700; found {minWidth}x{minHeight}. Update this check with it.");
+
+        var assemblyName = typeof(LiveRegion).Assembly.GetName().Name;
+        var overlayXaml = overlay.ToString().Replace(
+            "clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls",
+            "clr-namespace:A0CameraStitcher.M3.OperatorShell.Controls;assembly=" + assemblyName,
+            StringComparison.Ordinal);
+        var overlayElement = (Grid)XamlReader.Parse(overlayXaml);
+
+        var host = new Grid();
+        host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        host.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        host.Children.Add(overlayElement);
+        var window = new Window
+        {
+            Content = host,
+            Width = minWidth,
+            Height = minHeight,
+            FontFamily = new FontFamily("Yu Gothic UI"),
+            Left = -10000,
+            Top = -10000,
+            ShowActivated = false,
+            ShowInTaskbar = false,
+            DataContext = new SingleOverlayTexts(),
+        };
+        try
+        {
+            window.Show();
+            await window.Dispatcher.InvokeAsync(static () => { }, DispatcherPriority.ApplicationIdle);
+            window.UpdateLayout();
+
+            Require(overlayElement.IsVisible, "The close indicator must be showing while IsShutdownConfirming is true.");
+            var card = FindDescendants<Border>(overlayElement).Single(border => border.Width == 620);
+            var lines = FindDescendants<TextBlock>(card).ToList();
+            Require(lines.Count == 3, $"The close indicator is expected to have three lines; found {lines.Count}.");
+            foreach (var line in lines)
+            {
+                Require(line.IsVisible && line.Text.Length > 0, "All three lines must be showing for this check.");
+                Require(line.TextWrapping == TextWrapping.Wrap, "Each line must wrap.");
+                // DesiredSize includes the line's own margin; ActualHeight does not.
+                var wanted = line.DesiredSize.Height - line.Margin.Top - line.Margin.Bottom;
+                Require(wanted <= line.ActualHeight + 0.5,
+                    $"A line wants {wanted} but was given {line.ActualHeight}; it is cut off.");
+            }
+
+            Require(card.ActualWidth == 620, $"The card must keep its 620 width; was {card.ActualWidth}.");
+            Require(card.ActualHeight + 2 * MinimumCanvasMargin <= host.ActualHeight,
+                $"The card is {card.ActualHeight} tall in a {host.ActualHeight} tall window; " +
+                $"it must leave {MinimumCanvasMargin} above and below.");
+            Require(card.ActualHeight <= host.ActualHeight / 2,
+                $"The card is {card.ActualHeight} tall; it must not exceed half of the {host.ActualHeight} tall window.");
+            Require(card.ActualWidth + 2 * MinimumCanvasMargin <= host.ActualWidth,
+                $"The card is {card.ActualWidth} wide in a {host.ActualWidth} wide window.");
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"INFO #244 layout [single-camera close indicator, 3 lines]: card {card.ActualWidth:0}x{card.ActualHeight:0} in a {host.ActualWidth:0}x{host.ActualHeight:0} window"));
+        }
+        finally
+        {
+            window.Close();
+            await Task.Yield();
+        }
+    }
+
+    // The three texts and the flag the overlay binds to, taken from the ViewModel's own constants.
+    private sealed class SingleOverlayTexts
+    {
+        public bool IsShutdownConfirming => true;
+
+        public string ShutdownConfirmingText => HardwareSingleCameraViewModel.ShutdownConfirmingMessage;
+
+        public string ShutdownConfirmingDetailText => HardwareSingleCameraViewModel.ShutdownConfirmingDetailMessage;
+
+        public string ShutdownFrameWaitText => HardwareSingleCameraViewModel.ShutdownFrameWaitMessage;
+    }
+
+    private static string FindSourceFile(string relativePath)
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, relativePath);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new FileNotFoundException($"{relativePath} was not found above {AppContext.BaseDirectory}.");
     }
 
     // Issue #236 asked whether WPF breaks a line at U+000B. Measured here for the record; the sanitizer

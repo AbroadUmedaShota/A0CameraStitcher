@@ -659,6 +659,11 @@ public sealed class DualBindingViewModel : ObservableObject
         // The headline depends on _shutdownAgentProbablyExited, which can change between two
         // blocked reports without IsShutdownBlocked or Phase changing.
         OnPropertyChanged(nameof(HeadlineText));
+        // Pressing close again produces the same texts. An unchanged property raises no change
+        // notification, so a screen reader would stay silent on every attempt after the first.
+        // Passing through an empty value makes each report a change (the same technique as #228).
+        InvalidationText = string.Empty;
+        NoticeText = string.Empty;
         InvalidationText = BuildShutdownBlockedText(
             blockingCode,
             blockingDetail,
@@ -678,7 +683,7 @@ public sealed class DualBindingViewModel : ObservableObject
     private const int ShutdownEscalationMinutes = 10;
 
     /// <summary>Short notice shown under the buttons; the guidance itself is in <see cref="InvalidationText"/>.</summary>
-    public const string ShutdownBlockedNoticeText = "画面を閉じられませんでした。上の案内に従ってください。";
+    public const string ShutdownBlockedNoticeText = "画面を閉じられませんでした。案内に従ってください。";
 
     private static string BuildShutdownBlockedText(
         string blockingCode,
@@ -689,7 +694,7 @@ public sealed class DualBindingViewModel : ObservableObject
         bool repeatedUnknownReport)
     {
         const string KeepHandsOff = "カメラに触らず、他のカメラアプリも使わないでください。";
-        const string CloseAgain = "画面右上の ✕ でもう一度閉じてください。";
+        const string CloseAgain = "ウィンドウの閉じるボタン（右上の ✕）でもう一度閉じてください。";
         const string RecordsUnchanged = "撮影結果と採用の記録は変わりません。";
         const string NoForcedAction = "この画面が自動でやり直したり、Camera Agent を強制終了したりすることはありません。";
 
@@ -701,7 +706,7 @@ public sealed class DualBindingViewModel : ObservableObject
                 "Camera Agent はすでに終了している可能性があります。",
                 KeepHandsOff,
                 CloseAgain + RecordsUnchanged + NoForcedAction,
-                "✕ を押しても閉じられない場合は、技術担当者に連絡してください。",
+                "閉じるボタンを押しても閉じられない場合は、技術担当者に連絡してください。",
             ];
         }
         else
@@ -725,14 +730,18 @@ public sealed class DualBindingViewModel : ObservableObject
             // press is explicitly fine ("早めに押しても問題はなく"), so claiming the time had
             // passed would be untrue then.
             var pastHeldEstimate = repeatedUnknownReport && nowUtc > estimatedEndUtc;
+            var pastEscalation = repeatedUnknownReport &&
+                nowUtc > estimatedEndUtc.AddMinutes(ShutdownEscalationMinutes);
             paragraphs =
             [
                 "Camera Agent が自動で終了するのを待っています。" + lead,
                 "その間は" + KeepHandsOff,
                 $"{end} を過ぎたら、" + CloseAgain +
                     "早めに押しても問題はなく、" + RecordsUnchanged + NoForcedAction,
-                (pastHeldEstimate ? "目安の時刻を過ぎています。" : string.Empty) +
-                    $"{escalationAt} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
+                pastEscalation
+                    ? $"目安の {end} を過ぎ、{escalationAt} も過ぎました。閉じるボタンを押しても閉じられない場合は、技術担当者に連絡してください。"
+                    : (pastHeldEstimate ? $"目安の {end} を過ぎています。" : string.Empty) +
+                        $"{escalationAt} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
             ];
         }
 

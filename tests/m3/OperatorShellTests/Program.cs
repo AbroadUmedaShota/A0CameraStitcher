@@ -984,12 +984,12 @@ catch (Exception exception)
 try
 {
     RunOnStaRenderThread(ShutdownGuidanceLayoutContracts.RunAsync);
-    Console.WriteLine("PASS issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line");
+    Console.WriteLine("PASS issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line, and a repeated close attempt is announced again");
 }
 catch (Exception exception)
 {
-    failures.Add("issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line");
-    Console.Error.WriteLine($"FAIL issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line: {exception}");
+    failures.Add("issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line, and a repeated close attempt is announced again");
+    Console.Error.WriteLine($"FAIL issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line, and a repeated close attempt is announced again: {exception}");
 }
 
 try
@@ -8639,7 +8639,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
             Check.Equal(5, lines.Length);
             Check.True(lines[1].Contains("カメラに触らず、他のカメラアプリも使わないでください", StringComparison.Ordinal),
                 $"{label}: the hands-off instruction must be its own paragraph.");
-            Check.True(lines[2].Contains("画面右上の ✕ でもう一度閉じてください", StringComparison.Ordinal) &&
+            Check.True(lines[2].Contains("ウィンドウの閉じるボタン（右上の ✕）でもう一度閉じてください", StringComparison.Ordinal) &&
                 lines[2].Contains("撮影結果と採用の記録は変わりません", StringComparison.Ordinal) &&
                 lines[2].Contains("この画面が自動でやり直したり、Camera Agent を強制終了したりすることはありません", StringComparison.Ordinal),
                 $"{label}: the close-again paragraph must carry the steps and both reassurances.");
@@ -8691,7 +8691,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
         Check.True(exceeded[2].Contains("撮影結果と採用の記録は変わりません。", StringComparison.Ordinal) &&
             !exceeded[2].Contains("早めに押しても", StringComparison.Ordinal),
             "exceeded: the harmless-early-press sentence belongs to the waiting wording only.");
-        Check.Equal("✕ を押しても閉じられない場合は、技術担当者に連絡してください。", exceeded[3]);
+        Check.Equal("閉じるボタンを押しても閉じられない場合は、技術担当者に連絡してください。", exceeded[3]);
         Check.False(binding.InvalidationText.Contains("あと約", StringComparison.Ordinal) ||
             binding.InvalidationText.Contains("残り時間は確認できません", StringComparison.Ordinal),
             "exceeded: an exhausted budget is neither still-waiting nor unknown.");
@@ -8762,7 +8762,11 @@ static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknow
         var first = new DateTimeOffset(2026, 10, 6, 3, 0, 20, TimeSpan.Zero);
         var heldEnd = new DateTimeOffset(2026, 10, 6, 3, 11, 0, TimeSpan.Zero);
         var contact = $"{Hm(heldEnd + TimeSpan.FromMinutes(10))} を過ぎても閉じられない場合は、技術担当者に連絡してください。";
-        var passed = "目安の時刻を過ぎています。";
+        var passed = $"目安の {Hm(heldEnd)} を過ぎています。";
+        var escalationTime = Hm(heldEnd + TimeSpan.FromMinutes(10));
+        var passedEscalation =
+            $"目安の {Hm(heldEnd)} を過ぎ、{escalationTime} も過ぎました。" +
+            "閉じるボタンを押しても閉じられない場合は、技術担当者に連絡してください。";
 
         binding.ReportShutdownBlocked(code, "detail", null, first);
         var firstLines = binding.InvalidationText.Split('\n');
@@ -8806,7 +8810,7 @@ static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknow
 
         // The exhausted wording is unaffected by what was held.
         binding.ReportShutdownBlocked(code, "detail", TimeSpan.Zero, restart);
-        Check.Equal("✕ を押しても閉じられない場合は、技術担当者に連絡してください。", binding.InvalidationText.Split('\n')[3]);
+        Check.Equal("閉じるボタンを押しても閉じられない場合は、技術担当者に連絡してください。", binding.InvalidationText.Split('\n')[3]);
         Check.False(binding.InvalidationText.Contains(passed, StringComparison.Ordinal),
             "The exhausted wording never carries the held-time sentence.");
     }
@@ -8815,6 +8819,17 @@ static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknow
         await lifecycle.DisposeAsync();
         Directory.Delete(root, recursive: true);
     }
+        // Past the contact time too: the paragraph says both times have passed and no longer
+        // asks the operator to wait for the contact time. Exactly at that time is not past it.
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10));
+        Check.Equal(passed + contact, binding.InvalidationText.Split('\n')[3]);
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1));
+        var escalated = binding.InvalidationText.Split('\n');
+        Check.Equal(5, escalated.Length);
+        Check.Equal(passedEscalation, escalated[3]);
+        Check.True(escalated[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
+            "Past the contact time the held end time is still the one shown at the top.");
+
 }
 
 // Issue #225 (review M-3, LOW): the gate hands the UI a BlockingDetail from an exception
