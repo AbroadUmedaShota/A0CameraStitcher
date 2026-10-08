@@ -1476,8 +1476,16 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     internal const string ExportSuccessTechnicalText = "技術情報: 元の原画像と同一（SHA-256 一致）";
     internal const string ExportAgainText = "もう一度押すと、同じ画像を別の名前で追加保存します。";
     internal const string ExportInProgressText = "原画像を保存しています…";
-    internal const string ExportSavedNoticeText = "原画像を保存しました。保存先は「出力先」欄をご覧ください。";
-    internal const string ExportFailedNoticeText = "原画像を保存できませんでした。理由は「保存」欄をご覧ください。";
+    internal const string ExportSummaryInProgressText = "保存しています…";
+    internal const string ExportSavedNoticeText = "原画像を保存しました。保存したファイルは「出力先」欄で確認してください。";
+    // One notice per cause class, so the cause is read from the notice itself and the next step
+    // from the result field.
+    internal const string ExportFolderUnusableNoticeText =
+        "原画像を保存できませんでした。保存先のフォルダが使えません。次の操作は「保存」欄で確認してください。";
+    internal const string ExportSourceFailedNoticeText =
+        "原画像を保存できませんでした。アプリ内に保管した原画像を確認できません。詳しくは「保存」欄で確認してください。";
+    internal const string ExportDestinationFailedNoticeText =
+        "原画像を保存できませんでした。保存先への書き込みが完了しませんでした。次の操作は「保存」欄で確認してください。";
 
     public async Task ExportAsync()
     {
@@ -1488,6 +1496,8 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
         IsBusy = true;
         ActivityText = ExportInProgressText;
+        var previousExportSummary = ExportSummary;
+        ExportSummary = ExportSummaryInProgressText;
         try
         {
             try
@@ -1496,7 +1506,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             }
             catch (Exception exception) when (exception is IOException or ArgumentException or NotSupportedException or UnauthorizedAccessException or InvalidDataException)
             {
-                ReportExportFailure(ExportFolderUnusableText, exception);
+                ReportExportFailure(ExportFolderUnusableText, ExportFolderUnusableNoticeText, exception);
                 return;
             }
 
@@ -1516,21 +1526,27 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 _captureResult.RetainedOriginal.CameraAlias, _captureResult.TerminalState == "Complete");
             ActivityText = ExportSavedNoticeText;
         }
-        catch (Exception exception) when (exception is ExportSourceUnavailableException or InvalidDataException)
+        catch (ExportSourceUnavailableException exception)
         {
-            // Both are raised by checks on the app's own copy (record, shape of the request, the
-            // original.jpg bytes). The folder was already checked above.
-            ReportExportFailure(ExportSourceFailedText, exception);
+            // Raised by the exporter's checks on the app's own copy (record, transaction ID,
+            // camera alias, the original.jpg bytes). The folder was already checked above.
+            ReportExportFailure(ExportSourceFailedText, ExportSourceFailedNoticeText, exception);
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
-            // Everything else happened while writing to, locking or reading back from the
-            // chosen folder (I/O errors, full disk, access denied, name collisions, a read-back
-            // mismatch, no free file name).
-            ReportExportFailure(ExportDestinationFailedText, exception);
+            // Everything else happened on the destination side: a folder that turned unusable
+            // after the check above (an InvalidDataException), or writing to, locking or reading
+            // back from the chosen folder (I/O errors, full disk, access denied, name collisions,
+            // a read-back mismatch, no free file name).
+            ReportExportFailure(ExportDestinationFailedText, ExportDestinationFailedNoticeText, exception);
         }
         finally
         {
+            if (string.Equals(ExportSummary, ExportSummaryInProgressText, StringComparison.Ordinal))
+            {
+                // Neither a result nor a failure was reported (the save was cancelled).
+                ExportSummary = previousExportSummary;
+            }
             IsBusy = false;
         }
     }
@@ -1538,17 +1554,18 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private static string BuildExportSavedText(string cameraAlias, bool complete) =>
         (complete
             ? $"保存しました: 原画像1枚（{cameraAlias}）。"
-            : $"保存しました: 原画像1枚（{cameraAlias}）。この撮影は途中で止まりましたが、受け取れた原画像は保存できました。") +
+            : $"保存しました: 原画像1枚（{cameraAlias}）。この撮影は途中で止まりましたが、この画像は最後まで受け取れたものです。") +
         "\n" + ExportAgainText + "\n" + ExportSuccessTechnicalText;
 
-    // The plain-language reason stays in the result field and the notice only points to it.
-    private void ReportExportFailure(string operatorText, Exception exception)
+    // The plain-language reason and next step stay in the result field; the notice names the cause
+    // class in one sentence and points to it.
+    private void ReportExportFailure(string operatorText, string noticeText, Exception exception)
     {
         TechnicalDetail += $"\nexport_failed: {exception.GetType().Name}: {SafeMessage(exception)}";
         ExportSummary = operatorText + "\n" + ExportFailureTechnicalText;
         // The output field would otherwise keep the path of an earlier save beside this failure.
         LastExportPath = string.Empty;
-        ActivityText = ExportFailedNoticeText;
+        ActivityText = noticeText;
     }
 
     private async Task ApplyTerminalResultAsync(

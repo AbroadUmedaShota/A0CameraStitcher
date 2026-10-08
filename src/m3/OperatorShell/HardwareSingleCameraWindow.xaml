@@ -182,7 +182,7 @@
                             </Grid>
                             <Button Content="単体原画像を保存" Command="{Binding ExportCommand}" IsEnabled="{Binding CanExport}"
                                     Margin="0,14,0,0" HorizontalAlignment="Stretch"
-                                    AutomationProperties.Name="検証済み単体原画像をbyte identicalで明示保存" />
+                                    AutomationProperties.Name="単体原画像を保存 検証済みの原画像をそのままの内容で保存する" />
                             <TextBlock Text="{Binding ReviewStatus}" Margin="0,12,0,4" TextWrapping="Wrap"
                                        AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             <Button Content="採用して次の撮影を準備" Command="{Binding AcceptReviewCommand}"

@@ -300,7 +300,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=117 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=118 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -781,6 +781,17 @@ catch (Exception exception)
 {
     failures.Add("hardware single export reports its result in the two-camera wording (#229)");
     Console.Error.WriteLine($"FAIL hardware single export reports its result in the two-camera wording (#229): {exception}");
+}
+
+try
+{
+    await HardwareSingleExportFailureClassesAndProgressAsync();
+    Console.WriteLine("PASS hardware single export types source-side checks and shows progress between identical failures (#229)");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware single export types source-side checks and shows progress between identical failures (#229)");
+    Console.Error.WriteLine($"FAIL hardware single export types source-side checks and shows progress between identical failures (#229): {exception}");
 }
 
 try
@@ -2770,7 +2781,7 @@ static async Task HardwareSingleExportResultWordingAsync()
         Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedText + failureTail, viewModel.ExportSummary);
         Check.True(viewModel.ExportSummary.Contains("撮影した原画像はアプリ内に残っています。", StringComparison.Ordinal),
             "A failed save must say that the captured original stays in the app.");
-        Check.Equal(HardwareSingleCameraViewModel.ExportFailedNoticeText, viewModel.ActivityText);
+        Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText, viewModel.ActivityText);
         Check.False(
             viewModel.ExportSummary.Contains(writeFailureMessage, StringComparison.Ordinal) ||
             viewModel.ExportSummary.Contains("IOException", StringComparison.Ordinal) ||
@@ -2807,7 +2818,7 @@ static async Task HardwareSingleExportResultWordingAsync()
         Check.Equal(HardwareSingleCameraViewModel.ExportSourceFailedText + failureTail, viewModel.ExportSummary);
         Check.False(viewModel.ExportSummary.Contains("残っています", StringComparison.Ordinal),
             "A missing source must not promise that the original is still in the app.");
-        Check.Equal(HardwareSingleCameraViewModel.ExportFailedNoticeText, viewModel.ActivityText);
+        Check.Equal(HardwareSingleCameraViewModel.ExportSourceFailedNoticeText, viewModel.ActivityText);
         Check.Equal(string.Empty, viewModel.LastExportPath);
         Check.Equal(savedFiles, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
 
@@ -2821,12 +2832,198 @@ static async Task HardwareSingleExportResultWordingAsync()
             "The folder text must name the button that chooses another folder.");
         Check.False(viewModel.ExportSummary.Contains(exportDirectory, StringComparison.Ordinal),
             "The folder path must not be part of the operator-facing text.");
+        Check.Equal(HardwareSingleCameraViewModel.ExportFolderUnusableNoticeText, viewModel.ActivityText);
         Check.Equal("not a folder", File.ReadAllText(exportDirectory));
         Check.False(viewModel.IsBusy, "A folder failure must release the busy flag.");
+
+        // Each notice names its cause class, points to the result field and carries no exception text.
+        foreach (var notice in new[]
+                 {
+                     HardwareSingleCameraViewModel.ExportFolderUnusableNoticeText,
+                     HardwareSingleCameraViewModel.ExportSourceFailedNoticeText,
+                     HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText,
+                 })
+        {
+            Check.True(notice.StartsWith("原画像を保存できませんでした。", StringComparison.Ordinal) &&
+                       notice.Contains("「保存」欄で確認してください。", StringComparison.Ordinal),
+                $"A failure notice must open with the failure and point to the result field: {notice}");
+            Check.False(notice.Contains("ご覧ください", StringComparison.Ordinal),
+                $"A failure notice must not use the polite 'look at' wording: {notice}");
+        }
+        Check.Equal(3,
+            new[]
+            {
+                HardwareSingleCameraViewModel.ExportFolderUnusableNoticeText,
+                HardwareSingleCameraViewModel.ExportSourceFailedNoticeText,
+                HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText,
+            }.Distinct(StringComparer.Ordinal).Count());
     }
     finally
     {
         Directory.Delete(root, recursive: true);
+    }
+}
+
+// GitHub Issue #229 review follow-up. (1) The exporter types the checks on the retained original
+// and the request (record, transaction ID, camera alias) as ExportSourceUnavailableException, the
+// way the two-camera export does, so a plain InvalidDataException from the destination side is
+// never read as "the original in the app could not be checked". (2) The single-camera screen
+// sorts a destination-side InvalidDataException into the "writing did not finish" class; the
+// save outcome does not change, only the class of the exception. (3) The save shows an in-progress
+// state, so a second identical failure still changes the notice and the result field.
+static async Task HardwareSingleExportFailureClassesAndProgressAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var exportTime = DateTimeOffset.Parse("2026-10-08T00:00:00Z");
+        const string transactionId = "46464646464646464646464646464646";
+
+        // (1) Checks on the source side are typed; nothing is written for any of them.
+        {
+            var sourcePath = Path.Combine(root, "agent", "run-4600-1", "CAM-A", "original.jpg");
+            var original = WriteJpegRecord(sourcePath, "CAM-A");
+            var exportDirectory = Path.Combine(root, "typed-exports");
+            var exporter = new HardwareOriginalExporter(exportDirectory);
+
+            Exception? wrongPath = null;
+            try
+            {
+                await exporter.ExportAsync(
+                    original, transactionId, exportTime, Path.Combine(root, "agent", "elsewhere", "original.jpg"));
+            }
+            catch (Exception exception)
+            {
+                wrongPath = exception;
+            }
+            Check.True(wrongPath is ExportSourceUnavailableException { InnerException: InvalidDataException },
+                $"A record that is not the canonical original must be typed as a source failure. Actual: {wrongPath?.GetType().Name ?? "none"}");
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportAsync(
+                original, "not-a-transaction-id", exportTime, sourcePath));
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportAsync(
+                original with { CameraAlias = "CAM-X" }, transactionId, exportTime, sourcePath));
+            Check.Equal(
+                0,
+                Directory.Exists(exportDirectory) ? Directory.GetFileSystemEntries(exportDirectory).Length : 0);
+            // Bytes that no longer match the recorded size are found while staging (a diagnostic
+            // partial stays); they are a source failure as well.
+            await Check.ThrowsAsync<ExportSourceUnavailableException>(() => exporter.ExportAsync(
+                original with { SizeBytes = original.SizeBytes + 1 }, transactionId, exportTime, sourcePath));
+
+            // A folder the exporter cannot use stays a plain InvalidDataException (destination side).
+            var uncExporter = new HardwareOriginalExporter(@"\\fake-host\share\exports");
+            Exception? uncFailure = null;
+            try
+            {
+                await uncExporter.ExportAsync(original, transactionId, exportTime, sourcePath);
+            }
+            catch (Exception exception)
+            {
+                uncFailure = exception;
+            }
+            Check.True(uncFailure is InvalidDataException,
+                $"An unusable export folder must be rejected. Actual: {uncFailure?.GetType().Name ?? "none"}");
+            Check.False(uncFailure is ExportSourceUnavailableException,
+                "An unusable export folder is a destination-side failure, not a source failure.");
+        }
+
+        // (2) and (3) through the screen.
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (transactionIdValue, alias) =>
+                CompleteCapture(artifactsRoot, transactionIdValue, alias).Result,
+        };
+        var exportDirectoryForScreen = Path.Combine(root, "screen-exports");
+        HardwareSingleCameraViewModel? screen = null;
+        var failure = new Func<Exception>(() => new InvalidDataException("simulated destination-side check"));
+        var observedWhileSaving = new List<(string Activity, string Summary, bool Busy)>();
+        var exporterForScreen = new HardwareOriginalExporter(
+            exportDirectoryForScreen,
+            (stagingPath, cancellationToken) =>
+            {
+                observedWhileSaving.Add((screen!.ActivityText, screen.ExportSummary, screen.IsBusy));
+                throw failure();
+            });
+        using var viewModel = new HardwareSingleCameraViewModel(
+            operations, new HardwareSingleAppStateStore(Path.Combine(root, "state")), exporterForScreen);
+        screen = viewModel;
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+        await viewModel.CaptureAsync();
+        Check.True(viewModel.CanExport, "The scenario starts from an exportable single original.");
+        var failureTail = "\n" + HardwareSingleCameraViewModel.ExportFailureTechnicalText;
+
+        var changes = new List<(string Property, string Value)>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(HardwareSingleCameraViewModel.ActivityText))
+            {
+                changes.Add((args.PropertyName, viewModel.ActivityText));
+            }
+            else if (args.PropertyName == nameof(HardwareSingleCameraViewModel.ExportSummary))
+            {
+                changes.Add((args.PropertyName, viewModel.ExportSummary));
+            }
+        };
+
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedText + failureTail, viewModel.ExportSummary);
+        Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText, viewModel.ActivityText);
+        Check.True(viewModel.TechnicalDetail.Contains("export_failed: InvalidDataException", StringComparison.Ordinal),
+            "The exception type belongs to the technical detail.");
+        Check.Equal(string.Empty, viewModel.LastExportPath);
+        Check.True(viewModel.CanExport, "A destination-side failure must leave the save retryable.");
+
+        // The same failure a second time must still be announced: the in-progress state sits
+        // between the two identical failures in the property-change sequence.
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText, viewModel.ActivityText);
+        Check.Equal(2, observedWhileSaving.Count);
+        foreach (var (activity, summary, busy) in observedWhileSaving)
+        {
+            Check.Equal(HardwareSingleCameraViewModel.ExportInProgressText, activity);
+            Check.Equal(HardwareSingleCameraViewModel.ExportSummaryInProgressText, summary);
+            Check.True(busy, "The save must be busy while it runs.");
+        }
+        Check.True(
+            changes.Where(change => change.Property == nameof(HardwareSingleCameraViewModel.ActivityText))
+                .Select(change => change.Value)
+                .SequenceEqual(
+                [
+                    HardwareSingleCameraViewModel.ExportInProgressText,
+                    HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText,
+                    HardwareSingleCameraViewModel.ExportInProgressText,
+                    HardwareSingleCameraViewModel.ExportDestinationFailedNoticeText,
+                ]),
+            "Two identical failures must each be preceded by the in-progress notice. Actual: " +
+            string.Join(" | ", changes.Where(change => change.Property == nameof(HardwareSingleCameraViewModel.ActivityText)).Select(change => change.Value)));
+        Check.True(
+            changes.Where(change => change.Property == nameof(HardwareSingleCameraViewModel.ExportSummary))
+                .Select(change => change.Value)
+                .SequenceEqual(
+                [
+                    HardwareSingleCameraViewModel.ExportSummaryInProgressText,
+                    HardwareSingleCameraViewModel.ExportDestinationFailedText + failureTail,
+                    HardwareSingleCameraViewModel.ExportSummaryInProgressText,
+                    HardwareSingleCameraViewModel.ExportDestinationFailedText + failureTail,
+                ]),
+            "The result field must show the in-progress state between two identical failures.");
+
+        // An ExportSourceUnavailableException raised during the save is still the source class.
+        failure = () => new ExportSourceUnavailableException("simulated source-side check");
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportSourceFailedText + failureTail, viewModel.ExportSummary);
+        Check.Equal(HardwareSingleCameraViewModel.ExportSourceFailedNoticeText, viewModel.ActivityText);
+    }
+    finally
+    {
+        await DeleteHardwareTestRootAsync(root);
     }
 }
 
@@ -3455,7 +3652,7 @@ static async Task HardwarePendingTransactionRecoveryAsync()
             File.Exists(viewModel.LastExportPath),
             $"FailedPartial retained original export must be explicit and byte-verified. {viewModel.TechnicalDetail}");
         Check.True(
-            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-A）。この撮影は途中で止まりましたが、受け取れた原画像は保存できました。", StringComparison.Ordinal) &&
+            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-A）。この撮影は途中で止まりましたが、この画像は最後まで受け取れたものです。", StringComparison.Ordinal) &&
             !viewModel.ExportSummary.Contains("FailedPartial", StringComparison.Ordinal),
             $"Export of a stopped capture must say the capture stopped, in plain words. Actual: {viewModel.ExportSummary}");
         Check.True(await store.LoadPendingAsync() is not null, "Recovered terminal result must remain discoverable until operator preparation.");

@@ -366,21 +366,31 @@ public sealed class HardwareOriginalExporter
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(original);
-        HardwareArtifactVerifier.ValidateExpectedRecord(
-            original.Path,
-            original.SizeBytes,
-            original.Sha256,
-            "original.jpg",
-            expectedPath);
-        ValidateTransactionId(transactionId);
+        string safeAlias;
+        try
+        {
+            HardwareArtifactVerifier.ValidateExpectedRecord(
+                original.Path,
+                original.SizeBytes,
+                original.Sha256,
+                "original.jpg",
+                expectedPath);
+            ValidateTransactionId(transactionId);
+            safeAlias = original.CameraAlias switch
+            {
+                "CAM-A" => "CAM-A",
+                "CAM-B" => "CAM-B",
+                _ => throw new InvalidDataException("Export camera alias is invalid."),
+            };
+        }
+        catch (InvalidDataException exception)
+        {
+            // Everything checked here concerns the retained original and the request built from
+            // it, not the export folder; the dual export types the same checks the same way.
+            throw new ExportSourceUnavailableException(exception.Message, exception);
+        }
         EnsureExportDirectoryIsSafe();
 
-        var safeAlias = original.CameraAlias switch
-        {
-            "CAM-A" => "CAM-A",
-            "CAM-B" => "CAM-B",
-            _ => throw new InvalidDataException("Export camera alias is invalid."),
-        };
         var baseName = $"A0-single-{now.UtcDateTime:yyyyMMdd-HHmmssfff}-{safeAlias}-{transactionId[..8]}";
         var (lockedFile, finalPath) = await StageVerifiedOriginalAsync(
                 original.Path, original.SizeBytes, original.Sha256, baseName, cancellationToken)
