@@ -60,10 +60,10 @@ struct DualDelegationCloseEvidence final {
 // directory or marker write can let one write land through a junction or
 // symlink before the lease layer's reparse-point rejection stops it. That
 // rejection is not a backstop for a root whose own name ends in a dot or space:
-// Win32 trims every trailing dot and space from the last name of a path but only
-// one trailing dot from an inner name (`foo ` and `foo..` are kept, `foo .`
-// becomes `foo `), so the reparse check sees `foo` while the marker is written
-// through `foo `. That spelling is closed by the name rule above, which refuses
+// Win32 trims every trailing dot and space from the last name of a path, but an
+// inner name loses a trailing dot only when it ends in exactly one dot (`foo.`
+// becomes `foo`, `foo .` becomes `foo `; `foo ` and `foo..` are kept), so the
+// reparse check sees `foo` while the marker is written through `foo `. That spelling is closed by the name rule above, which refuses
 // every name that ends in a dot or space, a single dot included, and not by the
 // reparse check. Do not relax it to allow one trailing dot. A volume
 // mounted on a folder inside the data root and then addressed through its own

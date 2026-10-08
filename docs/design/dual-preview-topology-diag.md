@@ -468,7 +468,7 @@ struct DualDelegationMarkerRecoveryResult final {
 
 | # | 条件 | 外れたときの status |
 |---|---|---|
-| P1 | marker root が既存で、固定ローカル drive 上、祖先がすべて reparse でない directory（作成しない） | `marker_root_untrusted` |
+| P1 | marker root が既存で、固定ローカル drive 上、祖先がすべて reparse でない directory、各名前の末尾が点・空白でなく `:` を含まない（作成しない） | `marker_root_untrusted` |
 | P2 | `armed-session-*.marker` の一致がちょうど 1 件で、列挙が正常に終わる | 0 件 `marker_missing`、2 件以上 `marker_ambiguous`、列挙失敗 `marker_unavailable` |
 | P3 | 名前が正規形 `armed-session-<数字>.marker`（数字は 1〜10 桁、先頭 0 は `0` のみ、値は 4294967295 以下） | `marker_name_noncanonical` |
 | P4 | 通常の disk file、reparse でない、1〜255 byte、厳格な v2 構文、2 回読んで内容・属性・file index・更新時刻が同じ | `marker_invalid`／`marker_changed` |

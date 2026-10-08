@@ -45,9 +45,9 @@ std::wstring ToWide(std::string_view value) {
 // Win32 rewrites a trailing dot or space differently by the position of the name
 // in a path (measured on Windows 11):
 //   - the last name loses every trailing dot and space ("foo ." becomes "foo");
-//   - an inner name loses one trailing dot only and keeps a trailing space and
-//     the second and later dots ("foo " and "foo.." are kept as written, and
-//     "foo ." becomes "foo ").
+//   - an inner name loses a trailing dot only when the name ends in exactly one
+//     dot ("foo." becomes "foo", "foo ." becomes "foo "); a name that ends in
+//     two or more dots or in a space is kept as written ("foo " and "foo..").
 // A directory is opened as the last name, but every file or child below it is
 // reached through the same name as an inner name, so one spelling can designate
 // two different directories ("foo" and "foo "). The rule therefore refuses every
@@ -72,9 +72,11 @@ void RequireSafeDirectoryTree(const std::filesystem::path &root) {
     for (const auto &part : root.relative_path()) {
         if (part == L".." || part == L".")
             throw TransportError("camera_control_marker_failed", "marker path must be normalized");
-        // Defense in depth: every caller already passes a root that was checked
-        // by CheckMarkerRootOverlap or is the production root. The name is
-        // refused before the directory is created.
+        // Defense in depth: a caller normally passes a root that was checked by
+        // CheckMarkerRootOverlap or is the production root, but a root that
+        // contains ".." can arrive without that normalization. The name is
+        // refused before the directory is created, so a name such as "foo "
+        // ahead of a ".." component creates nothing.
         if (HasTrimmedOrStreamName(part.wstring()))
             throw TransportError("camera_control_marker_failed", "marker path has a name the file system may rewrite");
         current /= part;

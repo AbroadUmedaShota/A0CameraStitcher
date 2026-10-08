@@ -643,8 +643,9 @@ int RunAliasHardeningTests() {
               "a child of such a junction must be refused by the lease layer");
         // The same junction under a spelling with one more dot ("tsp ." and
         // "tsp..."). As the last name it is trimmed to the ordinary directory
-        // "tsp"; as an inner name it still reaches the junction. A rule that lets
-        // a single trailing dot through would accept it, so it is refused as well.
+        // "tsp". "tsp ." reaches the junction "tsp " as an inner name; "tsp..."
+        // reaches no junction and checks the name rule alone. A rule that lets a
+        // single trailing dot through would accept "tsp .", so both are refused.
         const auto extra_dot_root = scratch / (std::wstring(trailing) + L".");
         Check(overlaps(extra_dot_root, reference), "a name that ends in one more dot after a trailing-name junction must overlap");
         Check(overlaps(extra_dot_root / L"sub", reference),
@@ -700,6 +701,12 @@ int RunAliasHardeningTests() {
         LeaseRejectsAsMarkerFailure(name, dotted_root) && !std::filesystem::exists(scratch / L"leaseDotted");
     Check(tilde_refused, "short-name syntax must be refused by the lease before any directory is created");
     Check(dotted_refused, "a trailing dot must be refused by the lease before any directory is created");
+    // A root with a ".." component is not normalized before the directory walk.
+    // The name ahead of the ".." is refused before it is created, so nothing is
+    // left behind (the walk would otherwise create "m2-tail" and stop at "..").
+    Check(LeaseRejectsAsMarkerFailure(name, scratch / L"m2-tail " / L".." / L"LeaseM2") &&
+              !std::filesystem::exists(scratch / L"m2-tail"),
+          "a name that ends in a space ahead of a parent component must be refused before any directory is created");
     Check(LeaseRejectsAsMarkerFailure(name, std::filesystem::path(L"\\\\server\\share\\root")),
           "a UNC root must be refused by the lease before any I/O");
     Check(LeaseRejectsAsMarkerFailure(name, std::filesystem::path(L"C:root")),
