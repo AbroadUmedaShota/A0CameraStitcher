@@ -4757,13 +4757,13 @@ void TestContinuousLiveViewLeaseIsolation() {
             [](ProductionHardwareCameraAgentConfig& config) {
                 config.continuous_live_view_marker_root_for_testing.clear();
             },
-            "must be configured together",
+            "lease name and marker root must be configured together",
             "a test lease name without a test marker root must be rejected");
         constructor_rejects(
             [](ProductionHardwareCameraAgentConfig& config) {
                 config.continuous_live_view_lease_name_for_testing.clear();
             },
-            "must be configured together",
+            "lease name and marker root must be configured together",
             "a test marker root without a test lease name must be rejected");
         constructor_rejects(
             [](ProductionHardwareCameraAgentConfig& config) {

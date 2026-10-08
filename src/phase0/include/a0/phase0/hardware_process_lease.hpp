@@ -44,7 +44,10 @@ struct DualDelegationCloseEvidence final {
 // True when `marker_root` designates the per-user production dual-delegation
 // marker root (compared ignoring case and separator style). Throws
 // TransportError when the production root cannot be resolved, so callers fail
-// closed instead of treating an unverifiable root as safe.
+// closed instead of treating an unverifiable root as safe. The comparison is on
+// strings: 8.3 short names, trailing dots, and subst aliases are not detected.
+// Junctions and symlinks are stopped by the lease layer's reparse-point
+// rejection. Alias hardening is tracked in #246.
 [[nodiscard]] bool IsProductionDualDelegationMarkerRoot(const std::filesystem::path &marker_root);
 
 // Serializes all real-camera Phase 0 commands across processes in the current
