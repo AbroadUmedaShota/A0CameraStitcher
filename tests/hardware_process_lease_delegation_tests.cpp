@@ -5,6 +5,9 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 using namespace a0::phase0;
 namespace {
@@ -323,6 +326,248 @@ int RunCrossSessionMarkerGuardTests() {
     std::cout << "{\"mode\":\"cross-session-guard-simulation\",\"failures\":" << failures << "}\n";
     return 0;
 }
+
+bool LeaseRejectsAsMarkerFailure(const std::string &n, const std::filesystem::path &r) {
+    try {
+        HardwareProcessLease x(n, std::chrono::milliseconds(0), r);
+        return false;
+    } catch (const TransportError &e) {
+        return e.Category() == "camera_control_marker_failed";
+    }
+}
+std::filesystem::path LowerCased(const std::filesystem::path &path) {
+    std::wstring text = path.wstring();
+    CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
+    return std::filesystem::path(text);
+}
+// First drive letter (from Z down) that is neither a logical drive nor a DOS
+// device, or 0 when none is free.
+wchar_t FreeDriveLetter() {
+    const DWORD in_use = GetLogicalDrives();
+    for (wchar_t letter = L'Z'; letter >= L'D'; --letter) {
+        if ((in_use & (1u << (letter - L'A'))) != 0) continue;
+        const wchar_t device[3] = {letter, L':', 0};
+        wchar_t target[MAX_PATH]{};
+        if (QueryDosDeviceW(device, target, MAX_PATH) == 0) return letter;
+    }
+    return 0;
+}
+// A subst-style drive mapping, removed on every exit path.
+class SubstDrive final {
+  public:
+    SubstDrive(wchar_t letter, const std::filesystem::path &target)
+        : device_{letter, L':', 0}, target_(L"\\??\\" + target.wstring()) {
+        defined_ = DefineDosDeviceW(DDD_RAW_TARGET_PATH, device_, target_.c_str()) != FALSE;
+    }
+    ~SubstDrive() {
+        if (defined_)
+            DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_RAW_TARGET_PATH | DDD_EXACT_MATCH_ON_REMOVE,
+                             device_, target_.c_str());
+    }
+    SubstDrive(const SubstDrive &) = delete;
+    SubstDrive &operator=(const SubstDrive &) = delete;
+    [[nodiscard]] bool Defined() const noexcept { return defined_; }
+  private:
+    wchar_t device_[3];
+    std::wstring target_;
+    bool defined_{};
+};
+struct DirectoryStamp final {
+    bool exists{};
+    FILETIME last_write{};
+    DWORD attributes{};
+    [[nodiscard]] bool operator==(const DirectoryStamp &other) const noexcept {
+        return exists == other.exists && attributes == other.attributes &&
+               last_write.dwLowDateTime == other.last_write.dwLowDateTime &&
+               last_write.dwHighDateTime == other.last_write.dwHighDateTime;
+    }
+};
+// Reads directory metadata only (no open, no enumeration of the production tree).
+DirectoryStamp StampDirectory(const std::filesystem::path &path) {
+    DirectoryStamp stamp;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        stamp.exists = true;
+        stamp.last_write = data.ftLastWriteTime;
+        stamp.attributes = data.dwFileAttributes;
+    }
+    return stamp;
+}
+// Issue #246: the lease layer must refuse "test lease name + production marker
+// root" (the reverse of the existing "production name + test root" refusal),
+// including aliases of the production root. The predicate cases use a scratch
+// reference root, so nothing under the production marker root is touched. The
+// lease-layer cases that name the production root are expected to throw before
+// any file system access; the production directory metadata is compared before
+// and after to prove it.
+int RunAliasHardeningTests() {
+    wchar_t temp[MAX_PATH]{}, long_temp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp)) return 2;
+    const DWORD long_length = GetLongPathNameW(temp, long_temp, MAX_PATH);
+    const std::filesystem::path base(long_length > 0 && long_length < MAX_PATH ? long_temp : temp);
+    const auto scratch = base / (L"A0LeaseAliasHardeningTest-" + std::to_wstring(GetCurrentProcessId()));
+    const auto name = "A0.Poc.TestLease.AliasHardening." + std::to_string(GetCurrentProcessId());
+    std::error_code ignored;
+    std::filesystem::remove_all(scratch, ignored);
+    const auto reference = scratch / L"Phase0Like" / L"DualDelegation";
+    if (!std::filesystem::create_directories(reference)) return 2;
+    const auto alias = [](const std::filesystem::path &candidate, const std::filesystem::path &ref) {
+        return DualDelegationMarkerRootMayAlias(candidate, ref);
+    };
+    std::string notes;
+
+    // Reference exists: spellings of the same directory.
+    Check(alias(reference, reference), "identical root must alias");
+    Check(alias(reference.wstring() + L"\\", reference), "trailing separator must alias");
+    Check(alias(std::filesystem::path(reference.generic_wstring()), reference), "forward slashes must alias");
+    Check(alias(LowerCased(reference), reference), "case variant must alias");
+    Check(alias(scratch / L"not-created" / L".." / L"Phase0Like" / L"DualDelegation", reference),
+          "dot-dot spelling must alias");
+    Check(alias(reference / L".." / L"DualDelegation", reference), "dot-dot through an existing directory must alias");
+    Check(alias(reference.wstring() + L".", reference), "trailing dot on an existing root must alias");
+    Check(alias(reference.wstring() + L" ", reference), "trailing space on an existing root must alias");
+    Check(alias(reference.wstring() + L"::$INDEX_ALLOCATION", reference), "stream selector on a root must alias");
+    // Reference exists: things that are not the reference.
+    const auto sibling = scratch / L"Phase0Like" / L"Sibling";
+    if (!std::filesystem::create_directories(sibling)) return 2;
+    Check(!alias(reference / L"nested", reference), "a child of the reference must not alias");
+    Check(!alias(sibling, reference), "an existing sibling must not alias");
+    Check(!alias(scratch / L"Phase0Like" / L"AbsentSibling", reference), "an absent sibling must not alias");
+    Check(!alias(std::filesystem::path{}, reference), "an empty root is not a root and must not alias");
+    // Fail-closed: not an absolute drive-letter path, or a drive that cannot be opened.
+    Check(alias(std::filesystem::path(L"relative\\root"), reference), "a relative root must be unverifiable");
+    Check(alias(std::filesystem::path(L"\\\\?\\" + reference.wstring()), reference),
+          "an extended-length prefix must be unverifiable");
+    if (const wchar_t letter = FreeDriveLetter(); letter != 0) {
+        const std::wstring absent_drive = std::wstring(1, letter) + L":\\x\\y";
+        Check(alias(absent_drive, reference), "a root on an absent drive must be unverifiable");
+    } else {
+        notes += "absent-drive case not run: no free drive letter; ";
+    }
+
+    // Reference does not exist yet: names the file system would rewrite.
+    const auto absent_reference = scratch / L"Absent" / L"DualDelegation";
+    Check(alias(absent_reference, absent_reference), "identical absent root must alias");
+    Check(alias(absent_reference.wstring() + L".", absent_reference), "trailing dot on an absent root must alias");
+    Check(alias(absent_reference.wstring() + L" ", absent_reference), "trailing space on an absent root must alias");
+    Check(alias(scratch / L"ABSEN~1" / L"DualDelegation", absent_reference), "short-name syntax on an absent root must alias");
+    Check(alias(scratch / L"Absent" / L"DUALDE~1", absent_reference), "short-name syntax in the leaf must alias");
+    Check(alias(scratch / L"Absent:stream" / L"DualDelegation", absent_reference), "stream selector must alias");
+    Check(!alias(scratch / L"Absent" / L"Other", absent_reference), "an absent sibling must not alias an absent root");
+    Check(!alias(absent_reference / L"nested", absent_reference), "a child of an absent root must not alias");
+    Check(!std::filesystem::exists(scratch / L"Absent"), "alias checks must not create directories");
+
+    // 8.3 short names: generated only where the volume has them enabled.
+    const auto long_dir = scratch / L"AliasLongDirectoryName";
+    const auto long_reference = long_dir / L"Phase0Like2" / L"DualDelegation";
+    if (!std::filesystem::create_directories(long_reference)) return 2;
+    wchar_t short_buffer[MAX_PATH]{};
+    const DWORD short_length = GetShortPathNameW(long_dir.c_str(), short_buffer, MAX_PATH);
+    const bool short_name_generated = short_length > 0 && short_length < MAX_PATH &&
+        std::wstring_view(short_buffer).find(L'~') != std::wstring_view::npos;
+    if (short_name_generated) {
+        const std::filesystem::path short_dir(short_buffer);
+        const auto short_reference = short_dir / L"Phase0Like2" / L"DualDelegation";
+        Check(alias(short_reference, long_reference), "8.3 short name of an existing root must alias");
+        Check(alias(short_reference / L"nested", long_reference / L"nested"),
+              "8.3 short name in front of an absent leaf must alias");
+        Check(!alias(short_reference / L"other", long_reference / L"nested"),
+              "8.3 short name in front of a different absent leaf must not alias");
+        // An existing ancestor spelled with a short name is not itself a reason
+        // to refuse (a short TEMP path is legitimate); only the absent tail is.
+        Check(!alias(short_dir / L"NewRoot", reference), "a short-named existing ancestor must not alias by itself");
+    } else {
+        notes += "8.3 alias cases not run: GetShortPathNameW produced no short name for a 24-character directory "
+                 "(8.3 generation is disabled on this volume); ";
+    }
+
+    // Junction: resolved through the final path and refused by the lease layer.
+    const auto junction = scratch / L"junction-to-reference";
+    if (CreateJunctionFixture(junction, reference)) {
+        Check(alias(junction, reference), "a junction to the reference must alias");
+        Check(!alias(junction / L"nested", reference), "a child of a junction to the reference must not alias");
+        Check(LeaseRejectsAsMarkerFailure(name, junction),
+              "a junction marker root must be refused by the lease layer");
+        RemoveDirectoryW(junction.c_str());
+    } else {
+        notes += "junction case not run: mklink /J failed; ";
+    }
+
+    // subst-style drive mapped onto the reference's parent.
+    if (const wchar_t letter = FreeDriveLetter(); letter != 0) {
+        SubstDrive mapped(letter, scratch / L"Phase0Like");
+        if (mapped.Defined()) {
+            const std::filesystem::path drive(std::wstring(1, letter) + L":\\");
+            Check(alias(drive / L"DualDelegation", reference), "a subst drive onto the parent must alias an existing root");
+            Check(alias(drive / L"NotYet" / L"DualDelegation", scratch / L"Phase0Like" / L"NotYet" / L"DualDelegation"),
+                  "a subst drive must alias an absent root through its existing ancestor");
+            Check(!alias(drive / L"Sibling", reference), "a subst drive onto a sibling must not alias");
+        } else {
+            notes += "subst case not run: DefineDosDeviceW failed; ";
+        }
+    } else {
+        notes += "subst case not run: no free drive letter; ";
+    }
+
+    // Lease layer, scratch roots: an alias-prone name that does not exist yet is
+    // refused before anything is created, even though it is not the production root.
+    const auto tilde_root = scratch / L"Lease~1";
+    const auto dotted_root = scratch / L"leaseDotted.";
+    Check(LeaseRejectsAsMarkerFailure(name, tilde_root) && !std::filesystem::exists(tilde_root),
+          "short-name syntax must be refused by the lease before any directory is created");
+    Check(LeaseRejectsAsMarkerFailure(name, dotted_root) && !std::filesystem::exists(scratch / L"leaseDotted"),
+          "a trailing dot must be refused by the lease before any directory is created");
+    Check(Succeeds(name, scratch / L"LeaseOrdinary"), "an ordinary absent scratch root must still be accepted");
+
+    // Lease layer, production root and spellings of it. Nothing may be created
+    // or changed there.
+    wchar_t local_app_data[MAX_PATH]{};
+    const DWORD local_app_data_length = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data, MAX_PATH);
+    Check(local_app_data_length > 0 && local_app_data_length < MAX_PATH, "LOCALAPPDATA must be resolvable");
+    if (local_app_data_length > 0 && local_app_data_length < MAX_PATH) {
+        const auto production = std::filesystem::path(local_app_data) / L"A0CameraStitcher" / L"Phase0" / L"DualDelegation";
+        const auto production_parent_stamp = StampDirectory(production.parent_path());
+        const auto production_stamp = StampDirectory(production);
+        std::vector<std::filesystem::path> spellings = {
+            production,
+            production.wstring() + L"\\",
+            std::filesystem::path(production.generic_wstring()),
+            LowerCased(production),
+            production.wstring() + L".",
+            production / L"x" / L"..",
+            std::filesystem::path(local_app_data) / L"A0CameraStitcher" / L"Phase0" / L"..\\Phase0\\DualDelegation",
+        };
+        wchar_t production_short[MAX_PATH]{};
+        const DWORD production_short_length = GetShortPathNameW(production.c_str(), production_short, MAX_PATH);
+        if (production_short_length > 0 && production_short_length < MAX_PATH &&
+            std::wstring_view(production_short).find(L'~') != std::wstring_view::npos)
+            spellings.emplace_back(production_short);
+        else
+            notes += "production 8.3 spelling not run: the production root is absent or has no short name; ";
+        for (const auto &spelling : spellings) {
+            // Predicate first: it has no side effects, so a regression is reported
+            // without the constructor ever being pointed at the production root.
+            const bool predicate = IsProductionDualDelegationMarkerRoot(spelling);
+            Check(predicate, "a production root spelling must be recognised");
+            if (!predicate) continue;
+            Check(LeaseRejectsAsMarkerFailure(name, spelling),
+                  "a test lease name with the production marker root must be refused by the lease");
+            Check(LeaseRejectsAsMarkerFailure("A0CameraStitcher.Phase0.Test.AliasHardening", spelling),
+                  "the second test lease name prefix with the production marker root must be refused");
+        }
+        Check(StampDirectory(production) == production_stamp && StampDirectory(production.parent_path()) == production_parent_stamp,
+              "refusing the production root must not create or change anything under it");
+        Check(!IsProductionDualDelegationMarkerRoot(std::filesystem::path{}), "an empty root must not be the production root");
+        Check(!IsProductionDualDelegationMarkerRoot(production / L"nested"), "a child of the production root must not match");
+        Check(!IsProductionDualDelegationMarkerRoot(scratch / L"LeaseOrdinary"), "a scratch root must not match");
+    }
+
+    std::filesystem::remove_all(scratch, ignored);
+    std::cout << "{\"mode\":\"alias-hardening-simulation\",\"failures\":" << failures
+              << ",\"short_name_generated\":" << (short_name_generated ? "true" : "false")
+              << ",\"notes\":\"" << notes << "\"}\n";
+    return 0;
+}
 // Defense in depth (CWE-73, external control of file name/path) for the only
 // entry point that lets argv reach HardwareProcessLease's constructor as a
 // lease name and marker root: a production-shaped lease name paired with an
@@ -366,6 +611,7 @@ int RunMain(int argc, char **argv) {
     // point), so it is safe to run the fail-closed cross-session guard suite
     // once, against its own isolated fixture root.
     if (const auto guard_rc = RunCrossSessionMarkerGuardTests(); guard_rc != 0) return guard_rc;
+    if (const auto alias_rc = RunAliasHardeningTests(); alias_rc != 0) return alias_rc;
     wchar_t exe[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
         return 2;
