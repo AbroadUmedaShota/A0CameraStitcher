@@ -111,4 +111,4 @@ pwsh -NoProfile -File scripts/Export-PilotChartPdf.ps1 -Chart development -Outpu
 - oracle: 両方とも `Accept`（宣言した損傷なし）
 - 検証: `pwsh -NoProfile -File scripts/Test-M2CorpusContracts.ps1`。vector spec に `printMaster` がある場合は、SVG のハッシュ、A0 の寸法、版の ID と VERSION の印字、基準点の一覧、最小の重なり帯（x 360.5〜480.5）に入る基準点が 8 個以上あること、画像や外部リソースを埋め込んでいないこと、版を作った split にだけ置かれていることを確かめる
 
-pilot の 36 組（較正 12・開発 24）は、corpus の split ではすべて `development` に入れる想定（※要確認: #272 の ADR 草案で確定）。#278 の「pilot は development 専用」に合わせた扱いで、較正用か開発用かは撮影の記録の用途欄で分ける。corpus の契約では同じ版（`originalMasterGroupId`）を `calibration` と `development` の両方に置けないため、較正用の画像を `calibration` の split に入れるなら較正専用の版が別に要る。
+pilot の 36 組（較正 12・開発 24）は、corpus の split ではすべて `development` に入れる（ADR-0033 3 節、※要確認: Proposed）。較正用か開発用かは撮影の記録の用途欄で分ける。corpus の契約では同じ版（`originalMasterGroupId`）を `calibration` と `development` の両方に置けないため、較正用の画像を `calibration` の split に入れるなら較正専用の版が別に要る。
