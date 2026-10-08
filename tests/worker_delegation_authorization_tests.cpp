@@ -102,9 +102,22 @@ int ValidateChild(int argc, char **argv) {
         parent, argv[3], argv[4], aliased_root);
     std::error_code existence_error;
     const auto aliased_created = fs::exists(aliased_root, existence_error);
+    // A root with a "." or ".." component is judged by its lexically normalized
+    // spelling but would be created as written. It is refused before the
+    // directory ahead of the component is created, so the folders must not appear.
+    const auto dotdot_made = fs::u8path(argv[5]) / L"probe-dotdot-made";
+    const auto dotdot_record = HardwareProcessLease::ValidateWorkerDelegation(
+        parent, argv[3], argv[4], dotdot_made / L".." / L"probe-dotdot");
+    const auto dot_made = fs::u8path(argv[5]) / L"probe-dot-made";
+    const auto dot_record = HardwareProcessLease::ValidateWorkerDelegation(
+        parent, argv[3], argv[4], dot_made / L"." / L"probe-dot");
+    std::error_code dotdot_error, dot_error;
+    const auto dotdot_created = fs::exists(dotdot_made, dotdot_error);
+    const auto dot_created = fs::exists(dot_made, dot_error);
     CloseHandle(parent);
     return actual == expected && !wrong_epoch && !forged_parent && !missing_record && !aliased_record &&
-                   !aliased_created && !existence_error
+                   !aliased_created && !existence_error && !dotdot_record && !dot_record && !dotdot_created &&
+                   !dot_created && !dotdot_error && !dot_error
                ? 0
                : 7;
 }

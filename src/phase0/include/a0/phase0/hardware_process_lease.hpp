@@ -81,6 +81,15 @@ struct DualDelegationCloseEvidence final {
 // not, that contains `:` or ends in a dot or space). An empty `candidate`
 // yields false, so this must not be used to decide whether an empty root is
 // acceptable; a sibling or an ancestor of `reference` yields false.
+//
+// `candidate` is judged as its lexically normalized path, so "<A>\x\..\<B>" is
+// judged as "<A>\<B>". That is a statement about the spelling only: it does not
+// say the walk that creates the directories follows the same path. The lease
+// refuses a test root that has a "." or ".." component (constructor and
+// `ValidateWorkerDelegation`), before it creates any directory, so a spelling
+// that this function judges as outside `reference` cannot create anything on the
+// way through `reference`. Callers that create directories from `candidate`
+// themselves must refuse such a root the same way.
 [[nodiscard]] bool MarkerRootMayOverlap(const std::filesystem::path &candidate,
                                         const std::filesystem::path &reference);
 // Serializes all real-camera Phase 0 commands across processes in the current
@@ -114,6 +123,8 @@ class HardwareProcessLease final {
     // again around each SDK command. It intentionally does not take the mutex:
     // it proves that the controller still owns it. Test roots are accepted only
     // with a test lease and must never be supplied by an SDK-enabled executable.
+    // A test root with a "." or ".." component yields false, and no directory is
+    // created for it.
     [[nodiscard]] static bool ValidateWorkerDelegation(
         void *inherited_parent_process, std::string_view epoch,
         std::string_view lease_name = "A0CameraStitcher.Phase0.CameraControl.v1",

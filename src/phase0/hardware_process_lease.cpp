@@ -69,16 +69,23 @@ void RequireSafeDirectoryTree(const std::filesystem::path &root) {
         (root_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
         (root_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
         throw TransportError("camera_control_marker_failed", "marker drive root is not trusted");
+    // Every name is checked before the first directory is created. The overlap
+    // check (CheckMarkerRootOverlap) judges the lexically normalized path, while
+    // this walk creates the path as written, so a "." or ".." component would
+    // make the two differ: "<A>\absent\..\<B>" is judged as "<A>\<B>" but would
+    // create "<A>\absent" before the ".." is reached. Refusing the whole path up
+    // front keeps the path that was judged and the path that is created the same
+    // (apart from separators). The same pre-pass refuses a name such as "foo "
+    // (see HasTrimmedOrStreamName) before anything ahead of it is created. "."
+    // and ".." end in a dot, so that name rule alone also refuses them; the
+    // explicit test only gives them their own message.
     for (const auto &part : root.relative_path()) {
         if (part == L".." || part == L".")
             throw TransportError("camera_control_marker_failed", "marker path must be normalized");
-        // Defense in depth: a caller normally passes a root that was checked by
-        // CheckMarkerRootOverlap or is the production root, but a root that
-        // contains ".." can arrive without that normalization. The name is
-        // refused before the directory is created, so a name such as "foo "
-        // ahead of a ".." component creates nothing.
         if (HasTrimmedOrStreamName(part.wstring()))
             throw TransportError("camera_control_marker_failed", "marker path has a name the file system may rewrite");
+    }
+    for (const auto &part : root.relative_path()) {
         current /= part;
         DWORD a = GetFileAttributesW(current.c_str());
         if (a == INVALID_FILE_ATTRIBUTES) {
@@ -493,7 +500,9 @@ HardwareProcessLease::HardwareProcessLease(std::string_view lease_name, std::chr
     // (which holds the production marker root), anything inside it, or an alias
     // of either -- is refused here, before any directory is created or scanned.
     // Only a supplied test root reaches this check; the production default
-    // (empty root) is unchanged.
+    // (empty root) is unchanged. This check judges the lexically normalized root;
+    // a root with a "." or ".." component is refused by RequireSafeDirectoryTree
+    // before it creates anything, so the judged and the created path agree.
     const bool test_root_supplied = !test_marker_root.empty();
     if (test_root_supplied)
         RejectProductionDataTestRoot(test_marker_root);
@@ -841,6 +850,9 @@ bool HardwareProcessLease::ValidateWorkerDelegation(void *inherited_parent_proce
         // an alias of either, or a root that cannot be verified is refused; a
         // throw lands in the catch below and fails closed. This is after the SDK
         // build's refusal of every test root so that build does no file I/O here.
+        // The overlap check judges the lexically normalized root; a root with a
+        // "." or ".." component is refused by RequireSafeDirectoryTree below
+        // before it creates anything.
         if (!test_marker_root.empty() && MarkerRootMayTouchProductionData(test_marker_root))
             return false;
         const HANDLE parent = static_cast<HANDLE>(inherited_parent_process);

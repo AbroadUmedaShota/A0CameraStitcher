@@ -704,9 +704,50 @@ int RunAliasHardeningTests() {
     // A root with a ".." component is not normalized before the directory walk.
     // The name ahead of the ".." is refused before it is created, so nothing is
     // left behind (the walk would otherwise create "m2-tail" and stop at "..").
+    // Since the walk now refuses a "." or ".." component before it creates
+    // anything, this case no longer isolates the name rule inside the walk: it is
+    // refused by the ".." whether or not that rule exists. A name that ends in a
+    // dot or a space is otherwise refused by the overlap check first, so no case
+    // reaches the walk's own name rule alone; that rule is defense in depth
+    // behind the overlap check's. This case keeps the combined outcome (refused,
+    // nothing created).
     Check(LeaseRejectsAsMarkerFailure(name, scratch / L"m2-tail " / L".." / L"LeaseM2") &&
               !std::filesystem::exists(scratch / L"m2-tail"),
           "a name that ends in a space ahead of a parent component must be refused before any directory is created");
+    // A ".." component hides the real path from the overlap check, which judges
+    // the lexically normalized root. Nothing may be created on the way to the "..".
+    Check(LeaseRejectsAsMarkerFailure(name, scratch / L"dotdot-made" / L".." / L"LeaseDotDot") &&
+              !std::filesystem::exists(scratch / L"dotdot-made"),
+          "a parent component after an absent directory must be refused before any directory is created");
+    Check(LeaseRejectsAsMarkerFailure(name, scratch / L"dot-made" / L"." / L"LeaseDot") &&
+              !std::filesystem::exists(scratch / L"dot-made"),
+          "a current-directory component after an absent directory must be refused before any directory is created");
+    Check(LeaseRejectsAsMarkerFailure(name, scratch / L"dotdot-deep" / L"inner" / L".." / L".." / L"LeaseDeep") &&
+              !std::filesystem::exists(scratch / L"dotdot-deep"),
+          "two parent components after absent directories must be refused before any directory is created");
+    // A scratch directory that stands in for a marker root, entered by name and
+    // left again with "..": the marker-shaped directory that the lease would
+    // otherwise create inside it would quarantine a real marker root.
+    {
+        DWORD session{};
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) return 2;
+        const auto stand_in = scratch / L"StandInMarkerRoot";
+        if (!std::filesystem::create_directories(stand_in)) return 2;
+        const auto stand_in_is_empty = [&stand_in] {
+            std::error_code error;
+            const bool empty = std::filesystem::directory_iterator(stand_in, error) ==
+                               std::filesystem::directory_iterator();
+            return !error && empty;
+        };
+        const std::wstring marker_name = L"armed-session-" + std::to_wstring(session) + L".marker";
+        Check(LeaseRejectsAsMarkerFailure(name, stand_in / marker_name / L".." / L"LeaseVia"),
+              "a stand-in marker root entered by a marker-shaped name and left by a parent component must be refused");
+        Check(LeaseRejectsAsMarkerFailure(name, stand_in / L"armed-session-1.marker" / L".." / L"LeaseVia1"),
+              "a stand-in marker root entered by armed-session-1.marker and left by a parent component must be refused");
+        Check(LeaseRejectsAsMarkerFailure(name, stand_in / L"." / L"absent" / L".." / L"LeaseVia2"),
+              "a stand-in marker root with a current-directory component must be refused");
+        Check(stand_in_is_empty(), "a refused root must not create anything inside a stand-in marker root");
+    }
     Check(LeaseRejectsAsMarkerFailure(name, std::filesystem::path(L"\\\\server\\share\\root")),
           "a UNC root must be refused by the lease before any I/O");
     Check(LeaseRejectsAsMarkerFailure(name, std::filesystem::path(L"C:root")),
