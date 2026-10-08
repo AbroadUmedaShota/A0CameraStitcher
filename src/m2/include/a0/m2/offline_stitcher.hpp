@@ -1,5 +1,6 @@
 #pragma once
 
+#include "a0/m2/render.hpp"
 #include "a0/m2/setup_assessment.hpp"
 
 #include <array>
@@ -11,18 +12,6 @@
 namespace a0::m2 {
 
 inline constexpr std::uint64_t kMaximumCompressedJpegBytes = 64ULL * 1024ULL * 1024ULL;
-
-enum class StitchLayout {
-    camera_a_left_camera_b_right,
-    camera_a_top_camera_b_bottom,
-};
-
-struct StitchCropPixels {
-    std::uint32_t left{};
-    std::uint32_t top{};
-    std::uint32_t right{};
-    std::uint32_t bottom{};
-};
 
 // CAM-A is the output coordinate reference. This matrix maps CAM-B pixel
 // coordinates into that same coordinate system. It is calibration data only;

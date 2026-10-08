@@ -213,12 +213,26 @@ else()
     target_compile_options(a0_m2_stitch_metrics PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Pure pixel computation for the stitch (no Win32, COM, WIC, BCrypt or file I/O).
+# a0_m2_offline_stitcher depends on this library, never the reverse (Issue #268).
+add_library(a0_m2_render
+    src/m2/render.cpp
+)
+target_include_directories(a0_m2_render PUBLIC src/m2/include)
+include(cmake/a0_link_isolation.cmake)
+a0_assert_no_link_dependency(a0_m2_render)
+if(MSVC)
+    target_compile_options(a0_m2_render PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(a0_m2_render PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
     src/m2/stitch_job_manifest.cpp
 )
 target_include_directories(a0_m2_offline_stitcher PUBLIC src/m2/include src/common/include)
-target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup PRIVATE ole32 windowscodecs bcrypt)
+target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup a0_m2_render PRIVATE ole32 windowscodecs bcrypt)
 target_compile_definitions(a0_m2_offline_stitcher PRIVATE UNICODE _UNICODE NOMINMAX)
 if(MSVC)
     target_compile_options(a0_m2_offline_stitcher PRIVATE /W4 /permissive- /EHsc)

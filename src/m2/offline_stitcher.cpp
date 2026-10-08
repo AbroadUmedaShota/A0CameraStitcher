@@ -1,5 +1,6 @@
 #include "a0/m2/offline_stitcher.hpp"
 
+#include "a0/m2/render.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
 
 #include <Windows.h>
@@ -57,9 +58,9 @@ struct PublishedGeneratedJpeg {
 namespace a0::m2 {
 namespace {
 
-constexpr std::uint64_t kMaximumDecodedPixels = 200'000'000;
-constexpr std::uint32_t kMaximumImageDimension = 32'768;
-constexpr double kMatrixEpsilon = 1e-12;
+using render::Invert;
+using render::PixelCount;
+using render::ValidateProjectiveDomain;
 
 using TestHook = void (*)();
 std::atomic<TestHook> input_locks_held_hook{};
@@ -135,11 +136,7 @@ private:
     bool uninitialize_{};
 };
 
-struct Image {
-    std::uint32_t width{};
-    std::uint32_t height{};
-    std::vector<std::uint8_t> bgr;
-};
+using Image = render::BgrImage;
 
 struct JpegSnapshot {
     std::vector<std::uint8_t> compressed;
@@ -151,18 +148,6 @@ struct JpegSnapshot {
 struct JpegDimensions {
     std::uint32_t width{};
     std::uint32_t height{};
-};
-
-struct Point {
-    double x{};
-    double y{};
-};
-
-struct Bounds {
-    double minimum_x{};
-    double minimum_y{};
-    double maximum_x{};
-    double maximum_y{};
 };
 
 class LockedReadFile final {
@@ -340,15 +325,6 @@ ComPtr<IWICImagingFactory> CreateFactory() {
         CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw)),
         "WIC factory creation");
     return ComPtr<IWICImagingFactory>(raw);
-}
-
-std::uint64_t PixelCount(const std::uint32_t width, const std::uint32_t height) {
-    const auto count = static_cast<std::uint64_t>(width) * height;
-    if (width == 0 || height == 0 || width > kMaximumImageDimension
-        || height > kMaximumImageDimension || count > kMaximumDecodedPixels) {
-        throw std::invalid_argument("JPEG dimensions are empty or exceed the offline stitch limit");
-    }
-    return count;
 }
 
 // Opens the single frame of a JPEG byte stream after confirming SOI/EOI
@@ -548,194 +524,6 @@ void WriteBytesToNewFile(
         throw std::runtime_error("explicit export partial close failed");
     }
 }
-
-double TransformDenominator(const std::array<double, 9>& matrix, const Point point) {
-    return matrix[6] * point.x + matrix[7] * point.y + matrix[8];
-}
-
-bool TryTransform(const std::array<double, 9>& matrix, const Point point, Point& transformed) {
-    const double denominator = TransformDenominator(matrix, point);
-    if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
-        return false;
-    }
-    transformed = {
-        (matrix[0] * point.x + matrix[1] * point.y + matrix[2]) / denominator,
-        (matrix[3] * point.x + matrix[4] * point.y + matrix[5]) / denominator,
-    };
-    return std::isfinite(transformed.x) && std::isfinite(transformed.y);
-}
-
-Point Transform(const std::array<double, 9>& matrix, const Point point) {
-    Point transformed{};
-    if (!TryTransform(matrix, point, transformed)) {
-        throw std::invalid_argument("fixed transform maps a coordinate to infinity");
-    }
-    return transformed;
-}
-
-std::array<double, 9> Invert(const std::array<double, 9>& matrix) {
-    for (const double value : matrix) {
-        if (!std::isfinite(value)) {
-            throw std::invalid_argument("fixed transform values must be finite");
-        }
-    }
-    const double determinant =
-        matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7])
-        - matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6])
-        + matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
-    if (!std::isfinite(determinant) || std::abs(determinant) <= kMatrixEpsilon) {
-        throw std::invalid_argument("fixed transform must be invertible");
-    }
-    return {
-        (matrix[4] * matrix[8] - matrix[5] * matrix[7]) / determinant,
-        (matrix[2] * matrix[7] - matrix[1] * matrix[8]) / determinant,
-        (matrix[1] * matrix[5] - matrix[2] * matrix[4]) / determinant,
-        (matrix[5] * matrix[6] - matrix[3] * matrix[8]) / determinant,
-        (matrix[0] * matrix[8] - matrix[2] * matrix[6]) / determinant,
-        (matrix[2] * matrix[3] - matrix[0] * matrix[5]) / determinant,
-        (matrix[3] * matrix[7] - matrix[4] * matrix[6]) / determinant,
-        (matrix[1] * matrix[6] - matrix[0] * matrix[7]) / determinant,
-        (matrix[0] * matrix[4] - matrix[1] * matrix[3]) / determinant,
-    };
-}
-
-void ValidateProjectiveDomain(
-    const std::array<double, 9>& matrix,
-    const std::uint32_t width,
-    const std::uint32_t height) {
-    const std::array<Point, 4> corners{{
-        {0.0, 0.0},
-        {static_cast<double>(width), 0.0},
-        {0.0, static_cast<double>(height)},
-        {static_cast<double>(width), static_cast<double>(height)},
-    }};
-    bool positive{};
-    for (std::size_t index = 0; index < corners.size(); ++index) {
-        const double denominator = TransformDenominator(matrix, corners[index]);
-        if (!std::isfinite(denominator) || std::abs(denominator) <= kMatrixEpsilon) {
-            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
-        }
-        const bool current_positive = denominator > 0.0;
-        if (index == 0) {
-            positive = current_positive;
-        } else if (current_positive != positive) {
-            throw std::invalid_argument("fixed transform projective denominator crosses the input image");
-        }
-    }
-}
-
-Bounds TransformedBounds(const Image& image, const std::array<double, 9>& matrix) {
-    const std::array<Point, 4> corners{{
-        {0.0, 0.0},
-        {static_cast<double>(image.width), 0.0},
-        {0.0, static_cast<double>(image.height)},
-        {static_cast<double>(image.width), static_cast<double>(image.height)},
-    }};
-    const Point first = Transform(matrix, corners[0]);
-    Bounds bounds{first.x, first.y, first.x, first.y};
-    for (std::size_t index = 1; index < corners.size(); ++index) {
-        const Point point = Transform(matrix, corners[index]);
-        bounds.minimum_x = std::min(bounds.minimum_x, point.x);
-        bounds.minimum_y = std::min(bounds.minimum_y, point.y);
-        bounds.maximum_x = std::max(bounds.maximum_x, point.x);
-        bounds.maximum_y = std::max(bounds.maximum_y, point.y);
-    }
-    return bounds;
-}
-
-bool SampleBilinear(const Image& image, const double x, const double y, std::array<double, 3>& pixel) {
-    // GitHub Issue #86: 被覆判定はキャンバス寸法・バウンディング(コーナーモデル:
-    // 画像は [0,width)×[0,height) を占める)と揃える。従来は pixel-center モデルの
-    // [0,width-1] のみを有効域とし、コーナーモデルで採番された縁 1px 強(例: 純平行移動
-    // +50.5px)が「被覆済みキャンバスなのにサンプル不可」となって uncovered pixel 例外で
-    // stitch が必ず失敗していた。整数座標では x>width-1 と x>=width は同値なので既存の
-    // 整数フィクスチャは不変で、非整数の (width-1, width) の縁のみ端列へクランプして
-    // 被覆する(x1 = min(x0+1, width-1) の既存クランプがそのまま効く)。
-    if (x < 0.0 || y < 0.0 || x >= static_cast<double>(image.width)
-        || y >= static_cast<double>(image.height)) {
-        return false;
-    }
-    const auto x0 = static_cast<std::uint32_t>(std::floor(x));
-    const auto y0 = static_cast<std::uint32_t>(std::floor(y));
-    const auto x1 = std::min(x0 + 1, image.width - 1);
-    const auto y1 = std::min(y0 + 1, image.height - 1);
-    const double dx = x - x0;
-    const double dy = y - y0;
-    for (std::size_t channel = 0; channel < pixel.size(); ++channel) {
-        const auto at = [&](const std::uint32_t sx, const std::uint32_t sy) {
-            return static_cast<double>(image.bgr[(static_cast<std::size_t>(sy) * image.width + sx) * 3 + channel]);
-        };
-        pixel[channel] = (1.0 - dy) * ((1.0 - dx) * at(x0, y0) + dx * at(x1, y0))
-            + dy * ((1.0 - dx) * at(x0, y1) + dx * at(x1, y1));
-    }
-    return true;
-}
-
-double FeatherWeight(
-    const StitchLayout layout,
-    const double x,
-    const double y,
-    const Bounds& a_bounds,
-    const Bounds& b_bounds) {
-    const double start = layout == StitchLayout::camera_a_left_camera_b_right
-        ? std::max(a_bounds.minimum_x, b_bounds.minimum_x)
-        : std::max(a_bounds.minimum_y, b_bounds.minimum_y);
-    const double end = layout == StitchLayout::camera_a_left_camera_b_right
-        ? std::min(a_bounds.maximum_x, b_bounds.maximum_x)
-        : std::min(a_bounds.maximum_y, b_bounds.maximum_y);
-    const double coordinate = layout == StitchLayout::camera_a_left_camera_b_right ? x : y;
-    if (end <= start + kMatrixEpsilon) {
-        return 0.5;
-    }
-    return std::clamp((coordinate - start) / (end - start), 0.0, 1.0);
-}
-
-// The review navigation point is deliberately accumulated from the same
-// has_a/has_b and feather weight values that render the JPEG. A transform's
-// bounding box or the output midpoint is not enough: either can name a pixel
-// outside the real overlap after projective sampling and the approved crop.
-struct SeamNavigationCandidate {
-    bool available{};
-    std::uint32_t x{};
-    std::uint32_t y{};
-    double feather_midpoint_distance{std::numeric_limits<double>::infinity()};
-    double perpendicular_center_distance{std::numeric_limits<double>::infinity()};
-    double primary_center_distance{std::numeric_limits<double>::infinity()};
-
-    void Observe(
-        const StitchLayout layout,
-        const std::uint32_t output_x,
-        const std::uint32_t output_y,
-        const std::uint32_t output_width,
-        const std::uint32_t output_height,
-        const bool has_a,
-        const bool has_b,
-        const double b_weight) {
-        // A shared sample at a 0/1 endpoint has no contribution from one body,
-        // so it is not a useful seam point. There is intentionally no fallback
-        // to an image center when the rendered result has no feathered overlap.
-        if (!has_a || !has_b || b_weight <= 0.0 || b_weight >= 1.0) return;
-
-        const double feather_distance = std::abs(b_weight - 0.5);
-        const double perpendicular = layout == StitchLayout::camera_a_left_camera_b_right
-            ? std::abs(static_cast<double>(output_y) - (static_cast<double>(output_height) - 1.0) / 2.0)
-            : std::abs(static_cast<double>(output_x) - (static_cast<double>(output_width) - 1.0) / 2.0);
-        const double primary = layout == StitchLayout::camera_a_left_camera_b_right
-            ? std::abs(static_cast<double>(output_x) - (static_cast<double>(output_width) - 1.0) / 2.0)
-            : std::abs(static_cast<double>(output_y) - (static_cast<double>(output_height) - 1.0) / 2.0);
-        const auto score = std::tuple{feather_distance, perpendicular, primary, output_y, output_x};
-        const auto current = std::tuple{
-            feather_midpoint_distance, perpendicular_center_distance, primary_center_distance, y, x};
-        if (!available || score < current) {
-            available = true;
-            x = output_x;
-            y = output_y;
-            feather_midpoint_distance = feather_distance;
-            perpendicular_center_distance = perpendicular;
-            primary_center_distance = primary;
-        }
-    }
-};
 
 std::string ToLowerHex(const std::array<std::uint8_t, 32>& digest) {
     static constexpr std::string_view digits = "0123456789abcdef";
@@ -1048,103 +836,17 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         || camera_b.height != request.profile.expected_input_height) {
         throw std::invalid_argument("canonical JPEG dimensions do not match the approved rig profile");
     }
-    const auto inverse_b = Invert(request.profile.camera_b_to_camera_a);
-    const Bounds a_bounds{0.0, 0.0, static_cast<double>(camera_a.width), static_cast<double>(camera_a.height)};
-    const Bounds b_bounds = TransformedBounds(camera_b, request.profile.camera_b_to_camera_a);
-    const double minimum_x = std::floor(std::min(a_bounds.minimum_x, b_bounds.minimum_x));
-    const double minimum_y = std::floor(std::min(a_bounds.minimum_y, b_bounds.minimum_y));
-    const double maximum_x = std::ceil(std::max(a_bounds.maximum_x, b_bounds.maximum_x));
-    const double maximum_y = std::ceil(std::max(a_bounds.maximum_y, b_bounds.maximum_y));
-    const double canvas_width_value = maximum_x - minimum_x;
-    const double canvas_height_value = maximum_y - minimum_y;
-    if (canvas_width_value > std::numeric_limits<std::uint32_t>::max()
-        || canvas_height_value > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::invalid_argument("fixed transform canvas exceeds supported dimensions");
-    }
-    const auto canvas_width = static_cast<std::uint32_t>(canvas_width_value);
-    const auto canvas_height = static_cast<std::uint32_t>(canvas_height_value);
-    (void)PixelCount(canvas_width, canvas_height);
-    const auto horizontal_crop = static_cast<std::uint64_t>(request.profile.crop.left) + request.profile.crop.right;
-    const auto vertical_crop = static_cast<std::uint64_t>(request.profile.crop.top) + request.profile.crop.bottom;
-    if (horizontal_crop >= canvas_width || vertical_crop >= canvas_height) {
-        throw std::invalid_argument("approved crop removes the complete stitched canvas");
-    }
-
-    // GitHub Issue #102 (item 3): b_bounds is the axis-aligned bounding box, in
-    // the same global/output coordinate space as global_x/global_y below, of
-    // CAM-B's rectangle mapped forward through the approved fixed transform
-    // (TransformedBounds already computed it above for canvas sizing). Because
-    // that forward transform is a fixed projective map validated by
-    // ValidateProjectiveDomain to not cross its zero-denominator line inside
-    // the CAM-B rectangle, the transform is a homeomorphism there and the
-    // image of the rectangle is exactly the convex quadrilateral spanned by
-    // its four transformed corners -- so b_bounds, the AABB of those corners,
-    // is already a true, non-lossy superset of every global coordinate CAM-B
-    // can possibly cover. A global point strictly outside b_bounds can never
-    // produce a has_b=true, so skipping the inverse transform and bilinear
-    // sample for such points cannot change any output pixel; it only skips
-    // work that was always going to end in has_b=false.
-    //
-    // The padding below is not required by that geometric argument, but is
-    // added anyway as a second, independent safety margin against floating-
-    // point drift: b_bounds is computed via the forward matrix, while the
-    // per-pixel skip test below is compared against values ultimately used
-    // with the separately-computed inverse matrix (inverse_b), so the two are
-    // not guaranteed to agree to the last bit right at the boundary. Rounding
-    // the box outward to whole pixels and then padding by an extra
-    // kCameraBSkipSafetyMarginPixels on every side keeps the skip test
-    // conservative: on any doubt near the edge, this does not skip, and the
-    // pixel falls through to the exact same TryTransform+SampleBilinear path
-    // used before this change, producing an identical result.
-    constexpr double kCameraBSkipSafetyMarginPixels = 2.0;
-    const double b_skip_minimum_x = std::floor(b_bounds.minimum_x) - kCameraBSkipSafetyMarginPixels;
-    const double b_skip_minimum_y = std::floor(b_bounds.minimum_y) - kCameraBSkipSafetyMarginPixels;
-    const double b_skip_maximum_x = std::ceil(b_bounds.maximum_x) + kCameraBSkipSafetyMarginPixels;
-    const double b_skip_maximum_y = std::ceil(b_bounds.maximum_y) + kCameraBSkipSafetyMarginPixels;
-
-    Image output{
-        canvas_width - static_cast<std::uint32_t>(horizontal_crop),
-        canvas_height - static_cast<std::uint32_t>(vertical_crop),
-        {},
+    // Pixel computation (inverse mapping, bilinear sampling, feather, crop) lives
+    // in the I/O-free a0_m2_render library. Everything that follows this call is
+    // publish and manifest work.
+    const render::PairRenderParameters render_parameters{
+        request.profile.camera_b_to_camera_a,
+        request.profile.layout,
+        request.profile.crop,
     };
-    output.bgr.resize(static_cast<std::size_t>(PixelCount(output.width, output.height) * 3));
-    SeamNavigationCandidate seam_navigation;
-    for (std::uint32_t output_y = 0; output_y < output.height; ++output_y) {
-        const double global_y = minimum_y + request.profile.crop.top + output_y;
-        const bool row_may_hit_camera_b = global_y >= b_skip_minimum_y && global_y <= b_skip_maximum_y;
-        for (std::uint32_t output_x = 0; output_x < output.width; ++output_x) {
-            const double global_x = minimum_x + request.profile.crop.left + output_x;
-            std::array<double, 3> pixel_a{};
-            std::array<double, 3> pixel_b{};
-            const bool has_a = SampleBilinear(camera_a, global_x, global_y, pixel_a);
-            const bool may_hit_camera_b = row_may_hit_camera_b
-                && global_x >= b_skip_minimum_x && global_x <= b_skip_maximum_x;
-            Point source_b{};
-            const bool has_b = may_hit_camera_b
-                && TryTransform(inverse_b, {global_x, global_y}, source_b)
-                && SampleBilinear(camera_b, source_b.x, source_b.y, pixel_b);
-            if (!has_a && !has_b) {
-                throw std::invalid_argument("approved crop contains an uncovered output pixel");
-            }
-            const double b_weight = has_a && has_b
-                ? FeatherWeight(request.profile.layout, global_x, global_y, a_bounds, b_bounds)
-                : (has_b ? 1.0 : 0.0);
-            seam_navigation.Observe(
-                request.profile.layout,
-                output_x,
-                output_y,
-                output.width,
-                output.height,
-                has_a,
-                has_b,
-                b_weight);
-            const auto offset = (static_cast<std::size_t>(output_y) * output.width + output_x) * 3;
-            for (std::size_t channel = 0; channel < 3; ++channel) {
-                const double value = (1.0 - b_weight) * pixel_a[channel] + b_weight * pixel_b[channel];
-                output.bgr[offset + channel] = static_cast<std::uint8_t>(std::clamp(std::lround(value), 0L, 255L));
-            }
-        }
-    }
+    auto rendered = render::RenderPair(camera_a, camera_b, render_parameters);
+    render::BgrImage& output = rendered.image;
+    const render::SeamNavigationCandidate& seam_navigation = rendered.seam_navigation;
 
     std::error_code parent_error;
     std::filesystem::create_directories(job_path.parent_path(), parent_error);
