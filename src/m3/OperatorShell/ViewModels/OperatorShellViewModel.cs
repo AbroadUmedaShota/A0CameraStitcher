@@ -86,6 +86,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     private readonly Func<DualCameraCaptureRequest>? _hardwareDualRequestProvider;
     private readonly IHardwareDualCaptureRecoveryOnlyWorkflow? _captureRecoveryOnlyWorkflow;
     private readonly CaptureRecoveryOnlyFiveRunCoordinator? _captureRecoveryOnlyFiveRunCoordinator;
+    // Set when the five-pair series wrote its aggregate evidence; tells the reason line below the
+    // main button whether there is an evidence to look at after the series has started.
+    private bool _captureRecoveryOnlyFiveRunEvidenceSaved;
     private readonly IOperatorReviewStore? _operatorReviewStore;
     private readonly ISimulatedLiveViewFramePump? _liveViewFramePump;
     private readonly ISimulatedLiveViewFrameSource? _liveViewFrameSource;
@@ -2240,7 +2243,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         : IsCaptureRecoveryOnlyMode && !IsCaptureRecoveryOnlyOperatorApproved
             ? "専用カード2枚が空であることと『撮影・回収のみ』の実行承認を確認してください — 撮影禁止"
         : _captureRecoveryOnlyFiveRunCoordinator?.HasStarted == true
-            ? "最大5組の受入系列は開始済みです。追加撮影せず証跡を確認して終了してください。"
+            ? _captureRecoveryOnlyFiveRunEvidenceSaved
+                ? "最大5組の受入系列は開始済みです。追加撮影せず証跡を確認して終了してください。"
+                : "最大5組の受入系列は開始済みです。この系列ではもう撮影できません。アプリを終了してください。"
         : IsCaptureRecoveryOnlyMode && !_captureRecoveryOnlyWorkflow!.CanStartNewCapture
             ? $"CaptureRecoveryOnly開始条件を満たしていません: {_captureRecoveryOnlyWorkflow.NewCaptureBlocker} — 撮影禁止"
         : !IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && _dualCameraFlow is not null && !_dualCameraFlow.IdentitySnapshot.IsReady
@@ -2889,29 +2894,23 @@ public sealed class OperatorShellViewModel : ObservableObject
                     {
                         UiState = OperatorUiState.NotReady;
                         CaptureResult = "開始条件不成立（シャッター0回）";
-                        ExportResult = "証跡未作成";
-                    }
-
-                    if (run.EvidenceFiles is not null)
-                    {
-                        LastExportPath = run.EvidenceFiles.ReportPath;
-                        ExportResult = run.Status == CaptureRecoveryOnlyFiveRunStatus.Completed
-                            ? "5回集約証跡を保存（SoftwareAggregatePartial）"
-                            : "失敗までの集約証跡を保存（SoftwareAggregateFail）";
-                    }
-                    else
-                    {
-                        ExportResult = "集約証跡未作成（Hardware Pending）";
                     }
 
                     // The coordinator's detail is English and diagnostic, so the operator gets the status text
-                    // for how the series ended (GitHub Issue #251) and the detail moves to the technical detail.
+                    // for how the series ended (GitHub Issue #251). The detail, the internal verdict names and
+                    // the evidence report path move to the technical detail. The storage row and the folder
+                    // row (LastExportPath, set above to the last pair's fixed folder) show the originals.
+                    _captureRecoveryOnlyFiveRunEvidenceSaved = run.EvidenceFiles is not null;
+                    ExportResult = CaptureRecoveryOnlyFiveRunStatusText.BuildExportResult(run);
                     StatusMessage = CaptureRecoveryOnlyFiveRunStatusText.Build(run);
-                    TechnicalDetail =
-                        $"runId={runId} / requested=5 / attempted={run.AttemptedCount} / " +
-                        $"status={run.Status} / capturePurpose=CaptureRecoveryOnly / " +
-                        "stitchOutcome=Pending / a0QualityApproval=Unapproved / automatic retry count: 0 / " +
-                        $"detail={run.Detail}";
+                    TechnicalDetail = CaptureRecoveryOnlyFiveRunStatusText.BuildTechnicalDetail(runId, run);
+                    if (run.LastOutcome is null)
+                    {
+                        // No result panel in this case: the capture screen (action zone state 1) stays and
+                        // does not show StatusMessage, so the text is also put in the notice.
+                        Notify(StatusMessage, false);
+                    }
+
                     return;
                 }
 

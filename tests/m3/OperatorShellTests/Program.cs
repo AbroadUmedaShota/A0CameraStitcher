@@ -10448,8 +10448,12 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(5, tenRunOperations.CaptureRecoveryOnlyStartCalls);
         Check.Equal(0, tenRunOperations.OrdinaryStartCalls);
         Check.Equal(5, tenRunShell.TransactionStartCount);
-        Check.True(tenRunShell.ExportResult.Contains("SoftwareAggregatePartial", StringComparison.Ordinal),
+        Check.Equal("原画像10枚を保管・集約証跡を保存", tenRunShell.ExportResult);
+        Check.False(tenRunShell.ExportResult.Contains("SoftwareAggregate", StringComparison.Ordinal),
+            "The result row must not carry the internal verdict name.");
+        Check.True(tenRunShell.TechnicalDetail.Contains("aggregateEvidence=SoftwareAggregatePartial", StringComparison.Ordinal),
             "The successful WPF five-run must publish only the software aggregate partial verdict.");
+        Check.Equal(Path.Combine(tenRunWorkflow.TransactionRoot, tenRunShell.LastTransactionId), tenRunShell.LastExportPath);
         var tenRunDirectories = Directory.GetDirectories(Path.Combine(tenRunEvidenceRoot, "runs"));
         Check.Equal(1, tenRunDirectories.Length);
         Check.True(new[] { "report.md", "summary.json", "transaction-events.jsonl" }
@@ -10697,12 +10701,24 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
         Ending(number, DualHardwareCaptureTerminalState.Failed, DualCameraFailureCode.CaptureCameraA,
             "CAM-A did not fire.", 0);
 
-    async Task<OperatorShellViewModel> RunEndingAsync(string name, QueuedCaptureRecoveryOnlyWorkflow workflow)
+    // The same-session binding snapshot ran out before the pair's transaction was created: the
+    // workflow answers with a HardwarePending result that has no transaction ID and no directory.
+    HardwareDualCaptureRecoveryOnlyExecution IdentityExpired() =>
+        new(Guid.Empty, DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.IdentityNotReady,
+            "The current same-session CAM-A/CAM-B binding is not Ready.", [], string.Empty, false, 0);
+
+    async Task<OperatorShellViewModel> RunEndingAsync(
+        string name,
+        QueuedCaptureRecoveryOnlyWorkflow workflow,
+        Action<QueuedCaptureRecoveryOnlyWorkflow>? onActivation = null)
     {
+        var agentTransport = new CountingBindingTransport(DecodableBindingAgent());
         var shell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, name + "-journals")),
             dualCameraFlow: null,
-            dualBindingTransport: new CountingBindingTransport(DecodableBindingAgent()),
+            dualBindingTransport: onActivation is null
+                ? agentTransport
+                : new ActivationHookTransport(agentTransport, () => onActivation(workflow)),
             captureRecoveryOnlyWorkflow: workflow,
             captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
                 workflow,
@@ -10721,30 +10737,69 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
         return shell;
     }
 
-    void CheckEnding(OperatorShellViewModel shell, string expectedStatus, string englishDetail, string name)
+    // Names that belong to the technical detail only: none of them may reach a text the operator reads.
+    string[] diagnosticWords =
+    [
+        "Completed", "Failed", "HardwarePending", "Hardware Pending", "Blocked", "CaptureRecoveryOnly",
+        "transaction", "SoftwareAggregate", "IdentityNotReady", "binding",
+    ];
+
+    void CheckOperatorWords(string text, string name)
     {
-        Check.Equal(expectedStatus, shell.StatusMessage);
-        Check.False(shell.StatusMessage.Contains(englishDetail, StringComparison.Ordinal),
-            $"{name}: the coordinator's English detail must not be the status text.");
-        Check.False(System.Text.RegularExpressions.Regex.IsMatch(shell.StatusMessage, "[A-Za-z]{3,}"),
-            $"{name}: the status text must not carry English words.");
-        Check.True(shell.TechnicalDetail.Contains("detail=" + englishDetail, StringComparison.Ordinal),
-            $"{name}: the coordinator's detail must be kept in the technical detail.");
-        Check.False(shell.StatusMessage.Contains("保持", StringComparison.Ordinal) ||
-                    shell.StatusMessage.Contains("transaction", StringComparison.OrdinalIgnoreCase),
-            $"{name}: the status text must use the operator's words (撮影ID, 原画像).");
+        foreach (var word in diagnosticWords)
+        {
+            Check.False(text.Contains(word, StringComparison.OrdinalIgnoreCase),
+                $"{name}: the operator-facing text must not carry the diagnostic word '{word}'. Actual: {text}");
+        }
+        // 保持 is not the app's word for its own store; 残っています is the wording after a failed save.
+        Check.False(text.Contains("保持", StringComparison.Ordinal) || text.Contains("残っています", StringComparison.Ordinal),
+            $"{name}: originals kept after a stop are 保管, not 保持 or 残っています. Actual: {text}");
     }
 
-    // Completed: five pairs.
+    void CheckEnding(
+        OperatorShellViewModel shell,
+        string expectedStatus,
+        string expectedExportResult,
+        string englishDetail,
+        string name)
+    {
+        Check.True(expectedStatus == shell.StatusMessage,
+            $"{name}: status text differs.\nExpected: {expectedStatus}\nActual:   {shell.StatusMessage}");
+        Check.True(expectedExportResult == shell.ExportResult,
+            $"{name}: the result row differs.\nExpected: {expectedExportResult}\nActual:   {shell.ExportResult}");
+        Check.False(shell.StatusMessage.Contains(englishDetail, StringComparison.Ordinal),
+            $"{name}: the coordinator's English detail must not be the status text.");
+        CheckOperatorWords(shell.StatusMessage, name);
+        CheckOperatorWords(shell.ExportResult, name + " (result row)");
+        Check.True(shell.TechnicalDetail.Contains("detail=" + englishDetail, StringComparison.Ordinal),
+            $"{name}: the coordinator's detail must be kept in the technical detail.");
+        Check.True(shell.TechnicalDetail.Contains("lastTerminalState=", StringComparison.Ordinal) &&
+                   shell.TechnicalDetail.Contains("lastFailure=", StringComparison.Ordinal),
+            $"{name}: the last pair's terminal state and failure belong in the technical detail.");
+    }
+
+    // Completed: five pairs. The folder row shows the last pair's fixed folder, not the evidence report.
     var completed = await RunEndingAsync("completed", new QueuedCaptureRecoveryOnlyWorkflow(
         Enumerable.Range(1, 5).Select(Succeeded)));
     Check.True(completed.TechnicalDetail.Contains("status=Completed", StringComparison.Ordinal),
         "The completed series must record its status in the technical detail.");
     CheckEnding(completed,
-        "5組すべての撮影・回収・再検証が完了しました。撮影した原画像10枚はアプリ内に保管しています。" +
-        "合成は実施せず、A0品質は未承認です。追加の撮影はできません。" +
-        "保存先を選ぶと、「原画像をこのPCのフォルダへ保存」で直前の1組を取り出せます。",
+        "5組すべての撮影・回収・再検証が完了しました。撮影した原画像10枚はアプリ内に保管し、集約証跡も保存しました。" +
+        "合成は実施せず、A0品質は未承認です。" +
+        "直前の1組は、「選択…」で保存先を選び、「原画像をこのPCのフォルダへ保存」で取り出せます。" +
+        "追加の撮影はできないため、保存が済んだらアプリを終了してください。",
+        "原画像10枚を保管・集約証跡を保存",
         "All 5 CAM-A to CAM-B capture/recovery pairs completed; A0 quality remains Unapproved.", "completed");
+    Check.True(completed.TechnicalDetail.Contains("aggregateEvidence=SoftwareAggregatePartial", StringComparison.Ordinal) &&
+               completed.TechnicalDetail.Contains("evidenceReport=", StringComparison.Ordinal) &&
+               completed.TechnicalDetail.Contains("lastTerminalState=Succeeded / lastFailure=None", StringComparison.Ordinal),
+        "The internal verdict name, the evidence report path and the last pair's state belong in the technical detail.");
+    Check.Equal(Path.Combine("C:\\anonymous-five-run-ending", completed.LastTransactionId), completed.LastExportPath);
+    Check.False(completed.LastExportPath.Contains("report", StringComparison.OrdinalIgnoreCase),
+        "The folder row must show the folder of the originals, not the evidence report.");
+    Check.Equal("保管場所", completed.ExportPathLabel);
+    Check.Equal("最大5組の受入系列は開始済みです。追加撮影せず証跡を確認して終了してください。",
+        completed.CaptureDisabledReason);
 
     // Failed on the third pair: CAM-A's original of that pair was received, CAM-B's was not.
     var thirdFailed = await RunEndingAsync("third-failed", new QueuedCaptureRecoveryOnlyWorkflow(
@@ -10752,17 +10807,24 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     CheckEnding(thirdFailed,
         "3組目の撮影・回収が途中で停止しました。2組目までは完了しています。" +
         "残りの2組は撮影せず、自動再試行もしていません。" +
-        "受け取れた原画像は5枚です。撮影した原画像はアプリ内に残っています。" +
-        "追加の撮影はできません。失敗までの集約証跡は保存済みです。カメラの状態を確認し、アプリを終了してください。",
+        "受け取れた原画像5枚はアプリ内に保管し、失敗までの集約証跡も保存しました。" +
+        "追加の撮影はできないため、カメラの状態を確認してからアプリを終了してください。",
+        "原画像5枚を保管・失敗までの集約証跡を保存",
         "The run stopped at its first terminal failure; automatic retry count remains 0.", "third-failed");
+    Check.True(thirdFailed.TechnicalDetail.Contains("aggregateEvidence=SoftwareAggregateFail", StringComparison.Ordinal) &&
+               thirdFailed.TechnicalDetail.Contains("lastTerminalState=FailedPartial / lastFailure=CaptureCameraB", StringComparison.Ordinal),
+        "The failed series must record its verdict name and the last pair's failure in the technical detail.");
+    Check.False(thirdFailed.LastExportPath.Contains("report", StringComparison.OrdinalIgnoreCase),
+        "The folder row must show the folder of the originals, not the evidence report.");
 
     // Failed on the first pair with no original received.
     var firstFailed = await RunEndingAsync("first-failed", new QueuedCaptureRecoveryOnlyWorkflow(
         [CameraAFailed(1), Succeeded(2)]));
     CheckEnding(firstFailed,
         "1組目の撮影・回収が途中で停止しました。残りの4組は撮影せず、自動再試行もしていません。" +
-        "カメラから受け取れた原画像はありません。" +
-        "追加の撮影はできません。失敗までの集約証跡は保存済みです。カメラの状態を確認し、アプリを終了してください。",
+        "カメラから受け取れた原画像はありません。失敗までの集約証跡は保存しました。" +
+        "追加の撮影はできないため、カメラの状態を確認してからアプリを終了してください。",
+        "保管した原画像なし・失敗までの集約証跡を保存",
         "The run stopped at its first terminal failure; automatic retry count remains 0.", "first-failed");
 
     // The binding was invalidated on the second pair.
@@ -10775,28 +10837,81 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     CheckEnding(bindingInvalid,
         "機体照合が無効になったため、2組目で撮影・回収を停止しました。1組目までは完了しています。" +
         "残りの3組は撮影せず、自動再試行もしていません。" +
-        "受け取れた原画像は3枚です。撮影した原画像はアプリ内に残っています。" +
-        "追加の撮影はできません。カメラの接続と状態を確認し、アプリを終了してください。",
+        "受け取れた原画像3枚はアプリ内に保管しています。集約証跡は作成していません。" +
+        "追加の撮影はできないため、カメラの接続と状態を確認してからアプリを終了してください。",
+        "原画像3枚を保管・集約証跡は未作成",
         "The capture pipe reported a topology change.", "binding-invalid");
+    Check.True(bindingInvalid.TechnicalDetail.Contains("aggregateEvidence=none", StringComparison.Ordinal),
+        "A series without an aggregate evidence must say so in the technical detail.");
 
-    // The hardware state could not be confirmed (no recovery pending) on the first pair.
-    var hardwareNotConfirmed = await RunEndingAsync("hardware-not-confirmed", new QueuedCaptureRecoveryOnlyWorkflow(
-        [Ending(1, DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.IdentityNotReady,
-            "The current same-session CAM-A/CAM-B binding is not Ready.", 0),
+    // The binding snapshot ran out before the pair was started (GitHub Issue #251, ADR-0032 6-A):
+    // not a hardware failure, no shutter, not counted as an attempt. Still the first pair.
+    const string identityDetail = "The current same-session CAM-A/CAM-B binding is not Ready.";
+    var identityFirst = await RunEndingAsync("identity-expired-first", new QueuedCaptureRecoveryOnlyWorkflow(
+        [IdentityExpired(), Succeeded(2)]));
+    CheckEnding(identityFirst,
+        "機体照合の有効時間が切れたため、1組目の撮影は始めていません。シャッターは1回も切っていません。" +
+        "この組は受入の試行に数えません。" +
+        "追加の撮影はできないため、アプリを終了し、起動し直して機体照合からやり直してください。",
+        "保管した原画像なし・集約証跡は未作成", identityDetail, "identity-expired-first");
+    Check.True(identityFirst.TechnicalDetail.Contains("lastFailure=IdentityNotReady", StringComparison.Ordinal),
+        "The typed failure code belongs in the technical detail.");
+    Check.False(identityFirst.StatusMessage.Contains("カメラの状態を確認できない", StringComparison.Ordinal),
+        "An expired binding is not a camera problem and must not be reported as one.");
+
+    // Expired on the third pair, after two completed pairs.
+    var identityThird = await RunEndingAsync("identity-expired-third", new QueuedCaptureRecoveryOnlyWorkflow(
+        [Succeeded(1), Succeeded(2), IdentityExpired(), Succeeded(4)]));
+    CheckEnding(identityThird,
+        "機体照合の有効時間が切れたため、3組目の撮影は始めていません。" +
+        "2組目までは完了しています。3組目のシャッターは切っていません。" +
+        "この組は受入の試行に数えません。" +
+        "撮影した原画像4枚はアプリ内に保管しています。集約証跡は作成していません。" +
+        "追加の撮影はできないため、アプリを終了し、起動し直して機体照合からやり直してください。",
+        "原画像4枚を保管・集約証跡は未作成", identityDetail, "identity-expired-third");
+
+    // Any other pair that could not be completed (capability check, a close without capture): the
+    // cause is not named, and an expired binding is not claimed.
+    const string preflightDetail = "CaptureRecoveryOnly capability preflight failed before reservation: anonymous.";
+    var pendingFirst = await RunEndingAsync("hardware-pending-first", new QueuedCaptureRecoveryOnlyWorkflow(
+        [Ending(1, DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.HardwarePending,
+            preflightDetail, 0),
          Succeeded(2)]));
-    CheckEnding(hardwareNotConfirmed,
-        "1組目の撮影・回収を完了できませんでした。カメラの状態を確認できないため、ここで停止しました。" +
-        "残りの4組は撮影せず、自動再試行もしていません。カメラから受け取れた原画像はありません。" +
-        "追加の撮影はできません。カメラの接続と状態を確認し、アプリを終了してください。",
-        "The current same-session CAM-A/CAM-B binding is not Ready.", "hardware-not-confirmed");
+    CheckEnding(pendingFirst,
+        "1組目の撮影・回収を完了できなかったため、ここで停止しました。" +
+        "残りの4組は撮影せず、自動再試行もしていません。カメラから受け取れた原画像はありません。集約証跡は作成していません。" +
+        "追加の撮影はできないため、カメラの接続と状態を確認してからアプリを終了してください。",
+        "保管した原画像なし・集約証跡は未作成", preflightDetail, "hardware-pending-first");
+    var pendingSecond = await RunEndingAsync("hardware-pending-second", new QueuedCaptureRecoveryOnlyWorkflow(
+        [Succeeded(1),
+         Ending(2, DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.HardwarePending,
+             preflightDetail, 0),
+         Succeeded(3)]));
+    CheckEnding(pendingSecond,
+        "2組目の撮影・回収を完了できなかったため、ここで停止しました。1組目までは完了しています。" +
+        "残りの3組は撮影せず、自動再試行もしていません。" +
+        "受け取れた原画像2枚はアプリ内に保管しています。集約証跡は作成していません。" +
+        "追加の撮影はできないため、カメラの接続と状態を確認してからアプリを終了してください。",
+        "原画像2枚を保管・集約証跡は未作成", preflightDetail, "hardware-pending-second");
+    foreach (var generic in new[] { pendingFirst, pendingSecond })
+    {
+        Check.False(
+            generic.StatusMessage.Contains("確認できない", StringComparison.Ordinal) ||
+            generic.StatusMessage.Contains("有効時間", StringComparison.Ordinal),
+            "The generic stop must not name a cause it does not know.");
+    }
 
     // The result of a pair's ID is unknown: the existing re-check wording, with the detail moved.
     var unconfirmed = await RunEndingAsync("unconfirmed", new QueuedCaptureRecoveryOnlyWorkflow(
         [Succeeded(1),
          Ending(2, DualHardwareCaptureTerminalState.HardwarePending, DualCameraFailureCode.HardwarePending,
              "The same-ID CaptureRecoveryOnly query remains unknown.", 0, recoveryPending: true)]));
-    CheckEnding(unconfirmed, OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText,
-        "The same-ID CaptureRecoveryOnly query remains unknown.", "unconfirmed");
+    Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText, unconfirmed.StatusMessage);
+    Check.False(unconfirmed.StatusMessage.Contains("The same-ID", StringComparison.Ordinal),
+        "unconfirmed: the coordinator's English detail must not be the status text.");
+    Check.True(unconfirmed.TechnicalDetail.Contains("detail=The same-ID CaptureRecoveryOnly query remains unknown.", StringComparison.Ordinal),
+        "unconfirmed: the coordinator's detail must be kept in the technical detail.");
+    Check.Equal("原画像2枚を保管・集約証跡は未作成", unconfirmed.ExportResult);
 
     // The next pair could not be started after two completed pairs.
     var blockedBetweenPairs = await RunEndingAsync("blocked-between-pairs", new QueuedCaptureRecoveryOnlyWorkflow(
@@ -10804,36 +10919,87 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     CheckEnding(blockedBetweenPairs,
         "2組の撮影・回収が完了した時点で、続きの撮影を始められなくなりました。" +
         "残りの3組は撮影せず、自動再試行もしていません。" +
-        "撮影した原画像4枚はアプリ内に保管しています。追加の撮影はできません。アプリを終了してください。",
+        "撮影した原画像4枚はアプリ内に保管しています。集約証跡は作成していません。" +
+        "直前の1組は「原画像をこのPCのフォルダへ保存」で取り出せます。" +
+        "追加の撮影はできないため、アプリを終了してください。",
+        "原画像4枚を保管・集約証跡は未作成",
         startBlocker, "blocked-between-pairs");
 
-    // Endings the main button cannot reach (it is off when a series cannot start or a prior ID is
-    // unconfirmed) are fixed through the text builder.
+    // The series could not start although the main button was on (the profile became invalid between
+    // the press and the first pair): no result panel, so the capture screen stays and the text is
+    // also put in the notice. The reason line below the main button says there is no evidence.
+    var notStarted = await RunEndingAsync("not-started", new QueuedCaptureRecoveryOnlyWorkflow([Succeeded(1)]),
+        workflow => workflow.BlockNewCapture());
+    var notStartedText =
+        "新しい撮影を始められませんでした。シャッターは1回も切っていません。" +
+        "理由は技術情報に記録しました。" +
+        "この系列ではもう撮影できないため、アプリを終了してください。";
+    Check.Equal(notStartedText, notStarted.StatusMessage);
+    Check.Equal(notStartedText, notStarted.NoticeText);
+    Check.True(notStarted.IsActionZonePreparing && !notStarted.IsActionZoneReview,
+        $"A series that did not start stays on the capture screen, which does not show the status message. UiState={notStarted.UiState}");
+    Check.Equal("保管した原画像なし・集約証跡は未作成", notStarted.ExportResult);
+    Check.True(notStarted.TechnicalDetail.Contains("detail=" + startBlocker, StringComparison.Ordinal) &&
+               notStarted.TechnicalDetail.Contains("lastTerminalState=(none)", StringComparison.Ordinal),
+        "The start blocker belongs in the technical detail.");
+    CheckOperatorWords(notStarted.StatusMessage, "not-started");
+    Check.Equal("最大5組の受入系列は開始済みです。この系列ではもう撮影できません。アプリを終了してください。",
+        notStarted.CaptureDisabledReason);
+
+    // Endings the main button cannot reach through the view model are fixed through the text builder.
+    var recheckSteps =
+        "「同じ撮影IDの結果を確認する」を押すと、新しい撮影も自動再試行もせずに結果だけを確認します。" +
+        "確認の後も、この系列の続きは撮影できません。";
+    var pendingBeforeFirstPair = CaptureRecoveryOnlyFiveRunStatusText.Build(
+        new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 0, null, null, "A prior transaction requires same-ID recovery."));
     Check.Equal(
-        "新しい撮影を始められませんでした。シャッターは1回も切っていません。主ボタンの下に出ている理由を確認してください。",
-        CaptureRecoveryOnlyFiveRunStatusText.Build(
-            new(CaptureRecoveryOnlyFiveRunStatus.Blocked, 0, null, null, startBlocker)));
+        "前回の撮影IDの結果が確定していないため、新しい撮影は始めていません。シャッターは1回も切っていません。" +
+        recheckSteps,
+        pendingBeforeFirstPair);
+    var pendingAfterTwoPairs = CaptureRecoveryOnlyFiveRunStatusText.Build(
+        new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 2, Succeeded(2), null, "A prior transaction requires same-ID recovery."));
     Check.Equal(
-        "前回の撮影IDの結果が確定していないため、新しい撮影は始めていません。シャッターは切っていません。" +
-        "「同じ撮影IDの結果を確認する」を押すと、新しい撮影も自動再試行もせずに結果だけを確認します。",
-        CaptureRecoveryOnlyFiveRunStatusText.Build(
-            new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 0, null, null, "A prior transaction requires same-ID recovery.")));
-    Check.Equal(
-        "2組の撮影・回収の後、前回の撮影IDの結果が確定していないため、続きは始めていません。" +
+        "2組の撮影・回収が完了した後、前回の撮影IDの結果が確定していないため、続きは始めていません。" +
         "撮影した原画像4枚はアプリ内に保管しています。" +
-        "「撮り直しの準備へ」で撮影画面に戻り、「同じ撮影IDの結果を確認する」を押すと、" +
-        "新しい撮影も自動再試行もせずに結果だけを確認します。",
-        CaptureRecoveryOnlyFiveRunStatusText.Build(
-            new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 2, Succeeded(2), null, "A prior transaction requires same-ID recovery.")));
+        "「撮り直しの準備へ」で撮影画面に戻り、" + recheckSteps,
+        pendingAfterTwoPairs);
+    var invalidatedAfterSuccess = CaptureRecoveryOnlyFiveRunStatusText.Build(
+        new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 5,
+            Ending(5, DualHardwareCaptureTerminalState.Succeeded, DualCameraFailureCode.None, null, 2,
+                invalidationReason: DualBindingInvalidationReason.UsbReconnect),
+            null, "Hardware or binding state requires operator inspection."));
     Check.Equal(
-        "5組目の撮影・回収は完了しましたが、機体照合が無効になったため、ここで停止しました。" +
-        "自動再試行はしていません。受け取れた原画像は10枚です。撮影した原画像はアプリ内に残っています。" +
-        "追加の撮影はできません。カメラの接続と状態を確認し、アプリを終了してください。",
-        CaptureRecoveryOnlyFiveRunStatusText.Build(
-            new(CaptureRecoveryOnlyFiveRunStatus.HardwarePending, 5,
-                Ending(5, DualHardwareCaptureTerminalState.Succeeded, DualCameraFailureCode.None, null, 2,
-                    invalidationReason: DualBindingInvalidationReason.UsbReconnect),
-                null, "Hardware or binding state requires operator inspection.")));
+        "機体照合が無効になったため、5組目の撮影・回収の完了後に停止しました。5組目までは完了しています。" +
+        "自動再試行はしていません。受け取れた原画像10枚はアプリ内に保管しています。集約証跡は作成していません。" +
+        "追加の撮影はできないため、カメラの接続と状態を確認してからアプリを終了してください。",
+        invalidatedAfterSuccess);
+    var blockedBeforeFirstPair = CaptureRecoveryOnlyFiveRunStatusText.Build(
+        new(CaptureRecoveryOnlyFiveRunStatus.Blocked, 0, null, null, startBlocker));
+    Check.Equal(notStartedText, blockedBeforeFirstPair);
+    foreach (var (text, name) in new[]
+             {
+                 (pendingBeforeFirstPair, "pending-before-first"),
+                 (pendingAfterTwoPairs, "pending-after-two"),
+                 (invalidatedAfterSuccess, "invalidated-after-success"),
+                 (blockedBeforeFirstPair, "blocked-before-first"),
+             })
+    {
+        CheckOperatorWords(text, name);
+    }
+
+    // A status the builder does not know says only that the run stopped and how to leave; every
+    // status that exists must have a text of its own (a new status must not fall through to it).
+    var unknownText = "撮影・回収を停止しました。理由は技術情報に記録しました。追加の撮影はできないため、アプリを終了してください。";
+    Check.Equal(unknownText, CaptureRecoveryOnlyFiveRunStatusText.Build(
+        new((CaptureRecoveryOnlyFiveRunStatus)(-1), 0, null, null, "anonymous")));
+    foreach (var status in Enum.GetValues<CaptureRecoveryOnlyFiveRunStatus>())
+    {
+        var statusText = CaptureRecoveryOnlyFiveRunStatusText.Build(
+            new(status, 2, Succeeded(2), null, "anonymous"));
+        Check.True(statusText != unknownText,
+            $"{status}: every five-run status needs its own operator-facing text.");
+        CheckOperatorWords(statusText, "status " + status);
+    }
 }
 
 static (int Reserve, int Start, int Query, int Ordinary, int Close, int Preflight, int Activate, int Sends) AgentCallSnapshot(
@@ -11009,7 +11175,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                  })
         {
             Check.False(text.Contains("保持", StringComparison.Ordinal),
-                $"The app's own store is called 保管 (or 残っています), not 保持. Actual: {text}");
+                $"The app's own store is called 保管, not 保持. Actual: {text}");
         }
         // The result panel has no main button: the texts that point to the re-check name the two
         // steps by the labels the operator sees (the panel's own button, then the main button).
@@ -16592,6 +16758,23 @@ sealed class CountingBindingTransport(
     }
 }
 
+sealed class ActivationHookTransport(IHardwareCameraAgentTransport inner, Action onActivateCapture) : IHardwareCameraAgentTransport
+{
+    public Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
+    {
+        using (var document = JsonDocument.Parse(requestJson))
+        {
+            if (document.RootElement.GetProperty("operation").GetString() ==
+                DualBindingCameraAgentProtocol.Operations.ActivateCapture)
+            {
+                onActivateCapture();
+            }
+        }
+
+        return inner.SendAsync(requestJson, cancellationToken);
+    }
+}
+
 sealed class MutableDualIdentitySource(DualCameraIdentitySnapshot initial) : IDualCameraIdentitySnapshotSource
 {
     public event EventHandler<DualCameraIdentitySnapshot>? SnapshotChanged;
@@ -17255,6 +17438,9 @@ sealed class QueuedCaptureRecoveryOnlyWorkflow(
     public string TransactionRoot => "C:\\anonymous-ten-run";
 
     public bool CanStartNewCapture { get; private set; } = canStartNewCapture;
+
+    /// <summary>Makes the next start check fail, as when the approved profile becomes invalid.</summary>
+    public void BlockNewCapture() => CanStartNewCapture = false;
 
     public string NewCaptureBlocker => "anonymous deterministic start blocker";
 
