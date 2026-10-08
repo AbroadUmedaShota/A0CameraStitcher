@@ -91,7 +91,9 @@ $script:MaxPhotosPerRoot = 2000
 $script:SyntheticImageNotice = 'A0 replay fixture: synthetic image, not a photograph'
 $script:SyntheticImageMaxBytes = 4096
 # A decoded string shorter than this is a header, not a picture (the array of a JPEG header in code, say).
-$script:MinEmbeddedImageBytes = 64
+# It stays below one line of wrapped base64 (48 bytes at 64 columns, 57 at 76) so that each line of a
+# wrapped picture is still checked on its own when joining the lines shifts the start of the picture.
+$script:MinEmbeddedImageBytes = 32
 
 # Plain English words that are also short account or owner names. A short plain-word needle is
 # skipped only when it equals the account name (the profile path forms cover that) or is listed
@@ -824,6 +826,9 @@ function Invoke-SelfTest {
         & $add 'a small dummy image in a .b64 file' { & $write 'images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5' $false
         $real = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 600 + @(0xFF, 0xD9))
         & $add 'an image without the notice in a .b64 file' { & $write 'images/real.jpg.b64' ([Convert]::ToBase64String($real) + "`n") } 'add o6' $true
+        $big = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 2000 + @(0xFF, 0xD9))
+        $bigWrapped = [Convert]::ToBase64String($big, [Base64FormattingOptions]::InsertLineBreaks)
+        & $add 'JPEG wrapped at 76 columns after a heading line' { & $write 'o7.md' "Frame`n`n``````text`n$bigWrapped`n```````n" } 'add o7' $true
 
         # M-5: the same value written in other ways.
         $hexSep = ($script:Utf8.GetBytes($needle) | ForEach-Object { $_.ToString('x2') }) -join ' '
