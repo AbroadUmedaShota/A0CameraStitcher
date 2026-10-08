@@ -380,9 +380,10 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string BindingMenuHeader => IsHardwareDualEnvironment
         ? "機体照合を表示(_B)"
         : "機体照合を表示（模擬）(_B)";
+    // The spoken name starts with the visible header (WCAG 2.5.3, access key marker removed).
     public string BindingMenuAutomationName => IsHardwareDualEnvironment
-        ? "カメラ 実機の機体照合を表示 CAM-A CAM-Bの目視割当"
-        : "カメラ 機体照合を表示 模擬動作 実機の合格判定ではない";
+        ? "機体照合を表示 実機の機体照合 CAM-A CAM-Bの目視割当"
+        : "機体照合を表示（模擬） 模擬動作 実機の合格判定ではない";
     public string MenuBarAutomationName => IsCaptureRecoveryOnlyMode
         ? "メニューバー ファイル カメラ ヘルプ"
         : "メニューバー ファイル カメラ 表示 ツール ヘルプ";
@@ -498,6 +499,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _safetyAcknowledged, value))
             {
                 OnPropertyChanged(nameof(SafetyAckText));
+                OnPropertyChanged(nameof(SafetyAckAutomationName));
                 OnPropertyChanged(nameof(IsConsentOverlayVisible));
                 OnPropertyChanged(nameof(IsSafetyAckPending));
                 RebuildReadiness(preserveOutcomeState: UiState == OperatorUiState.FailedPartial);
@@ -506,6 +508,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
 
     public string SafetyAckText => SafetyAcknowledged ? "同意済み（アプリ終了時に破棄）" : "未同意 — 撮影禁止";
+    public string SafetyAckAutomationName => SafetyAckText + " 押すと排他同意の画面を開く";
 
     /// <summary>起動セッションの排他同意モーダルの表示可否。未同意の間だけ前面に出す。
     /// 「同意しない」を選んだ場合は閲覧できるよう畳み、タイトルバーの再開ボタンから開き直す。</summary>
@@ -549,9 +552,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string CaptureRecoveryOnlyConfirmationText => IsCaptureRecoveryOnlyFiveRunMode
         ? "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を5回（実シャッター合計10回）実行します。"
         : "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。";
-    public string CaptureRecoveryOnlyConfirmationAutomationName => IsCaptureRecoveryOnlyFiveRunMode
-        ? "専用カード2枚が空で撮影回収のみを5回 実シャッター合計10回実行することを承認"
-        : "専用カード2枚が空で撮影回収のみを1回実行することを承認";
+    // The spoken name starts with the visible sentence (WCAG 2.5.3), which follows the run count.
+    public string CaptureRecoveryOnlyConfirmationAutomationName =>
+        CaptureRecoveryOnlyConfirmationText + " 実行の承認";
     public string CaptureRecoveryOnlyInstructionText => IsCaptureRecoveryOnlyFiveRunMode
         ? "A→Bの順で最大5組を撮影・回収します。最初の失敗で停止し、自動再試行はしません。合成はPending、A0品質はUnapprovedのままです。"
         : "A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。";
@@ -630,13 +633,15 @@ public sealed class OperatorShellViewModel : ObservableObject
             ? "2台を順次撮影・回収する（最大5回）"
             : "2台を順次撮影・回収する（1回）"
         : IsSingleCameraMode ? $"{SelectedCamera}を撮影する（確認なし）" : "2台を順次撮影する（確認なし）";
+    // The spoken name keeps the "主ボタン " prefix, then the visible label verbatim (WCAG 2.5.3), then what the
+    // press does. The label follows the mode and the selected camera, so the name is built from it.
     public string CaptureButtonAutomationName => IsMainButtonRecheckingSameTransaction
         ? SameTransactionRecheckButtonAutomationName
         : IsCaptureRecoveryOnlyFiveRunMode
-        ? "主ボタン 専用確認済みでCAM-AからCAM-Bを最大5組 実シャッター最大10回 撮影回収する 自動再試行なし"
+        ? "主ボタン " + CaptureButtonText + " 専用確認済みでCAM-AからCAM-Bを最大5組 実シャッター最大10回 撮影回収する 自動再試行なし"
         : IsCaptureRecoveryOnlyMode
-            ? "主ボタン 専用確認済みでCAM-AからCAM-Bを1組 実シャッター2回 撮影回収する 自動再試行なし"
-            : "主ボタン 確認なしで明示構成の新しい撮影を一回開始 現在のフォーカス位置のまま撮影";
+            ? "主ボタン " + CaptureButtonText + " 専用確認済みでCAM-AからCAM-Bを1組 実シャッター2回 撮影回収する 自動再試行なし"
+            : "主ボタン " + CaptureButtonText + " 確認なしで明示構成の新しい撮影を一回開始 現在のフォーカス位置のまま撮影";
     public string CameraSelectionLabel => IsCaptureRecoveryOnlyMode
         ? "CAM-A / CAM-Bは機体照合画面で割り当て"
         : IsSingleCameraMode ? "撮影・ライブ表示の対象" : "ライブ表示するカメラ（1台ずつ）";
@@ -725,8 +730,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             OnPropertyChanged(nameof(IsSingleCameraModeChecked));
             OnPropertyChanged(nameof(IsDualCameraModeChecked));
             OnPropertyChanged(nameof(DualCameraIdentityStatusText));
+            OnPropertyChanged(nameof(DualCameraIdentityStatusAutomationName));
             OnPropertyChanged(nameof(OperatingModeDescription));
             OnPropertyChanged(nameof(CaptureButtonText));
+            OnPropertyChanged(nameof(CaptureButtonAutomationName));
             OnPropertyChanged(nameof(CameraSelectionLabel));
             OnPropertyChanged(nameof(ProcessingResultLabel));
             OnPropertyChanged(nameof(DiagnosticScenarios));
@@ -794,8 +801,10 @@ public sealed class OperatorShellViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(LiveViewPlaceholder));
                 OnPropertyChanged(nameof(LiveViewButtonText));
+                OnPropertyChanged(nameof(LiveViewButtonAutomationName));
                 OnPropertyChanged(nameof(OperatingModeDescription));
                 OnPropertyChanged(nameof(CaptureButtonText));
+                OnPropertyChanged(nameof(CaptureButtonAutomationName));
                 OnPropertyChanged(nameof(StageCompositeLiveAlias));
                 OnPropertyChanged(nameof(StageCompositeStillAlias));
                 OnPropertyChanged(nameof(StageSingleLiveAliasInPlan));
@@ -844,6 +853,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         ? HardwareDualStagePendingText
         : $"{SelectedCamera}\n\n模擬動作のライブ表示（実画像ではありません）\n原画像・合成入力には使いません";
     public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} ライブ表示を停止" : $"{SelectedCamera} ライブ表示を開始";
+    public string LiveViewButtonAutomationName => LiveViewButtonText + " ライブ表示の開始と停止を切り替える";
     public bool IsLiveViewActive
     {
         get => _isLiveViewActive;
@@ -866,6 +876,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                     _currentLiveViewFrameGeneration = 0;
                 }
                 OnPropertyChanged(nameof(LiveViewButtonText));
+                OnPropertyChanged(nameof(LiveViewButtonAutomationName));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
                 RaiseStageFrameProperties();
@@ -1366,6 +1377,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (changed)
             {
                 OnPropertyChanged(nameof(GridDivisionText));
+                OnPropertyChanged(nameof(GridSettingsToggleAutomationName));
             }
             else if (clamped != value)
             {
@@ -1387,6 +1399,7 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (changed)
             {
                 OnPropertyChanged(nameof(GridDivisionText));
+                OnPropertyChanged(nameof(GridSettingsToggleAutomationName));
             }
             else if (clamped != value)
             {
@@ -1396,6 +1409,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     }
 
     public string GridDivisionText => $"{GridColumns} × {GridRows}";
+    // The button face reads "グリッド <列数> × <行数>"; the spoken name starts with the same words.
+    public string GridSettingsToggleAutomationName => $"グリッド {GridDivisionText} 設定を開く 列数と行数の指定";
 
     /// <summary>入力欄からの直接指定を受けるため、範囲外はここで丸める（1未満・24超は作らない）。</summary>
     private static int ClampGridDivision(int value) => Math.Clamp(value, MinGridDivision, MaxGridDivision);
@@ -1466,11 +1481,13 @@ public sealed class OperatorShellViewModel : ObservableObject
             if (SetProperty(ref _isResetArmed, value))
             {
                 OnPropertyChanged(nameof(ResetButtonText));
+                OnPropertyChanged(nameof(ResetButtonAutomationName));
             }
         }
     }
 
     public string ResetButtonText => IsResetArmed ? "もう一度で初期化" : "リセット";
+    public string ResetButtonAutomationName => ResetButtonText + " 表示設定のリセット 2回押しで確定";
 
     private void RequestResetView()
     {
@@ -1689,6 +1706,8 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool ShowAutoFocusButton => IsFocusPanelAvailable && !IsFocusTargetOutsideLiveCameraDomain;
 
     public string SwitchLiveCameraButtonText => $"{TargetDomainCameraAlias} live に切替";
+    public string SwitchLiveCameraButtonAutomationName =>
+        SwitchLiveCameraButtonText + " 共通ターゲット□が非ライブ側カメラの担当域にあります ワンクリックでライブ表示を切り替え 自動では切り替えません";
 
     /// <summary>Base gate shared by AF and MF: the focus panel must be available (see
     /// <see cref="IsFocusPanelAvailable"/>), Live View must actually be streaming (contrast AF
@@ -1763,12 +1782,16 @@ public sealed class OperatorShellViewModel : ObservableObject
         {
             if (SetProperty(ref _isPeakingEnabled, value))
             {
+                OnPropertyChanged(nameof(PeakingButtonText));
+                OnPropertyChanged(nameof(PeakingButtonAutomationName));
                 RaiseStageFrameProperties();
             }
         }
     }
 
     public string PeakingButtonText => IsPeakingEnabled ? "ピーキング OFF" : "ピーキング ON";
+    public string PeakingButtonAutomationName =>
+        PeakingButtonText + " フォーカスピーキング ライブ画像へのエッジ強調 プレビュー専用 オンオフ切替";
 
     /// <summary>Preview-only edge-highlight overlay (see <see cref="FocusPeakingOverlayRenderer"/>)
     /// for the stage's single-live full-frame image. Null whenever peaking is off or no base
@@ -1970,6 +1993,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowSwitchLiveCameraButton));
         OnPropertyChanged(nameof(ShowAutoFocusButton));
         OnPropertyChanged(nameof(SwitchLiveCameraButtonText));
+        OnPropertyChanged(nameof(SwitchLiveCameraButtonAutomationName));
         OnPropertyChanged(nameof(CanUseFocusPanel));
         OnPropertyChanged(nameof(CanExecuteAutoFocus));
         OnPropertyChanged(nameof(CanSwitchLiveCameraToTargetDomain));
@@ -1977,6 +2001,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(FocusPositionText));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
         OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        OnPropertyChanged(nameof(CaptureWithAutoFocusUnavailableReason));
         NotifyAllCommands();
     }
 
@@ -1990,6 +2015,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
         OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        OnPropertyChanged(nameof(CaptureWithAutoFocusUnavailableReason));
         OnPropertyChanged(nameof(CaptureAvailabilityText));
         OnPropertyChanged(nameof(ReadyStatusChipText));
         OnPropertyChanged(nameof(CaptureDisabledReason));
@@ -2355,16 +2381,22 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool CanCaptureWithAutoFocus =>
         CanCapture && IsFocusPanelAvailable && !IsMainButtonRecheckingSameTransaction;
 
-    /// <summary>主ボタンは押せる（<see cref="CanCapture"/>）のに「撮影+AF」だけがHardwareDualゲート
-    /// で無効な場合だけ表示する、撮影+AF専用の理由行。両方とも無効なときは共通の
-    /// <see cref="CaptureDisabledReason"/> が既に理由を説明しているため、二重表示しない。</summary>
-    public bool IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !IsFocusPanelAvailable;
+    /// <summary>主ボタンは押せる（<see cref="CanCapture"/>）のに「撮影+AF」だけが押せない場合（
+    /// HardwareDualゲート、または主ボタンが結果確認だけを行っている間）に表示する、撮影+AF専用の理由行。
+    /// 両方とも無効なときは共通の<see cref="CaptureDisabledReason"/> が既に理由を説明しているため、二重表示しない。</summary>
+    public bool IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !CanCaptureWithAutoFocus;
 
-    public string CaptureWithAutoFocusUnavailableReason => FocusPanelUnavailableReason;
+    /// <summary>撮影+AFだけが押せない理由。実機モードの理由を優先し、それ以外で結果確認中のときは
+    /// 主ボタンが撮影をしないことを理由にする。</summary>
+    public string CaptureWithAutoFocusUnavailableReason =>
+        IsFocusPanelAvailable && IsMainButtonRecheckingSameTransaction
+            ? "同じ撮影IDの結果を確認している間は、撮影+AFを使えません。"
+            : FocusPanelUnavailableReason;
     /// <summary>カメラ(C)メニューの「identity状態」項目用（issue #34）の読み取り専用表示。
     /// <see cref="CaptureDisabledReason"/>が既に読んでいる同じ<see cref="IDualCameraProductFlow.IdentitySnapshot"/>
     /// を専用の表示文字列として公開するだけで、新しい業務ロジックは追加しない — 撮影失敗を
     /// 待たずにidentity状態を確認できるようにする目的のみ。</summary>
+    public string DualCameraIdentityStatusAutomationName => DualCameraIdentityStatusText + " 読み取り専用の表示";
     public string DualCameraIdentityStatusText => IsCaptureRecoveryOnlyMode
         ? $"同一Agent内の機体照合: {DualBinding.Phase} / 撮影引継ぎ: {(DualBinding.IsCaptureHostActivated ? "完了" : "未実施")}"
         : _dualCameraFlow is null
@@ -2616,6 +2648,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string ReviewPrimaryActionAutomationName =>
         ReviewPrimaryActionText + " 人の確認を記録後のみ撮影準備へ進む";
     public string PrepareNewCaptureText => "撮り直しの準備へ";
+    public string PrepareNewCaptureAutomationName => PrepareNewCaptureText + " 旧原画像をアプリ内に保管したまま撮影を開始しない";
     public bool CanOpenMaintenance => !IsCaptureRecoveryOnlyMode && _availability.OpenMaintenance.Allowed;
 
     private CapturePlan CurrentCapturePlan => IsSingleCameraMode ? CapturePlan.Single(SelectedCamera) : CapturePlan.Dual();
@@ -3398,6 +3431,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(DualCameraIdentityStatusText));
+        OnPropertyChanged(nameof(DualCameraIdentityStatusAutomationName));
         _showBindingDemoCommand.NotifyCanExecuteChanged();
         _captureCommand.NotifyCanExecuteChanged();
         _captureWithAutoFocusCommand.NotifyCanExecuteChanged();
@@ -4099,6 +4133,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(IsRestitchButtonVisible));
         OnPropertyChanged(nameof(OperatingModeDescription));
         OnPropertyChanged(nameof(CaptureButtonText));
+        OnPropertyChanged(nameof(CaptureButtonAutomationName));
         OnPropertyChanged(nameof(CameraSelectionLabel));
         OnPropertyChanged(nameof(ProcessingResultLabel));
         OnPropertyChanged(nameof(DiagnosticScenarios));
@@ -4272,6 +4307,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CaptureButtonAutomationName));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
         OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        OnPropertyChanged(nameof(CaptureWithAutoFocusUnavailableReason));
         OnPropertyChanged(nameof(CaptureAvailabilityText));
         OnPropertyChanged(nameof(ReadyStatusChipText));
         OnPropertyChanged(nameof(CaptureDisabledReason));
@@ -4295,6 +4331,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(ReviewPrimaryActionText));
         OnPropertyChanged(nameof(ReviewPrimaryActionAutomationName));
         OnPropertyChanged(nameof(PrepareNewCaptureText));
+        OnPropertyChanged(nameof(PrepareNewCaptureAutomationName));
         OnPropertyChanged(nameof(CanPrepareNewCapture));
         OnPropertyChanged(nameof(CanAcceptReview));
         _prepareNewCaptureCommand.NotifyCanExecuteChanged();

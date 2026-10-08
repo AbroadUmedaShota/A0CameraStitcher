@@ -6813,6 +6813,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", recoveryViewModel.CaptureButtonText);
         Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             recoveryViewModel.CaptureButtonAutomationName);
+        AssertAccessibleNamesContainVisibleLabels(recoveryViewModel, "hardware dual re-check");
         recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
         var restartedRecoveryFlow = new DualCameraProductFlow(
             recoveryProductRoot,
@@ -6835,6 +6836,7 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", restartedRecoveryViewModel.CaptureButtonText);
         Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             restartedRecoveryViewModel.CaptureButtonAutomationName);
+        AssertAccessibleNamesContainVisibleLabels(restartedRecoveryViewModel, "hardware dual restarted re-check");
         // GitHub Issue #242 review: the reason line and the running texts of the re-check say that
         // nothing is shot and that a complete result carries on to the composite.
         Check.Equal("この撮影IDの結果を確認します。新しい撮影は始めません。結果がそろっていれば合成まで進みます。",
@@ -7304,9 +7306,13 @@ static async Task SingleCameraWorkflowAsync()
                 restitchVisibilityChanges++;
             }
         };
+        var modeChangedNames = new HashSet<string>(StringComparer.Ordinal);
+        viewModel.PropertyChanged += (_, args) => modeChangedNames.Add(args.PropertyName ?? string.Empty);
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "simulated dual default");
         Check.Equal("採用して次へ 人の確認を記録後のみ撮影準備へ進む", viewModel.ReviewPrimaryActionAutomationName);
         Check.True(viewModel.IsRestitchButtonVisible, "Positive control: the two-camera mode shows the re-stitch button.");
         viewModel.SelectedOperatingMode = "1台構成";
+        modeChangedNames.Clear();
         viewModel.SelectedCamera = "CAM-B";
 
         Check.True(viewModel.IsSingleCameraMode, "The operator must explicitly select Single mode.");
@@ -7315,6 +7321,13 @@ static async Task SingleCameraWorkflowAsync()
         // The accept button's spoken name starts with its visible label (WCAG 2.5.3) and follows it.
         Check.Equal("原画像を確認して次へ", viewModel.ReviewPrimaryActionText);
         Check.Equal("原画像を確認して次へ 人の確認を記録後のみ撮影準備へ進む", viewModel.ReviewPrimaryActionAutomationName);
+        // GitHub Issue #249: the main button's name follows its label, so the label that names the selected body
+        // is also in the spoken name, and the change is announced for the name too.
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "simulated single CAM-B");
+        Check.True(viewModel.CaptureButtonAutomationName.Contains("CAM-B", StringComparison.Ordinal),
+            "The main button's spoken name must contain its label, which names the selected body.");
+        Check.True(modeChangedNames.Contains(nameof(OperatorShellViewModel.CaptureButtonAutomationName)),
+            "CaptureButtonAutomationName must be announced when the label changes.");
         // The label is only on screen in the result panel; RaiseReviewProperties raises the label
         // and the spoken name together there.
         Check.True(viewModel.CaptureButtonText.Contains("CAM-B", StringComparison.Ordinal), "The capture action must name the selected body.");
@@ -11056,6 +11069,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
                    shell.CaptureButtonAutomationName.Contains("2回", StringComparison.Ordinal) &&
                    !shell.CaptureButtonAutomationName.Contains("確認なし", StringComparison.Ordinal),
             "The one-shot accessibility name must disclose its dedicated confirmation and two shutter activations.");
+        AssertAccessibleNamesContainVisibleLabels(shell, "capture-recovery-only one-shot");
         Check.False(shell.IsStandardStageVisible, "CaptureRecoveryOnly must hide simulated stage surfaces.");
         Check.False(shell.CanChangeStageMode, "CaptureRecoveryOnly must not expose simulated stage switching.");
         Check.False(shell.CanSelectCamera, "CAM-A/B selection belongs to the explicit binding flow in CaptureRecoveryOnly.");
@@ -11209,6 +11223,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
                    tenRunShell.CaptureButtonAutomationName.Contains("最大10回", StringComparison.Ordinal) &&
                    tenRunShell.CaptureButtonAutomationName.Contains("専用確認済み", StringComparison.Ordinal),
             "The five-run primary button accessibility name must disclose the gate and maximum physical side effects.");
+        AssertAccessibleNamesContainVisibleLabels(tenRunShell, "capture-recovery-only five-run");
         Check.False(tenRunShell.CanCapture, "A Ready binding must not bypass the dedicated five-run confirmation.");
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated five-run confirmation must explicitly unlock the selected mode.");
@@ -11383,6 +11398,9 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal("2台を順次撮影・回収する（最大5回）", pendingFiveShell.CaptureButtonText);
         Check.True(pendingFiveShell.CanCapture && pendingFiveShell.CanCaptureWithAutoFocus,
             "Positive control: a new capture offered on a simulated shell also offers 撮影 + AF.");
+        AssertAccessibleNamesContainVisibleLabels(pendingFiveShell, "five-run new capture");
+        Check.False(pendingFiveShell.IsCaptureWithAutoFocusUnavailableReasonVisible,
+            "GitHub Issue #249: the 撮影 + AF reason row is only for a capturable shell whose 撮影 + AF button is off.");
         await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-pending",
             () => WpfCommandState.Create(pendingFiveShell, pendingFiveOperations));
         Check.True(!pendingFiveShell.IsBusy && pendingFiveWorkflow.HasPendingRecovery,
@@ -11392,11 +11410,32 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyUnconfirmedStatusText, pendingFiveShell.StatusMessage);
         Check.True(pendingFiveShell.PrepareNewCaptureCommand.CanExecute(null),
             "The result panel must offer the way back to the capture screen.");
+        var pendingFiveChanged = new HashSet<string>(StringComparer.Ordinal);
+        pendingFiveShell.PropertyChanged += (_, args) => pendingFiveChanged.Add(args.PropertyName ?? string.Empty);
         pendingFiveShell.PrepareNewCaptureCommand.Execute(null);
         Check.True(pendingFiveShell.CanCapture, "The main button must be pressable again after preparing.");
         Check.Equal("同じ撮影IDの結果を確認する（撮影しません）", pendingFiveShell.CaptureButtonText);
         Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             pendingFiveShell.CaptureButtonAutomationName);
+        AssertAccessibleNamesContainVisibleLabels(pendingFiveShell, "five-run re-check");
+        // GitHub Issue #249: while the main button only re-checks the same ID, the 撮影 + AF button is off for that
+        // reason, so the reason row is shown (CanCapture && !CanCaptureWithAutoFocus) and says so rather than
+        // repeating the real-hardware reason, which does not apply to this shell.
+        Check.True(pendingFiveShell.IsCaptureWithAutoFocusUnavailableReasonVisible,
+            "The 撮影 + AF reason row must be shown while the main button only re-checks the same ID.");
+        Check.True(pendingFiveShell.IsFocusPanelAvailable,
+            "The scenario needs a shell whose focus panel is available, so that the re-check is the only reason.");
+        Check.Equal("同じ撮影IDの結果を確認している間は、撮影+AFを使えません。", pendingFiveShell.CaptureWithAutoFocusUnavailableReason);
+        foreach (var announced in new[]
+        {
+            nameof(OperatorShellViewModel.CaptureButtonAutomationName),
+            nameof(OperatorShellViewModel.IsCaptureWithAutoFocusUnavailableReasonVisible),
+            nameof(OperatorShellViewModel.CaptureWithAutoFocusUnavailableReason),
+        })
+        {
+            Check.True(pendingFiveChanged.Contains(announced),
+                $"{announced} must be announced when the main button switches to the re-check wording.");
+        }
         Check.False(pendingFiveShell.CaptureButtonText.Contains("最大5回", StringComparison.Ordinal),
             "A pending ID must not offer the five-run label.");
         Check.Equal("この撮影IDの結果だけを再確認します。新しい撮影は始めません。", pendingFiveShell.CaptureDisabledReason);
@@ -14885,6 +14924,9 @@ static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelState
         await viewModel.InitializeAsync(CancellationToken.None);
         viewModel.AcceptSafetyCommand.Execute(null);
         Check.Equal("ピーキング ON", viewModel.PeakingButtonText);
+        var peakingChanged = new HashSet<string>(StringComparer.Ordinal);
+        viewModel.PropertyChanged += (_, args) => peakingChanged.Add(args.PropertyName ?? string.Empty);
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "peaking off");
         Check.True(viewModel.TogglePeakingCommand.CanExecute(null), "Peaking toggle must be available while the focus panel is available.");
 
         viewModel.ToggleLiveViewCommand.Execute(null);
@@ -14896,6 +14938,10 @@ static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelState
         viewModel.TogglePeakingCommand.Execute(null);
         Check.True(viewModel.IsPeakingEnabled, "Toggling peaking must flip IsPeakingEnabled.");
         Check.Equal("ピーキング OFF", viewModel.PeakingButtonText);
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "peaking on, live view running");
+        Check.True(peakingChanged.Contains(nameof(OperatorShellViewModel.PeakingButtonText)) &&
+                   peakingChanged.Contains(nameof(OperatorShellViewModel.PeakingButtonAutomationName)),
+            "The peaking button's label and spoken name must both be announced when peaking is toggled.");
         // The fake frame source always returns a 1x1 image, which BuildOverlay treats as
         // degenerate — so the overlay itself is still null here, but the *gate* (IsPeakingEnabled)
         // is what this asserts, matching the renderer-level assertions above for the real-image case.
@@ -14910,6 +14956,32 @@ static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelState
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+}
+
+// GitHub Issue #249 (WCAG 2.5.3 Label in Name): a control whose label follows the view model has an accessible
+// name built from that label, so the name contains the label in every state the caller reaches.
+static void AssertAccessibleNamesContainVisibleLabels(OperatorShellViewModel shell, string state)
+{
+    var pairs = new (string Control, string Label, string Name)[]
+    {
+        ("main capture button", shell.CaptureButtonText, shell.CaptureButtonAutomationName),
+        ("live view button", shell.LiveViewButtonText, shell.LiveViewButtonAutomationName),
+        ("view reset button", shell.ResetButtonText, shell.ResetButtonAutomationName),
+        ("safety acknowledgement button", shell.SafetyAckText, shell.SafetyAckAutomationName),
+        ("identity status menu item", shell.DualCameraIdentityStatusText, shell.DualCameraIdentityStatusAutomationName),
+        ("grid settings toggle", "グリッド " + shell.GridDivisionText, shell.GridSettingsToggleAutomationName),
+        ("switch live camera button", shell.SwitchLiveCameraButtonText, shell.SwitchLiveCameraButtonAutomationName),
+        ("peaking button", shell.PeakingButtonText, shell.PeakingButtonAutomationName),
+        ("prepare new capture button", shell.PrepareNewCaptureText, shell.PrepareNewCaptureAutomationName),
+        ("review primary button", shell.ReviewPrimaryActionText, shell.ReviewPrimaryActionAutomationName),
+        ("capture-recovery-only approval checkbox", shell.CaptureRecoveryOnlyConfirmationText, shell.CaptureRecoveryOnlyConfirmationAutomationName),
+        ("binding menu item", System.Text.RegularExpressions.Regex.Replace(shell.BindingMenuHeader, @"\(_.\)", string.Empty), shell.BindingMenuAutomationName),
+    };
+    foreach (var (control, label, name) in pairs)
+    {
+        Check.True(!string.IsNullOrWhiteSpace(label) && name.Contains(label, StringComparison.Ordinal),
+            $"GitHub Issue #249 ({state}): the {control} accessible name '{name}' must contain its visible label '{label}'.");
     }
 }
 
@@ -14969,6 +15041,9 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
         Check.False(viewModel.IsSingleCameraMode, "Dual mode must remain the default for this issue #33 撮影+AF regression.");
         Check.True(viewModel.CanCapture, "A ready Dual plan must allow capture.");
         Check.True(viewModel.CanCaptureWithAutoFocus, "撮影+AF must be available in SIMULATED Dual mode (no HardwareDual gate active).");
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "simulated dual 撮影+AF");
+        Check.False(viewModel.IsCaptureWithAutoFocusUnavailableReasonVisible,
+            "The 撮影+AF reason row must stay hidden while 撮影+AF is available.");
         Check.True(viewModel.IsActionZonePreparing, "The action zone must show state 1 (readiness card + capture buttons) while Ready.");
         Check.False(viewModel.IsActionZoneProcessing, "The action zone must not show the progress strip before capture starts.");
         Check.False(viewModel.IsActionZoneReview, "The action zone must not show the result panel before capture starts.");
@@ -15066,6 +15141,10 @@ static async Task CaptureWithAutoFocusUnavailableUnderHardwareDualAsync()
 
         Check.False(viewModel.CanCaptureWithAutoFocus, "実機モード（HardwareDual）では撮影+AFを実行不可とする（#35 Option A・#31のIsFocusPanelAvailableゲートを流用）。");
         Check.False(viewModel.CaptureWithAutoFocusCommand.CanExecute(null), "The bound command must agree with CanCaptureWithAutoFocus.");
+        AssertAccessibleNamesContainVisibleLabels(viewModel, "hardware dual 撮影+AF gate");
+        // GitHub Issue #249: the reason row shows the real-hardware reason, not a fixed accessible name.
+        Check.Equal(viewModel.FocusPanelUnavailableReason, viewModel.CaptureWithAutoFocusUnavailableReason);
+        Check.Equal(viewModel.CanCapture, viewModel.IsCaptureWithAutoFocusUnavailableReasonVisible);
     }
     finally
     {
