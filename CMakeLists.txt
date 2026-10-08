@@ -679,4 +679,7 @@ if(BUILD_TESTING)
     add_test(
         NAME m2_corpus_contracts
         COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-M2CorpusContracts.ps1")
+    add_test(
+        NAME m2_rig_profile_v2_schema
+        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-RigProfileV2Schema.ps1")
 endif()
