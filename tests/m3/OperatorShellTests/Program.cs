@@ -300,7 +300,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=111 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=116 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -676,6 +676,61 @@ catch (Exception exception)
 {
     failures.Add("hardware continuous Live View stop proceeds normally when the frame loop finishes just as the wait bound elapses");
     Console.Error.WriteLine($"FAIL hardware continuous Live View stop proceeds normally when the frame loop finishes just as the wait bound elapses: {exception}");
+}
+
+try
+{
+    await HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnouncesWhenFrameReturnsAsync();
+    Console.WriteLine("PASS issue #244 an unconfirmed continuous Live View stop blocks capture, says why, and says when stopping again is possible");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #244 an unconfirmed continuous Live View stop blocks capture, says why, and says when stopping again is possible");
+    Console.Error.WriteLine($"FAIL issue #244 an unconfirmed continuous Live View stop blocks capture, says why, and says when stopping again is possible: {exception}");
+}
+
+try
+{
+    await HardwareContinuousLiveViewUnconfirmedStopEvidenceOrderAndCategoryAsync();
+    Console.WriteLine("PASS issue #244 an unconfirmed stop is observed as requested then unconfirmed, and a second stop keeps LiveViewStopUnconfirmed as the reason");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #244 an unconfirmed stop is observed as requested then unconfirmed, and a second stop keeps LiveViewStopUnconfirmed as the reason");
+    Console.Error.WriteLine($"FAIL issue #244 an unconfirmed stop is observed as requested then unconfirmed, and a second stop keeps LiveViewStopUnconfirmed as the reason: {exception}");
+}
+
+try
+{
+    await HardwareSingleHandoffSecondStopAfterUnconfirmedStopKeepsTheFailureCategoryAsync();
+    Console.WriteLine("PASS issue #244 handoff evidence keeps the stop-unconfirmed reason on a second stop but still flags foreign sessions and late frames");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #244 handoff evidence keeps the stop-unconfirmed reason on a second stop but still flags foreign sessions and late frames");
+    Console.Error.WriteLine($"FAIL issue #244 handoff evidence keeps the stop-unconfirmed reason on a second stop but still flags foreign sessions and late frames: {exception}");
+}
+
+try
+{
+    await HardwareContinuousLiveViewStopSurfacesFailureOfLoopThatFinishedAtTheBoundAsync();
+    Console.WriteLine("PASS issue #244 a frame loop that ended with an exception at the wait bound reaches the caller and is not reported as an unconfirmed stop");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #244 a frame loop that ended with an exception at the wait bound reaches the caller and is not reported as an unconfirmed stop");
+    Console.Error.WriteLine($"FAIL issue #244 a frame loop that ended with an exception at the wait bound reaches the caller and is not reported as an unconfirmed stop: {exception}");
+}
+
+try
+{
+    await HardwareSingleShutdownTellsTheOperatorWhileWaitingForTheFrameRequestAsync();
+    Console.WriteLine("PASS issue #244 closing the single-camera window tells the operator it is waiting for the Camera Agent and for an in-flight frame request without cutting the wait short");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #244 closing the single-camera window tells the operator it is waiting for the Camera Agent and for an in-flight frame request without cutting the wait short");
+    Console.Error.WriteLine($"FAIL issue #244 closing the single-camera window tells the operator it is waiting for the Camera Agent and for an in-flight frame request without cutting the wait short: {exception}");
 }
 
 try
@@ -4079,10 +4134,14 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
         {
             HoldFrameReadUntilReleased = true,
         };
+        // A fake clock that is never advanced: the stop waits for the frame request alone, and no
+        // part of this test depends on how long the real stop wait budget is (issue #244).
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
         var viewModel = new HardwareSingleCameraViewModel(
             operations,
             new HardwareSingleAppStateStore(Path.Combine(root, "state")),
-            new HardwareOriginalExporter(Path.Combine(root, "exports")));
+            new HardwareOriginalExporter(Path.Combine(root, "exports")),
+            time);
         await viewModel.InitializeAsync();
         viewModel.ExclusiveCameraControlConfirmed = true;
         await viewModel.CheckReadinessAsync();
@@ -4213,29 +4272,36 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
         Check.True(viewModel.CanStopContinuousLiveView,
             "The operator must be able to retry the stop.");
 
-        // Capture goes through the same stop; it must stay blocked while the stop is unconfirmed.
-        // CaptureAsync returns early when CanCapture is false, which would make the checks below
-        // pass without ever reaching the stop path, so assert the capture is actually attempted.
-        Check.True(viewModel.CanCapture,
-            "Capture must be attemptable during continuous Live View so that the handoff reaches the stop path.");
+        // Issue #244: an unconfirmed stop keeps capture unavailable until a stop is confirmed.
+        // Before this, the button stayed pressable and every press waited out the budget again
+        // (the capture path runs the same stop), so a capture attempt now returns at once.
+        Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed,
+            "The unconfirmed stop must be visible as a state of its own.");
+        Check.False(viewModel.CanCapture,
+            "Capture must not be offered while the stop of the continuous Live View is unconfirmed.");
+        Check.True(viewModel.BlockerText.Contains("停止を確認できていません", StringComparison.Ordinal),
+            "The blocker text must say why capture is unavailable instead of showing 'なし'.");
         var captureTask = viewModel.CaptureAsync();
-        for (var step = 0; step < 50 && !captureTask.IsCompleted; step++)
-        {
-            time.Advance(TimeSpan.FromSeconds(1));
-            await Task.Delay(TimeSpan.FromMilliseconds(10));
-        }
         await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
-        Check.Equal(2, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
+        Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
         Check.Equal(0, operations.CaptureCallCount);
         Check.Equal(0, operations.StopCount);
         Check.True(viewModel.IsContinuousLiveViewActive,
             "A capture attempt with an unconfirmed stop must leave the session active.");
         Check.False(viewModel.IsBusy, "A blocked capture attempt must release the busy state.");
 
-        // The SDK finally returns the frame: the retried stop completes normally.
+        // The SDK finally returns the frame: the display says stopping again is possible (issue
+        // #244), capture is still blocked until a stop is confirmed, and the retried stop completes.
         operations.FrameReadReleaseGate.TrySetResult();
+        await WaitUntilAsync(
+            () => viewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
+            "The display must tell the operator that stopping again is possible once the frame request returned.");
+        Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed && !viewModel.CanCapture,
+            "A returned frame request does not confirm the stop; capture stays blocked.");
         await viewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
         Check.False(viewModel.IsContinuousLiveViewActive, "The retried stop must close the session.");
+        Check.False(viewModel.IsContinuousLiveViewStopUnconfirmed,
+            "A confirmed stop ends the unconfirmed state.");
         Check.Equal("停止済み（SDK session closed）", viewModel.LiveViewSummary);
         Check.Equal(1, operations.StopCount);
         Check.True(viewModel.PreviewImage is null,
@@ -4318,6 +4384,385 @@ static async Task HardwareContinuousLiveViewStopProceedsWhenFrameLoopFinishesAtT
             "A finished frame loop must not be reported as an unconfirmed stop.");
 
         await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+    }
+    finally
+    {
+        operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static HardwareSingleCameraViewModel NewHeldFrameViewModel(
+    string root,
+    FakeContinuousHardwareOperations operations,
+    MutableTimeProvider time,
+    IHardwareSingleHandoffEvidenceCollector? collector = null) =>
+    new(
+        operations,
+        new HardwareSingleAppStateStore(Path.Combine(root, "state")),
+        new HardwareOriginalExporter(Path.Combine(root, "exports")),
+        preferencesStore: null,
+        profileStore: null,
+        timeProvider: time,
+        handoffEvidenceCollector: collector);
+
+static async Task PrepareReadyViewModelAsync(HardwareSingleCameraViewModel viewModel)
+{
+    await viewModel.InitializeAsync();
+    viewModel.ExclusiveCameraControlConfirmed = true;
+    await viewModel.CheckReadinessAsync();
+    viewModel.DedicatedSpoolScopeConfirmed = true;
+    viewModel.ExactObjectDeleteConfirmed = true;
+}
+
+// Issue #244: an unconfirmed stop of the continuous Live View used to leave the capture button
+// pressable (when no acceptance collector is attached), and every press waited out the whole stop
+// budget again. The unconfirmed state now blocks capture, says why, and tells the operator when
+// the in-flight frame request has returned so that stopping again makes sense. A returned frame
+// request does not confirm the stop: capture stays blocked until a stop is confirmed. Fake clock.
+static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnouncesWhenFrameReturnsAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-unconfirmed-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        operations = new FakeContinuousHardwareOperations(frameBytes) { HoldFrameReadUntilReleased = true };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var viewModel = NewHeldFrameViewModel(root, operations, time);
+        await PrepareReadyViewModelAsync(viewModel);
+
+        await viewModel.StartContinuousLiveViewAsync();
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.True(viewModel.CanCapture,
+            "Before any stop, capture is attemptable during continuous Live View (the capture path runs the stop).");
+        Check.False(viewModel.IsContinuousLiveViewStopUnconfirmed, "Nothing is unconfirmed yet.");
+
+        // The capture path runs the stop; the frame request never returns, so the budget elapses.
+        // The timer is registered synchronously inside the first call segment.
+        var captureTask = viewModel.CaptureAsync();
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Check.Equal(0, operations.CaptureCallCount);
+        Check.Equal(0, operations.StopCount);
+        Check.True(viewModel.IsContinuousLiveViewActive && viewModel.IsContinuousLiveViewStopUnconfirmed,
+            "An unconfirmed stop keeps the session active and marks the stop unconfirmed.");
+        Check.False(viewModel.CanCapture, "Capture must not be offered while the stop is unconfirmed.");
+        Check.True(viewModel.BlockerText.Contains("停止を確認できていません", StringComparison.Ordinal),
+            "The blocker text must give the reason capture is unavailable.");
+        Check.True(viewModel.LiveViewSummary.StartsWith("停止未確認: フレーム取得が応答しません", StringComparison.Ordinal),
+            "While the frame request is in flight the display says it is still waiting.");
+        Check.True(viewModel.CanStopContinuousLiveView, "The operator can still press stop again.");
+
+        // Another capture press is a no-op: no second wait, no second unconfirmed record.
+        await viewModel.CaptureAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
+        Check.False(viewModel.IsBusy, "A blocked capture press must not leave the UI busy.");
+
+        // The frame request returns: the display changes to "can stop again", capture stays blocked.
+        operations.FrameReadReleaseGate.TrySetResult();
+        await WaitUntilAsync(
+            () => viewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
+            "The display must switch to 'can stop again' once the frame request returned.");
+        Check.True(viewModel.ActivityText.Contains("もう一度", StringComparison.Ordinal) &&
+            viewModel.ActivityText.Contains("撮影を開始しません", StringComparison.Ordinal),
+            "The activity text must ask for another stop and repeat that capture does not start.");
+        Check.True(viewModel.TechnicalDetail.Contains(
+            "continuous_live_view_frame_request_completed_after_unconfirmed_stop", StringComparison.Ordinal),
+            "The late completion must be recorded in the technical detail.");
+        Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed && !viewModel.CanCapture,
+            "A returned frame request does not confirm the stop.");
+        Check.Equal(0, operations.StopCount);
+
+        await viewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal(1, operations.StopCount);
+        Check.False(viewModel.IsContinuousLiveViewActive || viewModel.IsContinuousLiveViewStopUnconfirmed,
+            "A confirmed stop ends the session and the unconfirmed state.");
+        Check.Equal("停止済み（SDK session closed）", viewModel.LiveViewSummary);
+        Check.True(viewModel.CanCapture, "Capture is available again once the stop is confirmed.");
+
+        await viewModel.ShutdownAsync();
+        viewModel.Dispose();
+    }
+    finally
+    {
+        operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #244: the order of the acceptance observations an unconfirmed stop produces, checked
+// through the ViewModel (the collector alone cannot show that the ViewModel reports them in this
+// order): requested first, then unconfirmed, and a later successful stop is again requested then
+// stopped. With the real collector attached, stopping the same session a second time, as the
+// on-screen guidance asks, must leave LiveViewStopUnconfirmed as the recorded reason; it used to be
+// replaced by ForeignSession. The run still can never be a Pass.
+static async Task HardwareContinuousLiveViewUnconfirmedStopEvidenceOrderAndCategoryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? orderOperations = null;
+    FakeContinuousHardwareOperations? realOperations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-evidence-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+
+        // 1) Order, through the ViewModel, with a recording collector.
+        orderOperations = new FakeContinuousHardwareOperations(frameBytes) { HoldFrameReadUntilReleased = true };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var recorder = new RecordingHandoffEvidenceCollector();
+        var orderViewModel = NewHeldFrameViewModel(Path.Combine(root, "order"), orderOperations, time, recorder);
+        await PrepareReadyViewModelAsync(orderViewModel);
+        await orderViewModel.StartContinuousLiveViewAsync();
+        await orderOperations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var stopTask = orderViewModel.StopContinuousLiveViewAsync();
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal("started,stop-requested,stop-unconfirmed", string.Join(',', recorder.Calls));
+
+        orderOperations.FrameReadReleaseGate.TrySetResult();
+        await WaitUntilAsync(
+            () => orderViewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
+            "The display must allow stopping again.");
+        await orderViewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal("started,stop-requested,stop-unconfirmed,stop-requested,stopped", string.Join(',', recorder.Calls));
+        await orderViewModel.ShutdownAsync();
+        orderViewModel.Dispose();
+
+        // 2) Category, through the ViewModel, with the real collector.
+        realOperations = new FakeContinuousHardwareOperations(frameBytes) { HoldFrameReadUntilReleased = true };
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        Directory.CreateDirectory(artifactsRoot);
+        var collector = new HardwareSingleHandoffEvidenceCollector(
+            Path.Combine(root, "handoff-evidence"), artifactsRoot, new string('a', 40));
+        var realTime = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var realViewModel = NewHeldFrameViewModel(Path.Combine(root, "real"), realOperations, realTime, collector);
+        await PrepareReadyViewModelAsync(realViewModel);
+        await realViewModel.StartContinuousLiveViewAsync();
+        await realOperations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var firstStop = realViewModel.StopContinuousLiveViewAsync();
+        realTime.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await firstStop.WaitAsync(TimeSpan.FromSeconds(2));
+        realOperations.FrameReadReleaseGate.TrySetResult();
+        await WaitUntilAsync(
+            () => realViewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
+            "The display must allow stopping again.");
+        await realViewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await realViewModel.ShutdownAsync();
+        realViewModel.Dispose();
+        collector.Seal();
+        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        using var evidence = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath));
+        Check.Equal("LiveViewStopUnconfirmed", evidence.RootElement.GetProperty("lastErrorCategory").GetString()!);
+        Check.True(ReadTerminalState(collector.EvidencePath) != "Complete",
+            "A run with an unconfirmed stop can never be a Pass.");
+    }
+    finally
+    {
+        orderOperations?.FrameReadReleaseGate.TrySetResult();
+        realOperations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #244: the collector side of the same rule, with frames in the evidence. Stopping a session
+// a second time after its stop was unconfirmed must neither be recorded as a foreign session nor
+// turn the frames already counted into late frames. A session the evidence never saw is still
+// foreign, and a frame beyond the count held when the stop was reported is still late.
+static async Task HardwareSingleHandoffSecondStopAfterUnconfirmedStopKeepsTheFailureCategoryAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        Directory.CreateDirectory(artifactsRoot);
+        const string session = "10000000000000000000000000000001";
+
+        async Task<(string Category, string State)> RunAsync(string name, Action<HardwareSingleHandoffEvidenceCollector> steps)
+        {
+            var collector = new HardwareSingleHandoffEvidenceCollector(
+                Path.Combine(root, name), artifactsRoot, new string('a', 40));
+            steps(collector);
+            collector.Seal();
+            await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            using var document = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath));
+            return (
+                document.RootElement.GetProperty("lastErrorCategory").GetString()!,
+                document.RootElement.GetProperty("terminalState").GetString()!);
+        }
+
+        void UnconfirmedStop(HardwareSingleHandoffEvidenceCollector collector)
+        {
+            collector.ObserveLiveViewStarted(ContinuousLiveViewResult(session, "Started", running: true));
+            collector.ObserveLiveViewFrame(session, 1);
+            collector.ObserveLiveViewFrame(session, 2);
+            collector.ObserveLiveViewStopRequested(session);
+            collector.ObserveLiveViewStopUnconfirmed(session);
+        }
+
+        var secondStop = await RunAsync("second-stop", collector =>
+        {
+            UnconfirmedStop(collector);
+            collector.ObserveLiveViewStopRequested(session);
+            collector.ObserveLiveViewStopped(ContinuousLiveViewResult(session, "Stopped", running: false));
+        });
+        Check.Equal("LiveViewStopUnconfirmed", secondStop.Category);
+        Check.Equal("FailedPartial", secondStop.State);
+
+        var foreign = await RunAsync("foreign", collector =>
+        {
+            UnconfirmedStop(collector);
+            collector.ObserveLiveViewStopRequested("20000000000000000000000000000002");
+        });
+        Check.Equal("ForeignSession", foreign.Category);
+        Check.Equal("Invalid", foreign.State);
+
+        var lateFrame = await RunAsync("late-frame", collector =>
+        {
+            UnconfirmedStop(collector);
+            collector.ObserveLiveViewFrame(session, 3);
+        });
+        Check.Equal("LateOrForeignFrame", lateFrame.Category);
+        Check.Equal("Invalid", lateFrame.State);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #141 / #244: the stop wait bound elapses at the same time as the frame loop ends, but the
+// loop ended with an exception (here an observer of LiveViewSummary throws while the loop reports
+// that the Agent closed the session). The stop must pass that exception to its caller as it does
+// when the loop finishes just before the bound, and must not report it as an unconfirmed stop, send
+// stop-live-view, or leave the UI busy. Same deterministic ordering as the neighbouring test:
+// loop continuation first, then the timer continuation.
+static async Task HardwareContinuousLiveViewStopSurfacesFailureOfLoopThatFinishedAtTheBoundAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-loop-failure-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        operations = new FakeContinuousHardwareOperations(frameBytes)
+        {
+            HoldFrameReadUntilReleased = true,
+            FailFrameReads = true,
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var viewModel = NewHeldFrameViewModel(root, operations, time);
+        await PrepareReadyViewModelAsync(viewModel);
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(HardwareSingleCameraViewModel.LiveViewSummary) &&
+                viewModel.LiveViewSummary.StartsWith("Live View終了", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("synthetic observer failure");
+            }
+        };
+
+        var context = new QueuedPostSynchronizationContext();
+        var startTask = context.RunAsync(() => viewModel.StartContinuousLiveViewAsync());
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await context.DrainUntilCompletedAsync(startTask, TimeSpan.FromSeconds(2));
+
+        var stopTask = context.RunAsync(() => viewModel.StopContinuousLiveViewAsync());
+        Check.False(stopTask.IsCompleted, "Stop must wait for the in-flight frame request.");
+        var baseline = context.PostCount;
+
+        // 1) The frame request returns a failure: the loop continuation is queued, not run.
+        operations.FrameReadReleaseGate.TrySetResult();
+        await context.WaitForPostCountAsync(baseline + 1, TimeSpan.FromSeconds(2));
+        // 2) The wait bound elapses: the stop continuation is queued behind it.
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await context.WaitForPostCountAsync(baseline + 2, TimeSpan.FromSeconds(2));
+        Check.False(stopTask.IsCompleted, "Neither queued continuation may have run yet.");
+
+        // 3) Run both: the loop fails first, then the stop sees the timeout with a finished loop.
+        context.Drain();
+        await Task.WhenAny(stopTask, Task.Delay(TimeSpan.FromSeconds(2)));
+
+        Check.True(stopTask.IsFaulted,
+            "A loop that finished with an exception must reach the caller, not be swallowed by the timeout.");
+        Check.True(stopTask.Exception!.InnerException is InvalidOperationException { Message: "synthetic observer failure" },
+            "The loop's own exception is the one reported.");
+        Check.False(viewModel.IsBusy, "A failed stop must not leave the UI busy.");
+        Check.Equal(0, operations.StopCount);
+        Check.False(viewModel.TechnicalDetail.Contains("continuous_live_view_stop_unconfirmed", StringComparison.Ordinal),
+            "A finished loop is not an unconfirmed stop.");
+        Check.False(viewModel.IsContinuousLiveViewStopUnconfirmed,
+            "The Agent ended the session; nothing is left to confirm.");
+
+        viewModel.Dispose();
+    }
+    finally
+    {
+        operations?.FrameReadReleaseGate.TrySetResult();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #244: closing the window while the frame request is still in flight waits for it without
+// a limit (the Agent is never killed and the request must complete for the delivery-ACK contract).
+// The ViewModel says what is happening: the confirming indicator from the start, and a further line
+// while the frame request has not returned. Nothing is sent to the Agent by the guidance, and the
+// wait is not cut short.
+static async Task HardwareSingleShutdownTellsTheOperatorWhileWaitingForTheFrameRequestAsync()
+{
+    var root = CreateHardwareTestRoot();
+    FakeContinuousHardwareOperations? operations = null;
+    try
+    {
+        var framePath = Path.Combine(root, "agent", "run-live-shutdown-1", "preview.jpg");
+        var frameBytes = File.ReadAllBytes(WritePreviewRecord(framePath).Path);
+        operations = new FakeContinuousHardwareOperations(frameBytes) { HoldFrameReadUntilReleased = true };
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-15T00:00:00Z"));
+        var viewModel = NewHeldFrameViewModel(root, operations, time);
+        await PrepareReadyViewModelAsync(viewModel);
+
+        Check.False(viewModel.IsShutdownConfirming, "The indicator must not show before a close attempt.");
+        Check.Equal(string.Empty, viewModel.ShutdownConfirmingText);
+        Check.Equal(string.Empty, viewModel.ShutdownConfirmingDetailText);
+        Check.Equal(string.Empty, viewModel.ShutdownFrameWaitText);
+        Check.Equal("Camera Agent の終了を確認しています", HardwareSingleCameraViewModel.ShutdownConfirmingMessage);
+        Check.False(HardwareSingleCameraViewModel.ShutdownConfirmingMessage.Contains("秒", StringComparison.Ordinal) ||
+            HardwareSingleCameraViewModel.ShutdownConfirmingDetailMessage.Contains("秒", StringComparison.Ordinal),
+            "The indicator wording must not state a number of seconds.");
+
+        await viewModel.StartContinuousLiveViewAsync();
+        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        viewModel.BeginShutdownConfirmation();
+        Check.Equal(HardwareSingleCameraViewModel.ShutdownConfirmingMessage, viewModel.ShutdownConfirmingText);
+        Check.Equal(HardwareSingleCameraViewModel.ShutdownConfirmingDetailMessage, viewModel.ShutdownConfirmingDetailText);
+        Check.Equal(string.Empty, viewModel.ShutdownFrameWaitText);
+
+        // The stop inside ShutdownAsync registers its wait timer synchronously, then gives up at
+        // the bound and the close keeps waiting for the frame loop itself.
+        var shutdownTask = viewModel.ShutdownAsync();
+        time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
+        await WaitUntilAsync(
+            () => viewModel.ShutdownFrameWaitText.Length > 0,
+            "While the frame request is in flight the close must say it is waiting for it.");
+        Check.Equal(HardwareSingleCameraViewModel.ShutdownFrameWaitMessage, viewModel.ShutdownFrameWaitText);
+        Check.True(viewModel.ShutdownFrameWaitText.Contains("強制終了することはありません", StringComparison.Ordinal),
+            "The line must say the Agent is not force-killed.");
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        Check.False(shutdownTask.IsCompleted, "The wait for the in-flight frame request must not be cut short.");
+        Check.Equal(0, operations.StopCount);
+        Check.True(operations.LastFrameReadToken is { CanBeCanceled: false },
+            "The in-flight frame request must still carry a non-cancellable token.");
+
+        operations.FrameReadReleaseGate.TrySetResult();
+        await shutdownTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Check.Equal(string.Empty, viewModel.ShutdownFrameWaitText);
+        Check.True(viewModel.IsShutdownConfirming,
+            "The indicator stays up for the operations' own dispose that follows, until the window closes.");
         viewModel.Dispose();
     }
     finally
@@ -15568,6 +16013,39 @@ class FakeHardwareSingleCameraOperations : IHardwareSingleCameraOperations
     }
 }
 
+sealed class RecordingHandoffEvidenceCollector : IHardwareSingleHandoffEvidenceCollector
+{
+    public List<string> Calls { get; } = [];
+
+    public void ObserveLiveViewStarted(HardwareContinuousLiveViewResult result) => Calls.Add("started");
+
+    public void ObserveLiveViewStartUnconfirmed(string sessionId) => Calls.Add("start-unconfirmed");
+
+    public void ObserveLiveViewFrame(string sessionId, ulong frameNumber) => Calls.Add("frame");
+
+    public void BeginHandoff(string sessionId) => Calls.Add("begin-handoff");
+
+    public void ObserveLiveViewStopRequested(string sessionId) => Calls.Add("stop-requested");
+
+    public void ObserveLiveViewStopped(HardwareContinuousLiveViewResult result) => Calls.Add("stopped");
+
+    public void ObserveLiveViewStopUnconfirmed(string sessionId) => Calls.Add("stop-unconfirmed");
+
+    public void ObserveTransactionBound(string transactionId) => Calls.Add("transaction-bound");
+
+    public void ObserveCaptureDispatchAttempted(string transactionId) => Calls.Add("capture-dispatched");
+
+    public void ObserveCaptureResult(HardwareSingleCaptureResult result, bool applicationOriginalVerified) =>
+        Calls.Add("capture-result");
+
+    public void ObserveCaptureResponseUnknown(string transactionId, bool dispatchAttempted) =>
+        Calls.Add("capture-unknown");
+
+    public void Seal() => Calls.Add("seal");
+
+    public Task FlushAsync() => Task.CompletedTask;
+}
+
 sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
     FakeHardwareSingleCameraOperations,
     IHardwareContinuousLiveViewOperations
@@ -15581,6 +16059,9 @@ sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
     public ulong FrameCount => _frameNumber;
 
     public bool FailNextStop { get; set; }
+
+    // Frame reads answer with a failure reply (the Agent ended the Live View session itself).
+    public bool FailFrameReads { get; set; }
 
     public TaskCompletionSource FirstFrame { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -15625,6 +16106,11 @@ sealed class FakeContinuousHardwareOperations(byte[] frameBytes) :
             using var registration = cancellationToken.Register(
                 () => FrameReadReleaseGate.TrySetCanceled(cancellationToken));
             await FrameReadReleaseGate.Task.ConfigureAwait(false);
+        }
+        if (FailFrameReads)
+        {
+            CallOrder.Add("frame-failed");
+            return Reply(sessionId, false, "continuous_live_view_frame_failed", _frameNumber, []);
         }
         _frameNumber++;
         CallOrder.Add("frame");

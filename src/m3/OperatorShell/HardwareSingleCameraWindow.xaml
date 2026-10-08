@@ -231,5 +231,36 @@
                 </StackPanel>
             </Grid>
         </ScrollViewer>
+
+        <!-- 終了確認中（issue #244）。✕ の後、ウィンドウを無効化したまま Camera Agent の終了を待つ間は
+             操作できず、カメラの応答が遅いと閉じるまでに時間がかかる。固まったように見えないよう理由を出す。
+             待ちを打ち切ったり Camera Agent を強制終了したりはしない。文字そのものを読み上げ領域にするので、
+             Announce を付けた TextBlock に固定の AutomationProperties.Name は付けない。 -->
+        <Grid Grid.Row="0" Grid.RowSpan="3" Panel.ZIndex="10" Background="#CC0B0C0D"
+              AutomationProperties.Name="終了の確認中">
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsShutdownConfirming}" Value="True">
+                            <Setter Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
+            <Border Width="620" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="28"
+                    Background="White" BorderBrush="#FF173E5E" BorderThickness="2">
+                <StackPanel>
+                    <TextBlock Text="{Binding ShutdownConfirmingText}" FontSize="20" FontWeight="Bold" TextWrapping="Wrap"
+                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
+                    <TextBlock Margin="0,12,0,0" Text="{Binding ShutdownConfirmingDetailText}" TextWrapping="Wrap"
+                               Foreground="#FF56616B"
+                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
+                    <TextBlock Margin="0,12,0,0" Text="{Binding ShutdownFrameWaitText}" TextWrapping="Wrap"
+                               Foreground="#FF8E1712" FontWeight="SemiBold"
+                               AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

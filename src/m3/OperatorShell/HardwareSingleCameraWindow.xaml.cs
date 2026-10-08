@@ -104,6 +104,10 @@ public partial class HardwareSingleCameraWindow : Window
             return;
         }
         _shutdownStarted = true;
+        // Issue #244: the waits below (the frame loop, then the operations' DisposeAsync) are not
+        // cut short and the Agent is not killed, so say what is happening before the window is
+        // disabled. Display only.
+        _viewModel.BeginShutdownConfirmation();
         IsEnabled = false;
         _lifetime.Cancel();
         try

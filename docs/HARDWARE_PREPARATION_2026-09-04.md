@@ -217,6 +217,15 @@ WPD cleanup不明時はSDK API（End含む）を呼ばずAgentを隔離・termin
   この5秒は `live_view_frame` の既定（3秒）が前提で、環境変数 `A0_CAMERA_AGENT_LIVE_VIEW_FRAME_TIMEOUT_MS`
   で最大20秒まで延ばせる。4秒以上にすると往復とデコードの余裕が無くなり、5秒以上にすると予算どおりの動作でも
   停止が「停止未確認」になりうる。その設定で運用する場合は `LiveViewStopFrameWaitBudget` も合わせて見直す。
+  #244 で次を足した。停止未確認の間は撮影を無効にし（`IsContinuousLiveViewStopUnconfirmed`、受入試験用の収集器が
+  無い場合も同じ）、ブロッカー欄に理由を出す。フレーム要求が戻った時点で表示を「もう一度停止できます」に切り替える
+  （停止の確認ではないので撮影は無効のまま）。受入試験で再停止しても、証跡の理由は `LiveViewStopUnconfirmed` のまま
+  残る（以前は `ForeignSession` に上書きされた。合否が Pass にならない点は変わらない）。
+  ウィンドウを閉じる経路（`HardwareSingleCameraViewModel.ShutdownAsync`）は #141 以降、停止をフレーム待ちの上限
+  （5秒）で打ち切って「未確認」で戻り、SDK セッションの close は `PersistentHardwareCameraAgentOperations.DisposeAsync`
+  の close-agent-session に移っている。その後のフレームループの完了待ちと DisposeAsync の operation gate 待ちには
+  上限を置いていない（Agent を kill しない方針のため。フレーム応答のタイムアウトは30秒）。その間は終了確認の
+  案内を出し、フレーム取得が終わるまで待っていることを別の行で伝える。
 - #150: native capture profileの最小setting coverage、profile消失時のSDK open前gate、診断の匿名化と成果物鮮度。
   外部profileが「承認済み」という表示だけで撮影を許可しない。
 - #151残件: SDK callback前提、noexcept/例外境界、WPD列挙/cleanupの未監査項目。

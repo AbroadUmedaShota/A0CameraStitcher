@@ -97,6 +97,11 @@ internal sealed class HardwareSingleHandoffEvidenceCollector :
     private readonly HashSet<string> _seenSessionIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _seenTransactionIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _seenCaptureRunIds = new(StringComparer.Ordinal);
+    // Sessions whose stop was reported unconfirmed, with the frame count the evidence held then.
+    // The operator can stop such a session again (issue #244); that second stop and its frame
+    // snapshot refer to a session this evidence already knows and has already failed on, so they
+    // must not be recorded as a foreign session or a late frame and replace that failure category.
+    private readonly Dictionary<string, int> _stopUnconfirmedFrameCounts = new(StringComparer.Ordinal);
     private SessionState? _currentSession;
     private AttemptState? _activeAttempt;
     private string _terminalState = "InProgress";
@@ -368,6 +373,14 @@ internal sealed class HardwareSingleHandoffEvidenceCollector :
         if (_currentSession is null ||
             !string.Equals(_currentSession.SessionId, sessionId, StringComparison.Ordinal))
         {
+            if (_stopUnconfirmedFrameCounts.ContainsKey(sessionId))
+            {
+                // A second stop of a session whose first stop was unconfirmed. LiveViewStopUnconfirmed
+                // is already recorded and stays the reason; the result of this stop is applied by
+                // ApplyStopped/ApplyStopUnconfirmed.
+                return;
+            }
+
             Invalidate("ForeignSession");
             return;
         }
@@ -432,6 +445,7 @@ internal sealed class HardwareSingleHandoffEvidenceCollector :
         {
             _currentSession.StopObservedAtUtc = observedAt;
             _currentSession.SdkSessionClosed = false;
+            _stopUnconfirmedFrameCounts[sessionId] = _currentSession.FrameCount;
             _currentSession = null;
         }
         Fail("LiveViewStopUnconfirmed");
@@ -587,7 +601,11 @@ internal sealed class HardwareSingleHandoffEvidenceCollector :
         if (_currentSession is null ||
             !string.Equals(_currentSession.SessionId, snapshot.SessionId, StringComparison.Ordinal))
         {
-            if (snapshot.Count > 0)
+            // Frames already counted before the stop was reported unconfirmed are not late: the
+            // snapshot of such a session is taken again when the operator stops it a second time.
+            if (snapshot.Count > 0 &&
+                !(_stopUnconfirmedFrameCounts.TryGetValue(snapshot.SessionId, out var countAtStop) &&
+                  snapshot.Count <= countAtStop))
             {
                 Invalidate("LateOrForeignFrame");
             }

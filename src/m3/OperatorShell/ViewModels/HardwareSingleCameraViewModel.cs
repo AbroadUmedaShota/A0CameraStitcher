@@ -49,6 +49,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
     private int _handoffAcceptanceAttempts;
     private bool _handoffAcceptanceStopped;
     private bool _isContinuousLiveViewActive;
+    // True from the moment a stop of the active continuous Live View could not be confirmed
+    // (frame request still in flight after the wait budget, a stop that was refused or reported the
+    // session still open, or a stop whose result is unknown) until a stop is confirmed. Capture
+    // stays blocked meanwhile: without this a capture attempt would run the same stop again and
+    // wait out the budget each time (issue #244). Read through IsContinuousLiveViewStopUnconfirmed.
+    private bool _continuousLiveViewStopUnconfirmed;
+    private bool _isShutdownConfirming;
+    private bool _isShutdownWaitingForFrame;
     private string? _continuousLiveViewSessionId;
     private CancellationTokenSource? _continuousLiveViewLoopCancellation;
     private Task? _continuousLiveViewLoop;
@@ -434,6 +442,11 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                 return "結果が確定しています。次の撮影は「新しい撮影を準備」で明示的に開始してください。";
             }
 
+            if (IsContinuousLiveViewStopUnconfirmed)
+            {
+                return "継続Live Viewの停止を確認できていません。「継続Live Viewを停止」で停止を確認できるまで、撮影を開始しません。";
+            }
+
             if (!_exclusiveCameraControlConfirmed)
             {
                 return "Camera Agentを使う前に排他使用へ同意してください。";
@@ -481,8 +494,17 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _continuousLiveViewOperations is not null && _initializationComplete && !IsBusy &&
         IsContinuousLiveViewActive;
 
+    /// <summary>
+    /// True while the continuous Live View is still active and the last stop of it could not be
+    /// confirmed (issue #244). A later confirmed stop, or the Agent ending the session on its own
+    /// (which clears <see cref="IsContinuousLiveViewActive"/>), ends it.
+    /// </summary>
+    public bool IsContinuousLiveViewStopUnconfirmed =>
+        IsContinuousLiveViewActive && _continuousLiveViewStopUnconfirmed;
+
     public bool CanCapture =>
         _initializationComplete && !IsBusy && !_stateLoadFailed &&
+        !IsContinuousLiveViewStopUnconfirmed &&
         (_handoffEvidenceCollector is null ||
          (!_handoffAcceptanceStopped &&
           _handoffAcceptanceAttempts < HardwareSingleHandoffEvidenceCollector.RequestedHandoffs)) &&
@@ -894,6 +916,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             _continuousLiveViewSessionId = sessionId;
             _handoffEvidenceCollector?.ObserveLiveViewStarted(reply.Payload);
             _liveViewHandoffRequested = false;
+            _continuousLiveViewStopUnconfirmed = false;
             IsContinuousLiveViewActive = true;
             LiveViewSummary = "継続表示中（preview only）";
             ActivityText = "CAM-A 継続Live Viewを表示しています。";
@@ -949,14 +972,17 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
 
             if (!frameLoopFinished)
             {
+                // Evidence order: the stop was requested, then it could not be confirmed.
                 _handoffEvidenceCollector?.ObserveLiveViewStopRequested(_continuousLiveViewSessionId);
                 _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
+                SetStopUnconfirmed(true);
                 LiveViewSummary = "停止未確認: フレーム取得が応答しません";
                 ActivityText = "Live View停止を確認できません。撮影を開始しません。" +
                     "フレーム取得の完了後、もう一度停止してください。";
                 TechnicalDetail +=
                     "\ncontinuous_live_view_stop_unconfirmed: frame request still in flight after " +
                     $"{LiveViewStopFrameWaitBudget.TotalSeconds:0.#}s";
+                _ = ObserveFrameLoopCompletionAfterUnconfirmedStopAsync(frameLoop);
                 return false;
             }
 
@@ -983,10 +1009,14 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             if (!reply.Success || reply.Payload.SdkSessionOpen || reply.Payload.LiveViewRunning)
             {
                 _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
+                SetStopUnconfirmed(true);
                 LiveViewSummary = $"停止未確認: {reply.Payload.ErrorCategory}";
                 ActivityText = "Live View停止とSDK closeを確認できません。撮影を開始しません。";
                 if (!reply.Payload.SdkSessionOpen && !reply.Payload.LiveViewRunning)
                 {
+                    // The Agent reports the session closed even though the stop was refused, so
+                    // there is nothing left to stop; capture stays blocked on the readiness recheck.
+                    SetStopUnconfirmed(false);
                     IsContinuousLiveViewActive = false;
                     _continuousLiveViewLoopCancellation?.Dispose();
                     _continuousLiveViewLoopCancellation = null;
@@ -997,6 +1027,7 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             }
 
             _handoffEvidenceCollector?.ObserveLiveViewStopped(reply.Payload);
+            SetStopUnconfirmed(false);
             IsContinuousLiveViewActive = false;
             _continuousLiveViewLoopCancellation?.Dispose();
             _continuousLiveViewLoopCancellation = null;
@@ -1008,11 +1039,54 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
             _handoffEvidenceCollector?.ObserveLiveViewStopUnconfirmed(_continuousLiveViewSessionId);
+            SetStopUnconfirmed(true);
             LiveViewSummary = "停止結果を確認できません";
             ActivityText = "Live View停止状態が不明です。撮影を開始しません。";
             TechnicalDetail += $"\ncontinuous_live_view_stop_unconfirmed: {SafeMessage(exception)}";
             return false;
         }
+    }
+
+    private void SetStopUnconfirmed(bool value)
+    {
+        if (_continuousLiveViewStopUnconfirmed == value)
+        {
+            return;
+        }
+
+        _continuousLiveViewStopUnconfirmed = value;
+        NotifyAvailability();
+    }
+
+    // Issue #244: after the wait budget the frame request is still in flight, and nothing tells the
+    // operator when pressing stop again becomes useful. When the request finally returns (or
+    // fails), switch the display from "waiting" to "can stop again". Display only: it sends
+    // nothing, stops nothing, and leaves capture blocked until a stop is actually confirmed.
+    // Skipped when a newer stop is already running (it owns the display) and when the session
+    // has gone away or the loop belongs to an older session.
+    private async Task ObserveFrameLoopCompletionAfterUnconfirmedStopAsync(Task frameLoop)
+    {
+        try
+        {
+            await frameLoop.ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // The loop reported its own failure; only the fact that it ended matters here.
+        }
+
+        if (_disposed ||
+            IsBusy ||
+            !IsContinuousLiveViewStopUnconfirmed ||
+            !ReferenceEquals(_continuousLiveViewLoop, frameLoop))
+        {
+            return;
+        }
+
+        LiveViewSummary = "停止未確認: フレーム取得は完了しました。もう一度停止できます";
+        ActivityText = "フレーム取得が完了しました。もう一度「継続Live Viewを停止」を押してください。" +
+            "停止を確認できるまで撮影を開始しません。";
+        TechnicalDetail += "\ncontinuous_live_view_frame_request_completed_after_unconfirmed_stop";
     }
 
     private async Task RunContinuousLiveViewLoopAsync(
@@ -1904,6 +1978,64 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         _profileExpiryTimer = null;
     }
 
+    /// <summary>The window-close indicator headline (issue #244). It states no duration.</summary>
+    public const string ShutdownConfirmingMessage = "Camera Agent の終了を確認しています";
+
+    /// <summary>The window-close indicator second line: why it can take a while, and what to leave alone.</summary>
+    public const string ShutdownConfirmingDetailMessage =
+        "カメラの応答が遅い場合は、閉じるまでに時間がかかることがあります。" +
+        "確認できればこのウィンドウは自動で閉じます。カメラには触らず、他のカメラアプリも使わないでください。";
+
+    /// <summary>Shown in addition while the close waits for a frame request that has not returned.</summary>
+    public const string ShutdownFrameWaitMessage =
+        "Live View のフレーム取得がまだ終わっていません。終わるまで待ってから閉じます。" +
+        "Camera Agent を強制終了することはありません。";
+
+    /// <summary>
+    /// True from the moment a window close starts waiting for the Camera Agent until the window is
+    /// gone. Display only: it gates no command and sends nothing.
+    /// </summary>
+    public bool IsShutdownConfirming
+    {
+        get => _isShutdownConfirming;
+        private set
+        {
+            if (SetProperty(ref _isShutdownConfirming, value))
+            {
+                OnPropertyChanged(nameof(ShutdownConfirmingText));
+                OnPropertyChanged(nameof(ShutdownConfirmingDetailText));
+                OnPropertyChanged(nameof(ShutdownFrameWaitText));
+            }
+        }
+    }
+
+    // The three texts are empty unless they apply. The text itself changes (not only the
+    // visibility) so a UI Automation live region announces each of them.
+    public string ShutdownConfirmingText => IsShutdownConfirming ? ShutdownConfirmingMessage : string.Empty;
+
+    public string ShutdownConfirmingDetailText => IsShutdownConfirming ? ShutdownConfirmingDetailMessage : string.Empty;
+
+    public string ShutdownFrameWaitText =>
+        IsShutdownConfirming && _isShutdownWaitingForFrame ? ShutdownFrameWaitMessage : string.Empty;
+
+    /// <summary>
+    /// Starts showing the close indicator. Call before the window is disabled: the waits that
+    /// follow (<see cref="ShutdownAsync"/> and the operations' DisposeAsync) have no upper bound
+    /// of their own beyond the transport's response timeouts, and the Agent is never killed, so
+    /// the operator is told what is happening instead (issue #244).
+    /// </summary>
+    public void BeginShutdownConfirmation() => IsShutdownConfirming = true;
+
+    /// <summary>
+    /// Window-close path. Since issue #141 stage 3a the stop inside it no longer waits for an
+    /// in-flight frame request without limit: after <see cref="LiveViewStopFrameWaitBudget"/> it
+    /// returns "unconfirmed" without sending stop-live-view, and the SDK session is then closed
+    /// by the operations' DisposeAsync (close-agent-session) instead. The wait for the frame loop
+    /// below is therefore the one that can still be long (bounded only by the transport's
+    /// 30-second frame response timeout); it is not cut short, because the in-flight request must
+    /// complete for the Agent's delivery-ACK contract. While it waits,
+    /// <see cref="ShutdownFrameWaitText"/> says so.
+    /// </summary>
     public async Task ShutdownAsync()
     {
         if (IsContinuousLiveViewActive)
@@ -1911,14 +2043,21 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
             _ = await StopContinuousLiveViewCoreAsync().ConfigureAwait(true);
         }
         _continuousLiveViewLoopCancellation?.Cancel();
-        if (_continuousLiveViewLoop is not null)
+        if (_continuousLiveViewLoop is { } frameLoop)
         {
+            _isShutdownWaitingForFrame = !frameLoop.IsCompleted;
+            OnPropertyChanged(nameof(ShutdownFrameWaitText));
             try
             {
-                await _continuousLiveViewLoop.ConfigureAwait(true);
+                await frameLoop.ConfigureAwait(true);
             }
             catch (OperationCanceledException)
             {
+            }
+            finally
+            {
+                _isShutdownWaitingForFrame = false;
+                OnPropertyChanged(nameof(ShutdownFrameWaitText));
             }
         }
     }

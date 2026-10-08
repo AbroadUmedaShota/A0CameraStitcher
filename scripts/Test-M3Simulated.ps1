@@ -275,6 +275,25 @@ try {
     Assert-Condition ($hardwareViewModelText.Contains('SavePendingAsync')) 'Hardware capture must durably reserve its client transaction ID before dispatch.'
     Assert-Condition ($hardwareViewModelText.Contains('GetTransactionResultAsync')) 'Hardware recovery must query the existing transaction without recapture.'
     Assert-Condition (-not $hardwareViewModelText.Contains('DllImport')) 'Hardware shell must not invoke native camera APIs in-process.'
+    # Window-close indicator of the SingleCamera window (issue #244). The window is disabled while the Camera Agent's
+    # end is awaited, so the texts must be announced live regions (no fixed AutomationProperties.Name, which would
+    # replace the text for a screen reader), shown through IsShutdownConfirming, and raised before the window is disabled.
+    Assert-Condition ($hardwareWindowText.Contains('IsShutdownConfirming')) 'The SingleCamera window must show its close indicator through IsShutdownConfirming (issue #244).'
+    foreach ($shutdownTextBinding in @('ShutdownConfirmingText', 'ShutdownConfirmingDetailText', 'ShutdownFrameWaitText')) {
+        $shutdownTextNode = @($hardwareWindowXml.SelectNodes(('//*[@*[local-name()="Text" and .="{{Binding {0}}}"]]' -f $shutdownTextBinding))) | Select-Object -First 1
+        Assert-Condition ($null -ne $shutdownTextNode) "The SingleCamera window must show $shutdownTextBinding (issue #244)."
+        Assert-Condition ($shutdownTextNode.GetAttribute('AutomationProperties.LiveSetting') -eq 'Polite' -and $shutdownTextNode.GetAttribute('controls:LiveRegion.Announce') -eq 'True') "$shutdownTextBinding must be a polite announced live region (issue #244)."
+        Assert-Condition ([string]::IsNullOrEmpty($shutdownTextNode.GetAttribute('AutomationProperties.Name'))) "$shutdownTextBinding must not carry a fixed AutomationProperties.Name (issue #244)."
+        Assert-Condition ($shutdownTextNode.GetAttribute('TextWrapping') -eq 'Wrap') "$shutdownTextBinding must wrap (issue #244)."
+    }
+    $hardwareWindowCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/HardwareSingleCameraWindow.xaml.cs')
+    $hardwareClosingBegin = $hardwareWindowCode.IndexOf('private async void OnClosing')
+    Assert-Condition ($hardwareClosingBegin -ge 0) 'The SingleCamera window must keep its OnClosing handler (issue #244).'
+    $hardwareClosingText = $hardwareWindowCode.Substring($hardwareClosingBegin)
+    $hardwareBeginIndex = $hardwareClosingText.IndexOf('BeginShutdownConfirmation()')
+    Assert-Condition ($hardwareBeginIndex -ge 0 -and ([regex]::Matches($hardwareClosingText, [regex]::Escape('BeginShutdownConfirmation()'))).Count -eq 1) 'The SingleCamera OnClosing must raise the close indicator exactly once (issue #244).'
+    Assert-Condition ($hardwareBeginIndex -lt $hardwareClosingText.IndexOf('IsEnabled = false;')) 'The SingleCamera OnClosing must raise the close indicator before it disables the window (issue #244).'
+    Assert-Condition ($hardwareBeginIndex -lt $hardwareClosingText.IndexOf('ShutdownAsync()')) 'The SingleCamera OnClosing must raise the close indicator before it waits for ShutdownAsync (issue #244).'
 
     foreach ($marker in @('CAM-A原画像の確認', 'CAM-B原画像の確認', 'このPCのフォルダへ保存', '実JPEG合成完了', 'DualCameraExecutionEnvironment.TestSynthetic')) {
         Assert-Condition (($windowText + $viewModelText + $dualCompositionText).Contains($marker)) "Formal DualCamera WPF flow is missing required marker: $marker"
