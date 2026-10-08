@@ -1980,14 +1980,18 @@ public sealed class OperatorShellViewModel : ObservableObject
         NotifyAllCommands();
     }
 
-    /// <summary>Refreshes every binding gated by <see cref="_isPreCaptureAutoFocusRunning"/> —
-    /// called when issue #33's "撮影+AF" pre-capture AF gate starts and ends, mirroring how
+    /// <summary>Refreshes every binding gated by <see cref="_isPreCaptureAutoFocusRunning"/> or
+    /// <see cref="_isCaptureStarting"/> — called when issue #33's "撮影+AF" pre-capture AF gate starts
+    /// and ends, and when the capture-start latch (GitHub Issue #254) is set and released, mirroring how
     /// <see cref="IsBusy"/>'s own setter refreshes the equivalent set of dependent bindings.</summary>
     private void RaisePreCaptureAutoFocusGateProperties()
     {
         OnPropertyChanged(nameof(CanOpenHistoricalReview));
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+        OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        OnPropertyChanged(nameof(CaptureAvailabilityText));
+        OnPropertyChanged(nameof(ReadyStatusChipText));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(CanChangeOperatingMode));
         OnPropertyChanged(nameof(CanSelectCamera));
@@ -2252,7 +2256,8 @@ public sealed class OperatorShellViewModel : ObservableObject
              (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
               _hardwareDualRequestProvider is not null)))));
     // GitHub Issue #254: 新規撮影に進むために CaptureRecoveryOnly が満たすべき条件。CanCapture と、
-    // Agent 応答待ちの後の再確認（RunCaptureAsync）が同じ式を使い、判定の食い違いを作らない。
+    // Agent 応答待ちの後の再確認（AbortCaptureStartIfConditionsChanged）が、この同じ式を共有する。
+    // 再確認は文言を選ぶために条件を個別にも確かめ、最後にこの式で取りこぼしを拾う。
     private bool CaptureRecoveryOnlyNewCaptureConditionsMet =>
         IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
         _captureRecoveryOnlyFiveRunCoordinator?.HasStarted != true &&
@@ -2667,10 +2672,11 @@ public sealed class OperatorShellViewModel : ObservableObject
 
         // GitHub Issue #254: 最初の await より前に、同期で「撮影開始中」のラッチを立てる。これ以降は
         // 撮影処理が終わる（例外・拒否で抜ける場合を含む）まで CanCapture が偽になり、実行承認も変えられない。
-        _isCaptureStarting = true;
-        RaisePreCaptureAutoFocusGateProperties();
+        // ラッチは try の中で立てる。通知中に例外が出ても finally で必ず戻す。
         try
         {
+            _isCaptureStarting = true;
+            RaisePreCaptureAutoFocusGateProperties();
             await RunLatchedCaptureAsync(scenario).ConfigureAwait(true);
         }
         finally
@@ -2704,7 +2710,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         if (AbortCaptureStartIfConditionsChanged(
-                routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction))
+                routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction,
+                afterActivation: false))
         {
             return;
         }
@@ -2721,7 +2728,8 @@ public sealed class OperatorShellViewModel : ObservableObject
             }
 
             if (AbortCaptureStartIfConditionsChanged(
-                    routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction))
+                    routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction,
+                    afterActivation: true))
             {
                 return;
             }
@@ -2903,45 +2911,70 @@ public sealed class OperatorShellViewModel : ObservableObject
         $"撮影する場合は『撮影・回収のみ』の実行承認にチェックを入れ直してから、「{captureButtonText}」を押してください。";
 
     internal const string CaptureStartFiveRunAlreadyStartedText =
-        "最大5組の受入系列が開始済みになったため、撮影を開始しませんでした。シャッターは切っていません。" +
+        "最大5組の受入系列が開始済みになったため、撮影を開始しませんでした。この操作ではシャッターは切っていません。" +
         "追加撮影はせず、結果と証跡を確認してください。";
 
     internal const string CaptureStartConditionsNoLongerMetText =
         "撮影の開始条件を満たさなくなったため、撮影を開始しませんでした。シャッターは切っていません。" +
         "撮影ボタンの下に表示される理由を確認してください。";
 
-    internal static string BuildCaptureStartRouteChangedText(string captureButtonText) =>
-        "撮影の状態が変わったため、撮影を開始しませんでした。シャッターは切っていません。" +
-        $"画面の表示を確認し、押せる場合は「{captureButtonText}」を押し直してください。";
+    // 押した操作が同一撮影IDの照会だった場合、経路が変わった後の主ボタンは新規撮影を指していることがある。
+    // その場合はボタン名を出して押し直しを促さない（新規撮影へ誘導しない）。新規撮影として押した場合は、
+    // 変化後のボタンが同一IDの照会を指すので、ボタン名を出してよい。
+    internal static string BuildCaptureStartRouteChangedText(string captureButtonText, bool pressedAsSameIdRecheck) =>
+        pressedAsSameIdRecheck
+            ? "撮影の状態が変わったため、確認を開始しませんでした。この操作ではシャッターは切っていません。" +
+              "主ボタンの表示が変わっています。次に押すと新しい撮影になる場合があるため、表示と実行承認を確かめてから操作してください。"
+            : "撮影の状態が変わったため、撮影を開始しませんでした。シャッターは切っていません。" +
+              $"画面の表示を確認し、押せる場合は「{captureButtonText}」を押し直してください。";
 
+    // 再確認は、文言を選ぶために条件を個別に確かめ（経路・承認・5組の開始・新規撮影の可否）、最後に CanCapture と
+    // 共有の式（CaptureRecoveryOnlyNewCaptureConditionsMet ほか）で個別の判定が取りこぼした変化を拾う。
+    // 通常経路の同一撮影ID照会は、押下時にも _availability を見ないので、ここでも見ない。
     private bool AbortCaptureStartIfConditionsChanged(
         bool routeIsCaptureRecoveryOnly,
         bool routeIsSingleCamera,
         bool recoverPending,
-        bool recoverOrdinaryTransaction)
+        bool recoverOrdinaryTransaction,
+        bool afterActivation)
     {
         string? reason = null;
+        string? classification = null;
         if (IsCaptureRecoveryOnlyMode != routeIsCaptureRecoveryOnly ||
             IsSingleCameraMode != routeIsSingleCamera ||
             HasRecoverableHardwareDualTransaction != recoverOrdinaryTransaction ||
             (routeIsCaptureRecoveryOnly && HasRecoverableCaptureRecoveryOnlyTransaction != recoverPending))
         {
-            reason = BuildCaptureStartRouteChangedText(CaptureButtonText);
+            reason = BuildCaptureStartRouteChangedText(CaptureButtonText, recoverPending || recoverOrdinaryTransaction);
+            classification = "route_changed";
         }
         else if (routeIsCaptureRecoveryOnly && !recoverPending)
         {
             if (!IsCaptureRecoveryOnlyOperatorApproved)
             {
                 reason = BuildCaptureStartApprovalWithdrawnText(CaptureButtonText);
+                classification = "approval_withdrawn";
             }
             else if (_captureRecoveryOnlyFiveRunCoordinator?.HasStarted == true)
             {
                 reason = CaptureStartFiveRunAlreadyStartedText;
+                classification = "five_run_already_started";
             }
             else if (!_captureRecoveryOnlyWorkflow!.CanStartNewCapture)
             {
                 reason = CaptureStartConditionsNoLongerMetText;
+                classification = "new_capture_not_allowed";
             }
+        }
+
+        // 個別の判定が拾わなかった変化（_availability の変化・機体照合の未完了など）を、CanCapture と共有の式で拾う。
+        if (reason is null && routeIsCaptureRecoveryOnly &&
+            (!_availability.Capture.Allowed ||
+             (DualBinding.IsRequired && !DualBinding.IsReady) ||
+             (!recoverPending && !CaptureRecoveryOnlyNewCaptureConditionsMet)))
+        {
+            reason = CaptureStartConditionsNoLongerMetText;
+            classification = "conditions_no_longer_met";
         }
 
         if (reason is null)
@@ -2950,6 +2983,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
 
         StatusMessage = reason;
+        TechnicalDetail =
+            $"capture_start_aborted: after_activation={(afterActivation ? "true" : "false")} reserve=0 start=0 reason={classification}";
         Notify(reason, false);
         OnPropertyChanged(nameof(CanCapture));
         OnPropertyChanged(nameof(CaptureDisabledReason));
