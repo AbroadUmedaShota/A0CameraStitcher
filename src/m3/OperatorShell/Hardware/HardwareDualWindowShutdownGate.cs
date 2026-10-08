@@ -67,7 +67,7 @@ public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string Bl
 
     /// <summary>
     /// Collapses text to a single line (every line terminator .NET recognizes, including
-    /// U+2028, U+2029, U+0085 and form feed, plus tabs and runs of spaces become one space) and
+    /// U+2028, U+2029, U+0085 and form feed, plus tabs, vertical tabs and runs of spaces become one space) and
     /// bounds it to <see cref="MaxDetailLength"/> characters (an ellipsis marks a cut), so a raw
     /// exception message cannot flood or reshape the operator-facing text. Idempotent.
     /// </summary>
@@ -80,7 +80,7 @@ public sealed record HardwareDualWindowShutdownOutcome(bool Completed, string Bl
 
         var singleLine = string.Join(
             ' ',
-            value.ReplaceLineEndings(" ").Replace('\t', ' ').Split(
+            value.ReplaceLineEndings(" ").Replace('\t', ' ').Replace('\v', ' ').Split(
                 ' ',
                 StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         if (singleLine.Length <= MaxDetailLength)

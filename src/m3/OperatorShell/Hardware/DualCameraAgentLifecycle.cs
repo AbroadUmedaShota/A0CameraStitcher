@@ -161,7 +161,10 @@ public sealed class DualCameraAgentLifecycle :
     /// The current Agent process's own start time (in UTC), used only to let the
     /// shutdown-blocked UI estimate how much of <see cref="AgentMaxLifetime"/> remains
     /// (issue #225). Null once there is no process handle or its start time cannot be
-    /// read; callers must treat that as "unknown remaining time", never as zero elapsed.
+    /// read; callers must treat that as "unknown remaining time". A caller may use
+    /// <c>now + <see cref="AgentMaxLifetime"/></c> as an upper bound on when the Agent ends
+    /// (every live process started no later than now), but must not display that bound as
+    /// the remaining time.
     /// This is a wall-clock reading, while the native budget runs on a monotonic clock that
     /// starts slightly after process start; a system clock change or that startup gap makes
     /// the estimate approximate, which is why the UI presents it as a guide ("約", "目安").
@@ -199,9 +202,11 @@ public sealed class DualCameraAgentLifecycle :
     /// remaining wait; <see cref="TimeSpan.Zero"/> means the budget has already elapsed (or is
     /// exactly exhausted), so the Agent has probably exited; null means the start time is
     /// unknown and no estimate can be made -- it is neither "no time remaining" nor "fully
-    /// remaining". A start time that reads as being in the future (clock skew, or a read racing
-    /// the process's own start) is clamped to zero elapsed rather than reported as more than the
-    /// full budget remaining.
+    /// remaining". The caller may use <c>now + <see cref="AgentMaxLifetime"/></c> as an upper
+    /// bound on when the Agent ends, but must not display it as the remaining time. A start
+    /// time that reads as being in the future (clock skew, or a read racing the process's own
+    /// start) is clamped to zero elapsed rather than reported as more than the full budget
+    /// remaining.
     /// </summary>
     public static TimeSpan? EstimateRemainingAgentLifetime(DateTimeOffset? agentStartTimeUtc, DateTimeOffset nowUtc)
     {

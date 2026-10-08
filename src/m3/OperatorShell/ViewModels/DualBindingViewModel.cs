@@ -124,6 +124,11 @@ public sealed class DualBindingViewModel : ObservableObject
     // True only for the "budget already elapsed, the Agent has probably exited" wording of the
     // shutdown-blocked message; it selects the headline (issue #225).
     private bool _shutdownAgentProbablyExited;
+    // The end time shown for the first blocked report whose remaining time was unknown. Later
+    // unknown reports reuse it instead of counting ten minutes from the new "now", so the time the
+    // operator was first given does not slide away each time they press the close button again
+    // (issue #236). Cleared by any report that has a known remaining time.
+    private DateTimeOffset? _unknownLifetimeEstimatedEndUtc;
     private string _invalidationText = string.Empty;
     private bool _isBusy;
     private bool _hasDecodedPreviewForSelectedCandidate;
@@ -610,9 +615,11 @@ public sealed class DualBindingViewModel : ObservableObject
     /// is <see cref="DualCameraAgentLifecycle.EstimateRemainingAgentLifetime"/>'s result and
     /// selects the wording: positive = still waiting (with an approximate end time),
     /// <see cref="TimeSpan.Zero"/> = the budget has elapsed so the Agent has probably exited,
-    /// null = the start time is unknown, so the full <see cref="DualCameraAgentLifecycle.AgentMaxLifetime"/>
-    /// is assumed (every live Agent process started no later than now, so ten minutes from now is
-    /// an upper bound whether the handle is missing or its start time cannot be read).
+    /// null = the start time is unknown, so the end time shown is an upper bound of
+    /// <see cref="DualCameraAgentLifecycle.AgentMaxLifetime"/> from now (every live Agent process
+    /// started no later than now, whether the handle is missing or its start time cannot be read).
+    /// That time is held: a later null report shows the same end time, and says the time has
+    /// passed when it really has (issue #236).
     /// <paramref name="nowUtc"/> exists so the end-time hint is deterministic in tests; production
     /// callers omit it. Display only: nothing here sends to native, starts or ends a process, or
     /// retries.
@@ -628,6 +635,24 @@ public sealed class DualBindingViewModel : ObservableObject
         // retired binding pipe a cancel-binding request because the child happened
         // to exit between attempts.
         ClearSessionSurface(preserveCaptureHostActivationAcknowledgement: true);
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+        var repeatedUnknownReport = false;
+        if (remainingAgentLifetimeEstimate is null)
+        {
+            if (_unknownLifetimeEstimatedEndUtc is null)
+            {
+                _unknownLifetimeEstimatedEndUtc = RoundUpToMinute(now + DualCameraAgentLifecycle.AgentMaxLifetime);
+            }
+            else
+            {
+                repeatedUnknownReport = true;
+            }
+        }
+        else
+        {
+            _unknownLifetimeEstimatedEndUtc = null;
+        }
+
         _shutdownAgentProbablyExited = remainingAgentLifetimeEstimate is { } estimate && estimate <= TimeSpan.Zero;
         IsShutdownBlocked = true;
         Phase = DualBindingPhase.Invalid;
@@ -635,7 +660,12 @@ public sealed class DualBindingViewModel : ObservableObject
         // blocked reports without IsShutdownBlocked or Phase changing.
         OnPropertyChanged(nameof(HeadlineText));
         InvalidationText = BuildShutdownBlockedText(
-            blockingCode, blockingDetail, remainingAgentLifetimeEstimate, nowUtc ?? DateTimeOffset.UtcNow);
+            blockingCode,
+            blockingDetail,
+            remainingAgentLifetimeEstimate,
+            now,
+            _unknownLifetimeEstimatedEndUtc,
+            repeatedUnknownReport);
         // The full guidance is already on screen in the invalidation block; repeating it here
         // would show the same paragraphs twice.
         Notify(ShutdownBlockedNoticeText, "block");
@@ -654,7 +684,9 @@ public sealed class DualBindingViewModel : ObservableObject
         string blockingCode,
         string blockingDetail,
         TimeSpan? remainingAgentLifetimeEstimate,
-        DateTimeOffset nowUtc)
+        DateTimeOffset nowUtc,
+        DateTimeOffset? heldUnknownLifetimeEndUtc,
+        bool repeatedUnknownReport)
     {
         const string KeepHandsOff = "カメラに触らず、他のカメラアプリも使わないでください。";
         const string CloseAgain = "画面右上の ✕ でもう一度閉じてください。";
@@ -669,15 +701,18 @@ public sealed class DualBindingViewModel : ObservableObject
                 "Camera Agent はすでに終了している可能性があります。",
                 KeepHandsOff,
                 CloseAgain + RecordsUnchanged + NoForcedAction,
-                "もう一度閉じても閉じられない場合は、技術担当者に連絡してください。",
+                "✕ を押しても閉じられない場合は、技術担当者に連絡してください。",
             ];
         }
         else
         {
-            // Unknown remaining time is treated as the full budget: a live Agent started at or
-            // before now, so it cannot outlive nowUtc + AgentMaxLifetime.
-            var remaining = remainingAgentLifetimeEstimate ?? DualCameraAgentLifecycle.AgentMaxLifetime;
-            var estimatedEnd = RoundUpToMinute(nowUtc + remaining).ToLocalTime();
+            // Unknown remaining time: a live Agent started at or before the first report, so it
+            // cannot outlive that report's time plus AgentMaxLifetime. That bound is the end time
+            // shown, and later unknown reports show the same one (issue #236).
+            var estimatedEndUtc = remainingAgentLifetimeEstimate is { } knownRemaining
+                ? RoundUpToMinute(nowUtc + knownRemaining)
+                : heldUnknownLifetimeEndUtc ?? RoundUpToMinute(nowUtc + DualCameraAgentLifecycle.AgentMaxLifetime);
+            var estimatedEnd = estimatedEndUtc.ToLocalTime();
             var end = estimatedEnd.ToString("HH:mm", CultureInfo.InvariantCulture);
             var escalationAt = estimatedEnd.AddMinutes(ShutdownEscalationMinutes)
                 .ToString("HH:mm", CultureInfo.InvariantCulture);
@@ -685,14 +720,19 @@ public sealed class DualBindingViewModel : ObservableObject
                 ? "残り時間は確認できませんが、長くても " +
                   ((int)DualCameraAgentLifecycle.AgentMaxLifetime.TotalMinutes).ToString(CultureInfo.InvariantCulture) +
                   $" 分ほどで終わる見込みです（目安 {end} ごろ）。"
-                : $"あと約{Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes))}分、{end} ごろに終わる見込みです。";
+                : $"あと約 {Math.Max(1, (int)Math.Ceiling(remainingAgentLifetimeEstimate.Value.TotalMinutes))} 分、{end} ごろに終わる見込みです。";
+            // Only a repeated report that really is past the held time says so: an early second
+            // press is explicitly fine ("早めに押しても問題はなく"), so claiming the time had
+            // passed would be untrue then.
+            var pastHeldEstimate = repeatedUnknownReport && nowUtc > estimatedEndUtc;
             paragraphs =
             [
                 "Camera Agent が自動で終了するのを待っています。" + lead,
                 "その間は" + KeepHandsOff,
                 $"{end} を過ぎたら、" + CloseAgain +
                     "早めに押しても問題はなく、" + RecordsUnchanged + NoForcedAction,
-                $"{escalationAt} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
+                (pastHeldEstimate ? "目安の時刻を過ぎています。" : string.Empty) +
+                    $"{escalationAt} を過ぎても閉じられない場合は、技術担当者に連絡してください。",
             ];
         }
 

@@ -298,8 +298,9 @@ Console.SetOut(passLines);
 if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
 {
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
-    // remaining= is the number of top-level try blocks below; scripts/Test-M3Simulated.ps1 keeps it in step.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=105 reason=lifetime-contract-failure; exit=1");
+    // remaining= is the number of checks after the one that stopped the run (every top-level try block and
+    // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
+    Console.Error.WriteLine("UNRUN runner=normal remaining=111 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -916,6 +917,28 @@ catch (Exception exception)
 
 try
 {
+    await ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknownAsync();
+    Console.WriteLine("PASS issue #236 an unknown remaining time keeps the first end time on repeated close attempts and says so only once that time has passed");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #236 an unknown remaining time keeps the first end time on repeated close attempts and says so only once that time has passed");
+    Console.Error.WriteLine($"FAIL issue #236 an unknown remaining time keeps the first end time on repeated close attempts and says so only once that time has passed: {exception}");
+}
+
+try
+{
+    RunOnStaRenderThread(ShutdownGuidanceLayoutContracts.RunAsync);
+    Console.WriteLine("PASS issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line");
+}
+catch (Exception exception)
+{
+    failures.Add("issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line");
+    Console.Error.WriteLine($"FAIL issue #236 the shutdown-blocked guidance fits its card on the canvas for every wording and for the longest technical line: {exception}");
+}
+
+try
+{
     await ShutdownGateBlockedDetailIsSingleLineAndBoundedAsync();
     Console.WriteLine("PASS issue #225 shutdown gate reports refusal and exception detail as one bounded line with the code intact");
 }
@@ -982,12 +1005,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 46) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 47) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
-    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 45) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 46) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1190,7 +1213,7 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
-    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 26) == WpfScenarioOutcome.PendingStop)
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 27) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -8201,7 +8224,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
         var waiting = RequireCommonGuidance(binding.InvalidationText, "waiting");
         var waitingEnd = now + TimeSpan.FromMinutes(4);
         Check.Equal(
-            $"Camera Agent が自動で終了するのを待っています。あと約4分、{Hm(waitingEnd)} ごろに終わる見込みです。",
+            $"Camera Agent が自動で終了するのを待っています。あと約 4 分、{Hm(waitingEnd)} ごろに終わる見込みです。",
             waiting[0]);
         Check.True(waiting[1].StartsWith("その間は", StringComparison.Ordinal),
             "waiting: the hands-off paragraph must say it applies during the wait.");
@@ -8223,7 +8246,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
         Check.True(exceeded[2].Contains("撮影結果と採用の記録は変わりません。", StringComparison.Ordinal) &&
             !exceeded[2].Contains("早めに押しても", StringComparison.Ordinal),
             "exceeded: the harmless-early-press sentence belongs to the waiting wording only.");
-        Check.Equal("もう一度閉じても閉じられない場合は、技術担当者に連絡してください。", exceeded[3]);
+        Check.Equal("✕ を押しても閉じられない場合は、技術担当者に連絡してください。", exceeded[3]);
         Check.False(binding.InvalidationText.Contains("あと約", StringComparison.Ordinal) ||
             binding.InvalidationText.Contains("残り時間は確認できません", StringComparison.Ordinal),
             "exceeded: an exhausted budget is neither still-waiting nor unknown.");
@@ -8252,7 +8275,7 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
         var secondsIntoMinute = now + TimeSpan.FromSeconds(20);
         binding.ReportShutdownBlocked(code, detail, TimeSpan.FromMinutes(4), secondsIntoMinute);
         Check.True(binding.InvalidationText.Contains(
-            $"あと約4分、{Hm(now + TimeSpan.FromMinutes(5))} ごろに終わる見込みです。", StringComparison.Ordinal),
+            $"あと約 4 分、{Hm(now + TimeSpan.FromMinutes(5))} ごろに終わる見込みです。", StringComparison.Ordinal),
             "The estimated end time must be rounded up to the next whole minute.");
 
         var longDetail = "first line\r\nC:\\Users\\operator\\" + new string('x', 400);
@@ -8265,6 +8288,82 @@ static async Task ReportShutdownBlockedIncludesRetryGuidanceAsync()
         Check.True(binding.InvalidationText.Contains("技術担当者向け: 状態 test-code-only", StringComparison.Ordinal) &&
             !binding.InvalidationText.Contains("詳細", StringComparison.Ordinal),
             "A call without detail must show the code only, with no empty detail label.");
+    }
+    finally
+    {
+        await lifecycle.DisposeAsync();
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+// Issue #236: when the remaining Agent lifetime is unknown (null), the first blocked report
+// gives an end time that is an upper bound from that moment. Pressing the close button again
+// must not move that time later each time. A repeated report that really is past the time says
+// so at the head of the contact paragraph; an early repeat does not (the guidance itself calls
+// an early press harmless, so "the time has passed" would be untrue). A report with a known
+// remaining time starts the sequence over. Display only: no Agent process is started.
+static async Task ReportShutdownBlockedHoldsTheFirstEndTimeWhenRemainingIsUnknownAsync()
+{
+    var root = CreateHardwareTestRoot();
+    var lifecycle = CreateDualBindingTestLifecycle(root);
+    try
+    {
+        var binding = new DualBindingViewModel(new DualBindingSessionClient(lifecycle));
+        const string code = "HardwareCameraAgentLaunchException";
+        string Hm(DateTimeOffset value) => value.ToLocalTime()
+            .ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+        // 20 seconds into a minute, so the round-up (03:10:20 -> 03:11) is part of what is held.
+        var first = new DateTimeOffset(2026, 10, 6, 3, 0, 20, TimeSpan.Zero);
+        var heldEnd = new DateTimeOffset(2026, 10, 6, 3, 11, 0, TimeSpan.Zero);
+        var contact = $"{Hm(heldEnd + TimeSpan.FromMinutes(10))} を過ぎても閉じられない場合は、技術担当者に連絡してください。";
+        var passed = "目安の時刻を過ぎています。";
+
+        binding.ReportShutdownBlocked(code, "detail", null, first);
+        var firstLines = binding.InvalidationText.Split('\n');
+        Check.Equal(5, firstLines.Length);
+        Check.True(firstLines[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
+            "The first unknown report shows ten minutes from that moment, rounded up to the minute.");
+        Check.Equal(contact, firstLines[3]);
+
+        // Second press, still before the held time: same time, and no claim that it has passed.
+        binding.ReportShutdownBlocked(code, "detail", null, first + TimeSpan.FromMinutes(3));
+        var early = binding.InvalidationText.Split('\n');
+        Check.True(early[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
+            "A repeated unknown report must keep the first end time instead of counting ten minutes from now.");
+        Check.Equal(contact, early[3]);
+        Check.True(early[2].StartsWith($"{Hm(heldEnd)} を過ぎたら、", StringComparison.Ordinal),
+            "The close-again time must stay the held one too.");
+
+        // Exactly at the held time is not past it; one second after is.
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd);
+        Check.Equal(contact, binding.InvalidationText.Split('\n')[3]);
+        binding.ReportShutdownBlocked(code, "detail", null, heldEnd + TimeSpan.FromSeconds(1));
+        var late = binding.InvalidationText.Split('\n');
+        Check.Equal(5, late.Length);
+        Check.True(late[0].EndsWith($"（目安 {Hm(heldEnd)} ごろ）。", StringComparison.Ordinal),
+            "A repeated report after the held time must still show the held time, not a later one.");
+        Check.Equal(passed + contact, late[3]);
+        Check.False(late[0].Contains(passed, StringComparison.Ordinal) || late[2].Contains(passed, StringComparison.Ordinal),
+            "The 'time has passed' sentence belongs at the head of the contact paragraph only.");
+
+        // A known remaining time is a different wording and clears what was held.
+        binding.ReportShutdownBlocked(code, "detail", TimeSpan.FromMinutes(2), first + TimeSpan.FromMinutes(20));
+        Check.False(binding.InvalidationText.Contains(passed, StringComparison.Ordinal),
+            "A known remaining time has no held estimate to be past.");
+        var restart = first + TimeSpan.FromMinutes(30);
+        binding.ReportShutdownBlocked(code, "detail", null, restart);
+        var restarted = binding.InvalidationText.Split('\n');
+        var restartedEnd = new DateTimeOffset(2026, 10, 6, 3, 41, 0, TimeSpan.Zero);
+        Check.True(restarted[0].EndsWith($"（目安 {Hm(restartedEnd)} ごろ）。", StringComparison.Ordinal) &&
+            !restarted[3].StartsWith(passed, StringComparison.Ordinal),
+            "After a known report the next unknown one is a first report again, with a fresh end time.");
+
+        // The exhausted wording is unaffected by what was held.
+        binding.ReportShutdownBlocked(code, "detail", TimeSpan.Zero, restart);
+        Check.Equal("✕ を押しても閉じられない場合は、技術担当者に連絡してください。", binding.InvalidationText.Split('\n')[3]);
+        Check.False(binding.InvalidationText.Contains(passed, StringComparison.Ordinal),
+            "The exhausted wording never carries the held-time sentence.");
     }
     finally
     {
@@ -8315,6 +8414,9 @@ static async Task ShutdownGateBlockedDetailIsSingleLineAndBoundedAsync()
     Check.Equal(
         "a b c d e f g",
         HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\u2028b\u2029c\u0085d\fe\t\tf   g"));
+    // Issue #236: whether WPF's TextBlock breaks a line at a vertical tab is unverified, so it is
+    // collapsed like the other separators.
+    Check.Equal("a b c", HardwareDualWindowShutdownOutcome.SanitizeForOperatorDisplay("a\vb\v\vc"));
     Check.Equal(string.Empty, HardwareDualWindowShutdownOutcome.Blocked("code", null).BlockingDetail);
     Check.Equal("BindingCleanupUnconfirmed", HardwareDualWindowShutdownOutcome.Blocked(" ", "x").BlockingCode);
 }

@@ -78,8 +78,10 @@ try {
         # one PASS per top-level try block, and one PASS per top-level RunScenarioAsync call. Every try block
         # needs its catch, which is checked first so an unbalanced edit is reported as such. A block that
         # prints two PASS lines or none changes the count, and this derivation has to be updated with it.
-        # The early-exit UNRUN literal reports how many checks did not run; its remaining= is the top-level
-        # try count, not the PASS count.
+        # remaining= in every UNRUN report means the number of checks after the one that stopped the run, where a
+        # check is a top-level try block or a top-level RunScenarioAsync call (each ends in one PASS line). It is
+        # derived from the structure below and compared with each literal, so adding a check without updating the
+        # literals fails here instead of leaving a stale count (issue #236).
         $operatorProgramText = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'tests/m3/OperatorShellTests/Program.cs')
         $tryCount = ([regex]::Matches($operatorProgramText, '(?m)^try[ \t]*\r?$')).Count
         $catchCount = ([regex]::Matches($operatorProgramText, '(?m)^catch\b')).Count
@@ -87,7 +89,19 @@ try {
         Assert-Condition ($tryCount -eq $catchCount) "Program.cs top-level try/catch count mismatch ($tryCount/$catchCount)."
         $operatorSourceCheckCount = 1 + $tryCount + $scenarioCount
         Assert-Condition ($operatorPassLines.Count -eq $operatorSourceCheckCount) "M3 operator shell tests emitted $($operatorPassLines.Count) PASS lines, expected $operatorSourceCheckCount (1 WPF contract + $tryCount top-level try + $scenarioCount top-level RunScenarioAsync) in Program.cs."
-        Assert-Condition ($operatorProgramText.Contains("UNRUN runner=normal remaining=$tryCount reason=lifetime-contract-failure")) "The UNRUN remaining count in Program.cs is stale; it must be $tryCount (the top-level try count)."
+        $operatorCheckMatches = @([regex]::Matches($operatorProgramText, '(?m)^(?:try[ \t]*\r?$|if \(await WpfCommandTestRunner\.RunScenarioAsync\()'))
+        Assert-Condition ($operatorCheckMatches.Count -eq $tryCount + $scenarioCount) 'The check pattern must match exactly the top-level try blocks and RunScenarioAsync calls.'
+        # The WPF contract check runs first and its failure stops everything after it: every try block and scenario.
+        $expectedEarlyRemaining = $operatorCheckMatches.Count
+        Assert-Condition ($operatorProgramText.Contains("UNRUN runner=normal remaining=$expectedEarlyRemaining reason=lifetime-contract-failure")) "The early UNRUN remaining count in Program.cs is stale; it must be $expectedEarlyRemaining (every top-level try block and RunScenarioAsync call)."
+        for ($checkIndex = 0; $checkIndex -lt $operatorCheckMatches.Count; $checkIndex++) {
+            $checkMatch = $operatorCheckMatches[$checkIndex]
+            if (-not $checkMatch.Value.StartsWith('if')) { continue }
+            $scenarioRemaining = [regex]::Match($operatorProgramText.Substring($checkMatch.Index), 'remaining: (\d+)\)')
+            Assert-Condition $scenarioRemaining.Success "A RunScenarioAsync call at character $($checkMatch.Index) in Program.cs has no 'remaining:' argument."
+            $expectedScenarioRemaining = $operatorCheckMatches.Count - $checkIndex - 1
+            Assert-Condition ([int]$scenarioRemaining.Groups[1].Value -eq $expectedScenarioRemaining) "The RunScenarioAsync call at character $($checkMatch.Index) in Program.cs has remaining: $($scenarioRemaining.Groups[1].Value); it must be $expectedScenarioRemaining (the number of checks after it)."
+        }
     }
     finally {
         $env:A0_M2_ADAPTER_PATH = $previousAdapterPath
