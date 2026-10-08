@@ -2177,7 +2177,13 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string InfoText => IsCaptureRecoveryOnlyMode
         ? "機体照合画面のLive Viewは割当確認専用です。保存されるのは撮影した原画像（合成なし）です。"
         : FormatNotices(OperatorWarningSeverity.Info, "原画像はPCに保持 ／ ライブ表示は原画像ではありません ／ 2台のシャッター時刻差は保証しません");
+    // CaptureRecoveryOnly builds the ordinary flow on the same product root, so an ordinary
+    // response-unknown transaction left by an older build is restored into the ordinary flow too.
+    // That state belongs to the ordinary same-ID recovery only; CaptureRecoveryOnly gates on its own
+    // workflow (HasRecoverableCaptureRecoveryOnlyTransaction), and must still require the operator's
+    // approval and the pre-capture binding re-verification (GitHub Issue #253).
     private bool HasRecoverableHardwareDualTransaction =>
+        !IsCaptureRecoveryOnlyMode &&
         !IsSingleCameraMode &&
         _dualCameraFlow is
         {

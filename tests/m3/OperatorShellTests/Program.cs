@@ -254,6 +254,15 @@ if (args is ["--hardware-replay"])
     }
 }
 
+// Focused run of the #253 stale-ordinary-state scenario (the same check the normal run ends with).
+if (args is ["--stale-ordinary-recovery-only"])
+{
+    return await WpfCommandTestRunner.RunFocusedAsync(
+    [
+        ("CaptureRecoveryOnly ignores a stale ordinary response-unknown transaction and still requires approval and binding re-verification (#253)",
+            CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync),
+    ]);
+}
 if (args is ["--single-handoff-stop-order"])
 {
     try
@@ -300,7 +309,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=118 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=119 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -1082,12 +1091,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 47) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 48) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
-    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 46) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 47) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1290,7 +1299,7 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
-    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 27) == WpfScenarioOutcome.PendingStop)
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 28) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1576,7 +1585,11 @@ catch (Exception exception)
 }
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "replayed real Agent terminal results (Succeeded pair and Failed/CaptureCameraA) go through the shell CaptureRecoveryOnly capture and save path (#231)",
-    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 1) == WpfScenarioOutcome.PendingStop)
+    return 1;
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "CaptureRecoveryOnly ignores a stale ordinary response-unknown transaction and still requires approval and binding re-verification (#253)",
+    CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
     return 1;
 Console.WriteLine($"Operator shell tests: {passLines.Count}/{passLines.Count + failures.Count} passed.");
 return failures.Count == 0 ? 0 : 1;
@@ -9844,6 +9857,151 @@ static async Task CaptureRecoveryOnlyRealAgentReplayThroughShellAsync()
         Check.False(failedShell.CanExportCaptureRecoveryOnlyOriginals, "A capture without originals has nothing to save.");
         Check.Equal(1, failedTransport.Operations.Count(op =>
             op == DualHardwareCameraAgentProtocol.Operations.StartReservedCaptureRecoveryOnly));
+    });
+}
+
+// GitHub Issue #253: the production CaptureRecoveryOnly composition (MainWindow) builds the ordinary
+// HardwareDual flow and the CaptureRecoveryOnly workflow on the same product root, so a response-unknown
+// ordinary transaction left on disk by an older build is restored into the ordinary flow at startup.
+// That ordinary state must not make CaptureRecoveryOnly capturable: only the CaptureRecoveryOnly
+// workflow's own pending recovery may. Without the operator's explicit approval and a current binding
+// check, no Reserve/Start/Agent capture call may follow.
+static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
+{
+    var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(adapterPath), "The stale-ordinary-state scenario requires the bundled deterministic JPEG adapter.");
+    var root = CreateHardwareTestRoot();
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+
+        async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperations Operations,
+            CountingBindingTransport Transport, SimulatedDualBindingAgent Agent)> NewShellAsync(string name)
+        {
+            var productRoot = Path.Combine(root, name + "-products");
+            var staleTransactionId = Guid.NewGuid();
+            var startedAt = DateTimeOffset.UtcNow;
+            new HardwareDualTransactionSnapshotStore(productRoot).SavePending(new DualHardwareCaptureRequest(
+                staleTransactionId,
+                Path.Combine(productRoot, "transactions", staleTransactionId.ToString("N")),
+                DualCameraIdentitySnapshot.AnonymousTestSyntheticReady(),
+                HardwareDualCaptureProfile.ApprovedSynthetic(),
+                DualCameraRigProfile.ApprovedSynthetic(),
+                new HardwareDualOperatorConfirmations(true, true, true, true, true),
+                startedAt,
+                startedAt.AddSeconds(180)));
+
+            var operations = new CaptureRecoveryOnlyFakeOperations(adapter);
+            var ordinaryFlow = new DualCameraProductFlow(
+                productRoot,
+                new HardwareDualCaptureSource(
+                    operations,
+                    recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
+                new NeverCaptureDualBridge(),
+                new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+            Check.True(ordinaryFlow.Current?.FailureCode == DualCameraFailureCode.AgentResponseUnknown,
+                "The stale ordinary response-unknown transaction must be restored into the ordinary flow.");
+            var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                productRoot, operations, operations, ApprovedCaptureRecoveryOnlyProfile());
+            Check.False(workflow.HasPendingRecovery,
+                "The stale ordinary transaction must not appear as a CaptureRecoveryOnly pending recovery.");
+
+            var agent = DecodableBindingAgent();
+            var transport = new CountingBindingTransport(agent);
+            var shell = new OperatorShellViewModel(
+                new SimulationFoundationService(Path.Combine(root, name + "-journals")),
+                ordinaryFlow,
+                dualBindingTransport: transport,
+                captureRecoveryOnlyWorkflow: workflow);
+            await shell.InitializeAsync(CancellationToken.None);
+            shell.IsPhysicalShutterAckAccepted = true;
+            shell.IsExclusiveUseAckAccepted = true;
+            shell.AcceptSafetyCommand.Execute(null);
+            Check.True(shell.IsCaptureRecoveryOnlyMode, "The scenario must run in CaptureRecoveryOnly mode.");
+            Check.False(shell.IsCaptureRecoveryOnlyOperatorApproved, "A fresh shell must not be approved.");
+            return (shell, operations, transport, agent);
+        }
+
+        // Presses the main button without first checking CanExecute: a disabled button must be a no-op,
+        // an enabled one runs the real capture path.
+        async Task PressCaptureAsync(OperatorShellViewModel shell, string phase)
+        {
+            await ownedCommands.ObserveAsync(
+                ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null),
+                Task.Delay(TimeSpan.FromSeconds(10)),
+                phase,
+                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within 10s."),
+                () => WpfCommandState.Create(shell),
+                timeout: TimeSpan.FromSeconds(10));
+        }
+
+        static string Observe(string label, OperatorShellViewModel shell, bool canCaptureBefore,
+            CaptureRecoveryOnlyFakeOperations operations, CountingBindingTransport transport) =>
+            $"OBS253 {label}: CanCaptureBeforePress={canCaptureBefore} Reserve={operations.ReserveCalls} " +
+            $"RecoveryOnlyStart={operations.CaptureRecoveryOnlyStartCalls} OrdinaryStart={operations.OrdinaryStartCalls} " +
+            $"ActivateCapture={transport.ActivateCaptureCalls} TotalAgentSends={transport.TotalSendCalls} " +
+            $"UiState={shell.UiState} Status={shell.StatusMessage}";
+
+        // A: no approval, no binding.
+        var a = await NewShellAsync("unapproved-unbound");
+        var aCan = a.Shell.CanCapture;
+        await PressCaptureAsync(a.Shell, "stale-ordinary/unapproved-unbound");
+        Console.WriteLine(Observe("unapproved-unbound", a.Shell, aCan, a.Operations, a.Transport));
+
+        // B: binding Ready but the operator has not approved the run.
+        var b = await NewShellAsync("unapproved-bound");
+        await CompleteDualBindingAsync(b.Shell.DualBinding);
+        var bCan = b.Shell.CanCapture;
+        await PressCaptureAsync(b.Shell, "stale-ordinary/unapproved-bound");
+        Console.WriteLine(Observe("unapproved-bound", b.Shell, bCan, b.Operations, b.Transport));
+
+        // C: approved and bound, then the body topology changes before the press. The pre-capture
+        // re-verification must still run.
+        var c = await NewShellAsync("approved-invalidated");
+        c.Shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+        await CompleteDualBindingAsync(c.Shell.DualBinding);
+        c.Agent.RaiseInvalidation(DualBindingInvalidationReason.TopologyChanged);
+        var cCan = c.Shell.CanCapture;
+        await PressCaptureAsync(c.Shell, "stale-ordinary/approved-invalidated");
+        Console.WriteLine(Observe("approved-invalidated", c.Shell, cCan, c.Operations, c.Transport) +
+            $" RequiresRebinding={c.Shell.DualBinding.RequiresRebindingText}");
+
+        // D: positive control. Approved and bound, nothing invalidated: the stale ordinary state
+        // changes nothing and the capture runs exactly once as before.
+        var d = await NewShellAsync("approved-bound");
+        d.Shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+        await CompleteDualBindingAsync(d.Shell.DualBinding);
+        var dCan = d.Shell.CanCapture;
+        await PressCaptureAsync(d.Shell, "stale-ordinary/approved-bound");
+        Console.WriteLine(Observe("approved-bound", d.Shell, dCan, d.Operations, d.Transport));
+
+        Check.False(aCan, "Stale ordinary state must not enable CaptureRecoveryOnly before approval and binding.");
+        Check.Equal(0, a.Operations.ReserveCalls);
+        Check.Equal(0, a.Operations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(0, a.Operations.OrdinaryStartCalls);
+        Check.Equal(0, a.Transport.ActivateCaptureCalls);
+
+        Check.False(bCan, "Stale ordinary state must not enable CaptureRecoveryOnly without the operator's approval.");
+        Check.Equal(0, b.Operations.ReserveCalls);
+        Check.Equal(0, b.Operations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(0, b.Operations.OrdinaryStartCalls);
+        Check.Equal(0, b.Transport.ActivateCaptureCalls);
+
+        Check.True(cCan, "Nothing has told the shell about the topology change yet.");
+        Check.Equal(0, c.Operations.ReserveCalls);
+        Check.Equal(0, c.Operations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(0, c.Operations.OrdinaryStartCalls);
+        Check.Equal(0, c.Transport.ActivateCaptureCalls);
+        Check.True(c.Shell.DualBinding.RequiresRebindingText,
+            "The pre-capture binding re-verification must run even when stale ordinary state exists.");
+
+        Check.True(dCan, "Approval plus a Ready binding must still enable CaptureRecoveryOnly with stale ordinary state.");
+        Check.Equal(1, d.Operations.ReserveCalls);
+        Check.Equal(1, d.Operations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(0, d.Operations.OrdinaryStartCalls);
+        Check.Equal(1, d.Transport.ActivateCaptureCalls);
+        Check.Equal(OperatorUiState.Review, d.Shell.UiState);
     });
 }
 
