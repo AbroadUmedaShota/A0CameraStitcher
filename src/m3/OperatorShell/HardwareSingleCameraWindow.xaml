@@ -106,7 +106,7 @@
                                 <Button Grid.Column="0" Content="継続Live Viewを開始"
                                         Command="{Binding StartContinuousLiveViewCommand}"
                                         IsEnabled="{Binding CanStartContinuousLiveView}"
-                                        AutomationProperties.Name="一台実機の継続Live Viewを開始" />
+                                        AutomationProperties.Name="継続Live Viewを開始 一台実機のライブ表示を始める" />
                                 <Button Grid.Column="2" Content="継続Live Viewを停止"
                                         Command="{Binding StopContinuousLiveViewCommand}"
                                         IsEnabled="{Binding CanStopContinuousLiveView}"
@@ -187,7 +187,7 @@
                                        AutomationProperties.LiveSetting="Polite" controls:LiveRegion.Announce="True" />
                             <Button Content="採用して次の撮影を準備" Command="{Binding AcceptReviewCommand}"
                                     IsEnabled="{Binding CanAcceptReview}" HorizontalAlignment="Stretch"
-                                    AutomationProperties.Name="再検証済み単体原画像を採用して次の撮影を準備" />
+                                    AutomationProperties.Name="採用して次の撮影を準備 再検証済みの単体原画像を採用する" />
                             <Button Content="再合成（SingleCameraでは対象外）" IsEnabled="False" HorizontalAlignment="Stretch" />
                             <Button Content="新しい撮影を準備" Command="{Binding PrepareNewCaptureCommand}"
                                     IsEnabled="{Binding CanPrepareNewCapture}" HorizontalAlignment="Stretch" />
@@ -220,7 +220,7 @@
                             <TextBlock Text="{Binding ExportDirectoryDisplay}" Margin="0,5,0,8" />
                             <Button Content="保存先を選択" Click="OnChooseExportDirectory"
                                     IsEnabled="{Binding CanChangeExportDirectory}" HorizontalAlignment="Left"
-                                    AutomationProperties.Name="ローカル固定ドライブ上の保存先を選択" />
+                                    AutomationProperties.Name="保存先を選択 ローカル固定ドライブ上のフォルダを選ぶ" />
                             <TextBlock Text="Camera Agent" FontWeight="Bold" />
                             <TextBlock Text="{Binding AgentExecutablePath}" Margin="0,5,0,8" />
                             <Expander Header="技術情報（redacted）">

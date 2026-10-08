@@ -6779,6 +6779,7 @@ static async Task FormalDualCameraWpfFlowAsync()
                     Guid.NewGuid());
             },
             dualBindingTransport: new SimulatedDualBindingAgentTransport(DecodableBindingAgent()));
+        AccessibleNameNotificationRecorder.Attach(recoveryViewModel);
         await recoveryViewModel.InitializeAsync(CancellationToken.None);
         recoveryViewModel.AcceptSafetyCommand.Execute(null);
         await CompleteDualBindingAsync(recoveryViewModel.DualBinding);
@@ -6814,7 +6815,14 @@ static async Task FormalDualCameraWpfFlowAsync()
         Check.Equal(OperatorShellViewModel.SameTransactionRecheckButtonAutomationName,
             recoveryViewModel.CaptureButtonAutomationName);
         AssertAccessibleNamesContainVisibleLabels(recoveryViewModel, "hardware dual re-check");
+        // GitHub Issue #249: a change of the identity goes through OnDualCameraIdentityChanged -> RebuildReadiness ->
+        // RaiseReadinessProperties, which must announce the identity status menu item's name with its text. The
+        // round that AssertAccessibleNamesContainVisibleLabels checks is the one recorded around this Set.
+        var identityStatusBefore = recoveryViewModel.DualCameraIdentityStatusText;
         recoveryIdentity.Set(DualCameraIdentitySnapshot.HardwarePending());
+        Check.True(!string.Equals(identityStatusBefore, recoveryViewModel.DualCameraIdentityStatusText, StringComparison.Ordinal),
+            "The scenario needs the identity change to change the identity status text.");
+        AssertAccessibleNamesContainVisibleLabels(recoveryViewModel, "hardware dual identity changed");
         var restartedRecoveryFlow = new DualCameraProductFlow(
             recoveryProductRoot,
             new HardwareDualCaptureSource(
@@ -6830,6 +6838,7 @@ static async Task FormalDualCameraWpfFlowAsync()
                 requestProviderCalls++;
                 throw new InvalidOperationException("Restart recovery must not request current capture inputs.");
             });
+        AccessibleNameNotificationRecorder.Attach(restartedRecoveryViewModel);
         await restartedRecoveryViewModel.InitializeAsync(CancellationToken.None);
         restartedRecoveryViewModel.AcceptSafetyCommand.Execute(null);
         Check.True(restartedRecoveryViewModel.CanCapture, "Saved HardwareDual transaction recovery must remain available after restart with current identity Pending.");
@@ -7297,6 +7306,7 @@ static async Task SingleCameraWorkflowAsync()
     try
     {
         var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        AccessibleNameNotificationRecorder.Attach(viewModel);
         await viewModel.InitializeAsync(CancellationToken.None);
         var restitchVisibilityChanges = 0;
         viewModel.PropertyChanged += (_, args) =>
@@ -11047,6 +11057,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             ordinaryFlow,
             dualBindingTransport: bindingTransport,
             captureRecoveryOnlyWorkflow: wpfWorkflow);
+        AccessibleNameNotificationRecorder.Attach(shell);
         Check.Equal(
             $"A0 Camera Stitcher — {OperatorShellViewModel.HardwareDualCaptureRecoveryOnlyBanner}",
             shell.WindowTitle);
@@ -11100,6 +11111,9 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.False(shell.CanCapture, "A CaptureRecoveryOnly WPF path must wait for explicit CAM-A/B binding.");
         await CompleteDualBindingAsync(shell.DualBinding);
         Check.True(shell.CanCapture, "Ready binding plus explicit acceptance must enable only CaptureRecoveryOnly.");
+        // GitHub Issue #249: the round since the previous check holds the safety acceptance, the approval and the
+        // binding; CanCapture changed in it, so the 撮影 + AF button and its reason row must have been announced too.
+        AssertAccessibleNamesContainVisibleLabels(shell, "capture-recovery-only ready after approval");
         Check.False(shell.CanUseLiveView, "A Ready hardware binding must not enable the simulated main-stage Live View.");
         Check.False(shell.CanOpenMaintenance, "A Ready hardware binding must not enable simulated maintenance pages.");
         await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/one-shot",
@@ -11210,10 +11224,14 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
                 tenRunWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(tenRunEvidenceRoot)));
+        AccessibleNameNotificationRecorder.Attach(tenRunShell);
         await tenRunShell.InitializeAsync(CancellationToken.None);
         tenRunShell.IsPhysicalShutterAckAccepted = true;
         tenRunShell.IsExclusiveUseAckAccepted = true;
         tenRunShell.AcceptSafetyCommand.Execute(null);
+        // Ends the round of the start-up, so that the next check holds the binding completion alone (the binding gate
+        // change must announce CanCapture together with the 撮影 + AF button and its reason row).
+        AssertAccessibleNamesContainVisibleLabels(tenRunShell, "capture-recovery-only five-run safety accepted");
         await CompleteDualBindingAsync(tenRunShell.DualBinding);
         Check.True(tenRunShell.IsCaptureRecoveryOnlyFiveRunMode, "Only the explicit coordinator must select five-run mode.");
         Check.True(tenRunShell.CaptureRecoveryOnlyConfirmationText.Contains("5回", StringComparison.Ordinal) &&
@@ -11227,6 +11245,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         Check.False(tenRunShell.CanCapture, "A Ready binding must not bypass the dedicated five-run confirmation.");
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated five-run confirmation must explicitly unlock the selected mode.");
+        AssertAccessibleNamesContainVisibleLabels(tenRunShell, "capture-recovery-only five-run approved");
         await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run",
             () => WpfCommandState.Create(tenRunShell, tenRunOperations));
         Check.True(!tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
@@ -11388,6 +11407,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
                 pendingFiveWorkflow,
                 new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, "wpf-five-run-pending-evidence"))));
+        AccessibleNameNotificationRecorder.Attach(pendingFiveShell);
         await pendingFiveShell.InitializeAsync(CancellationToken.None);
         pendingFiveShell.IsPhysicalShutterAckAccepted = true;
         pendingFiveShell.IsExclusiveUseAckAccepted = true;
@@ -11420,12 +11440,13 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         AssertAccessibleNamesContainVisibleLabels(pendingFiveShell, "five-run re-check");
         // GitHub Issue #249: while the main button only re-checks the same ID, the 撮影 + AF button is off for that
         // reason, so the reason row is shown (CanCapture && !CanCaptureWithAutoFocus) and says so rather than
-        // repeating the real-hardware reason, which does not apply to this shell.
-        Check.True(pendingFiveShell.IsCaptureWithAutoFocusUnavailableReasonVisible,
-            "The 撮影 + AF reason row must be shown while the main button only re-checks the same ID.");
+        // repeating the real-hardware reason, which does not apply to this shell. The premise comes first: with
+        // the focus panel unavailable, the row would be shown for the other reason.
         Check.True(pendingFiveShell.IsFocusPanelAvailable,
             "The scenario needs a shell whose focus panel is available, so that the re-check is the only reason.");
-        Check.Equal("同じ撮影IDの結果を確認している間は、撮影+AFを使えません。", pendingFiveShell.CaptureWithAutoFocusUnavailableReason);
+        Check.True(pendingFiveShell.IsCaptureWithAutoFocusUnavailableReasonVisible,
+            "The 撮影 + AF reason row must be shown while the main button only re-checks the same ID.");
+        Check.Equal("撮影+AFは、主ボタンで同じ撮影IDの結果を確認し終えるまで使えません。", pendingFiveShell.CaptureWithAutoFocusUnavailableReason);
         foreach (var announced in new[]
         {
             nameof(OperatorShellViewModel.CaptureButtonAutomationName),
@@ -14921,6 +14942,7 @@ static async Task FocusPeakingOverlayHighlightsEdgesAndTogglesWithViewModelState
             dualCameraFlow: null,
             liveViewFramePump: pump,
             liveViewFrameSource: frameSource);
+        AccessibleNameNotificationRecorder.Attach(viewModel);
         await viewModel.InitializeAsync(CancellationToken.None);
         viewModel.AcceptSafetyCommand.Execute(null);
         Check.Equal("ピーキング ON", viewModel.PeakingButtonText);
@@ -14983,6 +15005,10 @@ static void AssertAccessibleNamesContainVisibleLabels(OperatorShellViewModel she
         Check.True(!string.IsNullOrWhiteSpace(label) && name.Contains(label, StringComparison.Ordinal),
             $"GitHub Issue #249 ({state}): the {control} accessible name '{name}' must contain its visible label '{label}'.");
     }
+
+    // The name must also be announced whenever the label is: see AccessibleNameNotificationRecorder. The recording
+    // of a view model starts at the first call or at an earlier Attach, and each call checks the round since the last.
+    AccessibleNameNotificationRecorder.AssertPairsNotified(shell, state);
 }
 
 static async Task FocusPanelDisabledInHardwareDualEnvironmentAsync()
@@ -15035,6 +15061,7 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
     await ownedCommands.RunAsync(async () =>
     {
         var viewModel = new OperatorShellViewModel(new SimulationFoundationService(root));
+        AccessibleNameNotificationRecorder.Attach(viewModel);
         await viewModel.InitializeAsync(CancellationToken.None);
         viewModel.AcceptSafetyCommand.Execute(null);
 
@@ -15136,6 +15163,7 @@ static async Task CaptureWithAutoFocusUnavailableUnderHardwareDualAsync()
         var viewModel = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, "journals")),
             hardwareFlow);
+        AccessibleNameNotificationRecorder.Attach(viewModel);
         await viewModel.InitializeAsync(CancellationToken.None);
         viewModel.AcceptSafetyCommand.Execute(null);
 

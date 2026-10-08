@@ -552,9 +552,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string CaptureRecoveryOnlyConfirmationText => IsCaptureRecoveryOnlyFiveRunMode
         ? "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を5回（実シャッター合計10回）実行します。"
         : "専用カード2枚が空であることを確認し、合成・A0品質判定を行わない『撮影・回収のみ』を1回実行します。";
-    // The spoken name starts with the visible sentence (WCAG 2.5.3), which follows the run count.
-    public string CaptureRecoveryOnlyConfirmationAutomationName =>
-        CaptureRecoveryOnlyConfirmationText + " 実行の承認";
+    // The spoken name is the visible sentence itself (WCAG 2.5.3); it follows the run count, and a checkbox
+    // already announces that it can be ticked.
+    public string CaptureRecoveryOnlyConfirmationAutomationName => CaptureRecoveryOnlyConfirmationText;
     public string CaptureRecoveryOnlyInstructionText => IsCaptureRecoveryOnlyFiveRunMode
         ? "A→Bの順で最大5組を撮影・回収します。最初の失敗で停止し、自動再試行はしません。合成はPending、A0品質はUnapprovedのままです。"
         : "A→Bの順に各1回だけ撮影・回収します。合成はPending、A0品質はUnapprovedのままです。";
@@ -589,6 +589,9 @@ public sealed class OperatorShellViewModel : ObservableObject
             }
 
             OnPropertyChanged(nameof(CanCapture));
+            OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+            OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+            OnPropertyChanged(nameof(CaptureWithAutoFocusUnavailableReason));
             OnPropertyChanged(nameof(CaptureAvailabilityText));
             OnPropertyChanged(nameof(CaptureDisabledReason));
             NotifyAllCommands();
@@ -1791,7 +1794,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     public string PeakingButtonText => IsPeakingEnabled ? "ピーキング OFF" : "ピーキング ON";
     public string PeakingButtonAutomationName =>
-        PeakingButtonText + " フォーカスピーキング ライブ画像へのエッジ強調 プレビュー専用 オンオフ切替";
+        PeakingButtonText + " ライブ画像のピントが合った縁を強調 プレビューだけで保存画像には影響しない";
 
     /// <summary>Preview-only edge-highlight overlay (see <see cref="FocusPeakingOverlayRenderer"/>)
     /// for the stage's single-live full-frame image. Null whenever peaking is off or no base
@@ -2390,13 +2393,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// 主ボタンが撮影をしないことを理由にする。</summary>
     public string CaptureWithAutoFocusUnavailableReason =>
         IsFocusPanelAvailable && IsMainButtonRecheckingSameTransaction
-            ? "同じ撮影IDの結果を確認している間は、撮影+AFを使えません。"
+            ? "撮影+AFは、主ボタンで同じ撮影IDの結果を確認し終えるまで使えません。"
             : FocusPanelUnavailableReason;
     /// <summary>カメラ(C)メニューの「identity状態」項目用（issue #34）の読み取り専用表示。
     /// <see cref="CaptureDisabledReason"/>が既に読んでいる同じ<see cref="IDualCameraProductFlow.IdentitySnapshot"/>
     /// を専用の表示文字列として公開するだけで、新しい業務ロジックは追加しない — 撮影失敗を
     /// 待たずにidentity状態を確認できるようにする目的のみ。</summary>
-    public string DualCameraIdentityStatusAutomationName => DualCameraIdentityStatusText + " 読み取り専用の表示";
     public string DualCameraIdentityStatusText => IsCaptureRecoveryOnlyMode
         ? $"同一Agent内の機体照合: {DualBinding.Phase} / 撮影引継ぎ: {(DualBinding.IsCaptureHostActivated ? "完了" : "未実施")}"
         : _dualCameraFlow is null
@@ -2404,6 +2406,9 @@ public sealed class OperatorShellViewModel : ObservableObject
         : IsSingleCameraMode
             ? "1台構成のため対象外"
             : $"機体照合: {_dualCameraFlow.IdentitySnapshot.Status}（{_dualCameraFlow.IdentitySnapshot.ReasonCode}）";
+
+    /// <summary>identity状態の項目の読み上げ名。表示文字列で始め、操作できない表示であることを続ける。</summary>
+    public string DualCameraIdentityStatusAutomationName => DualCameraIdentityStatusText + " 読み取り専用の表示";
 
     public bool CanUseLiveView =>
         !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode && _availability.LiveView.Allowed;
@@ -3429,6 +3434,9 @@ public sealed class OperatorShellViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(CanOpenHistoricalReview));
         OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CanCaptureWithAutoFocus));
+        OnPropertyChanged(nameof(IsCaptureWithAutoFocusUnavailableReasonVisible));
+        OnPropertyChanged(nameof(CaptureWithAutoFocusUnavailableReason));
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(DualCameraIdentityStatusText));
         OnPropertyChanged(nameof(DualCameraIdentityStatusAutomationName));
@@ -4354,7 +4362,7 @@ public sealed class OperatorShellViewModel : ObservableObject
 
     private void RaiseReadinessProperties()
     {
-        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText), nameof(DualCameraIdentityStatusText) }) OnPropertyChanged(name);
+        foreach (var name in new[] { nameof(ProfileText), nameof(OutputDirectory), nameof(CameraAStatus), nameof(CameraBStatus), nameof(SetupStatusText), nameof(CorrectionText), nameof(PhysicalAdjustmentText), nameof(BlockerText), nameof(CautionText), nameof(InfoText), nameof(OperatingModeDescription), nameof(CaptureButtonText), nameof(CaptureButtonAutomationName), nameof(ProcessingResultLabel), nameof(StageCompositeFreshnessText), nameof(StageSingleLiveText), nameof(StageSingleLiveAliasInPlan), nameof(StageCompositeApplicable), nameof(StageReviewBadgeText), nameof(DualCameraIdentityStatusText), nameof(DualCameraIdentityStatusAutomationName) }) OnPropertyChanged(name);
     }
 
     /// <summary>

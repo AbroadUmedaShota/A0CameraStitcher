@@ -254,7 +254,7 @@ try {
     Assert-Condition ($windowText.Contains('<Menu ')) 'Operator shell window must add a WPF Menu element for the menu bar (issue #34).'
     Assert-Condition (-not $windowText.Contains('TabStripPlacement="Left"')) 'Issue #34 must remove the left-nav TabControl (TabStripPlacement="Left").'
     Assert-Condition (-not $windowText.Contains('Header="編集')) 'Issue #34 must not add an 編集 (Edit) top-level menu — no image-editing feature exists in this contract.'
-    foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', 'このPCのフォルダへ保存(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '保守画面から撮影ダッシュボードへ戻る')) {
+    foreach ($marker in @('メニューバー ファイル カメラ 表示 ツール ヘルプ', 'ファイル(_F)', 'カメラ(_C)', '表示(_V)', 'ツール(_T)', 'ヘルプ(_H)', '保存先を指定', 'このPCのフォルダへ保存(_E)', '終了(_X)', '運用構成(_M)', 'カメラ設定を表示（read-only）', 'readiness再検査(_R)', '拡大エリア倍率', '傾き読み値の表示', '設置・校正(_S)', '再合成（別job）(_R)', '保存・診断(_D)', '技術情報（error code・ログ位置）(_T)', 'バージョン(_V)', '撮影ダッシュボードへ戻る 保守画面から戻る')) {
         Assert-Condition (($windowText + $viewModelText).Contains($marker)) "Operator shell is missing required menu bar binding/marker (issue #34): $marker"
     }
     foreach ($marker in @('SelectedPage', 'PageTitle', 'ShowDashboardCommand', 'ShowSetupCommand', 'ShowCameraSettingsCommand', 'ShowDiagnosticsCommand', 'IsSingleCameraModeChecked', 'IsDualCameraModeChecked', 'IsLoupeZoom100Checked', 'IsLoupeZoom200Checked', 'IsTiltReadingVisible', 'DualCameraIdentityStatusText', 'AppVersionText')) {
@@ -419,6 +419,37 @@ try {
         $label.Trim()
     }
     $labelledControlNames = @('Button', 'CheckBox', 'RadioButton', 'ToggleButton', 'MenuItem')
+    # A TextBlock whose Text is bound and whose AutomationProperties.Name is fixed shows a value that the fixed name
+    # hides from a screen reader and from voice control. Issue #263 owns these 24 existing cases and removes them
+    # one by one; this list only stops a new one from being added. Each entry is "file | Text binding | fixed name".
+    # Delete an entry when #263 fixes it, and do not add one.
+    $boundTextFixedNameAllowList = @(
+        'MainWindow.xaml | {Binding SelectedOperatingMode} | 状態チップ 現在の運用構成モード',
+        'MainWindow.xaml | {Binding ProfileText} | 設置プロファイル 版と期限',
+        'MainWindow.xaml | {Binding CameraAStatus} | CAM-A 状態表示',
+        'MainWindow.xaml | {Binding CameraBStatus} | CAM-B 状態表示',
+        'MainWindow.xaml | {Binding ReviewStatusText} | 撮影レビューの復元状態 未確認件数と採用済み件数',
+        'MainWindow.xaml | {Binding StageReviewBadgeText} | ステージ表示 結果確認バッジ',
+        'MainWindow.xaml | {Binding StageCompositeOverlapBandText} | 重複帯 幅pxプレースホルダ値 実測未接続',
+        'MainWindow.xaml | {Binding StageCompositeFreshnessText} | 非ライブ側 鮮度バッジ 経過秒',
+        'MainWindow.xaml | {Binding LoupePlaceholderText} | 拡大エリア フレーム未取得プレースホルダ',
+        'MainWindow.xaml | {Binding LoupeSourceLabelText} | 拡大エリア 表示ソースカメラ',
+        'MainWindow.xaml | {Binding LoupeFreshnessText} | 拡大エリア 鮮度バッジ 非ライブ側静止画',
+        'MainWindow.xaml | {Binding ProgressWatchdogText} | watchdog残り秒 実データ未接続時は180秒契約の静的表示',
+        'MainWindow.xaml | {Binding TiltRollDegreesText} | 傾き読み値 面内回転ROLL角 検出不能時は数値を出さない',
+        'MainWindow.xaml | {Binding TechnicalDetail} | 詳細情報 error code ログ位置',
+        'MainWindow.xaml | {Binding FocusPositionText} | フォーカス状態値 read-only 相対インジケータ 絶対値スライダーではない',
+        'MainWindow.xaml | {Binding CameraBFocusStatusText} | CAM-B フォーカス固定状態チップ',
+        'MainWindow.xaml | {Binding CameraAFocusStatusText} | CAM-A フォーカス固定状態チップ',
+        'MainWindow.xaml | {Binding PhysicalAdjustmentText} | 必要な物理調整',
+        'MainWindow.xaml | {Binding DualBinding.HeadlineKind} | 機体照合の状態区分',
+        'MainWindow.xaml | {Binding DualBinding.ResidualRiskText, Mode=OneTime} | 機体照合の残留リスク',
+        'MainWindow.xaml | {Binding DualBinding.PreviewPlaceholderText} | ライブ表示の代替説明',
+        'MainWindow.xaml | {Binding DualBinding.SelectedCandidateName, StringFormat=表示中: {0}} | 表示中の候補',
+        'HardwareSingleCameraWindow.xaml | {Binding ObservedSettingsText} | read-only observed camera settings',
+        'HardwareSingleCameraWindow.xaml | {Binding HistoricalReviewPageText} | 未確認の保存結果のページ'
+    )
+    $boundTextFixedNameFound = New-Object System.Collections.Generic.List[string]
     $labelInNameFailures = New-Object System.Collections.Generic.List[string]
     $labelInNameChecked = 0
     foreach ($labelFile in @('MainWindow.xaml', 'HardwareSingleCameraWindow.xaml', 'LaunchWindow.xaml', 'ReviewImageWindow.xaml', 'HistoricalReviewWindow.xaml')) {
@@ -443,6 +474,7 @@ try {
             foreach ($visibleText in $visibleTexts) {
                 if ($visibleText.Contains('{')) {
                     if ($isControl) { $labelInNameFailures.Add("$where has a fixed name but a bound label '$visibleText'; bind the name to the view model so that it follows the label.") }
+                    elseif ($labelNode.LocalName -eq 'TextBlock') { $boundTextFixedNameFound.Add("$labelFile | $visibleText | $accessibleName") }
                     continue
                 }
                 $label = & $normalizeLabel $visibleText
@@ -454,13 +486,21 @@ try {
     }
     Assert-Condition ($labelInNameFailures.Count -eq 0) ("Accessible names must contain the visible label (WCAG 2.5.3, issue #249):$([Environment]::NewLine)" + ($labelInNameFailures -join [Environment]::NewLine))
     Assert-Condition ($labelInNameChecked -ge 40) "The label-in-name check compared only $labelInNameChecked labels; it must keep reaching the windows' controls (issue #249)."
+    $newBoundTextFixedName = @($boundTextFixedNameFound | Where-Object { $boundTextFixedNameAllowList -notcontains $_ })
+    Assert-Condition ($newBoundTextFixedName.Count -eq 0) ("A TextBlock with a bound Text must not get a fixed AutomationProperties.Name, which hides the value it shows (issue #263; do not extend the allow list):$([Environment]::NewLine)" + ($newBoundTextFixedName -join [Environment]::NewLine))
+    Assert-Condition ($boundTextFixedNameFound.Count -ge 20) "The bound-text check found only $($boundTextFixedNameFound.Count) TextBlocks; it must keep reaching them (issue #263)."
+    $fixedBoundTextEntries = @($boundTextFixedNameAllowList | Where-Object { $boundTextFixedNameFound -notcontains $_ })
+    if ($fixedBoundTextEntries.Count -gt 0) {
+        Write-Host ("Note: {0} allow list entries no longer match a TextBlock; delete them from `$boundTextFixedNameAllowList (issue #263):{1}{2}" -f $fixedBoundTextEntries.Count, [Environment]::NewLine, ($fixedBoundTextEntries -join [Environment]::NewLine))
+    }
     Assert-Condition ($windowText.Contains('AutomationProperties.Name="{Binding CaptureWithAutoFocusUnavailableReason, StringFormat=') -and -not $windowText.Contains('撮影+AF 実機モードでは実行不可 理由')) 'The 撮影+AF reason row must bind its accessible name to its text instead of replacing it with a fixed name (issue #249).'
     # Long reasons and status sentences must wrap instead of being cut off (issue #249).
     foreach ($wrappedBinding in @('CaptureDisabledReason', 'StatusMessage', 'BlockerText', 'CautionText', 'InfoText', 'CaptureWithAutoFocusUnavailableReason')) {
-        $wrappedNode = @($windowXml.SelectNodes(('//*[local-name()="TextBlock"][@Text="{{Binding {0}}}"]' -f $wrappedBinding))) | Select-Object -First 1
-        Assert-Condition ($null -ne $wrappedNode -and $wrappedNode.GetAttribute('TextWrapping') -eq 'Wrap') "The TextBlock showing $wrappedBinding must set TextWrapping=Wrap so that a long sentence is not cut off (issue #249)."
+        $wrappedNodes = @($windowXml.SelectNodes(('//*[local-name()="TextBlock"][@Text="{{Binding {0}}}"]' -f $wrappedBinding)))
+        Assert-Condition ($wrappedNodes.Count -ge 1) "MainWindow.xaml has no TextBlock showing $wrappedBinding (issue #249)."
+        $unwrappedNodes = @($wrappedNodes | Where-Object { $_.GetAttribute('TextWrapping') -ne 'Wrap' })
+        Assert-Condition ($unwrappedNodes.Count -eq 0) "Every TextBlock showing $wrappedBinding must set TextWrapping=Wrap so that a long sentence is not cut off; $($unwrappedNodes.Count) of $($wrappedNodes.Count) do not (issue #249)."
     }
-    Assert-Condition ($viewModelText.Contains('IsCaptureWithAutoFocusUnavailableReasonVisible => CanCapture && !CanCaptureWithAutoFocus;')) 'The 撮影+AF reason row must be shown whenever the main button is pressable but 撮影+AF is not (issue #249).'
     Write-Host 'M3 simulated foundation, formal DualCamera JPEG product flow, and SingleCamera regression passed validation.'
     exit 0
 }

@@ -1184,7 +1184,7 @@
                                                     <!-- 従ボタン（小）: 撮影+AF。各カメラの撮影直前へAF段を挿入し、NGならシャッターへ進まずfail-closed停止する -->
                                                     <Button Grid.Column="2" Command="{Binding CaptureWithAutoFocusCommand}"
                                                             IsEnabled="{Binding CanCaptureWithAutoFocus}" Padding="4"
-                                                            AutomationProperties.Name="従ボタン 撮影 + AF AF→撮影 各カメラの撮影直前にAFを実行してから撮影 AFに失敗したら撮影せず停止し自動では再試行しない">
+                                                            AutomationProperties.Name="従ボタン 撮影 + AF AF→撮影 各カメラの撮影前にAFを実行 失敗したら撮影せず停止 自動では再試行しない">
                                                         <StackPanel>
                                                             <TextBlock Text="撮影 + AF" TextAlignment="Center"
                                                                        FontSize="{StaticResource FontSizeLabel}"
@@ -1429,7 +1429,7 @@
                         <StackPanel Margin="18" MaxWidth="960" HorizontalAlignment="Left">
                             <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
                                     HorizontalAlignment="Left" Margin="0,0,0,12"
-                                    AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
+                                    AutomationProperties.Name="撮影ダッシュボードへ戻る 保守画面から戻る" />
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
                                     <TextBlock Text="設置・校正（模擬動作）" Style="{StaticResource SectionTitleStyle}" />
@@ -1472,7 +1472,7 @@
                         <StackPanel Margin="18" MaxWidth="960" HorizontalAlignment="Left">
                             <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
                                     HorizontalAlignment="Left" Margin="0,0,0,12"
-                                    AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
+                                    AutomationProperties.Name="撮影ダッシュボードへ戻る 保守画面から戻る" />
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
                                     <TextBlock Text="カメラ設定（read-only）" Style="{StaticResource SectionTitleStyle}" />
@@ -1500,7 +1500,7 @@
                         <StackPanel Margin="18" MaxWidth="960" HorizontalAlignment="Left">
                             <Button Content="← 撮影ダッシュボードへ戻る" Command="{Binding ShowDashboardCommand}"
                                     HorizontalAlignment="Left" Margin="0,0,0,12"
-                                    AutomationProperties.Name="保守画面から撮影ダッシュボードへ戻る" />
+                                    AutomationProperties.Name="撮影ダッシュボードへ戻る 保守画面から戻る" />
                             <Border Style="{StaticResource CardStyle}" Padding="16">
                                 <StackPanel>
                                     <TextBlock Text="保存・診断（模擬動作）" Style="{StaticResource SectionTitleStyle}" />
