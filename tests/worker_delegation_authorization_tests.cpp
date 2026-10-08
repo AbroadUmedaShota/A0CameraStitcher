@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 using namespace a0::phase0;
 namespace fs = std::filesystem;
@@ -92,8 +93,20 @@ int ValidateChild(int argc, char **argv) {
         nullptr, argv[3], argv[4], fs::u8path(argv[5]));
     const auto missing_record = HardwareProcessLease::ValidateWorkerDelegation(
         parent, argv[3], argv[4], fs::u8path(argv[6]));
+    // A name the file system would rewrite (8.3 short-name syntax) that does not
+    // exist yet is refused before anything is created, with the parent handle
+    // and epoch unchanged. The folder must not appear: before the alias check,
+    // a missing directory under the root was created on the way to the marker.
+    const auto aliased_root = fs::u8path(argv[5]) / L"probe~1";
+    const auto aliased_record = HardwareProcessLease::ValidateWorkerDelegation(
+        parent, argv[3], argv[4], aliased_root);
+    std::error_code existence_error;
+    const auto aliased_created = fs::exists(aliased_root, existence_error);
     CloseHandle(parent);
-    return actual == expected && !wrong_epoch && !forged_parent && !missing_record ? 0 : 7;
+    return actual == expected && !wrong_epoch && !forged_parent && !missing_record && !aliased_record &&
+                   !aliased_created && !existence_error
+               ? 0
+               : 7;
 }
 
 Handle DuplicateParentForChild() {
