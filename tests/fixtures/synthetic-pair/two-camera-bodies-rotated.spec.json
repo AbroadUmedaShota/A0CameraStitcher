@@ -1,0 +1,43 @@
+{
+  "schema": "a0.m2.synthetic-pair-spec/2",
+  "seed": 269269,
+  "image": { "width_px": 7360, "height_px": 4912, "supersample": 2 },
+  "jpeg": { "quality": 0.95, "chroma_subsampling": "444" },
+  "chart": {
+    "width_mm": 1189,
+    "height_mm": 841,
+    "margin_mm": 20,
+    "grid_pitch_mm": 10,
+    "grid_line_width_mm": 0.3,
+    "fiducial_pitch_mm": 50,
+    "fiducial_radius_mm": 7,
+    "slanted_edge_slope": 0.0875,
+    "fine_line_base_width_mm": 0.2
+  },
+  "cameras": [
+    {
+      "alias": "CAM-A",
+      "projection": {
+        "intrinsics": { "fxPixels": 4424, "fyPixels": 4424, "cxPixels": 3679.5, "cyPixels": 2455.5 },
+        "distortion": { "model": "brown-conrady-k1k2k3-p1p2", "k1": -0.045, "k2": 0.012, "k3": 0, "p1": 0, "p2": 0 },
+        "placement": { "center_mm": [324.5, 420.5], "pixels_per_mm": 7.27, "quarter_turns": 3 }
+      },
+      "exposure_gain": 1.0,
+      "white_balance_gain": [1.0, 1.0, 1.0],
+      "vignette": [-0.18, 0.04],
+      "noise": { "read_sigma": 0.004, "shot_sigma": 0.006 }
+    },
+    {
+      "alias": "CAM-B",
+      "projection": {
+        "intrinsics": { "fxPixels": 4424, "fyPixels": 4424, "cxPixels": 3679.5, "cyPixels": 2455.5 },
+        "distortion": { "model": "brown-conrady-k1k2k3-p1p2", "k1": -0.03, "k2": 0.008, "k3": 0, "p1": 0, "p2": 0 },
+        "placement": { "center_mm": [865.5, 420.5], "pixels_per_mm": 7.27, "quarter_turns": 3 }
+      },
+      "exposure_gain": 1.06,
+      "white_balance_gain": [1.03, 1.0, 0.97],
+      "vignette": [-0.2, 0.05],
+      "noise": { "read_sigma": 0.005, "shot_sigma": 0.007 }
+    }
+  ]
+}

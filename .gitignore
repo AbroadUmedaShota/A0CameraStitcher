@@ -33,6 +33,7 @@ artifacts/
 *.jpg
 *.jpeg
 *.png
+*.partial
 !docs/assets/*.png
 !samples/public/README.md
 

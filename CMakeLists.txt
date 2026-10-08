@@ -260,6 +260,70 @@ else()
     target_compile_options(A0CameraStitcher.OpticalPlanner PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Ground-truth synthetic image pair generator (issue #269). It must stay
+# independent of the product warp/blend, otherwise a defect in the product could
+# also shape the images used to judge it. Fail the configure step if the target
+# can reach a0_m2_offline_stitcher, directly or through any dependency, or
+# compiles one of its sources.
+function(a0_assert_no_product_stitch_dependency target)
+    set(pending "${target}")
+    set(visited "")
+    while(pending)
+        list(POP_FRONT pending current)
+        if(current IN_LIST visited OR NOT TARGET "${current}")
+            continue()
+        endif()
+        list(APPEND visited "${current}")
+        if(current STREQUAL "a0_m2_offline_stitcher")
+            message(FATAL_ERROR "${target} must not depend on a0_m2_offline_stitcher (product warp/blend)")
+        endif()
+        get_target_property(sources "${current}" SOURCES)
+        foreach(source IN LISTS sources)
+            if(source MATCHES "offline_stitcher|stitch_job_manifest")
+                message(FATAL_ERROR "${target} must not compile product stitch source ${source} (via ${current})")
+            endif()
+        endforeach()
+        foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+            get_target_property(libraries "${current}" "${property}")
+            if(libraries)
+                foreach(library IN LISTS libraries)
+                    string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" library "${library}")
+                    list(APPEND pending "${library}")
+                endforeach()
+            endif()
+        endforeach()
+    endwhile()
+endfunction()
+
+add_library(a0_m2_synthetic_pair
+    src/m2/synthetic_pair_chart.cpp
+    src/m2/synthetic_pair_geometry.cpp
+    src/m2/synthetic_pair_json.cpp
+    src/m2/synthetic_pair_render.cpp
+    src/m2/synthetic_pair_spec.cpp
+    src/m2/synthetic_pair_writer.cpp
+)
+target_include_directories(a0_m2_synthetic_pair PUBLIC src/m2/include PRIVATE src/m2)
+target_link_libraries(a0_m2_synthetic_pair PRIVATE ole32 windowscodecs bcrypt psapi)
+target_compile_definitions(a0_m2_synthetic_pair PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    # No fast-math and no FMA contraction: the pixels must not depend on the build.
+    target_compile_options(a0_m2_synthetic_pair PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_synthetic_pair PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+add_executable(A0CameraStitcher.SyntheticPairGenerator src/m2/synthetic_pair_generator_main.cpp)
+target_link_libraries(A0CameraStitcher.SyntheticPairGenerator PRIVATE a0_m2_synthetic_pair)
+target_compile_definitions(A0CameraStitcher.SyntheticPairGenerator PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(A0CameraStitcher.SyntheticPairGenerator PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(A0CameraStitcher.SyntheticPairGenerator PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+a0_assert_no_product_stitch_dependency(a0_m2_synthetic_pair)
+a0_assert_no_product_stitch_dependency(A0CameraStitcher.SyntheticPairGenerator)
+
 include(CTest)
 if(BUILD_TESTING)
     # Anonymized real-device responses replayed by the native contract tests (issue #231).
@@ -678,6 +742,30 @@ if(BUILD_TESTING)
         target_compile_options(m2_render_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_render_contracts COMMAND m2_render_contracts)
+    # Synthetic pair generator contracts (issue #269). The generator and the
+    # adapter run as separate processes; the test itself links only the generator.
+    add_executable(m2_synthetic_pair_contracts tests/synthetic_pair_tests.cpp)
+    target_link_libraries(m2_synthetic_pair_contracts PRIVATE a0_m2_synthetic_pair)
+    # The publish contract test calls the internal PublishAll.
+    target_include_directories(m2_synthetic_pair_contracts PRIVATE src/m2)
+    target_compile_definitions(m2_synthetic_pair_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+    add_dependencies(m2_synthetic_pair_contracts
+        A0CameraStitcher.SyntheticPairGenerator A0CameraStitcher.M2Adapter)
+    if(MSVC)
+        target_compile_options(m2_synthetic_pair_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_synthetic_pair_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    a0_assert_no_product_stitch_dependency(m2_synthetic_pair_contracts)
+    find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_test(NAME m2_synthetic_pair_contracts
+        COMMAND m2_synthetic_pair_contracts
+            --generator $<TARGET_FILE:A0CameraStitcher.SyntheticPairGenerator>
+            --adapter $<TARGET_FILE:A0CameraStitcher.M2Adapter>
+            --spec "${CMAKE_SOURCE_DIR}/tests/fixtures/synthetic-pair/two-camera-bodies-rotated.spec.json"
+            --powershell "${A0_POWERSHELL_EXECUTABLE}"
+            --profile-schema "${CMAKE_SOURCE_DIR}/docs/schemas/rig-profile.v2.schema.json")
+    set_tests_properties(m2_synthetic_pair_contracts PROPERTIES TIMEOUT 1800)
 
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_executable(a0_pc_direct_summary_v2_fixture
