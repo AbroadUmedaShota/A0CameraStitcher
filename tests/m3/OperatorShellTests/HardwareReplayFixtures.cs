@@ -34,6 +34,14 @@ internal static class HardwareReplayFixtures
     internal static string Directory { get; } =
         Path.Combine(AppContext.BaseDirectory, "fixtures", "hardware-replay");
 
+    // The fixture folder must have been copied next to the test binary. The failure text has no path:
+    // the full path holds the profile of the machine running the test.
+    internal static void RequireDirectory(string root)
+    {
+        if (!System.IO.Directory.Exists(root))
+            throw new InvalidOperationException("The replay fixtures were not copied next to the test binary.");
+    }
+
     internal static string ReadText(string relativePath) =>
         File.ReadAllText(Path.Combine(Directory, relativePath), Encoding.UTF8);
 
@@ -122,6 +130,24 @@ internal static class HardwareReplayAnonymizationRules
     private static readonly Regex UncPath = new(
         @"(?<![A-Za-z0-9:\\/.])(?:\\{2,4}|//)[A-Za-z0-9_$][A-Za-z0-9._$\-]*(?:\\{1,2}|/)", RegexOptions.Compiled);
 
+    // The word rules that are also applied to the names of the files (#260): a host name, a PC name
+    // or a USB / PnP ID in a path is published as it is in a content.
+    private const string UsbOrPnpIdentifierName = "USB or PnP identifier";
+    private const string AccountOrHostNameName = "windows account or host name";
+    private const string DefaultHostNameName = "default windows host name";
+    private const string DefaultHostNameOtherCaseName = "default windows host name (other case)";
+    private static readonly Regex UsbOrPnpIdentifier = new(
+        @"\b(vid|pid)_[0-9a-f]{4}|usb[\\#]|\\\\\?\\|device ?id|instance ?id|pnp", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AccountOrHostName = new(
+        @"\b[A-Z]{2,6}-\d{2}-NOTE\b|\buser name\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Windows' own default names (DESKTOP-xxxxxxx and the like). The upper-case rule is
+    // case-sensitive on purpose: "win-x64" style runtime identifiers are not host names. A
+    // lower-case copy of the PC name is still the PC name, so DESKTOP- and LAPTOP- are also
+    // read in any case, and WIN- in any case when it has the 11 characters Windows generates.
+    private static readonly Regex DefaultHostName = new(@"\b(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9]{5,}\b", RegexOptions.Compiled);
+    private static readonly Regex DefaultHostNameOtherCase = new(
+        @"\b(?:desktop|laptop)-[a-z0-9]{5,}\b|\bwin-[a-z0-9]{11}\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     // Forbidden anywhere in a data file. Documentation (README.md) is exempt from the word rules
     // only, because it has to say which categories were removed.
     private static readonly (string Name, Regex Pattern)[] DataFileRules =
@@ -129,15 +155,10 @@ internal static class HardwareReplayAnonymizationRules
         ("user profile path", new Regex(@"[\\/]users[\\/]", RegexOptions.IgnoreCase)),
         ("app data folder", new Regex("appdata", RegexOptions.IgnoreCase)),
         ("serial number", new Regex("serial", RegexOptions.IgnoreCase)),
-        ("USB or PnP identifier", new Regex(@"\b(vid|pid)_[0-9a-f]{4}|usb[\\#]|\\\\\?\\|device ?id|instance ?id|pnp", RegexOptions.IgnoreCase)),
-        ("windows account or host name", new Regex(@"\b[A-Z]{2,6}-\d{2}-NOTE\b|\buser name\b", RegexOptions.IgnoreCase)),
-        // Windows' own default names (DESKTOP-xxxxxxx and the like). The upper-case rule is
-        // case-sensitive on purpose: "win-x64" style runtime identifiers are not host names. A
-        // lower-case copy of the PC name is still the PC name, so DESKTOP- and LAPTOP- are also
-        // read in any case, and WIN- in any case when it has the 11 characters Windows generates.
-        ("default windows host name", new Regex(@"\b(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9]{5,}\b")),
-        ("default windows host name (other case)", new Regex(
-            @"\b(?:desktop|laptop)-[a-z0-9]{5,}\b|\bwin-[a-z0-9]{11}\b", RegexOptions.IgnoreCase)),
+        (UsbOrPnpIdentifierName, UsbOrPnpIdentifier),
+        (AccountOrHostNameName, AccountOrHostName),
+        (DefaultHostNameName, DefaultHostName),
+        (DefaultHostNameOtherCaseName, DefaultHostNameOtherCase),
         ("host, machine, account or owner field", new Regex(
             "\"[\\w\\-]*(?:computer|machine|host|pc|user|account|login)[\\w\\-]*name[\\w\\-]*\"\\s*:|\"[\\w\\-]*owner[\\w\\-]*\"\\s*:",
             RegexOptions.IgnoreCase)),
@@ -179,7 +200,10 @@ internal static class HardwareReplayAnonymizationRules
     // dot with a digit on its other side (a decimal fraction), keeps it out. A dot alone does not:
     // 3012345.jpg is a number with a file extension, 1234567.5 is a fraction (#247). The
     // synthetic shapes below are removed first.
-    private static readonly Regex LongDigitRun = new(@"(?<![0-9])(?<![0-9]\.)\d{6,}(?![0-9])(?!\.[0-9])", RegexOptions.Compiled);
+    // The one exception to the dot rule (#260): a run behind "digit." and in front of ".letter" is a
+    // name with an extension (9.1234567.jpg), not a fraction.
+    private static readonly Regex LongDigitRun = new(
+        @"(?<![0-9])(?:(?<![0-9]\.)\d{6,}(?![0-9])(?!\.[0-9])|(?<=[0-9]\.)\d{6,}(?![0-9])(?=\.[A-Za-z]))", RegexOptions.Compiled);
 
     private static readonly Regex PathDigitRun = new(@"(?<![0-9])\d{6,}(?![0-9])", RegexOptions.Compiled);
 
@@ -197,7 +221,8 @@ internal static class HardwareReplayAnonymizationRules
 
     // Dates the first scans did not read: M/d/yyyy and d.M.yyyy (day and month either way round),
     // yyyy-M-d with one-digit parts, "15 Jun 2026" / "Jun 15, 2026" (RFC 1123 and prose) and
-    // yyyyMMddHHmmss (DSC_20260615050532). Only January 2026 is allowed, as for the other forms.
+    // yyyyMMddHHmmss (DSC_20260615050532), and the year first with a month name (2026-Jun-15, #260).
+    // Only January 2026 is allowed, as for the other forms.
     private static readonly Regex DateYearFirstLoose = new(
         @"(?<!\d)((?:19|20)\d{2})([-/:.])(\d{1,2})\2(\d{1,2})(?!\d)", RegexOptions.Compiled);
     private static readonly Regex DateYearLast = new(
@@ -209,7 +234,8 @@ internal static class HardwareReplayAnonymizationRules
     private static readonly Regex DateMonthName = new(
         @"(?<![A-Za-z0-9])(?:(\d{1,2})(?:st|nd|rd|th)?" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?,?" + MonthNameSeparator +
         @"((?:19|20)\d{2})|(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator + @"(\d{1,2})(?:st|nd|rd|th)?,?" + MonthNameSeparator +
-        @"((?:19|20)\d{2}))(?![A-Za-z0-9])",
+        @"((?:19|20)\d{2})|((?:19|20)\d{2})" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator +
+        @"(\d{1,2})(?:st|nd|rd|th)?)(?![A-Za-z0-9])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex DateTimeCompact = new(
         @"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d[0-5]\d(?:\d{3})?(?!\d)", RegexOptions.Compiled);
@@ -270,6 +296,7 @@ internal static class HardwareReplayAnonymizationRules
         [
             HexRun, DashedGuid, EmailAddress, Epoch, DateNumeric, DateJapanese, DateYearFirstLoose, DateYearLast,
             DateMonthName, DateTimeCompact, PathDigitRun,
+            UsbOrPnpIdentifier, AccountOrHostName, DefaultHostName, DefaultHostNameOtherCase,
         ];
         foreach (var pattern in patterns)
         {
@@ -298,6 +325,14 @@ internal static class HardwareReplayAnonymizationRules
         var problems = new List<string>();
         problems.AddRange(ScanEnvironment(label, relative, environmentNeedles));
         problems.AddRange(ScanShapes(label, relative, new HashSet<string>(StringComparer.Ordinal), checkLooseValues: false));
+        // A host name, a PC name of the XX-99-NOTE form and a USB / PnP ID are as much an identifier
+        // in a file name as in a content (#260).
+        foreach (var (ruleName, pattern) in DataFileRules)
+        {
+            if (ruleName is UsbOrPnpIdentifierName or AccountOrHostNameName or DefaultHostNameName or DefaultHostNameOtherCaseName &&
+                pattern.IsMatch(relative))
+                problems.Add($"{label}: contains a {ruleName}");
+        }
         // A dot in a name is the extension, not a decimal point (cam1234567.json), so the digit-run
         // rule here only looks at digits touching digits.
         // Hex runs and GUIDs were judged as a whole above, like the synthetic run IDs.
@@ -545,8 +580,13 @@ internal static class HardwareReplayAnonymizationRules
         }
         foreach (Match match in DateMonthName.Matches(numeric))
         {
-            var month = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[4].Value;
-            var year = match.Groups[3].Success ? match.Groups[3].Value : match.Groups[6].Value;
+            // Day first (groups 1 to 3), month first (4 to 6) or year first (7 to 9: 2026-Jun-15).
+            var month = match.Groups[2].Success ? match.Groups[2].Value
+                : match.Groups[4].Success ? match.Groups[4].Value
+                : match.Groups[8].Value;
+            var year = match.Groups[3].Success ? match.Groups[3].Value
+                : match.Groups[6].Success ? match.Groups[6].Value
+                : match.Groups[7].Value;
             if (year != "2026" || !month.StartsWith("jan", StringComparison.OrdinalIgnoreCase))
                 problems.Add($"{name}: date at offset {match.Index} is outside the shifted fixture month");
         }

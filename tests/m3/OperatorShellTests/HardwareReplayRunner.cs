@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using A0CameraStitcher.M3.Foundation.DualCamera;
 using A0CameraStitcher.M3.Foundation.Hardware;
 using A0CameraStitcher.M3.OperatorShell.Hardware;
@@ -17,6 +18,8 @@ internal static class HardwareReplayContracts
         AnonymizationRulesCloseTheKnownGaps();
         AnonymizationRulesCloseTheGapsOfTheSecondAudit();
         AnonymizationRulesCloseTheGapsOfTheThirdAudit();
+        PinnedImageHashesAgreeWithTheLeakCheckScript();
+        AnonymizationRulesCloseTheGapsOfIssue260();
         OperatorInputsAndDurableStateLoadThroughProductionReaders();
         await SingleCameraProfileApprovalReproducesTheRealApprovedProfileAsync();
         await SingleCameraReplaySavesThroughViewModelAsync();
@@ -36,7 +39,7 @@ internal static class HardwareReplayContracts
     private static void FixtureFilesAreAnonymizedAndSelfConsistent()
     {
         var root = HardwareReplayFixtures.Directory;
-        Check.True(System.IO.Directory.Exists(root), $"The replay fixtures were not copied next to the test binary: {root}");
+        HardwareReplayFixtures.RequireDirectory(root);
 
         var fileSetProblems = HardwareReplayAnonymizationRules.CheckFileSet(root);
         Check.True(fileSetProblems.Count == 0, "Replay fixture file set: " + string.Join("; ", fileSetProblems));
@@ -607,6 +610,141 @@ internal static class HardwareReplayContracts
             "single-camera/transaction.json", "{\"serial\":\"x\"}", allowed, isDocumentation: false, noNeedles);
         Check.True(plainProblems.Any(problem => problem.StartsWith("single-camera/transaction.json:", StringComparison.Ordinal)),
             "An ordinary file name must stay readable in the failure message.");
+    }
+
+    // GitHub Issue #260: the push check (scripts/Test-ReplayFixtureLeak.ps1) accepts an image only as
+    // one of the three pinned dummy images, in the fixture image folder. It holds a copy of the
+    // hashes (PinnedSha256 above); the two copies must be the same.
+    private static void PinnedImageHashesAgreeWithTheLeakCheckScript()
+    {
+        // The script is copied next to the test binary (see the project file); the failure texts
+        // below have no path, which would hold the profile of the machine running the test.
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "Test-ReplayFixtureLeak.ps1");
+        Check.True(File.Exists(scriptPath), "The push check script was not copied next to the test binary.");
+        var text = File.ReadAllText(scriptPath);
+
+        var block = Regex.Match(text, @"\$script:PinnedImageSha256\s*=\s*@\((?<list>[^)]*)\)", RegexOptions.Singleline);
+        Check.True(block.Success, "The push check script has no pinned image hash list.");
+        var quoted = Regex.Matches(block.Groups["list"].Value, "'([^']*)'").Select(match => match.Groups[1].Value).ToList();
+        Check.True(quoted.All(value => Regex.IsMatch(value, "^[0-9a-f]{64}$")),
+            "Every entry of the pinned image hash list of the push check script must be 64 lower-case hexadecimal digits.");
+        Check.Equal(HardwareReplayJpegContracts.PinnedSha256.Count, quoted.Count);
+        Check.True(
+            quoted.ToHashSet(StringComparer.Ordinal).SetEquals(HardwareReplayJpegContracts.PinnedSha256.Values),
+            "The pinned image hashes of the push check script differ from PinnedSha256 in HardwareReplayFixtures.cs.");
+
+        // The folder the script accepts the images in: the one the project copies as fixtures/hardware-replay/images.
+        Check.True(
+            text.Contains("$script:PinnedImageDirectory = 'tests/fixtures/hardware-replay/images/'", StringComparison.Ordinal),
+            "The push check script must accept the pinned images only in tests/fixtures/hardware-replay/images/.");
+        foreach (var name in HardwareReplayJpegContracts.PinnedSha256.Keys)
+        {
+            Check.True(
+                File.Exists(Path.Combine(HardwareReplayFixtures.Directory, "images", name + ".jpg.b64")),
+                $"The pinned image '{name}' is not in the fixture image folder.");
+        }
+    }
+
+    // GitHub Issue #260: the LOW findings of the audit of #247 that concern the file-name and
+    // content rules (the host and PC names and USB IDs in a file name, a date with a month name after
+    // the year, a name with a number and an extension). Every input is invented.
+    private static void AnonymizationRulesCloseTheGapsOfIssue260()
+    {
+        IReadOnlySet<string> allowed = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<string> noNeedles = [];
+
+        IReadOnlyList<string> ScanJson(string sample) =>
+            HardwareReplayAnonymizationRules.Scan("sample.json", sample, allowed, isDocumentation: false, noNeedles);
+
+        void MustReject(string gap, string sample, string messagePart)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count > 0, $"The anonymization scan missed ({gap}): {sample}");
+            Check.True(problems.Any(problem => problem.Contains(messagePart, StringComparison.Ordinal)),
+                $"The anonymization scan rejected ({gap}) for another reason than '{messagePart}': {string.Join("; ", problems)}");
+        }
+
+        void MustAccept(string what, string sample)
+        {
+            var problems = ScanJson(sample);
+            Check.True(problems.Count == 0, $"The anonymization scan must accept {what}: {string.Join("; ", problems)}");
+        }
+
+        // A number with an extension behind a digit and a dot is not a fraction; real fractions stay accepted.
+        MustReject("a number between a digit-dot and an extension", "{\"file\":\"9.1234567.jpg\"}", "7-digit number");
+        MustReject("a number between a digit-dot and a dotted extension", "{\"file\":\"2.3012345.tar.gz\"}", "7-digit number");
+        MustAccept("fractions", "{\"a\":\"9.1234567\",\"b\":1234567.5,\"c\":\"0.1234567\",\"d\":\"9.1234567.5\"}");
+
+        // A month name after the year.
+        MustReject("date as yyyy-MMM-d", "{\"day\":\"2026-Jun-15\"}", "date at offset");
+        MustReject("date as yyyy MMMM d", "{\"day\":\"2025 January 15\"}", "date at offset");
+        MustReject("date as yyyy/MMM/d with an ordinal", "{\"day\":\"2026/Feb/1st\"}", "date at offset");
+        MustAccept("January 2026 with the year first", "{\"a\":\"2026-Jan-15\",\"b\":\"2026 January 5\"}");
+
+        // The names of the files: the rules for host names, PC names and USB IDs apply to them too, and
+        // a failure text does not show the part of the name that matched.
+        foreach (var (gap, relative, value, rule) in new[]
+                 {
+                     ("default host name", "single-camera/DESKTOP-ABCD123.json", "DESKTOP-ABCD123", "default windows host name"),
+                     ("default host name in a directory name", "dual-camera/LAPTOP-WXYZ789/x.json", "LAPTOP-WXYZ789", "default windows host name"),
+                     ("default host name in lower case", "single-camera/desktop-abcd123.json", "desktop-abcd123", "default windows host name"),
+                     ("11-character WIN- host name", "single-camera/win-abcdefghijk.json", "win-abcdefghijk", "default windows host name"),
+                     ("PC name of the XX-99-NOTE form", "single-camera/PC-12-NOTE.json", "PC-12-NOTE", "windows account or host name"),
+                     ("USB vendor / product ID", "single-camera/vid_04b0.json", "vid_04b0", "USB or PnP identifier"),
+                     ("instance ID word", "single-camera/instanceid.json", "instanceid", "USB or PnP identifier"),
+                     ("year first with a month name", "single-camera/events-2026-Jun-15.json", "2026-Jun-15", "date at offset"),
+                 })
+        {
+            var problems = HardwareReplayAnonymizationRules.ScanRelativePath(relative, noNeedles);
+            Check.True(problems.Any(problem => problem.Contains(rule, StringComparison.Ordinal)),
+                $"The file-name check missed ({gap}) or rejected it for another reason than '{rule}': {string.Join("; ", problems)}");
+            Check.True(problems.All(problem => !problem.Contains(value, StringComparison.OrdinalIgnoreCase)),
+                $"A failure message must not show the part of the file name that failed ({gap}).");
+        }
+        foreach (var relative in new[]
+                 {
+                     "single-camera/win-x64.json",
+                     "single-camera/events-2026-Jan-15.json",
+                     "single-camera/ghost-state.json",
+                     "dual-camera/succeeded/pair-journal.json",
+                 })
+        {
+            Check.True(HardwareReplayAnonymizationRules.ScanRelativePath(relative, noNeedles).Count == 0,
+                $"The file-name check must accept {relative}.");
+        }
+        var folderRoot = HardwareReplayFixtures.NewTestRoot();
+        try
+        {
+            var path = Path.Combine(folderRoot, "single-camera", "DESKTOP-ABCD123.json");
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "{}");
+            var problems = HardwareReplayAnonymizationRules.CheckFileSet(folderRoot, noNeedles);
+            Check.True(problems.Any(problem => problem.Contains("default windows host name", StringComparison.Ordinal)),
+                "The file-set check must reject a default host name in a file name.");
+            Check.True(problems.All(problem => !problem.Contains("DESKTOP-ABCD123", StringComparison.OrdinalIgnoreCase)),
+                "The file-set check must not show the host name it found in a file name.");
+        }
+        finally
+        {
+            HardwareReplayFixtures.DeleteTestRoot(folderRoot);
+        }
+
+        // A missing fixture folder is reported without its path (the path holds the profile of the machine).
+        var missingRoot = Path.Combine(Path.GetTempPath(), "a0-replay-missing-folder-marker", Guid.NewGuid().ToString("N"));
+        string? failureText = null;
+        try
+        {
+            HardwareReplayFixtures.RequireDirectory(missingRoot);
+        }
+        catch (InvalidOperationException exception)
+        {
+            failureText = exception.Message;
+        }
+        Check.True(failureText is not null, "A missing fixture folder must be reported.");
+        Check.True(!failureText!.Contains("a0-replay-missing-folder-marker", StringComparison.Ordinal) &&
+                   !failureText.Contains(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase),
+            "The failure text of a missing fixture folder must not contain the path.");
+        HardwareReplayFixtures.RequireDirectory(HardwareReplayFixtures.Directory);
     }
 
     private static string NoticeOf(byte[] jpeg)

@@ -21,6 +21,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The push check script, copied next to the test binary so that the test can compare its copy of
+         the pinned dummy image hashes with PinnedSha256 (issue #260). -->
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\scripts\Test-ReplayFixtureLeak.ps1"
+          Link="scripts\Test-ReplayFixtureLeak.ps1"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Anonymized real-device responses replayed by HardwareReplayRunner.cs (issue #231). Copied
          next to the test binary so the tests need no path search. -->
     <None Include="$(MSBuildThisFileDirectory)..\..\fixtures\hardware-replay\**\*"
