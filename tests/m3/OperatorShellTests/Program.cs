@@ -11111,9 +11111,17 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     async Task<OperatorShellViewModel> RunEndingAsync(
         string name,
         QueuedCaptureRecoveryOnlyWorkflow workflow,
-        Action<QueuedCaptureRecoveryOnlyWorkflow>? onActivation = null)
+        Action<QueuedCaptureRecoveryOnlyWorkflow>? onActivation = null,
+        bool blockWhenSeriesStarts = false)
     {
         var agentTransport = new CountingBindingTransport(DecodableBindingAgent());
+        var coordinator = new CaptureRecoveryOnlyFiveRunCoordinator(
+            workflow,
+            new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, name + "-evidence")));
+        // The refusal turns on once the coordinator has started, which is after the shell's own re-check
+        // (GitHub Issue #254) and before the coordinator's first start check.
+        if (blockWhenSeriesStarts)
+            workflow.BlockNewCaptureWhen = () => coordinator.HasStarted;
         var shell = new OperatorShellViewModel(
             new SimulationFoundationService(Path.Combine(root, name + "-journals")),
             dualCameraFlow: null,
@@ -11121,9 +11129,7 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
                 ? agentTransport
                 : new ActivationHookTransport(agentTransport, () => onActivation(workflow)),
             captureRecoveryOnlyWorkflow: workflow,
-            captureRecoveryOnlyFiveRunCoordinator: new CaptureRecoveryOnlyFiveRunCoordinator(
-                workflow,
-                new CaptureRecoveryOnlyRunEvidenceWriter(Path.Combine(root, name + "-evidence"))));
+            captureRecoveryOnlyFiveRunCoordinator: coordinator);
         await shell.InitializeAsync(CancellationToken.None);
         shell.IsPhysicalShutterAckAccepted = true;
         shell.IsExclusiveUseAckAccepted = true;
@@ -11329,8 +11335,11 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     // The series could not start although the main button was on (the profile became invalid between
     // the press and the first pair): no result panel, so the capture screen stays and the text is
     // also put in the notice. The reason line below the main button says there is no evidence.
-    var notStarted = await RunEndingAsync("not-started", new QueuedCaptureRecoveryOnlyWorkflow([Succeeded(1)]),
-        workflow => workflow.BlockNewCapture());
+    // The refusal turns on after the shell's own re-check (#254), at the coordinator's first start check, so the
+    // shell reaches the coordinator and the Blocked ending (0 pairs) is the coordinator's own.
+    var notStartedWorkflow = new QueuedCaptureRecoveryOnlyWorkflow([Succeeded(1)]);
+    var notStarted = await RunEndingAsync("not-started", notStartedWorkflow, blockWhenSeriesStarts: true);
+    Check.Equal(0, notStartedWorkflow.CaptureCalls);
     var notStartedText =
         "新しい撮影を始められませんでした。シャッターは1回も切っていません。" +
         "理由は技術情報に記録しました。" +
@@ -11346,6 +11355,19 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
     CheckOperatorWords(notStarted.StatusMessage, "not-started");
     Check.Equal("最大5組の受入系列は開始済みです。この系列ではもう撮影できません。アプリを終了してください。",
         notStarted.CaptureDisabledReason);
+
+    // GitHub Issue #254: when the refusal turns on at the moment the hand-off (activate-capture) is sent, the shell's
+    // re-check after the hand-off stops the press before the five-pair coordinator is reached. The operator reads the
+    // #254 abort text, not the series ending above; the series never starts, so no pair is reserved or started.
+    var abortedAtActivationWorkflow = new QueuedCaptureRecoveryOnlyWorkflow([Succeeded(1)]);
+    var abortedAtActivation = await RunEndingAsync("aborted-at-activation", abortedAtActivationWorkflow,
+        workflow => workflow.BlockNewCapture());
+    Check.Equal(OperatorShellViewModel.CaptureStartConditionsNoLongerMetText, abortedAtActivation.StatusMessage);
+    Check.Equal("capture_start_aborted: after_activation=true reserve=0 start=0 reason=new_capture_not_allowed",
+        abortedAtActivation.TechnicalDetail);
+    Check.Equal(0, abortedAtActivationWorkflow.CaptureCalls);
+    Check.False(abortedAtActivation.StatusMessage.Contains("アプリを終了", StringComparison.Ordinal),
+        "An aborted press leaves the series unstarted, so it must not tell the operator to quit the app.");
 
     // Endings the main button cannot reach through the view model are fixed through the text builder.
     var recheckSteps =
@@ -17891,10 +17913,16 @@ sealed class QueuedCaptureRecoveryOnlyWorkflow(
 
     public string TransactionRoot => "C:\\anonymous-ten-run";
 
-    public bool CanStartNewCapture { get; private set; } = canStartNewCapture;
+    private bool _canStartNewCapture = canStartNewCapture;
 
-    /// <summary>Makes the next start check fail, as when the approved profile becomes invalid.</summary>
-    public void BlockNewCapture() => CanStartNewCapture = false;
+    public bool CanStartNewCapture => _canStartNewCapture && !(BlockNewCaptureWhen?.Invoke() ?? false);
+
+    /// <summary>Makes every later start check fail, as when the approved profile becomes invalid.</summary>
+    public void BlockNewCapture() => _canStartNewCapture = false;
+
+    /// <summary>While this returns true the workflow refuses a new capture. A test sets it to turn the refusal on
+    /// at a chosen moment after the shell's own re-check (for example once the five-pair coordinator has started).</summary>
+    public Func<bool>? BlockNewCaptureWhen { get; set; }
 
     public string NewCaptureBlocker => "anonymous deterministic start blocker";
 
@@ -17916,9 +17944,9 @@ sealed class QueuedCaptureRecoveryOnlyWorkflow(
         HasPendingRecovery = outcome.RecoveryPending;
         PendingTransactionId = outcome.RecoveryPending ? outcome.TransactionId : null;
         if (outcome.BindingInvalidationReason != DualBindingInvalidationReason.None)
-            CanStartNewCapture = false;
+            _canStartNewCapture = false;
         if (blockNewCaptureAfterCalls is { } limit && CaptureCalls >= limit)
-            CanStartNewCapture = false;
+            _canStartNewCapture = false;
         return Task.FromResult(outcome);
     }
 
