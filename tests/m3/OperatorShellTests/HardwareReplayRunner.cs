@@ -623,12 +623,42 @@ internal static class HardwareReplayContracts
         Check.True(File.Exists(scriptPath), "The push check script was not copied next to the test binary.");
         var text = File.ReadAllText(scriptPath);
 
-        var block = Regex.Match(text, @"\$script:PinnedImageSha256\s*=\s*@\((?<list>[^)]*)\)", RegexOptions.Singleline);
-        Check.True(block.Success, "The push check script has no pinned image hash list.");
-        var quoted = Regex.Matches(block.Groups["list"].Value, "'([^']*)'").Select(match => match.Groups[1].Value).ToList();
-        Check.True(quoted.All(value => Regex.IsMatch(value, "^[0-9a-f]{64}$")),
-            "Every entry of the pinned image hash list of the push check script must be 64 lower-case hexadecimal digits.");
+        // The list is read strictly, line by line: from the line that opens it to the line that holds
+        // only ")". Every line in between must be blank, a comment, or one single-quoted 64-digit
+        // lower-case hexadecimal value with an optional comment. A double-quoted value, two values on
+        // a line or any other code in the list fails here instead of being skipped (#260).
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var start = Array.FindIndex(lines, line => Regex.IsMatch(line, @"^\$script:PinnedImageSha256\s*=\s*@\(\s*$"));
+        Check.True(start >= 0, "The push check script has no pinned image hash list opened by '$script:PinnedImageSha256 = @(' on a line of its own.");
+        var quoted = new List<string>();
+        var closed = false;
+        for (var index = start + 1; index < lines.Length; index++)
+        {
+            var line = lines[index];
+            if (Regex.IsMatch(line, @"^\)\s*(?:#.*)?$"))
+            {
+                closed = true;
+                break;
+            }
+            if (line.Trim().Length == 0 || Regex.IsMatch(line, @"^\s*#.*$")) continue;
+            var entry = Regex.Match(line, @"^\s*'(?<hash>[0-9a-f]{64})'\s*(?:#.*)?$");
+            Check.True(entry.Success,
+                $"Line {index - start} of the pinned image hash list of the push check script must be one single-quoted value of 64 lower-case hexadecimal digits (a comment may follow).");
+            quoted.Add(entry.Groups["hash"].Value);
+        }
+        Check.True(closed, "The pinned image hash list of the push check script is not closed by a line holding only ')'.");
         Check.Equal(HardwareReplayJpegContracts.PinnedSha256.Count, quoted.Count);
+
+        // The list must be assigned in one place only. The self test (Invoke-SelfTest) swaps the
+        // variable in and out to test the check itself; any other assignment (=, +=) outside it
+        // would change what the real check accepts without showing in the list above.
+        var selfTest = Regex.Match(text, @"^function\s+Invoke-SelfTest\b", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        Check.True(selfTest.Success, "The push check script has no Invoke-SelfTest function.");
+        var selfTestEnd = Regex.Match(text[selfTest.Index..], @"^\}", RegexOptions.Multiline);
+        Check.True(selfTestEnd.Success, "The end of Invoke-SelfTest was not found in the push check script.");
+        var outsideSelfTest = text[..selfTest.Index] + text[(selfTest.Index + selfTestEnd.Index + 1)..];
+        var assignments = Regex.Matches(outsideSelfTest, @"\$script:PinnedImageSha256\s*[-+*/%]?=(?!=)", RegexOptions.IgnoreCase);
+        Check.Equal(1, assignments.Count);
         Check.True(
             quoted.ToHashSet(StringComparer.Ordinal).SetEquals(HardwareReplayJpegContracts.PinnedSha256.Values),
             "The pinned image hashes of the push check script differ from PinnedSha256 in HardwareReplayFixtures.cs.");
@@ -680,6 +710,10 @@ internal static class HardwareReplayContracts
         MustReject("date as yyyy MMMM d", "{\"day\":\"2025 January 15\"}", "date at offset");
         MustReject("date as yyyy/MMM/d with an ordinal", "{\"day\":\"2026/Feb/1st\"}", "date at offset");
         MustAccept("January 2026 with the year first", "{\"a\":\"2026-Jan-15\",\"b\":\"2026 January 5\"}");
+        // The allowed year-first form must not consume the start of a longer match and hide the date
+        // behind it (Regex.Matches returns no overlapping matches).
+        MustReject("allowed year-first date followed by a date in another year", "{\"d\":\"2026 Jan 15 2025\"}", "date at offset");
+        MustReject("allowed year-first date followed by a date in another month", "{\"d\":\"2026-Jan-15-Jun-2026\"}", "date at offset");
 
         // The names of the files: the rules for host names, PC names and USB IDs apply to them too, and
         // a failure text does not show the part of the name that matched.
@@ -693,6 +727,7 @@ internal static class HardwareReplayContracts
                      ("USB vendor / product ID", "single-camera/vid_04b0.json", "vid_04b0", "USB or PnP identifier"),
                      ("instance ID word", "single-camera/instanceid.json", "instanceid", "USB or PnP identifier"),
                      ("year first with a month name", "single-camera/events-2026-Jun-15.json", "2026-Jun-15", "date at offset"),
+                     ("year first date hiding a later date", "single-camera/events-2026-Jan-15-Jun-2026.json", "Jun-2026", "date at offset"),
                  })
         {
             var problems = HardwareReplayAnonymizationRules.ScanRelativePath(relative, noNeedles);

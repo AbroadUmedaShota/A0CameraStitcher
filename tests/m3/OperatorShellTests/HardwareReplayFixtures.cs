@@ -234,8 +234,14 @@ internal static class HardwareReplayAnonymizationRules
     private static readonly Regex DateMonthName = new(
         @"(?<![A-Za-z0-9])(?:(\d{1,2})(?:st|nd|rd|th)?" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?,?" + MonthNameSeparator +
         @"((?:19|20)\d{2})|(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator + @"(\d{1,2})(?:st|nd|rd|th)?,?" + MonthNameSeparator +
-        @"((?:19|20)\d{2})|((?:19|20)\d{2})" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator +
-        @"(\d{1,2})(?:st|nd|rd|th)?)(?![A-Za-z0-9])",
+        @"((?:19|20)\d{2}))(?![A-Za-z0-9])",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // The year first (2026-Jun-15, #260) is a separate rule, scanned on its own: Regex.Matches
+    // returns no overlapping matches, so as an alternative of DateMonthName its allowed form
+    // "2026 Jan 15" would consume the start of "2026 Jan 15 2025" and hide the date behind it.
+    private static readonly Regex DateMonthNameYearFirst = new(
+        @"(?<![A-Za-z0-9])((?:19|20)\d{2})" + MonthNameSeparator + "(" + MonthNames + @")[a-z]*\.?" + MonthNameSeparator +
+        @"(\d{1,2})(?:st|nd|rd|th)?(?![A-Za-z0-9])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex DateTimeCompact = new(
         @"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d[0-5]\d(?:\d{3})?(?!\d)", RegexOptions.Compiled);
@@ -295,7 +301,7 @@ internal static class HardwareReplayAnonymizationRules
         Regex[] patterns =
         [
             HexRun, DashedGuid, EmailAddress, Epoch, DateNumeric, DateJapanese, DateYearFirstLoose, DateYearLast,
-            DateMonthName, DateTimeCompact, PathDigitRun,
+            DateMonthName, DateMonthNameYearFirst, DateTimeCompact, PathDigitRun,
             UsbOrPnpIdentifier, AccountOrHostName, DefaultHostName, DefaultHostNameOtherCase,
         ];
         foreach (var pattern in patterns)
@@ -580,14 +586,15 @@ internal static class HardwareReplayAnonymizationRules
         }
         foreach (Match match in DateMonthName.Matches(numeric))
         {
-            // Day first (groups 1 to 3), month first (4 to 6) or year first (7 to 9: 2026-Jun-15).
-            var month = match.Groups[2].Success ? match.Groups[2].Value
-                : match.Groups[4].Success ? match.Groups[4].Value
-                : match.Groups[8].Value;
-            var year = match.Groups[3].Success ? match.Groups[3].Value
-                : match.Groups[6].Success ? match.Groups[6].Value
-                : match.Groups[7].Value;
+            var month = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[4].Value;
+            var year = match.Groups[3].Success ? match.Groups[3].Value : match.Groups[6].Value;
             if (year != "2026" || !month.StartsWith("jan", StringComparison.OrdinalIgnoreCase))
+                problems.Add($"{name}: date at offset {match.Index} is outside the shifted fixture month");
+        }
+        // The year first (2026-Jun-15) is scanned apart from the two forms above (#260).
+        foreach (Match match in DateMonthNameYearFirst.Matches(numeric))
+        {
+            if (match.Groups[1].Value != "2026" || !match.Groups[2].Value.StartsWith("jan", StringComparison.OrdinalIgnoreCase))
                 problems.Add($"{name}: date at offset {match.Index} is outside the shifted fixture month");
         }
         foreach (Match match in DateTimeCompact.Matches(numeric))

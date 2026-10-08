@@ -872,7 +872,7 @@ function Invoke-LeakCheck {
         [bool]$SelfTestIsolation = $false)
 
     # Without the pinned image hashes every image would be a hit or, worse, none could be judged.
-    if (@($script:PinnedImageSha256).Count -eq 0 -or @($script:PinnedImageSha256 | Where-Object { $_ -notmatch '^[0-9a-f]{64}$' }).Count -gt 0) {
+    if (@($script:PinnedImageSha256).Count -eq 0 -or @($script:PinnedImageSha256 | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -gt 0) {
         Write-Host 'CANNOT VERIFY: the pinned image hashes of this script are missing or malformed. Do not push.'
         return [pscustomobject]@{ Exit = 2; Hits = @(); Needles = 0; BodySerials = 0 }
     }
@@ -1118,6 +1118,7 @@ function Invoke-SelfTest {
         $bigNotice = [byte[]](@(0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10) + @(0x41) * 5000 + $script:Latin1.GetBytes($script:SyntheticImageNotice) + @(0xFF, 0xD9))
         & $add 'the pinned dummy image in the fixture image folder' { & $write "$pinnedDir/dummy.jpg.b64" ([Convert]::ToBase64String($dummy) + "`n") } 'add o5' $false
         & $add 'the pinned dummy image in another images folder' { & $write 'images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5a' $true
+        & $add 'the pinned dummy image in a subfolder of the fixture image folder' { & $write "$pinnedDir/sub/dummy.jpg.b64" ([Convert]::ToBase64String($dummy) + "`n") } 'add o5g' $true
         & $add 'the pinned dummy image in docs/images' { & $write 'docs/images/dummy.jpg.b64' ([Convert]::ToBase64String($dummy) + "`n") } 'add o5b' $true
         & $add 'a small image with the notice but not pinned, in the fixture image folder' { & $write "$pinnedDir/small.jpg.b64" ([Convert]::ToBase64String($otherDummy) + "`n") } 'add o5c' $true
         & $add 'an image with the notice over 4096 bytes in the fixture image folder' { & $write "$pinnedDir/big.jpg.b64" ([Convert]::ToBase64String($bigNotice) + "`n") } 'add o5d' $true
@@ -1448,14 +1449,14 @@ function Invoke-SelfTest {
             if ($r.Exit -ne $case.Exit) { $failures.Add("$($case.Name): expected exit $($case.Exit), got $($r.Exit)") }
         }
         # The pinned hashes of the script itself: without them (or malformed) nothing can be judged, so exit 2.
-        foreach ($bad in @('', 'abc', ('z' * 64))) {
+        foreach ($bad in @('', 'abc', ('z' * 64), ('A' * 64))) {
             $script:PinnedImageSha256 = if ($bad -eq '') { @() } else { @($bad) }
             $r = Invoke-LeakCheck -Root $tmpM1 -Base $seedM1 -Head $outsideHead -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
                 -IncludeChangedFiles $false -NoLocalSources $true 6>$null
             if ($r.Exit -ne 2) { $failures.Add("missing or malformed pinned image hashes must give exit 2 (got $($r.Exit))") }
         }
         $script:PinnedImageSha256 = $savedPinned
-        if (@($savedPinned).Count -lt 1 -or @($savedPinned | Where-Object { $_ -notmatch '^[0-9a-f]{64}$' }).Count -gt 0) { $failures.Add('the pinned image hashes of the script must be 64 digit lower case hex') }
+        if (@($savedPinned).Count -lt 1 -or @($savedPinned | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -gt 0) { $failures.Add('the pinned image hashes of the script must be 64 digit lower case hex') }
 
         # #260 LOW-1: a path that holds the hex form of a needle is not printed with it.
         $hexName = [Convert]::ToHexString($script:Utf8.GetBytes($needle))
