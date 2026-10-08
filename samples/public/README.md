@@ -4,6 +4,8 @@ Only rights-cleared synthetic charts may be committed here. Do not add customer 
 
 `a0-synthetic-chart.svg` is a wholly synthetic calibration target. Its grid, fiducials, grayscale and colour patches are generated artwork; it contains no camera capture, customer original, or third-party chart asset.
 
+`pilot-chart` contains two self-authored A0 print masters derived from `a0-synthetic-chart.svg` for the pilot captures of Issue #276: `a0-pilot-chart-development-v1.svg` (chart ID `A0CS-PILOT-DEV`, development split) and `a0-pilot-chart-holdout-v1.svg` (chart ID `A0CS-PILOT-HOLD`, locked-holdout split). The two use different fiducial, grid, circle, edge, line and patch layouts so that one printed master never serves two splits. Their hashes and fiducial lists are recorded in `corpus-contracts/vector-specs/pilot-chart-*-v1.json`. Printing PDFs are derived files and are not committed; see `docs/PILOT_CHART.md`.
+
 `rig-profile.draft.example.json` is a pre-approval fixture, not an approved optical rig. Its final layout, DPI, crop, calibration provenance/validity, automatic-correction envelope, and quality thresholds intentionally remain `null`. Neither file is evidence of imaging quality, calibration accuracy, colour fidelity, A0 coverage, or production readiness.
 
 `m2-fixtures` contains tiny JSON pixel pairs with exact overlap metrics. The perfect pair and two deliberately damaged variants are wholly synthetic and marked `test-only` / `not-evaluated`; they define deterministic software-test oracles, not acceptable quality thresholds.

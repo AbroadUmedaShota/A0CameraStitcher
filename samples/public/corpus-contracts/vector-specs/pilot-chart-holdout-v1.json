@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "a0.self-authored-vector-spec.v1",
+  "fixtureId": "vector-pilot-chart-holdout",
+  "marker": "Synthetic",
+  "authoringSource": "in-house-original-work",
+  "qualityDecision": "not-evaluated",
+  "containsCustomerContent": false,
+  "containsCameraIdentity": false,
+  "containsLicensedSdkMaterial": false,
+  "features": ["corner-and-asymmetry-fiducials", "overlap-band-fiducials-three-columns", "grid-8-40-mm", "concentric-circles", "slanted-edges", "fine-line-groups", "seam-crossing-lines", "grey-patches", "colour-patches", "orientation-marks", "printed-chart-id", "rulers"],
+  "injectedDamage": null,
+  "printMaster": {
+    "chartId": "A0CS-PILOT-HOLD",
+    "chartVersion": 1,
+    "intendedSplit": "locked-holdout",
+    "derivedFrom": "samples/public/a0-synthetic-chart.svg",
+    "masterPath": "samples/public/pilot-chart/a0-pilot-chart-holdout-v1.svg",
+    "masterSha256": "f443cecd36172c503a756073adad65ba336fb3944f27609aafc02e7ad390c3e3",
+    "sheetMm": { "width": 841, "height": 1189 },
+    "overlapBandMm": { "nominalFromX": 350, "nominalToX": 491, "minimumFromX": 360.5, "minimumToX": 480.5, "source": "issue-43-v0.1-candidate" },
+    "minimumOverlapBandFiducials": 8,
+    "fiducials": [
+      { "id": "F1", "kind": "corner", "xMm": 110, "yMm": 100 },
+      { "id": "F2", "kind": "corner", "xMm": 771, "yMm": 100 },
+      { "id": "F3", "kind": "corner", "xMm": 110, "yMm": 1124 },
+      { "id": "F4", "kind": "corner", "xMm": 771, "yMm": 1124 },
+      { "id": "F5", "kind": "asymmetry", "xMm": 110, "yMm": 175 },
+      { "id": "B01", "kind": "overlap-band", "xMm": 420.5, "yMm": 170 },
+      { "id": "B02", "kind": "overlap-band", "xMm": 372, "yMm": 250 },
+      { "id": "B03", "kind": "overlap-band", "xMm": 420.5, "yMm": 330 },
+      { "id": "B04", "kind": "overlap-band", "xMm": 469, "yMm": 410 },
+      { "id": "B05", "kind": "overlap-band", "xMm": 420.5, "yMm": 490 },
+      { "id": "B06", "kind": "overlap-band", "xMm": 372, "yMm": 570 },
+      { "id": "B07", "kind": "overlap-band", "xMm": 420.5, "yMm": 650 },
+      { "id": "B08", "kind": "overlap-band", "xMm": 469, "yMm": 730 },
+      { "id": "B09", "kind": "overlap-band", "xMm": 420.5, "yMm": 810 },
+      { "id": "B10", "kind": "overlap-band", "xMm": 372, "yMm": 890 },
+      { "id": "B11", "kind": "overlap-band", "xMm": 420.5, "yMm": 970 },
+      { "id": "B12", "kind": "overlap-band", "xMm": 469, "yMm": 1050 },
+      { "id": "B13", "kind": "overlap-band", "xMm": 420.5, "yMm": 1120 }
+    ]
+  }
+}

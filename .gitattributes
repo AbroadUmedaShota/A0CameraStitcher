@@ -3,6 +3,7 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.svg text eol=lf
 *.ps1 text eol=crlf
 *.psm1 text eol=crlf
 *.sln text eol=crlf

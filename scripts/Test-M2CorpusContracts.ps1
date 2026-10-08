@@ -76,6 +76,46 @@ function Resolve-RepositoryArtifact {
     return $item.FullName
 }
 
+# A vector spec may describe a printable chart master (SVG). The master is checked against the
+# spec: byte hash, A0 sheet size in millimetres, the printed chart ID and version, the fiducial
+# list, enough fiducials inside the minimum overlap band, and no embedded or external images.
+function Assert-PrintMaster {
+    param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$Name)
+    $master = $Spec.printMaster
+    Assert-Condition ([string]$master.masterPath -match '^samples/public/pilot-chart/[a-z0-9-]+\.svg$') "Print master path is outside samples/public/pilot-chart for $Name."
+    $path = Resolve-RepositoryArtifact -RelativePath $master.masterPath
+    $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Condition ($actualHash -ceq [string]$master.masterSha256) "Print master hash mismatch for $Name."
+    Assert-Condition ($master.intendedSplit -in @('calibration', 'development', 'locked-holdout', 'release')) "Print master split is invalid for $Name."
+    Assert-Condition ($master.sheetMm.width -eq 841 -and $master.sheetMm.height -eq 1189) "Print master sheet is not A0 portrait for $Name."
+
+    $raw = Get-Content -LiteralPath $path -Raw
+    Assert-Condition ($raw -notmatch '<image\b' -and $raw -notmatch 'data:image/' -and $raw -notmatch '(href|xlink:href)="(?!#)') "Print master embeds or links an image or external resource for $Name."
+    $settings = [Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $reader = [Xml.XmlReader]::Create([IO.StringReader]::new($raw), $settings)
+    try { $svg = [xml]::new(); $svg.Load($reader) } finally { $reader.Dispose() }
+    $root = $svg.DocumentElement
+    Assert-Condition ($root.LocalName -eq 'svg' -and $root.GetAttribute('width') -eq '841mm' -and $root.GetAttribute('height') -eq '1189mm' -and $root.GetAttribute('viewBox') -eq '0 0 841 1189') "Print master is not drawn at A0 size in millimetres for $Name."
+    $text = ($svg.SelectNodes("//*[local-name()='text']") | ForEach-Object { $_.InnerText }) -join "`n"
+    Assert-Condition ($text.Contains("CHART ID $($master.chartId)") -and $text.Contains("VERSION $($master.chartVersion)")) "Print master does not print its chart ID and version for $Name."
+    Assert-Condition ($text.Contains("$($master.chartId) v$($master.chartVersion)")) "Print master does not repeat its short chart ID for $Name."
+
+    $drawn = @($svg.SelectNodes("//*[local-name()='use' and @data-fiducial-id]") | ForEach-Object {
+        '{0}|{1}|{2}|{3}' -f $_.GetAttribute('data-fiducial-id'), $_.GetAttribute('data-kind'), [double]$_.GetAttribute('x'), [double]$_.GetAttribute('y')
+    } | Sort-Object)
+    $declared = @($master.fiducials | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.id, $_.kind, [double]$_.xMm, [double]$_.yMm } | Sort-Object)
+    Assert-UniqueValues -Values @($master.fiducials.id) -Name "Print master fiducial id ($Name)"
+    Assert-Condition (($drawn -join ',') -ceq ($declared -join ',')) "Print master fiducials differ from the spec for $Name."
+    $band = $master.overlapBandMm
+    Assert-Condition ($band.minimumFromX -ge $band.nominalFromX -and $band.minimumToX -le $band.nominalToX -and $band.minimumFromX -lt $band.minimumToX) "Print master overlap band is inconsistent for $Name."
+    $inBand = @($master.fiducials | Where-Object { $_.xMm -ge $band.minimumFromX -and $_.xMm -le $band.minimumToX })
+    Assert-Condition ($master.minimumOverlapBandFiducials -ge 1 -and $inBand.Count -ge $master.minimumOverlapBandFiducials) "Print master has too few fiducials in the minimum overlap band for $Name."
+    $asymmetry = @($master.fiducials | Where-Object { $_.kind -eq 'asymmetry' })
+    Assert-Condition ($asymmetry.Count -ge 1) "Print master has no asymmetry fiducial for $Name."
+}
+
 function Assert-CorpusContract {
     param(
         [Parameter(Mandatory)]$Rights,
@@ -95,6 +135,7 @@ function Assert-CorpusContract {
     Assert-UniqueValues -Values @($Rights.assets.contentSha256) -Name 'Rights contentSha256'
 
     $rightsById = @{}
+    $printMasters = @()
     foreach ($asset in $Rights.assets) {
         if ($asset.assetKind -eq 'SelfAuthoredVectorSpec') {
             $path = Resolve-RepositoryArtifact -RelativePath $asset.repositoryPath
@@ -104,12 +145,22 @@ function Assert-CorpusContract {
             Assert-Condition ($spec.marker -eq 'Synthetic' -and $spec.authoringSource -eq 'in-house-original-work') "Vector spec provenance is invalid for $($asset.assetId)."
             Assert-Condition ($spec.qualityDecision -eq 'not-evaluated') "Vector spec claims a quality decision for $($asset.assetId)."
             Assert-Condition (-not $spec.containsCustomerContent -and -not $spec.containsCameraIdentity -and -not $spec.containsLicensedSdkMaterial) "Vector spec contains prohibited material for $($asset.assetId)."
+            if ($null -ne $spec.PSObject.Properties['printMaster']) {
+                Assert-PrintMaster -Spec $spec -Name $asset.assetId
+                $printMasters += $spec.printMaster
+            }
         }
         else {
             Assert-Condition ($asset.assetKind -eq 'ExternalD810Pair' -and $null -eq $asset.repositoryPath -and $null -ne $asset.externalObjectId) "External rights provenance is invalid for $($asset.assetId)."
         }
         $rightsById[$asset.assetId] = $asset
     }
+    # The same printed master must not serve two splits: chart IDs, master files and fiducial
+    # layouts must all differ between print masters.
+    Assert-UniqueValues -Values @($printMasters | ForEach-Object { "$($_.chartId) v$($_.chartVersion)" }) -Name 'Print master chart ID'
+    Assert-UniqueValues -Values @($printMasters.masterPath) -Name 'Print master path'
+    Assert-UniqueValues -Values @($printMasters.masterSha256) -Name 'Print master hash'
+    Assert-UniqueValues -Values @($printMasters | ForEach-Object { (@($_.fiducials | ForEach-Object { "$($_.xMm),$($_.yMm)" } | Sort-Object)) -join ';' }) -Name 'Print master fiducial layout'
 
     Assert-Condition ($Oracle.independence.oracleOwnerRole -ne $Oracle.independence.productionPipelineOwnerRole) 'Oracle owner must be independent from the production pipeline owner.'
     Assert-Condition ($Oracle.independence.independentReviewerRole -ne $Oracle.independence.productionPipelineOwnerRole) 'Oracle reviewer must be independent from the production pipeline owner.'
@@ -162,6 +213,9 @@ function Assert-CorpusContract {
             Assert-Condition ($actualHash -ceq [string]$entry.contentSha256) "Manifest hash mismatch for $($entry.fixtureId)."
             $spec = Get-Content -LiteralPath $artifact -Raw | ConvertFrom-Json
             Assert-Condition ($spec.fixtureId -eq $entry.fixtureId) "Vector spec fixtureId mismatch for $($entry.fixtureId)."
+            if ($null -ne $spec.PSObject.Properties['printMaster']) {
+                Assert-Condition ($spec.printMaster.intendedSplit -eq $entry.split) "Print master is placed in a split it was not made for: $($entry.fixtureId)."
+            }
             if ($entry.expectedOutcome.outcome -eq 'Reject') {
                 Assert-Condition ($null -ne $spec.injectedDamage) "Reject fixture has no declared damage: $($entry.fixtureId)."
             }
@@ -292,6 +346,33 @@ try {
     ($oracleDisagreement.expectedOutcomes | Where-Object fixtureId -eq 'vector-development-seam-damaged').outcome = 'Accept'
     ($oracleDisagreement.expectedOutcomes | Where-Object fixtureId -eq 'vector-development-seam-damaged').failureCode = $null
     Assert-Rejected { Assert-CorpusContract -Rights $rights -Oracle $oracleDisagreement -Manifest $manifest } 'oracle disagreement'
+
+    $pilotSpec = Get-Content -LiteralPath (Join-Path $fixtureRoot 'vector-specs/pilot-chart-development-v1.json') -Raw | ConvertFrom-Json
+    Assert-PrintMaster -Spec $pilotSpec -Name 'pilot development master'
+
+    $movedFiducial = Copy-JsonObject $pilotSpec
+    $movedFiducial.printMaster.fiducials[0].xMm = 51
+    Assert-Rejected { Assert-PrintMaster -Spec $movedFiducial -Name 'moved fiducial' } 'print master fiducial differs from the drawing'
+
+    $masterHashMismatch = Copy-JsonObject $pilotSpec
+    $masterHashMismatch.printMaster.masterSha256 = '0' * 64
+    Assert-Rejected { Assert-PrintMaster -Spec $masterHashMismatch -Name 'master hash mismatch' } 'print master hash mismatch'
+
+    $wrongChartId = Copy-JsonObject $pilotSpec
+    $wrongChartId.printMaster.chartId = 'A0CS-PILOT-HOLD'
+    Assert-Rejected { Assert-PrintMaster -Spec $wrongChartId -Name 'wrong chart id' } 'print master chart ID not printed'
+
+    $sparseBand = Copy-JsonObject $pilotSpec
+    $sparseBand.printMaster.minimumOverlapBandFiducials = 99
+    Assert-Rejected { Assert-PrintMaster -Spec $sparseBand -Name 'sparse band' } 'too few overlap band fiducials'
+
+    $outsideMaster = Copy-JsonObject $pilotSpec
+    $outsideMaster.printMaster.masterPath = 'samples/public/a0-synthetic-chart.svg'
+    Assert-Rejected { Assert-PrintMaster -Spec $outsideMaster -Name 'master outside pilot folder' } 'print master outside the pilot chart folder'
+
+    $holdoutInDevelopment = Copy-JsonObject $manifest
+    ($holdoutInDevelopment.entries | Where-Object fixtureId -eq 'vector-pilot-chart-holdout').split = 'development'
+    Assert-Rejected { Assert-CorpusContract -Rights $rights -Oracle $oracle -Manifest $holdoutInDevelopment } 'holdout print master placed in development'
 
     Write-Host 'M2 corpus contracts passed validation.'
     exit 0

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "a0.self-authored-vector-spec.v1",
+  "fixtureId": "vector-pilot-chart-development",
+  "marker": "Synthetic",
+  "authoringSource": "in-house-original-work",
+  "qualityDecision": "not-evaluated",
+  "containsCustomerContent": false,
+  "containsCameraIdentity": false,
+  "containsLicensedSdkMaterial": false,
+  "features": ["corner-and-asymmetry-fiducials", "overlap-band-fiducials-two-columns", "grid-10-50-mm", "concentric-circles", "slanted-edges", "fine-line-groups", "seam-crossing-lines", "grey-patches", "colour-patches", "orientation-marks", "printed-chart-id", "rulers"],
+  "injectedDamage": null,
+  "printMaster": {
+    "chartId": "A0CS-PILOT-DEV",
+    "chartVersion": 1,
+    "intendedSplit": "development",
+    "derivedFrom": "samples/public/a0-synthetic-chart.svg",
+    "masterPath": "samples/public/pilot-chart/a0-pilot-chart-development-v1.svg",
+    "masterSha256": "4e13655bd0b46ec96b3ffd9cac8a152c216221d914e5686a850040d26ad89642",
+    "sheetMm": { "width": 841, "height": 1189 },
+    "overlapBandMm": { "nominalFromX": 350, "nominalToX": 491, "minimumFromX": 360.5, "minimumToX": 480.5, "source": "issue-43-v0.1-candidate" },
+    "minimumOverlapBandFiducials": 8,
+    "fiducials": [
+      { "id": "F1", "kind": "corner", "xMm": 50, "yMm": 110 },
+      { "id": "F2", "kind": "corner", "xMm": 791, "yMm": 110 },
+      { "id": "F3", "kind": "corner", "xMm": 50, "yMm": 1139 },
+      { "id": "F4", "kind": "corner", "xMm": 791, "yMm": 1139 },
+      { "id": "F5", "kind": "asymmetry", "xMm": 125, "yMm": 110 },
+      { "id": "B01", "kind": "overlap-band", "xMm": 383, "yMm": 150 },
+      { "id": "B02", "kind": "overlap-band", "xMm": 458, "yMm": 240 },
+      { "id": "B03", "kind": "overlap-band", "xMm": 383, "yMm": 330 },
+      { "id": "B04", "kind": "overlap-band", "xMm": 458, "yMm": 420 },
+      { "id": "B05", "kind": "overlap-band", "xMm": 383, "yMm": 510 },
+      { "id": "B06", "kind": "overlap-band", "xMm": 458, "yMm": 600 },
+      { "id": "B07", "kind": "overlap-band", "xMm": 383, "yMm": 690 },
+      { "id": "B08", "kind": "overlap-band", "xMm": 458, "yMm": 780 },
+      { "id": "B09", "kind": "overlap-band", "xMm": 383, "yMm": 870 },
+      { "id": "B10", "kind": "overlap-band", "xMm": 458, "yMm": 960 },
+      { "id": "B11", "kind": "overlap-band", "xMm": 383, "yMm": 1050 },
+      { "id": "B12", "kind": "overlap-band", "xMm": 458, "yMm": 1120 }
+    ]
+  }
+}

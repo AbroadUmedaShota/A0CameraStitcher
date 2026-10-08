@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="841mm" height="1189mm" viewBox="0 0 841 1189" role="img" aria-labelledby="title desc">
+  <title id="title">A0 pilot chart A0CS-PILOT-DEV version 1 (development)</title>
+  <desc id="desc">Self-authored A0 print master derived from samples/public/a0-synthetic-chart.svg. Fiducials, grid, circles, slanted edges, fine lines, grey and colour patches. Units are millimetres, origin top-left, portrait. Not a quality result.</desc>
+  <defs>
+    <g id="fiducial"><circle r="16" fill="white" stroke="black" stroke-width="1.2"/><circle r="10" fill="black"/><circle r="5" fill="white"/><path d="M-22 0H22M0-22V22" stroke="black" stroke-width="0.8"/></g>
+    <g id="bandFiducial"><circle r="10" fill="white" stroke="black" stroke-width="0.8"/><circle r="6.5" fill="black"/><circle r="3" fill="white"/><path d="M-14 0H14M0-14V14" stroke="black" stroke-width="0.6"/></g>
+  </defs>
+  <rect width="841" height="1189" fill="white"/>
+  <g id="grid" fill="none"><path d="M30 20V1169M40 20V1169M50 20V1169M60 20V1169M80 20V1169M90 20V1169M100 20V1169M110 20V1169M130 20V1169M140 20V1169M150 20V1169M160 20V1169M180 20V1169M190 20V1169M200 20V1169M210 20V1169M230 20V1169M240 20V1169M250 20V1169M260 20V1169M280 20V1169M290 20V1169M300 20V1169M310 20V1169M330 20V1169M340 20V1169M350 20V1169M360 20V1169M380 20V1169M390 20V1169M400 20V1169M410 20V1169M430 20V1169M440 20V1169M450 20V1169M460 20V1169M480 20V1169M490 20V1169M500 20V1169M510 20V1169M530 20V1169M540 20V1169M550 20V1169M560 20V1169M580 20V1169M590 20V1169M600 20V1169M610 20V1169M630 20V1169M640 20V1169M650 20V1169M660 20V1169M680 20V1169M690 20V1169M700 20V1169M710 20V1169M730 20V1169M740 20V1169M750 20V1169M760 20V1169M780 20V1169M790 20V1169M800 20V1169M810 20V1169M20 30H821M20 40H821M20 50H821M20 60H821M20 80H821M20 90H821M20 100H821M20 110H821M20 130H821M20 140H821M20 150H821M20 160H821M20 180H821M20 190H821M20 200H821M20 210H821M20 230H821M20 240H821M20 250H821M20 260H821M20 280H821M20 290H821M20 300H821M20 310H821M20 330H821M20 340H821M20 350H821M20 360H821M20 380H821M20 390H821M20 400H821M20 410H821M20 430H821M20 440H821M20 450H821M20 460H821M20 480H821M20 490H821M20 500H821M20 510H821M20 530H821M20 540H821M20 550H821M20 560H821M20 580H821M20 590H821M20 600H821M20 610H821M20 630H821M20 640H821M20 650H821M20 660H821M20 680H821M20 690H821M20 700H821M20 710H821M20 730H821M20 740H821M20 750H821M20 760H821M20 780H821M20 790H821M20 800H821M20 810H821M20 830H821M20 840H821M20 850H821M20 860H821M20 880H821M20 890H821M20 900H821M20 910H821M20 930H821M20 940H821M20 950H821M20 960H821M20 980H821M20 990H821M20 1000H821M20 1010H821M20 1030H821M20 1040H821M20 1050H821M20 1060H821M20 1080H821M20 1090H821M20 1100H821M20 1110H821M20 1130H821M20 1140H821M20 1150H821M20 1160H821" stroke="#d0d0d0" stroke-width="0.25"/><path d="M70 20V1169M120 20V1169M170 20V1169M220 20V1169M270 20V1169M320 20V1169M370 20V1169M420 20V1169M470 20V1169M520 20V1169M570 20V1169M620 20V1169M670 20V1169M720 20V1169M770 20V1169M820 20V1169M20 70H821M20 120H821M20 170H821M20 220H821M20 270H821M20 320H821M20 370H821M20 420H821M20 470H821M20 520H821M20 570H821M20 620H821M20 670H821M20 720H821M20 770H821M20 820H821M20 870H821M20 920H821M20 970H821M20 1020H821M20 1070H821M20 1120H821" stroke="#808080" stroke-width="0.6"/></g>
+  <rect x="20" y="20" width="801" height="1149" fill="none" stroke="black" stroke-width="1.5"/>
+  <g id="overlap-band-guides" stroke="black" stroke-width="0.4" fill="none">
+    <path d="M350 20V30M350 1169V1159"/>
+    <path d="M491 20V30M491 1169V1159"/>
+    <path d="M360.5 20V26M360.5 1169V1163"/>
+    <path d="M480.5 20V26M480.5 1169V1163"/>
+  </g>
+  <text x="493" y="1165" font-family="Arial, Helvetica, sans-serif" font-size="3">overlap 141 mm (x 350-491) / minimum 120 mm (x 360.5-480.5), #43 v0.1 candidate</text>
+  <g id="orientation" fill="black">
+    <rect x="24" y="24" width="60" height="8"/><rect x="24" y="24" width="8" height="60"/>
+    <path d="M420.5 24L409.5 42H431.5Z"/><text x="435" y="40" font-family="Arial, Helvetica, sans-serif" font-size="9" font-weight="bold">TOP</text>
+    <text x="32" y="640" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="bold">L</text>
+    <text x="785" y="640" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="bold">R</text>
+  </g>
+  <g id="identifiers" font-family="Arial, Helvetica, sans-serif" fill="black">
+    <text x="92" y="34" font-size="8" font-weight="bold">A0 PILOT CHART - DEVELOPMENT - NOT A QUALITY RESULT</text>
+    <text x="92" y="46" font-size="6" font-weight="bold">CHART ID A0CS-PILOT-DEV   VERSION 1   SPLIT development</text>
+    <text x="92" y="55" font-size="4">Self-authored print master. Origin top-left, millimetres, portrait. Print at 100 % on A0 (841 x 1189 mm).</text>
+    <text x="560" y="40" font-size="9" font-weight="bold">A0CS-PILOT-DEV v1</text>
+    <text x="92" y="1100" font-size="7" font-weight="bold">A0CS-PILOT-DEV v1</text>
+    <text x="600" y="1100" font-size="7" font-weight="bold">A0CS-PILOT-DEV v1</text>
+    <text x="92" y="1158" font-size="3.5">Nominal fiducial centres: F1-F2 741.0 mm, F1-F3 1029.0 mm, F1-F4 1268.0 mm (diagonal), F2-F3 1268.0 mm (diagonal). Verify after printing.</text>
+  </g>
+  <g id="fiducials" font-family="Arial, Helvetica, sans-serif" font-size="4">
+    <use href="#fiducial" xlink:href="#fiducial" x="50" y="110" data-fiducial-id="F1" data-kind="corner"/><text x="68" y="92">F1</text>
+    <use href="#fiducial" xlink:href="#fiducial" x="791" y="110" data-fiducial-id="F2" data-kind="corner"/><text x="809" y="92">F2</text>
+    <use href="#fiducial" xlink:href="#fiducial" x="50" y="1139" data-fiducial-id="F3" data-kind="corner"/><text x="68" y="1121">F3</text>
+    <use href="#fiducial" xlink:href="#fiducial" x="791" y="1139" data-fiducial-id="F4" data-kind="corner"/><text x="809" y="1121">F4</text>
+    <use href="#fiducial" xlink:href="#fiducial" x="125" y="110" data-fiducial-id="F5" data-kind="asymmetry"/><text x="143" y="92">F5</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="150" data-fiducial-id="B01" data-kind="overlap-band"/><text x="394" y="139" font-size="3">B01</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="240" data-fiducial-id="B02" data-kind="overlap-band"/><text x="469" y="229" font-size="3">B02</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="330" data-fiducial-id="B03" data-kind="overlap-band"/><text x="394" y="319" font-size="3">B03</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="420" data-fiducial-id="B04" data-kind="overlap-band"/><text x="469" y="409" font-size="3">B04</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="510" data-fiducial-id="B05" data-kind="overlap-band"/><text x="394" y="499" font-size="3">B05</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="600" data-fiducial-id="B06" data-kind="overlap-band"/><text x="469" y="589" font-size="3">B06</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="690" data-fiducial-id="B07" data-kind="overlap-band"/><text x="394" y="679" font-size="3">B07</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="780" data-fiducial-id="B08" data-kind="overlap-band"/><text x="469" y="769" font-size="3">B08</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="870" data-fiducial-id="B09" data-kind="overlap-band"/><text x="394" y="859" font-size="3">B09</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="960" data-fiducial-id="B10" data-kind="overlap-band"/><text x="469" y="949" font-size="3">B10</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="383" y="1050" data-fiducial-id="B11" data-kind="overlap-band"/><text x="394" y="1039" font-size="3">B11</text>
+    <use href="#bandFiducial" xlink:href="#bandFiducial" x="458" y="1120" data-fiducial-id="B12" data-kind="overlap-band"/><text x="469" y="1109" font-size="3">B12</text>
+  </g>
+  <g id="slanted-edges" fill="black">
+    <rect x="407.5" y="187" width="26" height="26" transform="rotate(5 420.5 200)"/>
+    <rect x="407.5" y="547" width="26" height="26" transform="rotate(-5 420.5 560)"/>
+    <rect x="407.5" y="987" width="26" height="26" transform="rotate(5 420.5 1000)"/>
+    <rect x="105" y="315" width="50" height="50" transform="rotate(5 130 340)"/>
+    <rect x="245" y="835" width="50" height="50" transform="rotate(-7 270 860)"/>
+    <rect x="665" y="695" width="50" height="50" transform="rotate(5 690 720)"/>
+    <rect x="580" y="310" width="40" height="40" transform="rotate(-5 600 330)"/>
+  </g>
+  <g id="circles" fill="none" stroke="black">
+    <circle cx="200" cy="520" r="15" stroke-width="0.8"/>
+    <circle cx="200" cy="520" r="30" stroke-width="0.8"/>
+    <circle cx="200" cy="520" r="45" stroke-width="0.8"/>
+    <circle cx="200" cy="520" r="1.5" fill="black" stroke="none"/>
+    <circle cx="160" cy="980" r="20" stroke-width="0.8"/>
+    <circle cx="160" cy="980" r="40" stroke-width="0.8"/>
+    <circle cx="160" cy="980" r="1.5" fill="black" stroke="none"/>
+    <circle cx="650" cy="470" r="20" stroke-width="0.8"/>
+    <circle cx="650" cy="470" r="40" stroke-width="0.8"/>
+    <circle cx="650" cy="470" r="60" stroke-width="0.8"/>
+    <circle cx="650" cy="470" r="1.5" fill="black" stroke="none"/>
+    <circle cx="700" cy="940" r="15" stroke-width="0.8"/>
+    <circle cx="700" cy="940" r="30" stroke-width="0.8"/>
+    <circle cx="700" cy="940" r="1.5" fill="black" stroke="none"/>
+  </g>
+  <g id="fine-lines" fill="black">
+    <rect x="70" y="700" width="0.1" height="60"/>
+    <rect x="70.2" y="700" width="0.1" height="60"/>
+    <rect x="70.4" y="700" width="0.1" height="60"/>
+    <rect x="73.6" y="700" width="0.2" height="60"/>
+    <rect x="74" y="700" width="0.2" height="60"/>
+    <rect x="74.4" y="700" width="0.2" height="60"/>
+    <rect x="77.8" y="700" width="0.3" height="60"/>
+    <rect x="78.4" y="700" width="0.3" height="60"/>
+    <rect x="79" y="700" width="0.3" height="60"/>
+    <rect x="82.6" y="700" width="0.5" height="60"/>
+    <rect x="83.6" y="700" width="0.5" height="60"/>
+    <rect x="84.6" y="700" width="0.5" height="60"/>
+    <rect x="88.6" y="700" width="1" height="60"/>
+    <rect x="90.6" y="700" width="1" height="60"/>
+    <rect x="92.6" y="700" width="1" height="60"/>
+    <rect x="540" y="560" width="70" height="0.1"/>
+    <rect x="540" y="560.2" width="70" height="0.1"/>
+    <rect x="540" y="560.4" width="70" height="0.1"/>
+    <rect x="540" y="563.6" width="70" height="0.2"/>
+    <rect x="540" y="564" width="70" height="0.2"/>
+    <rect x="540" y="564.4" width="70" height="0.2"/>
+    <rect x="540" y="567.8" width="70" height="0.3"/>
+    <rect x="540" y="568.4" width="70" height="0.3"/>
+    <rect x="540" y="569" width="70" height="0.3"/>
+    <rect x="540" y="572.6" width="70" height="0.5"/>
+    <rect x="540" y="573.6" width="70" height="0.5"/>
+    <rect x="540" y="574.6" width="70" height="0.5"/>
+    <rect x="540" y="578.6" width="70" height="1"/>
+    <rect x="540" y="580.6" width="70" height="1"/>
+    <rect x="540" y="582.6" width="70" height="1"/>
+    <rect x="560" y="820" width="0.2" height="50"/>
+    <rect x="560.4" y="820" width="0.2" height="50"/>
+    <rect x="560.8" y="820" width="0.2" height="50"/>
+    <rect x="564.2" y="820" width="0.5" height="50"/>
+    <rect x="565.2" y="820" width="0.5" height="50"/>
+    <rect x="566.2" y="820" width="0.5" height="50"/>
+    <rect x="570.2" y="820" width="1" height="50"/>
+    <rect x="572.2" y="820" width="1" height="50"/>
+    <rect x="574.2" y="820" width="1" height="50"/>
+  </g>
+  <g id="seam-crossing-lines" stroke="black" fill="none">
+    <path d="M300 457L541 457" stroke-width="0.1"/>
+    <path d="M300 461L541 461" stroke-width="0.2"/>
+    <path d="M300 465L541 465" stroke-width="0.3"/>
+    <path d="M300 469L541 469" stroke-width="0.5"/>
+    <path d="M300 473L541 473" stroke-width="1"/>
+    <path d="M300 1072L541 1072" stroke-width="0.2"/>
+    <path d="M300 1080L541 1080" stroke-width="0.5"/>
+    <path d="M300 640L541 700" stroke-width="0.3"/>
+  </g>
+  <g id="patches" font-family="Arial, Helvetica, sans-serif" font-size="4">
+    <rect x="406.5" y="290" width="28" height="12" fill="#000000"/>
+    <rect x="406.5" y="302" width="28" height="12" fill="#333333"/>
+    <rect x="406.5" y="314" width="28" height="12" fill="#666666"/>
+    <rect x="406.5" y="326" width="28" height="12" fill="#999999"/>
+    <rect x="406.5" y="338" width="28" height="12" fill="#cccccc"/>
+    <rect x="406.5" y="350" width="28" height="12" fill="#ffffff" stroke="#000000" stroke-width="0.4"/>
+    <rect x="406.5" y="735" width="28" height="12" fill="#e31a1c"/>
+    <rect x="406.5" y="747" width="28" height="12" fill="#33a02c"/>
+    <rect x="406.5" y="759" width="28" height="12" fill="#1f78b4"/>
+    <rect x="406.5" y="771" width="28" height="12" fill="#ffdf00"/>
+    <rect x="406.5" y="783" width="28" height="12" fill="#ff7f00"/>
+    <rect x="406.5" y="795" width="28" height="12" fill="#6a3d9a"/>
+    <rect x="70" y="150" width="30" height="25" fill="#000000"/>
+    <rect x="100" y="150" width="30" height="25" fill="#333333"/>
+    <rect x="130" y="150" width="30" height="25" fill="#666666"/>
+    <rect x="160" y="150" width="30" height="25" fill="#999999"/>
+    <rect x="190" y="150" width="30" height="25" fill="#cccccc"/>
+    <rect x="220" y="150" width="30" height="25" fill="#ffffff" stroke="#000000" stroke-width="0.4"/>
+    <text x="70" y="148">GREY</text>
+    <rect x="70" y="210" width="30" height="25" fill="#e31a1c"/>
+    <rect x="100" y="210" width="30" height="25" fill="#33a02c"/>
+    <rect x="130" y="210" width="30" height="25" fill="#1f78b4"/>
+    <rect x="160" y="210" width="30" height="25" fill="#ffdf00"/>
+    <rect x="190" y="210" width="30" height="25" fill="#ff7f00"/>
+    <rect x="220" y="210" width="30" height="25" fill="#6a3d9a"/>
+    <text x="70" y="208">COLOUR</text>
+    <rect x="560" y="150" width="35" height="25" fill="#ffffff" stroke="#000000" stroke-width="0.4"/>
+    <rect x="595" y="150" width="35" height="25" fill="#cccccc"/>
+    <rect x="630" y="150" width="35" height="25" fill="#999999"/>
+    <rect x="665" y="150" width="35" height="25" fill="#666666"/>
+    <rect x="700" y="150" width="35" height="25" fill="#333333"/>
+    <rect x="735" y="150" width="35" height="25" fill="#000000"/>
+    <text x="560" y="148">GREY</text>
+  </g>
+  <g id="rulers" stroke="black" stroke-width="0.25" fill="none">
+    <path d="M92 1080v-6M93 1080v-2.5M94 1080v-2.5M95 1080v-2.5M96 1080v-2.5M97 1080v-4M98 1080v-2.5M99 1080v-2.5M100 1080v-2.5M101 1080v-2.5M102 1080v-6M103 1080v-2.5M104 1080v-2.5M105 1080v-2.5M106 1080v-2.5M107 1080v-4M108 1080v-2.5M109 1080v-2.5M110 1080v-2.5M111 1080v-2.5M112 1080v-6M113 1080v-2.5M114 1080v-2.5M115 1080v-2.5M116 1080v-2.5M117 1080v-4M118 1080v-2.5M119 1080v-2.5M120 1080v-2.5M121 1080v-2.5M122 1080v-6M123 1080v-2.5M124 1080v-2.5M125 1080v-2.5M126 1080v-2.5M127 1080v-4M128 1080v-2.5M129 1080v-2.5M130 1080v-2.5M131 1080v-2.5M132 1080v-6M133 1080v-2.5M134 1080v-2.5M135 1080v-2.5M136 1080v-2.5M137 1080v-4M138 1080v-2.5M139 1080v-2.5M140 1080v-2.5M141 1080v-2.5M142 1080v-6M143 1080v-2.5M144 1080v-2.5M145 1080v-2.5M146 1080v-2.5M147 1080v-4M148 1080v-2.5M149 1080v-2.5M150 1080v-2.5M151 1080v-2.5M152 1080v-6M153 1080v-2.5M154 1080v-2.5M155 1080v-2.5M156 1080v-2.5M157 1080v-4M158 1080v-2.5M159 1080v-2.5M160 1080v-2.5M161 1080v-2.5M162 1080v-6M163 1080v-2.5M164 1080v-2.5M165 1080v-2.5M166 1080v-2.5M167 1080v-4M168 1080v-2.5M169 1080v-2.5M170 1080v-2.5M171 1080v-2.5M172 1080v-6M173 1080v-2.5M174 1080v-2.5M175 1080v-2.5M176 1080v-2.5M177 1080v-4M178 1080v-2.5M179 1080v-2.5M180 1080v-2.5M181 1080v-2.5M182 1080v-6M183 1080v-2.5M184 1080v-2.5M185 1080v-2.5M186 1080v-2.5M187 1080v-4M188 1080v-2.5M189 1080v-2.5M190 1080v-2.5M191 1080v-2.5M192 1080v-6M193 1080v-2.5M194 1080v-2.5M195 1080v-2.5M196 1080v-2.5M197 1080v-4M198 1080v-2.5M199 1080v-2.5M200 1080v-2.5M201 1080v-2.5M202 1080v-6M203 1080v-2.5M204 1080v-2.5M205 1080v-2.5M206 1080v-2.5M207 1080v-4M208 1080v-2.5M209 1080v-2.5M210 1080v-2.5M211 1080v-2.5M212 1080v-6M213 1080v-2.5M214 1080v-2.5M215 1080v-2.5M216 1080v-2.5M217 1080v-4M218 1080v-2.5M219 1080v-2.5M220 1080v-2.5M221 1080v-2.5M222 1080v-6M223 1080v-2.5M224 1080v-2.5M225 1080v-2.5M226 1080v-2.5M227 1080v-4M228 1080v-2.5M229 1080v-2.5M230 1080v-2.5M231 1080v-2.5M232 1080v-6M233 1080v-2.5M234 1080v-2.5M235 1080v-2.5M236 1080v-2.5M237 1080v-4M238 1080v-2.5M239 1080v-2.5M240 1080v-2.5M241 1080v-2.5M242 1080v-6M243 1080v-2.5M244 1080v-2.5M245 1080v-2.5M246 1080v-2.5M247 1080v-4M248 1080v-2.5M249 1080v-2.5M250 1080v-2.5M251 1080v-2.5M252 1080v-6M253 1080v-2.5M254 1080v-2.5M255 1080v-2.5M256 1080v-2.5M257 1080v-4M258 1080v-2.5M259 1080v-2.5M260 1080v-2.5M261 1080v-2.5M262 1080v-6M263 1080v-2.5M264 1080v-2.5M265 1080v-2.5M266 1080v-2.5M267 1080v-4M268 1080v-2.5M269 1080v-2.5M270 1080v-2.5M271 1080v-2.5M272 1080v-6M273 1080v-2.5M274 1080v-2.5M275 1080v-2.5M276 1080v-2.5M277 1080v-4M278 1080v-2.5M279 1080v-2.5M280 1080v-2.5M281 1080v-2.5M282 1080v-6M283 1080v-2.5M284 1080v-2.5M285 1080v-2.5M286 1080v-2.5M287 1080v-4M288 1080v-2.5M289 1080v-2.5M290 1080v-2.5M291 1080v-2.5M292 1080v-6M92 1080h200"/>
+    <path d="M26 300h6M26 301h2.5M26 302h2.5M26 303h2.5M26 304h2.5M26 305h4M26 306h2.5M26 307h2.5M26 308h2.5M26 309h2.5M26 310h6M26 311h2.5M26 312h2.5M26 313h2.5M26 314h2.5M26 315h4M26 316h2.5M26 317h2.5M26 318h2.5M26 319h2.5M26 320h6M26 321h2.5M26 322h2.5M26 323h2.5M26 324h2.5M26 325h4M26 326h2.5M26 327h2.5M26 328h2.5M26 329h2.5M26 330h6M26 331h2.5M26 332h2.5M26 333h2.5M26 334h2.5M26 335h4M26 336h2.5M26 337h2.5M26 338h2.5M26 339h2.5M26 340h6M26 341h2.5M26 342h2.5M26 343h2.5M26 344h2.5M26 345h4M26 346h2.5M26 347h2.5M26 348h2.5M26 349h2.5M26 350h6M26 351h2.5M26 352h2.5M26 353h2.5M26 354h2.5M26 355h4M26 356h2.5M26 357h2.5M26 358h2.5M26 359h2.5M26 360h6M26 361h2.5M26 362h2.5M26 363h2.5M26 364h2.5M26 365h4M26 366h2.5M26 367h2.5M26 368h2.5M26 369h2.5M26 370h6M26 371h2.5M26 372h2.5M26 373h2.5M26 374h2.5M26 375h4M26 376h2.5M26 377h2.5M26 378h2.5M26 379h2.5M26 380h6M26 381h2.5M26 382h2.5M26 383h2.5M26 384h2.5M26 385h4M26 386h2.5M26 387h2.5M26 388h2.5M26 389h2.5M26 390h6M26 391h2.5M26 392h2.5M26 393h2.5M26 394h2.5M26 395h4M26 396h2.5M26 397h2.5M26 398h2.5M26 399h2.5M26 400h6M26 401h2.5M26 402h2.5M26 403h2.5M26 404h2.5M26 405h4M26 406h2.5M26 407h2.5M26 408h2.5M26 409h2.5M26 410h6M26 411h2.5M26 412h2.5M26 413h2.5M26 414h2.5M26 415h4M26 416h2.5M26 417h2.5M26 418h2.5M26 419h2.5M26 420h6M26 421h2.5M26 422h2.5M26 423h2.5M26 424h2.5M26 425h4M26 426h2.5M26 427h2.5M26 428h2.5M26 429h2.5M26 430h6M26 431h2.5M26 432h2.5M26 433h2.5M26 434h2.5M26 435h4M26 436h2.5M26 437h2.5M26 438h2.5M26 439h2.5M26 440h6M26 441h2.5M26 442h2.5M26 443h2.5M26 444h2.5M26 445h4M26 446h2.5M26 447h2.5M26 448h2.5M26 449h2.5M26 450h6M26 451h2.5M26 452h2.5M26 453h2.5M26 454h2.5M26 455h4M26 456h2.5M26 457h2.5M26 458h2.5M26 459h2.5M26 460h6M26 461h2.5M26 462h2.5M26 463h2.5M26 464h2.5M26 465h4M26 466h2.5M26 467h2.5M26 468h2.5M26 469h2.5M26 470h6M26 471h2.5M26 472h2.5M26 473h2.5M26 474h2.5M26 475h4M26 476h2.5M26 477h2.5M26 478h2.5M26 479h2.5M26 480h6M26 481h2.5M26 482h2.5M26 483h2.5M26 484h2.5M26 485h4M26 486h2.5M26 487h2.5M26 488h2.5M26 489h2.5M26 490h6M26 491h2.5M26 492h2.5M26 493h2.5M26 494h2.5M26 495h4M26 496h2.5M26 497h2.5M26 498h2.5M26 499h2.5M26 500h6M26 300v200"/>
+  </g>
+</svg>

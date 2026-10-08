@@ -26,6 +26,8 @@
     { "fixtureId": "vector-development-seam", "outcome": "Accept", "failureCode": null },
     { "fixtureId": "vector-development-seam-damaged", "outcome": "Reject", "failureCode": "declared-damage-detected" },
     { "fixtureId": "vector-locked-holdout-edge", "outcome": "Accept", "failureCode": null },
-    { "fixtureId": "vector-release-layout", "outcome": "Accept", "failureCode": null }
+    { "fixtureId": "vector-release-layout", "outcome": "Accept", "failureCode": null },
+    { "fixtureId": "vector-pilot-chart-development", "outcome": "Accept", "failureCode": null },
+    { "fixtureId": "vector-pilot-chart-holdout", "outcome": "Accept", "failureCode": null }
   ]
 }
