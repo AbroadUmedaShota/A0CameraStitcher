@@ -94,6 +94,8 @@ $script:SyntheticImageMaxBytes = 4096
 # It stays below one line of wrapped base64 (48 bytes at 64 columns, 57 at 76) so that each line of a
 # wrapped picture is still checked on its own when joining the lines shifts the start of the picture.
 $script:MinEmbeddedImageBytes = 32
+# Hashes of the fixture dummy images at Head (set for each range; see Get-HeadDummyImageHashes).
+$script:AllowedImageSha256 = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
 # Plain English words that are also short account or owner names. A short plain-word needle is
 # skipped only when it equals the account name (the profile path forms cover that) or is listed
@@ -314,6 +316,11 @@ function Get-LocalNeedles {
     }
     $exportDirs = [System.Collections.Generic.List[string]]::new()
     foreach ($t in $texts) { Add-NeedlesFromText $set $t $exportDirs }
+    # How many camera bodies the records point to: the distinct aliases (CAM-A, CAM-B) they name.
+    $aliases = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($t in $texts) {
+        foreach ($m in [regex]::Matches($t, '(?<![A-Za-z0-9])CAM-([A-Z])(?![A-Za-z0-9])')) { $null = $aliases.Add($m.Groups[1].Value) }
+    }
 
     # Original photographs: hash, size, EXIF. The folders are the app's own data, the extra roots
     # given on the command line, and the export folders named in the records.
@@ -380,7 +387,7 @@ function Get-LocalNeedles {
     }
     [pscustomobject]@{
         Set = $set; SourceFiles = $sourceFiles.Count; Photos = $photoFiles.Count; UsbInstances = $usbCount; WpdKeys = $wpdCount
-        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped
+        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped; RecordBodies = $aliases.Count
     }
 }
 
@@ -388,6 +395,37 @@ function Get-LocalNeedles {
 function Get-BodySerialCount {
     param($Set)
     return @($Set.List | Where-Object { $_.Category -in 'exif-serial', 'usb-serial' }).Count
+}
+
+# The same serials counted per body: the padded and the unpadded form (and the EXIF and the USB
+# form) of one serial are one body.
+function Get-DistinctBodyCount {
+    param($Set)
+    $bodies = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($Set.List | Where-Object { $_.Category -in 'exif-serial', 'usb-serial' })) {
+        $v = $n.Value.Trim().TrimStart('0')
+        if ($v.Length -gt 0) { $null = $bodies.Add($v) }
+    }
+    return $bodies.Count
+}
+
+# Identifiers that come from the records themselves: 32 / 64 digit hex, run IDs, approval references.
+# A source folder that yields none of them cannot be the records this check is meant to compare.
+function Get-RecordIdCount {
+    param($Set)
+    $total = 0
+    foreach ($c in 'hex32', 'hex64', 'runid', 'approvalref') { if ($Set.Count.ContainsKey($c)) { $total += $Set.Count[$c] } }
+    return $total
+}
+
+# A line to print when the records are not read from the default folder (never the path itself).
+function Get-SourceRootNote {
+    param([string]$SourceRoot)
+    if ([string]::IsNullOrWhiteSpace($SourceRoot) -or [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
+    $default = Join-Path $env:LOCALAPPDATA 'A0CameraStitcher'
+    $normalize = { param($p) try { [IO.Path]::GetFullPath($p).TrimEnd('\', '/') } catch { $p } }
+    if ((& $normalize $SourceRoot) -ieq (& $normalize $default)) { return $null }
+    return 'note: -SourceRoot is not the default source folder; the records of another folder are compared.'
 }
 
 # ------------------------------------------------------------------ variants
@@ -449,10 +487,35 @@ function Get-ImageKind([byte[]]$Bytes) {
     return $null
 }
 
+# SHA-256 (lower case hex) of the dummy images that sit in the tree at Head as images/*.jpg.b64 and
+# pass the same test as a .b64 file in the range (small, with the synthetic-image notice). A decoded
+# image with one of these hashes is a fixture dummy, not a photograph, wherever it is embedded.
+function Get-HeadDummyImageHashes {
+    param([string]$Root, [string]$Head)
+    $hashes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in @(Invoke-Git $Root @('ls-tree', '-r', '--name-only', $Head))) {
+        if (([string]$p) -notmatch '(^|/)images/[^/]+\.jpg\.b64$') { continue }
+        $content = (Invoke-Git $Root @('show', '--no-textconv', '--no-ext-diff', "${Head}:$p")) -join ''
+        try { $bytes = [Convert]::FromBase64String(($content -replace '\s', '')) } catch { continue }
+        if ((Get-ImageKind $bytes) -and (Test-DummyImage $bytes)) {
+            $null = $hashes.Add([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)))
+        }
+    }
+    return , $hashes
+}
+
+# A small image that carries the synthetic-image notice.
+function Test-DummyImage([byte[]]$Bytes) {
+    return ($Bytes.Length -le $script:SyntheticImageMaxBytes) -and $script:Latin1.GetString($Bytes).Contains($script:SyntheticImageNotice)
+}
+
 function Add-DecodedBytesTargets {
     param($Targets, $Structural, [string]$Name, [string]$Kind, [byte[]]$Bytes, [bool]$NoImageCheck)
     if (-not $NoImageCheck -and $Bytes.Length -ge $script:MinEmbeddedImageBytes -and (Get-ImageKind $Bytes)) {
-        $Structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = $Name; Line = 0; Label = 'image' })
+        $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes))
+        if (-not $script:AllowedImageSha256.Contains($sha)) {
+            $Structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = $Name; Line = 0; Label = 'image' })
+        }
     }
     $latin1 = $script:Latin1.GetString($Bytes)
     Add-Target $Targets "$Kind-latin1 $Name" $latin1 $null "decoded-$Kind"
@@ -492,7 +555,78 @@ function Restore-Escapes {
     $t = [regex]::Replace($t, '&#[xX]([0-9a-fA-F]{1,6});', { param($m) try { [char]::ConvertFromUtf32([Convert]::ToInt32($m.Groups[1].Value, 16)) } catch { '' } })
     $t = [regex]::Replace($t, '&#(\d{1,7});', { param($m) try { [char]::ConvertFromUtf32([int]$m.Groups[1].Value) } catch { '' } })
     try { $t = [Uri]::UnescapeDataString($t) } catch { }
+    # Named HTML entities (&amp; &lt; ...) as well.
+    $t = [System.Net.WebUtility]::HtmlDecode($t)
     return $t
+}
+
+# True when line $Index follows line $Index-1 in the file (line numbers known) or when numbers are unknown.
+function Test-NextLine($LineNumbers, [int]$Index) {
+    if ($null -eq $LineNumbers -or @($LineNumbers).Count -le $Index) { return $true }
+    return (@($LineNumbers)[$Index] -eq (@($LineNumbers)[$Index - 1] + 1))
+}
+
+# Base64 written over several lines of one width (the last one shorter): each block of such lines is
+# one base64 string. The lines before and after the block (a heading, a fence) do not shift it.
+function Get-WrappedBase64Blocks {
+    param([string[]]$Lines, $LineNumbers)
+    $blocks = [System.Collections.Generic.List[string]]::new()
+    $t = @($Lines | ForEach-Object { $_.Trim() })
+    $n = $t.Count
+    $i = 0
+    while ($i -lt $n) {
+        $len = $t[$i].Length
+        if ($len -lt 8 -or $len % 4 -ne 0 -or $t[$i] -notmatch '^[A-Za-z0-9+/\-_]+$') { $i++; continue }
+        $end = $i
+        while ($end + 1 -lt $n -and (Test-NextLine $LineNumbers ($end + 1)) -and $t[$end + 1].Length -eq $len -and $t[$end + 1] -match '^[A-Za-z0-9+/\-_]+={0,2}$') {
+            $end++
+            if ($t[$end].EndsWith('=')) { break }
+        }
+        if (-not $t[$end].EndsWith('=') -and $end + 1 -lt $n -and (Test-NextLine $LineNumbers ($end + 1)) -and $t[$end + 1].Length -lt $len -and $t[$end + 1] -match '^[A-Za-z0-9+/\-_]+={0,2}$') { $end++ }
+        if ($end -gt $i) { $blocks.Add(($t[$i..$end] -join '')) }
+        $i = $end + 1
+    }
+    return , $blocks
+}
+
+# The hex bytes of one line of a hex dump (hexdump -C, xxd, Format-Hex: an address, the bytes, then a
+# character column of one character per byte), or $null when the line is no dump line. Address and
+# character column are not part of the value.
+function Get-HexDumpLineBytes([string]$Line) {
+    $m = [regex]::Match($Line, '^\s*(?:0x)?[0-9A-Fa-f]{4,16}h?:?[ \t]+(?<rest>\S.*)$')
+    if (-not $m.Success) { return $null }
+    $rest = $m.Groups['rest'].Value.TrimEnd("`r")
+    $bar = $rest.IndexOf('|')
+    if ($bar -ge 0) { $rest = $rest.Substring(0, $bar) }
+    $tokens = @([regex]::Matches($rest, '\S+'))
+    $hexTokens = 0
+    while ($hexTokens -lt $tokens.Count -and $tokens[$hexTokens].Value -match '^(?:[0-9A-Fa-f]{2})+$') { $hexTokens++ }
+    if ($hexTokens -eq 0) { return $null }
+    # With a character column, take the shortest run of tokens whose remainder is exactly one character per byte.
+    $take = $hexTokens
+    $bytes = 0
+    for ($k = 1; $k -le $hexTokens; $k++) {
+        $bytes += $tokens[$k - 1].Value.Length / 2
+        $after = $tokens[$k - 1].Index + $tokens[$k - 1].Length
+        $column = $rest.Substring($after).TrimStart()
+        if ($column.Length -gt 0 -and $column.Length -eq $bytes) { $take = $k; break }
+    }
+    return -join ($tokens[0..($take - 1)] | ForEach-Object { $_.Value })
+}
+
+# Consecutive hex dump lines are one byte string.
+function ConvertFrom-HexDumpLines {
+    param([string[]]$Lines, $LineNumbers)
+    $results = [System.Collections.Generic.List[string]]::new()
+    $current = [System.Text.StringBuilder]::new()
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $hex = Get-HexDumpLineBytes $Lines[$i]
+        if ($null -ne $hex -and ($current.Length -eq 0 -or (Test-NextLine $LineNumbers $i))) { $null = $current.Append($hex); continue }
+        if ($current.Length -gt 0) { $results.Add($current.ToString()); $null = $current.Clear() }
+        if ($null -ne $hex) { $null = $current.Append($hex) }
+    }
+    if ($current.Length -gt 0) { $results.Add($current.ToString()) }
+    return , $results
 }
 
 # The published text as written, and in normalized forms: escapes restored, and the lines joined
@@ -518,11 +652,25 @@ function Add-TextTargets {
         Add-Target $Targets "normalized-$k $Name" $v $first 'normalized'
         Add-DecodedTargets $Targets $Structural "$k $DecodedName" $v $NoImageCheck
     }
+    # Base64 wrapped over lines is one string, apart from the lines around it.
+    foreach ($block in (Get-WrappedBase64Blocks $Lines $LineNumbers)) {
+        $s = $block.TrimEnd('=').Replace('-', '+').Replace('_', '/')
+        $s = $s.PadRight($s.Length + ((4 - $s.Length % 4) % 4), '=')
+        try { $bytes = [Convert]::FromBase64String($s) } catch { continue }
+        Add-DecodedBytesTargets $Targets $Structural "b64block $DecodedName" 'b64block' $bytes $NoImageCheck
+    }
+    # A hex dump (address, bytes, character column) is one byte string, without the address and the characters.
+    foreach ($hex in (ConvertFrom-HexDumpLines $Lines $LineNumbers)) {
+        if ($hex.Length -lt 16) { continue }
+        Add-DecodedBytesTargets $Targets $Structural "hexdump $DecodedName" 'hexdump' ([Convert]::FromHexString($hex)) $NoImageCheck
+    }
 }
 
 function Invoke-Git {
     param([string]$Root, [string[]]$GitArgs)
-    $out = & git -C $Root -c core.quotepath=off @GitArgs 2>&1
+    # --no-replace-objects: a refs/replace entry would make git show other content than the push
+    # publishes (a push sends the real objects, not the replacements).
+    $out = & git --no-replace-objects -C $Root -c core.quotepath=off @GitArgs 2>&1
     # The message is fixed text: git's own output can hold paths and the revisions given.
     if ($LASTEXITCODE -ne 0) { throw (New-SafeError "git $($GitArgs[0]) failed") }
     return $out
@@ -532,6 +680,7 @@ function Get-PublishTargets {
     param([string]$Root, [string]$Base, [string]$Head, [bool]$IncludeChangedFiles)
     $targets = [System.Collections.Generic.List[object]]::new()
     $structural = [System.Collections.Generic.List[object]]::new()
+    $script:AllowedImageSha256 = Get-HeadDummyImageHashes $Root $Head
     $commits = @(Invoke-Git $Root @('rev-list', '--reverse', "$Base..$Head"))
     Write-Host "commits in range $Base..$Head : $($commits.Count)"
     $merges = @(Invoke-Git $Root @('rev-list', '--merges', "$Base..$Head"))
@@ -590,7 +739,7 @@ function Get-PublishTargets {
                 $structural.Add([pscustomobject]@{ Scope = 'unreadable-b64'; Target = "$short $p"; Line = 0; Label = 'b64' }); continue
             }
             if (Get-ImageKind $bytes) {
-                $dummy = ($bytes.Length -le $script:SyntheticImageMaxBytes) -and $script:Latin1.GetString($bytes).Contains($script:SyntheticImageNotice)
+                $dummy = Test-DummyImage $bytes
                 if (-not $dummy) { $structural.Add([pscustomobject]@{ Scope = 'embedded-image'; Target = "$short $p"; Line = 0; Label = 'image' }) }
             }
             Add-Target $targets "b64-file-latin1 $short $p" ($script:Latin1.GetString($bytes)) $null 'decoded-b64'
@@ -600,7 +749,9 @@ function Get-PublishTargets {
     }
 
     if ($IncludeChangedFiles -and $commits.Count -gt 0) {
-        foreach ($p in @(Invoke-Git $Root @('diff', '--no-textconv', '--no-ext-diff', '--name-only', '--diff-filter=AM', "$Base..$Head"))) {
+        # Three dots: what the push adds on top of the common ancestor. Two dots would also list the
+        # files that only Base changed, and read files that are not part of this push.
+        foreach ($p in @(Invoke-Git $Root @('diff', '--no-textconv', '--no-ext-diff', '--name-only', '--diff-filter=AM', "$Base...$Head"))) {
             $full = Join-Path $Root $p
             if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
             $bytes = [IO.File]::ReadAllBytes($full)
@@ -615,7 +766,13 @@ function Test-MatchBoundary([string]$Text, [int]$Index, [int]$Length, [string]$M
     if ($Mode -eq 'none') { return $true }
     $end = $Index + $Length
     if ($Mode -eq 'digit') {
-        if ($Index -gt 0 -and [char]::IsDigit($Text[$Index - 1])) { return $false }
+        # Digits in front count as another number, unless they are all zeros: a value padded with
+        # zeros to another width is the same value.
+        $k = $Index - 1
+        while ($k -ge 0 -and [char]::IsDigit($Text[$k])) {
+            if ($Text[$k] -ne '0') { return $false }
+            $k--
+        }
         if ($end -lt $Text.Length -and [char]::IsDigit($Text[$end])) { return $false }
         return $true
     }
@@ -644,6 +801,32 @@ function Find-NeedleHits {
     }
 }
 
+# A location printed for a hit holds a repository path, and the path itself may hold a real value.
+# Every part of the text that is one of the needle forms is replaced by asterisks (wherever it
+# sits, without the boundary rules of the comparison: hiding too much is the safe side).
+function Hide-NeedleText {
+    param([string]$Text, $Variants)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $spans = [System.Collections.Generic.List[int[]]]::new()
+    foreach ($v in $Variants) {
+        if ([string]::IsNullOrEmpty($v.Text)) { continue }
+        $idx = $Text.IndexOf($v.Text, $v.Compare)
+        while ($idx -ge 0) {
+            $spans.Add(@($idx, $v.Text.Length))
+            $idx = $Text.IndexOf($v.Text, $idx + 1, $v.Compare)
+        }
+    }
+    if ($spans.Count -eq 0) { return $Text }
+    $mask = [bool[]]::new($Text.Length)
+    foreach ($s in $spans) { for ($i = $s[0]; $i -lt $s[0] + $s[1]; $i++) { $mask[$i] = $true } }
+    $sb = [System.Text.StringBuilder]::new()
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        if ($mask[$i]) { if ($i -eq 0 -or -not $mask[$i - 1]) { $null = $sb.Append('***') } }
+        else { $null = $sb.Append($Text[$i]) }
+    }
+    return $sb.ToString()
+}
+
 # ------------------------------------------------------------------ main check
 
 function Invoke-LeakCheck {
@@ -654,16 +837,24 @@ function Invoke-LeakCheck {
 
     $set = New-NeedleSet
     $cannotVerify = $null
+    $recordBodies = 0
     if (-not $NoLocalSources) {
+        $note = Get-SourceRootNote $SourceRoot
+        if ($note) { Write-Host $note }
         if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
             $cannotVerify = "The local source data folder does not exist: nothing real to compare against."
         }
         else {
             $local = Get-LocalNeedles $SourceRoot $ExtraPhotoRoot $SelfTestIsolation $SelfTestIsolation
             $set = $local.Set
-            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys)"
+            $recordBodies = $local.RecordBodies
+            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys), camera bodies named in the records=$recordBodies"
             if ($local.SourceFiles -eq 0) { $cannotVerify = 'The local source data folder holds no files.' }
             elseif ($local.Capped) { $cannotVerify = "A photograph folder holds more than $($script:MaxPhotosPerRoot) photographs and was not read completely." }
+            elseif ((Get-RecordIdCount $set) -eq 0) {
+                # Without any ID from the records the comparison would cover only the PC and the photographs.
+                $cannotVerify = 'No ID (32 or 64 digit hex, run ID, approval reference) could be read from the records.'
+            }
         }
     }
     foreach ($v in $ExtraNeedle) { Add-Needle $set $v 'extra' }
@@ -676,6 +867,14 @@ function Invoke-LeakCheck {
     if (-not $NoLocalSources -and -not $cannotVerify -and $bodySerials -eq 0) {
         # Without a body serial number the check would pass a push that carries one.
         $cannotVerify = 'No body serial number could be read (no photograph with EXIF, no Nikon USB or WPD registry entry on this PC).'
+    }
+    if (-not $NoLocalSources -and -not $cannotVerify) {
+        # A dual-camera record names two bodies: one serial would leave the other body unchecked.
+        $distinctBodies = Get-DistinctBodyCount $set
+        Write-Host "distinct body serials = $distinctBodies (camera bodies named in the records = $recordBodies)"
+        if ($recordBodies -ge 2 -and $distinctBodies -lt $recordBodies) {
+            $cannotVerify = "The records name $recordBodies camera bodies, but only $distinctBodies distinct body serial number(s) could be read."
+        }
     }
     if ($set.List.Count -eq 0 -and -not $cannotVerify) { $cannotVerify = 'No needles could be built.' }
     if ($cannotVerify) {
@@ -697,7 +896,7 @@ function Invoke-LeakCheck {
         Write-Host "## scope=$($g.Name) hits=$($g.Count)"
         foreach ($h in ($g.Group | Sort-Object Target, Line | Select-Object -First 80)) {
             $where = if ($h.Line -gt 0) { " :$($h.Line)" } else { '' }
-            Write-Host ('  {0}{1}  {2} ({3})' -f $h.Target, $where, $h.Label, $(if ($h.PSObject.Properties['Kind']) { $h.Kind } else { '-' }))
+            Write-Host ('  {0}{1}  {2} ({3})' -f (Hide-NeedleText $h.Target $variants), $where, $h.Label, $(if ($h.PSObject.Properties['Kind']) { $h.Kind } else { '-' }))
         }
     }
     if ($hits.Count -eq 0) { Write-Host 'NO HITS in the content this push would publish.' }
@@ -752,6 +951,39 @@ function New-SelfTestJpeg {
     $payload = [byte[]](@(0x45, 0x78, 0x69, 0x66, 0x00, 0x00) + $tiff.ToArray())
     $len = $payload.Length + 2
     return [byte[]](@(0xFF, 0xD8, 0xFF, 0xE1, [byte]($len -shr 8), [byte]($len -band 0xFF)) + $payload + @(0xFF, 0xD9))
+}
+
+# Runs the check with the given arguments and returns its result and what it printed.
+function Invoke-CheckCaptured {
+    param([hashtable]$Arguments)
+    $all = @(Invoke-LeakCheck @Arguments 6>&1)
+    $info = @($all | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $result = @($all | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] }) | Select-Object -Last 1
+    return [pscustomobject]@{ Result = $result; Text = ($info | Out-String) }
+}
+
+function Invoke-SelfTestGit {
+    param([string]$Dir, [string[]]$GitArgs)
+    $o = & git -C $Dir @GitArgs 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs[0]) failed: $($o -join ' ')" }
+    return $o
+}
+
+# A throw-away repository of its own (invented identity, no signing, no line-ending conversion).
+function New-SelfTestRepo {
+    param([string]$Dir)
+    New-Item -ItemType Directory -Path $Dir | Out-Null
+    foreach ($a in @(@('init', '-q'), @('config', 'user.name', 'selftest'), @('config', 'user.email', 'selftest@example.invalid'),
+            @('config', 'core.autocrlf', 'false'), @('config', 'commit.gpgsign', 'false'))) {
+        $null = Invoke-SelfTestGit $Dir $a
+    }
+}
+
+function Add-SelfTestCommit {
+    param([string]$Dir, [string]$Message)
+    $null = Invoke-SelfTestGit $Dir @('add', '-A')
+    $null = Invoke-SelfTestGit $Dir @('commit', '-q', '-m', $Message)
+    return (Invoke-SelfTestGit $Dir @('rev-parse', 'HEAD'))
 }
 
 function Invoke-SelfTest {
@@ -830,6 +1062,21 @@ function Invoke-SelfTest {
         $bigWrapped = [Convert]::ToBase64String($big, [Base64FormattingOptions]::InsertLineBreaks)
         & $add 'JPEG wrapped at 76 columns after a heading line' { & $write 'o7.md' "Frame`n`n``````text`n$bigWrapped`n```````n" } 'add o7' $true
 
+        # L6: an image whose SHA-256 is that of a dummy under images/*.jpg.b64 at Head is no hit, wherever
+        # it is embedded; any other image still is.
+        $dummyB64 = [Convert]::ToBase64String($dummy)
+        & $add 'the fixture dummy image under a *Base64 key' { & $write 'q1.json' "{`"frameJpegBase64`":`"$dummyB64`"}`n" } 'add q1' $false
+        $otherDummy = [byte[]]$dummy.Clone(); $otherDummy[10] = 0x42
+        $otherDummyB64 = [Convert]::ToBase64String($otherDummy)
+        & $add 'a dummy-like image with one other byte under a *Base64 key' { & $write 'q2.json' "{`"frameJpegBase64`":`"$otherDummyB64`"}`n" } 'add q2' $true
+        $dummyHex = [Convert]::ToHexString($dummy)
+        & $add 'the fixture dummy image as hex' { & $write 'q3.txt' "dump $dummyHex`n" } 'add q3' $false
+
+        # L3: a value padded with zeros to another width is the same value.
+        & $add 'digit needle padded with zeros' { & $write 'q4.txt' "id 000${digits} only`n" } 'add q4' $true
+        & $add 'digit needle behind a non-zero digit' { & $write 'q5.txt' "id 90${digits} only`n" } 'add q5' $false
+        & $add 'digit needle behind zeros and a non-zero digit' { & $write 'q6.txt' "id 0900${digits} only`n" } 'add q6' $false
+
         # M-5: the same value written in other ways.
         $hexSep = ($script:Utf8.GetBytes($needle) | ForEach-Object { $_.ToString('x2') }) -join ' '
         & $add 'hex with spaces' { & $write 'p1.txt' "bytes: $hexSep`n" } 'add p1' $true
@@ -850,10 +1097,42 @@ function Invoke-SelfTest {
         & $add 'value wrapped over two lines' { & $write 'p9.md' "first part zz-selftest-`n    needle-0001 and more`n" } 'add p9' $true
         $wrapped = [Convert]::ToBase64String($script:Utf8.GetBytes("QQ$needle"))
         & $add 'base64 wrapped at 8 columns' { & $write 'p10.md' ((($wrapped -split '(?<=\G.{8})(?!$)') -join "`n") + "`n") } 'add p10' $true
-        & $add 'clean commit after the normalized forms' { & $write 'p11.txt' "12 34 56 78`nnothing here`n" } 'add p11' $false
+        # L5: hex dumps (the address and the character column sit between the bytes), HTML entities.
+        $dumpRows = {
+            param([byte[]]$Bytes, [string]$Style)
+            for ($o = 0; $o -lt $Bytes.Length; $o += 16) {
+                $chunk = $Bytes[$o..([math]::Min($o + 15, $Bytes.Length - 1))]
+                $ascii = -join ($chunk | ForEach-Object { if ($_ -ge 32 -and $_ -lt 127) { [string][char]$_ } else { '.' } })
+                $pairs = @(0..15 | ForEach-Object { if ($_ -lt $chunk.Length) { '{0:x2}' -f $chunk[$_] } else { '  ' } })
+                switch ($Style) {
+                    'hexdump' { '{0:x8}  {1}  {2}  |{3}|' -f $o, ($pairs[0..7] -join ' '), ($pairs[8..15] -join ' '), $ascii }
+                    'xxd' { '{0:x8}: {1}  {2}' -f $o, ((0..7 | ForEach-Object { ($pairs[2 * $_] + $pairs[2 * $_ + 1]).TrimEnd() } | Where-Object { $_ }) -join ' '), $ascii }
+                    'formathex' { '{0:x8}   {1}   {2}' -f $o, ($pairs -join ' '), $ascii }
+                }
+            }
+        }
+        $dumpBytes = $script:Utf8.GetBytes("x $needle y")
+        foreach ($style in 'hexdump', 'xxd', 'formathex') {
+            $rows = @(& $dumpRows $dumpBytes $style)
+            & $add "needle in a hex dump over two lines ($style)" { & $write "r-$style.txt" (($rows -join "`n") + "`n") } "add r $style" $true
+        }
+        $cleanRows = @(& $dumpRows $script:Utf8.GetBytes('hello world, this is a clean sentence for the dump.') 'hexdump')
+        & $add 'a hex dump of clean text' { & $write 'r4.txt' (($cleanRows -join "`n") + "`n") } 'add r4' $false
+        $jpegRows = @(& $dumpRows $jpegBytes 'xxd')
+        & $add 'JPEG as a hex dump' { & $write 'r5.txt' (($jpegRows -join "`n") + "`n") } 'add r5' $true
+        & $add 'needle behind an HTML entity (&amp;)' { & $write 'r6.html' "<p>value zz&amp;tail-needle-0002 here</p>`n" } 'add r6' $true
+        $wrap16 = ($jpegB64 -split '(?<=\G.{16})(?!$)') -join "`n"
+        & $add 'JPEG wrapped at 16 columns after a heading line' { & $write 'r7.md' "Frame`n$wrap16`n" } 'add r7' $true
+        $needleB64 = [Convert]::ToBase64String($script:Utf8.GetBytes("QQ$needle"))
+        $wrap12 = ($needleB64 -split '(?<=\G.{12})(?!$)') -join "`n"
+        & $add 'needle in base64 wrapped at 12 columns after a heading line' { & $write 'r8.md' "Frame`n$wrap12`n" } 'add r8' $true
+        $cleanB64 = [Convert]::ToBase64String($script:Utf8.GetBytes('hello world, this is only text, and then some more text here.'))
+        $wrapClean = ($cleanB64 -split '(?<=\G.{16})(?!$)') -join "`n"
+        & $add 'clean base64 wrapped at 16 columns after a heading line' { & $write 'r9.md' "Frame`n$wrapClean`n" } 'add r9' $false
+        & $add 'clean commit after the normalized forms'{ & $write 'p11.txt' "12 34 56 78`nnothing here`n" } 'add p11' $false
 
         foreach ($s in $scenarios) {
-            $r = Invoke-LeakCheck -Root $tmp -Base $s.Base -Head $s.Head -SourceRoot '' -ExtraNeedle @($needle, $digits) `
+            $r = Invoke-LeakCheck -Root $tmp -Base $s.Base -Head $s.Head -SourceRoot '' -ExtraNeedle @($needle, $digits, 'zz&tail-needle-0002') `
                 -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $true 6>$null
             $got = ($r.Exit -eq 1)
             if ($got -ne $s.ExpectHit) { $failures.Add("scenario '$($s.Name)': expected hit=$($s.ExpectHit), got exit=$($r.Exit)") }
@@ -887,11 +1166,29 @@ function Invoke-SelfTest {
         $source = Join-Path $tmp 'source'
         $exports = Join-Path $tmp 'zz-export-dir-0001'
         New-Item -ItemType Directory -Force -Path $source, $exports | Out-Null
-        [IO.File]::WriteAllText((Join-Path $source 'record.json'), ('{"exportDirectory": "' + ($exports -replace '\\', '\\') + '", "note": "x"}'), $script:Utf8)
+        $record = Join-Path $source 'record.json'
+        $exportJson = '"exportDirectory": "' + ($exports -replace '\\', '\\') + '"'
+        $recordId = '0f1e2d3c4b5a69788796a5b4c3d2e1f0'   # invented
         $clean = ($scenarios | Where-Object { $_.Name -eq 'clean commit' })
-        $r = Invoke-LeakCheck -Root $tmp -Base $clean.Base -Head $clean.Head -SourceRoot $source -ExtraNeedle @() -ExtraPhotoRoot @() `
-            -IncludeChangedFiles $false -NoLocalSources $false -SelfTestIsolation $true 6>$null
-        if ($r.Exit -ne 2) { $failures.Add("a source folder without a body serial number must give exit 2 (got $($r.Exit))") }
+        $localArgs = @{ Root = $tmp; Base = $clean.Base; Head = $clean.Head; SourceRoot = $source; ExtraNeedle = @(); ExtraPhotoRoot = @()
+                        IncludeChangedFiles = $false; NoLocalSources = $false; SelfTestIsolation = $true }
+
+        # L1 (a): records without any ID of their own (hex32 / hex64 / run ID / approval reference) cannot be verified.
+        # (The export folder path holds the random name of this temporary folder, so the photograph sits in the source folder here.)
+        [IO.File]::WriteAllText($record, '{"note": "x"}', $script:Utf8)
+        $photo = Join-Path $source 'own.jpg'
+        [IO.File]::WriteAllBytes($photo, (New-SelfTestJpeg '0012345'))
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'No ID \(') { $failures.Add("records without any ID must give exit 2 even with a photographed serial (got $($cap.Result.Exit))") }
+        Remove-Item -LiteralPath $photo
+
+        # L1 (b): another source folder than the default is said in one line, without its path.
+        if ($cap.Text -notmatch 'note: -SourceRoot is not the default' -or $cap.Text.Contains($tmp)) { $failures.Add('a source folder other than the default must be noted in one line without its path') }
+        if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -and $null -ne (Get-SourceRootNote (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher'))) { $failures.Add('the default source folder must not be noted') }
+
+        [IO.File]::WriteAllText($record, ('{' + $exportJson + ', "transactionId": "' + $recordId + '", "cameraAlias": "CAM-A"}'), $script:Utf8)
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'No body serial') { $failures.Add("a source folder without a body serial number must give exit 2 (got $($cap.Result.Exit))") }
         $photo = Join-Path $exports 'x.jpg'
         [IO.File]::WriteAllBytes($photo, (New-SelfTestJpeg '0012345'))
         $photoHash = (Get-FileHash -LiteralPath $photo -Algorithm SHA256).Hash
@@ -899,10 +1196,19 @@ function Invoke-SelfTest {
         if ($local.ExportDirs -ne 1 -or $local.ExportPhotos -ne 1) { $failures.Add('the export folder named in a record must be read for photographs') }
         $serials = @($local.Set.List | Where-Object { $_.Category -eq 'exif-serial' } | ForEach-Object { $_.Value })
         if (($serials -notcontains '0012345') -or ($serials -notcontains '12345')) { $failures.Add('the EXIF serial must be read, with and without leading zeros') }
-        $r = Invoke-LeakCheck -Root $tmp -Base $clean.Base -Head $clean.Head -SourceRoot $source -ExtraNeedle @() -ExtraPhotoRoot @() `
-            -IncludeChangedFiles $false -NoLocalSources $false -SelfTestIsolation $true 6>$null
-        if ($r.Exit -ne 0) { $failures.Add("a source folder with a photographed serial and a clean range must give exit 0 (got $($r.Exit))") }
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 0) { $failures.Add("a source folder with a photographed serial and a clean range must give exit 0 (got $($cap.Result.Exit))") }
         if ((Get-FileHash -LiteralPath $photo -Algorithm SHA256).Hash -ne $photoHash) { $failures.Add('the export folder must be read only') }
+
+        # L1 (c): records that name two camera bodies need two distinct body serials.
+        [IO.File]::WriteAllText($record, ('{' + $exportJson + ', "transactionId": "' + $recordId + '", "legs": ["CAM-A", "CAM-B"]}'), $script:Utf8)
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'name 2 camera bodies') { $failures.Add("two camera bodies in the records and one body serial must give exit 2 (got $($cap.Result.Exit))") }
+        $photo2 = Join-Path $exports 'y.jpg'
+        [IO.File]::WriteAllBytes($photo2, (New-SelfTestJpeg '0054321'))
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 0) { $failures.Add("two camera bodies in the records and two body serials must give exit 0 (got $($cap.Result.Exit))") }
+        Remove-Item -LiteralPath $photo2
 
         # M-1 (d): -NoLocalSources outside the self test is refused.
         $out = & { Invoke-Entry -Base $first -Head $removed -RepositoryRoot $tmp -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
@@ -942,9 +1248,67 @@ function Invoke-SelfTest {
             Find-NeedleHits $variants $targets $hits
             if (($hits.Count -gt 0) -ne $case.Hit) { $failures.Add("a short word needle: expected hit=$($case.Hit) for one of the sample texts") }
         }
+
+        # L2, L4 and L7 run in repositories of their own: the folder above holds the files of the other tests.
+        $tmp2 = "$tmp-r2"
+        New-SelfTestRepo $tmp2
+        [IO.File]::WriteAllText((Join-Path $tmp2 'seed.txt'), "seed`n", $script:Utf8)
+        $seed2 = Add-SelfTestCommit $tmp2 'seed'
+
+        # L2: a refs/replace entry must not change what the check reads (the push sends the real objects).
+        [IO.File]::WriteAllText((Join-Path $tmp2 'zr.txt'), "replaced $needle`n", $script:Utf8)
+        $replaceHead = Add-SelfTestCommit $tmp2 'add zr'
+        $blob = (Invoke-SelfTestGit $tmp2 @('rev-parse', "${replaceHead}:zr.txt"))
+        $cleanBlob = ('clean' | & git -C $tmp2 hash-object -w --stdin)
+        $null = Invoke-SelfTestGit $tmp2 @('replace', '-f', $blob, $cleanBlob)
+        try {
+            if (((Invoke-SelfTestGit $tmp2 @('show', "${replaceHead}:zr.txt")) -join '').Contains($needle)) { $failures.Add('self test setup: the replacement must hide the needle from a plain git show') }
+            $r = Invoke-LeakCheck -Root $tmp2 -Base $seed2 -Head $replaceHead -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+            if ($r.Exit -ne 1) { $failures.Add("a replaced object must not hide a needle (got exit $($r.Exit))") }
+        }
+        finally { $null = Invoke-SelfTestGit $tmp2 @('replace', '-d', $blob) }
+
+        # L4: the path printed for a hit hides the part of it that is a needle.
+        [IO.File]::WriteAllText((Join-Path $tmp2 "n-$needle.md"), "id $digits only`n", $script:Utf8)
+        $hideHead = Add-SelfTestCommit $tmp2 'add hide'
+        $cap = Invoke-CheckCaptured @{ Root = $tmp2; Base = $replaceHead; Head = $hideHead; SourceRoot = ''; ExtraNeedle = @($needle, $digits); ExtraPhotoRoot = @()
+                                       IncludeChangedFiles = $false; NoLocalSources = $true }
+        if ($cap.Result.Exit -ne 1) { $failures.Add("a needle in a file name and in its content must give exit 1 (got $($cap.Result.Exit))") }
+        if ($cap.Text.Contains($needle) -or $cap.Text.Contains($digits)) { $failures.Add('a path printed for a hit must not show the needle') }
+        if ($cap.Text -notmatch 'n-\*\*\*\.md') { $failures.Add('the part of a printed path that is a needle must be replaced by asterisks') }
+
+        # L7: -IncludeChangedFiles reads what the push adds (Base...Head), not what only Base changed.
+        $tmp7 = "$tmp-l7"
+        New-SelfTestRepo $tmp7
+        $git7 = { Invoke-SelfTestGit $tmp7 $args | Out-Null }
+        [IO.File]::WriteAllText((Join-Path $tmp7 'q.txt'), "line one`nold value $needle`n", $script:Utf8)
+        & $git7 add -A
+        & $git7 commit -q -m fork
+        $fork = (Invoke-SelfTestGit $tmp7 @('rev-parse', 'HEAD'))
+        & $git7 checkout -q -b zz-base
+        [IO.File]::WriteAllText((Join-Path $tmp7 'q.txt'), "line one`nclean`n", $script:Utf8)
+        & $git7 add -A
+        & $git7 commit -q -m 'base changes q'
+        $base7 = (Invoke-SelfTestGit $tmp7 @('rev-parse', 'HEAD'))
+        & $git7 checkout -q -b zz-head $fork
+        [IO.File]::WriteAllText((Join-Path $tmp7 'r.txt'), "clean`n", $script:Utf8)
+        & $git7 add -A
+        & $git7 commit -q -m 'head adds r'
+        $head7 = (Invoke-SelfTestGit $tmp7 @('rev-parse', 'HEAD'))
+        $r = Invoke-LeakCheck -Root $tmp7 -Base $base7 -Head $head7 -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+            -IncludeChangedFiles $true -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 0) { $failures.Add("-IncludeChangedFiles must not read a file only Base changed (got exit $($r.Exit))") }
+        [IO.File]::WriteAllText((Join-Path $tmp7 'r.txt'), "uncommitted $needle`n", $script:Utf8)
+        $r = Invoke-LeakCheck -Root $tmp7 -Base $base7 -Head $head7 -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+            -IncludeChangedFiles $true -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 1) { $failures.Add("-IncludeChangedFiles must still read a file the push adds (got exit $($r.Exit))") }
     }
     finally {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+        foreach ($extra in "$tmp-r2", "$tmp-l7") {
+            if (Test-Path -LiteralPath $extra) { Remove-Item -LiteralPath $extra -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
     if ($failures.Count -eq 0) { Write-Host 'SELFTEST PASS (invented values only)'; return 0 }
     foreach ($f in $failures) { Write-Host "SELFTEST FAIL: $f" }
