@@ -8460,18 +8460,63 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
     };
 
     var releaseCount = 0;
+    var steps = new List<string>();
     for (var attempt = 1; attempt <= 2; attempt++)
     {
         var label = $"close attempt {attempt}";
         var exit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var textChangesBefore = textChanges;
+        steps.Clear();
 
-        // Same order as MainWindow.OnClosing: indicator first, then the window-disabling wait.
-        binding.BeginShutdownConfirmation();
-        var shutdown = HardwareDualWindowShutdownGate.TryShutdownAsync(
-            () => binding.CancelBindingOnShutdownAsync(),
-            () => new ValueTask(exit.Task),
-            () => releaseCount++);
+        // The same sequence code MainWindow.OnClosing runs (issue #239); only the window's own
+        // actions are replaced by recorders. The ViewModel calls are the real ones.
+        var shutdown = HardwareDualWindowCloseSequence.RunAsync(new HardwareDualWindowCloseSteps(
+            StopHostLifetimeMonitor: () => steps.Add("stop-monitor"),
+            DisableWindow: () =>
+            {
+                steps.Add("disable");
+                Check.True(binding.IsShutdownConfirming,
+                    $"{label}: the indicator must be up before the window is disabled.");
+            },
+            CancelWindowLifetime: () => steps.Add("cancel-lifetime"),
+            Agent: new HardwareDualWindowAgentCloseSteps(
+                BeginConfirmation: () =>
+                {
+                    steps.Add("begin");
+                    binding.BeginShutdownConfirmation();
+                },
+                CancelBindingAsync: () =>
+                {
+                    steps.Add("cancel-binding");
+                    return binding.CancelBindingOnShutdownAsync();
+                },
+                DisposeAgentAsync: () =>
+                {
+                    steps.Add("dispose-agent");
+                    return new ValueTask(exit.Task);
+                },
+                ReleaseExclusiveLease: () =>
+                {
+                    steps.Add("release-lease");
+                    releaseCount++;
+                },
+                EstimateRemainingAgentLifetime: () =>
+                {
+                    steps.Add("estimate");
+                    return TimeSpan.FromMinutes(4);
+                },
+                ReportBlocked: (code, detail, remaining) =>
+                {
+                    steps.Add("report-blocked");
+                    binding.ReportShutdownBlocked(code, detail, remaining);
+                },
+                EndConfirmation: () =>
+                {
+                    steps.Add("end");
+                    binding.EndShutdownConfirmation();
+                },
+                EnableWindow: () => steps.Add("enable"),
+                RestartHostLifetimeMonitor: () => steps.Add("restart-monitor"))));
 
         Check.False(shutdown.IsCompleted, $"{label}: the wait must still be pending.");
         Check.True(binding.IsShutdownConfirming, $"{label}: the indicator must be up while the wait is pending.");
@@ -8487,8 +8532,9 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
             exit.SetException(new TimeoutException("synthetic exit timeout"));
             var outcome = await shutdown;
             Check.False(outcome.Completed, $"{label}: an Agent that did not exit must keep the window open.");
-            binding.ReportShutdownBlocked(outcome.BlockingCode, outcome.BlockingDetail, TimeSpan.FromMinutes(4));
-            binding.EndShutdownConfirmation();
+            Check.Equal(
+                "stop-monitor,begin,disable,cancel-lifetime,cancel-binding,dispose-agent,estimate,report-blocked,end,enable,restart-monitor",
+                string.Join(',', steps));
             Check.False(binding.IsShutdownConfirming, $"{label}: the indicator must go once the result is shown.");
             Check.Equal(string.Empty, binding.ShutdownConfirmingText);
             Check.Equal(string.Empty, binding.ShutdownConfirmingDetailText);
@@ -8503,8 +8549,25 @@ static async Task ShutdownConfirmingIndicatorShowsDuringCloseWaitAsync()
             var outcome = await shutdown;
             Check.True(outcome.Completed, $"{label}: an exited Agent must let the close complete.");
             Check.Equal(1, releaseCount);
+            // A completed close leaves the indicator up (Close() takes the window away) and does
+            // not re-enable the window, restart the monitor or show the blocked guidance.
+            Check.Equal(
+                "stop-monitor,begin,disable,cancel-lifetime,cancel-binding,dispose-agent,release-lease",
+                string.Join(',', steps));
+            Check.True(binding.IsShutdownConfirming, $"{label}: the indicator stays up until the window closes.");
         }
     }
+
+    // A window that owns no Camera Agent (simulated mode) runs the same sequence without the
+    // agent steps: nothing is awaited, no indicator is shown, and the result is a completed close.
+    var simulatedSteps = new List<string>();
+    var simulated = await HardwareDualWindowCloseSequence.RunAsync(new HardwareDualWindowCloseSteps(
+        StopHostLifetimeMonitor: () => simulatedSteps.Add("stop-monitor"),
+        DisableWindow: () => simulatedSteps.Add("disable"),
+        CancelWindowLifetime: () => simulatedSteps.Add("cancel-lifetime"),
+        Agent: null));
+    Check.True(simulated.Completed, "A window without a Camera Agent has nothing to wait for.");
+    Check.Equal("stop-monitor,disable,cancel-lifetime", string.Join(',', simulatedSteps));
 
     // Display only: nothing was sent through the binding transport during either close
     // (CancelBinding included). Reserve/Start and kill are confirmed in

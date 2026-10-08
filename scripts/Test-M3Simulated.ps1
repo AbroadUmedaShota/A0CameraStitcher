@@ -189,15 +189,33 @@ try {
     Assert-Condition ($confirmingDetail.GetAttribute('TextWrapping') -eq 'Wrap') 'The close indicator second line must wrap (issue #228).'
     Assert-Condition ($confirmingDetail.GetAttribute('Style') -eq '{StaticResource MutedTextStyle}' -and $confirmingDetail.GetAttribute('FontSize') -eq '{StaticResource FontSizeLabel}') 'The close indicator second line must use MutedTextStyle and FontSizeLabel (issue #228).'
     Assert-Condition ($null -eq $confirmingNode.SelectSingleNode('.//*[@*[local-name()="Text" and contains(., "秒")]]')) 'The close indicator must not state a number of seconds (issue #228).'
+    # The order of one window-close attempt lives in HardwareDualWindowCloseSequence (issue #239), which the window
+    # and OperatorShellTests both run; the order itself is exercised there. This text check only guards what a
+    # behaviour test cannot see: that OnClosing still reaches the sequence, supplies each window action exactly
+    # once, and does not run the gate or the individual steps itself. It reads OnClosing's body only (up to the
+    # next member), not the rest of the file, so a token elsewhere cannot satisfy or break it.
     $mainWindowCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')
     $closingBegin = $mainWindowCode.IndexOf('private async void OnClosing')
-    $closingText = $mainWindowCode.Substring($closingBegin)
-    $beginIndex = $closingText.IndexOf('BeginShutdownConfirmation()')
-    $disableIndex = $closingText.IndexOf('IsEnabled = false;')
-    $endIndex = $closingText.IndexOf('EndShutdownConfirmation()')
-    $reenableIndex = $closingText.IndexOf('IsEnabled = true;')
-    Assert-Condition ($beginIndex -ge 0 -and $disableIndex -gt $beginIndex) 'OnClosing must show the confirming indicator before it disables the window (issue #228).'
-    Assert-Condition ($endIndex -gt $beginIndex -and $reenableIndex -gt $endIndex) 'OnClosing must hide the confirming indicator before it re-enables the window after a blocked result (issue #228).'
+    Assert-Condition ($closingBegin -ge 0 -and $mainWindowCode.IndexOf('private async void OnClosing', $closingBegin + 1) -lt 0) 'MainWindow must declare exactly one OnClosing handler (issue #239).'
+    $closingRest = $mainWindowCode.Substring($closingBegin + 1)
+    $closingEnd = [regex]::Match($closingRest, '\r?\n    (private|public|internal|protected)\s')
+    Assert-Condition $closingEnd.Success 'The member after OnClosing could not be found to bound the scan (issue #239).'
+    $closingText = $closingRest.Substring(0, $closingEnd.Index)
+    foreach ($closingToken in @('HardwareDualWindowCloseSequence.RunAsync(', 'BeginShutdownConfirmation()', 'EndShutdownConfirmation()', 'CancelBindingOnShutdownAsync()', 'ReportShutdownBlocked(', 'IsEnabled = false', 'IsEnabled = true', '_lifetime.Cancel()', '_dualBindingHostLifetimeMonitor?.Stop()', '_dualBindingHostLifetimeMonitor?.Start()')) {
+        $closingTokenCount = ([regex]::Matches($closingText, [regex]::Escape($closingToken))).Count
+        Assert-Condition ($closingTokenCount -eq 1) "OnClosing must contain '$closingToken' exactly once; found $closingTokenCount (issues #228, #239)."
+    }
+    foreach ($closingForbidden in @('HardwareDualWindowShutdownGate', 'TryShutdownAsync')) {
+        Assert-Condition (-not $closingText.Contains($closingForbidden)) "OnClosing must not run '$closingForbidden' itself; the close sequence owns it (issue #239)."
+    }
+    $closeSequenceCode = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/Hardware/HardwareDualWindowCloseSequence.cs')
+    $closeSequenceIndexes = @('steps.StopHostLifetimeMonitor()', 'agent?.BeginConfirmation()', 'steps.DisableWindow()', 'steps.CancelWindowLifetime()', 'HardwareDualWindowShutdownGate.TryShutdownAsync(', 'agent.ReportBlocked(', 'agent.EndConfirmation()', 'agent.EnableWindow()', 'agent.RestartHostLifetimeMonitor()') | ForEach-Object {
+        Assert-Condition (([regex]::Matches($closeSequenceCode, [regex]::Escape($_))).Count -eq 1) "HardwareDualWindowCloseSequence must contain '$_' exactly once (issue #239)."
+        $closeSequenceCode.IndexOf($_)
+    }
+    for ($closeSequenceStep = 1; $closeSequenceStep -lt $closeSequenceIndexes.Count; $closeSequenceStep++) {
+        Assert-Condition ($closeSequenceIndexes[$closeSequenceStep] -gt $closeSequenceIndexes[$closeSequenceStep - 1]) 'HardwareDualWindowCloseSequence must keep its order: stop monitor, show the indicator, disable the window, cancel the lifetime, run the gate, then report, hide the indicator, re-enable and restart the monitor (issues #228, #239).'
+    }
 
     $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
     Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'

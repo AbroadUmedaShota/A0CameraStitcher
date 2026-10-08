@@ -355,42 +355,48 @@ public partial class MainWindow : Window
             return;
         }
         _shutdownStarted = true;
-        _dualBindingHostLifetimeMonitor?.Stop();
-        if (_dualAgentLifecycle is not null)
+        // Issue #239: the order of this close attempt lives in HardwareDualWindowCloseSequence so
+        // that the tests run the same code. This handler only supplies the window's own actions.
+        var monitorWasRunning = false;
+        HardwareDualWindowAgentCloseSteps? agentSteps = null;
+        if (_dualAgentLifecycle is { } agentLifecycle)
         {
-            // Issue #228: the wait below can take several seconds with the window disabled. Say so
-            // before disabling, so the operator never sees a silent grey window. Display only.
-            _viewModel.DualBinding.BeginShutdownConfirmation();
+            agentSteps = new HardwareDualWindowAgentCloseSteps(
+                BeginConfirmation: () => _viewModel.DualBinding.BeginShutdownConfirmation(),
+                CancelBindingAsync: () => _viewModel.DualBinding.CancelBindingOnShutdownAsync(),
+                DisposeAgentAsync: agentLifecycle.DisposeAsync,
+                ReleaseExclusiveLease: () => _sessionLease?.Dispose(),
+                EstimateRemainingAgentLifetime: () => DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(
+                    agentLifecycle.CurrentProcessStartTimeUtc, DateTimeOffset.UtcNow),
+                ReportBlocked: (code, detail, remaining) =>
+                    _viewModel.DualBinding.ReportShutdownBlocked(code, detail, remaining),
+                EndConfirmation: () => _viewModel.DualBinding.EndShutdownConfirmation(),
+                EnableWindow: () =>
+                {
+                    _shutdownStarted = false;
+                    IsEnabled = true;
+                },
+                RestartHostLifetimeMonitor: () =>
+                {
+                    if (monitorWasRunning)
+                    {
+                        _dualBindingHostLifetimeMonitor?.Start();
+                    }
+                });
         }
-        IsEnabled = false;
-        _lifetime.Cancel();
-        if (_dualAgentLifecycle is not null)
-        {
-            // The gate releases the exclusive lease only after both the typed
-            // binding cleanup acknowledgment and the child's natural exit are
-            // confirmed. Any refusal, response loss or timeout leaves this
-            // window open and the lease held; it never retries or kills Native.
-            var outcome = await HardwareDualWindowShutdownGate.TryShutdownAsync(
-                () => _viewModel.DualBinding.CancelBindingOnShutdownAsync(),
-                _dualAgentLifecycle.DisposeAsync,
-                () => _sessionLease?.Dispose());
-            if (!outcome.Completed)
+
+        var outcome = await HardwareDualWindowCloseSequence.RunAsync(new HardwareDualWindowCloseSteps(
+            StopHostLifetimeMonitor: () =>
             {
-                // Issue #225: the Agent's own process start time (read here, not inside
-                // the ViewModel) lets the blocked message estimate how much of the fixed
-                // native lifetime budget is likely left, instead of only naming a status
-                // code the operator cannot act on.
-                var remainingAgentLifetimeEstimate = DualCameraAgentLifecycle.EstimateRemainingAgentLifetime(
-                    _dualAgentLifecycle.CurrentProcessStartTimeUtc, DateTimeOffset.UtcNow);
-                _viewModel.DualBinding.ReportShutdownBlocked(
-                    outcome.BlockingCode, outcome.BlockingDetail, remainingAgentLifetimeEstimate);
-                // Issue #228: the result is on screen, so the "confirming" indicator goes. On the
-                // completed path below it stays up until Close() takes the window away.
-                _viewModel.DualBinding.EndShutdownConfirmation();
-                _shutdownStarted = false;
-                IsEnabled = true;
-                return;
-            }
+                monitorWasRunning = _dualBindingHostLifetimeMonitor?.IsEnabled == true;
+                _dualBindingHostLifetimeMonitor?.Stop();
+            },
+            DisableWindow: () => IsEnabled = false,
+            CancelWindowLifetime: () => _lifetime.Cancel(),
+            Agent: agentSteps));
+        if (!outcome.Completed)
+        {
+            return;
         }
 
         if (_reviewDisplayServer is not null) await _reviewDisplayServer.DisposeAsync();
