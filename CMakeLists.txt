@@ -668,6 +668,16 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_offline_stitcher_contracts COMMAND m2_offline_stitcher_contracts)
 
+    add_executable(m2_render_contracts tests/render_tests.cpp)
+    target_link_libraries(m2_render_contracts PRIVATE a0_m2_render)
+    a0_assert_no_link_dependency(m2_render_contracts)
+    if(MSVC)
+        target_compile_options(m2_render_contracts PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(m2_render_contracts PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME m2_render_contracts COMMAND m2_render_contracts)
+
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_executable(a0_pc_direct_summary_v2_fixture
         src/phase0/main.cpp)
