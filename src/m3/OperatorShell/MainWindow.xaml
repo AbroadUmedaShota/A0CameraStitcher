@@ -1161,6 +1161,7 @@
                                                         BorderBrush="{StaticResource CautionBrush}" BorderThickness="1"
                                                         Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}">
                                                     <CheckBox IsChecked="{Binding IsCaptureRecoveryOnlyOperatorApproved}"
+                                                              IsEnabled="{Binding CanChangeCaptureRecoveryOnlyApproval}"
                                                               AutomationProperties.Name="{Binding CaptureRecoveryOnlyConfirmationAutomationName}">
                                                         <TextBlock Text="{Binding CaptureRecoveryOnlyConfirmationText}"
                                                                    TextWrapping="Wrap" FontWeight="Medium"

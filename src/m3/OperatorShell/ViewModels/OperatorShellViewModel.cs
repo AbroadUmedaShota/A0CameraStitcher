@@ -197,6 +197,12 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// 競合操作をロック" intent for the small window before <see cref="IsBusy"/> itself would
     /// otherwise be set by the downstream flow.</summary>
     private bool _isPreCaptureAutoFocusRunning;
+    /// <summary>GitHub Issue #254: 主ボタン（<see cref="RunCaptureAsync"/>）を受け付けてから、Agent との
+    /// 往復（機体照合の再確認・撮影処理への引継ぎ）を待つ間も含めて撮影処理が終わるまで立つラッチ。
+    /// <see cref="IsBusy"/> は撮影・回収の本体が始まってからしか立たないため、その前の待ちの間に
+    /// 実行承認を外されたり、同じ主ボタンを重ねて押されたりしないよう、最初の await より前に同期で立てる。
+    /// <see cref="CanCapture"/> と実行承認チェックボックスの変更可否に畳み込む。</summary>
+    private bool _isCaptureStarting;
     private bool _isPeakingEnabled;
     /// <summary>Issue #32 設置ガイドオーバーレイ toggle state. See the "Alignment guide overlays
     /// and tilt reading" region below for the derived visibility/text properties.</summary>
@@ -468,6 +474,7 @@ public sealed class OperatorShellViewModel : ObservableObject
                 OnPropertyChanged(nameof(ActivityText));
                 OnPropertyChanged(nameof(CanChangeOperatingMode));
                 OnPropertyChanged(nameof(CanSelectCamera));
+                OnPropertyChanged(nameof(CanChangeCaptureRecoveryOnlyApproval));
                 OnPropertyChanged(nameof(CanChangeExportDirectory));
                 OnPropertyChanged(nameof(CanChangeSimulatedFramePattern));
                 RaiseCaptureRecoveryOnlyExportStateChanged();
@@ -559,8 +566,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         get => _captureRecoveryOnlyOperatorApproved;
         set
         {
-            if (!IsCaptureRecoveryOnlyMode || IsBusy ||
-                !SetProperty(ref _captureRecoveryOnlyOperatorApproved, value))
+            if (!IsCaptureRecoveryOnlyMode)
+            {
+                return;
+            }
+
+            // GitHub Issue #254: 撮影・回収の実行中と、主ボタンを押してから撮影・回収が始まるまでの
+            // Agent 応答待ちの間は承認を変えられない。受け付けなかった値をチェックボックスに残さない
+            // よう、現在の値をもう一度通知する。
+            if (!CanChangeCaptureRecoveryOnlyApproval)
+            {
+                OnPropertyChanged(nameof(IsCaptureRecoveryOnlyOperatorApproved));
+                return;
+            }
+
+            if (!SetProperty(ref _captureRecoveryOnlyOperatorApproved, value))
             {
                 return;
             }
@@ -572,11 +592,17 @@ public sealed class OperatorShellViewModel : ObservableObject
         }
     }
 
+    /// <summary>GitHub Issue #254: 『撮影・回収のみ』の実行承認チェックボックスの変更可否。撮影・回収の実行中
+    /// （<see cref="IsBusy"/>）と、主ボタンを押してから Agent の応答を待っている間
+    /// （<see cref="_isCaptureStarting"/>）は変更できない。</summary>
+    public bool CanChangeCaptureRecoveryOnlyApproval =>
+        IsCaptureRecoveryOnlyMode && !IsBusy && !_isCaptureStarting;
+
     public string ActivityText => IsBusy ? "操作をロック中" : "操作受付中";
     public bool IsSingleCameraMode => SelectedOperatingMode == SingleModeLabel;
-    public bool CanChangeOperatingMode => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
+    public bool CanChangeOperatingMode => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning && !_isCaptureStarting &&
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.CheckingReadiness or OperatorUiState.NotReady or OperatorUiState.Ready or OperatorUiState.ReadyWithCorrection;
-    public bool CanSelectCamera => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning &&
+    public bool CanSelectCamera => !IsCaptureRecoveryOnlyMode && !IsBusy && !IsLiveViewActive && !_isPreCaptureAutoFocusRunning && !_isCaptureStarting &&
         UiState is not (OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review or OperatorUiState.FailedPartial or OperatorUiState.Degraded);
     public bool CanChangeExportDirectory => !IsCaptureRecoveryOnlyMode && !IsBusy;
     /// <summary>GitHub Issue #226: CaptureRecoveryOnlyモード専用の保存先選択ゲート。通常フロー
@@ -1965,6 +1991,7 @@ public sealed class OperatorShellViewModel : ObservableObject
         OnPropertyChanged(nameof(CaptureDisabledReason));
         OnPropertyChanged(nameof(CanChangeOperatingMode));
         OnPropertyChanged(nameof(CanSelectCamera));
+        OnPropertyChanged(nameof(CanChangeCaptureRecoveryOnlyApproval));
         NotifyAllCommands();
     }
 
@@ -2211,7 +2238,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     // ordinary HardwareDual の同一撮影ID読み直しは既存host契約どおりbinding gate対象外。
     // CaptureRecoveryOnlyは再起動後の新しいAgentがbinding pipeから始まるため、同一ID照会だけでも
     // CAM-A/Bを再割当してcapture hostへactivationしなければならない（新規撮影は送らない）。
-    public bool CanCapture => !_historicalReviewOpen && !_isPreCaptureAutoFocusRunning &&
+    public bool CanCapture => !_historicalReviewOpen && !_isPreCaptureAutoFocusRunning && !_isCaptureStarting &&
         (HasRecoverableHardwareDualTransaction ||
         (HasRecoverableCaptureRecoveryOnlyTransaction &&
          (!DualBinding.IsRequired || DualBinding.IsReady) &&
@@ -2219,15 +2246,25 @@ public sealed class OperatorShellViewModel : ObservableObject
         ((!DualBinding.IsRequired || DualBinding.IsReady) &&
         _availability.Capture.Allowed &&
         (IsCaptureRecoveryOnlyMode
-            ? !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
-              _captureRecoveryOnlyFiveRunCoordinator?.HasStarted != true &&
-              _captureRecoveryOnlyWorkflow!.CanStartNewCapture
+            ? CaptureRecoveryOnlyNewCaptureConditionsMet
             : IsSingleCameraMode || _dualCameraFlow is null ||
             (_dualCameraFlow.IdentitySnapshot.IsReady &&
              (_dualCameraFlow.ExecutionEnvironment != DualCameraExecutionEnvironment.HardwareDual ||
               _hardwareDualRequestProvider is not null)))));
+    // GitHub Issue #254: 新規撮影に進むために CaptureRecoveryOnly が満たすべき条件。CanCapture と、
+    // Agent 応答待ちの後の再確認（RunCaptureAsync）が同じ式を使い、判定の食い違いを作らない。
+    private bool CaptureRecoveryOnlyNewCaptureConditionsMet =>
+        IsCaptureRecoveryOnlyMode && !IsSingleCameraMode && IsCaptureRecoveryOnlyOperatorApproved &&
+        _captureRecoveryOnlyFiveRunCoordinator?.HasStarted != true &&
+        _captureRecoveryOnlyWorkflow!.CanStartNewCapture;
+
+    internal const string CaptureStartingReasonText =
+        "撮影の開始処理中です。機体照合とAgentの応答を待っています。完了までお待ちください。";
+
     public string CaptureDisabledReason => _isPreCaptureAutoFocusRunning
         ? "撮影+AF: 各カメラの撮影直前AFを実行中です。完了までお待ちください。"
+        : _isCaptureStarting && !IsBusy
+        ? CaptureStartingReasonText
         : CanCapture
         ? IsMainButtonRecheckingSameTransaction
             ? IsCaptureRecoveryOnlyMode
@@ -2438,7 +2475,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     // independently represented, history is available only before binding begins.
     public bool CanOpenHistoricalReview => _historyInitializationComplete && !_initializationFailed &&
         !_historicalReviewOpen && !IsBusy && !IsLiveViewActive && !IsAutoFocusRunning &&
-        !_isPreCaptureAutoFocusRunning && !_cameraInspectionRequired && !IsCaptureRecoveryOnlyMode &&
+        !_isPreCaptureAutoFocusRunning && !_isCaptureStarting && !_cameraInspectionRequired && !IsCaptureRecoveryOnlyMode &&
         !DualBinding.IsBusy && !DualBinding.IsShutdownBlocked && !DualBinding.IsCaptureHostActivated &&
         DualBinding.Phase == DualBindingPhase.NotStarted &&
         UiState is OperatorUiState.AwaitingSafetyAck or OperatorUiState.NotReady or
@@ -2628,11 +2665,35 @@ public sealed class OperatorShellViewModel : ObservableObject
             return;
         }
 
+        // GitHub Issue #254: 最初の await より前に、同期で「撮影開始中」のラッチを立てる。これ以降は
+        // 撮影処理が終わる（例外・拒否で抜ける場合を含む）まで CanCapture が偽になり、実行承認も変えられない。
+        _isCaptureStarting = true;
+        RaisePreCaptureAutoFocusGateProperties();
+        try
+        {
+            await RunLatchedCaptureAsync(scenario).ConfigureAwait(true);
+        }
+        finally
+        {
+            _isCaptureStarting = false;
+            RaisePreCaptureAutoFocusGateProperties();
+        }
+    }
+
+    private async Task RunLatchedCaptureAsync(string scenario)
+    {
+        // GitHub Issue #254: 経路は最初の await より前に固定する。Agent の応答を待つ間に状態が動いても、
+        // 待つ前に選んだ経路を後から評価し直して別の経路（承認なしの新規撮影など）へ進まない。
+        var routeIsCaptureRecoveryOnly = IsCaptureRecoveryOnlyMode;
+        var routeIsSingleCamera = IsSingleCameraMode;
+        var recoverPending = routeIsCaptureRecoveryOnly && HasRecoverableCaptureRecoveryOnlyTransaction;
+        var recoverOrdinaryTransaction = HasRecoverableHardwareDualTransaction;
+
         // 機体照合が確定してからシャッターを切るまでの間にも本体は抜ける。request/response の
         // protocol は誰かが訊ねるまで無効化を伝えられないので、撮影を始める直前にここで訊ねる。
         // ordinary HardwareDualだけは既存hostで同一IDを読める。CaptureRecoveryOnlyはAgent再起動時に
         // capture pipeへ到達するため再binding/activationが必要だが、新規Reserve/Startは送らない。
-        if (!HasRecoverableHardwareDualTransaction &&
+        if (!recoverOrdinaryTransaction &&
             !await DualBinding.VerifyBindingIsCurrentAsync().ConfigureAwait(true))
         {
             StatusMessage = "機体照合が無効になりました。撮影は開始していません。";
@@ -2642,7 +2703,13 @@ public sealed class OperatorShellViewModel : ObservableObject
             return;
         }
 
-        if (IsCaptureRecoveryOnlyMode)
+        if (AbortCaptureStartIfConditionsChanged(
+                routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction))
+        {
+            return;
+        }
+
+        if (routeIsCaptureRecoveryOnly)
         {
             if (!await DualBinding.ActivateCaptureAsync(_lifetimeToken).ConfigureAwait(true))
             {
@@ -2653,9 +2720,13 @@ public sealed class OperatorShellViewModel : ObservableObject
                 return;
             }
 
-            await RunCaptureRecoveryOnlyAsync(
-                    recoverPending: HasRecoverableCaptureRecoveryOnlyTransaction)
-                .ConfigureAwait(true);
+            if (AbortCaptureStartIfConditionsChanged(
+                    routeIsCaptureRecoveryOnly, routeIsSingleCamera, recoverPending, recoverOrdinaryTransaction))
+            {
+                return;
+            }
+
+            await RunCaptureRecoveryOnlyAsync(recoverPending).ConfigureAwait(true);
             return;
         }
 
@@ -2822,6 +2893,67 @@ public sealed class OperatorShellViewModel : ObservableObject
             IsBusy = false;
             RebuildReadiness(preserveOutcomeState: true);
         }
+    }
+
+    // GitHub Issue #254: Agent の応答を待った後、撮影の入口で固定した経路と開始条件がまだ成り立つかを
+    // 確かめる。外れていれば Reserve・Start を含む以降の Agent への送信を 0 回にして中止する。
+    // 文面は何が起きたか／撮影していないこと／次の操作の順で、その時点で画面に見えている操作だけを挙げる。
+    internal static string BuildCaptureStartApprovalWithdrawnText(string captureButtonText) =>
+        "実行承認が外れたため、撮影を開始しませんでした。シャッターは切っていません。" +
+        $"撮影する場合は『撮影・回収のみ』の実行承認にチェックを入れ直してから、「{captureButtonText}」を押してください。";
+
+    internal const string CaptureStartFiveRunAlreadyStartedText =
+        "最大5組の受入系列が開始済みになったため、撮影を開始しませんでした。シャッターは切っていません。" +
+        "追加撮影はせず、結果と証跡を確認してください。";
+
+    internal const string CaptureStartConditionsNoLongerMetText =
+        "撮影の開始条件を満たさなくなったため、撮影を開始しませんでした。シャッターは切っていません。" +
+        "撮影ボタンの下に表示される理由を確認してください。";
+
+    internal static string BuildCaptureStartRouteChangedText(string captureButtonText) =>
+        "撮影の状態が変わったため、撮影を開始しませんでした。シャッターは切っていません。" +
+        $"画面の表示を確認し、押せる場合は「{captureButtonText}」を押し直してください。";
+
+    private bool AbortCaptureStartIfConditionsChanged(
+        bool routeIsCaptureRecoveryOnly,
+        bool routeIsSingleCamera,
+        bool recoverPending,
+        bool recoverOrdinaryTransaction)
+    {
+        string? reason = null;
+        if (IsCaptureRecoveryOnlyMode != routeIsCaptureRecoveryOnly ||
+            IsSingleCameraMode != routeIsSingleCamera ||
+            HasRecoverableHardwareDualTransaction != recoverOrdinaryTransaction ||
+            (routeIsCaptureRecoveryOnly && HasRecoverableCaptureRecoveryOnlyTransaction != recoverPending))
+        {
+            reason = BuildCaptureStartRouteChangedText(CaptureButtonText);
+        }
+        else if (routeIsCaptureRecoveryOnly && !recoverPending)
+        {
+            if (!IsCaptureRecoveryOnlyOperatorApproved)
+            {
+                reason = BuildCaptureStartApprovalWithdrawnText(CaptureButtonText);
+            }
+            else if (_captureRecoveryOnlyFiveRunCoordinator?.HasStarted == true)
+            {
+                reason = CaptureStartFiveRunAlreadyStartedText;
+            }
+            else if (!_captureRecoveryOnlyWorkflow!.CanStartNewCapture)
+            {
+                reason = CaptureStartConditionsNoLongerMetText;
+            }
+        }
+
+        if (reason is null)
+        {
+            return false;
+        }
+
+        StatusMessage = reason;
+        Notify(reason, false);
+        OnPropertyChanged(nameof(CanCapture));
+        OnPropertyChanged(nameof(CaptureDisabledReason));
+        return true;
     }
 
     private async Task RunCaptureRecoveryOnlyAsync(bool recoverPending)

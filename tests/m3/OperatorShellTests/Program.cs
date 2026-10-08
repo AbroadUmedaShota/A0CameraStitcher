@@ -263,6 +263,15 @@ if (args is ["--stale-ordinary-recovery-only"])
             CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync),
     ]);
 }
+// Focused run of the #254 Agent-wait scenario (the same check the normal run ends with).
+if (args is ["--capture-start-latch"])
+{
+    return await WpfCommandTestRunner.RunFocusedAsync(
+    [
+        ("CaptureRecoveryOnly keeps the approval and the route fixed while the Agent response is awaited after the main button is pressed (#254)",
+            CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync),
+    ]);
+}
 if (args is ["--single-handoff-stop-order"])
 {
     try
@@ -309,7 +318,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=119 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=120 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -1091,12 +1100,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 48) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 49) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
-    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 47) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 48) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1299,7 +1308,7 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
-    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 28) == WpfScenarioOutcome.PendingStop)
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 29) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1585,11 +1594,15 @@ catch (Exception exception)
 }
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "replayed real Agent terminal results (Succeeded pair and Failed/CaptureCameraA) go through the shell CaptureRecoveryOnly capture and save path (#231)",
-    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 1) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 2) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly ignores a stale ordinary response-unknown transaction and still requires approval and binding re-verification (#253)",
-    CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 1) == WpfScenarioOutcome.PendingStop)
+    return 1;
+if (await WpfCommandTestRunner.RunScenarioAsync(
+    "CaptureRecoveryOnly keeps the approval and the route fixed while the Agent response is awaited after the main button is pressed (#254)",
+    CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
     return 1;
 Console.WriteLine($"Operator shell tests: {passLines.Count}/{passLines.Count + failures.Count} passed.");
 return failures.Count == 0 ? 0 : 1;
@@ -10005,6 +10018,249 @@ static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
     });
 }
 
+// GitHub Issue #254: after the main button is pressed the shell waits for the Agent (binding re-verification, then
+// the hand-off to the capture host) before it reaches RunCaptureRecoveryOnlyAsync, the only place that sets
+// IsBusy. During that wait the operator must not be able to withdraw the approval, and if the approval or the
+// start conditions are gone anyway, nothing may be sent to the Agent afterwards (no Reserve, no Start).
+static async Task CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync()
+{
+    var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(adapterPath), "The Agent-wait scenario requires the bundled deterministic JPEG adapter.");
+    var root = CreateHardwareTestRoot();
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+        var approvalField = typeof(OperatorShellViewModel).GetField(
+            "_captureRecoveryOnlyOperatorApproved",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The approval backing field was not found.");
+
+        async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperations Operations,
+            CountingBindingTransport Transport, ToggleableRecoveryOnlyWorkflow Workflow)> NewShellAsync(
+            string name, bool refuseActivation = false)
+        {
+            var productRoot = Path.Combine(root, name + "-products");
+            var operations = new CaptureRecoveryOnlyFakeOperations(adapter);
+            var ordinaryFlow = new DualCameraProductFlow(
+                productRoot,
+                new HardwareDualCaptureSource(
+                    operations,
+                    recoveryStore: new HardwareDualTransactionSnapshotStore(productRoot)),
+                new NeverCaptureDualBridge(),
+                new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+            var workflow = new ToggleableRecoveryOnlyWorkflow(new HardwareDualCaptureRecoveryOnlyWorkflow(
+                productRoot, operations, operations, ApprovedCaptureRecoveryOnlyProfile()));
+            var transport = new CountingBindingTransport(DecodableBindingAgent(), refuseActivation);
+            var shell = new OperatorShellViewModel(
+                new SimulationFoundationService(Path.Combine(root, name + "-journals")),
+                ordinaryFlow,
+                dualBindingTransport: transport,
+                captureRecoveryOnlyWorkflow: workflow);
+            await shell.InitializeAsync(CancellationToken.None);
+            shell.IsPhysicalShutterAckAccepted = true;
+            shell.IsExclusiveUseAckAccepted = true;
+            shell.AcceptSafetyCommand.Execute(null);
+            Check.True(shell.IsCaptureRecoveryOnlyMode, "The scenario must run in CaptureRecoveryOnly mode.");
+            shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+            await CompleteDualBindingAsync(shell.DualBinding);
+            Check.True(shell.CanCapture, $"{name}: an approved shell with a Ready binding must be capturable.");
+            return (shell, operations, transport, workflow);
+        }
+
+        // Presses the main button and returns once the Agent request named by holdOperation is in flight, so the
+        // state the operator sees during the wait can be inspected before the response is released.
+        async Task<Task> PressAndWaitForAgentAsync(
+            OperatorShellViewModel shell, CountingBindingTransport transport, string holdOperation)
+        {
+            transport.HoldOperation = holdOperation;
+            var press = ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null);
+            await Task.WhenAny(transport.HoldReached.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            Check.True(transport.HoldReached.Task.IsCompleted,
+                $"The shell never sent {holdOperation}; the press finished early: {press.IsCompleted}.");
+            return press;
+        }
+
+        async Task FinishPressAsync(Task press, string phase)
+        {
+            await ownedCommands.ObserveAsync(press, Task.Delay(TimeSpan.FromSeconds(10)), phase,
+                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within 10s."),
+                timeout: TimeSpan.FromSeconds(10));
+        }
+
+        static string Observe(string label, OperatorShellViewModel shell, CaptureRecoveryOnlyFakeOperations operations,
+            CountingBindingTransport transport) =>
+            $"OBS254 {label}: CanCapture={shell.CanCapture} MainCmd={shell.CaptureCommand.CanExecute(null)} " +
+            $"AfCmd={shell.CaptureWithAutoFocusCommand.CanExecute(null)} DiagCmd={shell.DiagnosticCommand.CanExecute(null)} " +
+            $"IsBusy={shell.IsBusy} UiState={shell.UiState} ApprovalEditable={shell.CanChangeCaptureRecoveryOnlyApproval} " +
+            $"Approved={shell.IsCaptureRecoveryOnlyOperatorApproved} Reserve={operations.ReserveCalls} " +
+            $"Start={operations.CaptureRecoveryOnlyStartCalls} Query={operations.QueryRecoveryOnlyCalls} " +
+            $"ActivateCapture={transport.ActivateCaptureCalls} TotalAgentSends={transport.TotalSendCalls} " +
+            $"Status={shell.StatusMessage}";
+
+        void AssertLockedDuringWait(string label, OperatorShellViewModel shell)
+        {
+            Check.False(shell.CanCapture, $"{label}: CanCapture must be false while the Agent response is awaited.");
+            Check.False(shell.CaptureCommand.CanExecute(null), $"{label}: the main button command must be disabled.");
+            Check.False(shell.CaptureWithAutoFocusCommand.CanExecute(null), $"{label}: the capture+AF command must be disabled.");
+            Check.False(shell.DiagnosticCommand.CanExecute(null), $"{label}: the diagnostic capture command must be disabled.");
+            Check.False(shell.CanChangeCaptureRecoveryOnlyApproval, $"{label}: the approval checkbox must be disabled.");
+            Check.Equal(OperatorShellViewModel.CaptureStartingReasonText, shell.CaptureDisabledReason);
+        }
+
+        // A: the response of the binding re-verification is awaited. An attempt to withdraw the approval does not
+        // take, and releasing the response captures exactly once (positive control).
+        {
+            var a = await NewShellAsync("verify-wait");
+            var press = await PressAndWaitForAgentAsync(a.Shell, a.Transport, DualBindingCameraAgentProtocol.Operations.CompleteBinding);
+            var during = Observe("verify-wait/during", a.Shell, a.Operations, a.Transport);
+            Console.WriteLine(during);
+            AssertLockedDuringWait("verify-wait", a.Shell);
+            Check.False(a.Shell.IsBusy, "The capture body has not started, so IsBusy is still false in this window.");
+            a.Shell.IsCaptureRecoveryOnlyOperatorApproved = false;
+            Console.WriteLine(Observe("verify-wait/after-withdraw-attempt", a.Shell, a.Operations, a.Transport));
+            Check.True(a.Shell.IsCaptureRecoveryOnlyOperatorApproved, "The approval must not be withdrawable during the wait.");
+            Check.Equal(0, a.Operations.ReserveCalls);
+            Check.Equal(0, a.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, a.Transport.ActivateCaptureCalls);
+            a.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/verify-positive");
+            Console.WriteLine(Observe("verify-wait/after-release", a.Shell, a.Operations, a.Transport));
+            Check.Equal(1, a.Operations.ReserveCalls);
+            Check.Equal(1, a.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(1, a.Transport.ActivateCaptureCalls);
+            Check.Equal(0, a.Operations.OrdinaryStartCalls);
+            Check.Equal(OperatorUiState.Review, a.Shell.UiState);
+            Check.True(a.Shell.CanChangeCaptureRecoveryOnlyApproval, "The latch must be released when the capture is over.");
+        }
+
+        // B: the hand-off to the capture host is awaited. Same expectations.
+        {
+            var b = await NewShellAsync("activate-wait");
+            var press = await PressAndWaitForAgentAsync(b.Shell, b.Transport, DualBindingCameraAgentProtocol.Operations.ActivateCapture);
+            Console.WriteLine(Observe("activate-wait/during", b.Shell, b.Operations, b.Transport));
+            AssertLockedDuringWait("activate-wait", b.Shell);
+            b.Shell.IsCaptureRecoveryOnlyOperatorApproved = false;
+            Check.True(b.Shell.IsCaptureRecoveryOnlyOperatorApproved, "The approval must not be withdrawable during the hand-off wait.");
+            Check.Equal(0, b.Operations.ReserveCalls);
+            Check.Equal(0, b.Operations.CaptureRecoveryOnlyStartCalls);
+            b.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/activate-positive");
+            Console.WriteLine(Observe("activate-wait/after-release", b.Shell, b.Operations, b.Transport));
+            Check.Equal(1, b.Operations.ReserveCalls);
+            Check.Equal(1, b.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(1, b.Transport.ActivateCaptureCalls);
+            Check.Equal(OperatorUiState.Review, b.Shell.UiState);
+        }
+
+        // C: defence in depth. Some other path clears the approval during the wait (the field is cleared directly,
+        // standing in for any path that bypasses the setter): after the response nothing more is sent.
+        {
+            var c = await NewShellAsync("verify-wait-approval-cleared");
+            var uiStateBeforePress = c.Shell.UiState;
+            var press = await PressAndWaitForAgentAsync(c.Shell, c.Transport, DualBindingCameraAgentProtocol.Operations.CompleteBinding);
+            var sendsAtHold = c.Transport.TotalSendCalls;
+            approvalField.SetValue(c.Shell, false);
+            c.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/verify-approval-cleared");
+            Console.WriteLine(Observe("verify-wait-approval-cleared/after-release", c.Shell, c.Operations, c.Transport));
+            Check.Equal(0, c.Operations.ReserveCalls);
+            Check.Equal(0, c.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, c.Transport.ActivateCaptureCalls);
+            Check.Equal(sendsAtHold, c.Transport.TotalSendCalls);
+            Check.Equal(OperatorShellViewModel.BuildCaptureStartApprovalWithdrawnText(c.Shell.CaptureButtonText), c.Shell.StatusMessage);
+            Check.Equal(uiStateBeforePress, c.Shell.UiState);
+            Check.True(c.Shell.CanChangeCaptureRecoveryOnlyApproval, "The latch must be released after the abort.");
+            c.Shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+            Check.True(c.Shell.CanCapture, "Re-approving after the abort must make the shell capturable again.");
+        }
+
+        // D: the same, cleared while the hand-off response is awaited. The hand-off request is already in flight,
+        // but no Reserve and no Start follow.
+        {
+            var d = await NewShellAsync("activate-wait-approval-cleared");
+            var press = await PressAndWaitForAgentAsync(d.Shell, d.Transport, DualBindingCameraAgentProtocol.Operations.ActivateCapture);
+            approvalField.SetValue(d.Shell, false);
+            d.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/activate-approval-cleared");
+            Console.WriteLine(Observe("activate-wait-approval-cleared/after-release", d.Shell, d.Operations, d.Transport));
+            Check.Equal(0, d.Operations.ReserveCalls);
+            Check.Equal(0, d.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(1, d.Transport.ActivateCaptureCalls);
+            Check.Equal(OperatorShellViewModel.BuildCaptureStartApprovalWithdrawnText(d.Shell.CaptureButtonText), d.Shell.StatusMessage);
+            Check.True(d.Shell.CanChangeCaptureRecoveryOnlyApproval, "The latch must be released after the abort.");
+        }
+
+        // E: the workflow stops accepting a new capture during the wait.
+        {
+            var e = await NewShellAsync("verify-wait-cannot-start");
+            var press = await PressAndWaitForAgentAsync(e.Shell, e.Transport, DualBindingCameraAgentProtocol.Operations.CompleteBinding);
+            e.Workflow.ForcedCannotStartNewCapture = true;
+            e.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/verify-cannot-start");
+            Console.WriteLine(Observe("verify-wait-cannot-start/after-release", e.Shell, e.Operations, e.Transport));
+            Check.Equal(0, e.Operations.ReserveCalls);
+            Check.Equal(0, e.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, e.Transport.ActivateCaptureCalls);
+            Check.Equal(OperatorShellViewModel.CaptureStartConditionsNoLongerMetText, e.Shell.StatusMessage);
+        }
+
+        // F: a pending recovery appears during the wait of a new-capture press: the route changed, no Reserve/Start.
+        {
+            var f = await NewShellAsync("activate-wait-pending-appears");
+            var press = await PressAndWaitForAgentAsync(f.Shell, f.Transport, DualBindingCameraAgentProtocol.Operations.ActivateCapture);
+            f.Workflow.ForcedPendingRecovery = true;
+            f.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/activate-pending-appears");
+            Console.WriteLine(Observe("activate-wait-pending-appears/after-release", f.Shell, f.Operations, f.Transport));
+            Check.Equal(0, f.Operations.ReserveCalls);
+            Check.Equal(0, f.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, f.Operations.QueryRecoveryOnlyCalls);
+            Check.True(f.Shell.StatusMessage.StartsWith("撮影の状態が変わったため", StringComparison.Ordinal),
+                "The route-changed text must be shown.");
+        }
+
+        // G: a same-ID recovery press whose pending recovery disappears during the wait must not turn into a new
+        // capture (the route was fixed before the wait).
+        {
+            var g = await NewShellAsync("verify-wait-pending-vanishes");
+            g.Workflow.ForcedPendingRecovery = true;
+            Check.True(g.Shell.CanCapture, "A pending recovery keeps the main button usable for the same-ID check.");
+            var press = await PressAndWaitForAgentAsync(g.Shell, g.Transport, DualBindingCameraAgentProtocol.Operations.CompleteBinding);
+            g.Workflow.ForcedPendingRecovery = false;
+            g.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/verify-pending-vanishes");
+            Console.WriteLine(Observe("verify-wait-pending-vanishes/after-release", g.Shell, g.Operations, g.Transport));
+            Check.Equal(0, g.Operations.ReserveCalls);
+            Check.Equal(0, g.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.Equal(0, g.Operations.QueryRecoveryOnlyCalls);
+            Check.Equal(0, g.Transport.ActivateCaptureCalls);
+            Check.Equal(OperatorShellViewModel.BuildCaptureStartRouteChangedText(g.Shell.CaptureButtonText), g.Shell.StatusMessage);
+        }
+
+        // H: leaving by a refusal and by an exception both release the latch.
+        {
+            var h = await NewShellAsync("activation-refused", refuseActivation: true);
+            await FinishPressAsync(((AsyncRelayCommand)h.Shell.CaptureCommand).ExecuteAsync(null), "agent-wait/refused");
+            Console.WriteLine(Observe("activation-refused/after", h.Shell, h.Operations, h.Transport));
+            Check.Equal(0, h.Operations.ReserveCalls);
+            Check.Equal(1, h.Transport.ActivateCaptureCalls);
+            Check.True(h.Shell.CanChangeCaptureRecoveryOnlyApproval, "A refusal must release the latch.");
+
+            var i = await NewShellAsync("response-throws");
+            var press = await PressAndWaitForAgentAsync(i.Shell, i.Transport, DualBindingCameraAgentProtocol.Operations.CompleteBinding);
+            i.Transport.ThrowAfterRelease = new IOException("Test: the Agent pipe broke while waiting.");
+            i.Transport.Release.SetResult();
+            await FinishPressAsync(press, "agent-wait/throws");
+            Console.WriteLine(Observe("response-throws/after", i.Shell, i.Operations, i.Transport));
+            Check.Equal(0, i.Operations.ReserveCalls);
+            Check.Equal(0, i.Operations.CaptureRecoveryOnlyStartCalls);
+            Check.True(i.Shell.CanChangeCaptureRecoveryOnlyApproval, "An exception must release the latch.");
+            Check.False(i.Shell.IsBusy, "An exception before the capture body must not leave the shell busy.");
+        }
+    });
+}
+
 static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
 {
     var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
@@ -16726,18 +16982,39 @@ sealed class CountingBindingTransport(
     /// <summary>Every request that reached the transport, whatever its operation.</summary>
     public int TotalSendCalls { get; private set; }
 
-    public Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
+    /// <summary>GitHub Issue #254: when set, the next request with this operation is counted and then held until
+    /// <see cref="Release"/> completes, which models a slow Agent response.</summary>
+    public string? HoldOperation { get; set; }
+
+    public TaskCompletionSource HoldReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>When set, the held request fails with this exception once it is released.</summary>
+    public Exception? ThrowAfterRelease { get; set; }
+
+    public async Task<string> SendAsync(string requestJson, CancellationToken cancellationToken = default)
     {
         TotalSendCalls++;
         using var document = JsonDocument.Parse(requestJson);
         var operation = document.RootElement.GetProperty("operation").GetString();
+        if (HoldOperation is not null && operation == HoldOperation)
+        {
+            HoldOperation = null;
+            HoldReached.TrySetResult();
+            await Release.Task.ConfigureAwait(false);
+            if (ThrowAfterRelease is not null)
+            {
+                throw ThrowAfterRelease;
+            }
+        }
         if (operation == DualBindingCameraAgentProtocol.Operations.ActivateCapture)
         {
             ActivateCaptureCalls++;
             if (refuseActivation)
             {
                 var requestId = document.RootElement.GetProperty("requestId").GetString();
-                return Task.FromResult(JsonSerializer.Serialize(new
+                return JsonSerializer.Serialize(new
                 {
                     schemaVersion = DualBindingCameraAgentProtocol.SchemaVersion,
                     simulation = false,
@@ -16751,10 +17028,10 @@ sealed class CountingBindingTransport(
                         invalidationReason = "None",
                         detail = "synthetic activation refusal",
                     },
-                }));
+                });
             }
         }
-        return Task.FromResult(agent.Handle(requestJson));
+        return agent.Handle(requestJson);
     }
 }
 
@@ -16773,6 +17050,38 @@ sealed class ActivationHookTransport(IHardwareCameraAgentTransport inner, Action
 
         return inner.SendAsync(requestJson, cancellationToken);
     }
+}
+
+/// <summary>GitHub Issue #254: wraps the real CaptureRecoveryOnly workflow so a test can change, during an Agent
+/// wait, what the shell reads from it (pending recovery, whether a new capture may start).</summary>
+sealed class ToggleableRecoveryOnlyWorkflow(IHardwareDualCaptureRecoveryOnlyWorkflow inner) : IHardwareDualCaptureRecoveryOnlyWorkflow
+{
+    public bool ForcedPendingRecovery { get; set; }
+
+    public bool ForcedCannotStartNewCapture { get; set; }
+
+    public string TransactionRoot => inner.TransactionRoot;
+
+    public bool CanStartNewCapture => !ForcedPendingRecovery && !ForcedCannotStartNewCapture && inner.CanStartNewCapture;
+
+    public string NewCaptureBlocker => ForcedPendingRecovery
+        ? "A prior CaptureRecoveryOnly transaction requires same-ID recovery."
+        : ForcedCannotStartNewCapture
+            ? "Test: a new capture is no longer allowed."
+            : inner.NewCaptureBlocker;
+
+    public bool HasPendingRecovery => ForcedPendingRecovery || inner.HasPendingRecovery;
+
+    public Guid? PendingTransactionId => ForcedPendingRecovery ? Guid.NewGuid() : inner.PendingTransactionId;
+
+    public Task<HardwareDualCaptureRecoveryOnlyExecution> CaptureAsync(
+        DualCameraIdentitySnapshot identitySnapshot,
+        CancellationToken cancellationToken = default) =>
+        inner.CaptureAsync(identitySnapshot, cancellationToken);
+
+    public Task<HardwareDualCaptureRecoveryOnlyExecution> RecoverAsync(
+        CancellationToken cancellationToken = default) =>
+        inner.RecoverAsync(cancellationToken);
 }
 
 sealed class MutableDualIdentitySource(DualCameraIdentitySnapshot initial) : IDualCameraIdentitySnapshotSource
