@@ -72,6 +72,11 @@ void RequireSafeDirectoryTree(const std::filesystem::path &root) {
     for (const auto &part : root.relative_path()) {
         if (part == L".." || part == L".")
             throw TransportError("camera_control_marker_failed", "marker path must be normalized");
+        // Defense in depth: every caller already passes a root that was checked
+        // by CheckMarkerRootOverlap or is the production root. The name is
+        // refused before the directory is created.
+        if (HasTrimmedOrStreamName(part.wstring()))
+            throw TransportError("camera_control_marker_failed", "marker path has a name the file system may rewrite");
         current /= part;
         DWORD a = GetFileAttributesW(current.c_str());
         if (a == INVALID_FILE_ATTRIBUTES) {
@@ -617,6 +622,9 @@ bool ExistingSafeDirectoryTree(const std::filesystem::path &root) {
     if (!safe_directory(current)) return false;
     for (const auto &part : root.relative_path()) {
         if (part == L".." || part == L".") return false;
+        // Defense in depth: a name the file system rewrites when it is the last
+        // name of a path is not a trusted ancestor (see HasTrimmedOrStreamName).
+        if (HasTrimmedOrStreamName(part.wstring())) return false;
         current /= part;
         if (!safe_directory(current)) return false;
     }

@@ -641,6 +641,22 @@ int RunAliasHardeningTests() {
               "a junction whose name ends in a space or dots must be refused by the lease layer");
         Check(LeaseRejectsAsMarkerFailure(name, trailing_root / L"sub"),
               "a child of such a junction must be refused by the lease layer");
+        // The same junction under a spelling with one more dot ("tsp ." and
+        // "tsp..."). As the last name it is trimmed to the ordinary directory
+        // "tsp"; as an inner name it still reaches the junction. A rule that lets
+        // a single trailing dot through would accept it, so it is refused as well.
+        const auto extra_dot_root = scratch / (std::wstring(trailing) + L".");
+        Check(overlaps(extra_dot_root, reference), "a name that ends in one more dot after a trailing-name junction must overlap");
+        Check(overlaps(extra_dot_root / L"sub", reference),
+              "a child of a name that ends in one more dot after a trailing-name junction must overlap");
+        Check(LeaseRejectsAsMarkerFailure(name, extra_dot_root),
+              "a name that ends in one more dot after a trailing-name junction must be refused by the lease layer");
+        // The read-only diagnostic does not go through the overlap check, so its
+        // directory walk refuses these names itself.
+        Check(InspectDualDelegationMarkerReadOnly(trailing_root).status == "marker_root_untrusted",
+              "the read-only diagnostic must not trust a root whose name ends in a space or dots");
+        Check(InspectDualDelegationMarkerReadOnly(extra_dot_root).status == "marker_root_untrusted",
+              "the read-only diagnostic must not trust a name that ends in one more dot");
         Check(reference_is_untouched(), "refusing a trailing-name junction must not write into its target");
         RemoveDirectoryW((L"\\\\?\\" + scratch.wstring() + L"\\" + trailing).c_str());
         Check(GetFileAttributesW((L"\\\\?\\" + scratch.wstring() + L"\\" + trailing).c_str()) == INVALID_FILE_ATTRIBUTES,
