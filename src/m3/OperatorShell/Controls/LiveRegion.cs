@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
@@ -70,6 +71,13 @@ public static class LiveRegion
     {
         if (sender is not TextBlock textBlock)
         {
+            // TextBlock 以外の Text は監視できない。黙って無効にせず、設定ミスとして残す。
+            if ((bool)e.NewValue)
+            {
+                Trace.TraceWarning(
+                    $"LiveRegion.Announce is only supported on TextBlock; ignored on {sender.GetType().Name}.");
+            }
+
             return;
         }
 
@@ -97,6 +105,7 @@ public static class LiveRegion
     private static void OnObservedTextChanged(DependencyObject sender, DependencyPropertyChangedEventArgs e)
     {
         // 束縛が最初に値を反映する時（旧値が null）は現在の表示を記録するだけで、変化ではない。
+        // 前提: TextBlock.Text は null を保持せず空文字になるため、初回反映以外で旧値が null になることはない。
         if (sender is not TextBlock textBlock || e.OldValue is null)
         {
             return;
@@ -162,6 +171,15 @@ public static class LiveRegion
             return;
         }
 
-        RaiseLiveRegionChanged(peer);
+        try
+        {
+            RaiseLiveRegionChanged(peer);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // 通知の失敗で状態遷移（Text を変えた側）を止めない。
+            Trace.TraceWarning(
+                $"LiveRegionChanged raise failed ({exception.GetType().Name}): {exception.Message}");
+        }
     }
 }
