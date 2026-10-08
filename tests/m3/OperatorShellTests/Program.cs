@@ -300,7 +300,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=116 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=117 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -770,6 +770,17 @@ catch (Exception exception)
 {
     failures.Add("hardware single requires an operator export folder and permits repair after capture");
     Console.Error.WriteLine($"FAIL hardware single requires an operator export folder and permits repair after capture: {exception}");
+}
+
+try
+{
+    await HardwareSingleExportResultWordingAsync();
+    Console.WriteLine("PASS hardware single export reports its result in the two-camera wording (#229)");
+}
+catch (Exception exception)
+{
+    failures.Add("hardware single export reports its result in the two-camera wording (#229)");
+    Console.Error.WriteLine($"FAIL hardware single export reports its result in the two-camera wording (#229): {exception}");
 }
 
 try
@@ -2703,6 +2714,122 @@ static async Task PersistentHardwareCameraAgentOperationsPassesArtifactsRootToCh
     }
 }
 
+// GitHub Issue #229: the single-camera explicit export tells its result the way the two-camera
+// export does (#226). The result field carries the cause class and the next step, says the
+// original stays in the app, and ends with the technical wording; the exception text (English,
+// path-bearing) is kept in the technical detail only. The export logic itself is unchanged.
+static async Task HardwareSingleExportResultWordingAsync()
+{
+    var root = CreateHardwareTestRoot();
+    try
+    {
+        var artifactsRoot = FakeAgentArtifactsRoot(root);
+        string? capturedOriginalPath = null;
+        var operations = new FakeHardwareSingleCameraOperations
+        {
+            AgentExecutablePath = Path.Combine(root, "app", "fake-agent.exe"),
+            AgentArtifactsRoot = artifactsRoot,
+            CaptureResultFactory = (transactionId, alias) =>
+            {
+                var (result, originalPath) = CompleteCapture(artifactsRoot, transactionId, alias);
+                capturedOriginalPath = originalPath;
+                return result;
+            },
+        };
+        var exportDirectory = Path.Combine(root, "exports");
+        var failWrite = true;
+        const string writeFailureMessage = "disk write failed for C:/secret/exports/file.partial";
+        var exporter = new HardwareOriginalExporter(
+            exportDirectory,
+            (stagingPath, cancellationToken) => failWrite
+                ? throw new IOException(writeFailureMessage)
+                : Task.CompletedTask);
+        using var viewModel = new HardwareSingleCameraViewModel(
+            operations, new HardwareSingleAppStateStore(Path.Combine(root, "state")), exporter);
+        await viewModel.InitializeAsync();
+        viewModel.ExclusiveCameraControlConfirmed = true;
+        await viewModel.CheckReadinessAsync();
+        viewModel.DedicatedSpoolScopeConfirmed = true;
+        viewModel.ExactObjectDeleteConfirmed = true;
+        await viewModel.CaptureAsync();
+        Check.True(viewModel.CanExport, "The scenario starts from an exportable single original.");
+        var failureTail = "\n" + HardwareSingleCameraViewModel.ExportFailureTechnicalText;
+
+        // The shared texts are the two-camera export's own, so the two screens cannot drift apart.
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText,
+            HardwareSingleCameraViewModel.ExportSourceFailedText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportDestinationFailedText,
+            HardwareSingleCameraViewModel.ExportDestinationFailedText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportFailureTechnicalText,
+            HardwareSingleCameraViewModel.ExportFailureTechnicalText);
+        Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportAgainText,
+            HardwareSingleCameraViewModel.ExportAgainText);
+
+        // (a) Writing to the save folder fails: destination class, try again, original stays.
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportDestinationFailedText + failureTail, viewModel.ExportSummary);
+        Check.True(viewModel.ExportSummary.Contains("撮影した原画像はアプリ内に残っています。", StringComparison.Ordinal),
+            "A failed save must say that the captured original stays in the app.");
+        Check.Equal(HardwareSingleCameraViewModel.ExportFailedNoticeText, viewModel.ActivityText);
+        Check.False(
+            viewModel.ExportSummary.Contains(writeFailureMessage, StringComparison.Ordinal) ||
+            viewModel.ExportSummary.Contains("IOException", StringComparison.Ordinal) ||
+            viewModel.ActivityText.Contains(writeFailureMessage, StringComparison.Ordinal) ||
+            viewModel.ActivityText.Contains("IOException", StringComparison.Ordinal),
+            "The exception text must not reach the operator-facing fields.");
+        Check.True(viewModel.TechnicalDetail.Contains("export_failed: IOException", StringComparison.Ordinal),
+            "The exception type belongs to the technical detail.");
+        Check.Equal(string.Empty, viewModel.LastExportPath);
+        Check.Equal(0, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+        Check.False(viewModel.IsBusy, "A failed save must release the busy flag.");
+        Check.True(viewModel.CanExport, "A destination-side failure must leave the save retryable.");
+
+        // (b) The same save, retried, succeeds. The result field carries the count and alias, the
+        // note about saving again and the technical line; the old English wording is gone.
+        failWrite = false;
+        await viewModel.ExportAsync();
+        Check.True(File.Exists(viewModel.LastExportPath), "The retried save must publish the original.");
+        Check.Equal(
+            "保存しました: 原画像1枚（CAM-A）。\n" +
+            HardwareSingleCameraViewModel.ExportAgainText + "\n" +
+            HardwareSingleCameraViewModel.ExportSuccessTechnicalText,
+            viewModel.ExportSummary);
+        Check.Equal(HardwareSingleCameraViewModel.ExportSavedNoticeText, viewModel.ActivityText);
+        Check.False(
+            viewModel.ExportSummary.Contains("byte-identical", StringComparison.Ordinal) ||
+            viewModel.ExportSummary.Contains("FailedPartial", StringComparison.Ordinal),
+            "The saved text must not carry English terms.");
+
+        // (c) The app's own copy is gone: source class, saving again cannot help, nothing is promised.
+        File.Delete(capturedOriginalPath!);
+        var savedFiles = Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length;
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportSourceFailedText + failureTail, viewModel.ExportSummary);
+        Check.False(viewModel.ExportSummary.Contains("残っています", StringComparison.Ordinal),
+            "A missing source must not promise that the original is still in the app.");
+        Check.Equal(HardwareSingleCameraViewModel.ExportFailedNoticeText, viewModel.ActivityText);
+        Check.Equal(string.Empty, viewModel.LastExportPath);
+        Check.Equal(savedFiles, Directory.GetFiles(exportDirectory, "*.jpg", SearchOption.TopDirectoryOnly).Length);
+
+        // (d) The save folder cannot be used: folder class, choose another folder. The folder is
+        // checked before the source, so this wins even though the source is gone.
+        Directory.Delete(exportDirectory, recursive: true);
+        File.WriteAllText(exportDirectory, "not a folder");
+        await viewModel.ExportAsync();
+        Check.Equal(HardwareSingleCameraViewModel.ExportFolderUnusableText + failureTail, viewModel.ExportSummary);
+        Check.True(viewModel.ExportSummary.Contains("保存先を選択", StringComparison.Ordinal),
+            "The folder text must name the button that chooses another folder.");
+        Check.False(viewModel.ExportSummary.Contains(exportDirectory, StringComparison.Ordinal),
+            "The folder path must not be part of the operator-facing text.");
+        Check.Equal("not a folder", File.ReadAllText(exportDirectory));
+        Check.False(viewModel.IsBusy, "A folder failure must release the busy flag.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static async Task HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync()
 {
     var root = CreateHardwareTestRoot();
@@ -3242,7 +3369,10 @@ static async Task HardwareSingleHappyPathAsync()
         Check.True(
             File.ReadAllBytes(capturedOriginalPath!).SequenceEqual(File.ReadAllBytes(viewModel.LastExportPath)),
             "Hardware export must be byte-identical to the canonical original.");
-        Check.True(viewModel.ExportSummary.Contains("byte-identical", StringComparison.Ordinal), "The UI must label the single export provenance.");
+        Check.True(
+            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-B）。", StringComparison.Ordinal) &&
+            viewModel.ExportSummary.Contains(HardwareSingleCameraViewModel.ExportSuccessTechnicalText, StringComparison.Ordinal),
+            $"The UI must report the saved original and its provenance. Actual: {viewModel.ExportSummary}");
         Check.True(await store.LoadPendingAsync() is not null, "A terminal result must remain durable until explicit operator preparation.");
         await viewModel.PrepareNewCaptureAsync();
         Check.True(await store.LoadPendingAsync() is null, "Only explicit new-capture preparation may clear the app transaction marker.");
@@ -3324,7 +3454,10 @@ static async Task HardwarePendingTransactionRecoveryAsync()
         Check.True(
             File.Exists(viewModel.LastExportPath),
             $"FailedPartial retained original export must be explicit and byte-verified. {viewModel.TechnicalDetail}");
-        Check.True(viewModel.ExportSummary.Contains("FailedPartial", StringComparison.Ordinal), "Export must preserve the transaction failure label.");
+        Check.True(
+            viewModel.ExportSummary.StartsWith("保存しました: 原画像1枚（CAM-A）。この撮影は途中で止まりましたが、受け取れた原画像は保存できました。", StringComparison.Ordinal) &&
+            !viewModel.ExportSummary.Contains("FailedPartial", StringComparison.Ordinal),
+            $"Export of a stopped capture must say the capture stopped, in plain words. Actual: {viewModel.ExportSummary}");
         Check.True(await store.LoadPendingAsync() is not null, "Recovered terminal result must remain discoverable until operator preparation.");
         await viewModel.PrepareNewCaptureAsync();
         Check.True(await store.LoadPendingAsync() is null, "Explicit preparation must clear the recovered transaction marker.");

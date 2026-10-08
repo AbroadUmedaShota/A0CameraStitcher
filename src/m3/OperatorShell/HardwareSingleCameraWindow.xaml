@@ -176,7 +176,7 @@
                                 <TextBlock Grid.Row="3" Text="合成" FontWeight="Bold" />
                                 <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding StitchSummary}" />
                                 <TextBlock Grid.Row="4" Text="保存" FontWeight="Bold" />
-                                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding ExportSummary}" />
+                                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding ExportSummary}" TextWrapping="Wrap" />
                                 <TextBlock Grid.Row="5" Text="出力先" FontWeight="Bold" />
                                 <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastExportPath}" />
                             </Grid>

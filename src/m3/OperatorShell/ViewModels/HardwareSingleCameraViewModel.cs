@@ -1452,6 +1452,33 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
     }
 
+    // Wording of the explicit original export. It follows the two-camera export (#226): the
+    // result field names the cause class and the next step, says the original stays in the app,
+    // and keeps the technical wording on the last line. The exception text (English, path-bearing)
+    // goes to the technical detail only.
+    // The save folder is checked before anything is written. If it is unusable, saving again
+    // cannot help until another folder is chosen.
+    internal const string ExportFolderUnusableText =
+        "保存できませんでした。保存先のフォルダが使えません。「保存先を選択」で、このPC内の別のフォルダを選び直してから、" +
+        "もう一度保存してください。撮影した原画像はアプリ内に残っています。";
+    // The app's own copy could not be checked or read: nothing was written, and pressing again
+    // cannot help, so the text does not promise the original is still there.
+    internal const string ExportSourceFailedText =
+        "保存できませんでした。アプリ内に保管した原画像を確認できませんでした。この撮影の原画像はここからは保存できません。" +
+        "アプリ内の保管場所のファイルは消さずに、技術担当者に連絡してください。";
+    // Writing to the chosen folder did not finish (full disk, access denied, a name collision,
+    // a failed read-back, ...): trying again may work, and the app's copy is untouched.
+    internal const string ExportDestinationFailedText =
+        "保存できませんでした。保存先のフォルダへの書き込みが最後まで完了しませんでした。" +
+        "空き容量を確認して、もう一度保存してください。続けて失敗する場合は技術担当者に連絡してください。" +
+        "撮影した原画像はアプリ内に残っています。";
+    internal const string ExportFailureTechnicalText = "技術担当者向け: 技術情報に記録しました";
+    internal const string ExportSuccessTechnicalText = "技術情報: 元の原画像と同一（SHA-256 一致）";
+    internal const string ExportAgainText = "もう一度押すと、同じ画像を別の名前で追加保存します。";
+    internal const string ExportInProgressText = "原画像を保存しています…";
+    internal const string ExportSavedNoticeText = "原画像を保存しました。保存先は「出力先」欄をご覧ください。";
+    internal const string ExportFailedNoticeText = "原画像を保存できませんでした。理由は「保存」欄をご覧ください。";
+
     public async Task ExportAsync()
     {
         if (!CanExport || _captureResult?.RetainedOriginal is null)
@@ -1460,9 +1487,19 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
         }
 
         IsBusy = true;
-        ActivityText = "検証済み単体原画像をbyte-identical copyで保存中…";
+        ActivityText = ExportInProgressText;
         try
         {
+            try
+            {
+                _exporter.EnsureExportDirectoryIsSafe();
+            }
+            catch (Exception exception) when (exception is IOException or ArgumentException or NotSupportedException or UnauthorizedAccessException or InvalidDataException)
+            {
+                ReportExportFailure(ExportFolderUnusableText, exception);
+                return;
+            }
+
             var expectedOriginalPath = HardwareAgentArtifactLayout.OriginalPath(
                 _operations.AgentArtifactsRoot,
                 _captureResult.RunId,
@@ -1475,23 +1512,43 @@ public sealed class HardwareSingleCameraViewModel : ObservableObject, IDisposabl
                     expectedOriginalPath)
                 .ConfigureAwait(true);
             LastExportPath = outputPath;
-            ExportSummary = _captureResult.TerminalState == "Complete"
-                ? "保存完了（単体原画像・byte-identical）"
-                : "保存完了（FailedPartial保持原画像・byte-identical）";
-            ActivityText = _captureResult.TerminalState == "Complete"
-                ? "明示保存が完了しました。"
-                : "失敗状態を維持したまま、検証済み保持原画像の明示保存が完了しました。";
+            ExportSummary = BuildExportSavedText(
+                _captureResult.RetainedOriginal.CameraAlias, _captureResult.TerminalState == "Complete");
+            ActivityText = ExportSavedNoticeText;
+        }
+        catch (Exception exception) when (exception is ExportSourceUnavailableException or InvalidDataException)
+        {
+            // Both are raised by checks on the app's own copy (record, shape of the request, the
+            // original.jpg bytes). The folder was already checked above.
+            ReportExportFailure(ExportSourceFailedText, exception);
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
-            ExportSummary = "保存失敗（上書き・自動再試行なし）";
-            ActivityText = "保存結果を採用しませんでした。product originalは変更していません。";
-            TechnicalDetail += $"\nexport_failed: {SafeMessage(exception)}";
+            // Everything else happened while writing to, locking or reading back from the
+            // chosen folder (I/O errors, full disk, access denied, name collisions, a read-back
+            // mismatch, no free file name).
+            ReportExportFailure(ExportDestinationFailedText, exception);
         }
         finally
         {
             IsBusy = false;
         }
+    }
+
+    private static string BuildExportSavedText(string cameraAlias, bool complete) =>
+        (complete
+            ? $"保存しました: 原画像1枚（{cameraAlias}）。"
+            : $"保存しました: 原画像1枚（{cameraAlias}）。この撮影は途中で止まりましたが、受け取れた原画像は保存できました。") +
+        "\n" + ExportAgainText + "\n" + ExportSuccessTechnicalText;
+
+    // The plain-language reason stays in the result field and the notice only points to it.
+    private void ReportExportFailure(string operatorText, Exception exception)
+    {
+        TechnicalDetail += $"\nexport_failed: {exception.GetType().Name}: {SafeMessage(exception)}";
+        ExportSummary = operatorText + "\n" + ExportFailureTechnicalText;
+        // The output field would otherwise keep the path of an earlier save beside this failure.
+        LastExportPath = string.Empty;
+        ActivityText = ExportFailedNoticeText;
     }
 
     private async Task ApplyTerminalResultAsync(
