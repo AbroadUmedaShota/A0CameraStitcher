@@ -1,7 +1,7 @@
 # Link-isolation checks for pure-computation libraries.
 #
 # a0_assert_no_link_dependency(<target> [FORBIDDEN_LIBRARIES <names>...]
-#   [FORBIDDEN_SOURCES <regexes>...])
+#   [FORBIDDEN_SOURCES <regexes>...] [FORBIDDEN_LIBRARY_PATTERNS <regexes>...])
 #   Fails configuration when <target>, or anything it reaches through
 #   LINK_LIBRARIES / INTERFACE_LINK_LIBRARIES / LINK_OPTIONS /
 #   INTERFACE_LINK_OPTIONS (transitively), names one of the forbidden system
@@ -26,9 +26,12 @@
 #   "no product stitcher dependency" check) can be registered the same way.
 #   Arguments are fixed when this is called; the properties they refer to are
 #   read when the deferred call runs.
+#   Optional library patterns also inspect normalized names, including version
+#   suffixes, link options and imported targets. Existing exact-name policies
+#   remain unchanged when no patterns are supplied.
 
 function(a0_assert_no_link_dependency target)
-    cmake_parse_arguments(PARSE_ARGV 1 isolation "" "" "FORBIDDEN_LIBRARIES;FORBIDDEN_SOURCES")
+    cmake_parse_arguments(PARSE_ARGV 1 isolation "" "" "FORBIDDEN_LIBRARIES;FORBIDDEN_SOURCES;FORBIDDEN_LIBRARY_PATTERNS")
     if(isolation_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "Unknown isolation arguments: ${isolation_UNPARSED_ARGUMENTS}")
     endif()
@@ -49,6 +52,11 @@ function(a0_assert_no_link_dependency target)
         if("${current_lower}" IN_LIST forbidden)
             message(FATAL_ERROR "${target} must not link ${current}")
         endif()
+        foreach(pattern IN LISTS isolation_FORBIDDEN_LIBRARY_PATTERNS)
+            if("${current_lower}" MATCHES "${pattern}")
+                message(FATAL_ERROR "${target} must not link ${current}")
+            endif()
+        endforeach()
         foreach(property SOURCES INTERFACE_SOURCES)
             get_target_property(entries "${current}" ${property})
             foreach(source IN LISTS entries)
@@ -90,6 +98,11 @@ function(a0_assert_no_link_dependency target)
                                 "${target} must not link ${library_name} "
                                 "(found in ${property} of ${current}: ${entry})")
                         endif()
+                        foreach(pattern IN LISTS isolation_FORBIDDEN_LIBRARY_PATTERNS)
+                            if("${library_name}" MATCHES "${pattern}")
+                                message(FATAL_ERROR "${target} must not link ${library_name}")
+                            endif()
+                        endforeach()
                     endforeach()
                     if(TARGET "${word}")
                         list(APPEND pending "${word}")
@@ -117,6 +130,17 @@ function(a0_assert_no_stitch_evaluator_dependency target)
         FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher a0_m2_synthetic_pair a0_m2_rig_profile_v2
         FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher"
             "stitch_job_manifest" "synthetic_pair" "rig_profile_v2" "stitch_eval_main")
+endfunction()
+
+# The linear calibration preflight is a standalone numerical observation.
+# Version-suffixed OpenCV library names and imported targets are excluded too.
+function(a0_assert_no_calibration_view_dependency target)
+    a0_assert_no_link_dependency("${target}"
+        FORBIDDEN_LIBRARIES ole32 windowscodecs bcrypt shell32
+            a0_m2_render a0_m2_offline_stitcher a0_m2_synthetic_pair a0_m2_rig_profile_v2
+        FORBIDDEN_LIBRARY_PATTERNS "^(lib)?opencv($|[_:])" "^cv2$"
+        FORBIDDEN_SOURCES "opencv" "/render\\.cpp$" "/document_render\\.cpp$"
+            "offline_stitcher" "synthetic_pair" "rig_profile_v2")
 endfunction()
 
 function(a0_defer_to_end_of_configure function_name)

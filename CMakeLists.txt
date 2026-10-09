@@ -362,7 +362,27 @@ if(A0_BUILD_STITCH_EVALUATOR)
     a0_defer_to_end_of_configure(a0_assert_no_stitch_evaluator_dependency A0CameraStitcher.StitchEvaluator)
 endif()
 
+add_library(a0_m2_calibration_view_geometry src/m2/calibration_view_geometry.cpp)
+target_include_directories(a0_m2_calibration_view_geometry PUBLIC src/m2/include)
+if(MSVC)
+    target_compile_options(a0_m2_calibration_view_geometry PRIVATE /W4 /permissive- /EHsc /fp:precise)
+endif()
+a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_view_geometry)
+
 include(CTest)
+if(BUILD_TESTING)
+    add_executable(m2_calibration_view_geometry_contracts tests/calibration_view_geometry_tests.cpp)
+    target_link_libraries(m2_calibration_view_geometry_contracts PRIVATE a0_m2_calibration_view_geometry)
+    if(MSVC)
+        target_compile_options(m2_calibration_view_geometry_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency m2_calibration_view_geometry_contracts)
+    add_test(NAME m2_calibration_view_geometry_contracts COMMAND m2_calibration_view_geometry_contracts)
+    add_test(NAME m2_calibration_view_link_isolation
+        COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cal-v"
+            -P "${CMAKE_SOURCE_DIR}/tests/calibration_view_isolation_tests.cmake")
+endif()
 if(BUILD_TESTING)
     add_executable(m2_stitch_evaluation_contracts tests/stitch_evaluation_tests.cpp)
     # The existing library validates the schema contract only. No measurement
