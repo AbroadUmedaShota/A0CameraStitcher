@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-evaluation-thresholds.v1.schema.json",
+  "title": "Explicit independent measurement thresholds v1",
+  "description": "Runtime also rejects duplicate keys, non-UTF-8 input, noncanonical integer lexemes (including .0 or exponent forms), nonfinite binary64 conversions, and cross-field violations not expressible here. Input JSON is bounded to 256 KiB. All eight checks are required exactly once in any order. These caller-supplied comparisons are observations only; they confer no product quality approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "checks"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-evaluation-thresholds.v1"
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-median"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-p95"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-max"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-detection-coverage"
+              },
+              "comparison": {
+                "const": "AtLeast"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "valid-pixel-coverage"
+              },
+              "comparison": {
+                "const": "AtLeast"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "seam-luma-step-max"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "seam-rgb-step-max"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "metricId",
+              "comparison",
+              "value"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "local-dpi-error-ratio-max"
+              },
+              "comparison": {
+                "const": "AtMost"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-median"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-p95"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-position-max"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "fiducial-detection-coverage"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "valid-pixel-coverage"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "seam-luma-step-max"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "seam-rgb-step-max"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "metricId"
+            ],
+            "properties": {
+              "metricId": {
+                "const": "local-dpi-error-ratio-max"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    }
+  },
+  "$defs": {}
+}

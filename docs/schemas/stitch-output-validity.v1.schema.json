@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-output-validity.v1.schema.json",
+  "title": "Image-bound externally declared binary validity v1",
+  "description": "Runtime also rejects duplicate keys, non-UTF-8 input, noncanonical integer lexemes (including .0 or exponent forms), nonfinite binary64 conversions, and cross-field violations not expressible here. Input JSON is bounded to 256 KiB. SHA-256 binds the image and the adjacent validity.pgm bytes, not the truthfulness of the mask producer. Runtime requires dimensions matching the image/plan (at most 200,000,000 pixels), exact P5\\nWIDTH HEIGHT\\n1\\n header, and exactly WIDTH*HEIGHT binary samples 0 or 1 with no trailing bytes. A black image sample can be valid.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "imageSha256",
+    "maskSha256",
+    "widthPixels",
+    "heightPixels",
+    "maskRelativePath"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-output-validity.v1"
+    },
+    "imageSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "maskSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "widthPixels": {
+      "$ref": "#/$defs/dimension"
+    },
+    "heightPixels": {
+      "$ref": "#/$defs/dimension"
+    },
+    "maskRelativePath": {
+      "const": "validity.pgm"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "schemaVersion": "a0.stitch-evaluation-plan.v1",
+  "raster": {
+    "heightPixels": 256,
+    "widthPixels": 256,
+    "dpi": 254,
+    "regionUm": {
+      "bottom": 25600,
+      "top": 0,
+      "right": 25600,
+      "left": 0
+    }
+  },
+  "detector": {
+    "maximumAspectRatio": 2,
+    "minimumContrast": 0.1,
+    "darkThreshold": 0.5,
+    "minimumComponentPixels": 8,
+    "maximumComponentPixels": 60,
+    "ambiguityGapPixels": 1
+  },
+  "minimumSamples": {
+    "dpiPairs": 2,
+    "fiducials": 3,
+    "seamPairs": 1
+  },
+  "rounding": {
+    "decimalPlaces": 6
+  },
+  "fiducials": [
+    {
+      "id": "F-000-000",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-000-001",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-000-002",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-001-000",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-001-001",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-001-002",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-002-000",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-002-001",
+      "halfWindowPixels": 16
+    },
+    {
+      "id": "F-002-002",
+      "halfWindowPixels": 16
+    }
+  ],
+  "dpiPairs": [
+    {
+      "secondId": "F-000-001",
+      "firstId": "F-000-000"
+    },
+    {
+      "secondId": "F-001-000",
+      "firstId": "F-000-000"
+    },
+    {
+      "secondId": "F-000-002",
+      "firstId": "F-000-001"
+    },
+    {
+      "secondId": "F-001-001",
+      "firstId": "F-000-001"
+    },
+    {
+      "secondId": "F-001-002",
+      "firstId": "F-000-002"
+    },
+    {
+      "secondId": "F-001-001",
+      "firstId": "F-001-000"
+    },
+    {
+      "secondId": "F-002-000",
+      "firstId": "F-001-000"
+    },
+    {
+      "secondId": "F-001-002",
+      "firstId": "F-001-001"
+    },
+    {
+      "secondId": "F-002-001",
+      "firstId": "F-001-001"
+    },
+    {
+      "secondId": "F-002-002",
+      "firstId": "F-001-002"
+    },
+    {
+      "secondId": "F-002-001",
+      "firstId": "F-002-000"
+    },
+    {
+      "secondId": "F-002-002",
+      "firstId": "F-002-001"
+    }
+  ],
+  "seamPairs": [
+    {
+      "second": {
+        "width": 8,
+        "height": 8,
+        "top": 224,
+        "left": 144
+      },
+      "first": {
+        "width": 8,
+        "height": 8,
+        "top": 224,
+        "left": 112
+      }
+    }
+  ]
+}

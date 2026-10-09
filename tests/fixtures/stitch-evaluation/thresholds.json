@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "a0.stitch-evaluation-thresholds.v1",
+  "checks": [
+    {
+      "value": 0.5,
+      "metricId": "fiducial-position-median",
+      "comparison": "AtMost"
+    },
+    {
+      "value": 0.5,
+      "metricId": "fiducial-position-p95",
+      "comparison": "AtMost"
+    },
+    {
+      "value": 0.5,
+      "metricId": "fiducial-position-max",
+      "comparison": "AtMost"
+    },
+    {
+      "value": 1,
+      "metricId": "fiducial-detection-coverage",
+      "comparison": "AtLeast"
+    },
+    {
+      "value": 1,
+      "metricId": "valid-pixel-coverage",
+      "comparison": "AtLeast"
+    },
+    {
+      "value": 0.01,
+      "metricId": "seam-luma-step-max",
+      "comparison": "AtMost"
+    },
+    {
+      "value": 0.01,
+      "metricId": "seam-rgb-step-max",
+      "comparison": "AtMost"
+    },
+    {
+      "value": 0.01,
+      "metricId": "local-dpi-error-ratio-max",
+      "comparison": "AtMost"
+    }
+  ]
+}

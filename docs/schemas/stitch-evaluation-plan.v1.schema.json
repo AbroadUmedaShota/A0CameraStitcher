@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-evaluation-plan.v1.schema.json",
+  "title": "Independent stitch evaluation plan v1",
+  "description": "Runtime also rejects duplicate keys, non-UTF-8 input, noncanonical integer lexemes (including .0 or exponent forms), nonfinite binary64 conversions, and cross-field violations not expressible here. Input JSON is bounded to 256 KiB. Raster spans/DPI/dimensions must agree by exact ceiling, raster area is at most 200,000,000 pixels, selected IDs must exist in ground truth, unordered DPI/rectangle pairs must be distinct, and total search/patch ROI area is at most 16,777,216 pixels. Invalid or clipped declared ROIs yield missing measurements rather than being silently removed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "raster",
+    "detector",
+    "minimumSamples",
+    "rounding",
+    "fiducials",
+    "dpiPairs",
+    "seamPairs"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-evaluation-plan.v1"
+    },
+    "raster": {
+      "$ref": "#/$defs/raster"
+    },
+    "detector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "darkThreshold",
+        "minimumContrast",
+        "maximumAspectRatio",
+        "ambiguityGapPixels",
+        "minimumComponentPixels",
+        "maximumComponentPixels"
+      ],
+      "properties": {
+        "darkThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimumContrast": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "maximumAspectRatio": {
+          "type": "number",
+          "minimum": 1
+        },
+        "ambiguityGapPixels": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimumComponentPixels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1050625
+        },
+        "maximumComponentPixels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1050625
+        }
+      }
+    },
+    "minimumSamples": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fiducials",
+        "dpiPairs",
+        "seamPairs"
+      ],
+      "properties": {
+        "fiducials": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "dpiPairs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "seamPairs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "rounding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decimalPlaces"
+      ],
+      "properties": {
+        "decimalPlaces": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        }
+      }
+    },
+    "fiducials": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "halfWindowPixels"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/identifier"
+          },
+          "halfWindowPixels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512
+          }
+        }
+      }
+    },
+    "dpiPairs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "firstId",
+          "secondId"
+        ],
+        "properties": {
+          "firstId": {
+            "$ref": "#/$defs/identifier"
+          },
+          "secondId": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "seamPairs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "first",
+          "second"
+        ],
+        "properties": {
+          "first": {
+            "$ref": "#/$defs/rectangle"
+          },
+          "second": {
+            "$ref": "#/$defs/rectangle"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "raster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regionUm",
+        "dpi",
+        "widthPixels",
+        "heightPixels"
+      ],
+      "properties": {
+        "regionUm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "left",
+            "top",
+            "right",
+            "bottom"
+          ],
+          "properties": {
+            "left": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "top": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "right": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "bottom": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            }
+          }
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "widthPixels": {
+          "$ref": "#/$defs/dimension"
+        },
+        "heightPixels": {
+          "$ref": "#/$defs/dimension"
+        }
+      }
+    },
+    "rectangle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "left",
+        "top",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "left": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "top": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        }
+      }
+    }
+  }
+}

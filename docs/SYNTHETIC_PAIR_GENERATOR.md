@@ -90,7 +90,7 @@ C++ から使う場合は `a0_m2_synthetic_pair`（`src/m2/include/a0/m2/synthet
 
 - **#270（実寸の時間・メモリ・決定性の計測）**: 固定 spec で 2 回生成して SHA-256 を比べる。生成器自体の時間とメモリは標準出力の `elapsedMilliseconds`、`peakWorkingSetBytes`。製品の合成に渡す入力は `<出力>/CAM-A/original.jpg` と `CAM-B/original.jpg`。
 - **#274（レンズ補正＋文書への写像）**: spec の `projection` が正解（profile にそのまま写せる）。補正後の画像上の基準点は、`document_mm` を目標の写像で送った位置と比べる。レンズなし（`k1`〜`p2` = 0）の spec で幾何だけを先に確かめられる。
-- **#275（独立した評価器）**: `reference_points` の `image_px` を正解として、合成画像から検出した基準点の位置との差を測る。`patterns` が斜めエッジ・細線・色・グレーの位置を与える。ノイズ・露出・周辺減光は `noise`、`exposure_gain`、`vignette` を変えて作り分ける。
+- **#275（独立した評価器）**: `reference_points` の `document_mm` と明示した出力領域・DPIから期待する合成画像の座標を求め、検出位置との差を測る。`image_px` は元のカメラ画像上の座標なので、合成画像の期待位置には使わない。[独立評価器の契約](M2_INDEPENDENT_STITCH_EVALUATOR.md)を参照。`patterns` が斜めエッジ・細線・色・グレーの位置を与える。ノイズ・露出・周辺減光は `noise`、`exposure_gain`、`vignette` を変えて作り分ける。
 - **#277（チャートからの draft キャリブレーション）**: 既知の `projection` を持つペアを作り、推定値を正解と比べる。基準点だけを使う検出が通るかを、歪みなし → 歪みあり → ノイズありの順に確かめられる。
 
 重なりを変えたいときは、`placement.center_mm` の 2 台の間隔（baseline）か `pixels_per_mm` を変える。fixture は baseline 541 mm、`pixels_per_mm` 7.27 で、文書中央の水平線上の重なりが約 142 mm（#42 の v0.1 候補の 141 mm を参考にした値で、承認値ではない）。

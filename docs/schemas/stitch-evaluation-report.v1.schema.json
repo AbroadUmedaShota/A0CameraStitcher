@@ -1,0 +1,2591 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/stitch-evaluation-report.v1.schema.json",
+  "title": "Independent stitch image observation report v1",
+  "description": "Strict emitted observation record, bounded to 16 MiB at publication. All eight ordered definition/result pairs preserve the existing stitch-metric v1 constraints. The CLI produces observations through Parse, Evaluate and Serialize. The serializer validates field shapes, supported outcome/presence, hash syntax and exact decimal bounds; it does not remeasure a hand-built Evaluation. JSON Schema cannot express observation joins or recompute measurements. Explicit external-mask coverage is an observation domain, not proof of faithful geometric validity, physical quality, or product acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "quality",
+    "thresholdAssessment",
+    "measurementModel",
+    "sourceHashes",
+    "image",
+    "metrics",
+    "fiducials",
+    "dpiPairs",
+    "diagnosticCodes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-evaluation-report.v1"
+    },
+    "quality": {
+      "const": "not-evaluated"
+    },
+    "thresholdAssessment": {
+      "enum": [
+        "thresholds-met",
+        "thresholds-not-met",
+        "incomplete-measurements"
+      ]
+    },
+    "measurementModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coordinates",
+        "photometry",
+        "validity",
+        "coverageDomain",
+        "coverageTrialValidity",
+        "seamSelection"
+      ],
+      "properties": {
+        "coordinates": {
+          "const": "document-mm-to-output-sample-center-v1"
+        },
+        "photometry": {
+          "const": "rec709-weighted-decoded-rgb-code-values"
+        },
+        "validity": {
+          "const": "externally-declared-image-bound-mask"
+        },
+        "coverageDomain": {
+          "const": "whole-explicit-output-raster"
+        },
+        "coverageTrialValidity": {
+          "const": "all-declared-trials"
+        },
+        "seamSelection": {
+          "const": "preannotated-same-flat-content"
+        }
+      }
+    },
+    "sourceHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "groundTruth",
+        "plan",
+        "thresholds",
+        "validity",
+        "mask"
+      ],
+      "properties": {
+        "image": {
+          "$ref": "#/$defs/sha256"
+        },
+        "groundTruth": {
+          "$ref": "#/$defs/sha256"
+        },
+        "plan": {
+          "$ref": "#/$defs/sha256"
+        },
+        "thresholds": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validity": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mask": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "widthPixels",
+        "heightPixels"
+      ],
+      "properties": {
+        "widthPixels": {
+          "$ref": "#/$defs/dimension"
+        },
+        "heightPixels": {
+          "$ref": "#/$defs/dimension"
+        }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-median"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "pixels"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Median",
+                        "percentile": null,
+                        "algorithm": "SortedMiddle",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": "MeanOfMiddlePair"
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-median"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-p95"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "pixels"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Percentile",
+                        "percentile": 95,
+                        "algorithm": "SortedOrderStatistic",
+                        "percentileInterpolation": "LinearR7",
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-p95"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-max"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "pixels"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Maximum",
+                        "percentile": null,
+                        "algorithm": "SortedLast",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-position-max"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-detection-coverage"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "ratio"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Mean",
+                        "percentile": null,
+                        "algorithm": "PairwiseArithmeticMean",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "fiducial-detection-coverage"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtLeast"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "valid-pixel-coverage"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "ratio"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Nearest",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Mean",
+                        "percentile": null,
+                        "algorithm": "PairwiseArithmeticMean",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "valid-pixel-coverage"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 200000000
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtLeast"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "seam-luma-step-max"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "ratio"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Maximum",
+                        "percentile": null,
+                        "algorithm": "SortedLast",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "seam-luma-step-max"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "seam-rgb-step-max"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "ratio"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Maximum",
+                        "percentile": null,
+                        "algorithm": "SortedLast",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "seam-rgb-step-max"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "result",
+            "threshold"
+          ],
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricDefinition"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "local-dpi-error-ratio-max"
+                    },
+                    "domain": {
+                      "const": "Image"
+                    },
+                    "unit": {
+                      "const": "ratio"
+                    },
+                    "coordinateSystem": {
+                      "const": {
+                        "origin": "TopLeftPixelCenter",
+                        "xAxis": "Right",
+                        "yAxis": "Down",
+                        "reference": "StitchedOutput"
+                      }
+                    },
+                    "mask": {
+                      "const": {
+                        "kind": "BinaryValidity",
+                        "source": "StitchedOutputValidity",
+                        "includedValue": 1,
+                        "excludedValue": 0
+                      }
+                    },
+                    "sampling": {
+                      "const": {
+                        "method": "Area",
+                        "outOfBounds": "Exclude",
+                        "invalidSample": "Exclude"
+                      }
+                    },
+                    "aggregation": {
+                      "const": {
+                        "method": "Maximum",
+                        "percentile": null,
+                        "algorithm": "SortedLast",
+                        "percentileInterpolation": null,
+                        "medianEvenRule": null
+                      }
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "boundary": {
+                      "const": {
+                        "imageEdge": "ExcludeIncompleteKernel",
+                        "maskEdge": "RequireAllSamplesValid",
+                        "intervalClosure": "LowerInclusiveUpperExclusive"
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "unitMode": "SameAsMetric"
+                      }
+                    },
+                    "outcomePolicy": {
+                      "const": {
+                        "allowedFailureCodes": {
+                          "NoResult": [
+                            "insufficient-valid-samples",
+                            "zero-valid-results"
+                          ],
+                          "NotApplicable": [],
+                          "Invalid": [
+                            "invalid-source-contract",
+                            "definition-mismatch"
+                          ]
+                        },
+                        "noResultRule": "ZeroValidSamples"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metricResult"
+                },
+                {
+                  "properties": {
+                    "metricId": {
+                      "const": "local-dpi-error-ratio-max"
+                    },
+                    "metricDomain": {
+                      "const": "Image"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "Success",
+                        "NoResult"
+                      ]
+                    },
+                    "sampleCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "rounding": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "HalfToEven"
+                        },
+                        "order": {
+                          "const": "AggregateThenRound"
+                        }
+                      }
+                    },
+                    "confidence": {
+                      "const": {
+                        "method": "None",
+                        "level": null,
+                        "lower": null,
+                        "upper": null
+                      }
+                    },
+                    "uncertainty": {
+                      "const": {
+                        "method": "None",
+                        "value": null
+                      }
+                    },
+                    "rawValue": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "threshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "comparison",
+                "value",
+                "met"
+              ],
+              "properties": {
+                "comparison": {
+                  "const": "AtMost"
+                },
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "properties": {
+                      "outcome": {
+                        "const": "Success"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "threshold": {
+                    "properties": {
+                      "met": {
+                        "const": null
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "fiducials": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/observation"
+      }
+    },
+    "dpiPairs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "firstId",
+          "secondId",
+          "measuredDpi"
+        ],
+        "properties": {
+          "firstId": {
+            "$ref": "#/$defs/identifier"
+          },
+          "secondId": {
+            "$ref": "#/$defs/identifier"
+          },
+          "measuredDpi": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "diagnosticCodes": {
+      "type": "array",
+      "maxItems": 7,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "fiducial-position-out-of-range",
+          "fiducial-coverage-below-minimum",
+          "pixel-coverage-below-minimum",
+          "seam-luminance-out-of-range",
+          "seam-color-out-of-range",
+          "local-dpi-out-of-range",
+          "insufficient-valid-measurements"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "pixel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "expectedPixel",
+        "observedPixel",
+        "positionErrorPixels"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "status": {
+          "enum": [
+            "found",
+            "missing",
+            "ambiguous",
+            "partial-window",
+            "invalid-mask"
+          ]
+        },
+        "expectedPixel": {
+          "$ref": "#/$defs/pixel"
+        },
+        "observedPixel": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pixel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "positionErrorPixels": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "found"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observedPixel": {
+                "$ref": "#/$defs/pixel"
+              },
+              "positionErrorPixels": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "observedPixel": {
+                "const": null
+              },
+              "positionErrorPixels": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    "metricDefinition": {
+  "title": "A0 stitch metric definition v1",
+  "description": "Reproducible measurement semantics only. Product acceptance values are deliberately outside this contract. Successful result rounding uses a binary64 representation-safety contract: decimalPlaces is 0 through 9, and the result schemas require the exact scaled magnitude |rawValue * 10^decimalPlaces| to be at most 2^39. This is a numeric representability boundary, not a product-quality limit; JSON Schema states the per-decimal-place raw/value ranges and runtime validation rechecks the scaled value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "definitionVersion", "metricId", "domain", "unit",
+    "coordinateSystem", "mask", "sampling", "aggregation", "rounding", "boundary",
+    "confidence", "uncertainty", "outcomePolicy"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-metric-definition.v1" },
+    "definitionVersion": { "const": 1 },
+    "metricId": { "$ref": "#/$defs/metricDefinition/$defs/token" },
+    "domain": { "enum": ["Image", "Resource"] },
+    "unit": { "enum": ["pixels", "degrees", "ratio", "percent", "ev", "delta-e-2000", "seconds", "milliseconds", "bytes", "MiB"] },
+    "coordinateSystem": { "oneOf": [{ "$ref": "#/$defs/metricDefinition/$defs/coordinateSystem" }, { "type": "null" }] },
+    "mask": { "oneOf": [{ "$ref": "#/$defs/metricDefinition/$defs/mask" }, { "type": "null" }] },
+    "sampling": { "oneOf": [{ "$ref": "#/$defs/metricDefinition/$defs/sampling" }, { "type": "null" }] },
+    "aggregation": { "$ref": "#/$defs/metricDefinition/$defs/aggregation" },
+    "rounding": { "$ref": "#/$defs/metricDefinition/$defs/rounding" },
+    "boundary": { "oneOf": [{ "$ref": "#/$defs/metricDefinition/$defs/boundary" }, { "type": "null" }] },
+    "confidence": { "$ref": "#/$defs/metricDefinition/$defs/confidenceDefinition" },
+    "uncertainty": { "$ref": "#/$defs/metricDefinition/$defs/uncertaintyDefinition" },
+    "outcomePolicy": { "$ref": "#/$defs/metricDefinition/$defs/outcomePolicy" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "domain": { "const": "Image" } }, "required": ["domain"] },
+      "then": {
+        "properties": {
+          "unit": { "enum": ["pixels", "degrees", "ratio", "percent", "ev", "delta-e-2000"] },
+          "coordinateSystem": { "$ref": "#/$defs/metricDefinition/$defs/coordinateSystem" },
+          "mask": { "$ref": "#/$defs/metricDefinition/$defs/mask" },
+          "sampling": { "$ref": "#/$defs/metricDefinition/$defs/sampling" },
+          "boundary": { "$ref": "#/$defs/metricDefinition/$defs/boundary" },
+          "outcomePolicy": {
+            "properties": {
+              "allowedFailureCodes": {
+                "properties": { "NotApplicable": { "maxItems": 0 } }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "domain": { "const": "Resource" } }, "required": ["domain"] },
+      "then": {
+        "properties": {
+          "unit": { "enum": ["seconds", "milliseconds", "bytes", "MiB", "ratio", "percent"] },
+          "coordinateSystem": { "const": null },
+          "mask": { "const": null },
+          "sampling": { "const": null },
+          "boundary": { "const": null },
+          "outcomePolicy": {
+            "properties": {
+              "allowedFailureCodes": {
+                "properties": { "NotApplicable": { "minItems": 1 } }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "coordinateSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "xAxis", "yAxis", "reference"],
+      "properties": {
+        "origin": { "enum": ["TopLeftPixelCenter", "OpticalCenter"] },
+        "xAxis": { "const": "Right" },
+        "yAxis": { "const": "Down" },
+        "reference": { "enum": ["CAM-A", "CAM-B", "StitchedOutput"] }
+      }
+    },
+    "mask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "includedValue", "excludedValue"],
+      "properties": {
+        "kind": { "const": "BinaryValidity" },
+        "source": { "enum": ["CAM-AValidSamples", "CAM-BValidSamples", "IntersectionOfValidSamples", "UnionOfValidSamples", "StitchedOutputValidity"] },
+        "includedValue": { "const": 1 },
+        "excludedValue": { "const": 0 }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "outOfBounds", "invalidSample"],
+      "properties": {
+        "method": { "enum": ["Nearest", "Bilinear", "Area"] },
+        "outOfBounds": { "const": "Exclude" },
+        "invalidSample": { "const": "Exclude" }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imageEdge", "maskEdge", "intervalClosure"],
+      "properties": {
+        "imageEdge": { "enum": ["ExcludeIncompleteKernel", "ClampToImage"] },
+        "maskEdge": { "enum": ["RequireAllSamplesValid", "RequireCenterSampleValid"] },
+        "intervalClosure": { "enum": ["LowerInclusiveUpperExclusive", "Closed"] }
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "percentile", "algorithm", "percentileInterpolation", "medianEvenRule"],
+      "properties": {
+        "method": { "enum": ["Mean", "Median", "Minimum", "Maximum", "Percentile"] },
+        "percentile": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "algorithm": { "enum": ["PairwiseArithmeticMean", "SortedMiddle", "SortedFirst", "SortedLast", "SortedOrderStatistic"] },
+        "percentileInterpolation": { "enum": ["LinearR7", null] },
+        "medianEvenRule": { "enum": ["MeanOfMiddlePair", null] }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "Mean" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "PairwiseArithmeticMean" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Median" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedMiddle" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": "MeanOfMiddlePair" } } } },
+        { "if": { "properties": { "method": { "const": "Minimum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedFirst" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Maximum" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "const": null }, "algorithm": { "const": "SortedLast" }, "percentileInterpolation": { "const": null }, "medianEvenRule": { "const": null } } } },
+        { "if": { "properties": { "method": { "const": "Percentile" } }, "required": ["method"] }, "then": { "properties": { "percentile": { "type": "number" }, "algorithm": { "const": "SortedOrderStatistic" }, "percentileInterpolation": { "const": "LinearR7" }, "medianEvenRule": { "const": null } } } }
+      ]
+    },
+    "rounding": {
+      "type": "object",
+      "description": "Rounding is defined only inside the exact-safe binary64 range documented above. The result schemas apply the decimalPlaces-specific rawValue/value ranges; runtime validation additionally checks the exact decimal scaled value.",
+      "additionalProperties": false,
+      "required": ["mode", "decimalPlaces", "order"],
+      "properties": {
+        "mode": { "enum": ["HalfToEven", "HalfAwayFromZero", "TowardZero"] },
+        "decimalPlaces": { "type": "integer", "minimum": 0, "maximum": 9 },
+        "order": { "const": "AggregateThenRound" }
+      }
+    },
+    "confidenceDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "level"],
+      "properties": {
+        "method": { "enum": ["None", "BootstrapPercentile", "AnalyticNormal"] },
+        "level": { "type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "level": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["BootstrapPercentile", "AnalyticNormal"] } }, "required": ["method"] }, "then": { "properties": { "level": { "type": "number" } } } }
+      ]
+    },
+    "uncertaintyDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "unitMode"],
+      "properties": {
+        "method": { "enum": ["None", "StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] },
+        "unitMode": { "enum": ["SameAsMetric", "Dimensionless"] }
+      }
+    },
+    "outcomePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedFailureCodes", "noResultRule"],
+      "properties": {
+        "allowedFailureCodes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["NoResult", "NotApplicable", "Invalid"],
+          "properties": {
+            "NoResult": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "enum": ["insufficient-valid-samples", "zero-valid-results"] } },
+            "NotApplicable": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "enum": ["not-applicable-for-metric-domain", "metric-not-applicable"] } },
+            "Invalid": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "enum": ["invalid-source-contract", "definition-mismatch"] } }
+          }
+        },
+        "noResultRule": { "const": "ZeroValidSamples" }
+      }
+    }
+  }
+},
+    "metricResult": {
+  "title": "A0 stitch metric result v1",
+  "description": "One result bound at runtime to an exact metric definition. It carries both raw and rounded values but no product acceptance value. Successful rawValue and value use an exact-safe binary64 rounding contract: |rawValue * 10^decimalPlaces| must be finite and at most 2^39. The conditional ranges below are the schema-side raw/value projection of that scaled rule; runtime validation performs the strict scaled check. Nonnegative integer counters are bounded by 2^53-1 for exact binary64 interoperability. These are representability boundaries, not product-quality limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "definitionVersion", "metricId", "metricDomain", "outcome",
+    "rawValue", "value", "sampleCount", "rounding", "confidence", "uncertainty", "failureCode"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-metric-result.v1" },
+    "definitionVersion": { "const": 1 },
+    "metricId": { "$ref": "#/$defs/metricResult/$defs/token" },
+    "metricDomain": { "enum": ["Image", "Resource"] },
+    "outcome": { "enum": ["Success", "NoResult", "NotApplicable", "Invalid"] },
+    "rawValue": { "type": ["number", "null"] },
+    "value": { "type": ["number", "null"] },
+    "sampleCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "rounding": { "$ref": "#/$defs/metricResult/$defs/rounding" },
+    "confidence": { "$ref": "#/$defs/metricResult/$defs/confidenceResult" },
+    "uncertainty": { "$ref": "#/$defs/metricResult/$defs/uncertaintyResult" },
+    "failureCode": {
+      "enum": [
+        null, "insufficient-valid-samples", "zero-valid-results",
+        "not-applicable-for-metric-domain", "metric-not-applicable",
+        "invalid-source-contract", "definition-mismatch"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "Success" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "rawValue": { "type": "number" },
+          "value": { "type": "number" },
+          "sampleCount": { "minimum": 1 },
+          "failureCode": { "const": null }
+        }
+      },
+      "else": {
+        "properties": {
+          "rawValue": { "const": null },
+          "value": { "const": null },
+          "sampleCount": { "const": 0 },
+          "confidence": {
+            "properties": {
+              "method": { "const": "None" }, "level": { "const": null },
+              "lower": { "const": null }, "upper": { "const": null }
+            }
+          },
+          "uncertainty": { "properties": { "method": { "const": "None" }, "value": { "const": null } } },
+          "failureCode": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "NoResult" } }, "required": ["outcome"] },
+      "then": { "properties": { "failureCode": { "enum": ["insufficient-valid-samples", "zero-valid-results"] } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "NotApplicable" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "metricDomain": { "const": "Resource" },
+          "failureCode": { "enum": ["not-applicable-for-metric-domain", "metric-not-applicable"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Invalid" } }, "required": ["outcome"] },
+      "then": { "properties": { "failureCode": { "enum": ["invalid-source-contract", "definition-mismatch"] } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 0 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp0" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp0" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 1 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp1" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp1" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 2 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp2" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp2" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 3 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp3" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp3" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 4 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp4" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp4" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 5 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp5" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp5" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 6 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp6" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp6" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 7 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp7" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp7" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 8 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp8" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp8" } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "Success" }, "rounding": { "properties": { "decimalPlaces": { "const": 9 } }, "required": ["decimalPlaces"] } }, "required": ["outcome", "rounding"] },
+      "then": { "properties": { "rawValue": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp9" }, "value": { "$ref": "#/$defs/metricResult/$defs/exactSafeNumberDp9" } } }
+    }
+  ],
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "exactSafeNumberDp0": { "type": "number", "minimum": -549755813888, "maximum": 549755813888, "description": "Exact-safe result number when decimalPlaces is 0; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp1": { "type": "number", "minimum": -54975581388.8, "maximum": 54975581388.8, "description": "Exact-safe result number when decimalPlaces is 1; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp2": { "type": "number", "minimum": -5497558138.88, "maximum": 5497558138.88, "description": "Exact-safe result number when decimalPlaces is 2; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp3": { "type": "number", "minimum": -549755813.888, "maximum": 549755813.888, "description": "Exact-safe result number when decimalPlaces is 3; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp4": { "type": "number", "minimum": -54975581.3888, "maximum": 54975581.3888, "description": "Exact-safe result number when decimalPlaces is 4; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp5": { "type": "number", "minimum": -5497558.13888, "maximum": 5497558.13888, "description": "Exact-safe result number when decimalPlaces is 5; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp6": { "type": "number", "minimum": -549755.813888, "maximum": 549755.813888, "description": "Exact-safe result number when decimalPlaces is 6; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp7": { "type": "number", "minimum": -54975.5813888, "maximum": 54975.5813888, "description": "Exact-safe result number when decimalPlaces is 7; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp8": { "type": "number", "minimum": -5497.55813888, "maximum": 5497.55813888, "description": "Exact-safe result number when decimalPlaces is 8; scaled magnitude is at most 2^39." },
+    "exactSafeNumberDp9": { "type": "number", "minimum": -549.755813888, "maximum": 549.755813888, "description": "Exact-safe result number when decimalPlaces is 9; scaled magnitude is at most 2^39." },
+    "rounding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "decimalPlaces", "order"],
+      "properties": {
+        "mode": { "enum": ["HalfToEven", "HalfAwayFromZero", "TowardZero"] },
+        "decimalPlaces": { "type": "integer", "minimum": 0, "maximum": 9 },
+        "order": { "const": "AggregateThenRound" }
+      }
+    },
+    "confidenceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "level", "lower", "upper"],
+      "properties": {
+        "method": { "enum": ["None", "BootstrapPercentile", "AnalyticNormal"] },
+        "level": { "type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "lower": { "type": ["number", "null"] },
+        "upper": { "type": ["number", "null"] }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "level": { "const": null }, "lower": { "const": null }, "upper": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["BootstrapPercentile", "AnalyticNormal"] } }, "required": ["method"] }, "then": { "properties": { "level": { "type": "number" }, "lower": { "type": "number" }, "upper": { "type": "number" } } } }
+      ]
+    },
+    "uncertaintyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "value"],
+      "properties": {
+        "method": { "enum": ["None", "StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] },
+        "value": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "None" } }, "required": ["method"] }, "then": { "properties": { "value": { "const": null } } } },
+        { "if": { "properties": { "method": { "enum": ["StandardDeviation", "StandardError", "ConfidenceIntervalHalfWidth"] } }, "required": ["method"] }, "then": { "properties": { "value": { "type": "number" } } } }
+      ]
+    }
+  }
+}
+  }
+}

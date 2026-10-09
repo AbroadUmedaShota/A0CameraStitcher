@@ -109,6 +109,16 @@ function(a0_assert_no_product_stitch_dependency target)
         FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher" "stitch_job_manifest")
 endfunction()
 
+# An image evaluator may consume independent oracle data, never the code that
+# produces the pixels under examination (Issue #275). IO/system dependencies
+# are checked separately for its pure numerical core.
+function(a0_assert_no_stitch_evaluator_dependency target)
+    a0_assert_no_link_dependency("${target}"
+        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher a0_m2_synthetic_pair a0_m2_rig_profile_v2
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher"
+            "stitch_job_manifest" "synthetic_pair" "rig_profile_v2" "stitch_eval_main")
+endfunction()
+
 function(a0_defer_to_end_of_configure function_name)
     # DEFER evaluates ${...} in its arguments when the call runs, after this
     # function's scope is gone, so the arguments are expanded here first.

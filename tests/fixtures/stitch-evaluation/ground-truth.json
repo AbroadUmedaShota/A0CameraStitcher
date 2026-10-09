@@ -1,0 +1,294 @@
+{
+  "schema": "a0.m2.synthetic-pair-ground-truth/2",
+  "generator_version": "a0.m2.synthetic-pair-generator/2",
+  "seed": 275275,
+  "conventions": {
+    "matrix": "row-major-column-vector",
+    "exifOrientation": "ignored",
+    "cameraPixel": "stored-order-sample-at-integer-index",
+    "documentPlane": "mm-origin-sheet-top-left-x-right-y-down"
+  },
+  "spec": {
+    "schema": "a0.m2.synthetic-pair-spec/2",
+    "seed": 275275,
+    "image": {
+      "width_px": 320,
+      "height_px": 240,
+      "supersample": 2
+    },
+    "jpeg": {
+      "quality": 1,
+      "chroma_subsampling": "444"
+    },
+    "chart": {
+      "width_mm": 30,
+      "grid_line_width_mm": 0.03,
+      "height_mm": 30,
+      "fiducial_radius_mm": 1,
+      "slanted_edge_slope": 0.0875,
+      "fine_line_base_width_mm": 0.02,
+      "fiducial_pitch_mm": 8,
+      "margin_mm": 4.85,
+      "grid_pitch_mm": 4
+    },
+    "cameras": [
+      {
+        "alias": "CAM-A",
+        "projection": {
+          "intrinsics": {
+            "cxPixels": 159.5,
+            "fxPixels": 200,
+            "fyPixels": 200,
+            "cyPixels": 119.5
+          },
+          "distortion": {
+            "model": "brown-conrady-k1k2k3-p1p2",
+            "k1": 0,
+            "k2": 0,
+            "p1": 0,
+            "p2": 0,
+            "k3": 0
+          },
+          "documentToImage": [
+            [
+              10,
+              0,
+              -0.5
+            ],
+            [
+              0,
+              10,
+              -0.5
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ]
+        },
+        "exposure_gain": 1,
+        "white_balance_gain": [
+          1,
+          1,
+          1
+        ],
+        "vignette": [
+          0,
+          0
+        ],
+        "noise": {
+          "read_sigma": 0,
+          "shot_sigma": 0
+        }
+      },
+      {
+        "alias": "CAM-B",
+        "projection": {
+          "intrinsics": {
+            "cxPixels": 159.5,
+            "fxPixels": 200,
+            "fyPixels": 200,
+            "cyPixels": 119.5
+          },
+          "distortion": {
+            "model": "brown-conrady-k1k2k3-p1p2",
+            "k1": 0,
+            "k2": 0,
+            "p1": 0,
+            "p2": 0,
+            "k3": 0
+          },
+          "documentToImage": [
+            [
+              10,
+              0,
+              -0.5
+            ],
+            [
+              0,
+              10,
+              -0.5
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ]
+        },
+        "exposure_gain": 1,
+        "white_balance_gain": [
+          1,
+          1,
+          1
+        ],
+        "vignette": [
+          0,
+          0
+        ],
+        "noise": {
+          "read_sigma": 0,
+          "shot_sigma": 0
+        }
+      }
+    ]
+  },
+  "output_files": [],
+  "reference_points": [
+    {
+      "id": "F-000-000",
+      "document_mm": [
+        4.85,
+        4.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-000-001",
+      "document_mm": [
+        12.85,
+        4.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-000-002",
+      "document_mm": [
+        20.85,
+        4.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-001-000",
+      "document_mm": [
+        4.85,
+        12.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-001-001",
+      "document_mm": [
+        12.85,
+        12.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-001-002",
+      "document_mm": [
+        20.85,
+        12.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-002-000",
+      "document_mm": [
+        4.85,
+        20.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-002-001",
+      "document_mm": [
+        12.85,
+        20.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    },
+    {
+      "id": "F-002-002",
+      "document_mm": [
+        20.85,
+        20.85
+      ],
+      "image_px": {
+        "CAM-B": [
+          33,
+          44
+        ],
+        "CAM-A": [
+          11,
+          22
+        ]
+      }
+    }
+  ],
+  "patterns": []
+}
