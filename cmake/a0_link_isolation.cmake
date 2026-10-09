@@ -100,6 +100,15 @@ function(a0_assert_no_link_dependency target)
     endwhile()
 endfunction()
 
+# Actual policy shared by generator targets and configure-only regression
+# tests. Both legacy and document-plane warp/blend must stay out of the
+# independent ground-truth image generator.
+function(a0_assert_no_product_stitch_dependency target)
+    a0_assert_no_link_dependency("${target}"
+        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher" "stitch_job_manifest")
+endfunction()
+
 function(a0_defer_to_end_of_configure function_name)
     # DEFER evaluates ${...} in its arguments when the call runs, after this
     # function's scope is gone, so the arguments are expanded here first.

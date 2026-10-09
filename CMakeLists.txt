@@ -217,6 +217,7 @@ endif()
 # a0_m2_offline_stitcher depends on this library, never the reverse (Issue #268).
 add_library(a0_m2_render
     src/m2/render.cpp
+    src/m2/document_render.cpp
 )
 target_include_directories(a0_m2_render PUBLIC src/m2/include)
 include(cmake/a0_link_isolation.cmake)
@@ -265,12 +266,6 @@ endif()
 # also shape the images used to judge it. Fail the configure step if the target
 # can reach a0_m2_offline_stitcher, directly or through any dependency, or
 # compiles one of its sources.
-function(a0_assert_no_product_stitch_dependency target)
-    a0_assert_no_link_dependency("${target}"
-        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher
-        FORBIDDEN_SOURCES "/render\\.cpp$" "offline_stitcher" "stitch_job_manifest")
-endfunction()
-
 add_library(a0_m2_synthetic_pair
     src/m2/synthetic_pair_chart.cpp
     src/m2/synthetic_pair_geometry.cpp
@@ -741,6 +736,17 @@ if(BUILD_TESTING)
         target_compile_options(m2_render_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_render_contracts COMMAND m2_render_contracts)
+
+    add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
+    target_link_libraries(m2_document_render_contracts PRIVATE a0_m2_render)
+    add_executable(m2_document_render_mtf_contracts tests/document_render_mtf_tests.cpp)
+    target_link_libraries(m2_document_render_mtf_contracts PRIVATE a0_m2_render)
+    if(MSVC)
+        target_compile_options(m2_document_render_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+        target_compile_options(m2_document_render_mtf_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_document_render_contracts COMMAND m2_document_render_contracts)
+    add_test(NAME m2_document_render_mtf_contracts COMMAND m2_document_render_mtf_contracts)
     # Synthetic pair generator contracts (issue #269). The generator and the
     # adapter run as separate processes; the test itself links only the generator.
     add_executable(m2_synthetic_pair_contracts tests/synthetic_pair_tests.cpp)

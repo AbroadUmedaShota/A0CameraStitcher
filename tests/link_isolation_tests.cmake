@@ -13,15 +13,13 @@ function(check_case name reject body)
     file(MAKE_DIRECTORY "${source_dir}")
     file(MAKE_DIRECTORY "${source_dir}/src/m2")
     file(WRITE "${source_dir}/src/m2/synthetic_pair_render.cpp" "")
+    file(WRITE "${source_dir}/src/m2/document_render.cpp" "")
     file(WRITE "${source_dir}/CMakeLists.txt"
         "cmake_minimum_required(VERSION 3.24)\nproject(isolation NONE)\n"
         "include([==[${ISOLATION_MODULE}]==])\n"
         "add_library(subject INTERFACE)\nadd_library(bridge INTERFACE)\n"
         "add_library(a0_m2_render INTERFACE)\nadd_library(a0_m2_offline_stitcher INTERFACE)\n"
-        "function(check_subject)\n"
-        "a0_assert_no_link_dependency(subject FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher"
-        " FORBIDDEN_SOURCES \"/render\\\\.cpp$\" \"offline_stitcher\" \"stitch_job_manifest\")\n"
-        "endfunction()\na0_defer_to_end_of_configure(check_subject)\n${body}\n")
+        "a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency subject)\n${body}\n")
     execute_process(COMMAND "${CMAKE_COMMAND}" -S "${source_dir}" -B "${TEST_ROOT}/${name}/build"
         RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE errors)
     if(reject)
@@ -47,6 +45,8 @@ check_case(source_windows_path TRUE "set_property(TARGET subject PROPERTY SOURCE
 check_case(interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/render.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
 check_case(stitch_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/offline_stitcher.cpp)")
 check_case(allowed_synthetic_source FALSE "set_property(TARGET subject PROPERTY SOURCES src/m2/synthetic_pair_render.cpp)")
+check_case(document_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/document_render.cpp)")
+check_case(document_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/document_render.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
 
 # Preserve the original pure-render rule, including flags and late additions.
 check_case(system_default TRUE "a0_defer_to_end_of_configure(a0_assert_no_link_dependency bridge)\ntarget_link_options(bridge INTERFACE /DEFAULTLIB:bcrypt.lib)")
