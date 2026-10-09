@@ -1,5 +1,7 @@
 # 校正入力の多視点・線形制約の検査（#283、#277前段）
 
+次の校正実装の入力・固定リグ基準・真値の分離・draft来歴は[入出力設計案](M2_DRAFT_CALIBRATION_IO_PLAN.md)を参照。設計案の欄名と診断は未実装で、既存API/profile契約を変更しない。
+
 `a0_m2_calibration_view_geometry` はカメラ1台分の複数視点について、平面校正の線形制約を調べる純粋なC++20 library。画像処理・OpenCV・Win32・製品renderer/stitcher/生成器/profile readerには依存しない。profileは作らない。#277の検出・レンズ校正・draft出力の前段で使うための検査であり、その作業全体の完了ではない。
 
 ## 数学と入力の意味
