@@ -54,4 +54,4 @@ SDKなしの関連 native target build と CTest は Debug/Release とも11/11 P
 
 通常ファイルの有効な JPEG 差し替えは、保存した修正前 library と現行試験を組み合わせて再現した（3項目中2失敗）。修正後は3項目 PASS。同一 file ID の有効な JFIF 版変更も、DPI の独立検査を通したうえで生成 byte の SHA 違反として拒否した。偽の子プロセスは無変更の正常対照を通し、profile・両入力の write/delete アクセスが共有違反になることを実測した。15種類の偽成功では、期待した具体的な拒否理由と、子が実際に fixture を生成した証跡を確認している。
 
-#274 の圧縮後基準点 p95 0.05 px の評価、#273 の draft 評価 exe、UI の profile 選択・setup 接続、#46 の補正 pipeline は後続。最初の approved-v2 が出る #45 までは、ADR-0034 の移行規則に従って v1 試験経路を残す。品質・実機の受入を自動で承認しない。
+#273 の draft 評価 exe は [評価合成](M2_DRAFT_STITCH_EVAL.md) に別入口として追加した。#274 の圧縮後基準点 p95 0.05 px の評価、UI の profile 選択・setup 接続、#46 の補正 pipeline は後続。最初の approved-v2 が出る #45 までは、ADR-0034 の移行規則に従って v1 試験経路を残す。品質・実機の受入を自動で承認しない。

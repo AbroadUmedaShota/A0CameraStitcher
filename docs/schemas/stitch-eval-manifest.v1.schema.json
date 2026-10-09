@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evaluation-only calibrated-draft stitch record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "profileStatus", "quality", "profileVersion", "profileFingerprintSha256", "resampling", "outputRaster", "inputs", "output", "engine"],
+  "properties": {
+    "schemaVersion": { "const": "a0.stitch-eval-manifest.v1" },
+    "profileStatus": { "const": "draft" },
+    "quality": { "const": "not-evaluated" },
+    "profileVersion": { "const": "2.0.0" },
+    "profileFingerprintSha256": { "$ref": "#/$defs/sha256" },
+    "resampling": { "enum": ["bilinear", "bicubic-catmull-rom"] },
+    "outputRaster": {
+      "type": "object", "additionalProperties": false,
+      "required": ["regionUm", "dpi", "widthPixels", "heightPixels"],
+      "properties": {
+        "regionUm": {
+          "type": "object", "additionalProperties": false,
+          "required": ["left", "top", "right", "bottom"],
+          "properties": {
+            "left": { "type": "integer", "minimum": 0 },
+            "top": { "type": "integer", "minimum": 0 },
+            "right": { "type": "integer", "minimum": 1 },
+            "bottom": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "dpi": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "widthPixels": { "$ref": "#/$defs/dimension" },
+        "heightPixels": { "$ref": "#/$defs/dimension" }
+      }
+    },
+    "inputs": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/input" }, { "properties": { "cameraAlias": { "const": "CAM-A" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/input" }, { "properties": { "cameraAlias": { "const": "CAM-B" } } }] }
+      ],
+      "items": false
+    },
+    "output": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relativePath", "sha256", "encodedSizeBytes", "widthPixels", "heightPixels"],
+      "properties": {
+        "relativePath": { "const": "evaluation.jpg" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "encodedSizeBytes": { "$ref": "#/$defs/jpegSize" },
+        "widthPixels": { "$ref": "#/$defs/dimension" },
+        "heightPixels": { "$ref": "#/$defs/dimension" }
+      }
+    },
+    "engine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "a0.m2.stitch-eval" },
+        "version": { "const": "1.0.0" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "dimension": { "type": "integer", "minimum": 1, "maximum": 32768 },
+    "jpegSize": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cameraAlias", "sha256", "encodedSizeBytes"],
+      "properties": {
+        "cameraAlias": { "enum": ["CAM-A", "CAM-B"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "encodedSizeBytes": { "$ref": "#/$defs/jpegSize" }
+      }
+    }
+  }
+}

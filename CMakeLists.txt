@@ -323,7 +323,47 @@ if(A0_BUILD_RENDER_BENCHMARK)
         FORBIDDEN_SOURCES "offline_stitcher" "stitch_job_manifest" "synthetic_pair")
 endif()
 
+# Draft evaluation is a separate, opt-in executable, never a product adapter
+# capability or a dependency of the application/distribution targets (#273).
+option(A0_BUILD_STITCH_EVAL "Build the evaluation-only calibrated-draft stitch executable (#273)" OFF)
+if(A0_BUILD_STITCH_EVAL)
+    add_executable(A0CameraStitcher.StitchEval src/m2/stitch_eval_main.cpp)
+    target_include_directories(A0CameraStitcher.StitchEval PRIVATE src/common/include)
+    target_link_libraries(A0CameraStitcher.StitchEval PRIVATE
+        a0_m2_render a0_m2_rig_profile_v2 ole32 windowscodecs bcrypt shell32 uuid)
+    target_compile_definitions(A0CameraStitcher.StitchEval PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(A0CameraStitcher.StitchEval PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency A0CameraStitcher.StitchEval
+        FORBIDDEN_LIBRARIES a0_m2_offline_stitcher a0_m2_synthetic_pair
+        FORBIDDEN_SOURCES "offline_stitcher" "stitch_job_manifest" "synthetic_pair")
+endif()
+
 include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME m2_stitch_eval_default_off
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-default-off"
+            "-DTEST_GENERATOR=${CMAKE_GENERATOR}"
+            "-DTEST_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            -P "${CMAKE_SOURCE_DIR}/tests/stitch_eval_default_off.cmake")
+endif()
+if(BUILD_TESTING AND A0_BUILD_STITCH_EVAL)
+    add_executable(m2_stitch_eval_contracts tests/stitch_eval_tests.cpp)
+    target_include_directories(m2_stitch_eval_contracts PRIVATE src/common/include)
+    target_link_libraries(m2_stitch_eval_contracts PRIVATE ole32 windowscodecs bcrypt shell32 uuid)
+    target_compile_definitions(m2_stitch_eval_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+    add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StitchEval A0CameraStitcher.M2Adapter)
+    if(MSVC)
+        target_compile_options(m2_stitch_eval_contracts PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME m2_stitch_eval_contracts COMMAND m2_stitch_eval_contracts
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+        $<TARGET_FILE:A0CameraStitcher.StitchEval> $<TARGET_FILE:A0CameraStitcher.M2Adapter>)
+    set_tests_properties(m2_stitch_eval_contracts PROPERTIES TIMEOUT 1800)
+endif()
 if(BUILD_TESTING AND A0_BUILD_RENDER_BENCHMARK)
     add_test(NAME m2_render_benchmark_self_test
         COMMAND A0CameraStitcher.RenderBenchmark --self-test)
