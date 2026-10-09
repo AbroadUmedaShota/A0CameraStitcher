@@ -1,0 +1,2925 @@
+{
+  "schema": "a0.m2.render-benchmark-report.v1",
+  "issue": 270,
+  "environment": "software-only",
+  "measurementOutcome": "recorded",
+  "parameterId": "synthetic269-legacy-render",
+  "profileStatus": "not-used-fixed-test-parameters",
+  "quality": "not-evaluated",
+  "parameters": {
+    "width": 7360,
+    "height": 4912,
+    "translateY": -3933.07,
+    "cropTop": 1
+  },
+  "execution": {
+    "engine": "legacy-render-pair",
+    "coldMeaning": "first-iteration-in-process-os-cache-not-controlled",
+    "warmCount": 9,
+    "totalCount": 10,
+    "peakScope": "process-lifetime-cumulative-observations",
+    "totalTimingIncludes": [
+      "wic-decode",
+      "render-pair",
+      "wic-encode",
+      "full-output-decode-verification",
+      "output-hash"
+    ],
+    "totalTimingExcludes": [
+      "initial-locked-input-load-and-hash",
+      "com-setup",
+      "canvas-plan",
+      "buffer-cleanup",
+      "filesystem-write-flush-atomic-publish-product-manifest",
+      "json-output-and-metadata-collection"
+    ],
+    "encoderConfiguration": "wic-jpeg-default-property-bag-memory-istream",
+    "qualityEvaluated": false,
+    "productManifestWritten": false,
+    "productPathExecuted": false,
+    "v2PipelineMeasured": false,
+    "actual64MiBLimitPathTested": false
+  },
+  "machine": {
+    "osBuild": "26200",
+    "osUbr": 9457,
+    "executableSha256": "31b656c20a84b37db94bff82b6d03889940018eeb69832c0b8f8b5ab93faac21",
+    "processors": [
+      {
+        "name": "Intel(R) Core(TM) i5-10310U CPU @ 1.70GHz",
+        "cores": 4,
+        "logicalProcessors": 8
+      }
+    ],
+    "memoryBytes": 8215056384,
+    "wicComponentVersion": "1.0.0.0",
+    "wicDllVersion": "6.2.26100.9457"
+  },
+  "inputsUnchanged": true,
+  "outputHashesIdentical": true,
+  "measurement": {
+    "schema": "a0.m2.render-benchmark-run.v1",
+    "inputSha256": [
+      "2e5a1cc74750f0b01a8e85a6e666f71fa3a756184f22ff80daadba461ac81f03",
+      "995a842618ea042fb96c1832dcbfcce6fe2661cd849b07d7317deee033e1dc94"
+    ],
+    "outputWidth": 7360,
+    "outputHeight": 8845,
+    "runs": [
+      {
+        "iteration": 1,
+        "phase": "process-first",
+        "decodeMilliseconds": 1314.0709,
+        "renderMilliseconds": 5576.2148,
+        "encodeMilliseconds": 251.274,
+        "verifyHashMilliseconds": 401.687,
+        "totalMilliseconds": 7543.2467,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653271040,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 2,
+        "phase": "warm",
+        "decodeMilliseconds": 760.4155,
+        "renderMilliseconds": 3753.6784,
+        "encodeMilliseconds": 269.1109,
+        "verifyHashMilliseconds": 393.7671,
+        "totalMilliseconds": 5176.9719,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 3,
+        "phase": "warm",
+        "decodeMilliseconds": 675.8284,
+        "renderMilliseconds": 3446.4263,
+        "encodeMilliseconds": 274.968,
+        "verifyHashMilliseconds": 438.2105,
+        "totalMilliseconds": 4835.4332,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 4,
+        "phase": "warm",
+        "decodeMilliseconds": 643.5832,
+        "renderMilliseconds": 3778.5476,
+        "encodeMilliseconds": 286.5067,
+        "verifyHashMilliseconds": 467.0566,
+        "totalMilliseconds": 5175.6941,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 5,
+        "phase": "warm",
+        "decodeMilliseconds": 612.8171,
+        "renderMilliseconds": 3459.005,
+        "encodeMilliseconds": 274.5112,
+        "verifyHashMilliseconds": 405.6149,
+        "totalMilliseconds": 4751.9482,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 6,
+        "phase": "warm",
+        "decodeMilliseconds": 617.6899,
+        "renderMilliseconds": 3796.2649,
+        "encodeMilliseconds": 282.8867,
+        "verifyHashMilliseconds": 422.0856,
+        "totalMilliseconds": 5118.9271,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 7,
+        "phase": "warm",
+        "decodeMilliseconds": 778.8091,
+        "renderMilliseconds": 4812.4036,
+        "encodeMilliseconds": 770.6578,
+        "verifyHashMilliseconds": 633.3129,
+        "totalMilliseconds": 6995.1834,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 8,
+        "phase": "warm",
+        "decodeMilliseconds": 927.9803,
+        "renderMilliseconds": 4256.3551,
+        "encodeMilliseconds": 270.4057,
+        "verifyHashMilliseconds": 404.1292,
+        "totalMilliseconds": 5858.8703,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 9,
+        "phase": "warm",
+        "decodeMilliseconds": 876.7454,
+        "renderMilliseconds": 4259.9177,
+        "encodeMilliseconds": 275.0071,
+        "verifyHashMilliseconds": 422.947,
+        "totalMilliseconds": 5834.6172,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      },
+      {
+        "iteration": 10,
+        "phase": "warm",
+        "decodeMilliseconds": 641.3713,
+        "renderMilliseconds": 3709.7976,
+        "encodeMilliseconds": 303.6017,
+        "verifyHashMilliseconds": 596.3496,
+        "totalMilliseconds": 5251.1202,
+        "outputSizeBytes": 11159404,
+        "outputSha256": "c640184f056dc6c5d6e82284788605d7ffd13c214c881afa49c798ffdcac96e2",
+        "peakWorkingSetBytes": 653328384,
+        "peakCommitBytes": 648548352
+      }
+    ],
+    "allHashesEqual": true,
+    "wicComponentVersion": "1.0.0.0",
+    "wicDllVersion": "6.2.26100.9457"
+  },
+  "summary": [
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 718.12195,
+        "value": 718.12,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 1140.3301299999996,
+        "value": 1140.33,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 1314.0709,
+        "value": 1314.07,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 3787.40625,
+        "value": 3787.41,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 5232.499759999999,
+        "value": 5232.5,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 5576.2148,
+        "value": 5576.21,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 274.98755,
+        "value": 274.99,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 560.4825549999995,
+        "value": 560.48,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 770.6578,
+        "value": 770.66,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 422.5163,
+        "value": 422.52,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 616.679415,
+        "value": 616.68,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 633.3129,
+        "value": 633.31,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 5214.04605,
+        "value": 5214.05,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 7296.6182149999995,
+        "value": 7296.62,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 7543.2467,
+        "value": 7543.25,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "process-lifetime-cumulative-observations",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-working-set-all10-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-working-set-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 653328384.0,
+        "value": 653328384.0,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "process-lifetime-cumulative-observations",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-commit-all10-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-commit-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 648548352.0,
+        "value": 648548352.0,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "all10",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "output-size-all10-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "output-size-all10-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 11159404.0,
+        "value": 11159404.0,
+        "sampleCount": 10,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 675.8284,
+        "value": 675.83,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 907.48634,
+        "value": 907.49,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "decode-duration-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 927.9803,
+        "value": 927.98,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 3778.5476,
+        "value": 3778.55,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 4591.40924,
+        "value": 4591.41,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "render-duration-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 4812.4036,
+        "value": 4812.4,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 275.0071,
+        "value": 275.01,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 583.8353599999998,
+        "value": 583.84,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "encode-duration-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 770.6578,
+        "value": 770.66,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 422.947,
+        "value": 422.95,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 618.52758,
+        "value": 618.53,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "verifyhash-duration-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 633.3129,
+        "value": 633.31,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-p50",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 50,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-p50",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 5176.9719,
+        "value": 5176.97,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-p95",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Percentile",
+          "percentile": 95,
+          "algorithm": "SortedOrderStatistic",
+          "percentileInterpolation": "LinearR7",
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-p95",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 6540.658159999999,
+        "value": 6540.66,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-max",
+        "domain": "Resource",
+        "unit": "milliseconds",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "total-duration-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 6995.1834,
+        "value": 6995.18,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 2,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "process-lifetime-cumulative-observations",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-working-set-warm9-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-working-set-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 653328384.0,
+        "value": 653328384.0,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "process-lifetime-cumulative-observations",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-commit-warm9-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "peak-commit-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 648548352.0,
+        "value": 648548352.0,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    },
+    {
+      "population": "warm9",
+      "measurementScope": "per-run",
+      "definition": {
+        "schemaVersion": "a0.stitch-metric-definition.v1",
+        "definitionVersion": 1,
+        "metricId": "output-size-warm9-max",
+        "domain": "Resource",
+        "unit": "bytes",
+        "coordinateSystem": null,
+        "mask": null,
+        "sampling": null,
+        "aggregation": {
+          "method": "Maximum",
+          "percentile": null,
+          "algorithm": "SortedLast",
+          "percentileInterpolation": null,
+          "medianEvenRule": null
+        },
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "boundary": null,
+        "confidence": {
+          "method": "None",
+          "level": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "unitMode": "SameAsMetric"
+        },
+        "outcomePolicy": {
+          "allowedFailureCodes": {
+            "NoResult": [
+              "zero-valid-results"
+            ],
+            "NotApplicable": [
+              "metric-not-applicable"
+            ],
+            "Invalid": [
+              "invalid-source-contract"
+            ]
+          },
+          "noResultRule": "ZeroValidSamples"
+        }
+      },
+      "result": {
+        "schemaVersion": "a0.stitch-metric-result.v1",
+        "definitionVersion": 1,
+        "metricId": "output-size-warm9-max",
+        "metricDomain": "Resource",
+        "outcome": "Success",
+        "rawValue": 11159404.0,
+        "value": 11159404.0,
+        "sampleCount": 9,
+        "rounding": {
+          "mode": "HalfAwayFromZero",
+          "decimalPlaces": 0,
+          "order": "AggregateThenRound"
+        },
+        "confidence": {
+          "method": "None",
+          "level": null,
+          "lower": null,
+          "upper": null
+        },
+        "uncertainty": {
+          "method": "None",
+          "value": null
+        },
+        "failureCode": null
+      }
+    }
+  ],
+  "comparisons": {
+    "status": "numeric-comparison-only-no-product-verdict",
+    "renderP95All10Milliseconds": 5232.499759999999,
+    "candidateStitchOnlyP95Milliseconds": 10000,
+    "renderP95MinusCandidateMilliseconds": -4767.500240000001,
+    "pipelineTotalP95All10Milliseconds": 7296.6182149999995,
+    "pipelineTotalScope": "decode-render-encode-output-verification-hash-diagnostic-only",
+    "processPeakCommitBytes": 648548352.0,
+    "candidateAppCommitBytes": 5368709120,
+    "processPeakCommitMinusAppCandidateBytes": -4720160768.0,
+    "outputMaxBytes": 11159404.0,
+    "existingReadLimitBytes": 67108864,
+    "outputMaxMinusExistingReadLimitBytes": -55949460.0,
+    "limitations": [
+      "render-only-is-not-full-stitch-only",
+      "native-process-is-not-whole-app-commit",
+      "size-comparison-is-not-product-limit-path-test"
+    ]
+  }
+}

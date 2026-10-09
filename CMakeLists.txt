@@ -300,7 +300,30 @@ endif()
 a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency a0_m2_synthetic_pair)
 a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency A0CameraStitcher.SyntheticPairGenerator)
 
+option(A0_BUILD_RENDER_BENCHMARK "Build the evaluation-only legacy render benchmark (#270)" OFF)
+if(A0_BUILD_RENDER_BENCHMARK)
+    add_executable(A0CameraStitcher.RenderBenchmark src/m2/render_benchmark_main.cpp)
+    target_link_libraries(A0CameraStitcher.RenderBenchmark PRIVATE
+        a0_m2_render a0_m2_stitch_metrics ole32 windowscodecs bcrypt psapi version)
+    target_compile_definitions(A0CameraStitcher.RenderBenchmark PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(A0CameraStitcher.RenderBenchmark PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency
+        A0CameraStitcher.RenderBenchmark
+        FORBIDDEN_LIBRARIES a0_m2_offline_stitcher a0_m2_synthetic_pair
+        FORBIDDEN_SOURCES "offline_stitcher" "stitch_job_manifest" "synthetic_pair")
+endif()
+
 include(CTest)
+if(BUILD_TESTING AND A0_BUILD_RENDER_BENCHMARK)
+    add_test(NAME m2_render_benchmark_self_test
+        COMMAND A0CameraStitcher.RenderBenchmark --self-test)
+    add_test(NAME m2_render_benchmark_metrics
+        COMMAND pwsh -NoProfile -File "${CMAKE_SOURCE_DIR}/tests/render_benchmark_metrics_tests.ps1"
+            -BenchmarkExe "$<TARGET_FILE:A0CameraStitcher.RenderBenchmark>")
+    set_tests_properties(m2_render_benchmark_self_test m2_render_benchmark_metrics PROPERTIES TIMEOUT 120)
+endif()
 if(BUILD_TESTING)
     # Anonymized real-device responses replayed by the native contract tests (issue #231).
     set(A0_REPLAY_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/hardware-replay")
