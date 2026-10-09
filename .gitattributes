@@ -4,6 +4,9 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.svg text eol=lf
+# Fingerprint vectors compare UTF-8 bytes, including the final LF.
+tests/fixtures/rig-profile-v2/*.canonical.txt text eol=lf
+tests/fixtures/rig-profile-v2/*.sha256 text eol=lf
 *.ps1 text eol=crlf
 *.psm1 text eol=crlf
 *.sln text eol=crlf

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "2.0.0",
+  "status": "draft",
+  "profileId": null,
+  "conventions": {
+    "documentPlane": "mm-origin-sheet-top-left-x-right-y-down",
+    "cameraPixel": "stored-order-sample-at-integer-index",
+    "matrix": "row-major-column-vector",
+    "exifOrientation": "ignored"
+  },
+  "cameraModel": {
+    "manufacturer": "Nikon",
+    "model": "D810",
+    "sensorWidthPixels": 7360,
+    "sensorHeightPixels": 4912
+  },
+  "documentPlane": null,
+  "cameras": {
+    "CAM-A": {
+      "physicalIdentity": null,
+      "projection": null
+    },
+    "CAM-B": {
+      "physicalIdentity": null,
+      "projection": null
+    }
+  },
+  "calibration": null,
+  "outputRaster": null,
+  "correctionEnvelope": null,
+  "qualityContract": null,
+  "approval": null
+}

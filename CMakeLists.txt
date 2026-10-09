@@ -229,6 +229,18 @@ else()
     target_compile_options(a0_m2_render PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Strict immutable v2 document reader. The renderer does not depend on this
+# Windows hashing boundary, and the synthetic generator remains independent.
+add_library(a0_m2_rig_profile_v2 src/m2/rig_profile_v2.cpp)
+target_include_directories(a0_m2_rig_profile_v2 PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_rig_profile_v2 PUBLIC a0_m2_render PRIVATE bcrypt)
+target_compile_definitions(a0_m2_rig_profile_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(a0_m2_rig_profile_v2 PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_rig_profile_v2 PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
     src/m2/stitch_job_manifest.cpp
@@ -736,6 +748,15 @@ if(BUILD_TESTING)
         target_compile_options(m2_render_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_render_contracts COMMAND m2_render_contracts)
+
+    add_executable(m2_rig_profile_v2_contracts tests/rig_profile_v2_tests.cpp)
+    target_include_directories(m2_rig_profile_v2_contracts PRIVATE src/common/include)
+    target_link_libraries(m2_rig_profile_v2_contracts PRIVATE a0_m2_rig_profile_v2)
+    if(MSVC)
+        target_compile_options(m2_rig_profile_v2_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_rig_profile_v2_contracts COMMAND m2_rig_profile_v2_contracts
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
     target_link_libraries(m2_document_render_contracts PRIVATE a0_m2_render)
