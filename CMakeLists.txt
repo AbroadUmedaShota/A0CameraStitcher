@@ -266,33 +266,9 @@ endif()
 # can reach a0_m2_offline_stitcher, directly or through any dependency, or
 # compiles one of its sources.
 function(a0_assert_no_product_stitch_dependency target)
-    set(pending "${target}")
-    set(visited "")
-    while(pending)
-        list(POP_FRONT pending current)
-        if(current IN_LIST visited OR NOT TARGET "${current}")
-            continue()
-        endif()
-        list(APPEND visited "${current}")
-        if(current STREQUAL "a0_m2_offline_stitcher")
-            message(FATAL_ERROR "${target} must not depend on a0_m2_offline_stitcher (product warp/blend)")
-        endif()
-        get_target_property(sources "${current}" SOURCES)
-        foreach(source IN LISTS sources)
-            if(source MATCHES "offline_stitcher|stitch_job_manifest")
-                message(FATAL_ERROR "${target} must not compile product stitch source ${source} (via ${current})")
-            endif()
-        endforeach()
-        foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
-            get_target_property(libraries "${current}" "${property}")
-            if(libraries)
-                foreach(library IN LISTS libraries)
-                    string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" library "${library}")
-                    list(APPEND pending "${library}")
-                endforeach()
-            endif()
-        endforeach()
-    endwhile()
+    a0_assert_no_link_dependency("${target}"
+        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher
+        FORBIDDEN_SOURCES "/render\\.cpp$" "offline_stitcher" "stitch_job_manifest")
 endfunction()
 
 add_library(a0_m2_synthetic_pair
@@ -321,8 +297,8 @@ if(MSVC)
 else()
     target_compile_options(A0CameraStitcher.SyntheticPairGenerator PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-a0_assert_no_product_stitch_dependency(a0_m2_synthetic_pair)
-a0_assert_no_product_stitch_dependency(A0CameraStitcher.SyntheticPairGenerator)
+a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency a0_m2_synthetic_pair)
+a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency A0CameraStitcher.SyntheticPairGenerator)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -756,7 +732,7 @@ if(BUILD_TESTING)
     else()
         target_compile_options(m2_synthetic_pair_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
-    a0_assert_no_product_stitch_dependency(m2_synthetic_pair_contracts)
+    a0_defer_to_end_of_configure(a0_assert_no_product_stitch_dependency m2_synthetic_pair_contracts)
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_test(NAME m2_synthetic_pair_contracts
         COMMAND m2_synthetic_pair_contracts
@@ -766,6 +742,11 @@ if(BUILD_TESTING)
             --powershell "${A0_POWERSHELL_EXECUTABLE}"
             --profile-schema "${CMAKE_SOURCE_DIR}/docs/schemas/rig-profile.v2.schema.json")
     set_tests_properties(m2_synthetic_pair_contracts PROPERTIES TIMEOUT 1800)
+    add_test(NAME m2_link_isolation_contracts
+        COMMAND "${CMAKE_COMMAND}"
+            "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/link-isolation-contracts"
+            -P "${CMAKE_SOURCE_DIR}/tests/link_isolation_tests.cmake")
 
     find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_executable(a0_pc_direct_summary_v2_fixture

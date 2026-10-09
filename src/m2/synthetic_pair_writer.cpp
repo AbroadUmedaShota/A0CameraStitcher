@@ -270,10 +270,17 @@ GenerateResult GeneratePair(const PairSpec& spec, const GenerateOptions& options
 
     const auto& root = options.output_directory;
     const auto truth_path = root / std::string(kGroundTruthFileName);
+    const auto partial_of = [](const std::filesystem::path& destination) {
+        return std::filesystem::path(destination.wstring() + L".partial");
+    };
     if (std::filesystem::exists(truth_path)) throw std::invalid_argument("ground truth already exists in the output directory");
+    if (std::filesystem::exists(partial_of(truth_path))) throw std::invalid_argument("ground truth partial already exists in the output directory");
     for (const auto& camera : spec.cameras) {
         if (std::filesystem::exists(root / camera.alias / std::string(kCanonicalFileName))) {
             throw std::invalid_argument("an original.jpg already exists for " + camera.alias);
+        }
+        if (std::filesystem::exists(partial_of(root / camera.alias / std::string(kCanonicalFileName)))) {
+            throw std::invalid_argument("an original.jpg.partial already exists for " + camera.alias);
         }
     }
 
@@ -283,6 +290,7 @@ GenerateResult GeneratePair(const PairSpec& spec, const GenerateOptions& options
     // Everything is written next to its destination as <name>.partial. Nothing becomes
     // visible under its real name until all of it is complete.
     std::vector<detail::PublishItem> items;
+    items.reserve(spec.cameras.size() + 1);
     std::vector<std::filesystem::path> created_directories;
     const auto discard = [&]() noexcept {
         for (const auto& item : items) RemoveQuietly(item.partial);
@@ -291,25 +299,34 @@ GenerateResult GeneratePair(const PairSpec& spec, const GenerateOptions& options
             RemoveQuietly(*directory);
         }
     };
-    const auto partial_of = [](const std::filesystem::path& destination) {
-        return std::filesystem::path(destination.wstring() + L".partial");
+    const auto reserve = [&](const std::filesystem::path& destination) {
+        const auto partial = partial_of(destination);
+        detail::PublishItem item{partial, destination};
+        const HANDLE handle = CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) {
+                throw std::invalid_argument("a partial already exists in the output directory");
+            }
+            throw std::runtime_error("could not reserve a partial output file");
+        }
+        CloseHandle(handle);
+        items.push_back(std::move(item));
     };
 
     try {
-        created_directories = MissingDirectories(root);
-        std::filesystem::create_directories(root);
+        for (const auto& directory : MissingDirectories(root)) {
+            if (std::filesystem::create_directory(directory)) created_directories.push_back(directory);
+        }
         for (std::size_t index = 0; index < spec.cameras.size(); ++index) {
             const auto directory = root / spec.cameras[index].alias;
             if (!std::filesystem::exists(directory)) {
-                std::filesystem::create_directory(directory);
-                created_directories.push_back(directory);
+                if (std::filesystem::create_directory(directory)) created_directories.push_back(directory);
             }
             const auto destination = directory / std::string(kCanonicalFileName);
-            items.push_back({partial_of(destination), destination});
-            RemoveQuietly(items.back().partial);
+            reserve(destination);
         }
-        items.push_back({partial_of(truth_path), truth_path});
-        RemoveQuietly(items.back().partial);
+        reserve(truth_path);
 
         for (std::size_t index = 0; index < spec.cameras.size(); ++index) {
             const auto& alias = spec.cameras[index].alias;

@@ -1,11 +1,14 @@
 # Link-isolation checks for pure-computation libraries.
 #
-# a0_assert_no_link_dependency(<target>)
+# a0_assert_no_link_dependency(<target> [FORBIDDEN_LIBRARIES <names>...]
+#   [FORBIDDEN_SOURCES <regexes>...])
 #   Fails configuration when <target>, or anything it reaches through
 #   LINK_LIBRARIES / INTERFACE_LINK_LIBRARIES / LINK_OPTIONS /
 #   INTERFACE_LINK_OPTIONS (transitively), names one of the forbidden system
 #   libraries (ole32, windowscodecs, bcrypt). Used to keep a0_m2_render free of
 #   Win32 / COM / WIC / BCrypt dependencies.
+#   Explicit library/source lists use the same transitive walk to keep the
+#   ground-truth generator independent of the product renderer and stitcher.
 #
 #   The check is deliberately conservative. Every entry is split into words at
 #   generator-expression delimiters, ';', ',', ':', '/', '\' and spaces, and each
@@ -25,7 +28,15 @@
 #   read when the deferred call runs.
 
 function(a0_assert_no_link_dependency target)
-    set(forbidden ole32 windowscodecs bcrypt)
+    cmake_parse_arguments(PARSE_ARGV 1 isolation "" "" "FORBIDDEN_LIBRARIES;FORBIDDEN_SOURCES")
+    if(isolation_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unknown isolation arguments: ${isolation_UNPARSED_ARGUMENTS}")
+    endif()
+    if(DEFINED isolation_FORBIDDEN_LIBRARIES)
+        set(forbidden ${isolation_FORBIDDEN_LIBRARIES})
+    else()
+        set(forbidden ole32 windowscodecs bcrypt)
+    endif()
     set(pending "${target}")
     set(seen "")
     while(NOT "${pending}" STREQUAL "")
@@ -34,6 +45,25 @@ function(a0_assert_no_link_dependency target)
             continue()
         endif()
         list(APPEND seen "${current}")
+        string(TOLOWER "${current}" current_lower)
+        if("${current_lower}" IN_LIST forbidden)
+            message(FATAL_ERROR "${target} must not link ${current}")
+        endif()
+        foreach(property SOURCES INTERFACE_SOURCES)
+            get_target_property(entries "${current}" ${property})
+            foreach(source IN LISTS entries)
+                string(REPLACE "\\" "/" normalized_source "${source}")
+                string(TOLOWER "${normalized_source}" normalized_source)
+                string(REGEX REPLACE "[$<>,: \"']" ";" source_words "${normalized_source}")
+                foreach(word IN LISTS source_words)
+                    foreach(pattern IN LISTS isolation_FORBIDDEN_SOURCES)
+                        if("/${word}" MATCHES "${pattern}")
+                            message(FATAL_ERROR "${target} must not compile product source ${source} (via ${current})")
+                        endif()
+                    endforeach()
+                endforeach()
+            endforeach()
+        endforeach()
         foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES LINK_OPTIONS INTERFACE_LINK_OPTIONS)
             get_target_property(entries "${current}" ${property})
             if("${entries}" STREQUAL "" OR "${entries}" MATCHES "NOTFOUND$")

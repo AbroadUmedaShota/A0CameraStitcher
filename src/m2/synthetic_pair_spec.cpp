@@ -170,9 +170,13 @@ void ValidateChart(const ChartSpec& chart) {
         Reject("chart.grid_line_width_mm must be at most 0.2 times grid_pitch_mm");
     }
     const double ratio = chart.fiducial_pitch_mm / chart.grid_pitch_mm;
-    if (std::abs(ratio - std::round(ratio)) > 1e-9 || ratio < 1.0) {
+    if (!std::isfinite(ratio) || ratio >= 0x1p62 || std::abs(ratio - std::round(ratio)) > 1e-9 || ratio < 1.0) {
         Reject("chart.fiducial_pitch_mm must be an integer multiple of grid_pitch_mm");
     }
+    // Keep every floor-to-int64 grid coordinate, including its rounding margin,
+    // representable. Checking only the lattice pitch ratio misses tiny grid pitches.
+    const double grid_extent = (std::max(chart.width_mm, chart.height_mm) + chart.fiducial_radius_mm) / chart.grid_pitch_mm;
+    if (!std::isfinite(grid_extent) || grid_extent >= 0x1p62) Reject("chart grid coordinates exceed the supported integer range");
     if (chart.fiducial_radius_mm > 0.15 * chart.fiducial_pitch_mm) {
         Reject("chart.fiducial_radius_mm must be at most 0.15 times fiducial_pitch_mm");
     }
@@ -182,6 +186,13 @@ void ValidateChart(const ChartSpec& chart) {
     const double usable_x = (chart.width_mm - 2.0 * chart.margin_mm) / chart.fiducial_pitch_mm;
     const double usable_y = (chart.height_mm - 2.0 * chart.margin_mm) / chart.fiducial_pitch_mm;
     if (!(usable_x >= 1.0) || !(usable_y >= 1.0)) Reject("chart must hold at least one lattice cell in each direction");
+    // A tooling resource bound, not an optical-quality threshold. Test before
+    // uint32 conversion, +1, reserve or iteration over the lattice.
+    constexpr double kMaxReferencePoints = 1000000;
+    const double nodes_x = std::floor(usable_x) + 1, nodes_y = std::floor(usable_y) + 1;
+    if (!std::isfinite(nodes_x) || !std::isfinite(nodes_y) || nodes_x * nodes_y > kMaxReferencePoints) {
+        Reject("chart supports at most 1000000 reference points");
+    }
 }
 
 std::string UpperAscii(std::string text) {

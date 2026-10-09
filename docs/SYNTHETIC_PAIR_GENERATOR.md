@@ -22,17 +22,17 @@ Issue #269（親: #278 段階 0）。実写なしで、校正・レンズ補正�
 A0CameraStitcher.SyntheticPairGenerator.exe --spec tests/fixtures/synthetic-pair/two-camera-bodies-rotated.spec.json --output <空のフォルダ> [--threads <n>]
 ```
 
-出力フォルダに `ground-truth.json` か `original.jpg` が既にあると、上書きせず exit 2 で止まる。標準出力に各ファイルの SHA-256、`elapsedMilliseconds`、`peakWorkingSetBytes` が `key=value` で出る。
+出力フォルダに `ground-truth.json`・`original.jpg` または対応する `.partial`（ファイルでもディレクトリでも）が既にあると、上書きせず exit 2 で止まる。標準出力に各ファイルの SHA-256、`elapsedMilliseconds`、`peakWorkingSetBytes` が `key=value` で出る。
 
 C++ から使う場合は `a0_m2_synthetic_pair`（`src/m2/include/a0/m2/synthetic_pair.hpp`）をリンクする。`ParsePairSpec` → `GeneratePair`。画像をファイルにせず取り出すなら `CameraRenderer::RenderRows`（24 bit BGR）。`ValidatePairSpec` は `ParsePairSpec`・`CameraRenderer`・`GeneratePair` が自分で呼ぶので、C++ で組んだ `PairSpec`（`supersample = 0` など）も同じ規則で拒否される。
 
 ## 公開の順序
 
-`GeneratePair` は全ファイルを、行き先の隣に `<名前>.partial` として書き終えてから、画像 → `ground-truth.json` の順にまとめて名前を付ける。途中で失敗したら、名前を付け終えたファイルを消し、`.partial` も消し、この実行で作ったフォルダ（空のもの）も消す。`ground-truth.json` が見えていれば画像は揃っている（正解 JSON が完成の目印）。`.partial` は `.gitignore` の対象。
+`GeneratePair` は既存の `.partial` を拒否し、Windows の `CREATE_NEW` で今回の staging を排他的に確保する。同じ行き先への同時生成も一方だけが成功し、拒否された側は成功側のファイルを消さない。全ファイルを、行き先の隣に `<名前>.partial` として書き終えてから、画像 → `ground-truth.json` の順にまとめて名前を付ける。途中で失敗したら、名前を付け終えたファイルを消し、`.partial` も消し、この実行で作ったフォルダ（空のもの）も消す。`ground-truth.json` が見えていれば画像は揃っている（正解 JSON が完成の目印）。`.partial` は `.gitignore` の対象。
 
 ## 入力（spec）
 
-数値の既定値は持たない。欠けたキーも、知らないキーも、範囲外の値も `std::invalid_argument` で拒否する。例は `tests/fixtures/synthetic-pair/two-camera-bodies-rotated.spec.json`（カメラ本体を 90 度回して据えた 2 台。文書の向きは横置きのまま）。
+格子座標は整数で扱える範囲に限り、基準点は合計 1,000,000 点までとする（生成器の資源上限であり、光学品質の閾値ではない）。数値の既定値は持たない。欠けたキーも、知らないキーも、範囲外の値も `std::invalid_argument` で拒否する。例は `tests/fixtures/synthetic-pair/two-camera-bodies-rotated.spec.json`（カメラ本体を 90 度回して据えた 2 台。文書の向きは横置きのまま）。
 
 | 項目 | 内容 |
 |---|---|
@@ -100,7 +100,7 @@ C++ から使う場合は `a0_m2_synthetic_pair`（`src/m2/include/a0/m2/synthet
 - 文書は完全な平面で、視差・紙の浮き・ピントぼけ・順次撮影の時間差・実レンズの MTF は入っていない。ここで合格しても実写の品質合格にはならない。
 - 色は 0〜1 の値を直接 8 bit にする（sRGB のガンマ変換はしない）。色の再現を測る用途には向かない。
 - 歪みは Brown–Conrady の 5 係数（k1〜k3、p1、p2）まで。有理式や魚眼は無い。
-- 歪んだリングの重心は、中心の像とは一致しない（レンズがリングを曲げ、画素面積が場所で変わる）。リングを順写像で密に送って重心を予測する試験では、fixture の実寸で中心の像から約 0.04 カメラ px（主点から約 3,500 px の位置）ずれた。Issue の見積もり（隅で最大約 0.17 px）とは数値が合っていない（※要確認。測れたのは窓が画像に収まるリングまでで、主点から約 3,500 px が上限）。#275・#277 の誤差予算では、基準点の位置を「リングの重心」で測る限りこの分が入る。
+- 歪んだリングの重心は、中心の像とは一致しない（レンズがリングを曲げ、画素面積が場所で変わる）。全インクを順写像して面積のJacobianで重みをつけた予測では、fixtureの遠点（主点から約3,560 px）でCAM-Aが0.0365、CAM-Bが0.0248カメラpxずれる。fixtureの紙はセンサーの隅を覆わないため、同じレンズ・縮尺・回転・露出のまま文書の写像だけ平行移動し、基準点を各隅から80 px内側に置くprobeを別に測る。4隅の最大はCAM-Aが0.018152、CAM-Bが0.013266カメラpxだった。「隅で約0.17 px」はこのfixtureの条件では再現せず、これらの測定値で訂正する。リング全体と窓を画像内に保ち、切れた窓は測定済みに数えない。格子線を除くマスクをかけた重心の計測誤差と、このマスク無しの物理的な重心のずれは別の値である。#275・#277の誤差予算には、レンズによるこのずれと、部分標本の密度・ノイズによる計測誤差を別々に含める。
 - 正対した 1 視点だけでは fx が決まらない（平面校正の縮退。fx と撮影距離が分離できず、画像には比 fx/Z だけが残る）。#277 には傾いた視点が要る。生成器は `documentToImage` に任意の射影変換を書けるので、`H = K [r1 r2 t]`（K は内部パラメータ、r1・r2 は回転行列の第 1・第 2 列、t は mm の平行移動を `H[2][2]` で割る）で傾いた視点を作れる。試験の傾いた視点（25 度のあおり、fx ≠ fy、p1・p2 あり）が組み立て方の例。
 
 ## 試験
@@ -111,8 +111,8 @@ C++ から使う場合は `a0_m2_synthetic_pair`（`src/m2/include/a0/m2/synthet
 - 正解 JSON と独立実装（本書の式を別に書いた版。MSVC の `long double` は `double` と同じ 53 bit なので精度の検査ではなく、実装の独立性の検査）の投影の差が 1e-6 px 以内、`conventions` の 4 定数、被覆判定 `0 <= u < width`、折り返しの外の点が `null`。
 - 画像全体（四隅を含む 65×65 の格子）で、画素 → 文書 → 画素の往復が 1e-6 px 以内（fixture、小さい spec、回転・射影・接線・fx≠fy のカメラ、傾いた視点）。
 - `/1` からの移行: fixture の `image_px` が `/1` の値 −0.5 と 1e-9 px 以内で一致。
-- 描画したリングの重心と、リングを順写像で密に送った重心の予測の比較（小さい spec 4 通りと実寸 fixture の数本の行）。今の許容は推定器の揺れで決まっている（画素位相で約 0.09〜0.18 px 動く）。
+- 描画したリングの重心と、リングを順写像で密に送った重心の予測の比較（小さい spec 4 通りと実寸 fixture の数本の行）。推定器は背景輝度（外側の紙 0.92、内側の白 1.0）に対する線形な被覆率を使い、既知の露出・周辺減光・白バランスを除き、格子線の4本の腕を文書座標で滑らかに除く。予測にも同じマスクをかけ、画像の重心と比較する。小さい画像は8×8の部分標本で許容0.02 pxとする（4×4では標本化の揺れで最大約0.024 pxが残った）。実寸の近点・遠点の重心検査は4×4にし、ノイズ・露出・周辺減光はfixtureの値を使う（2×2ではCAM-Bの遠点がノイズ無しで約0.0189 px、ノイズありで約0.0215 px、4×4ではノイズありで約0.0051 pxだった）。実寸JPEGの決定性・画像検証と隅のprobeはfixtureの2×2のままとする。0.02 pxはJPEG化前のBGRでの検査であり、JPEG圧縮による計測誤差は含めない。マスク無しの全インクの重心と中心像の差は、計測誤差とは別に記録する。隅ではリング全体を画像内に保つ80 pxの内寄せを使い、窓が切れたリングは測定済みに数えない。
 - 正解から組んだ draft profile を `rig-profile.v2.schema.json` に当てる（`Test-Json`）。欄を壊した負例が拒否されることも確かめる。
 - 行の分割・スレッド数・seed による出力の違い、公開の原子性（失敗時に画像・`.partial` が残らない）、2 回生成での SHA-256 一致、`M2Adapter validate-canonical-jpeg` の合格。
 
-製品の合成への依存は `CMakeLists.txt` の `a0_assert_no_product_stitch_dependency` が configure 時に検査する。
+製品の合成・画素計算への依存は `cmake/a0_link_isolation.cmake` の共通の推移的な検査を使い、`CMakeLists.txt` の `a0_assert_no_product_stitch_dependency` を configure の末尾で実行する。`a0_m2_render`・`a0_m2_offline_stitcher` へのリンクと製品ソースの取り込みを拒否する。`m2_link_isolation_contracts` が直接・間接・generator expression・link option・ソース・遅い追加の正例と負例を検査する。

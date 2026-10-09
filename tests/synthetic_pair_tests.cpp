@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace synth = a0::m2::synthetic;
@@ -318,6 +320,17 @@ void TestJson() {
 // ---- Spec validation --------------------------------------------------------------------------
 
 void TestSpecValidation() {
+    {
+        auto tiny = synth::ParsePairSpec(kSmallSpec);
+        tiny.chart = {1000, 1000, 1, 1e-7, 1e-9, 1e-7, 1e-8, 0, 1e-9};
+        CheckRejects([&] { synth::ValidatePairSpec(tiny); }, "reference points", "chart: huge lattice rejected before integer conversion");
+        tiny.chart = {1000, 1000, 1, 1e-300, 1e-302, 1, 0.1, 0, 0.01};
+        CheckRejects([&] { synth::ValidatePairSpec(tiny); }, "integer multiple", "chart: huge grid ratio rejected before int64 conversion");
+        tiny.chart = {1000, 1000, 1, 1e-18, 1e-20, 1, 0.1, 0, 0.01};
+        CheckRejects([&] { synth::ValidatePairSpec(tiny); }, "grid coordinates", "chart: grid extent outside int64 range rejected");
+        tiny.chart = {1000, 1000, 1, 1e-310, 1e-312, 1e-310, 1e-311, 0, 1e-312};
+        CheckRejects([&] { synth::ValidatePairSpec(tiny); }, "grid coordinates", "chart: infinite grid extent rejected");
+    }
     const std::string good = kSmallSpec;
     const auto spec = synth::ParsePairSpec(good);
     Check(spec.seed == 11 && spec.cameras.size() == 2 && spec.image_width_px == 480, "spec: small spec parses");
@@ -880,14 +893,51 @@ struct Predicted {
     long double scale{};  // sqrt(|det J|) at the ring centre: raw pixels per mm
 };
 
+// Keep the dot; smoothly suppress the four grid-line arms in the outer ring.
+// A smooth document-space mask avoids another pixel-phase dependent threshold.
+long double RingMask(const long double dx, const long double dy, const long double radius,
+    const long double guard, const long double transition) {
+    if (guard == 0 || dx * dx + dy * dy < 0.16L * radius * radius) return 1.0L;
+    return std::clamp((std::min(std::abs(dx), std::abs(dy)) - guard) / transition, 0.0L, 1.0L);
+}
+
+// Invert the independently written forward projection by finite-difference Newton
+// steps in document coordinates. This deliberately does not call the generator's
+// inverse lens or inverse homography code.
+std::optional<std::array<long double, 2>> IndependentUnproject(const IndependentCamera& c,
+    const long double u, const long double v) {
+    const long double a = c.h[0] - u * c.h[6], b = c.h[1] - u * c.h[7];
+    const long double d = c.h[3] - v * c.h[6], e = c.h[4] - v * c.h[7];
+    const long double det = a * e - b * d;
+    if (std::abs(det) < 1e-18L) return std::nullopt;
+    long double x = ((u * c.h[8] - c.h[2]) * e - b * (v * c.h[8] - c.h[5])) / det;
+    long double y = (a * (v * c.h[8] - c.h[5]) - (u * c.h[8] - c.h[2]) * d) / det;
+    constexpr long double h = 1e-3L;
+    for (int step = 0; step < 16; ++step) {
+        const auto p = IndependentProject(c, x, y);
+        const auto px = IndependentProject(c, x + h, y);
+        const auto py = IndependentProject(c, x, y + h);
+        if (!p || !px || !py) return std::nullopt;
+        const long double du = (*p)[0] - u, dv = (*p)[1] - v;
+        if (std::hypot(du, dv) < 1e-8L) return std::array<long double, 2>{x, y};
+        const long double j00 = ((*px)[0] - (*p)[0]) / h, j01 = ((*py)[0] - (*p)[0]) / h;
+        const long double j10 = ((*px)[1] - (*p)[1]) / h, j11 = ((*py)[1] - (*p)[1]) / h;
+        const long double jdet = j00 * j11 - j01 * j10;
+        if (std::abs(jdet) < 1e-18L) return std::nullopt;
+        x -= (j11 * du - j01 * dv) / jdet;
+        y -= (j00 * dv - j10 * du) / jdet;
+    }
+    return std::nullopt;
+}
+
 // Centroid of the black ink (the outer ring 0.6R..R and the dot 0..0.25R) after the full forward map.
 // The ring is sampled densely in polar coordinates, every sample is sent through the independent
 // projection and weighted by the document area it stands for times the local Jacobian of the map,
 // which is what the camera integrates. This is not the image of the ring centre: the lens bends the
 // ring, and the difference grows toward the corners.
 std::optional<Predicted> PredictRingCentroid(const IndependentCamera& camera, const long double x0, const long double y0,
-    const long double radius) {
-    constexpr int kAngular = 96;
+    const long double radius, const long double guard = 0, const long double transition = 1) {
+    const int kAngular = guard > 0 ? 360 : 96;
     constexpr long double kTwoPi = 6.28318530717958647692L;
     const auto jacobian = [&](const long double x, const long double y) -> std::optional<long double> {
         const long double h = 1e-3L;
@@ -915,7 +965,7 @@ std::optional<Predicted> PredictRingCentroid(const IndependentCamera& camera, co
                 const auto position = IndependentProject(camera, x, y);
                 const auto j_abs = jacobian(x, y);
                 if (!position || !j_abs) return false;
-                const long double weight = r * dr * dtheta * *j_abs;
+                const long double weight = r * dr * dtheta * *j_abs * RingMask(x - x0, y - y0, radius, guard, transition);
                 sum += weight;
                 sum_x += weight * (*position)[0];
                 sum_y += weight * (*position)[1];
@@ -923,21 +973,29 @@ std::optional<Predicted> PredictRingCentroid(const IndependentCamera& camera, co
         }
         return true;
     };
-    if (!accumulate(0.6L * radius, radius, 24) || !accumulate(0.0L, 0.25L * radius, 8)) return std::nullopt;
+    if (!accumulate(0.6L * radius, radius, 48) || !accumulate(0.0L, 0.25L * radius, 16)) return std::nullopt;
     const auto centre = jacobian(x0, y0);
     if (!centre || !(sum > 0.0L)) return std::nullopt;
     return Predicted{sum_x / sum, sum_y / sum, std::sqrt(*centre)};
 }
 
-// Centroid of the dark ink around (px, py) in a buffer holding rows [first_row, first_row + rows).
-// Pixel (x, y) has its sample at (x, y). Only the black ring and dot count; grid lines (0.30 and
-// 0.55) and paper stay out. A window of 1.12 radii keeps the grid-line arms that leave the ring out.
+// Linear ink coverage relative to the white interior (1.0) or paper (0.92),
+// with known photometric gains undone per channel and grid arms masked in document
+// coordinates. The whole projected window must fit: never measure a clipped ring.
 std::optional<std::array<double, 2>> RenderedInkCentroid(const std::vector<std::uint8_t>& bgr, const std::uint32_t width,
-    const std::uint32_t first_row, const std::uint32_t rows, const double px, const double py, const double window) {
-    const long y_begin = static_cast<long>(py - window) - 1;
-    const long y_end = static_cast<long>(py + window) + 1;
-    const long x_begin = static_cast<long>(px - window) - 1;
-    const long x_end = static_cast<long>(px + window) + 1;
+    const std::uint32_t first_row, const std::uint32_t rows, const IndependentCamera& camera,
+    const synth::CameraSpec& photometry, const double x0, const double y0, const double radius,
+    const double guard, const double transition) {
+    double left = width, right = 0, top = first_row + rows, bottom = first_row;
+    for (int index = 0; index < 360; ++index) {
+        const double angle = index * 6.28318530717958647692 / 360;
+        const auto p = IndependentProject(camera, x0 + 1.12 * radius * std::cos(angle), y0 + 1.12 * radius * std::sin(angle));
+        if (!p) return std::nullopt;
+        left = std::min(left, static_cast<double>((*p)[0])); right = std::max(right, static_cast<double>((*p)[0]));
+        top = std::min(top, static_cast<double>((*p)[1])); bottom = std::max(bottom, static_cast<double>((*p)[1]));
+    }
+    const long y_begin = static_cast<long>(std::floor(top)) - 1, y_end = static_cast<long>(std::ceil(bottom)) + 1;
+    const long x_begin = static_cast<long>(std::floor(left)) - 1, x_end = static_cast<long>(std::ceil(right)) + 1;
     if (x_begin < 0 || x_end >= static_cast<long>(width) || y_begin < static_cast<long>(first_row)
         || y_end >= static_cast<long>(first_row + rows)) {
         return std::nullopt;
@@ -945,12 +1003,23 @@ std::optional<std::array<double, 2>> RenderedInkCentroid(const std::vector<std::
     double sum = 0.0, sum_x = 0.0, sum_y = 0.0;
     for (long y = y_begin; y <= y_end; ++y) {
         for (long x = x_begin; x <= x_end; ++x) {
-            const double dx = x - px;
-            const double dy = y - py;
-            if (dx * dx + dy * dy > window * window) continue;
+            const auto document = IndependentUnproject(camera, x, y);
+            if (!document) throw std::runtime_error("independent centroid inverse failed");
+            const double dx = static_cast<double>((*document)[0]) - x0;
+            const double dy = static_cast<double>((*document)[1]) - y0;
+            const double r = std::hypot(dx, dy);
+            if (r > 1.12 * radius) continue;
+            const double mask = static_cast<double>(RingMask(dx, dy, radius, guard, transition));
+            if (mask == 0) continue;
             const auto* p = &bgr[(static_cast<std::size_t>(y - first_row) * width + static_cast<std::size_t>(x)) * 3U];
-            const double luma = (0.114 * p[0] + 0.587 * p[1] + 0.299 * p[2]) / 255.0;
-            const double w = luma < 0.25 ? 0.25 - luma : 0.0;
+            const double nx = (x - static_cast<double>(camera.cx)) / static_cast<double>(camera.fx);
+            const double ny = (y - static_cast<double>(camera.cy)) / static_cast<double>(camera.fy);
+            const double rho2 = nx * nx + ny * ny;
+            const double gain = photometry.exposure_gain * (1 + rho2 * (photometry.vignette[0] + rho2 * photometry.vignette[1]));
+            const double luma = (0.114 * p[0] / photometry.white_balance_gain[2]
+                + 0.587 * p[1] / photometry.white_balance_gain[1] + 0.299 * p[2] / photometry.white_balance_gain[0]) / (255.0 * gain);
+            const double background = r < 0.8 * radius ? 1.0 : 0.92;
+            const double w = mask * (background - luma) / (background - 0.06);
             sum += w;
             sum_x += w * x;
             sum_y += w * y;
@@ -988,16 +1057,21 @@ CentroidStats CompareRingCentroids(const synth::PairSpec& spec, const synth::Jso
             Check(false, "centroid: prediction failed for " + id);
             continue;
         }
-        const double window = 1.12 * spec.chart.fiducial_radius_mm * static_cast<double>(predicted->scale);
+        const double pixel_mm = 1.0 / static_cast<double>(predicted->scale);
+        const double transition = 2.0 * pixel_mm;
+        const double guard = spec.chart.grid_line_width_mm + pixel_mm;
+        const auto masked = PredictRingCentroid(independent[camera_index], x0, y0, spec.chart.fiducial_radius_mm, guard, transition);
+        if (!masked) throw std::runtime_error("masked centroid prediction failed");
         const auto rendered = RenderedInkCentroid(bgr, spec.image_width_px, first_row, rows,
-            static_cast<double>(predicted->x), static_cast<double>(predicted->y), window);
+            independent[camera_index], spec.cameras[camera_index], static_cast<double>(x0), static_cast<double>(y0),
+            spec.chart.fiducial_radius_mm, guard, transition);
         if (!rendered) continue;
         ++stats.measured;
-        const double offset = std::hypot((*rendered)[0] - static_cast<double>(predicted->x), (*rendered)[1] - static_cast<double>(predicted->y));
+        const double offset = std::hypot((*rendered)[0] - static_cast<double>(masked->x), (*rendered)[1] - static_cast<double>(masked->y));
         if (offset > stats.worst) {
             stats.worst = offset;
             stats.worst_where = id;
-            stats.worst_detail = {(*rendered)[0], (*rendered)[1], static_cast<double>(predicted->x), static_cast<double>(predicted->y),
+            stats.worst_detail = {(*rendered)[0], (*rendered)[1], static_cast<double>(masked->x), static_cast<double>(masked->y),
                 recorded->items[0].AsDouble(), recorded->items[1].AsDouble()};
         }
         const double shift = std::hypot(static_cast<double>(predicted->x) - recorded->items[0].AsDouble(),
@@ -1080,7 +1154,12 @@ void TestRenderIsRowSplitInvariant() {
 // A few rows of the real 7360x4912 fixture: the rings nearest to and farthest from the principal
 // point of each camera, rendered as a band of rows and compared with the predicted centroid.
 void TestFullSizeBands(const std::filesystem::path& fixture_path) {
-    const auto spec = synth::ParsePairSpec(ReadText(fixture_path));
+    auto spec = synth::ParsePairSpec(ReadText(fixture_path));
+    // A precision centroid check needs a denser area integral than the fixture's
+    // fast JPEG setting: with S=2 the noisy outer CAM-B ring differs by 0.0215 px
+    // (0.0189 without noise); S=4 reduces it to 0.0051 px. Generated JPEG pairs
+    // and the corner probes retain the unmodified S=2 fixture.
+    spec.supersample = 4;
     const auto truth = synth::ParseJson(synth::SerializeGroundTruth(spec, {}));
     const auto independent = ReadCamerasFromGroundTruth(truth);
     for (std::size_t camera_index = 0; camera_index < spec.cameras.size(); ++camera_index) {
@@ -1112,16 +1191,75 @@ void TestFullSizeBands(const std::filesystem::path& fixture_path) {
             const std::uint32_t rows = last_row - first_row + 1;
             std::vector<std::uint8_t> band(static_cast<std::size_t>(spec.image_width_px) * rows * 3U);
             renderer.RenderRows(first_row, rows, band.data());
-            // The fixture has vignetting and noise; the ink threshold stays far from both.
+            // The estimator removes known photometric gains; fixture noise remains.
             const std::vector<std::string> only = {candidate.id};
             const auto stats = CompareRingCentroids(spec, truth, independent, camera_index, band, first_row, rows, &only);
             Info("full size band (" + camera.alias + ", " + candidate.id + ", " + Fixed(candidate.radius, 0) + " px from the principal point): "
                 + std::to_string(rows) + " rows, centroid difference " + Fixed(stats.worst, 4) + " px, ring centroid "
                 + Fixed(stats.largest_shift, 4) + " px from the image of its centre");
             Check(stats.measured == 1, "full size band: the ring " + candidate.id + " was measured for " + camera.alias);
-            // Same estimator wobble as in the small tests, plus the fixture noise and vignetting.
-            Check(stats.worst < 0.10, "full size band: " + candidate.id + " centroid agrees within 0.10 px for " + camera.alias);
+            Check(stats.worst < 0.02, "full size band: " + candidate.id + " centroid agrees within 0.02 px for " + camera.alias);
         }
+    }
+}
+
+// The fixture's paper does not cover the sensor corners. Keep its lens, scale,
+// rotation and photometry, and translate an interior fiducial to each corner
+// with an 80 px inset so the whole ring/window remains in the image. These are
+// explicitly corner probes, not measurements of unseen fixture fiducials.
+void TestFullSizeCornerBands(const std::filesystem::path& fixture_path) {
+    const auto fixture = synth::ParsePairSpec(ReadText(fixture_path));
+    const auto base_truth = synth::ParseJson(synth::SerializeGroundTruth(fixture, {}));
+    const auto base_cameras = ReadCamerasFromGroundTruth(base_truth);
+    constexpr double inset = 80;
+    constexpr double x0 = 520, y0 = 420;
+    const std::array<std::array<double, 2>, 4> corners{{
+        {inset, inset}, {fixture.image_width_px - 1 - inset, inset},
+        {inset, fixture.image_height_px - 1 - inset},
+        {fixture.image_width_px - 1 - inset, fixture.image_height_px - 1 - inset}}};
+    for (std::size_t camera_index = 0; camera_index < fixture.cameras.size(); ++camera_index) {
+        double largest_shift = 0;
+        for (std::size_t corner = 0; corner < corners.size(); ++corner) {
+            auto probe = fixture;
+            auto ideal = base_cameras[camera_index];
+            ideal.k1 = ideal.k2 = ideal.k3 = ideal.p1 = ideal.p2 = 0;
+            const auto document = IndependentUnproject(base_cameras[camera_index], corners[corner][0], corners[corner][1]);
+            if (!document) throw std::runtime_error("corner probe inverse failed");
+            const auto target = IndependentProject(ideal, (*document)[0], (*document)[1]);
+            const auto current = IndependentProject(ideal, x0, y0);
+            if (!target || !current) throw std::runtime_error("corner probe ideal projection failed");
+            auto& camera = probe.cameras[camera_index];
+            camera.document_to_image[2] += static_cast<double>((*target)[0] - (*current)[0]);
+            camera.document_to_image[5] += static_cast<double>((*target)[1] - (*current)[1]);
+            synth::ValidatePairSpec(probe);
+            const auto truth = synth::ParseJson(synth::SerializeGroundTruth(probe, {}));
+            const auto independent = ReadCamerasFromGroundTruth(truth);
+            const auto centre = IndependentProject(independent[camera_index], x0, y0);
+            Check(centre && std::hypot(static_cast<double>((*centre)[0]) - corners[corner][0],
+                static_cast<double>((*centre)[1]) - corners[corner][1]) < 1e-6, "corner probe: centre lands at the requested inset");
+            const auto first_row = static_cast<std::uint32_t>(corners[corner][1] - inset);
+            const std::uint32_t rows = static_cast<std::uint32_t>(2 * inset + 1);
+            std::vector<std::uint8_t> band(static_cast<std::size_t>(probe.image_width_px) * rows * 3U);
+            const synth::CameraRenderer renderer(probe, camera_index);
+            renderer.RenderRows(first_row, rows, band.data());
+            const std::vector<std::string> only = {"F-010-008"};
+            const auto stats = CompareRingCentroids(probe, truth, independent, camera_index, band, first_row, rows, &only);
+            Info("full size corner probe (" + camera.alias + ", corner " + std::to_string(corner)
+                + ", 80 px inset): centroid difference " + Fixed(stats.worst, 4) + " px; full ink centroid shift "
+                + Fixed(stats.largest_shift, 4) + " px");
+            Check(stats.measured == 1, "corner probe: the whole ring was measured for " + camera.alias);
+            Check(stats.worst < 0.02, "corner probe: centroid agrees within 0.02 px for " + camera.alias);
+            largest_shift = std::max(largest_shift, stats.largest_shift);
+            // The same buffer with the ring's top half removed must be refused.
+            const auto clipped_first = static_cast<std::uint32_t>(corners[corner][1]);
+            const auto offset = static_cast<std::size_t>(clipped_first - first_row) * probe.image_width_px * 3U;
+            const std::vector<std::uint8_t> clipped(band.begin() + offset, band.end());
+            const auto incomplete = CompareRingCentroids(probe, truth, independent, camera_index, clipped,
+                clipped_first, first_row + rows - clipped_first, &only);
+            Check(incomplete.measured == 0, "corner probe: a clipped window is not reported as a complete ring");
+        }
+        Info("full size corner probe maximum full ink centroid shift (" + fixture.cameras[camera_index].alias
+            + "): " + Fixed(largest_shift, 6) + " px");
     }
 }
 
@@ -1226,8 +1364,61 @@ void TestLibraryGeneration(const std::filesystem::path& adapter) {
     CheckRejects([&] { (void)synth::GeneratePair(spec, single); }, "already exists", "generate: second run into the same folder rejected");
     CheckRejects([&] { (void)synth::GeneratePair(spec, {}); }, "output directory", "generate: empty output directory rejected");
 
-    // A failure after the images are rendered leaves nothing behind: the ground truth cannot be
-    // written because its .partial name is taken by a non-empty directory.
+    // A pre-existing staging path belongs to an earlier run or another process.
+    // Preserve regular files and both empty and non-empty directories, before
+    // creating any camera folders or touching another output.
+    for (const auto* relative : {"CAM-A/original.jpg.partial", "CAM-B/original.jpg.partial", "ground-truth.json.partial"}) {
+        for (const bool directory : {false, true}) {
+            const auto folder = temp.Sub(std::string("existing-partial-") + std::to_string(relative[0])
+                + "-" + std::to_string(relative[4]) + (directory ? "-directory" : "-file"));
+            const auto partial = folder / relative;
+            std::filesystem::create_directories(partial.parent_path());
+            if (directory) std::filesystem::create_directory(partial);
+            else WriteText(partial, "keep previous staging bytes");
+            synth::GenerateOptions blocked;
+            blocked.output_directory = folder;
+            CheckRejects([&] { (void)synth::GeneratePair(spec, blocked); }, "partial already exists",
+                "generate: pre-existing staging is rejected");
+            Check(std::filesystem::exists(partial) && (directory ? std::filesystem::is_empty(partial)
+                : ReadText(partial) == "keep previous staging bytes"), "generate: previous staging remains unchanged");
+            Check(!std::filesystem::exists(folder / "CAM-A/original.jpg") && !std::filesystem::exists(folder / "ground-truth.json"),
+                "generate: rejecting staging publishes no output");
+        }
+    }
+    {
+        const auto folder = temp.Sub("concurrent-output");
+        for (const auto& camera : spec.cameras) std::filesystem::create_directories(folder / camera.alias);
+        synth::GenerateOptions options;
+        options.output_directory = folder;
+        options.thread_count = 1;
+        std::barrier ready(2);
+        std::array<bool, 2> succeeded{};
+        std::array<bool, 2> refused{};
+        std::array<std::string, 2> errors;
+        const auto run = [&](const std::size_t index) {
+            ready.arrive_and_wait();
+            try {
+                (void)synth::GeneratePair(spec, options);
+                succeeded[index] = true;
+            } catch (const std::invalid_argument& error) {
+                refused[index] = std::string(error.what()).find("already exists") != std::string::npos;
+            } catch (const std::exception& error) {
+                errors[index] = error.what();
+            }
+        };
+        {
+            std::jthread one(run, 0), two(run, 1);
+        }
+        Check(succeeded[0] != succeeded[1] && refused[0] != refused[1]
+            && errors[0].empty() && errors[1].empty(), "generate: simultaneous output writers have exactly one winner");
+        Check(synth::Sha256Hex(folder / "ground-truth.json") == first.ground_truth_sha256
+            && synth::Sha256Hex(folder / "CAM-A/original.jpg") == first.files[0].sha256
+            && synth::Sha256Hex(folder / "CAM-B/original.jpg") == first.files[1].sha256,
+            "generate: rejected simultaneous writer preserves the complete winner's bytes");
+        Check(CountPartialFiles(folder) == 0, "generate: simultaneous writers leave no staging behind");
+    }
+
+    // A non-empty ground-truth staging directory is rejected before rendering.
     {
         const auto folder = temp.Sub("blocked");
         std::filesystem::create_directories(folder / "ground-truth.json.partial");
@@ -1238,10 +1429,10 @@ void TestLibraryGeneration(const std::filesystem::path& adapter) {
         bool threw = false;
         try {
             (void)synth::GeneratePair(spec, blocked);
-        } catch (const std::runtime_error&) {
+        } catch (const std::invalid_argument&) {
             threw = true;
         }
-        Check(threw, "atomic: a failure while writing the ground truth is reported");
+        Check(threw, "atomic: existing ground-truth staging is reported");
         Check(!std::filesystem::exists(folder / "CAM-A" / "original.jpg") && !std::filesystem::exists(folder / "CAM-B" / "original.jpg"),
             "atomic: no image is published when the ground truth could not be written");
         Check(!std::filesystem::exists(folder / "ground-truth.json"), "atomic: no ground truth is published after a failure");
@@ -1480,9 +1671,11 @@ int main(int argc, char* argv[]) {
         std::filesystem::path powershell;
         std::filesystem::path profile_schema;
         bool small_only = false;
+        bool centroids_only = false;
         for (int index = 1; index < argc; ++index) {
             const std::string argument = argv[index];
             if (argument == "--small-only") small_only = true;
+            else if (argument == "--centroids-only") centroids_only = true;
             else if (argument == "--generator" && index + 1 < argc) generator = argv[++index];
             else if (argument == "--adapter" && index + 1 < argc) adapter = argv[++index];
             else if (argument == "--spec" && index + 1 < argc) spec = argv[++index];
@@ -1498,6 +1691,7 @@ int main(int argc, char* argv[]) {
         adapter = std::filesystem::absolute(adapter);
         spec = std::filesystem::absolute(spec);
         profile_schema = std::filesystem::absolute(profile_schema);
+        if (!centroids_only) {
         TestJson();
         TestSpecValidation();
         TestPlacement();
@@ -1506,30 +1700,30 @@ int main(int argc, char* argv[]) {
         TestFoldedPointsAreNotRecorded();
         TestInverseAllSpecs(spec);
         TestMigrationFromV1(spec);
+        }
 
         {
             // Ideal lens first (a pure sampling convention check), then the distorted lens, then
             // the cameras with rotation, perspective, tilt, tangential terms and fx != fy.
-            // The limits are set by the estimator, not by the renderer: the ink weight below is
-            // a threshold on luma, which is not linear in coverage, so its centroid wobbles with
-            // the sub-pixel phase of the ring (0.015 px at phase 0, up to 0.09 px for an ideal
-            // lens shifted by a fraction of a pixel, up to 0.18 px in the distorted cases). A
-            // linear coverage weight that also masks the grid-line arms is the next step to reach
-            // 0.02 px.
+            // Linear coverage, a document-space grid mask and an 8x8 area
+            // integral enforce the same 0.02 px limit for every small variant.
             auto ideal = synth::ParsePairSpec(CleanSmallSpec(false));
-            ideal.supersample = 4;
+            ideal.supersample = 8;
             auto distorted = synth::ParsePairSpec(CleanSmallSpec(true));
-            distorted.supersample = 4;
-            TestRenderMatchesGroundTruth("ideal lens", ideal, 0.05, 0.0);
+            distorted.supersample = 8;
+            TestRenderMatchesGroundTruth("ideal lens", ideal, 0.02, 0.0);
             auto shifted = ideal;
             for (auto& camera : shifted.cameras) {
                 camera.document_to_image[2] += 0.37;
                 camera.document_to_image[5] += 0.23;
             }
-            TestRenderMatchesGroundTruth("ideal lens, shifted by a sub-pixel", shifted, 0.15, 0.0);
-            TestRenderMatchesGroundTruth("distorted", distorted, 0.25, 0.0);
-            TestRenderMatchesGroundTruth("rotated/perspective/tangential and tilted pose", MakeStressSpec(), 0.25, 0.0);
+            TestRenderMatchesGroundTruth("ideal lens, shifted by a sub-pixel", shifted, 0.02, 0.0);
+            TestRenderMatchesGroundTruth("distorted", distorted, 0.02, 0.0);
+            auto stress = MakeStressSpec();
+            stress.supersample = 8;
+            TestRenderMatchesGroundTruth("rotated/perspective/tangential and tilted pose", stress, 0.02, 0.0);
         }
+        if (!centroids_only) {
         TestRenderIsRowSplitInvariant();
         TestPublishContract();
         TestLibraryGeneration(adapter);
@@ -1537,7 +1731,9 @@ int main(int argc, char* argv[]) {
         TestCommandLine(generator, spec);
         if (!small_only) {
             TestFullSizeBands(spec);
+            TestFullSizeCornerBands(spec);
             TestFullSize(generator, adapter, spec);
+        }
         }
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
