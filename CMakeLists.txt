@@ -246,7 +246,8 @@ add_library(a0_m2_offline_stitcher
     src/m2/stitch_job_manifest.cpp
 )
 target_include_directories(a0_m2_offline_stitcher PUBLIC src/m2/include src/common/include)
-target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup a0_m2_render PRIVATE ole32 windowscodecs bcrypt)
+target_link_libraries(a0_m2_offline_stitcher PUBLIC a0_m2_setup a0_m2_render
+    PRIVATE a0_m2_rig_profile_v2 ole32 windowscodecs bcrypt)
 target_compile_definitions(a0_m2_offline_stitcher PRIVATE UNICODE _UNICODE NOMINMAX)
 if(MSVC)
     target_compile_options(a0_m2_offline_stitcher PRIVATE /W4 /permissive- /EHsc)
@@ -738,6 +739,18 @@ if(BUILD_TESTING)
         target_compile_options(m2_offline_stitcher_contracts PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME m2_offline_stitcher_contracts COMMAND m2_offline_stitcher_contracts)
+
+    add_executable(m2_offline_stitcher_v2_contracts tests/offline_stitcher_v2_tests.cpp)
+    target_link_libraries(m2_offline_stitcher_v2_contracts PRIVATE a0_m2_offline_stitcher ole32 windowscodecs)
+    target_compile_definitions(m2_offline_stitcher_v2_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+    add_dependencies(m2_offline_stitcher_v2_contracts A0CameraStitcher.M2Adapter)
+    if(MSVC)
+        target_compile_options(m2_offline_stitcher_v2_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_offline_stitcher_v2_contracts COMMAND m2_offline_stitcher_v2_contracts
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+        $<TARGET_FILE:A0CameraStitcher.M2Adapter>)
+    set_tests_properties(m2_offline_stitcher_v2_contracts PROPERTIES TIMEOUT 1800)
 
     add_executable(m2_render_contracts tests/render_tests.cpp)
     target_link_libraries(m2_render_contracts PRIVATE a0_m2_render)

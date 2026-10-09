@@ -381,6 +381,28 @@ int wmain(const int argc, wchar_t* argv[]) {
                 // and execution environment before restoring a review or accepting it.
                 std::cout << "result=verified-published-stitch\nmanifestJson="
                     << a0::m2::SerializeStitchJobManifest(manifest) << '\n';
+            } else if (operation == L"stitch-v2") {
+                constexpr std::array<std::wstring_view, 10> allowed{
+                    L"camera-a", L"camera-b", L"job-directory", L"profile-file", L"expected-profile-sha256",
+                    L"assessed-at", L"resampling", L"stitch-job-id", L"capture-transaction-id", L"completed-at"};
+                if (options.size() != allowed.size()
+                    || std::any_of(options.begin(), options.end(), [&](const auto& entry) {
+                        return std::find(allowed.begin(), allowed.end(), entry.first) == allowed.end();
+                    })) throw std::invalid_argument("stitch-v2 requires exactly its ten named options");
+                const auto& kernel = Required(options, L"resampling");
+                if (kernel != L"bilinear" && kernel != L"bicubic-catmull-rom")
+                    throw std::invalid_argument("stitch-v2 resampling kernel is unsupported");
+                const auto result = a0::m2::StitchCanonicalPairV2({
+                    Required(options, L"camera-a"), Required(options, L"camera-b"), Required(options, L"job-directory"),
+                    Required(options, L"profile-file"), Utf8(Required(options, L"assessed-at")),
+                    Utf8(Required(options, L"expected-profile-sha256")),
+                    kernel == L"bilinear" ? a0::m2::render::Resampling::bilinear
+                                          : a0::m2::render::Resampling::bicubic_catmull_rom,
+                    Utf8(Required(options, L"stitch-job-id")), Utf8(Required(options, L"capture-transaction-id")),
+                    Utf8(Required(options, L"completed-at"))});
+                std::cout << "result=stitched\nwidth=" << result.width << "\nheight=" << result.height
+                    << "\nprofileId=" << result.profile_id << "\nstitchJobId=" << result.stitch_job_id
+                    << "\nmanifest=" << result.manifest_path.filename().string() << '\n';
             } else if (operation == L"stitch") {
                 const auto result = a0::m2::StitchCanonicalPair({
                     Required(options, L"camera-a"),

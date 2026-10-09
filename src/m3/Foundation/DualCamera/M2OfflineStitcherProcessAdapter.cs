@@ -4,7 +4,7 @@ using System.Text;
 
 namespace A0CameraStitcher.M3.Foundation.DualCamera;
 
-public sealed class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOfflineStitcherAdapter
+public sealed partial class M2OfflineStitcherProcessAdapter : ITestSyntheticCamera, IOfflineStitcherAdapter
 {
     private const int MaximumRetainedDiagnosticCharacters = 64 * 1024;
     private static readonly TimeSpan TerminationAndDrainTimeout = TimeSpan.FromSeconds(5);

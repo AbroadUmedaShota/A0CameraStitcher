@@ -35,4 +35,4 @@ SDK なし Debug/Release の関連 native target のビルドと CTest は両構
 
 ## 完了境界
 
-この変更は reader・使用検証・fingerprint とその契約試験まで。製品 adapter への JSON 接続、manifest の照合、入力 JPEG 寸法の検査、画像 I/O、#273 の評価 exe は後続。v1 の試験経路は ADR-0034 の移行規則に従って維持する。実リグの approved profile、DPI・品質閾値、kernel の採用を決定していない。
+#281 は reader・使用検証・fingerprint とその契約試験まで。製品 adapter の追加 v2 入口、.NET の snapshot/manifest 照合、入力 JPEG 寸法の検査、画像 I/O と JFIF DPI は #282 で接続した（`docs/M2_APPROVED_V2_STITCH.md`）。UI の profile 選択・setup 接続、#273 の評価 exe は後続。v1 の試験経路は ADR-0034 の移行規則に従って維持する。実リグの approved profile、DPI・品質閾値、kernel の採用を決定していない。

@@ -1,6 +1,7 @@
 #include "a0/m2/offline_stitcher.hpp"
 
 #include "a0/m2/render.hpp"
+#include "a0/m2/rig_profile_v2.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
 
 #include <Windows.h>
@@ -16,9 +17,11 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -150,19 +153,41 @@ struct JpegDimensions {
     std::uint32_t height{};
 };
 
+struct EncodedJpegIdentity {
+    BY_HANDLE_FILE_INFORMATION file{};
+    std::array<std::uint8_t, 32> sha256{};
+    std::uint64_t size{};
+};
+
+bool SameFileIdentity(const BY_HANDLE_FILE_INFORMATION& a, const BY_HANDLE_FILE_INFORMATION& b) {
+    return a.dwVolumeSerialNumber == b.dwVolumeSerialNumber
+        && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
+}
+
 class LockedReadFile final {
 public:
-    explicit LockedReadFile(const std::filesystem::path& path, const bool allow_rename = false) {
+    explicit LockedReadFile(const std::filesystem::path& path, const bool allow_rename = false,
+        const bool reject_reparse = false) {
         handle_ = CreateFileW(
             path.c_str(),
             GENERIC_READ | (allow_rename ? DELETE : 0),
             FILE_SHARE_READ | (allow_rename ? FILE_SHARE_DELETE : 0),
             nullptr,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN
+                | (reject_reparse ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
             nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) {
             throw std::invalid_argument("JPEG source cannot be locked for immutable read");
+        }
+        if (reject_reparse) {
+            BY_HANDLE_FILE_INFORMATION information{};
+            if (!GetFileInformationByHandle(handle_, &information)
+                || (information.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+                CloseHandle(handle_);
+                handle_ = INVALID_HANDLE_VALUE;
+                throw std::invalid_argument("v2 source handle is not an ordinary immutable file");
+            }
         }
     }
 
@@ -183,10 +208,26 @@ public:
         return static_cast<std::uint64_t>(size.QuadPart);
     }
 
-    [[nodiscard]] std::vector<std::uint8_t> ReadAll() const {
+    bool SameFileAs(const LockedReadFile& other) const {
+        BY_HANDLE_FILE_INFORMATION a{}, b{};
+        if (!GetFileInformationByHandle(handle_, &a) || !GetFileInformationByHandle(other.handle_, &b))
+            throw std::runtime_error("v2 immutable source identity inspection failed");
+        return SameFileIdentity(a, b);
+    }
+
+    void ValidateIdentity(const EncodedJpegIdentity& expected) const {
+        BY_HANDLE_FILE_INFORMATION actual{};
+        if (!GetFileInformationByHandle(handle_, &actual) || !SameFileIdentity(actual, expected.file))
+            throw std::invalid_argument("v2 generated candidate file identity changed after encoding");
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> ReadAll(
+        const std::uint64_t maximum = kMaximumCompressedJpegBytes) const {
         const auto size = Size();
-        if (size == 0 || size > kMaximumCompressedJpegBytes) {
-            throw std::invalid_argument("compressed JPEG byte size is empty or exceeds the 64 MiB limit");
+        if (size == 0 || size > maximum) {
+            throw std::invalid_argument(maximum == kMaximumCompressedJpegBytes
+                ? "compressed JPEG byte size is empty or exceeds the 64 MiB limit"
+                : "locked profile byte size is empty or exceeds the 256 KiB limit");
         }
         LARGE_INTEGER beginning{};
         if (!SetFilePointerEx(handle_, beginning, nullptr, FILE_BEGIN)) {
@@ -644,6 +685,197 @@ void EncodeJpegPartial(
     stream.reset();
 }
 
+// A v2 encoder owns a CREATE_NEW handle throughout encoding and metadata
+// stamping. It cannot replace a pre-existing candidate or patch a substituted
+// path; WIC writes and the JFIF correction address this exact same object.
+class NewJpegStream final : public IStream {
+public:
+    explicit NewJpegStream(const std::filesystem::path& path) {
+        handle_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("v2 JPEG partial exclusive creation failed");
+    }
+    ~NewJpegStream() { if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** result) override {
+        if (!result) return E_POINTER;
+        *result = nullptr;
+        if (id == IID_IUnknown || id == IID_ISequentialStream || id == IID_IStream) {
+            *result = static_cast<IStream*>(this); AddRef(); return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto count = --references_; if (!count) delete this; return count;
+    }
+    HRESULT STDMETHODCALLTYPE Read(void* buffer, ULONG count, ULONG* read) override {
+        DWORD actual{};
+        if (!ReadFile(handle_, buffer, count, &actual, nullptr)) return STG_E_READFAULT;
+        if (read) *read = actual;
+        return actual == count ? S_OK : S_FALSE;
+    }
+    HRESULT STDMETHODCALLTYPE Write(const void* buffer, ULONG count, ULONG* written) override {
+        LARGE_INTEGER zero{}, position{};
+        if (written) *written = 0;
+        if (!SetFilePointerEx(handle_, zero, &position, FILE_CURRENT)
+            || position.QuadPart < 0
+            || static_cast<std::uint64_t>(position.QuadPart) + count > kMaximumCompressedJpegBytes)
+            return STG_E_MEDIUMFULL;
+        DWORD actual{};
+        if (!WriteFile(handle_, buffer, count, &actual, nullptr)) return STG_E_WRITEFAULT;
+        if (written) *written = actual;
+        return actual == count ? S_OK : STG_E_WRITEFAULT;
+    }
+    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER distance, DWORD origin, ULARGE_INTEGER* result) override {
+        if (origin > STREAM_SEEK_END) return STG_E_INVALIDFUNCTION;
+        LARGE_INTEGER position{};
+        if (!SetFilePointerEx(handle_, distance, &position, origin)) return STG_E_SEEKERROR;
+        if (result) result->QuadPart = static_cast<ULONGLONG>(position.QuadPart);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER size) override {
+        if (size.QuadPart > kMaximumCompressedJpegBytes) return STG_E_MEDIUMFULL;
+        LARGE_INTEGER zero{}, previous{}, end{};
+        end.QuadPart = static_cast<LONGLONG>(size.QuadPart);
+        if (!SetFilePointerEx(handle_, zero, &previous, FILE_CURRENT)
+            || !SetFilePointerEx(handle_, end, nullptr, FILE_BEGIN)
+            || !SetEndOfFile(handle_)
+            || !SetFilePointerEx(handle_, previous, nullptr, FILE_BEGIN)) return STG_E_WRITEFAULT;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return S_OK; } // shared durable flush follows
+    HRESULT STDMETHODCALLTYPE Revert() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
+    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
+    HRESULT STDMETHODCALLTYPE Stat(STATSTG* result, DWORD) override {
+        if (!result) return E_POINTER;
+        *result = {}; LARGE_INTEGER size{};
+        if (!GetFileSizeEx(handle_, &size) || size.QuadPart < 0) return STG_E_READFAULT;
+        result->type = STGTY_STREAM; result->cbSize.QuadPart = static_cast<ULONGLONG>(size.QuadPart);
+        result->grfMode = STGM_READWRITE; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Clone(IStream**) override { return E_NOTIMPL; }
+    std::vector<std::uint8_t> Snapshot() {
+        STATSTG information{}; CheckHresult(Stat(&information, STATFLAG_NONAME), "v2 partial size");
+        if (!information.cbSize.QuadPart || information.cbSize.QuadPart > kMaximumCompressedJpegBytes)
+            throw std::runtime_error("v2 generated JPEG exceeds its byte bound");
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(information.cbSize.QuadPart));
+        LARGE_INTEGER start{}; CheckHresult(Seek(start, STREAM_SEEK_SET, nullptr), "v2 partial rewind");
+        ULONG read{}; CheckHresult(Read(bytes.data(), static_cast<ULONG>(bytes.size()), &read), "v2 partial snapshot");
+        if (read != bytes.size()) throw std::runtime_error("v2 partial snapshot was short");
+        return bytes;
+    }
+    void ReplaceOwnedBytes(const std::vector<std::uint8_t>& bytes) {
+        LARGE_INTEGER start{}; CheckHresult(Seek(start, STREAM_SEEK_SET, nullptr), "v2 metadata rewind");
+        ULONG written{}; CheckHresult(Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written), "v2 metadata write");
+        if (written != bytes.size()) throw std::runtime_error("v2 metadata write was short");
+        ULARGE_INTEGER size{}; size.QuadPart = bytes.size();
+        CheckHresult(SetSize(size), "v2 metadata final length");
+    }
+    EncodedJpegIdentity Identity(const std::vector<std::uint8_t>& verified) const {
+        EncodedJpegIdentity identity;
+        if (!GetFileInformationByHandle(handle_, &identity.file))
+            throw std::runtime_error("v2 encoded candidate identity inspection failed");
+        Sha256Provider provider; identity.sha256 = provider.Compute(verified); identity.size = verified.size();
+        return identity;
+    }
+private:
+    std::atomic<ULONG> references_{1};
+    HANDLE handle_{INVALID_HANDLE_VALUE};
+};
+
+struct JpegMetadataSegment { std::size_t offset, size; bool jfif; };
+std::vector<JpegMetadataSegment> JpegMetadataSegments(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8)
+        throw std::invalid_argument("v2 JPEG metadata has no SOI");
+    std::vector<JpegMetadataSegment> segments;
+    std::size_t position = 2;
+    while (position < bytes.size()) {
+        const auto beginning = position;
+        if (bytes[position++] != 0xff) throw std::invalid_argument("v2 JPEG metadata marker is invalid");
+        while (position < bytes.size() && bytes[position] == 0xff) ++position;
+        if (position >= bytes.size()) throw std::invalid_argument("v2 JPEG metadata marker is truncated");
+        const auto marker = bytes[position++];
+        if (marker == 0xda || marker == 0xd9) return segments;
+        if (marker == 0x00 || marker == 0xd8 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7))
+            throw std::invalid_argument("v2 JPEG contains an invalid header marker");
+        if (position + 2 > bytes.size()) throw std::invalid_argument("v2 JPEG metadata length is truncated");
+        const auto length = (static_cast<std::size_t>(bytes[position]) << 8U) | bytes[position + 1];
+        if (length < 2 || length > bytes.size() - position)
+            throw std::invalid_argument("v2 JPEG metadata segment is truncated");
+        const auto payload = position + 2;
+        if (marker == 0xe1 && length >= 8 && std::memcmp(bytes.data() + payload, "Exif\0\0", 6) == 0)
+            throw std::invalid_argument("v2 generated JPEG must not carry EXIF orientation metadata");
+        const bool jfif = marker == 0xe0 && length >= 7 && std::memcmp(bytes.data() + payload, "JFIF\0", 5) == 0;
+        segments.push_back({beginning, position + length - beginning, jfif});
+        position += length;
+    }
+    throw std::invalid_argument("v2 JPEG has no scan header");
+}
+
+void ValidateJpegDpi(const std::vector<std::uint8_t>& bytes, const std::uint32_t dpi) {
+    unsigned count = 0;
+    for (const auto& segment : JpegMetadataSegments(bytes)) {
+        if (!segment.jfif) continue;
+        ++count;
+        // Canonical APP0: marker(2), length(2), identifier(5), version(2), units,
+        // Xdensity(2), Ydensity(2), thumbnail dimensions(2).
+        const auto p = segment.offset;
+        if (segment.size != 18 || bytes[p + 2] != 0 || bytes[p + 3] != 16
+            || bytes[p + 11] != 1
+            || ((static_cast<unsigned>(bytes[p + 12]) << 8U) | bytes[p + 13]) != dpi
+            || ((static_cast<unsigned>(bytes[p + 14]) << 8U) | bytes[p + 15]) != dpi
+            || bytes[p + 16] || bytes[p + 17])
+            throw std::invalid_argument("v2 generated JPEG JFIF density does not match the approved raster");
+    }
+    if (count != 1) throw std::invalid_argument("v2 generated JPEG requires exactly one JFIF density record");
+}
+
+EncodedJpegIdentity EncodeJpegPartialV2(IWICImagingFactory* factory, Image& image,
+    const std::filesystem::path& partial, const std::uint32_t dpi) {
+    if (!dpi || dpi > 65535) throw std::invalid_argument("v2 JPEG DPI is outside JFIF density range");
+    ComPtr<NewJpegStream> stream(new NewJpegStream(partial));
+    IWICBitmapEncoder* encoder_raw{};
+    CheckHresult(factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder_raw), "v2 JPEG encoder creation");
+    ComPtr<IWICBitmapEncoder> encoder(encoder_raw);
+    CheckHresult(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache), "v2 JPEG encoder initialization");
+    IWICBitmapFrameEncode* frame_raw{}; IPropertyBag2* properties_raw{};
+    CheckHresult(encoder->CreateNewFrame(&frame_raw, &properties_raw), "v2 JPEG frame creation");
+    ComPtr<IWICBitmapFrameEncode> frame(frame_raw); ComPtr<IPropertyBag2> properties(properties_raw);
+    CheckHresult(frame->Initialize(properties.get()), "v2 JPEG frame initialization");
+    CheckHresult(frame->SetSize(image.width, image.height), "v2 JPEG dimensions");
+    CheckHresult(frame->SetResolution(dpi, dpi), "v2 JPEG resolution");
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    CheckHresult(frame->SetPixelFormat(&format), "v2 JPEG pixel format");
+    if (format != GUID_WICPixelFormat24bppBGR) throw std::runtime_error("v2 JPEG encoder rejected BGR");
+    CheckHresult(frame->WritePixels(image.height, image.width * 3U,
+        static_cast<UINT>(image.bgr.size()), image.bgr.data()), "v2 JPEG pixels");
+    CheckHresult(frame->Commit(), "v2 JPEG frame commit");
+    CheckHresult(encoder->Commit(), "v2 JPEG commit");
+    frame.reset(); properties.reset(); encoder.reset();
+    const auto original = stream->Snapshot();
+    const auto segments = JpegMetadataSegments(original);
+    std::vector<std::uint8_t> corrected{0xff, 0xd8, 0xff, 0xe0, 0, 16,
+        'J', 'F', 'I', 'F', 0, 1, 2, 1,
+        static_cast<std::uint8_t>(dpi >> 8U), static_cast<std::uint8_t>(dpi),
+        static_cast<std::uint8_t>(dpi >> 8U), static_cast<std::uint8_t>(dpi), 0, 0};
+    std::size_t cursor = 2;
+    for (const auto& segment : segments) {
+        if (!segment.jfif) continue;
+        corrected.insert(corrected.end(), original.begin() + cursor, original.begin() + segment.offset);
+        cursor = segment.offset + segment.size;
+    }
+    corrected.insert(corrected.end(), original.begin() + cursor, original.end());
+    if (corrected.size() > kMaximumCompressedJpegBytes) throw std::runtime_error("v2 JPEG metadata exceeds byte bound");
+    stream->ReplaceOwnedBytes(corrected);
+    const auto verified = stream->Snapshot();
+    if (verified != corrected) throw std::runtime_error("v2 JPEG metadata write verification failed");
+    ValidateJpegDpi(verified, dpi);
+    return stream->Identity(verified);
+}
+
 void TruncateGeneratedPartialForFault(
     const std::filesystem::path& partial,
     const bool disk_full) {
@@ -673,17 +905,30 @@ void TruncateGeneratedPartialForFault(
     throw InjectedOfflineStitchFault(disk_full ? "disk-full" : "partial-short-write");
 }
 
-void FlushGeneratedPartial(const std::filesystem::path& partial) {
+void FlushGeneratedPartial(const std::filesystem::path& partial, const bool reject_reparse = false,
+    const EncodedJpegIdentity* expected = nullptr) {
     HANDLE handle = CreateFileW(
         partial.c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ,
         nullptr,
         OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NORMAL | (reject_reparse ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
         nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("generated JPEG partial flush open failed");
+    }
+    if (reject_reparse) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle, &info)
+            || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+            CloseHandle(handle);
+            throw std::invalid_argument("v2 generated JPEG partial is redirected or nonregular");
+        }
+        if (expected && !SameFileIdentity(info, expected->file)) {
+            CloseHandle(handle);
+            throw std::invalid_argument("v2 generated JPEG partial identity changed before flush");
+        }
     }
     const bool flushed = FlushFileBuffers(handle) != FALSE;
     const bool closed = CloseHandle(handle) != FALSE;
@@ -710,6 +955,96 @@ private:
 
 std::filesystem::path NormalizedAbsolute(const std::filesystem::path& path) {
     return std::filesystem::absolute(path).lexically_normal();
+}
+
+// V2 paths are local absolute ordinary paths. Pin every existing ancestor
+// without write/delete sharing so path inspection cannot be invalidated by a
+// junction/rename while profile, inputs and the commit pipeline are active.
+class V2PathPins final {
+public:
+    ~V2PathPins() { for (const auto handle : handles_) CloseHandle(handle); }
+    void Pin(const std::filesystem::path& path, const bool leaf_is_directory = false) {
+        const auto text = path.native();
+        if (text.size() < 3 || text[1] != L':' || (text[2] != L'\\' && text[2] != L'/')
+            || !((text[0] >= L'A' && text[0] <= L'Z') || (text[0] >= L'a' && text[0] <= L'z'))
+            || text.find(L':', 2) != std::wstring::npos
+            || GetDriveTypeW(path.root_path().make_preferred().c_str()) != DRIVE_FIXED)
+            throw std::invalid_argument("v2 paths require an ordinary local absolute fixed-drive path");
+        for (const auto& component : path.relative_path()) {
+            auto name = component.native();
+            if (name.empty() || name == L"." || name == L".." || name.back() == L'.' || name.back() == L' '
+                || name.find_first_of(L"<>\"|?*:") != std::wstring::npos
+                || std::any_of(name.begin(), name.end(), [](wchar_t c) { return c < 32; }))
+                throw std::invalid_argument("v2 path component is ambiguous or redirected");
+            const auto dot = name.find(L'.');
+            name.resize(dot == std::wstring::npos ? name.size() : dot);
+            for (auto& c : name) if (c >= L'a' && c <= L'z') c -= L'a' - L'A';
+            if (name == L"CON" || name == L"PRN" || name == L"AUX" || name == L"NUL"
+                || name == L"CONIN$" || name == L"CONOUT$" || name == L"CLOCK$"
+                || (name.size() == 4 && (name.starts_with(L"COM") || name.starts_with(L"LPT"))
+                    && ((name[3] >= L'1' && name[3] <= L'9')
+                        || name[3] == L'\u00b9' || name[3] == L'\u00b2' || name[3] == L'\u00b3')))
+                throw std::invalid_argument("v2 path contains a device component");
+        }
+        const auto leaf_attributes = GetFileAttributesW(path.c_str());
+        if (leaf_attributes != INVALID_FILE_ATTRIBUTES && (leaf_attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            throw std::invalid_argument("v2 path is redirected");
+        auto directory = leaf_is_directory ? path : path.parent_path();
+        std::vector<std::filesystem::path> ancestors;
+        while (!directory.empty()) {
+            ancestors.push_back(directory);
+            const auto parent = directory.parent_path();
+            if (directory == parent) break;
+            directory = parent;
+        }
+        for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it) {
+            HANDLE handle = CreateFileW(it->c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (handle == INVALID_HANDLE_VALUE) {
+                const auto error = GetLastError();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+                throw std::invalid_argument("v2 path ancestor cannot be pinned");
+            }
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(handle, &info)
+                || !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                CloseHandle(handle);
+                throw std::invalid_argument("v2 path ancestor is not an ordinary directory");
+            }
+            handles_.push_back(handle);
+        }
+    }
+private:
+    std::vector<HANDLE> handles_;
+};
+
+void ValidateV2Identity(const OfflineStitchV2Request& request) {
+    const auto hex = [](std::string_view value, std::size_t size) {
+        return value.size() == size && std::all_of(value.begin(), value.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    };
+    if (!hex(request.stitch_job_id, 32) || !hex(request.capture_transaction_id, 32)
+        || request.stitch_job_id == std::string(32, '0') || request.capture_transaction_id == std::string(32, '0')
+        || !hex(request.expected_profile_sha256, 64))
+        throw std::invalid_argument("v2 job identity or expected profile fingerprint is invalid");
+    const auto& time = request.completed_at_utc;
+    if (time.size() != 20 || time[4] != '-' || time[7] != '-' || time[10] != 'T'
+        || time[13] != ':' || time[16] != ':' || time[19] != 'Z')
+        throw std::invalid_argument("v2 completion time must be whole-second UTC");
+    for (std::size_t i = 0; i < time.size(); ++i) {
+        if (i == 4 || i == 7 || i == 10 || i == 13 || i == 16 || i == 19) continue;
+        if (time[i] < '0' || time[i] > '9') throw std::invalid_argument("v2 completion time is invalid");
+    }
+    const auto number = [&](std::size_t start, std::size_t length) {
+        unsigned n = 0; for (auto i = start; i < start + length; ++i) n = n * 10 + time[i] - '0'; return n;
+    };
+    const std::chrono::year_month_day date{std::chrono::year{static_cast<int>(number(0, 4))},
+        std::chrono::month{number(5, 2)}, std::chrono::day{number(8, 2)}};
+    if (!number(0, 4) || !date.ok() || number(11, 2) > 23 || number(14, 2) > 59 || number(17, 2) > 59)
+        throw std::invalid_argument("v2 completion time is not a valid Gregorian UTC instant");
+    if (time < request.assessed_at_utc) throw std::invalid_argument("v2 completion time precedes assessment");
 }
 
 } // namespace
@@ -761,12 +1096,15 @@ PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     const std::filesystem::path& partial,
     const std::filesystem::path& destination,
     const std::uint32_t expected_width,
-    const std::uint32_t expected_height) {
+    const std::uint32_t expected_height,
+    const std::optional<std::uint32_t> expected_dpi,
+    const EncodedJpegIdentity* expected_candidate = nullptr) {
     // Keep the partial immutable while it is snapshotted, validated, hashed,
     // and renamed. FILE_SHARE_DELETE permits this process's atomic rename
     // only; writers remain excluded and a competing rename/delete makes ours
     // fail.
-    LockedReadFile locked_partial(partial, true);
+    LockedReadFile locked_partial(partial, true, expected_dpi.has_value());
+    if (expected_candidate) locked_partial.ValidateIdentity(*expected_candidate);
     ComApartment apartment;
     auto factory = CreateFactory();
     JpegDimensions dimensions{};
@@ -775,6 +1113,10 @@ PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     if (dimensions.width != expected_width || dimensions.height != expected_height) {
         throw std::invalid_argument("generated JPEG partial dimensions do not match the stitched result");
     }
+    if (expected_dpi) ValidateJpegDpi(snapshot.compressed, *expected_dpi);
+    if (expected_candidate && (snapshot.sha256 != expected_candidate->sha256
+        || snapshot.compressed.size() != expected_candidate->size))
+        throw std::invalid_argument("v2 generated candidate bytes changed after encoding");
     ValidateSnapshotHash(snapshot, locked_partial, "generated JPEG partial");
     InterruptIfFault(OfflineStitchFaultPoint::interrupt_before_publish);
     ThrowIfFault(OfflineStitchFaultPoint::publish_failure, "publish-failed");
@@ -783,10 +1125,20 @@ PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
     return {ToLowerHex(snapshot.sha256), static_cast<std::uint64_t>(snapshot.compressed.size())};
 }
 
+PublishedGeneratedJpeg PublishValidatedGeneratedJpeg(
+    const std::filesystem::path& partial, const std::filesystem::path& destination,
+    const std::uint32_t expected_width, const std::uint32_t expected_height) {
+    return PublishValidatedGeneratedJpeg(partial, destination, expected_width, expected_height, std::nullopt);
+}
+
 } // namespace detail
 
-OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
-    ValidateProfile(request.profile);
+namespace {
+OfflineStitchResult StitchCanonicalPairImpl(const OfflineStitchRequest& request,
+    const render::DocumentRenderParameters* v2_parameters,
+    const std::string& v2_fingerprint, const std::string& engine_version,
+    V2PathPins* v2_pins, const std::function<void()>& verify_profile) {
+    if (!v2_parameters) ValidateProfile(request.profile);
     // Refused up front, before any file is created. A job that cannot be
     // recorded must not leave a stitched output behind for someone to later
     // mistake for a completed one.
@@ -819,8 +1171,10 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     // Acquire both handles before snapshotting either input and keep them alive
     // through publish. FILE_SHARE_READ excludes concurrent source write,
     // replacement, and deletion for the complete operation.
-    LockedReadFile locked_camera_a(camera_a_path);
-    LockedReadFile locked_camera_b(camera_b_path);
+    LockedReadFile locked_camera_a(camera_a_path, false, v2_parameters != nullptr);
+    LockedReadFile locked_camera_b(camera_b_path, false, v2_parameters != nullptr);
+    if (v2_parameters && locked_camera_a.SameFileAs(locked_camera_b))
+        throw std::invalid_argument("CAM-A and CAM-B canonical originals must be distinct locked files");
     InvokeTestHook(input_locks_held_hook);
     const auto camera_a_snapshot = ReadJpegSnapshot(
         factory.get(), locked_camera_a, "CAM-A canonical JPEG", false);
@@ -844,7 +1198,8 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         request.profile.layout,
         request.profile.crop,
     };
-    auto rendered = render::RenderPair(camera_a, camera_b, render_parameters);
+    auto rendered = v2_parameters ? render::RenderDocumentPair(camera_a, camera_b, *v2_parameters)
+                                 : render::RenderPair(camera_a, camera_b, render_parameters);
     render::BgrImage& output = rendered.image;
     const render::SeamNavigationCandidate& seam_navigation = rendered.seam_navigation;
 
@@ -853,6 +1208,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     if (parent_error) {
         throw std::runtime_error("output job parent creation failed");
     }
+    if (v2_pins) v2_pins->Pin(job_path.parent_path(), true);
     std::error_code reservation_error;
     const bool reserved = std::filesystem::create_directory(job_path, reservation_error);
     if (!reserved) {
@@ -861,6 +1217,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         }
         throw std::runtime_error("output job reservation failed");
     }
+    if (v2_pins) v2_pins->Pin(job_path, true);
 
     PartialFileGuard partial_guard(partial);
     // GitHub Issue #102 (item 2): captured from PublishValidatedGeneratedJpeg,
@@ -873,11 +1230,13 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     // operation that never touches file content, so the bytes hashed here are
     // byte-identical to the bytes at `destination` afterward.
     detail::PublishedGeneratedJpeg published;
+    std::optional<EncodedJpegIdentity> encoded_identity;
     try {
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_before_encode);
         ThrowIfFault(detail::OfflineStitchFaultPoint::encode_failure, "encode-failed");
         InvokeTestHook(before_encode_hook);
-        EncodeJpegPartial(factory.get(), output, partial);
+        if (v2_parameters) encoded_identity = EncodeJpegPartialV2(factory.get(), output, partial, v2_parameters->raster.dpi);
+        else EncodeJpegPartial(factory.get(), output, partial);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_partial_write);
         if (TriggerFault(detail::OfflineStitchFaultPoint::partial_short_write)) {
             TruncateGeneratedPartialForFault(partial, false);
@@ -887,9 +1246,12 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         }
         ThrowIfFault(detail::OfflineStitchFaultPoint::partial_flush_failure, "partial-flush-failed");
         InvokeTestHook(before_partial_flush_hook);
-        FlushGeneratedPartial(partial);
+        FlushGeneratedPartial(partial, v2_parameters != nullptr, encoded_identity ? &*encoded_identity : nullptr);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_flush);
-        published = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height);
+        if (verify_profile) verify_profile();
+        published = detail::PublishValidatedGeneratedJpeg(partial, destination, output.width, output.height,
+            v2_parameters ? std::optional<std::uint32_t>{v2_parameters->raster.dpi} : std::nullopt,
+            encoded_identity ? &*encoded_identity : nullptr);
         InterruptIfFault(detail::OfflineStitchFaultPoint::interrupt_after_publish);
         partial_guard.Release();
     } catch (...) {
@@ -934,11 +1296,11 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
     manifest.rig_profile = {
         request.profile.profile_id,
         request.profile.trust.schema_version,
-        ProfileFingerprint(request.profile),
+        v2_parameters ? v2_fingerprint : ProfileFingerprint(request.profile),
     };
     manifest.engine = {
         std::string(kOfflineStitcherEngineId),
-        std::string(kOfflineStitcherEngineVersion),
+        engine_version,
     };
     manifest.output = {
         "stitched.jpg",
@@ -953,6 +1315,7 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         seam_navigation.y,
     };
     manifest.completed_at_utc = request.completed_at_utc;
+    if (verify_profile) verify_profile();
     PublishAndVerifyStitchJobManifest(job_path, manifest);
 
     return {
@@ -963,6 +1326,64 @@ OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
         job_path / std::filesystem::path(kStitchJobManifestFileName),
         request.stitch_job_id,
     };
+}
+
+} // namespace
+
+OfflineStitchResult StitchCanonicalPair(const OfflineStitchRequest& request) {
+    return StitchCanonicalPairImpl(request, nullptr, {}, std::string(kOfflineStitcherEngineVersion), nullptr, {});
+}
+
+OfflineStitchResult StitchCanonicalPairV2(const OfflineStitchV2Request& request) {
+    ValidateV2Identity(request);
+    V2PathPins pins;
+    pins.Pin(request.profile_path);
+    pins.Pin(request.camera_a_original);
+    pins.Pin(request.camera_b_original);
+    pins.Pin(request.output_job_directory, true);
+    // V2 does not create a missing parent tree: a new intermediate junction
+    // could otherwise redirect recursive creation before the next pin. The
+    // existing, pinned parent must already be present, as in the .NET entry.
+    if (!std::filesystem::is_directory(request.output_job_directory.parent_path()))
+        throw std::invalid_argument("v2 output job parent must already exist");
+    LockedReadFile profile_file(request.profile_path, false, true);
+    constexpr std::uint64_t maximum_profile_bytes = 256U * 1024U;
+    const auto profile_bytes = profile_file.ReadAll(maximum_profile_bytes);
+    const std::string text(profile_bytes.begin(), profile_bytes.end());
+    const auto profile = RigProfileV2::Parse(text);
+    const auto parameters = profile.ValidateApprovedForUse(request.assessed_at_utc, request.resampling);
+    const auto fingerprint = profile.FingerprintSha256();
+    if (fingerprint != request.expected_profile_sha256)
+        throw std::invalid_argument("native approved profile fingerprint differs from the expected fingerprint");
+    if (parameters.raster.dpi > 65535) throw std::invalid_argument("approved output DPI exceeds JFIF density range");
+    const auto verify_profile = [&] {
+        if (profile_file.ReadAll(maximum_profile_bytes) != profile_bytes)
+            throw std::runtime_error("locked approved profile changed before completion");
+    };
+    // Only dimensions/identity feed the shared I/O pipeline; v2 pixels are
+    // produced exclusively by its separately validated document parameters.
+    const FixedRigStitchProfile identity{*profile.ProfileId(), {}, 7360, 4912, {}, parameters.layout, {}};
+    const OfflineStitchRequest common{request.camera_a_original, request.camera_b_original,
+        request.output_job_directory, identity, request.stitch_job_id,
+        request.capture_transaction_id, request.completed_at_utc};
+    auto applied = common;
+    applied.profile.trust.schema_version = "2.0.0";
+    const auto version = request.resampling == render::Resampling::bilinear
+        ? kOfflineStitcherV2BilinearVersion : kOfflineStitcherV2BicubicVersion;
+    // Reuse the manifest's exact field validation before reserving any job.
+    // Placeholder input/output hashes only validate shape and are never saved.
+    const std::string placeholder(64, '0');
+    StitchJobManifest preflight;
+    preflight.stitch_job_id = request.stitch_job_id;
+    preflight.capture_transaction_id = request.capture_transaction_id;
+    preflight.inputs = {{{"CAM-A", placeholder, 1}, {"CAM-B", placeholder, 1}}};
+    preflight.rig_profile = {*profile.ProfileId(), "2.0.0", fingerprint};
+    preflight.engine = {std::string(kOfflineStitcherEngineId), std::string(version)};
+    preflight.output = {"stitched.jpg", placeholder, parameters.raster.width_pixels, parameters.raster.height_pixels, 1};
+    preflight.seam_navigation = StitchJobSeamNavigationRecord{false, 0, 0};
+    preflight.completed_at_utc = request.completed_at_utc;
+    (void)SerializeStitchJobManifest(preflight);
+    return StitchCanonicalPairImpl(applied, &parameters, fingerprint, std::string(version), &pins, verify_profile);
 }
 
 void ExportStitchedJpeg(

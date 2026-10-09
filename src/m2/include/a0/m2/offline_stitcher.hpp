@@ -1,6 +1,7 @@
 #pragma once
 
 #include "a0/m2/render.hpp"
+#include "a0/m2/document_render.hpp"
 #include "a0/m2/setup_assessment.hpp"
 
 #include <array>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 
 namespace a0::m2 {
 
@@ -64,6 +66,29 @@ struct OfflineStitchResult {
     std::filesystem::path manifest_path;
     std::string stitch_job_id;
 };
+
+// Product v2 requires an approved file, a cross-language fingerprint guard and
+// an explicit kernel. No evaluation/DRAFT entry or implicit kernel exists.
+struct OfflineStitchV2Request {
+    std::filesystem::path camera_a_original, camera_b_original, output_job_directory;
+    std::filesystem::path profile_path;
+    std::string assessed_at_utc, expected_profile_sha256;
+    render::Resampling resampling;
+    std::string stitch_job_id, capture_transaction_id, completed_at_utc;
+    OfflineStitchV2Request(std::filesystem::path a, std::filesystem::path b,
+        std::filesystem::path job, std::filesystem::path profile, std::string assessed,
+        std::string expected_sha, render::Resampling kernel, std::string job_id,
+        std::string capture_id, std::string completed)
+        : camera_a_original(std::move(a)), camera_b_original(std::move(b)),
+          output_job_directory(std::move(job)), profile_path(std::move(profile)),
+          assessed_at_utc(std::move(assessed)), expected_profile_sha256(std::move(expected_sha)),
+          resampling(kernel), stitch_job_id(std::move(job_id)),
+          capture_transaction_id(std::move(capture_id)), completed_at_utc(std::move(completed)) {}
+};
+
+inline constexpr std::string_view kOfflineStitcherV2BilinearVersion = "2.0.0+bilinear";
+inline constexpr std::string_view kOfflineStitcherV2BicubicVersion = "2.0.0+bicubic-catmull-rom";
+[[nodiscard]] OfflineStitchResult StitchCanonicalPairV2(const OfflineStitchV2Request& request);
 
 // Decodes two retained canonical original.jpg files, applies only the supplied
 // fixed profile transform, linearly feathers the geometric overlap, crops, and

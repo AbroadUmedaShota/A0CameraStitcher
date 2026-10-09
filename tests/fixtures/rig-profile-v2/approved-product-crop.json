@@ -1,0 +1,178 @@
+{
+  "schemaVersion": "2.0.0",
+  "status": "approved",
+  "profileId": "synthetic-approved-product-crop",
+  "conventions": {
+    "documentPlane": "mm-origin-sheet-top-left-x-right-y-down",
+    "cameraPixel": "stored-order-sample-at-integer-index",
+    "matrix": "row-major-column-vector",
+    "exifOrientation": "ignored"
+  },
+  "cameraModel": {
+    "manufacturer": "Nikon",
+    "model": "D810",
+    "sensorWidthPixels": 7360,
+    "sensorHeightPixels": 4912
+  },
+  "documentPlane": {
+    "paper": "ISO-216-A0",
+    "orientation": "landscape",
+    "sheetWidthMm": 1189.0,
+    "sheetHeightMm": 841.0,
+    "cameraOrder": "CAM-A-left-CAM-B-right"
+  },
+  "cameras": {
+    "CAM-A": {
+      "physicalIdentity": null,
+      "projection": {
+        "intrinsics": {
+          "fxPixels": 10000.0,
+          "fyPixels": 10000.0,
+          "cxPixels": 3679.5,
+          "cyPixels": 2455.5
+        },
+        "distortion": {
+          "model": "brown-conrady-k1k2k3-p1p2",
+          "k1": 0.0,
+          "k2": 0.0,
+          "k3": 0.0,
+          "p1": 0.0,
+          "p2": 0.0
+        },
+        "documentToImage": [
+          [
+            0.0,
+            8.0,
+            100.0
+          ],
+          [
+            -8.0,
+            0.0,
+            4800.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    "CAM-B": {
+      "physicalIdentity": null,
+      "projection": {
+        "intrinsics": {
+          "fxPixels": 10000.0,
+          "fyPixels": 10000.0,
+          "cxPixels": 3679.5,
+          "cyPixels": 2455.5
+        },
+        "distortion": {
+          "model": "brown-conrady-k1k2k3-p1p2",
+          "k1": 0.0,
+          "k2": 0.0,
+          "k3": 0.0,
+          "p1": 0.0,
+          "p2": 0.0
+        },
+        "documentToImage": [
+          [
+            0.0,
+            8.0,
+            100.0
+          ],
+          [
+            -8.0,
+            0.0,
+            9400.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    }
+  },
+  "calibration": {
+    "method": "chart-fiducial-planar",
+    "chartId": "synthetic-fingerprint-chart",
+    "provenanceId": "synthetic-fingerprint-provenance",
+    "measuredAt": "2000-01-01T00:00:00Z",
+    "tool": {
+      "toolId": "synthetic-calibration-tool",
+      "version": "0.0.0"
+    },
+    "inputSha256": {
+      "CAM-A": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "CAM-B": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "fitResidualPixels": {
+      "CAM-A": {
+        "rms": 0.0,
+        "max": 0.0
+      },
+      "CAM-B": {
+        "rms": 0.0,
+        "max": 0.0
+      }
+    },
+    "rigMeasurements": {
+      "baselineMm": 1.0,
+      "overlapMm": 1.0,
+      "cameraToDocumentMm": {
+        "CAM-A": 1.0,
+        "CAM-B": 1.0
+      },
+      "lensFocalLengthMm": {
+        "CAM-A": 1.0,
+        "CAM-B": 1.0
+      }
+    }
+  },
+  "outputRaster": {
+    "dpi": 100,
+    "regionMm": {
+      "left": 565.0,
+      "top": 400.0,
+      "right": 566.0,
+      "bottom": 401.0
+    },
+    "widthPixels": 4,
+    "heightPixels": 4
+  },
+  "correctionEnvelope": {
+    "minimumOverlapMm": 0.0,
+    "registrationErrorOutputPixels": {
+      "targetMax": 0.0,
+      "autoCorrectionMax": 0.0
+    },
+    "rotationErrorDegrees": {
+      "targetMax": 0.0,
+      "autoCorrectionMax": 0.0
+    },
+    "scaleDifferencePercent": {
+      "targetMax": 0.0,
+      "autoCorrectionMax": 0.0
+    },
+    "exposureDifferenceEv": {
+      "targetMax": 0.0,
+      "autoCorrectionMax": 0.0
+    },
+    "colorDeltaE": {
+      "targetMax": 0.0,
+      "autoCorrectionMax": 0.0
+    }
+  },
+  "qualityContract": {
+    "seamErrorOutputPixelsMax": 0.0,
+    "registrationErrorOutputPixelsMax": 0.0,
+    "colorDeltaEMax": 0.0
+  },
+  "approval": {
+    "decisionRef": "synthetic-fingerprint-decision",
+    "approvedAt": "2000-01-02T00:00:00Z",
+    "validUntil": "2100-01-01T00:00:00Z"
+  }
+}
