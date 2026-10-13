@@ -1,6 +1,6 @@
 # draft校正の入出力設計案（#285、#277前段）
 
-この文書は次の実装を分けるための設計案。観測reader、検出器、solver、report/schema、draft writerはまだ実装していない。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。新しい欄名や失敗コードはこの文書だけでは製品契約にならない。
+この文書は次の実装を分けるための設計案。観測session（reader、validator、schema v1）は実装済み（#286、[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)）。検出器、solver、report/schema、draft writerはまだ実装していない。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。新しい欄名や失敗コードはこの文書だけでは製品契約にならない。
 
 ## 1. 既存契約と今回の境界
 
@@ -14,7 +14,7 @@
 
 ### 観測session（推定側）
 
-sessionには画像・チャートの対応と検出結果を置く。次の表は論理的な欄の案で、JSONの名前・版・資源上限はreader/schema実装時に定義する。
+sessionには画像・チャートの対応と検出結果を置く。次の表は論理的な欄の案。JSONの名前・版・資源上限は#286で確定した（[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)）。
 
 | 入力 | 意味と検証 |
 | --- | --- |
@@ -94,7 +94,7 @@ referenceのチャートは文書面と同じ平面上にあることを要件�
 
 依存順に一つずつIssue化する。各段階で実装済みの範囲だけを完了とする。
 
-1. 観測sessionのpure reader/validatorとschemaを定義。有限値、点対応、役割と画像結合、共線/重複、資源上限、校正と検証の分離を正負fixtureで検査。真値に依存しないpublic APIを作る。
+1. 観測sessionのpure reader/validatorとschemaを定義。有限値、点対応、役割と画像結合、共線/重複、資源上限、校正と検証の分離を正負fixtureで検査。真値に依存しないpublic APIを作る。実装済み（#286）。契約は[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)。
 2. 歪みなしの解析的な多視点観測からのK/pose推定を独立の既知幾何で検算。#283へ観測Hを接続し、正面/同じ傾き/異なる傾き/不整合を区別。真値Hの注入を経路分離で防ぐ。
 3. 採用する開発用ライブラリの版/module/ライセンスと製品非同梱の境界を具体化してから、レンズ推定とJPEG検出を接続。pure入力の試験とJPEG end-to-end試験を区別。歪みなし→歪みあり→ノイズありの順で未使用点への再投影を測る。
 4. reference pair/配置から固定文書写像を求める。異なる学習poseを固定写像に選んだ誤り、reference欠損、片方の失敗を負の対照にし、いずれもprofile非発行を確認。

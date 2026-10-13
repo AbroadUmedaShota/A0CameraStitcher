@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a0-camera-stitcher.local/schemas/calibration-observation-session.v1.schema.json",
+  "title": "A0 Camera Stitcher calibration observation session v1",
+  "description": "Estimator-side input for draft calibration (Issue #286, #277 stage 1): chart points in millimetres, CAM-A/CAM-B camera groups, views with stored-order pixel observations and their roles, and provenance. Pixel coordinates are distorted stored-order pixels without EXIF orientation; an integer index is a pixel centre. No ground truth, lens model, projection, numerical policy or reference placement belongs here. Rules JSON Schema cannot express are enforced by the C++ reader: integer literals, binary64 overflow and underflow, UTC calendar, identifier and image-hash uniqueness, references to chart points and detected observations, pixel range against image size, view dimensions equal to the camera group, at most one reference view per camera, at most 128 views per camera, at most 65536 observations in total, disjoint validation pose and measurement points, and a non-degenerate chart.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sessionId", "chartId", "provenance", "chartPoints", "cameras", "views"],
+  "properties": {
+    "schemaVersion": { "const": "a0.calibration-observation-session.v1" },
+    "sessionId": { "$ref": "#/$defs/safeId" },
+    "chartId": { "$ref": "#/$defs/safeId" },
+    "provenance": {
+      "description": "measuredAt is the time the observations (detection results) were finalized, not an image capture time. measuredAt and tool use the same definitions as calibration.measuredAt and calibration.tool in rig-profile.v2.schema.json (drift-checked).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measuredAt", "tool"],
+      "properties": {
+        "measuredAt": { "$ref": "#/$defs/utcSeconds" },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["toolId", "version"],
+          "properties": {
+            "toolId": { "$ref": "#/$defs/identifier" },
+            "version": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      }
+    },
+    "chartPoints": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 16384,
+      "items": { "$ref": "#/$defs/chartPoint" }
+    },
+    "cameras": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["CAM-A", "CAM-B"],
+      "properties": {
+        "CAM-A": { "$ref": "#/$defs/cameraGroup" },
+        "CAM-B": { "$ref": "#/$defs/cameraGroup" }
+      }
+    },
+    "views": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/trainingOrReferenceView" },
+          { "$ref": "#/$defs/validationView" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "utcSeconds": {
+      "description": "UTC, whole seconds, Z suffix only, so that the text is already canonical.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeId": {
+      "description": "Session identifiers and self-reported labels. A subset of identifier (no dot).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "imageSide": { "type": "integer", "minimum": 1, "maximum": 32768 },
+    "pointIdList": {
+      "type": "array",
+      "maxItems": 16384,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeId" }
+    },
+    "chartPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointId", "xMm", "yMm"],
+      "properties": {
+        "pointId": { "$ref": "#/$defs/safeId" },
+        "xMm": { "type": "number" },
+        "yMm": { "type": "number" }
+      }
+    },
+    "cameraGroup": {
+      "description": "Self-reported conditions that change intrinsics. Labels are not proof of physical identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["widthPixels", "heightPixels", "lensLabel", "focalLengthLabel", "focusLabel"],
+      "properties": {
+        "widthPixels": { "$ref": "#/$defs/imageSide" },
+        "heightPixels": { "$ref": "#/$defs/imageSide" },
+        "lensLabel": { "$ref": "#/$defs/safeId" },
+        "focalLengthLabel": { "$ref": "#/$defs/safeId" },
+        "focusLabel": { "$ref": "#/$defs/safeId" }
+      }
+    },
+    "pixel": {
+      "description": "Stored-order pixel; the runtime upper bounds are widthPixels - 0.5 and heightPixels - 0.5.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number", "minimum": -0.5, "maximum": 32767.5 },
+        "y": { "type": "number", "minimum": -0.5, "maximum": 32767.5 }
+      }
+    },
+    "observation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pointId", "state", "pixel"],
+          "properties": {
+            "pointId": { "$ref": "#/$defs/safeId" },
+            "state": { "const": "detected" },
+            "pixel": { "$ref": "#/$defs/pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pointId", "state", "pixel"],
+          "properties": {
+            "pointId": { "$ref": "#/$defs/safeId" },
+            "state": { "enum": ["missing", "ambiguous"] },
+            "pixel": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "observationList": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": { "$ref": "#/$defs/observation" }
+    },
+    "trainingOrReferenceView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["viewId", "camera", "imageSha256", "widthPixels", "heightPixels", "role", "usedPointIds", "observations"],
+      "properties": {
+        "viewId": { "$ref": "#/$defs/safeId" },
+        "camera": { "enum": ["CAM-A", "CAM-B"] },
+        "imageSha256": { "$ref": "#/$defs/sha256" },
+        "widthPixels": { "$ref": "#/$defs/imageSide" },
+        "heightPixels": { "$ref": "#/$defs/imageSide" },
+        "role": { "enum": ["training", "reference"] },
+        "usedPointIds": { "$ref": "#/$defs/pointIdList" },
+        "observations": { "$ref": "#/$defs/observationList" }
+      }
+    },
+    "validationView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["viewId", "camera", "imageSha256", "widthPixels", "heightPixels", "role", "posePointIds", "measurementPointIds", "observations"],
+      "properties": {
+        "viewId": { "$ref": "#/$defs/safeId" },
+        "camera": { "enum": ["CAM-A", "CAM-B"] },
+        "imageSha256": { "$ref": "#/$defs/sha256" },
+        "widthPixels": { "$ref": "#/$defs/imageSide" },
+        "heightPixels": { "$ref": "#/$defs/imageSide" },
+        "role": { "const": "validation" },
+        "posePointIds": { "$ref": "#/$defs/pointIdList" },
+        "measurementPointIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16384,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeId" }
+        },
+        "observations": { "$ref": "#/$defs/observationList" }
+      }
+    }
+  }
+}

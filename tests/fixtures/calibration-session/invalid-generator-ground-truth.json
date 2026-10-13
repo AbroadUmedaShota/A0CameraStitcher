@@ -1,0 +1,17 @@
+{
+  "schema": "a0.m2.synthetic-pair-ground-truth/2",
+  "generator_version": "a0.m2.synthetic-pair-generator/2",
+  "seed": 1,
+  "conventions": {
+    "matrix": "row-major-column-vector",
+    "exifOrientation": "ignored",
+    "cameraPixel": "stored-order-sample-at-integer-index",
+    "documentPlane": "mm-origin-sheet-top-left-x-right-y-down"
+  },
+  "spec": { "schema": "a0.m2.synthetic-pair-spec/2" },
+  "output_files": [],
+  "reference_points": [
+    { "id": "F-000-000", "document_mm": [4.85, 4.85], "image_px": { "CAM-A": [11, 22], "CAM-B": [33, 44] } }
+  ],
+  "patterns": []
+}

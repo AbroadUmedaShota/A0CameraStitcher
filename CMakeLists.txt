@@ -369,6 +369,16 @@ if(MSVC)
 endif()
 a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_view_geometry)
 
+# Strict reader of the calibration observation session (#286). STL and the
+# shared JSON parser only; no Win32, OpenCV, product computation, generator
+# or profile reader.
+add_library(a0_m2_calibration_observation_session src/m2/calibration_observation_session.cpp)
+target_include_directories(a0_m2_calibration_observation_session PUBLIC src/m2/include PRIVATE src/common/include)
+if(MSVC)
+    target_compile_options(a0_m2_calibration_observation_session PRIVATE /W4 /permissive- /EHsc /fp:precise)
+endif()
+a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_observation_session)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(m2_calibration_view_geometry_contracts tests/calibration_view_geometry_tests.cpp)
@@ -382,6 +392,23 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
             "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cal-v"
             -P "${CMAKE_SOURCE_DIR}/tests/calibration_view_isolation_tests.cmake")
+    add_executable(m2_calibration_observation_session_contracts tests/calibration_observation_session_tests.cpp)
+    target_link_libraries(m2_calibration_observation_session_contracts PRIVATE a0_m2_calibration_observation_session)
+    # src/m2 for the internal exact-predicate header; common for building mutated JSON.
+    target_include_directories(m2_calibration_observation_session_contracts PRIVATE src/m2 src/common/include)
+    if(MSVC)
+        target_compile_options(m2_calibration_observation_session_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency m2_calibration_observation_session_contracts)
+    add_test(NAME m2_calibration_observation_session_contracts
+        COMMAND m2_calibration_observation_session_contracts "${CMAKE_SOURCE_DIR}/tests/fixtures/calibration-session")
+    add_test(NAME m2_calibration_observation_session_limits
+        COMMAND m2_calibration_observation_session_contracts "${CMAKE_SOURCE_DIR}/tests/fixtures/calibration-session" --limits)
+    set_tests_properties(m2_calibration_observation_session_limits PROPERTIES TIMEOUT 900)
+    add_test(NAME m2_calibration_observation_session_link_isolation
+        COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cal-s"
+            -P "${CMAKE_SOURCE_DIR}/tests/calibration_observation_session_isolation_tests.cmake")
 endif()
 if(BUILD_TESTING)
     add_executable(m2_stitch_evaluation_contracts tests/stitch_evaluation_tests.cpp)
@@ -961,4 +988,7 @@ if(BUILD_TESTING)
     add_test(
         NAME m2_rig_profile_v2_schema
         COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-RigProfileV2Schema.ps1")
+    add_test(
+        NAME m2_calibration_observation_session_schema
+        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-CalibrationObservationSessionSchema.ps1")
 endif()

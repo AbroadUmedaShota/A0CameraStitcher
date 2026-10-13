@@ -1,0 +1,142 @@
+{
+  "schemaVersion": "a0.calibration-observation-session.v1",
+  "sessionId": "synthetic-minimal-session",
+  "chartId": "synthetic-chart-6",
+  "provenance": {
+    "measuredAt": "2026-01-01T00:00:00Z",
+    "tool": {
+      "toolId": "synthetic-fixture",
+      "version": "1.0.0"
+    }
+  },
+  "chartPoints": [
+    { "pointId": "P1", "xMm": 0, "yMm": 0 },
+    { "pointId": "P2", "xMm": 50, "yMm": 0 },
+    { "pointId": "P3", "xMm": 100, "yMm": 0 },
+    { "pointId": "P4", "xMm": 0, "yMm": 40 },
+    { "pointId": "P5", "xMm": 50, "yMm": 40 },
+    { "pointId": "P6", "xMm": 100, "yMm": 40 }
+  ],
+  "cameras": {
+    "CAM-A": {
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "lensLabel": "synthetic-lens",
+      "focalLengthLabel": "f50mm",
+      "focusLabel": "fixed-a"
+    },
+    "CAM-B": {
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "lensLabel": "synthetic-lens",
+      "focalLengthLabel": "f50mm",
+      "focusLabel": "fixed-b"
+    }
+  },
+  "views": [
+    {
+      "viewId": "A-T1",
+      "camera": "CAM-A",
+      "imageSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "training",
+      "usedPointIds": ["P1", "P3", "P4", "P6"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 4, "y": 4 } },
+        { "pointId": "P2", "state": "detected", "pixel": { "x": 29, "y": 4 } },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 54, "y": 4 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 4, "y": 34 } },
+        { "pointId": "P5", "state": "detected", "pixel": { "x": 29, "y": 34 } },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 54, "y": 34 } }
+      ]
+    },
+    {
+      "viewId": "A-V1",
+      "camera": "CAM-A",
+      "imageSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "validation",
+      "posePointIds": ["P1", "P3", "P4", "P6"],
+      "measurementPointIds": ["P2", "P5"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 5, "y": 5 } },
+        { "pointId": "P2", "state": "detected", "pixel": { "x": 30, "y": 5 } },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 55, "y": 5 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 5, "y": 35 } },
+        { "pointId": "P5", "state": "detected", "pixel": { "x": 30, "y": 35 } },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 55, "y": 35 } }
+      ]
+    },
+    {
+      "viewId": "A-R1",
+      "camera": "CAM-A",
+      "imageSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "reference",
+      "usedPointIds": ["P1", "P3", "P4", "P6"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 6, "y": 6 } },
+        { "pointId": "P2", "state": "detected", "pixel": { "x": 31, "y": 6 } },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 56, "y": 6 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 6, "y": 36 } },
+        { "pointId": "P5", "state": "detected", "pixel": { "x": 31, "y": 36 } },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 56, "y": 36 } }
+      ]
+    },
+    {
+      "viewId": "B-T1",
+      "camera": "CAM-B",
+      "imageSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "training",
+      "usedPointIds": ["P1", "P3", "P4", "P6"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 4.5, "y": 4.5 } },
+        { "pointId": "P2", "state": "missing", "pixel": null },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 54.5, "y": 4.5 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 4.5, "y": 34.5 } },
+        { "pointId": "P5", "state": "ambiguous", "pixel": null },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 54.5, "y": 34.5 } }
+      ]
+    },
+    {
+      "viewId": "B-V1",
+      "camera": "CAM-B",
+      "imageSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "validation",
+      "posePointIds": ["P1", "P3", "P4", "P6"],
+      "measurementPointIds": ["P2", "P5"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 5.5, "y": 5.5 } },
+        { "pointId": "P2", "state": "detected", "pixel": { "x": 30.5, "y": 5.5 } },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 55.5, "y": 5.5 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 5.5, "y": 35.5 } },
+        { "pointId": "P5", "state": "detected", "pixel": { "x": 30.5, "y": 35.5 } },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 55.5, "y": 35.5 } }
+      ]
+    },
+    {
+      "viewId": "B-R1",
+      "camera": "CAM-B",
+      "imageSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "widthPixels": 64,
+      "heightPixels": 48,
+      "role": "reference",
+      "usedPointIds": ["P1", "P3", "P4", "P6"],
+      "observations": [
+        { "pointId": "P1", "state": "detected", "pixel": { "x": 6.5, "y": 6.5 } },
+        { "pointId": "P2", "state": "detected", "pixel": { "x": 31.5, "y": 6.5 } },
+        { "pointId": "P3", "state": "detected", "pixel": { "x": 56.5, "y": 6.5 } },
+        { "pointId": "P4", "state": "detected", "pixel": { "x": 6.5, "y": 36.5 } },
+        { "pointId": "P5", "state": "detected", "pixel": { "x": 31.5, "y": 36.5 } },
+        { "pointId": "P6", "state": "detected", "pixel": { "x": 56.5, "y": 36.5 } }
+      ]
+    }
+  ]
+}
