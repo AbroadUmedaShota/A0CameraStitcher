@@ -461,6 +461,7 @@ void TestPolicyAndCodes() {
         Rejects([&] { (void)EstimateUndistortedIntrinsics(session, Policy(2, cutoff)); }, "A0: cutoff " + Num(cutoff));
     }
     Rejects([&] { (void)EstimateUndistortedIntrinsics(session, {2, 1e-4, static_cast<ObservationModel>(1)}); }, "A0: unknown observation model");
+    Rejects([&] { (void)EstimateUndistortedIntrinsics(session, {2, 1e-4, ObservationModel::DistortedAnalytic}); }, "A0: the distorted model belongs to the lens stage");
     try {
         (void)EstimateUndistortedIntrinsics(session, Policy(1));
     } catch (const std::invalid_argument& error) {

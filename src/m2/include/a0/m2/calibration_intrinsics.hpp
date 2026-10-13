@@ -13,8 +13,11 @@
 namespace a0::m2::calibration {
 
 // How the observed pixels are read. Stage 2 treats every detected pixel as an
-// undistorted stored-order pixel; no lens model exists yet.
-enum class ObservationModel { UndistortedAnalytic };
+// undistorted stored-order pixel and accepts only UndistortedAnalytic.
+// DistortedAnalytic belongs to the lens stage (calibration_lens.hpp) and is
+// rejected here. The value 1 is never assigned: the stage 2 contract test uses
+// it as an out-of-range probe.
+enum class ObservationModel { UndistortedAnalytic = 0, DistortedAnalytic = 2 };
 
 // All fields are required; there are no defaults and the session never carries them.
 struct UndistortedIntrinsicsPolicy {
@@ -51,6 +54,7 @@ enum class HeldOutCoverage { NotReached, NoValidationView, AllViewsEvaluated, So
 constexpr std::string_view ObservationModelCode(ObservationModel model) {
     switch (model) {
     case ObservationModel::UndistortedAnalytic: return "undistorted-analytic";
+    case ObservationModel::DistortedAnalytic: return "distorted-analytic";
     }
     return {};
 }

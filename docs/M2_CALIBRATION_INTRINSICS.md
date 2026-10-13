@@ -26,7 +26,7 @@ UndistortedIntrinsicsResult EstimateUndistortedIntrinsics(
 | --- | --- |
 | minimum_views | 最低視点数。2〜128。#283へそのまま渡す |
 | relative_singular_cutoff | 特異値の相対判定値。有限で厳密に0より大きく1より小さい。#283へそのまま渡す |
-| observation_model | `UndistortedAnalytic` のみ。範囲外の値は不正 |
+| observation_model | `UndistortedAnalytic` のみ。範囲外の値は不正。`DistortedAnalytic`（値2）も不正で、[レンズ歪みの推定](M2_CALIBRATION_LENS.md)（#290）専用。値1は割り当てない |
 
 すべて必須で既定値はなく、sessionにも入れない。不正なpolicyは `std::invalid_argument("undistorted intrinsics: invalid policy")`（メッセージに値を含めない）。ほかに投げるのは `std::bad_alloc` だけ。sessionはParseを通った値なので、入力が原因の例外は構成上ない。投げた場合は欠陥として扱う。
 
@@ -138,7 +138,7 @@ viewごとの `outcome` は、最初に失敗した手順の理由（`insufficie
 
 ## 範囲外と段階3以降への申し送り
 
-今回含めないもの（interfaceも置いていない）: レンズ歪み、非線形の微調整（LM）、重み付け、外れ値除去、`UndistortedAnalytic` 以外のmodel、残差の閾値、JPEGの検出、OpenCV。
+レンズ歪みと非線形の微調整（LM）は#290で実装した（[レンズ歪みの推定](M2_CALIBRATION_LENS.md)）。この段階のAPIと結果は変えず、ここで求めた閉形式の結果を、その初期値に使う。今回含めないもの（interfaceも置いていない）: 重み付け、外れ値除去、`UndistortedAnalytic` 以外のmodel、残差の閾値、JPEGの検出、OpenCV。
 
 段階3で扱う前提として、次を申し送る。
 

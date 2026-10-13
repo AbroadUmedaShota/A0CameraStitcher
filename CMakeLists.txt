@@ -390,6 +390,16 @@ if(MSVC)
 endif()
 a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_intrinsics)
 
+# Lens intrinsics by Levenberg-Marquardt from a distorted analytic session (#290).
+# STL and #289 only; no Win32, OpenCV, generator or profile reader.
+add_library(a0_m2_calibration_lens src/m2/calibration_lens.cpp)
+target_include_directories(a0_m2_calibration_lens PUBLIC src/m2/include)
+target_link_libraries(a0_m2_calibration_lens PUBLIC a0_m2_calibration_intrinsics)
+if(MSVC)
+    target_compile_options(a0_m2_calibration_lens PRIVATE /W4 /permissive- /EHsc /fp:precise)
+endif()
+a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_lens)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(m2_calibration_view_geometry_contracts tests/calibration_view_geometry_tests.cpp)
@@ -431,6 +441,28 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
             "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cal-i"
             -P "${CMAKE_SOURCE_DIR}/tests/calibration_intrinsics_isolation_tests.cmake")
+    add_executable(m2_calibration_lens_contracts tests/calibration_lens_tests.cpp)
+    target_link_libraries(m2_calibration_lens_contracts PRIVATE a0_m2_calibration_lens)
+    # src/m2 for the internal lens model header.
+    target_include_directories(m2_calibration_lens_contracts PRIVATE src/m2)
+    if(MSVC)
+        target_compile_options(m2_calibration_lens_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency m2_calibration_lens_contracts)
+    add_test(NAME m2_calibration_lens_contracts COMMAND m2_calibration_lens_contracts)
+    add_test(NAME m2_calibration_lens_link_isolation
+        COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cal-l"
+            -P "${CMAKE_SOURCE_DIR}/tests/calibration_lens_isolation_tests.cmake")
+    # Links the synthetic pair generator on purpose, to compare the distortion
+    # formula bit for bit. This executable is outside the calibration isolation.
+    add_executable(m2_calibration_lens_formula tests/calibration_lens_formula_tests.cpp)
+    target_link_libraries(m2_calibration_lens_formula PRIVATE a0_m2_synthetic_pair)
+    target_include_directories(m2_calibration_lens_formula PRIVATE src/m2)
+    if(MSVC)
+        target_compile_options(m2_calibration_lens_formula PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_calibration_lens_formula COMMAND m2_calibration_lens_formula)
 endif()
 if(BUILD_TESTING)
     add_executable(m2_stitch_evaluation_contracts tests/stitch_evaluation_tests.cpp)
