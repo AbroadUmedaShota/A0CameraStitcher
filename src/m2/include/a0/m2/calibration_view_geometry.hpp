@@ -42,6 +42,14 @@ constexpr std::string_view StatusCode(ViewGeometryStatus status) {
     return "numerical-failure";
 }
 
+// Image frame of the constraint rows: x' = (x - center_x) / scale, same for y.
+struct ConditionedConic {
+    std::array<double, 6> b; // [B11,B12,B22,B13,B23,B33]; unit 2-norm up to rounding; overall sign unspecified.
+    double center_x;         // (width - 1) / 2
+    double center_y;         // (height - 1) / 2
+    double scale;            // max(width, height) / 2
+};
+
 struct ViewGeometryAssessment {
     ViewGeometryStatus status;
     std::uint32_t view_count;
@@ -50,6 +58,10 @@ struct ViewGeometryAssessment {
     std::optional<std::array<double, 6>> singular_values; // Descending; normalized rows.
     std::optional<std::uint32_t> numerical_rank;
     std::uint32_t svd_sweeps;
+    // Right singular vector of the smallest singular value, from the same Jacobi
+    // decomposition as singular_values. Engaged only for LinearConstraintsSufficient.
+    // It is the null vector of the constraint rows, not an intrinsic estimate.
+    std::optional<ConditionedConic> conditioned_conic;
 };
 
 // Zhang's two linear constraints per plane + explicit zero-skew constraint.

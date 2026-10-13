@@ -1,6 +1,6 @@
 # draft校正の入出力設計案（#285、#277前段）
 
-この文書は次の実装を分けるための設計案。観測session（reader、validator、schema v1）は実装済み（#286、[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)）。検出器、solver、report/schema、draft writerはまだ実装していない。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。新しい欄名や失敗コードはこの文書だけでは製品契約にならない。
+この文書は次の実装を分けるための設計案。観測session（reader、validator、schema v1）は実装済み（#286、[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)）。歪みなしの観測からの内部パラメータとposeの閉形式推定も実装済み（#289、[内部パラメータ](M2_CALIBRATION_INTRINSICS.md)）。検出器、レンズ歪みのsolver、report/schema、draft writerはまだ実装していない。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。新しい欄名や失敗コードはこの文書だけでは製品契約にならない。
 
 ## 1. 既存契約と今回の境界
 
@@ -84,6 +84,7 @@ referenceのチャートは文書面と同じ平面上にあることを要件�
 | 不正なsession、画像hash不一致、未知/重複点ID、非有限値、同一画像の独立検証への流用 | 作らない |
 | insufficient-observations / ambiguous-correspondence | 作らない。view/点の欠損理由を残す |
 | #283の視点不足・縮退・不整合・numerical-failure | 作らない。特異値/rankの有無を保持 |
+| homography-unavailable / pose-unavailable | 作らない。どのviewが止めたかとその理由を残し、成功したviewの値は捨てない（#289） |
 | solver-nonconvergence / nonphysical-intrinsics / invalid-distortion / reference-placement-missing | 作らない。成功値にclampしない |
 | validation-not-evaluated / provenance-contract-unresolved | この案では作らない。検証や来歴を省いて成功にしない |
 | draft-produced | 両カメラの校正値と記録がそろい、既存strict reader/schemaに通るdraftのみ |
@@ -95,7 +96,7 @@ referenceのチャートは文書面と同じ平面上にあることを要件�
 依存順に一つずつIssue化する。各段階で実装済みの範囲だけを完了とする。
 
 1. 観測sessionのpure reader/validatorとschemaを定義。有限値、点対応、役割と画像結合、共線/重複、資源上限、校正と検証の分離を正負fixtureで検査。真値に依存しないpublic APIを作る。実装済み（#286）。契約は[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)。
-2. 歪みなしの解析的な多視点観測からのK/pose推定を独立の既知幾何で検算。#283へ観測Hを接続し、正面/同じ傾き/異なる傾き/不整合を区別。真値Hの注入を経路分離で防ぐ。
+2. 歪みなしの解析的な多視点観測からのK/pose推定を独立の既知幾何で検算。#283へ観測Hを接続し、正面/同じ傾き/異なる傾き/不整合を区別。真値Hの注入を経路分離で防ぐ。実装済み（#289）。契約は[内部パラメータ](M2_CALIBRATION_INTRINSICS.md)。結果は「解析的観測・歪みなし」で、校正の成功ではない。#277は閉じない。
 3. 採用する開発用ライブラリの版/module/ライセンスと製品非同梱の境界を具体化してから、レンズ推定とJPEG検出を接続。pure入力の試験とJPEG end-to-end試験を区別。歪みなし→歪みあり→ノイズありの順で未使用点への再投影を測る。
 4. reference pair/配置から固定文書写像を求める。異なる学習poseを固定写像に選んだ誤り、reference欠損、片方の失敗を負の対照にし、いずれもprofile非発行を確認。
 5. 上記のprovenance/残差集計の判断を正本へ反映した後、report/draft writerを実装。既存C++ strict reader、schema、.NET fingerprint、#273との接続と非上書きIOを検証。approved欄の混入は拒否。

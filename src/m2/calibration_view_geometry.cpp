@@ -1,14 +1,13 @@
 #include "a0/m2/calibration_view_geometry.hpp"
 
 #include "calibration_exact_predicates.hpp"
+#include "calibration_jacobi.hpp"
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -21,12 +20,8 @@ using Homography = std::array<double, 9>;
 using exact_detail::ExactNonzeroDeterminant;
 using Column = std::array<double, 3>;
 using Row = std::array<double, 6>;
-using Constraints = std::vector<Row>;
+using Constraints = jacobi_detail::Matrix<6>;
 constexpr std::uint32_t maximum_views = 128;
-constexpr std::uint32_t maximum_sweeps = 128;
-constexpr double epsilon = std::numeric_limits<double>::epsilon();
-constexpr double correlation_tolerance = 8 * epsilon;
-constexpr double unresolved_tail_resolution = 16 * epsilon;
 
 [[noreturn]] void Invalid() {
     throw std::invalid_argument("invalid calibration view geometry input");
@@ -52,6 +47,15 @@ void ValidateHomography(const Homography& original) {
     if (!ExactNonzeroDeterminant(original)) Invalid();
 }
 
+// Image frame of the constraint rows. The same values are reported with the
+// null vector, so the caller can map conditioned coordinates back to pixels.
+struct ImageFrame { double center_x, center_y, scale; };
+ImageFrame FrameOf(const ViewGeometryOptions& options) {
+    return {(static_cast<double>(options.image_width) - 1) * .5,
+        (static_cast<double>(options.image_height) - 1) * .5,
+        static_cast<double>(std::max(options.image_width, options.image_height)) * .5};
+}
+
 std::array<Column, 2> ConditionColumns(const Homography& matrix, const ViewGeometryOptions& options) {
     std::array<Column, 2> columns{{{matrix[0], matrix[3], matrix[6]}, {matrix[1], matrix[4], matrix[7]}}};
     double scale = 0;
@@ -60,9 +64,8 @@ std::array<Column, 2> ConditionColumns(const Homography& matrix, const ViewGeome
     // Both columns share each scale. Independent unit normalization would
     // remove their relative magnitude and corrupt the v11-v22 equation.
     for (auto& column : columns) for (auto& value : column) value /= scale;
-    const auto center_x = (static_cast<double>(options.image_width) - 1) * .5;
-    const auto center_y = (static_cast<double>(options.image_height) - 1) * .5;
-    const auto image_scale = static_cast<double>(std::max(options.image_width, options.image_height)) * .5;
+    const auto frame = FrameOf(options);
+    const auto center_x = frame.center_x, center_y = frame.center_y, image_scale = frame.scale;
     for (auto& column : columns) {
         column[0] = std::fma(-center_x, column[2], column[0]) / image_scale;
         column[1] = std::fma(-center_y, column[2], column[1]) / image_scale;
@@ -89,93 +92,6 @@ Row UnitRow(Row row) {
     return row;
 }
 
-double ColumnNorm(const Constraints& matrix, std::size_t column) {
-    double norm = 0;
-    for (const auto& row : matrix) norm = std::hypot(norm, row[column]);
-    return norm;
-}
-double Correlation(const Constraints& matrix, std::size_t p, std::size_t q, double p_norm, double q_norm) {
-    // Compensated summation of unit-column products avoids squaring the
-    // condition number and is safe even for a very small nonzero column.
-    double sum = 0, correction = 0;
-    for (const auto& row : matrix) {
-        const auto term = (row[p] / p_norm) * (row[q] / q_norm);
-        const auto adjusted = term - correction;
-        const auto next = sum + adjusted;
-        correction = (next - sum) - adjusted;
-        sum = next;
-    }
-    return sum;
-}
-std::array<double, 6> Norms(const Constraints& matrix) {
-    std::array<double, 6> norms{};
-    for (std::size_t column = 0; column < norms.size(); ++column) norms[column] = ColumnNorm(matrix, column);
-    return norms;
-}
-bool Orthogonal(const Constraints& matrix, bool& unresolved_tail) {
-    const auto norms = Norms(matrix);
-    const auto largest = *std::max_element(norms.begin(), norms.end());
-    if (!std::isfinite(largest) || !(largest > 0)) return false;
-    for (std::size_t p = 0; p < 5; ++p) for (std::size_t q = p + 1; q < 6; ++q) {
-        if (norms[p] == 0 || norms[q] == 0) continue;
-        const auto correlation = Correlation(matrix, p, q, norms[p], norms[q]);
-        if (!std::isfinite(correlation)) return false;
-        if (std::abs(correlation) <= correlation_tolerance) continue;
-        if (norms[p] <= epsilon * largest || norms[q] <= epsilon * largest) unresolved_tail = true;
-        else return false;
-    }
-    return true;
-}
-struct Spectrum {
-    bool converged{};
-    bool unresolved_tail{};
-    std::array<double, 6> values{};
-    std::uint32_t sweeps{};
-};
-Spectrum Jacobi(Constraints matrix) {
-    Spectrum result;
-    for (std::uint32_t sweep = 1; sweep <= maximum_sweeps; ++sweep) {
-        result.sweeps = sweep;
-        for (std::size_t p = 0; p < 5; ++p) for (std::size_t q = p + 1; q < 6; ++q) {
-            const auto norms = Norms(matrix);
-            const auto largest = *std::max_element(norms.begin(), norms.end());
-            const auto p_norm = norms[p], q_norm = norms[q];
-            if (!std::isfinite(largest) || !(largest > 0)) return result;
-            // The epsilon floor only controls termination of roundoff-sized
-            // null columns. Their actual norms are retained in the spectrum;
-            // no caller-policy cutoff is used until numerical work is done.
-            if (p_norm <= epsilon * largest || q_norm <= epsilon * largest) continue;
-            const auto correlation = Correlation(matrix, p, q, p_norm, q_norm);
-            if (!std::isfinite(correlation)) return result;
-            if (std::abs(correlation) <= correlation_tolerance) continue;
-            const auto scale = std::max(p_norm, q_norm);
-            const auto a = p_norm / scale, b = q_norm / scale;
-            const auto delta = b * b - a * a;
-            const auto cross = correlation * a * b;
-            const auto denominator = delta + std::copysign(std::hypot(delta, 2 * cross), delta);
-            if (cross == 0 || denominator == 0 || !std::isfinite(denominator)) return result;
-            const auto tangent = (2 * cross) / denominator;
-            const auto cosine = 1 / std::hypot(1.0, tangent), sine = tangent * cosine;
-            if (!std::isfinite(cosine) || !std::isfinite(sine)) return result;
-            for (auto& row : matrix) {
-                const auto old_p = row[p], old_q = row[q];
-                row[p] = std::fma(-sine, old_q, cosine * old_p);
-                row[q] = std::fma(sine, old_p, cosine * old_q);
-                if (!std::isfinite(row[p]) || !std::isfinite(row[q])) return result;
-            }
-        }
-        bool unresolved_tail = false;
-        if (Orthogonal(matrix, unresolved_tail)) {
-            result.values = Norms(matrix);
-            if (!std::all_of(result.values.begin(), result.values.end(), [](double value) { return std::isfinite(value) && value >= 0; })) return result;
-            std::sort(result.values.begin(), result.values.end(), [](double a, double b) { return a > b; });
-            result.converged = true;
-            result.unresolved_tail = unresolved_tail;
-            return result;
-        }
-    }
-    return result;
-}
 } // namespace
 
 ViewGeometryAssessment AssessViewGeometry(std::span<const ViewHomography> views, const ViewGeometryOptions& options) {
@@ -198,10 +114,10 @@ ViewGeometryAssessment AssessViewGeometry(std::span<const ViewHomography> views,
     // Centering and isotropic image scaling preserve zero skew. This is the
     // explicit linear B12=0 constraint, not an intrinsic estimate or profile.
     constraints.push_back({0, 1, 0, 0, 0, 0});
-    const auto spectrum = Jacobi(std::move(constraints));
+    const auto spectrum = jacobi_detail::OneSidedJacobi<6>(std::move(constraints));
     ViewGeometryAssessment assessment{ViewGeometryStatus::NumericalFailure, static_cast<std::uint32_t>(views.size()), std::nullopt, std::nullopt, spectrum.sweeps};
     if (!spectrum.converged || (spectrum.unresolved_tail
-        && options.relative_singular_cutoff <= unresolved_tail_resolution)) return assessment;
+        && options.relative_singular_cutoff <= jacobi_detail::kUnresolvedTailResolution)) return assessment;
     const auto threshold = options.relative_singular_cutoff * spectrum.values[0];
     std::uint32_t rank = 0;
     for (const auto value : spectrum.values) if (value > threshold) ++rank;
@@ -210,6 +126,12 @@ ViewGeometryAssessment AssessViewGeometry(std::span<const ViewHomography> views,
     else if (rank == 5) assessment.status = ViewGeometryStatus::LinearConstraintsSufficient;
     else if (rank == 6) assessment.status = ViewGeometryStatus::InconsistentLinearConstraints;
     else assessment.status = ViewGeometryStatus::InsufficientDiversity;
+    if (assessment.status == ViewGeometryStatus::LinearConstraintsSufficient) {
+        // Rank 5 leaves exactly one column below the cutoff, so the right
+        // singular vector of the smallest value is unique up to sign.
+        const auto frame = FrameOf(options);
+        assessment.conditioned_conic = ConditionedConic{spectrum.vectors[5], frame.center_x, frame.center_y, frame.scale};
+    }
     return assessment;
 }
 } // namespace a0::m2::calibration

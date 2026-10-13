@@ -6,7 +6,7 @@
 
 ## 数学と入力の意味
 
-Zhang の [A Flexible New Technique for Camera Calibration](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/tr98-71.pdf) の3.1節に従う。入力Hは文書mmから歪みのない保存順pixelへの3×3 homography（行優先）。同一カメラ・同一の内部パラメータの視点をまとめる。接続時は検出点から求めた観測Hを渡し、生成器の真値Hで代用しない。このlibraryは入力Hの来歴や観測誤差を検証しない。
+Zhang の [A Flexible New Technique for Camera Calibration](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/tr98-71.pdf) の3.1節に従う。入力Hは文書mmから歪みのない保存順pixelへの3×3 homography（行優先）。同一カメラ・同一の内部パラメータの視点をまとめる。型の名前は `document_to_image` のままだが、入力平面は文書面でなくチャート平面でもよい。[内部パラメータの推定](M2_CALIBRATION_INTRINSICS.md)（#289）は、チャートmmからpixelへのHを渡す。面内の回転・並進・等方scaleは線形制約を変えないので、metricな平面座標であれば何でもよい（異方scaleは対象外）。接続時は検出点から求めた観測Hを渡し、生成器の真値Hで代用しない。このlibraryは入力Hの来歴や観測誤差を検証しない。
 
 Hの第1・第2列を h1,h2 とし、6未知数を `[B11,B12,B22,B13,B23,B33]` の順で持つ。各視点から `v12` と `v11−v22` の2行を積み、ADR-0034のskew=0から `[0,1,0,0,0,0]` を1行追加する。入力がN視点なら行数は `2N+1`。十分な独立制約がある場合、6未知数の同次解はscaleを除いて一意となり、数値rankは5になる。
 
@@ -31,6 +31,10 @@ skew=0が明示されているため、異なる傾きの2視点でも足りる�
 視点不足でも計算できた特異値とrankを残す。視点0の場合も既知のskew制約の1行があるのでrankは1。数値失敗のときだけ特異値とrankをnullにする。入力検証は最低枚数の判定より先に行う。不正なHを「画像が少ない」で隠さない。
 
 128視点以下、各辺32768以下。IDは128文字以下の英数字・`_`・`-`で重複禁止。非有限・零・特異なHや不正なoptionは `invalid_argument`。Hの特異性は、入力binary64の仮数と指数を有限長整数として扱い、3×3行列式の6項の和を正確に比較する。浮動小数点のpivot誤差で、行列式0の入力が通ることを防ぐ。この厳密判定は内部header`src/m2/calibration_exact_predicates.hpp`にあり、[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)の共線判定と共有する。任意の非零scaleや文書単位の等方scaleで表される同じHは同じ線形制約を持つ。binary64への丸めが加わるため、数値判定は指定した許容の範囲で検証する。文書の異方scaleは別の問題なので、この不変性の対象にしない。
+
+結果の末尾の欄 `conditioned_conic` は、status が `linear-constraints-sufficient` のときだけ入る `std::optional`。判定に使った分解の、最小特異値に対応する右特異ベクトル `[B11,B12,B22,B13,B23,B33]`（2ノルム1、全体の符号は不定）と、条件付けに使った画像の中心 `((width−1)/2,(height−1)/2)`・等方scale `max(width,height)/2` を持つ。rankが5なら最小の特異値だけが判定値以下なので、この列は一意に決まる。内部パラメータそのものではなく、Kへの変換は[内部パラメータの推定](M2_CALIBRATION_INTRINSICS.md)が行う。既存の5欄の値は変えていない。
+
+Jacobi分解は内部header`src/m2/calibration_jacobi.hpp`へ移し、列数のtemplateにした（#289）。移した後も試験は `checks=607`、特異値と`svd_sweeps`はビット単位で変わらない。DLTの9×9とposeの3×3も同じ実装を使う。
 
 `linear-constraints-sufficient` はレンズ校正の成功を意味しない。Bの正定値性、物理的な内部パラメータ、レンズ係数、未使用点の再投影誤差、被覆、JPEG後の品質、rig/provenanceの妥当性は後続で検証する。異なるレンズや焦点距離を混ぜた入力が常にrank6になる保証もない。#277ではカメラ・撮影条件の同一性を別に確認する必要がある。
 
