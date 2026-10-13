@@ -171,7 +171,7 @@ Camera Agentは`%LOCALAPPDATA%\A0CameraStitcher\camera-agent\approved-single-cap
 - `--approved-capture-profile`は`a0.dual-capture-profile.operator-approved.v1`の承認profileで、画面からは作れません。正準サンプルは`tests/m3/OperatorShellTests/Program.cs`にあります。
 - `--dual-identity-proof`はこの経路ではパスだけを受け取り、中身を検証しません。何を置くべきかは※要確認です。
 - 撮影の前に、`A0CameraStitcher.DualCameraAgent.exe`の`--read-only-sdk-probe` → プロセス終了の確認 → `--read-only-wpd-probe --wpd-camera-map <map>` → `--read-only-coexistence-probe --wpd-camera-map <map>`を順に実行し、すべて`terminalState: Pass`であることを確かめます（[Phase 0試験計画](docs/PHASE0_TEST_PLAN.md)のP0-B1）。WPFはprobeの合否を確認しないため、手順として守ります。
-- 機体照合（CAM-A/Bの割当）は確定から5分で失効し、Agentは起動から10分で自然終了します。照合を確定したら続けて撮影し、閉じるときはAgentの終了を待ちます。
+- 機体照合（CAM-A/Bの割当）には確定からの期限はありません。ただしAgentは起動から10分で自然終了し、撮影を受け付けるのは起動から6分55秒までです（残り185秒が要るため）。照合を確定したら続けて撮影し、閉じるときはAgentの終了を待ちます。5分の期限は照合ではなく、撮影の主ボタンを押した時点で作る撮影開始スナップショットのものです。詳しくは[二台の撮影にかかわる時間の定義](docs/HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md#二台の撮影にかかわる時間の定義)を参照してください。
 - 結果は合成`Pending`、A0品質`Unapproved`です。合成と合成JPEGのexportは行いません。2026-10-06の実機結果は[現在の開発状況](docs/CURRENT_STATUS.md)を参照してください。
 - 撮影した原画像（CAM-A・CAM-B）を操作者が選んだこのPC内のフォルダへ保存する機能は#226で実装済みです。保存するのは撮影した原画像そのもので、合成JPEGのexportとは別です。実機での受入は#227で行います。
 

@@ -154,6 +154,19 @@ and both invalidate the session immediately. A TTL would be a second mechanism
 for a risk the first one already handles, and the untested one of the two is
 whichever fires second.
 
+## 二台の撮影にかかわる時間の定義
+
+二台の撮影にかかわるのは、次の表の 4 つ。照合（binding）そのものには期限が無く、長さのある時間は残りの 3 つ（撮影開始スナップショットの 5 分、Agent の寿命 600 秒、受付に要る残り 185 秒）である。ほかの文書で「5 分」「10 分」と書くときは、この節の定義を指す（2026-10-13、#294 で整理）。
+
+| 時間 | 起点と長さ | 切れたとき | 根拠 |
+| --- | --- | --- | --- |
+| 照合（binding） | 期限は無い。「確定から何分」という期限も無い。失効するのは事象のときだけ（USB・topology の事象、新しい session への置き換え、`cancel-binding`、`activate-capture` の終端、Agent の寿命の終わり） | 照合からやり直す | 上の「There is no per-session expiry」、`docs/PRODUCT_REQUIREMENTS.md` の FR-CAP-002、ADR-0025 |
+| 撮影開始スナップショット | 撮影の主ボタンを押した時点で WPF が作る。`observedAtUtc` が押した時刻、`expiresAtUtc` がその 5 分後。1 組モードは押すたびに作り、5 組の実行は押した 1 回で作って全組で共有する | 組の開始時に有効でなければ、撮影 ID を作る前に `IdentityNotReady` で返る。シャッターは切らない | `src/m3/OperatorShell/ViewModels/OperatorShellViewModel.cs` の `RunCaptureRecoveryOnlyAsync`（`AddMinutes(5)`）、判定は `src/m3/Foundation/DualCamera/DualCameraIdentity.cs` の `EvaluateAt` |
+| Agent の寿命 | Agent プロセスの起動から 600 秒（10 分）。延長しない。binding host と capture host が同じ寿命を共有する | Agent が自然に終わり、照合も消える（ADR-0028）。照合からやり直す | `src/phase0/include/a0/phase0/agent_host_lifetime.hpp` の `kDefaultBudgetMilliseconds`、C# の写しは `src/m3/OperatorShell/Hardware/DualCameraAgentLifecycle.cs` の `AgentMaxLifetime` |
+| capture host の撮影の受付 | 寿命の残りが 185 秒（transaction の watchdog 180 秒、応答 3 秒、後始末 2 秒）以上のときだけ受け付ける。受付の締切は Agent の起動から 415 秒（6 分 55 秒） | 撮影を受け付けない。シャッターは切らない | `src/phase0/dual_hardware_camera_agent.cpp` の `kDualMinimumHostAdmissionMilliseconds` と `HasSufficientHostAdmissionBudget`（カメラに触る前の確認の直前と、送り出しの直前に確かめる） |
+
+撮影できる時間を実際に決めるのは、Agent の寿命と受付の締切である。照合を確定した時刻では決まらない。撮影開始スナップショットの 5 分は、1 組モードでは押した直後に組を始めるので、足りなくなることはほぼ無いと見ている（※推定。記録は 1 件）。5 組の実行では、押してから 5 分以内に各組を始められるかに効く。
+
 ## Quiesce is the binding core's decision
 
 `confirm-alias` stops the Live View and closes the SDK session, then reports
