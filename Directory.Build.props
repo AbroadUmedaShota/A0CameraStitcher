@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <!-- Source paths in the PDBs (and so in stack traces printed by the tests and the app) are written relative to the
+         repository root, so a failure output pasted into a public Issue or log does not carry the absolute path of the
+         machine that built it (issue #266). The compiler maps the key as a prefix; the value is a fixed placeholder. -->
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+  </PropertyGroup>
+</Project>

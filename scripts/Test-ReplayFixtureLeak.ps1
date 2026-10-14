@@ -103,6 +103,8 @@ $script:PinnedImageSha256 = @(
     '7c6ff5ee413bf1eca56ecef055fbfe58e42af688c1c04d60342038af701a0eda'   # dual-cam-b
 )
 $script:PinnedImageDirectory = 'tests/fixtures/hardware-replay/images/'
+# This script, as the repository path whose hash list is compared between a commit and its parent (#266 L-4).
+$script:PinnedListScript = 'scripts/Test-ReplayFixtureLeak.ps1'
 # A decoded string shorter than this is a header, not a picture (the array of a JPEG header in code, say).
 # It stays below one line of wrapped base64 (48 bytes at 64 columns, 57 at 76) so that each line of a
 # wrapped picture is still checked on its own when joining the lines shifts the start of the picture.
@@ -541,6 +543,41 @@ function Get-HeadPinnedImageHashes {
     return , $hashes
 }
 
+# The pinned hash list of this script as committed at a revision (#266 L-4). The C# fixture check holds
+# the same list, but only this script is required before a push, and a change to both lists in one commit
+# passes both. So the push check itself reports a hash that a commit adds to this list.
+# Exists: the file is in that revision. Readable: the list was found and closed. Hashes: its 64 digit values.
+function Get-PinnedListAtRevision {
+    param([string]$Root, [string]$Revision)
+    $hashes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $lines = @(& git --no-replace-objects -C $Root -c core.quotepath=off show --no-textconv --no-ext-diff "${Revision}:$($script:PinnedListScript)" 2>$null)
+    if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Exists = $false; Readable = $false; Hashes = $hashes } }
+    $inList = $false; $closed = $false
+    foreach ($line in $lines) {
+        $text = [string]$line
+        if (-not $inList) {
+            if ($text -match '^\$script:PinnedImageSha256\s*=\s*@\(\s*$') { $inList = $true }
+            continue
+        }
+        if ($text -match '^\)\s*(#.*)?$') { $closed = $true; break }
+        foreach ($m in [regex]::Matches($text, '(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])')) { $null = $hashes.Add($m.Value) }
+    }
+    return [pscustomobject]@{ Exists = $true; Readable = $closed; Hashes = $hashes }
+}
+
+# $null when the commit does not widen the pinned list; otherwise the scope of the structural hit.
+# A hash the list gains, or a list that cannot be read (so that no comparison is possible), is a hit.
+# A parent that has no readable list counts as an empty list, so every hash then counts as added.
+function Get-PinnedListChange {
+    param([string]$Root, [string]$Commit)
+    $now = Get-PinnedListAtRevision $Root $Commit
+    if (-not $now.Exists) { return $null }
+    if (-not $now.Readable) { return 'pinned-list-unreadable' }
+    $before = Get-PinnedListAtRevision $Root "${Commit}^"
+    foreach ($h in $now.Hashes) { if (-not $before.Hashes.Contains($h)) { return 'pinned-list-changed' } }
+    return $null
+}
+
 function Add-DecodedBytesTargets {
     param($Targets, $Structural, [string]$Name, [string]$Kind, [byte[]]$Bytes, [bool]$NoImageCheck)
     if (-not $NoImageCheck -and $Bytes.Length -ge $script:MinEmbeddedImageBytes -and (Get-ImageKind $Bytes)) {
@@ -742,6 +779,13 @@ function Get-PublishTargets {
             if ($fields[0] -match '^[AMRC]' -and $fields[-1] -like '*.b64') { $b64Paths.Add($fields[-1]) }
         }
         Add-Target $targets "path $short" ($paths -join "`n") $null 'file-path'
+
+        # A commit that widens the pinned image hash list of this script is judged by a person (#266 L-4):
+        # the list decides which images the check lets through, and the C# copy is not required before a push.
+        if ($paths -contains $script:PinnedListScript) {
+            $listChange = Get-PinnedListChange $Root $c
+            if ($listChange) { $structural.Add([pscustomobject]@{ Scope = $listChange; Target = "$short $($script:PinnedListScript)"; Line = 0; Label = 'pinned' }) }
+        }
 
         $diff = (Invoke-Git $Root @('show', '--no-color', '--no-textconv', '--no-ext-diff', '--format=', '--unified=0', $c)) -join "`n"
         $file = $null; $newLine = 0; $inHunk = $false
@@ -1071,7 +1115,17 @@ function Invoke-SelfTest {
             $scenarios.Add([pscustomobject]@{ Name = $Name; Base = $script:prev; Head = $c; ExpectHit = $ExpectHit })
             $script:prev = $c
         }
+        # #266 L-4: a copy of the script with a pinned hash list of invented values. Only the list matters here;
+        # the self test never edits the real script.
+        $listA = 'a1' * 32; $listB = 'b2' * 32; $listC = 'c3' * 32; $listD = 'd4' * 32
+        $listFile = $script:PinnedListScript
+        $listText = {
+            param([string[]]$Hashes, [string]$Extra = '')
+            "# invented copy of the script`n$Extra" + '$script:PinnedImageSha256 = @(' + "`n" +
+                (($Hashes | ForEach-Object { "    '$_'   # label" }) -join "`n") + "`n)`n"
+        }
         & $write 'README.txt' 'seed'
+        & $write $listFile (& $listText @($listA, $listB))
         $script:prev = Commit 'seed'
 
         & $add 'plain added line' { & $write 'a.txt' "line one`nvalue is $needle here`n" } 'add a' $true
@@ -1205,6 +1259,17 @@ function Invoke-SelfTest {
         & $add 'clean base64 wrapped at 16 columns after a heading line' { & $write 'r9.md' "Frame`n$wrapClean`n" } 'add r9' $false
         & $add 'clean commit after the normalized forms'{ & $write 'p11.txt' "12 34 56 78`nnothing here`n" } 'add p11' $false
 
+        # #266 L-4: a commit that adds a hash to the pinned list of the script is a hit; removing one, or a change
+        # elsewhere in the script, is not. A list that cannot be read cannot be compared, so it is a hit as well.
+        & $add 'pinned list: the script changes elsewhere' { & $write $listFile (& $listText @($listA, $listB) "# note`n") } 'pinned 1' $false
+        & $add 'pinned list: a hash is added' { & $write $listFile (& $listText @($listA, $listB, $listC)) } 'pinned 2' $true
+        & $add 'pinned list: a hash is removed' { & $write $listFile (& $listText @($listA, $listC)) } 'pinned 3' $false
+        & $add 'pinned list: a hash is replaced' { & $write $listFile (& $listText @($listA, $listD)) } 'pinned 4' $true
+        & $add 'pinned list: the same hash in upper case' { & $write $listFile (& $listText @($listA.ToUpperInvariant(), $listD)) } 'pinned 5' $false
+        & $add 'pinned list: the list is gone from the script' { & $write $listFile "# no list here`n" } 'pinned 6' $true
+        & $add 'pinned list: the script is deleted' { Remove-Item -LiteralPath (Join-Path $tmp $listFile) } 'pinned 7' $false
+        & $add 'pinned list: the script is back with a list' { & $write $listFile (& $listText @($listA, $listD)) } 'pinned 8' $true
+
         foreach ($s in $scenarios) {
             $r = Invoke-LeakCheck -Root $tmp -Base $s.Base -Head $s.Head -SourceRoot '' -ExtraNeedle @($needle, $digits, 'zz&tail-needle-0002') `
                 -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $true 6>$null
@@ -1216,6 +1281,13 @@ function Invoke-SelfTest {
         $removed = ($scenarios | Where-Object { $_.Name -like 'needle removed*' }).Head
         $r = Invoke-LeakCheck -Root $tmp -Base $first -Head $removed -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $true 6>$null
         if ($r.Exit -ne 1) { $failures.Add('a needle removed in a later commit must still be found in the range') }
+        # The same for the pinned list: a hash added in one commit and removed in the next is still found over the range.
+        $listAdded = $scenarios | Where-Object { $_.Name -eq 'pinned list: a hash is added' }
+        $listRemoved = $scenarios | Where-Object { $_.Name -eq 'pinned list: a hash is removed' }
+        $r = Invoke-LeakCheck -Root $tmp -Base $listAdded.Base -Head $listRemoved.Head -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 1) { $failures.Add('a hash added to the pinned list and removed in a later commit must still be found in the range') }
+        $r = Invoke-LeakCheck -Root $tmp -Base $listRemoved.Base -Head $listRemoved.Head -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+        if ($r.Exit -ne 0) { $failures.Add('removing a hash from the pinned list must not be a hit') }
         # No sources and no needles: must refuse (exit 2), never report clean.
         $r = Invoke-LeakCheck -Root $tmp -Base $first -Head $removed -SourceRoot (Join-Path $tmp 'missing') -ExtraNeedle @() -ExtraPhotoRoot @() -IncludeChangedFiles $false -NoLocalSources $false 6>$null
         if ($r.Exit -ne 2) { $failures.Add('missing source data must give exit 2 (cannot verify)') }

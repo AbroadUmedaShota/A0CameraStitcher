@@ -11,6 +11,7 @@ using A0CameraStitcher.M3.Foundation.Hardware;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("source paths in stack traces are relative to the repository root", SourcePathsAreRelativeToRepositoryRootAsync),
     ("protocol serialization and rejection", ProtocolSerializationAndRejectionAsync),
     ("stitched seam navigation reads only an exact v2 manifest", StitchSeamNavigationManifestReaderAsync),
     ("operator review persists pending and accepted across restart", OperatorReviewPersistenceAsync),
@@ -93,6 +94,33 @@ static OperatorReviewRecord PendingReview() => new()
     ResultId = "result-1", TransactionId = "transaction-1", ReviewKind = "OriginalsOnly",
     State = "Pending", UpdatedAtUtc = new DateTimeOffset(2026, 9, 21, 0, 0, 0, TimeSpan.Zero),
 };
+
+// Issue #266: the failure output of the tests prints Exception.ToString(), whose stack frames carry the source
+// path from the PDB. Directory.Build.props maps the repository root to "/_/", so the path is not the absolute
+// path of the machine that built the test. The messages below do not repeat the path they found.
+static Task SourcePathsAreRelativeToRepositoryRootAsync()
+{
+    var file = new System.Diagnostics.StackTrace(fNeedFileInfo: true).GetFrame(0)?.GetFileName();
+    Check.True(file is not null, "The stack trace has no source file name (is the PDB next to the test binary?).");
+    Check.True(
+        file!.StartsWith("/_/tests/m3/FoundationTests/", StringComparison.Ordinal),
+        "A source path in a stack trace must be relative to the repository root (PathMap in Directory.Build.props).");
+
+    string thrown;
+    try
+    {
+        throw new InvalidOperationException("probe");
+    }
+    catch (InvalidOperationException exception)
+    {
+        thrown = exception.ToString();
+    }
+    var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    Check.True(
+        string.IsNullOrEmpty(profile) || !thrown.Contains(profile, StringComparison.OrdinalIgnoreCase),
+        "The text of an exception must not hold the user profile path.");
+    return Task.CompletedTask;
+}
 
 static async Task StitchSeamNavigationManifestReaderAsync()
 {
