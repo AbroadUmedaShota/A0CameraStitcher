@@ -2,6 +2,14 @@
 
 2026-09-21本人指示: STEP4（実写A0合成受入）までを今回の対象とし、受入反復は初回one-shotを含めて各系列最大5回へ変更する（ADR-0030）。旧ADRの10回/100回指定より本変更を優先する。過去の実機合格記録は履歴として保持する。
 
+2026-10-13の所有者の決定（#293。合成は後回しにし、それ以外は100%を目指す）:
+
+- D1: 合成ができるまでリリースしない。合成なしの二台は製品として出さず、二台は現在の評価経路（`CaptureRecoveryOnly`）のままとする。製品の位置づけを変えるADRは作らない。
+- D2: 配布は社内のPCだけとする。Nikon SDKは同梱せず、使用許諾に同意した利用者が各PCに置く（ADR-0007、`CON-004`の内容と矛盾しない。具体化を`CON-004`の本文に追記した）。
+- D3: 二台の実機受入は新しい系列で最大5組とする。USB抜去の合格線「削除0」は「抜去が原因の削除0」と読む。
+- D5: 実機日1を前倒しする。日程の決定であり、要件は変えない。
+- 二台のライブビューは、当面は`FR-LV-004`の形（選んだ側をLive、反対側を静止画。#291）、最終目標は`FR-LV-003`（#292）とする。撮影の後も同じ表示を使う#295は、#291の設計の確認（2026-10-13）で分けた後半であり、所有者の決定そのものではない。二台とも動く映像をMVPに含めるかは決まっていない（#234、`HG-0010`）。
+
 ## 1. 目的
 
 製品は、固定したNikon D810一台で静止平面原稿を一枚の原画像として撮影・保存する`SingleCamera`と、D810二台でA0級原稿を分割撮影して一枚の大画像へ合成する`DualCamera`を提供する。二台A0合成を主用途として維持しつつ、一台だけを用意できる環境でも撮影、Live View、read-only設定確認、結果確認、明示保存を安全に行える状態を目指す。
@@ -17,7 +25,7 @@
 - active transaction中は操作者も物理シャッターを操作せず、active modeがその段階で処理するcameraをPhase 0ツールが排他的に使用する。
 - JPEG Fine Lを使用する。
 - ハードウェア同期装置は使用しない。
-- 現行のNikon Camera Remote SDK経路ではsessionを同時に1台だけ開く。二台同時Live Viewは、ADR-0031のSDK capability・安全性gateを満たすまで有効化しない。注: 二worker Live View試作は開発用のCMake option `A0_BUILD_DUAL_PREVIEW_POC`（SDK有効ビルドでは既定OFF）の下に置く実験であり、本要件上の有効化には当たらず、gate未達の間の実機表示は各回の人の承認に限る。
+- 現行のNikon Camera Remote SDK経路ではsessionを同時に1台だけ開く。二台同時Live Viewは、ADR-0031のSDK capability・安全性gateを満たすまで有効化しない。注: 二worker Live View試作は開発用のCMake option `A0_BUILD_DUAL_PREVIEW_POC`（SDK有効ビルドでは既定OFF）の下に置く実験であり、本要件上の有効化には当たらず、gate未達の間の実機表示は各回の人の承認に限る。二台モードの当面のライブビュー（`FR-LV-004`）は、同時に開くSDK sessionを1つのままにして、選んだ側をLive、反対側を静止画で見せるもので、二台同時Live Viewには当たらない。
 
 ## 3. 機能要件
 
@@ -25,21 +33,23 @@
 
 - `FR-MODE-001`: active transaction外で`SingleCamera`または`DualCamera`を明示選択し、mode、required camera aliases、profile IDをtransaction開始時に固定できる。active中のmode変更、接続台数からのmode推定、および`DualCamera`から`SingleCamera`への自動降格を禁止する。
 - `FR-CAP-001`: 接続されたD810を列挙し、active modeが要求するaliasをfail closedで解決できる。初期`SingleCamera`は`CAM-A`だけを対象とし、登録済みWPD serial digestとSDK/WPD各exactly-one current-session projectionを要求する。`DualCamera`はAgent session開始時にSDK candidate source objectが厳密に二つであることを確認し、二候補を同時表示せず一台ずつLive View表示して、操作者が各候補を`CAM-A`または`CAM-B`へexactly onceで明示割当する。同一候補の二重割当、候補数が二以外、alias不足、Live View停止またはSDK source/capture session closeを確認できない場合はbindingを拒否する。ADR-0028のcontrolled `CaptureRecoveryOnly`だけは、source/capture sessionを閉じた後のopaque binding token保持だけを目的にSDK Moduleを残せる。
-- `FR-CAP-002`: `SingleCamera`はWPD serial digestを永続identity、SDKを`exactly-one-current-session`選択として扱い、SDKの衝突するName/Interfaceを永続化しない。`DualCamera`の承認済みrelaxationは、candidate source object、candidate ordinal、列挙順、USB portを永続identityにせず、同じAgent sessionのmemory-only `DualIdentitySessionBinding`としてだけ`CAM-A/B`を保持する。Agent restart、USB reconnect、camera countまたはtopology変化、SDK manager再生成、任意のSDK error、またはWPD cleanup未確認で即時invalidにして、再binding完了までは`HardwarePending`とする。WPD cleanup未確認時はSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を上位へ返す。このinvalidationとAgent/binding-session terminal teardownではSDK Moduleをunloadする。WPD cleanup確認済みの有効bindingだけをpair terminal後も保持し、同一Agent-sessionの連続runでは再列挙しない。同一bindingの反復runnerはADR-0030の最大5回を上限とする。100回runnerの製品接続は今回の受入条件から外す。既定600秒はserver/request稼働時間予算であり、processの強制終了時刻ではない。安全な終了処理が予算を超える可能性があり、連続試験との適合を示す実機証拠は未取得である。最大5回の実機実施と合格には`FR-CAP-007`の段階gateを満たすことを要求する。Single identityをDualへ流用しない。安定した`a0.camera-agent.hardware-dual.v2`の既存payload/result shapeは変更せず、binding専用`a0.camera-agent.hardware-dual-binding.v1`とCaptureRecoveryOnly開始・同一ID照会・終了専用`a0.camera-agent.hardware-dual-capture-recovery-only.v1`を分離する。v2 capabilitiesにはCaptureRecoveryOnly操作名だけをadditiveに広告する。
+- `FR-CAP-002`: `SingleCamera`はWPD serial digestを永続identity、SDKを`exactly-one-current-session`選択として扱い、SDKの衝突するName/Interfaceを永続化しない。`DualCamera`の承認済みrelaxationは、candidate source object、candidate ordinal、列挙順、USB portを永続identityにせず、同じAgent sessionのmemory-only `DualIdentitySessionBinding`としてだけ`CAM-A/B`を保持する。Agent restart、USB reconnect、camera countまたはtopology変化、SDK manager再生成、任意のSDK error、またはWPD cleanup未確認で即時invalidにして、再binding完了までは`HardwarePending`とする。WPD cleanup未確認時はSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を上位へ返す。このinvalidationとAgent/binding-session terminal teardownではSDK Moduleをunloadする。WPD cleanup確認済みの有効bindingだけをpair terminal後も保持し、同一Agent-sessionの連続runでは再列挙しない。同一bindingの反復runnerはADR-0030の最大5回を上限とする。100回runnerの製品接続は今回の受入条件から外す。既定600秒はserver/request稼働時間予算であり、processの強制終了時刻ではない。安全な終了処理が予算を超える可能性があり、連続試験との適合を示す実機証拠は未取得である。最大5回の実機実施と合格には`FR-CAP-007`の段階gateを満たすことを要求する。Single identityをDualへ流用しない。安定した`a0.camera-agent.hardware-dual.v2`の既存payload/result shapeは変更せず、binding専用`a0.camera-agent.hardware-dual-binding.v1`とCaptureRecoveryOnly開始・同一ID照会・終了専用`a0.camera-agent.hardware-dual-capture-recovery-only.v1`を分離する。v2 capabilitiesにはCaptureRecoveryOnly操作名だけをadditiveに広告する。照合（binding）には確定からの期限は無く、失効の事象の正本は[HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md](HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md)とする。撮影開始スナップショットの5分、Agentの寿命600秒、撮影の受付に要る残り185秒の定義は[二台の撮影にかかわる時間の定義](HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md#二台の撮影にかかわる時間の定義)に従う（#294）。
 - `FR-CAP-003`: 2026-08-06に承認されたdedicated single-slot spoolをactive modeが要求する各cameraで使い、`SDK exactly-one card capture → WPD exact-one recovery → PC原本の再読込検証までの確定 → just-recovered object delete → empty-after確認`を完了する。`SingleCamera`は選択alias一台で完了する。`DualCamera`は再列挙せずsession bindingが保持するsource objectを`CAM-A`後に`CAM-B`の順で処理し、各aliasに対応するWPD objectをexactly oneで回収する。
 - `FR-CAP-004`: device datetime cutoffによる画像帰属は採用しない。専用empty/cleared cardをsingle-slot transient spoolとして使い、撮影前にJPEG・NEF・動画・generic fileなど全camera payload objectが0件であることを確認し、SDK one capture後の唯一のexact JPEG objectをWPDで回収できる。PC `.partial`、JPEG・size検証、SHA-256、atomic rename、`original.jpg`再読込検証後に限り、そのobjectだけを削除して全payload 0件を再確認する。候補0件・複数件・遅延・曖昧画像、download/persist/delete失敗は削除せず、PC原本があれば保持して`FailedPartial`にする。`DualCamera`で対応するWPD aliasからexactly oneを回収できない場合も`FailedPartial`とし、他aliasの探索、他objectの削除、自動retryを行わない。
 - `FR-CAP-005`: modeにかかわらず同時に一つのcapture transaction、一つのSDK source/capture session、または一つのWPD sessionだけを開く。SDK source/capture sessionとWPD sessionを重複させず、WPD access前に全Live ViewとSDK source/capture sessionをcloseする。ADR-0028のcontrolled Dual `CaptureRecoveryOnly`だけはModuleをmemory-only binding tokenのために保持できるが、WPD open中のSDK API、Live View、capture、enumeration、settings writeはすべて禁止し、WPD close後までSDK operationを開始しない。
 - `FR-CAP-006`: タイムアウト、USB切断、片側失敗、曖昧画像を検出し、自動再試行せず、取得済み原画像と診断情報を保持して`FailedPartial`で終了できる。
 - `FR-CAP-007`: 製品責任者がDual実機の撮影・回収方式を評価する目的で明示承認した場合に限り、承認済みrig profileなしで`CaptureRecoveryOnly`を開始できる。この経路もcurrent-sessionの`DualIdentitySessionBinding=Ready`、承認済みread-only capture profile、全Live View停止・SDK source/capture session close、ADR-0028のModule保持共存probe合格、pair-level exact-two/alias 1:1/両card empty/全WPD close preflight、CAM-A→CAM-B、canonical PC原本検証、exact-object cleanup、180秒watchdog、no retryを必須とする。WPD cleanup未確認時はSDK API（`End`を含む）を呼ばずAgentを隔離・terminal化し、失効理由を上位へ返して再bindingを必須とする。production adapterのpair-level preflight、read-only coexistence probe、CaptureRecoveryOnly backend・WPF経路を検証した後、対象と候補を照合して実機試験を行う。ADR-0030により最初のone-shotを含む一つの系列を最大5組とし、最初の失敗・未確定・割当失効で停止する。初回成功を確認して残りの組へ進み、6組目・補充撮影・自動retryを行わない。5標本の全時間値・最大値を記録し、p95は小標本の記述統計に限る。100組への昇格工程は要求しない。software合格を実機受入や性能承認へ読み替えない。rig profileを入力・偽装せず、合成・再合成・製品exportを開始せず、結果を`StitchOutcome=Pending`かつA0品質未承認として記録する。通常の`start-reserved-pair`はv2 payload/result shapeを維持し、ADR-0028例外の対象外であるproduction binding hostでは既存shapeの`PairDispatcherUnavailable`を返す。CaptureRecoveryOnlyの開始・同一ID照会・終了は別schema `a0.camera-agent.hardware-dual-capture-recovery-only.v1`を使う。ADR-0032で解釈を確定（2026-10-07）: 「組」はtransaction作成で数え、#226の保持済み原画像のbyte-identicalな書き出しは「製品export」に当たらない。
+  二台の正常系列は#227の実機日に5組目（カメラ側の拒否`OutOfFocus`）で不合格となった。所有者の決定（#227、2026-10-13 #293 D3）により、二台の実機受入は新しい系列で最大5組として行う。
 - `FR-LV-001`: `SingleCamera`の`CAM-A`または`DualCamera`で選択した一台について、Nikon SDK経由の対話的Live View開始、継続frame取得、停止を実行できる。Dual session bindingでは二候補を一台ずつ表示し、candidate ordinalはそのsession内だけで使用する。有限probeを継続Live Viewの合格証拠にせず、プレビュー画像は原画像・合成入力・撮影transactionの候補または保存証拠に使用しない。
 - `FR-LV-002`: 承認済みspool transaction前に選択中Live Viewの停止とSDK source/capture session closeを確認する。SDK one capture、WPD recovery、PC `original.jpg`の再読込検証までの確定、single-object delete、empty-after確認が成功した後だけ、操作者が選択していた一台のSDK Live Viewを再開できる。ADR-0028のModule保持中もWPD open中のLive View再開は認めない。
-- `FR-LV-003`: 将来の`DualCamera`は、SDK vendor documentationと実機PoCで二つの独立したsource/capture sessionによるLive View同時取得が安全に確認された場合に限り、CAM-AとCAM-Bを左右に並べた横長の確認画面を提供できる。各paneにはalias、`Live`/`映像停止`、最終frame受信時刻を表示し、片側停止を両側のLive表示または成功として偽装しない。厳密なframe同期、リアルタイム合成、previewの原画像・合成入力への採用は保証しない。実装・有効化の前に、二台開始/停止/例外/USB切断/撮影handoffで全sessionを停止・closeできること、WPD open中のSDK operation 0、binding再確認、capture transactionとの排他、および最大5回の明示承認済み実機検証を満たす。
+- `FR-LV-003`: 将来の`DualCamera`は、SDK vendor documentationと実機PoCで二つの独立したsource/capture sessionによるLive View同時取得が安全に確認された場合に限り、CAM-AとCAM-Bを左右に並べた横長の確認画面を提供できる。各paneにはalias、`Live`/`映像停止`、最終frame受信時刻を表示し、片側停止を両側のLive表示または成功として偽装しない。厳密なframe同期、リアルタイム合成、previewの原画像・合成入力への採用は保証しない。実装・有効化の前に、二台開始/停止/例外/USB切断/撮影handoffで全sessionを停止・closeできること、WPD open中のSDK operation 0、binding再確認、capture transactionとの排他、および最大5回の明示承認済み実機検証を満たす。所有者は2026-10-13にこの目標（二台とも動く映像）を確認した（#292）。実現方式（1つのSDKを2プロセスで使う、HDMI出力の取り込み、WPD経由のPTPライブビュー命令）は決まっていない。HDMIの案はUSBだけの境界を、WPD経由の案はvendor operationを範囲外とする要件とADRを変えるため、どちらも改定を要する。MVPに含めるかは決まっていない（#234、`HG-0010`）。
+- `FR-LV-004`: `DualCamera`の当面のライブビューとして、左右のpaneのうち操作者が選んだ1台をLive、反対側をそのカメラの最終frameの静止画で表示し、静止画の側には受信時刻を出す。「両方を更新」ボタンを押した時だけ1台ずつframeを取り直し、選んでいた側のLiveに戻る。自動の交互表示はせず、画面に「同時」「同期」とは書かない。同時に開くSDK sessionは1つのままとし（`FR-CAP-005`、ADR-0031）、previewを撮影・合成の入力や保存の証拠に使わない。撮影の後も同じ表示を使えるようにする（#295。#291の設計の確認（2026-10-13）で分けた後半で、所有者の決定が及ぶのは#291の当面の形まで）。所有者の決定（2026-10-13、#234、#291）。MVPの区分（`mvp=true`、優先度must）は所有者が決めたものではない。所有者の方針（2026-10-13、#293）で合成を除く100%の範囲に#291が入るため、`mvp=true`と置いた（※仮定）。ADR-0025・ADR-0031・[操作者画面仕様](OPERATOR_UI_SPEC.md)の改定と実装は#291・#295で行う（※未実装）。静止画が前の原稿を写している可能性がある時の扱い（注意の表示だけにするか、2段階の操作にするか）は決まっていない（`HG-0011`）。
 
 #### 実装状況と生成記録の区分（2026-09-12）
 
 上記の実装状況は、PR #184/#185後のコードと[開発状況](CURRENT_STATUS.md)、[Phase 0Bの試験ゲート](PHASE0_TEST_PLAN.md#phase-0b-二台順次撮影)に基づく。実機確認待ちは維持し、この文書更新自体を撮影再開の承認としない。10回runnerの実装は、実機受入や100回runnerの完成を意味しない。
 
-[正規化要件](../.autodev/requirements/normalized.json)と[計画](../.autodev/plan.json)には、2026-08-31生成時点の「one-shot前まで・10/100 runner未実装・固定600秒との両立未解決」という説明が残る。現在の実装状況とは不一致であり、一貫した再正規化と再計画は別の未完了作業とする。将来の受入条件であるmode別p95承認、100/100初回成功、既存のhuman／transport gateは縮小・完了扱いにしない。
+[正規化要件](../.autodev/requirements/normalized.json)、[計画](../.autodev/plan.json)、[未決事項](../.autodev/requirements/unresolved_questions.json)は、2026-10-14にADR-0030・ADR-0032と2026-10-13の所有者の決定に合わせて再正規化した（#297）。それまで残っていた「one-shot前まで・10/100 runner未実装」という2026-08-31生成時点の説明は解消した。ADR-0030により100/100初回成功は今回の受入条件ではない。mode別の全時間値・最大値の記録と、既存のhuman／transport gateは縮小・完了扱いにしない。
 
 #### PC直接保存の評価境界（2026-09-16）
 
@@ -63,7 +73,7 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - `FR-EXP-001`: `DualCamera`では合成JPEGを指定フォルダへ保存できる。`SingleCamera`では検証済み`7360×4912` canonical `original.jpg`をbyte-identicalな単一撮影出力として、操作者が選択したfixed-local folderへ明示保存できる。network、UNC、device path、ADS、removable、reparse chainを拒否し、合成済みとは表示しない。
 - `FR-UI-001`: 一画面の撮影ダッシュボードで、明示選択したmode、起動セッションの排他同意、modeが要求するcameraの接続・identity・設定・card・Live View状態、profile ID・版・期限、設置と自動補正可否、mode別処理進捗、撮影・合成・保存を分離した結果、赤Blocker・黄Caution・青Infoを表示できる。`SingleCamera`で非required cameraの不在をBlockerにしない。
 - `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。標準導線は「位置合わせ → 撮影 → 詳細確認 → 採用 → 次の原稿」とし、撮影後は結果確認へ移動して明示操作まで留まる。原画像は採用前に自動保存し、保存済み・合成完了・人の採用済みを分離する。採用記録の成功後だけ次の準備へ進み、撮り直しは旧画像を保持した新しい撮影IDで行う。CaptureRecoveryOnlyでは原画像の確認であり、合成・A0品質の採用とは扱わない。設置・校正、read-onlyカメラ設定、結果確認後の明示書き出し、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。画面配置・状態契約は[操作者画面仕様](OPERATOR_UI_SPEC.md#2026-09-21-改訂設計撮影ごとの詳細確認)に従う。本改訂は設計合意であり実装完了ではない。
-- `FR-UI-003`: 現行の一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。ADR-0031 gateが未達の間、二台同時Live Viewは操作可能に見せない。gate達成後の二台表示では、左右各paneのalias・Live/停止・最終frame時刻を表示する。previewを原画像・合成入力として扱わない。
+- `FR-UI-003`: 現行の一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。ADR-0031 gateが未達の間、二台同時Live Viewは操作可能に見せない。gate達成後の二台表示では、左右各paneのalias・Live/停止・最終frame時刻を表示する。gate未達の間の二台モードの表示は`FR-LV-004`に従う。previewを原画像・合成入力として扱わない。
 
 ## 4. 非機能要件
 
@@ -72,14 +82,14 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - `NFR-REL-001`: ADR-0030によりSingleCameraとDualCameraそれぞれ最大5回の初回試行で受入を確認する。予定5回が全て成功し、誤pair・原画像消失・曖昧画像採用・retry・回復不能停止が0件であることを要求する。最初の失敗で停止し、不足分を補充しない。mode間で結果を代用しない。100回相当の耐久性は主張しない。ADR-0032で改定（2026-10-07）: 試行はtransaction作成で数え、シャッター0のソフト起因の拒否は条件付きで回数の予算に数え合否に数えない。
 - `NFR-OBS-001`: mode、required aliases、Live View開始・初回frame・停止、WPD baseline/open/close/reopen、SDK card capture/open/close、画像検出、転送、`.partial`、JPEG・size検証、SHA-256、原子的保存、再読込検証、single-object delete、empty-after、Live View再開、合成または`NotApplicable`理由、export、エラーの時刻を記録する。ADR-0028のcontrolled Dual経路では、SDK Module retained、SDK source/capture session close、WPD open/close、Agent/binding-session terminal Module unload、coexistence probeの結果とWPD open中SDK operation 0を匿名で記録する。datetime診断結果、handoffの要求数・試行数・完了数・終端状態、WPD capture command未送信に加え、profile ID・版、baseline校正残差、提案・適用・拒否した一時補正量、拒否理由を確認可能にする。Dual bindingの公開・保存可能な証拠は匿名alias、provider、version、`confirmedAt`、`invalidationReason`だけとする。
 - `NFR-SEC-001`: 原画像と履歴をローカル保存し、MVPではクラウド送信しない。実識別子とSDK配布物をコミットしない。Dual bindingのpreview、raw identifier、serial、source objectまたはcandidate ordinalを保存・公開しない。
-- `NFR-MEM-001`: 推奨32GB、最低16GBのPCでピークメモリを計測し、上限を実機PoCで確定する。
+- `NFR-MEM-001`: 推奨32GB、最低16GBのPCでピークメモリを計測し、上限を実機PoCで確定する。合成を除く経路のピークメモリは、操作PC-1で計測して記録する（#293）。
 
 ## 5. 制約
 
 - `CON-001`: USB接続したNikon D810を、明示modeに応じて厳密に一台または二台使用する。初期`SingleCamera`はSDK/WPD双方でexactly-one physical D810を要求する。`DualCamera`は同じAgent sessionで厳密に二候補を要求し、操作者によるmemory-only CAM-A/B bindingが完了している間だけ使用する。三台以上は対象外とする。
 - `CON-002`: ハードウェアシャッター同期を追加せず、実シャッター開口時刻差の上限を保証しない。
 - `CON-003`: attempted hybridのdevice datetime cutoffはhardware evidenceでRejectedであり、2026-08-06に承認された専用empty/cleared card single-slot spool以外の帰属・削除経路を実装・実行しない。SDK source/capture sessionとWPD sessionは重複させず、vendor operation（`0x9207`を含む）、existing cardのbulk delete/format、retryは禁止する。deleteはPC原本の再読込検証後のexact just-recovered WPD objectだけとし、zero/multiple/late/invalid/download/persist/delete failureでは実行しない。Dual binding完了時は全candidate Live View停止とSDK source/capture session closeを確認してから内部`DualIdentitySessionBinding`を`Ready`にし、撮影中はbound source objectを再列挙しない。ADR-0028のcontrolled `CaptureRecoveryOnly`ではModuleだけを保持できるが、WPD open中のSDK API operationは0とし、Agent/binding-session terminalまたはinvalidationでModuleをunloadしてbindingをinvalidにする。
-- `CON-004`: Nikon SDK、ライセンス対象バイナリ・資料、実カメラ識別子をリポジトリへ含めない。内部評価利用と製品再配布を別々に承認する。
+- `CON-004`: Nikon SDK、ライセンス対象バイナリ・資料、実カメラ識別子をリポジトリへ含めない。内部評価利用と製品再配布を別々に承認する。製品の配布ではNikon SDKを同梱せず、使用許諾に同意した利用者が各PCに置く。配布先は社内のPCに限る（所有者の決定 2026-10-13、#293 D2）。OpenCV等の他のnative依存の再配布と導入物の範囲は`HG-0005`で未承認のまま。
 - `CON-005`: 動体、手持ち、近距離立体物、リアルタイム動画は対象外。
 
 ## 6. MVP対象外
@@ -111,8 +121,9 @@ MVPの受入は、以下をすべて満たした時点で人間が判定する�
 4. `DualCamera`ではAgent sessionごとに厳密に二候補を一台ずつLive View表示し、操作者が`CAM-A`、`CAM-B`を明示割当して全Live View停止とSDK source/capture session closeを確認する。ADR-0028のcontrolled `CaptureRecoveryOnly`ではModuleをbinding tokenだけのために残せる。そのmemory-only bindingが有効な間だけbound source objectを再列挙せず順次撮影し、対応WPD aliasから各画像をexactly oneで回収して同一transactionとして確定できる。
 5. `DualCamera`では承認済みテスト原稿で位置ずれ、二重像、色差、継ぎ目が合意済み基準内であり、再合成できる。
 6. mode別に今回の最大5回受入と全時間値・最大値を確認し、USB再接続など個別異常系の結果を記録する。初回one-shotを5回に含め、失敗時はその系列を不合格として止める。SingleCameraとDualCameraの証拠は相互代用しない。ADR-0032で改定（2026-10-07）: シャッター0のソフト起因の拒否の扱い、USB抜去の別系列、保存の合格線はADR-0032に従う。
+   2026-10-13の所有者の決定（#293 D3）: 二台の正常系列は新しい系列で最大5組とし、USB抜去の不変条件「カード上のobjectの削除0」は「抜去が原因の削除0」と読む（抜去より前に正常に済んだexact cleanupは数えない）。
 7. 未解決の安全・SDK利用・再配布・mode別品質・リリースゲートがない。
 8. 一台選択式Live Viewが表示でき、撮影時にSDK source/capture sessionとWPD sessionを重複させず、安全に停止、WPD baseline、SDK一回card capture、WPD recovery、再開できる。ADR-0028のModule保持中もWPD open中にSDK operationを行わない。
 9. active modeに対応する承認済みprofileを使って設置状態を判定し、範囲内の差だけを自動補正し、範囲外では成功扱いにせず物理調整または再キャリブレーションを案内できる。
 
-二台A0の数値品質基準は`HG-0001/0002`で確定する。`HG-0003B`はADR-0025のsession-local operator binding relaxationとして解消済みだが、Issue #9のcore・binding protocol・WPF・capture backendと実機の最大5回受入が合格するまでは`HardwarePending`であり、操作者の誤割当riskは残る。実シャッター同期は保証しない。一台の初期出力・profileはADR-0024を維持し、今回のrun数はADR-0030で最大5回へ更新した。2026-08-26のHG-0009承認は当時の条件で保持し、新しい条件の性能承認を推定しない。
+二台A0の数値品質基準は`HG-0001/0002`で確定する。`HG-0003B`はADR-0025のsession-local operator binding relaxationとして解消済みだが、Issue #9のcore・binding protocol・WPF・capture backendと実機の最大5回受入が合格するまでは`HardwarePending`であり、操作者の誤割当riskは残る。実シャッター同期は保証しない。一台の初期出力・profileはADR-0024を維持し、今回のrun数はADR-0030で最大5回へ更新した。2026-08-26のHG-0009承認は当時の条件で保持し、新しい条件の性能承認を推定しない。リリースは合成ができてから行い、合成なしの二台は製品として出さない（#293 D1）。
