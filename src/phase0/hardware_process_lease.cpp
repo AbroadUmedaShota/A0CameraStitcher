@@ -742,6 +742,19 @@ bool ProcessAbsent(DWORD pid) {
 }
 DualDelegationMarkerDiagnostic InspectDualDelegationMarkerReadOnly(const std::filesystem::path &test_marker_root) {
     // No lease, directory creation, worker start, SDK/WPD call, or marker write.
+    // A supplied root gets the same judgment as the lease's test marker root
+    // (issue #246): the production data root, anything inside it, an alias of
+    // either, and a root that cannot be verified are not scanned. The check only
+    // opens directories to read their identity. An empty root means the
+    // production marker root and is not judged here.
+    if (!test_marker_root.empty()) {
+        bool production_or_unverifiable = true;
+        try {
+            production_or_unverifiable = MarkerRootMayTouchProductionData(test_marker_root);
+        } catch (...) {
+        }
+        if (production_or_unverifiable) return {"marker_root_untrusted"};
+    }
     const auto root = test_marker_root.empty() ? ProductionMarkerRoot() : test_marker_root;
     if (!ExistingSafeDirectoryTree(root)) return {"marker_root_untrusted"};
     const std::wstring expected = std::filesystem::path(MarkerPath(root)).filename().wstring();

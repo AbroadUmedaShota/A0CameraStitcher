@@ -49,9 +49,13 @@ template<class Action> bool Rejects(Action action) {
     return false;
 }
 #ifdef A0_MARKER_DIAGNOSTIC_TEST_ROOT
-bool DiagnosticCliAcceptsTestRoot(const std::filesystem::path &root, std::string &output,
-                                  bool &child_finished) {
+// Runs the diagnostic CLI with --test-root. Returns false when the child did not
+// finish or its exit code could not be read; otherwise `exit_code` and `output`
+// (the first 512 bytes) are the child's.
+bool RunDiagnosticCli(const std::filesystem::path &root, std::string &output, bool &child_finished,
+                      DWORD &exit_code) {
     child_finished = true;
+    exit_code = 0;
     wchar_t own_path[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, own_path, MAX_PATH)) return false;
     const auto cli = std::filesystem::path(own_path).parent_path() / L"A0CameraStitcher.MarkerDiagnostic.exe";
@@ -79,15 +83,18 @@ bool DiagnosticCliAcceptsTestRoot(const std::filesystem::path &root, std::string
     CloseHandle(child.hThread);
     const DWORD wait = WaitForSingleObject(child.hProcess, 5000);
     child_finished = wait == WAIT_OBJECT_0;
-    DWORD exit_code{};
-    const bool accepted = child_finished && GetExitCodeProcess(child.hProcess, &exit_code) &&
-                          exit_code == 0;
+    const bool got_code = child_finished && GetExitCodeProcess(child.hProcess, &exit_code);
     CloseHandle(child.hProcess);
     char bytes[512]{};
     DWORD read{};
-    if (accepted && ReadFile(reader, bytes, sizeof(bytes), &read, nullptr)) output.assign(bytes, read);
+    if (got_code && ReadFile(reader, bytes, sizeof(bytes), &read, nullptr)) output.assign(bytes, read);
     CloseHandle(reader);
-    return accepted;
+    return got_code;
+}
+bool DiagnosticCliAcceptsTestRoot(const std::filesystem::path &root, std::string &output,
+                                  bool &child_finished) {
+    DWORD exit_code{};
+    return RunDiagnosticCli(root, output, child_finished, exit_code) && exit_code == 0;
 }
 #endif
 int RunDiagnosticTests() {
@@ -833,6 +840,53 @@ int RunAliasHardeningTests() {
                   "a test lease name with the production data root or a directory inside it must be refused by the lease");
             Check(LeaseRejectsAsMarkerFailure("A0CameraStitcher.Phase0.Test.AliasHardening", spelling),
                   "the second test lease name prefix with the production data root must be refused");
+        }
+        // Issue #252: the read-only diagnostic judges a supplied root the same way.
+        // The production root, anything inside it and its aliases are reported as
+        // an untrusted root (the diagnostic only opens them to read their identity)
+        // and are not scanned for a marker. A regression would only scan, never
+        // write, so these cases may name directories that exist.
+        {
+            std::vector<std::filesystem::path> diagnostic_roots = predicate_only;
+            diagnostic_roots.insert(diagnostic_roots.end(), spellings.begin(), spellings.end());
+            for (const auto &spelling : diagnostic_roots)
+                Check(InspectDualDelegationMarkerReadOnly(spelling).status == "marker_root_untrusted",
+                      "the read-only diagnostic must not scan the production root, a spelling of it, or what is inside it");
+            if (skip_subst) {
+                notes += "diagnostic subst case not run: A0_LEASE_TEST_SKIP_SUBST=1; ";
+            } else if (!production_stamp.exists) {
+                notes += "diagnostic subst case not run: the production root does not exist on this machine; ";
+            } else if (const wchar_t letter = drive_cases_allowed ? FreeDriveLetter() : 0; letter != 0) {
+                {
+                    SubstDrive mapped(letter, production.parent_path());
+                    if (mapped.Defined()) {
+                        const std::filesystem::path drive(std::wstring(1, letter) + L":\\");
+                        Check(InspectDualDelegationMarkerReadOnly(drive / L"DualDelegation").status ==
+                                  "marker_root_untrusted",
+                              "the read-only diagnostic must not scan the production root through a subst drive");
+                        Check(InspectDualDelegationMarkerReadOnly(drive).status == "marker_root_untrusted",
+                              "the read-only diagnostic must not scan a subst drive that maps the production parent");
+                    } else {
+                        notes += "diagnostic subst case not run: DefineDosDeviceW failed; ";
+                    }
+                }
+                Check(DriveLetterIsFree(letter), "the temporary drive mapping must be removed after the diagnostic subst cases");
+            } else {
+                notes += "diagnostic subst case not run: no free drive letter; ";
+            }
+#ifdef A0_MARKER_DIAGNOSTIC_TEST_ROOT
+            for (const auto &cli_root : {production, production.parent_path(), data_root}) {
+                std::string cli_output;
+                bool cli_finished{};
+                DWORD cli_exit{};
+                const bool ran = RunDiagnosticCli(cli_root, cli_output, cli_finished, cli_exit);
+                Check(ran && cli_exit == 2 &&
+                          cli_output.find("\"status\":\"marker_root_untrusted\"") != std::string::npos &&
+                          cli_output.find("eligible_for_human_review") == std::string::npos,
+                      "the diagnostic CLI must refuse the production root and what is inside it as a --test-root");
+                if (!cli_finished) Check(false, "the diagnostic CLI child did not finish");
+            }
+#endif
         }
         Check(StampDirectory(data_root) == data_stamp && StampDirectory(production.parent_path()) == phase0_stamp &&
                   StampDirectory(production) == production_stamp,

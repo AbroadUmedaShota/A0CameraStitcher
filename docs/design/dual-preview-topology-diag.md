@@ -563,6 +563,9 @@ A0CameraStitcher.MarkerRecovery --execute --expect-sha256 <hex64> --confirm-came
 - SDK なしビルドだけ `--test-root <marker root の絶対パス>` と `--test-lease <試験用 lease 名>` を受け付ける（compile 定義 `A0_MARKER_RECOVERY_TEST_ROOT`）。監査 directory は test root の兄弟 `DualDelegationRecovery`
 - SDK 有効ビルドでは引数解析にこの 2 つが存在せず、指定すると「不明な引数」で exit 2。ファイルにも mutex にも触らない
 - 試験用 lease 名は既存の `IsTestLeaseName` を満たすものだけ
+- **`--test-root` は #246 の判定を通す（C の着地条件）**。判定は `MarkerRootMayTouchProductionData`（`HardwareProcessLease` の test marker root と読取り専用診断 CLI の `--test-root` と同じ関数）を使い、本番の data root と同一・その配下・別名（8.3 短縮名、subst ドライブ、junction）に加えて、名前の末尾が空白や点（1 個でも）の root、`:` を含む名前の root、NUL を含む root、絶対のドライブ文字パスでない root、検証できない root を拒否する。修正前の判定を流用すると、末尾に空白のある junction の綴りで本番 marker を削除できてしまう（#246 の再監査 N1）
+- この判定は、marker root を走査する前、監査 directory を作る前、lease を取る前に行う。拒否は `marker_root_untrusted`・exit 2。判定が本番フォルダに対して行うのは、同一性を読むための open だけで、作成・書込み・削除をしない
+- `--test-root` の判定を通らない root に対して、`--dry-run` も `--execute` も何もしない（監査 directory も、dry-run 記録も作らない）
 
 ## 10. `PollDualInvalidation` との矛盾（記録して判断を先送りする）
 
@@ -688,6 +691,7 @@ SDK なしビルド。test root に合成の v2 marker を置き、試験用 lea
 | h13 | h1・h12 の標準出力と監査 | 合成した nonce・epoch・PID・session ID の数字・パスの断片が出ない |
 | h14 | CLI: 引数なし／不明な引数／`--execute` だけ／大文字や 63 字の hash／空の test root | 前 4 つは usage で exit 2、空の test root は `marker_missing` で exit 2（探査に到達しない） |
 | h15 | SDK 有効ビルド | 回復 target の compile 定義に `A0_MARKER_RECOVERY_TEST_ROOT` がない。`--test-root X --dry-run` が usage で exit 2 で、X 配下が不変（SDK 有効ビルドでの実行が要る。カメラには触らない） |
+| h16 | `--test-root` に本番の data root と marker root・その配下・8.3 短縮名・subst ドライブ・小文字や末尾の区切りの綴り・名前の末尾が空白か点の root・`:` を含む名前の root・相対 root・NUL を含む root | `--dry-run`／`--execute` のどちらも `marker_root_untrusted` で exit 2。本番フォルダの属性・更新時刻が不変。監査 directory と dry-run 記録が作られない。読取り専用診断（`InspectDualDelegationMarkerReadOnly`）と CLI の同じ root への試験は `hardware_process_lease_delegation_tests` に着地済み（#252）で、C の試験はそれと同じ綴りの表を使う |
 
 手動確認 M-1（本人判断パケット A の範囲。読取りだけでカメラ制御なし）: 運用 PC で、カメラ接続中の dry-run が `camera_present`、電源 OFF・USB 切断後は P8 を通ることを確かめ、PnP 探査を実機の装置名で検証する（※要確認: 実施の承認）。
 
