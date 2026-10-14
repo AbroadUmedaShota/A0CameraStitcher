@@ -59,6 +59,11 @@ bool HasTrimmedOrStreamName(const std::wstring &name) noexcept {
            (name.back() == L'.' || name.back() == L' ' || name.find(L':') != std::wstring::npos);
 }
 void RequireSafeDirectoryTree(const std::filesystem::path &root) {
+    // std::filesystem::path keeps an embedded NUL, but every Win32 call below
+    // reads c_str() and stops at it, so the directory that is checked or created
+    // would differ from the path that was judged.
+    if (root.native().find(L'\0') != std::wstring::npos)
+        throw TransportError("camera_control_marker_failed", "marker path must not contain a NUL character");
     const auto drive = root.root_name().wstring();
     if (!root.is_absolute() || drive.size() != 2 || drive[1] != L':' ||
         GetDriveTypeW(root.root_path().c_str()) != DRIVE_FIXED)
@@ -277,6 +282,10 @@ bool IsAliasProneName(const std::wstring &name) noexcept {
 // device or extended-length prefixes), which the caller treats as unverifiable.
 std::optional<std::filesystem::path> NormalizedDrivePath(const std::filesystem::path &path) {
     std::wstring text = path.lexically_normal().wstring();
+    // An embedded NUL is compared as part of the string here but ends the path in
+    // every Win32 call, so the path cannot be verified.
+    if (text.find(L'\0') != std::wstring::npos)
+        return std::nullopt;
     std::replace(text.begin(), text.end(), L'/', L'\\');
     while (!text.empty() && text.back() == L'\\')
         text.pop_back();

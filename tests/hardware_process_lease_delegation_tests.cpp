@@ -754,6 +754,25 @@ int RunAliasHardeningTests() {
           "a drive-relative root must be refused by the lease before any I/O");
     Check(LeaseRejectsAsMarkerFailure(name, std::filesystem::path(L"\\\\.\\C:\\root")),
           "a device-path root must be refused by the lease before any I/O");
+    // Issue #267: a NUL inside the root. std::filesystem::path keeps it, the string
+    // comparison reads past it, and every Win32 call stops at it, so the judged
+    // and the created path would differ. The root is built in code (a NUL cannot
+    // come through the command line). Nothing may be created, not even the part
+    // in front of the NUL.
+    {
+        const std::wstring nul(1, L'\0');
+        const std::filesystem::path nul_inner(scratch.wstring() + L"\\NulMade" + nul + L"x");
+        const std::filesystem::path nul_leaf(scratch.wstring() + L"\\NulLeaf" + nul);
+        const std::filesystem::path nul_deep(scratch.wstring() + L"\\NulDeep" + nul + L"x\\sub");
+        Check(overlaps(nul_inner, reference), "a root with a NUL must be unverifiable");
+        Check(overlaps(nul_leaf, reference), "a root that ends in a NUL must be unverifiable");
+        Check(LeaseRejectsAsMarkerFailure(name, nul_inner) && !std::filesystem::exists(scratch / L"NulMade"),
+              "a root with a NUL must be refused by the lease before any directory is created");
+        Check(LeaseRejectsAsMarkerFailure(name, nul_leaf) && !std::filesystem::exists(scratch / L"NulLeaf"),
+              "a root that ends in a NUL must be refused by the lease before any directory is created");
+        Check(LeaseRejectsAsMarkerFailure(name, nul_deep) && !std::filesystem::exists(scratch / L"NulDeep"),
+              "a NUL in an ancestor name must be refused by the lease before any directory is created");
+    }
     Check(Succeeds(name, scratch / L"LeaseOrdinary"), "an ordinary absent scratch root must still be accepted");
 
     // Lease layer, production data root and what is inside it. Nothing may be
