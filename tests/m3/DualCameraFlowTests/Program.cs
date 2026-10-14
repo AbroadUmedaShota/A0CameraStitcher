@@ -190,7 +190,7 @@ static async Task IdentityGateAsync()
         var flow = new DualCameraProductFlow(root, camera, bridge, source);
         var first = flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
-        await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await camera.Started.Task.AwaitAsync();
         source.Set(DualCameraIdentitySnapshot.HardwarePending());
         Check.Equal(DualCameraIdentityStatus.Ready, flow.Current!.IdentitySnapshot.Status);
         await Check.ThrowsCodeAsync(DualCameraFailureCode.DuplicateStart,
@@ -268,7 +268,7 @@ static async Task IdentityExpiryBoundaryAsync()
             time);
         var active = flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
-        await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await camera.Started.Task.AwaitAsync();
         time.Advance(TimeSpan.FromSeconds(2));
         Check.Equal(DualCameraIdentityStatus.Expired, flow.IdentitySnapshot.Status);
         Check.Equal(DualCameraIdentityStatus.Ready, flow.Current!.IdentitySnapshot.Status);
@@ -408,7 +408,7 @@ static async Task ConcurrencyAndModeLockAsync()
         var flow = new DualCameraProductFlow(root, camera, bridge, SyntheticIdentitySource());
         var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic());
         var first = flow.CaptureAndStitchAsync(request);
-        await camera.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await camera.Started.Task.AwaitAsync();
         await Check.ThrowsCodeAsync(DualCameraFailureCode.DuplicateStart, () => flow.CaptureAndStitchAsync(request));
         await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidMode, () => flow.CaptureAndStitchAsync(request with { Mode = CameraOperatingMode.SingleCamera }));
         await Check.ThrowsCodeAsync(DualCameraFailureCode.InvalidExecutionEnvironment, () => flow.CaptureAndStitchAsync(request with { ExecutionEnvironment = (DualCameraExecutionEnvironment)999 }));
@@ -446,6 +446,9 @@ static async Task BoundedFailureDiscoveryAsync()
 
     await WithRootAsync(async root =>
     {
+        // The discovery bound is a product timer. A manual clock fires it only when the test says so,
+        // so a slow machine cannot end the discovery before the test has looked at the active state.
+        var time = new ManualTimerTimeProvider(DateTimeOffset.UtcNow);
         var source = new FailureDiscoveryCaptureSource();
         var stitcher = new FailureDiscoveryStitcher();
         var flow = new DualCameraProductFlow(
@@ -453,20 +456,21 @@ static async Task BoundedFailureDiscoveryAsync()
             source,
             stitcher,
             SyntheticIdentitySource(),
-            null,
-            TimeSpan.FromMilliseconds(100));
+            time,
+            FailureDiscovery.Bound);
         var request = DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic());
         var capture = flow.CaptureAndStitchAsync(request);
         try
         {
-            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await source.FailureReady.Task.AwaitAsync();
             source.ReleaseFailure.TrySetResult();
-            await stitcher.ValidationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var current = await Task.Run(() => flow.Current).WaitAsync(TimeSpan.FromSeconds(2));
+            await stitcher.ValidationStarted.Task.AwaitAsync();
+            var current = await Task.Run(() => flow.Current).AwaitAsync();
             Check.True(current!.IsActive);
             await Check.ThrowsCodeAsync(DualCameraFailureCode.DuplicateStart, () => flow.CaptureAndStitchAsync(request));
 
-            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            Check.Equal(1, time.Advance(FailureDiscovery.Bound));
+            var result = await capture.AwaitAsync();
             Check.Equal(DualCameraFailureCode.CaptureCameraB, result.FailureCode);
             Check.False(result.IsActive);
             Check.False(result.Capture!.Succeeded);
@@ -483,6 +487,7 @@ static async Task BoundedFailureDiscoveryAsync()
 
     await WithRootAsync(async root =>
     {
+        var time = new ManualTimerTimeProvider(DateTimeOffset.UtcNow);
         var source = new FailureDiscoveryCaptureSource();
         var stitcher = new FailureDiscoveryStitcher { IgnoreCancellation = true };
         var flow = new DualCameraProductFlow(
@@ -490,18 +495,19 @@ static async Task BoundedFailureDiscoveryAsync()
             source,
             stitcher,
             SyntheticIdentitySource(),
-            null,
-            TimeSpan.FromMilliseconds(100));
+            time,
+            FailureDiscovery.Bound);
         try
         {
             var capture = flow.CaptureAndStitchAsync(
                 DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
-            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await source.FailureReady.Task.AwaitAsync();
             source.ReleaseFailure.TrySetResult();
-            await stitcher.ValidationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var current = await Task.Run(() => flow.Current).WaitAsync(TimeSpan.FromSeconds(2));
+            await stitcher.ValidationStarted.Task.AwaitAsync();
+            var current = await Task.Run(() => flow.Current).AwaitAsync();
             Check.True(current!.IsActive);
-            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            Check.Equal(1, time.Advance(FailureDiscovery.Bound));
+            var result = await capture.AwaitAsync();
             Check.False(result.IsActive);
             Check.Equal(0, result.Capture!.Originals.Count);
             Check.Equal(0, result.AutomaticRetryCount);
@@ -519,21 +525,22 @@ static async Task BoundedFailureDiscoveryAsync()
 
     await WithRootAsync(async root =>
     {
+        var time = new ManualTimerTimeProvider(DateTimeOffset.UtcNow);
         var source = new FailureDiscoveryCaptureSource();
         var flow = new DualCameraProductFlow(
             root,
             source,
             new FailureDiscoveryStitcher { ThrowValidationIOException = true },
             SyntheticIdentitySource(),
-            null,
-            TimeSpan.FromMilliseconds(100));
+            time,
+            FailureDiscovery.Bound);
         var capture = flow.CaptureAndStitchAsync(
             DualCameraCaptureRequest.CreateTestSynthetic(DualCameraRigProfile.ApprovedSynthetic()));
         try
         {
-            await source.FailureReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await source.FailureReady.Task.AwaitAsync();
             source.ReleaseFailure.TrySetResult();
-            var result = await capture.WaitAsync(TimeSpan.FromSeconds(2));
+            var result = await capture.AwaitAsync();
             Check.Equal(DualCameraFailureCode.CaptureCameraB, result.FailureCode);
             Check.Equal(0, result.Capture!.Originals.Count);
             Check.Equal(0, result.AutomaticRetryCount);
@@ -550,6 +557,8 @@ static async Task BoundedFailureDiscoveryAsync()
 static async Task M2AdapterCancellationBoundsAsync()
 {
     if (!OperatingSystem.IsWindows()) return;
+    var assumedTerminationAndDrainTimeout = TimeSpan.FromSeconds(5);
+    var cancellationCompletionLimit = assumedTerminationAndDrainTimeout * 5;
     await WithRootAsync(async root =>
     {
         var pidFile = Path.Combine(Path.GetTempPath(), $"A0CameraStitcher-m2-hang-{Guid.NewGuid():N}.pid");
@@ -569,13 +578,28 @@ static async Task M2AdapterCancellationBoundsAsync()
         int childPid = 0;
         try
         {
-            childPid = await ReadPublishedProcessIdAsync(pidFile, TimeSpan.FromSeconds(5));
+            childPid = await ReadPublishedProcessIdAsync(pidFile, TestWaits.Ceiling);
+            // The waits below only separate "stuck" from "slow". The promised bound is the elapsed
+            // time measured from the cancel request: the product kills the child within
+            // TerminationAndDrainTimeout (5 s, M2OfflineStitcherProcessAdapter, private and not
+            // reachable from this assembly, so the value is repeated here). The limit is five times
+            // that and stays under the 30 s after which the hang child ends by itself, so a product
+            // that waits for the child to give up cannot pass.
+            var cancelToCompletion = Stopwatch.StartNew();
             cancellation.Cancel();
             var canceled = false;
-            try { await validation.WaitAsync(TimeSpan.FromSeconds(8)); }
+            try { await validation.AwaitAsync(); }
             catch (OperationCanceledException) { canceled = true; }
             Check.True(canceled);
-            await WaitForProcessExitAsync(childPid, TimeSpan.FromSeconds(5));
+            var completedAfter = cancelToCompletion.Elapsed;
+            Check.True(completedAfter < cancellationCompletionLimit,
+                $"The adapter must finish a canceled validation within {cancellationCompletionLimit.TotalSeconds:0} s " +
+                $"(product bound {assumedTerminationAndDrainTimeout.TotalSeconds:0} s); it took {completedAfter.TotalSeconds:0.0} s.");
+            await WaitForProcessExitAsync(childPid, TestWaits.Ceiling);
+            var exitedAfter = cancelToCompletion.Elapsed;
+            Check.True(exitedAfter < cancellationCompletionLimit,
+                $"The hang child must be gone within {cancellationCompletionLimit.TotalSeconds:0} s of the cancel request, " +
+                $"not by ending on its own; it took {exitedAfter.TotalSeconds:0.0} s.");
             await Task.Delay(100);
         }
         finally
@@ -583,7 +607,7 @@ static async Task M2AdapterCancellationBoundsAsync()
             try
             {
                 cancellation.Cancel();
-                try { await validation.WaitAsync(TimeSpan.FromSeconds(8)); }
+                try { await validation.AwaitAsync(); }
                 catch (Exception) { }
                 if (childPid == 0)
                 {
@@ -603,13 +627,13 @@ static async Task M2AdapterCancellationBoundsAsync()
                         {
                             // The normal outcome is that adapter cleanup already reaped it.
                         }
-                        await WaitForProcessExitAsync(childPid, TimeSpan.FromSeconds(5));
+                        await WaitForProcessExitAsync(childPid, TestWaits.Ceiling);
                     }
                 }
                 finally
                 {
-                    await DeleteTestFileAsync(pidFile, TimeSpan.FromSeconds(2));
-                    await DeleteTestFileAsync(pidFile + ".pending", TimeSpan.FromSeconds(2));
+                    await DeleteTestFileAsync(pidFile, TestWaits.Ceiling);
+                    await DeleteTestFileAsync(pidFile + ".pending", TestWaits.Ceiling);
                 }
             }
             finally
@@ -653,7 +677,7 @@ static async Task M2AdapterCancellationBoundsAsync()
                 try
                 {
                     await raceAdapter.ValidateCanonicalJpegAsync("ignored.jpg", 16, 8, raceCancellation.Token)
-                        .WaitAsync(TimeSpan.FromSeconds(7));
+                        .AwaitAsync();
                 }
                 catch (OperationCanceledException)
                 {
@@ -1094,7 +1118,7 @@ static async Task HardwareDualSnapshotFreezeAsync()
                 HardwareDualCaptureProfile.ApprovedSynthetic(),
                 new HardwareDualOperatorConfirmations(true, true, true, true, true),
                 Guid.NewGuid()));
-        await operations.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await operations.Started.Task.AwaitAsync();
         identitySource.Set(DualCameraIdentitySnapshot.HardwarePending());
         matrix[0] = 0;
         matrix[4] = 0;
@@ -1711,7 +1735,9 @@ static async Task<int> ReadPublishedProcessIdAsync(string path, TimeSpan timeout
         }
         await Task.Delay(25);
     }
-    throw new TimeoutException($"Timed out waiting for a published process ID in {path}.");
+    throw new TimeoutException(
+        $"Timed out after {(DateTime.UtcNow - (deadline - timeout)).TotalMilliseconds:0} ms (ceiling {timeout.TotalSeconds:0.#} s) " +
+        $"waiting for the hang child to publish its process ID in {Path.GetFileName(path)}.");
 }
 
 static async Task DeleteTestFileAsync(string path, TimeSpan timeout)
@@ -1732,7 +1758,7 @@ static async Task WaitForProcessExitAsync(int processId, TimeSpan timeout)
     try
     {
         using var process = Process.GetProcessById(processId);
-        await process.WaitForExitAsync().WaitAsync(timeout);
+        await process.WaitForExitAsync().AwaitAsync($"process {processId} to exit", timeout);
     }
     catch (ArgumentException)
     {
@@ -2306,6 +2332,89 @@ sealed class MutableIdentitySource(DualCameraIdentitySnapshot initial) : IDualCa
     }
 }
 
+static class FailureDiscovery
+{
+    // Handed to the product as the discovery bound; it only becomes elapsed time when
+    // ManualTimerTimeProvider.Advance is called.
+    public static readonly TimeSpan Bound = TimeSpan.FromMilliseconds(100);
+}
+
+// Clock whose timers fire only inside Advance. The product code under test creates its timers through
+// TimeProvider.CreateTimer (for example CancellationTokenSource(timeout, timeProvider)), so time passes
+// exactly when the test moves it.
+sealed class ManualTimerTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private readonly object _gate = new();
+    private readonly List<ManualTimer> _timers = [];
+    private DateTimeOffset _utcNow = utcNow;
+
+    public override DateTimeOffset GetUtcNow()
+    {
+        lock (_gate) return _utcNow;
+    }
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        var timer = new ManualTimer(this, callback, state);
+        timer.Change(dueTime, period);
+        lock (_gate) _timers.Add(timer);
+        return timer;
+    }
+
+    // Moves the clock forward, runs the callbacks of the timers that became due, and returns how many ran.
+    public int Advance(TimeSpan delta)
+    {
+        List<ManualTimer> due;
+        lock (_gate)
+        {
+            _utcNow += delta;
+            due = _timers.Where(timer => timer.IsDue(_utcNow)).ToList();
+        }
+        foreach (var timer in due) timer.Fire();
+        return due.Count;
+    }
+
+    private void Remove(ManualTimer timer)
+    {
+        lock (_gate) _timers.Remove(timer);
+    }
+
+    private sealed class ManualTimer(ManualTimerTimeProvider owner, TimerCallback callback, object? state) : ITimer
+    {
+        private DateTimeOffset? _dueAt;
+        private TimeSpan _period = Timeout.InfiniteTimeSpan;
+
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            lock (owner._gate)
+            {
+                _dueAt = dueTime == Timeout.InfiniteTimeSpan ? null : owner._utcNow + dueTime;
+                _period = period;
+            }
+            return true;
+        }
+
+        public bool IsDue(DateTimeOffset now) => _dueAt is { } due && due <= now;
+
+        public void Fire()
+        {
+            lock (owner._gate)
+            {
+                _dueAt = _period > TimeSpan.Zero && _dueAt is { } due ? due + _period : null;
+            }
+            callback(state);
+        }
+
+        public void Dispose() => owner.Remove(this);
+
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+            return ValueTask.CompletedTask;
+        }
+    }
+}
+
 sealed class MutableIdentityTimeProvider(DateTimeOffset utcNow) : TimeProvider
 {
     private DateTimeOffset _utcNow = utcNow;
@@ -2318,6 +2427,7 @@ sealed class MutableIdentityTimeProvider(DateTimeOffset utcNow) : TimeProvider
 static class Check
 {
     public static void True(bool condition) { if (!condition) throw new InvalidOperationException("Expected true."); }
+    public static void True(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     public static void False(bool condition) { if (condition) throw new InvalidOperationException("Expected false."); }
     public static void Equal<T>(T expected, T actual) where T : notnull
     {

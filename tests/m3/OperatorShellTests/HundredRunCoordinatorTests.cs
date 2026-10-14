@@ -426,7 +426,7 @@ internal static class HundredRunCoordinatorTests
         {
             try
             {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await entered.Task.AwaitAsync();
                 // A second valid approval must be rejected by the workflow gate,
                 // not incidentally by an approval target mismatch or existing claim.
                 var secondRun = competing.Coordinator(workflow).RunAsync(
@@ -435,7 +435,7 @@ internal static class HundredRunCoordinatorTests
                 // Either invocation can access the shared workflow's fixture if exclusion
                 // regresses. Never delete either root while that work is unconfirmed.
                 fixture.PendingWork = competing.PendingWork = Task.WhenAll(first, secondRun);
-                var second = await secondRun.WaitAsync(TimeSpan.FromSeconds(10));
+                var second = await secondRun.AwaitAsync();
                 Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Blocked, second.Status);
                 Check.Equal("run_already_active", second.Detail);
                 Check.Equal(0, second.AttemptedCount);
@@ -443,7 +443,7 @@ internal static class HundredRunCoordinatorTests
                 Check.False(File.Exists(Path.Combine(competing.EvidenceRoot, "approvals", competing.ApprovalId + ".used")), "A competing valid run must be rejected before claiming its approval.");
             }
             finally { competingCancellation.Cancel(); release.TrySetResult(); }
-            var completed = await first.WaitAsync(TimeSpan.FromSeconds(30));
+            var completed = await first.AwaitAsync();
             Check.Equal(CaptureRecoveryOnlyHundredRunStatus.Failed, completed.Status);
             Check.Equal("first_failure_no_retry", completed.Detail);
             Check.Equal(1, completed.AttemptedCount);

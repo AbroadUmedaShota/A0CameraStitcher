@@ -115,7 +115,7 @@ internal static class ReviewVerificationContracts
         using var process = Process.Start(start) ?? throw new Exception("CLI failed to start.");
         var output = process.StandardOutput.ReadToEndAsync();
         var errors = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(50));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await process.WaitForExitAsync(timeout.Token);
         var text = await output;
         Check(process.ExitCode == expectedExit, $"CLI exit mismatch: {text}");

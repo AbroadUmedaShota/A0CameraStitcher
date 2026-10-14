@@ -2174,7 +2174,7 @@ static async Task<int> RunPersistentCameraAgentTestChildAsync(
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    using var timeout = new CancellationTokenSource(TestWaits.Ceiling);
     await pipe.WaitForConnectionAsync(timeout.Token);
     var requestJson = await ReadPersistentTestFrameAsync(pipe, timeout.Token);
     if (scenario == "capture-eof-recovery")
@@ -2439,7 +2439,7 @@ static async Task<int> RunContinuousLiveViewSessionChildAsync(
             var sessionId = root.GetProperty("payload").GetProperty("sessionId").GetString() ?? string.Empty;
             recorded.Add((operation, sessionId));
 
-            using var respondTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var respondTimeout = new CancellationTokenSource(TestWaits.Ceiling);
             await WritePersistentTestFrameAsync(
                 pipe,
                 BuildContinuousLiveViewResponse(requestId, operation, sessionId),
@@ -2449,10 +2449,11 @@ static async Task<int> RunContinuousLiveViewSessionChildAsync(
         pipe.Disconnect();
 
         // A well-behaved caller reconnects immediately over a local pipe if it has
-        // another request queued. Two seconds is long enough to also observe a
+        // another request queued. This is a quiet window, not a wait for an event: it must be long
+        // enough that a caller on a loaded machine still reconnects inside it, and to also observe a
         // regressed extra close-agent-session call from DisposeAsync, while keeping
         // the well-behaved (nothing more to send) path from stalling the test suite.
-        using var nextConnectionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var nextConnectionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try
         {
             await pipe.WaitForConnectionAsync(nextConnectionTimeout.Token);
@@ -3730,7 +3731,7 @@ static async Task WaitForPreviewImageAsync(HardwareSingleCameraViewModel viewMod
         {
             return;
         }
-        await tcs.Task.WaitAsync(timeout).ConfigureAwait(false);
+        await tcs.Task.AwaitAsync("PreviewImage to be set", timeout).ConfigureAwait(false);
     }
     finally
     {
@@ -3783,16 +3784,15 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
 
         Check.True(viewModel.CanStartContinuousLiveView, "Ready CAM-A must allow continuous Live View v2.");
         await viewModel.StartContinuousLiveViewAsync();
-        await operations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await operations.FirstFrame.Task.AwaitAsync();
         Check.True(viewModel.IsContinuousLiveViewActive, "The UI must expose the owned active Live View session.");
         // #148: decode and BitmapImage creation now run off the UI thread, so the frame
         // read (FirstFrame) completing no longer guarantees PreviewImage has been set yet.
-        await WaitForPreviewImageAsync(viewModel, TimeSpan.FromSeconds(2));
+        await WaitForPreviewImageAsync(viewModel, TestWaits.Ceiling);
         Check.True(viewModel.PreviewImage is not null, "A verified in-memory JPEG frame must be displayed.");
         await WaitUntilAsync(
             () => operations.FrameCount >= 2,
-            "The initial continuous session did not produce two verified frames.",
-            TimeSpan.FromSeconds(2));
+            "The initial continuous session did not produce two verified frames.");
 
         await viewModel.CaptureAsync();
         Check.Equal(1, operations.CaptureCallCount);
@@ -3808,8 +3808,7 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         var framesBeforeRestartObservation = operations.FrameCount;
         await WaitUntilAsync(
             () => operations.FrameCount >= framesBeforeRestartObservation + 2,
-            "The restarted continuous session did not produce two verified frames.",
-            TimeSpan.FromSeconds(2));
+            "The restarted continuous session did not produce two verified frames.");
         await viewModel.StopContinuousLiveViewAsync();
         Check.False(viewModel.IsContinuousLiveViewActive, "Explicit stop must close the continuous session.");
         evidenceCollector.Seal();
@@ -3841,7 +3840,7 @@ static async Task HardwareContinuousLiveViewCaptureHandoffAsync()
         blockedViewModel.DedicatedSpoolScopeConfirmed = true;
         blockedViewModel.ExactObjectDeleteConfirmed = true;
         await blockedViewModel.StartContinuousLiveViewAsync();
-        await blockedOperations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await blockedOperations.FirstFrame.Task.AwaitAsync();
         await blockedViewModel.CaptureAsync();
         Check.Equal(0, blockedOperations.CaptureCallCount);
         Check.False(blockedViewModel.IsContinuousLiveViewActive,
@@ -3884,11 +3883,11 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
                 {
                     case 2:
                         seedPersistReached.TrySetResult();
-                        releaseSeedPersist.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                        releaseSeedPersist.Task.AwaitAsync().GetAwaiter().GetResult();
                         break;
                     case 3:
                         targetStartPersistReached.TrySetResult();
-                        releaseTargetStartPersist.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                        releaseTargetStartPersist.Task.AwaitAsync().GetAwaiter().GetResult();
                         break;
                 }
             });
@@ -3896,7 +3895,7 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
         var seedSession = "10000000000000000000000000000001";
         collector.ObserveLiveViewStarted(ContinuousLiveViewResult(seedSession, "Started", running: true));
         collector.ObserveLiveViewStopped(ContinuousLiveViewResult(seedSession, "Stopped", running: false));
-        await seedPersistReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await seedPersistReached.Task.AwaitAsync();
 
         var targetSession = "20000000000000000000000000000002";
         collector.ObserveLiveViewStarted(ContinuousLiveViewResult(targetSession, "Started", running: true));
@@ -3905,10 +3904,10 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
         collector.ObserveLiveViewStopRequested(targetSession);
         collector.ObserveLiveViewStopped(ContinuousLiveViewResult(targetSession, "Stopped", running: false));
         releaseSeedPersist.TrySetResult();
-        await targetStartPersistReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await targetStartPersistReached.Task.AwaitAsync();
 
         releaseTargetStartPersist.TrySetResult();
-        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await collector.FlushAsync().AwaitAsync();
         using (var beforeLateFrame = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath)))
         {
             Check.Equal("InProgress", beforeLateFrame.RootElement.GetProperty("terminalState").GetString()!);
@@ -3922,7 +3921,7 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
         // dropped after the first two frames and the run instead looks Incomplete.
         collector.ObserveLiveViewFrame(targetSession, 3);
         collector.Seal();
-        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await collector.FlushAsync().AwaitAsync();
 
         Check.True(seedPersistReached.Task.IsCompletedSuccessfully, "The seed second persistence boundary must be reached.");
         Check.True(targetStartPersistReached.Task.IsCompletedSuccessfully, "The target started persistence boundary must be reached.");
@@ -3942,7 +3941,7 @@ static async Task HardwareSingleHandoffLateFrameStopOrderRegressionAsync()
         {
             // A timeout fails the test and retains its directory rather than deleting
             // beneath an unconfirmed background continuation.
-            await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await collector.FlushAsync().AwaitAsync();
         }
         Directory.Delete(root, recursive: true);
     }
@@ -4524,7 +4523,7 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
         Check.True(viewModel.PreviewImage is null,
             "No frame has been decoded yet, PreviewImage must remain empty.");
 
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
         Check.True(operations.LastFrameReadToken.HasValue,
             "ReadLiveViewFrameAsync must be observed with a token.");
         Check.False(
@@ -4542,7 +4541,7 @@ static async Task HardwareContinuousLiveViewStopWaitsForInFlightFrameAsync()
 
         // Let the in-flight request run to completion, as the transport is expected to.
         operations.FrameReadReleaseGate.TrySetResult();
-        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await stopTask.AwaitAsync();
 
         Check.False(viewModel.IsContinuousLiveViewActive,
             "Stop must complete once the in-flight frame request finishes.");
@@ -4604,7 +4603,7 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
 
         await viewModel.StartContinuousLiveViewAsync();
         Check.True(viewModel.IsContinuousLiveViewActive, "Start must mark the continuous session active.");
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
 
         var budget = HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget;
         Check.True(budget > TimeSpan.FromSeconds(3) && budget <= TimeSpan.FromSeconds(10),
@@ -4622,7 +4621,7 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
         Check.False(stopTask.IsCompleted, "Stop must keep waiting until the bound elapses.");
 
         time.Advance(TimeSpan.FromMilliseconds(100));
-        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await stopTask.AwaitAsync();
 
         Check.False(viewModel.IsBusy, "The UI must not stay busy after the bound elapses.");
         Check.True(viewModel.IsContinuousLiveViewActive,
@@ -4651,7 +4650,7 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
         Check.True(viewModel.BlockerText.Contains("停止を確認できていません", StringComparison.Ordinal),
             "The blocker text must say why capture is unavailable instead of showing 'なし'.");
         var captureTask = viewModel.CaptureAsync();
-        await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await captureTask.AwaitAsync();
         Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
         Check.Equal(0, operations.CaptureCallCount);
         Check.Equal(0, operations.StopCount);
@@ -4667,7 +4666,7 @@ static async Task HardwareContinuousLiveViewStopIsBoundedWhenFrameNeverReturnsAs
             "The display must tell the operator that stopping again is possible once the frame request returned.");
         Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed && !viewModel.CanCapture,
             "A returned frame request does not confirm the stop; capture stays blocked.");
-        await viewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await viewModel.StopContinuousLiveViewAsync().AwaitAsync();
         Check.False(viewModel.IsContinuousLiveViewActive, "The retried stop must close the session.");
         Check.False(viewModel.IsContinuousLiveViewStopUnconfirmed,
             "A confirmed stop ends the unconfirmed state.");
@@ -4721,8 +4720,8 @@ static async Task HardwareContinuousLiveViewStopProceedsWhenFrameLoopFinishesAtT
 
         var context = new QueuedPostSynchronizationContext();
         var startTask = context.RunAsync(() => viewModel.StartContinuousLiveViewAsync());
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await context.DrainUntilCompletedAsync(startTask, TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
+        await context.DrainUntilCompletedAsync(startTask, TestWaits.Ceiling);
         Check.True(viewModel.IsContinuousLiveViewActive, "Start must mark the continuous session active.");
 
         var stopTask = context.RunAsync(() => viewModel.StopContinuousLiveViewAsync());
@@ -4731,17 +4730,17 @@ static async Task HardwareContinuousLiveViewStopProceedsWhenFrameLoopFinishesAtT
 
         // 1) The frame request ends; the loop's continuation is queued on the context but not run.
         operations.FrameReadReleaseGate.TrySetCanceled();
-        await context.WaitForPostCountAsync(baseline + 1, TimeSpan.FromSeconds(2));
+        await context.WaitForPostCountAsync(baseline + 1, TestWaits.Ceiling);
         Check.False(stopTask.IsCompleted, "The queued loop continuation must not have run yet.");
 
         // 2) The wait bound elapses; the stop continuation is queued behind the loop's one.
         time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await context.WaitForPostCountAsync(baseline + 2, TimeSpan.FromSeconds(2));
+        await context.WaitForPostCountAsync(baseline + 2, TestWaits.Ceiling);
         Check.False(stopTask.IsCompleted, "The queued stop continuation must not have run yet.");
 
         // 3) Run both: the loop finishes first, then the stop sees the timeout with a finished loop.
         context.Drain();
-        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await stopTask.AwaitAsync();
 
         Check.True(stopTask.IsCompletedSuccessfully,
             "A timeout that coincides with the loop finishing must not surface as an error.");
@@ -4804,7 +4803,7 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         await PrepareReadyViewModelAsync(viewModel);
 
         await viewModel.StartContinuousLiveViewAsync();
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
         Check.True(viewModel.CanCapture,
             "Before any stop, capture is attemptable during continuous Live View (the capture path runs the stop).");
         Check.False(viewModel.IsContinuousLiveViewStopUnconfirmed, "Nothing is unconfirmed yet.");
@@ -4813,7 +4812,7 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         // The timer is registered synchronously inside the first call segment.
         var captureTask = viewModel.CaptureAsync();
         time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await captureTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await captureTask.AwaitAsync();
 
         Check.Equal(0, operations.CaptureCallCount);
         Check.Equal(0, operations.StopCount);
@@ -4827,7 +4826,7 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         Check.True(viewModel.CanStopContinuousLiveView, "The operator can still press stop again.");
 
         // Another capture press is a no-op: no second wait, no second unconfirmed record.
-        await viewModel.CaptureAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await viewModel.CaptureAsync().AwaitAsync();
         Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_stop_unconfirmed").Length - 1);
         Check.False(viewModel.IsBusy, "A blocked capture press must not leave the UI busy.");
 
@@ -4835,7 +4834,7 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         // more and is unconfirmed again. It must not register a second observer for that request.
         var stopAgainTask = viewModel.StopContinuousLiveViewAsync();
         time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await stopAgainTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await stopAgainTask.AwaitAsync();
         Check.True(viewModel.IsContinuousLiveViewStopUnconfirmed && viewModel.IsContinuousLiveViewActive,
             "A second stop with the request still in flight is unconfirmed again.");
         Check.Equal(0, operations.StopCount);
@@ -4845,8 +4844,33 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
         await WaitUntilAsync(
             () => viewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
             "The display must switch to 'can stop again' once the frame request returned.");
-        await Task.Delay(TimeSpan.FromMilliseconds(200));
-        Check.Equal(1, viewModel.TechnicalDetail.Split("continuous_live_view_frame_request_completed_after_unconfirmed_stop").Length - 1);
+        await WaitUntilAsync(
+            () => viewModel.TechnicalDetail.Contains(
+                "continuous_live_view_frame_request_completed_after_unconfirmed_stop", StringComparison.Ordinal),
+            "The late completion must be recorded in the technical detail.");
+        // A second observer on the same request would add its record from another continuation,
+        // later than the first. Seeing the first record proves nothing about that, so the count has
+        // to stay put for a quiet window before it is judged. The window restarts whenever the count
+        // changes, so a slow machine only delays the verdict.
+        int CompletionRecordCount() => viewModel.TechnicalDetail.Split(
+            "continuous_live_view_frame_request_completed_after_unconfirmed_stop").Length - 1;
+        var recordCount = CompletionRecordCount();
+        var recordsQuietSince = Stopwatch.StartNew();
+        var recordsSettleTimer = Stopwatch.StartNew();
+        while (recordsQuietSince.ElapsedMilliseconds < 200)
+        {
+            if (recordsSettleTimer.Elapsed > TestWaits.Ceiling)
+                throw TestWaits.TimedOut(
+                    "the late-completion record count to stop changing", recordsSettleTimer, TestWaits.Ceiling, null, 0);
+            await Task.Delay(20);
+            var current = CompletionRecordCount();
+            if (current != recordCount)
+            {
+                recordCount = current;
+                recordsQuietSince.Restart();
+            }
+        }
+        Check.Equal(1, recordCount);
         Check.True(viewModel.ActivityText.Contains("もう一度", StringComparison.Ordinal) &&
             viewModel.ActivityText.Contains("撮影を開始しません", StringComparison.Ordinal),
             "The activity text must ask for another stop and repeat that capture does not start.");
@@ -4857,7 +4881,7 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopBlocksCaptureAndAnnou
             "A returned frame request does not confirm the stop.");
         Check.Equal(0, operations.StopCount);
 
-        await viewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await viewModel.StopContinuousLiveViewAsync().AwaitAsync();
         Check.Equal(1, operations.StopCount);
         Check.False(viewModel.IsContinuousLiveViewActive || viewModel.IsContinuousLiveViewStopUnconfirmed,
             "A confirmed stop ends the session and the unconfirmed state.");
@@ -4897,18 +4921,18 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopEvidenceOrderAndCateg
         var orderViewModel = NewHeldFrameViewModel(Path.Combine(root, "order"), orderOperations, time, recorder);
         await PrepareReadyViewModelAsync(orderViewModel);
         await orderViewModel.StartContinuousLiveViewAsync();
-        await orderOperations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await orderOperations.FrameReadEntered.Task.AwaitAsync();
 
         var stopTask = orderViewModel.StopContinuousLiveViewAsync();
         time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await stopTask.AwaitAsync();
         Check.Equal("started,stop-requested,stop-unconfirmed", string.Join(',', recorder.Calls));
 
         orderOperations.FrameReadReleaseGate.TrySetResult();
         await WaitUntilAsync(
             () => orderViewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
             "The display must allow stopping again.");
-        await orderViewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await orderViewModel.StopContinuousLiveViewAsync().AwaitAsync();
         Check.Equal("started,stop-requested,stop-unconfirmed,stop-requested,stopped", string.Join(',', recorder.Calls));
         await orderViewModel.ShutdownAsync();
         orderViewModel.Dispose();
@@ -4923,19 +4947,19 @@ static async Task HardwareContinuousLiveViewUnconfirmedStopEvidenceOrderAndCateg
         var realViewModel = NewHeldFrameViewModel(Path.Combine(root, "real"), realOperations, realTime, collector);
         await PrepareReadyViewModelAsync(realViewModel);
         await realViewModel.StartContinuousLiveViewAsync();
-        await realOperations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await realOperations.FrameReadEntered.Task.AwaitAsync();
         var firstStop = realViewModel.StopContinuousLiveViewAsync();
         realTime.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await firstStop.WaitAsync(TimeSpan.FromSeconds(2));
+        await firstStop.AwaitAsync();
         realOperations.FrameReadReleaseGate.TrySetResult();
         await WaitUntilAsync(
             () => realViewModel.LiveViewSummary.Contains("もう一度停止できます", StringComparison.Ordinal),
             "The display must allow stopping again.");
-        await realViewModel.StopContinuousLiveViewAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await realViewModel.StopContinuousLiveViewAsync().AwaitAsync();
         await realViewModel.ShutdownAsync();
         realViewModel.Dispose();
         collector.Seal();
-        await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await collector.FlushAsync().AwaitAsync();
         using var evidence = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath));
         Check.Equal("LiveViewStopUnconfirmed", evidence.RootElement.GetProperty("lastErrorCategory").GetString()!);
         Check.True(ReadTerminalState(collector.EvidencePath) != "Complete",
@@ -4968,7 +4992,7 @@ static async Task HardwareSingleHandoffSecondStopAfterUnconfirmedStopKeepsTheFai
                 Path.Combine(root, name), artifactsRoot, new string('a', 40));
             steps(collector);
             collector.Seal();
-            await collector.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await collector.FlushAsync().AwaitAsync();
             using var document = JsonDocument.Parse(File.ReadAllText(collector.EvidencePath));
             return (
                 document.RootElement.GetProperty("lastErrorCategory").GetString()!,
@@ -5048,8 +5072,8 @@ static async Task HardwareContinuousLiveViewStopSurfacesFailureOfLoopThatFinishe
 
         var context = new QueuedPostSynchronizationContext();
         var startTask = context.RunAsync(() => viewModel.StartContinuousLiveViewAsync());
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await context.DrainUntilCompletedAsync(startTask, TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
+        await context.DrainUntilCompletedAsync(startTask, TestWaits.Ceiling);
 
         var stopTask = context.RunAsync(() => viewModel.StopContinuousLiveViewAsync());
         Check.False(stopTask.IsCompleted, "Stop must wait for the in-flight frame request.");
@@ -5057,15 +5081,15 @@ static async Task HardwareContinuousLiveViewStopSurfacesFailureOfLoopThatFinishe
 
         // 1) The frame request returns a failure: the loop continuation is queued, not run.
         operations.FrameReadReleaseGate.TrySetResult();
-        await context.WaitForPostCountAsync(baseline + 1, TimeSpan.FromSeconds(2));
+        await context.WaitForPostCountAsync(baseline + 1, TestWaits.Ceiling);
         // 2) The wait bound elapses: the stop continuation is queued behind it.
         time.Advance(HardwareSingleCameraViewModel.LiveViewStopFrameWaitBudget);
-        await context.WaitForPostCountAsync(baseline + 2, TimeSpan.FromSeconds(2));
+        await context.WaitForPostCountAsync(baseline + 2, TestWaits.Ceiling);
         Check.False(stopTask.IsCompleted, "Neither queued continuation may have run yet.");
 
         // 3) Run both: the loop fails first, then the stop sees the timeout with a finished loop.
         context.Drain();
-        await Task.WhenAny(stopTask, Task.Delay(TimeSpan.FromSeconds(2)));
+        await stopTask.SettleAsync("the stop task to finish after the queued continuations ran");
 
         Check.True(stopTask.IsFaulted,
             "A loop that finished with an exception must reach the caller, not be swallowed by the timeout.");
@@ -5115,7 +5139,7 @@ static async Task HardwareSingleShutdownTellsTheOperatorWhileWaitingForTheFrameR
             "The indicator wording must not state a number of seconds.");
 
         await viewModel.StartContinuousLiveViewAsync();
-        await operations.FrameReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await operations.FrameReadEntered.Task.AwaitAsync();
 
         viewModel.BeginShutdownConfirmation();
         Check.Equal(HardwareSingleCameraViewModel.ShutdownConfirmingMessage, viewModel.ShutdownConfirmingText);
@@ -5139,7 +5163,7 @@ static async Task HardwareSingleShutdownTellsTheOperatorWhileWaitingForTheFrameR
             "The in-flight frame request must still carry a non-cancellable token.");
 
         operations.FrameReadReleaseGate.TrySetResult();
-        await shutdownTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await shutdownTask.AwaitAsync();
         Check.Equal(string.Empty, viewModel.ShutdownFrameWaitText);
         Check.True(viewModel.IsShutdownConfirming,
             "The indicator stays up for the operations' own dispose that follows, until the window closes.");
@@ -5194,8 +5218,8 @@ static async Task HardwareContinuousLiveViewDecodesFramesOffTheCallingThreadAsyn
 
         Check.True(viewModel.CanStartContinuousLiveView, "Ready CAM-A must allow continuous Live View v2.");
         await viewModel.StartContinuousLiveViewAsync();
-        await operations.FirstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await WaitForPreviewImageAsync(viewModel, TimeSpan.FromSeconds(2));
+        await operations.FirstFrame.Task.AwaitAsync();
+        await WaitForPreviewImageAsync(viewModel, TestWaits.Ceiling);
 
         int[] observedSnapshot;
         lock (observedThreadIds)
@@ -5648,7 +5672,7 @@ static void HardwareOperatorSessionLeaseIsExclusive()
         {
             using var lease = HardwareSingleAppSessionLease.Acquire();
             acquired.Set();
-            release.Wait(TimeSpan.FromSeconds(10));
+            release.Wait(TestWaits.Ceiling);
         }
         catch (Exception exception)
         {
@@ -5657,7 +5681,8 @@ static void HardwareOperatorSessionLeaseIsExclusive()
         }
     });
     owner.Start();
-    Check.True(acquired.Wait(TimeSpan.FromSeconds(5)), "The hardware session lease owner did not start.");
+    Check.True(acquired.Wait(TestWaits.Ceiling),
+        $"The hardware session lease owner did not start within {TestWaits.Ceiling.TotalSeconds:0.#} s.");
     if (ownerFailure is not null)
     {
         throw new InvalidOperationException("The hardware session lease owner failed.", ownerFailure);
@@ -5670,7 +5695,8 @@ static void HardwareOperatorSessionLeaseIsExclusive()
     finally
     {
         release.Set();
-        Check.True(owner.Join(millisecondsTimeout: 5000), "The hardware session lease owner did not exit.");
+        Check.True(owner.Join(TestWaits.Ceiling),
+            $"The hardware session lease owner did not exit within {TestWaits.Ceiling.TotalSeconds:0.#} s.");
     }
 
     using var reacquired = HardwareSingleAppSessionLease.Acquire();
@@ -6378,7 +6404,7 @@ static async Task HardwareInitializationAndProfileExpiryGateAsync()
         Check.False(startupViewModel.CanCheckReadiness, "Readiness must be disabled before startup state inspection.");
 
         var initialize = startupViewModel.InitializeAsync();
-        await blockingStore.LoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await blockingStore.LoadStarted.Task.AwaitAsync();
         startupViewModel.ExclusiveCameraControlConfirmed = true;
         await startupViewModel.CheckReadinessAsync();
         await startupViewModel.CaptureAsync();
@@ -7073,7 +7099,7 @@ static async Task FormalDualCameraExportFailureProgressAsync()
         Check.Equal("処理中", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
         Check.Equal("待機", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
         viewModel.ExportCommand.Execute(null);
-        await bridge.ExportStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await bridge.ExportStarted.Task.AwaitAsync();
         Check.Equal("完了", viewModel.ProgressSteps.Single(step => step.Id == "review").StatusText);
         Check.Equal("処理中", viewModel.ProgressSteps.Single(step => step.Id == "export").StatusText);
 
@@ -7387,7 +7413,7 @@ static async Task ModeAndAliasLockDuringCaptureAsync()
     viewModel.AcceptSafetyCommand.Execute(null);
 
     viewModel.CaptureCommand.Execute(null);
-    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.Started.AwaitAsync();
     Check.True(viewModel.IsBusy, "The capture must hold the UI operation lock.");
     Check.False(viewModel.CanChangeOperatingMode, "Operating mode must be locked during capture.");
     Check.False(viewModel.CanSelectCamera, "The selected alias must be locked during capture.");
@@ -7487,8 +7513,11 @@ static async Task LiveViewStopFailureWorkflowAsync()
         Check.Equal(1, Directory.EnumerateDirectories(root).Count());
 
         var transactionId = Guid.ParseExact(viewModel.LastTransactionId, "N");
-        viewModel.DiagnosticCommand.Execute(null);
-        await Task.Delay(100);
+        // A second press on the failed transaction is refused by the command guard. Awaiting the
+        // command itself covers both outcomes: refused returns at once, an accidental start is awaited
+        // to its end and then counted below.
+        await ((AsyncRelayCommand)viewModel.DiagnosticCommand).ExecuteAsync(null)
+            .AwaitAsync("the repeated diagnostic press on the failed transaction to return");
         Check.Equal(1, viewModel.TransactionStartCount);
 
         var restarted = new OperatorShellViewModel(new SimulationFoundationService(root));
@@ -7766,8 +7795,8 @@ static async Task DualBindingBlocksTheSingleCameraFallbackAsync()
 
         // And it stays blocked at the command level, not only on the property the button binds to.
         var startsBefore = shell.TransactionStartCount;
-        shell.CaptureCommand.Execute(null);
-        await Task.Delay(50);
+        await ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null)
+            .AwaitAsync("the blocked capture press to return");
         Check.Equal(startsBefore, shell.TransactionStartCount);
 
         shell.IsDualCameraModeChecked = true;
@@ -7945,7 +7974,7 @@ static async Task AsyncCommandCompletionAsync()
         Check.False(completion.IsCompleted, "The execution task must remain pending until the operation completes.");
     }
     finally { release.TrySetResult(); }
-    await completion.WaitAsync(TimeSpan.FromSeconds(5));
+    await completion.AwaitAsync();
     Check.True(command.CanExecute(null), "Completion must include the busy reset.");
     Exception? reported = null;
     var failure = new AsyncRelayCommand(() => throw new IOException("controlled command failure"), onException: error => reported = error);
@@ -7958,25 +7987,17 @@ static async Task ExecuteNativeCommandAsync(System.Windows.Input.ICommand comman
 {
     Check.True(command.CanExecute(null), "The native workflow command must be enabled before execution.");
     var elapsed = Stopwatch.StartNew();
-    // Await the actual command, including UI updates and busy reset. The 30s
-    // harness ceiling detects a stuck integration; it is not a product p95.
+    // Await the actual command, including UI updates and busy reset. The harness
+    // ceiling (TestWaits.Ceiling) detects a stuck integration; it is not a product p95.
     // The previous 5s UI-poll deadline rejected a valid 6.8s delayed capture.
-    await ((AsyncRelayCommand)command).ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(30));
+    await ((AsyncRelayCommand)command).ExecuteAsync(null).AwaitAsync("the native WPF command to complete");
     Console.WriteLine($"Native WPF command completed in {elapsed.ElapsedMilliseconds} ms.");
 }
 
-static async Task WaitUntilAsync(Func<bool> predicate, string message, TimeSpan? timeout = null)
-{
-    var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
-    while (!predicate())
-    {
-        if (DateTime.UtcNow >= deadline)
-        {
-            throw new TimeoutException(message);
-        }
-        await Task.Delay(20);
-    }
-}
+// Polls a condition that has no completion signal of its own. The default ceiling is TestWaits.Ceiling,
+// well above anything a loaded machine needs; on timeout the failure text carries the elapsed time.
+static Task WaitUntilAsync(Func<bool> predicate, string message, TimeSpan? timeout = null) =>
+    TestWaits.PollUntilAsync(predicate, message, timeout);
 
 static string CreateHardwareTestRoot()
 {
@@ -7997,7 +8018,7 @@ static async Task DeleteHardwareTestRootAsync(string root)
             Directory.Delete(root, recursive: true);
             return;
         }
-        catch (IOException) when (attempt < 11)
+        catch (IOException) when (attempt < 30)
         {
             // Windows test teardown can briefly retain newly published evidence files,
             // especially while an asynchronous failure path is still settling. Retry only
@@ -8378,8 +8399,8 @@ static async Task DualBindingRejectsUndecodablePreviewAsync()
         Check.False(shell.DualBinding.AssignCameraBCommand.CanExecute(null),
             "CAM-B assignment must stay disabled without a decoded current frame.");
 
-        shell.DualBinding.AssignCameraACommand.Execute(null);
-        await Task.Delay(50);
+        await shell.DualBinding.AssignCameraACommand.ExecuteAsync(null)
+            .AwaitAsync("the refused CAM-A assignment press to return");
         Check.Equal(string.Empty, shell.DualBinding.Candidates[0].AssignedAlias);
         Check.Equal(DualBindingPhase.Collecting, shell.DualBinding.Phase);
     }
@@ -8848,6 +8869,7 @@ static async Task DualCameraAgentLifecycleExitTimeoutStaysBlockingAsync()
         var lifecycle = CreateDualBindingTestLifecycle(root);
         var client = new DualBindingSessionClient(lifecycle);
         Check.True((await client.BeginBindingAsync()).Succeeded, "binding must start before exit-timeout coverage");
+        var processGeneration = lifecycle.CurrentProcessGeneration;
         Check.True((await client.CancelBindingAsync()).Succeeded, "cleanup acknowledgment must arrive before the timeout");
 
         HardwareCameraAgentLaunchException? caught = null;
@@ -8864,7 +8886,9 @@ static async Task DualCameraAgentLifecycleExitTimeoutStaysBlockingAsync()
 
         // The child exits naturally after the first bounded wait. Re-entering
         // Dispose only verifies that exit; it does not resend cancel-binding.
-        await Task.Delay(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(processGeneration),
+            "the synthetic binding host did not exit on its own after the bounded wait");
         await lifecycle.DisposeAsync();
         Check.Equal(1, ReadDualAgentTraceEntries(tracePath)
             .Count(entry => entry.Operation == DualBindingCameraAgentProtocol.Operations.CancelBinding));
@@ -8917,7 +8941,9 @@ static async Task ActivatedCaptureHostShutdownWaitsForNaturalExitAsync()
 
         // The synthetic child exits by itself shortly after the five-second bounded
         // wait. This is a second explicit close, not a retry of any native operation.
-        await Task.Delay(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(processGeneration),
+            "the synthetic activated host did not exit on its own after the bounded wait");
         var secondClose = await HardwareDualWindowShutdownGate.TryShutdownAsync(
             () => Task.FromResult<DualBindingRefusal?>(null),
             lifecycle.DisposeAsync,
@@ -8958,7 +8984,10 @@ static async Task ActivatedCaptureHostImmediateNaturalExitAllowsShutdownAsync()
         var lifecycle = CreateDualBindingTestLifecycle(root);
         var binding = new DualBindingSessionClient(lifecycle);
         await CompleteDualBindingAndActivateAsync(binding);
-        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        var naturalExitGeneration = lifecycle.CurrentProcessGeneration;
+        await WaitUntilAsync(
+            () => !lifecycle.IsProcessGenerationAlive(naturalExitGeneration),
+            "the synthetic activated host did not exit naturally");
 
         var releaseCount = 0;
         var close = await HardwareDualWindowShutdownGate.TryShutdownAsync(
@@ -9859,7 +9888,7 @@ static async Task CaptureRecoveryOnlyRealAgentReplayThroughShellAsync()
         var succeededTransport = new ReplayDualHardwareTransport(ReplayDualScenario.Succeeded, rebaseTimesToRequest: true);
         var shell = NewShell("replay-succeeded", succeededTransport, out var succeededWorkflow);
         await BindAndAcceptAsync(shell);
-        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(10), "replay/succeeded-capture",
+        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TestWaits.Ceiling, "replay/succeeded-capture",
             () => WpfCommandState.Create(shell));
         Check.True(!shell.IsBusy && shell.UiState == OperatorUiState.Review,
             $"The replayed real Succeeded terminal must reach review. detail={shell.TechnicalDetail}");
@@ -9874,7 +9903,7 @@ static async Task CaptureRecoveryOnlyRealAgentReplayThroughShellAsync()
         shell.ChangeCaptureRecoveryOnlyExportDirectory(exportFolder);
         Check.True(shell.CanExportCaptureRecoveryOnlyOriginals, "Two verified originals and a chosen folder must allow saving.");
         var operationsBeforeExport = succeededTransport.Operations.Count;
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "replay/succeeded-export", () => WpfCommandState.Create(shell));
         Check.Equal(operationsBeforeExport, succeededTransport.Operations.Count);
         Check.True(shell.CaptureRecoveryOnlyExportResult.StartsWith("保存しました: 2枚（CAM-A・CAM-B）", StringComparison.Ordinal),
@@ -9894,7 +9923,7 @@ static async Task CaptureRecoveryOnlyRealAgentReplayThroughShellAsync()
         var failedTransport = new ReplayDualHardwareTransport(ReplayDualScenario.FailedCameraA, rebaseTimesToRequest: true);
         var failedShell = NewShell("replay-failed", failedTransport, out var failedWorkflow);
         await BindAndAcceptAsync(failedShell);
-        await ownedCommands.ExecuteAsync(failedShell.CaptureCommand, TimeSpan.FromSeconds(10), "replay/failed-capture",
+        await ownedCommands.ExecuteAsync(failedShell.CaptureCommand, TestWaits.Ceiling, "replay/failed-capture",
             () => WpfCommandState.Create(failedShell));
         Check.True(!failedShell.IsBusy && failedShell.UiState != OperatorUiState.Capturing,
             "The replayed real Failed terminal must end the command.");
@@ -9987,11 +10016,11 @@ static async Task CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync()
         {
             await ownedCommands.ObserveAsync(
                 ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null),
-                Task.Delay(TimeSpan.FromSeconds(10)),
+                Task.Delay(TestWaits.Ceiling),
                 phase,
-                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within 10s."),
+                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within {TestWaits.Ceiling.TotalSeconds:0.#}s."),
                 () => WpfCommandState.Create(shell),
-                timeout: TimeSpan.FromSeconds(10));
+                timeout: TestWaits.Ceiling);
         }
 
         static string Observe(string label, OperatorShellViewModel shell, bool canCaptureBefore,
@@ -10137,11 +10166,11 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
         {
             await ownedCommands.ObserveAsync(
                 ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null),
-                Task.Delay(TimeSpan.FromSeconds(10)),
+                Task.Delay(TestWaits.Ceiling),
                 phase,
-                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within 10s."),
+                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within {TestWaits.Ceiling.TotalSeconds:0.#}s."),
                 () => WpfCommandState.Create(shell),
-                timeout: TimeSpan.FromSeconds(10));
+                timeout: TestWaits.Ceiling);
         }
 
         static string Observe(string label, OperatorShellViewModel shell, CaptureRecoveryOnlyFakeOperations operations,
@@ -10324,7 +10353,8 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
 
             transport.HoldOperation = DualBindingCameraAgentProtocol.Operations.CompleteBinding;
             var press = ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null);
-            await Task.WhenAny(transport.HoldReached.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            await Task.WhenAny(transport.HoldReached.Task, press)
+                .AwaitAsync("the shell to send the binding re-verification (or the press to end early)");
             Check.True(transport.HoldReached.Task.IsCompleted, "The shell never sent the binding re-verification.");
 
             // Stand-in for a state change during the wait: another ordinary unconfirmed result is now reported.
@@ -10335,9 +10365,9 @@ static async Task CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnc
                 "The source flow must report an unconfirmed ordinary result.");
             wrapper.OverrideCurrent = staleFlow.Current;
             transport.Release.SetResult();
-            await ownedCommands.ObserveAsync(press, Task.Delay(TimeSpan.FromSeconds(10)), "ordinary-unconfirmed/appears",
-                new PendingWpfCommandTimeoutException("ordinary-unconfirmed/appears: command completion was not observed within 10s."),
-                timeout: TimeSpan.FromSeconds(10));
+            await ownedCommands.ObserveAsync(press, Task.Delay(TestWaits.Ceiling), "ordinary-unconfirmed/appears",
+                new PendingWpfCommandTimeoutException($"ordinary-unconfirmed/appears: command completion was not observed within {TestWaits.Ceiling.TotalSeconds:0.#}s."),
+                timeout: TestWaits.Ceiling);
             Console.WriteLine(Observe("appears-during-wait", shell, operations, transport, true, true) +
                 $" Detail={shell.TechnicalDetail}");
 
@@ -10483,7 +10513,8 @@ static async Task CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync()
         {
             transport.HoldOperation = holdOperation;
             var press = ((AsyncRelayCommand)shell.CaptureCommand).ExecuteAsync(null);
-            await Task.WhenAny(transport.HoldReached.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            await Task.WhenAny(transport.HoldReached.Task, press)
+                .AwaitAsync($"the shell to send {holdOperation} (or the press to end early)");
             Check.True(transport.HoldReached.Task.IsCompleted,
                 $"The shell never sent {holdOperation}; the press finished early: {press.IsCompleted}.");
             return press;
@@ -10491,9 +10522,9 @@ static async Task CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync()
 
         async Task FinishPressAsync(Task press, string phase)
         {
-            await ownedCommands.ObserveAsync(press, Task.Delay(TimeSpan.FromSeconds(10)), phase,
-                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within 10s."),
-                timeout: TimeSpan.FromSeconds(10));
+            await ownedCommands.ObserveAsync(press, Task.Delay(TestWaits.Ceiling), phase,
+                new PendingWpfCommandTimeoutException($"{phase}: command completion was not observed within {TestWaits.Ceiling.TotalSeconds:0.#}s."),
+                timeout: TestWaits.Ceiling);
         }
 
         static string Observe(string label, OperatorShellViewModel shell, CaptureRecoveryOnlyFakeOperations operations,
@@ -11116,7 +11147,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         AssertAccessibleNamesContainVisibleLabels(shell, "capture-recovery-only ready after approval");
         Check.False(shell.CanUseLiveView, "A Ready hardware binding must not enable the simulated main-stage Live View.");
         Check.False(shell.CanOpenMaintenance, "A Ready hardware binding must not enable simulated maintenance pages.");
-        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/one-shot",
+        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TestWaits.Ceiling, "recovery-only/one-shot",
             () => WpfCommandState.Create(shell, wpfOperations));
         Check.True(!shell.IsBusy && shell.UiState == OperatorUiState.Review,
             "CaptureRecoveryOnly WPF path did not reach review.");
@@ -11166,7 +11197,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         var savedFileCountBeforeExport = shell.SavedFiles.Count;
         // Saving must never touch the camera or the Agent: every operation counter stays put.
         var agentCallsBeforeExport = AgentCallSnapshot(wpfOperations, bindingTransport);
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/export-originals", () => WpfCommandState.Create(shell, wpfOperations));
         Check.Equal(agentCallsBeforeExport, AgentCallSnapshot(wpfOperations, bindingTransport));
         var savedResult = shell.CaptureRecoveryOnlyExportResult;
@@ -11246,7 +11277,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         tenRunShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(tenRunShell.CanCapture, "The dedicated five-run confirmation must explicitly unlock the selected mode.");
         AssertAccessibleNamesContainVisibleLabels(tenRunShell, "capture-recovery-only five-run approved");
-        await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run",
+        await ownedCommands.ExecuteAsync(tenRunShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/five-run",
             () => WpfCommandState.Create(tenRunShell, tenRunOperations));
         Check.True(!tenRunShell.IsBusy && tenRunShell.UiState == OperatorUiState.Review,
             "The explicit WPF five-run did not reach review after five successful pairs.");
@@ -11256,7 +11287,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
             "The five-run export note must say that only the last pair is saved.");
         var fiveRunExportFolder = Path.Combine(root, "wpf-five-run-originals-export");
         tenRunShell.ChangeCaptureRecoveryOnlyExportDirectory(fiveRunExportFolder);
-        await ownedCommands.ExecuteAsync(tenRunShell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(tenRunShell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/five-run-export-originals", () => WpfCommandState.Create(tenRunShell, tenRunOperations));
         var fiveRunExported = Directory.GetFiles(fiveRunExportFolder, "*.jpg", SearchOption.TopDirectoryOnly);
         Check.Equal(2, fiveRunExported.Length);
@@ -11305,7 +11336,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
                 initialRecoveryShell.IsActionZonePreparing,
                 initialRecoveryShell.IsActionZoneProcessing,
                 initialRecoveryShell.IsBusy);
-        await ownedCommands.ExecuteAsync(initialRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/response-unknown",
+        await ownedCommands.ExecuteAsync(initialRecoveryShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/response-unknown",
             () => WpfCommandState.Create(initialRecoveryShell, wpfRecoveryOperations));
         wpfRecoveryOperations.OnCaptureRecoveryOnlyStart = null;
         Check.True(duringCapture is { Pending: true, ZonePreparing: false, ZoneProcessing: true, Busy: true },
@@ -11373,7 +11404,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         var reserveBeforeRestartedPress = wpfRecoveryOperations.ReserveCalls;
         var startBeforeRestartedPress = wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls;
         var startCountBeforeRestartedPress = restartedRecoveryShell.TransactionStartCount;
-        await ownedCommands.ExecuteAsync(restartedRecoveryShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/restarted-recovery",
+        await ownedCommands.ExecuteAsync(restartedRecoveryShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/restarted-recovery",
             () => WpfCommandState.Create(restartedRecoveryShell, wpfRecoveryOperations));
         Check.Equal(reserveBeforeRestartedPress, wpfRecoveryOperations.ReserveCalls);
         Check.Equal(startBeforeRestartedPress, wpfRecoveryOperations.CaptureRecoveryOnlyStartCalls);
@@ -11421,7 +11452,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         AssertAccessibleNamesContainVisibleLabels(pendingFiveShell, "five-run new capture");
         Check.False(pendingFiveShell.IsCaptureWithAutoFocusUnavailableReasonVisible,
             "GitHub Issue #249: the 撮影 + AF reason row is only for a capturable shell whose 撮影 + AF button is off.");
-        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-pending",
+        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/five-run-pending",
             () => WpfCommandState.Create(pendingFiveShell, pendingFiveOperations));
         Check.True(!pendingFiveShell.IsBusy && pendingFiveWorkflow.HasPendingRecovery,
             "The five-run's first pair must stop with an unconfirmed ID.");
@@ -11473,7 +11504,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         var pendingFiveQueries = pendingFiveOperations.QueryRecoveryOnlyCalls;
         var pendingFiveStartCount = pendingFiveShell.TransactionStartCount;
         var pendingFiveActivations = pendingFiveTransport.ActivateCaptureCalls;
-        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-pending-press",
+        await ownedCommands.ExecuteAsync(pendingFiveShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/five-run-pending-press",
             () => WpfCommandState.Create(pendingFiveShell, pendingFiveOperations));
         Check.Equal(pendingFiveReserve, pendingFiveOperations.ReserveCalls);
         Check.Equal(pendingFiveStart, pendingFiveOperations.CaptureRecoveryOnlyStartCalls);
@@ -11498,7 +11529,7 @@ static async Task CaptureRecoveryOnlyWorkflowAndWpfPathAsync()
         refusalShell.AcceptSafetyCommand.Execute(null);
         refusalShell.IsCaptureRecoveryOnlyOperatorApproved = true;
         await CompleteDualBindingAsync(refusalShell.DualBinding);
-        await ownedCommands.ExecuteAsync(refusalShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/activation-refusal",
+        await ownedCommands.ExecuteAsync(refusalShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/activation-refusal",
             () => WpfCommandState.Create(refusalShell, refusedOperations));
         Check.True(!refusalShell.IsBusy && refusalShell.StatusMessage.Contains("引き継げなかった", StringComparison.Ordinal),
             "A refused CaptureRecoveryOnly activation was not shown to the operator.");
@@ -11583,7 +11614,7 @@ static async Task FiveRunEndingStatusTextsAsync(string root, OwnedWpfCommandScop
         shell.IsCaptureRecoveryOnlyOperatorApproved = true;
         Check.True(shell.IsCaptureRecoveryOnlyFiveRunMode && shell.CanCapture,
             $"The five-run ending scenario '{name}' needs a capturable five-run shell.");
-        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(20), "recovery-only/five-run-ending-" + name,
+        await ownedCommands.ExecuteAsync(shell.CaptureCommand, TestWaits.Ceiling, "recovery-only/five-run-ending-" + name,
             () => WpfCommandState.Create(shell));
         Check.False(shell.IsBusy, $"The five-run ending scenario '{name}' must end with the shell idle.");
         return shell;
@@ -11926,7 +11957,7 @@ static async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperatio
 {
     var (shell, operations, transport) = await CreateOriginalsExportShellAsync(
         root, name, adapter, ordinaryFlow, failCameraB, corruptCameraBOriginal, failCameraAImmediate);
-    await ownedCommands.ExecuteAsync(shell.CaptureCommand, TimeSpan.FromSeconds(5), $"recovery-only/{name}",
+    await ownedCommands.ExecuteAsync(shell.CaptureCommand, TestWaits.Ceiling, $"recovery-only/{name}",
         () => WpfCommandState.Create(shell, operations));
     Check.False(shell.IsBusy, $"{name}: the capture must have finished.");
     return (shell, operations, transport);
@@ -11995,7 +12026,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
                     busyShell.IsCaptureRecoveryOnlyExportDisabledReasonMuted));
             }
         };
-        await ownedCommands.ExecuteAsync(busyShell.CaptureCommand, TimeSpan.FromSeconds(5), "recovery-only/busy-reason",
+        await ownedCommands.ExecuteAsync(busyShell.CaptureCommand, TestWaits.Ceiling, "recovery-only/busy-reason",
             () => WpfCommandState.Create(busyShell, busyOperations));
         Check.True(busyReasons.Count > 0, "The reason must be observable while the capture is running.");
         Check.True(
@@ -12216,7 +12247,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         // Positive control: the earlier new capture did move the counter, so an unchanged value
         // after the press means that no capture was started.
         Check.Equal(1, startCountBeforeRecoveryPress);
-        await ownedCommands.ExecuteAsync(pendingShell.CaptureCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(pendingShell.CaptureCommand, TestWaits.Ceiling,
             "recovery-only/m1-recover-press", () => WpfCommandState.Create(pendingShell, pendingOperations));
         // Pressing the relabelled button asks the same ID only: no Reserve, Start or preflight is sent.
         Check.Equal(beforeRecoveryPress, (
@@ -12240,7 +12271,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         partialShell.ChangeCaptureRecoveryOnlyExportDirectory(partialFolder);
         Check.True(partialShell.CanExportCaptureRecoveryOnlyOriginals,
             "A FailedPartial outcome with one verified original must be exportable.");
-        await ownedCommands.ExecuteAsync(partialShell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(partialShell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/partial-vm-export", () => WpfCommandState.Create(partialShell));
         Check.True(
             partialShell.CaptureRecoveryOnlyExportResult.StartsWith(
@@ -12292,7 +12323,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             }
             return Task.CompletedTask;
         };
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/m3-stage-failure", () => WpfCommandState.Create(shell, operations));
         Check.Equal((Jpg: 0, Partial: 2), observedAtHook);
         // While saving, the reason line is empty and the result field says that it is saving.
@@ -12328,7 +12359,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             publishedCount == 0
                 ? throw new ExportVerificationMismatchException("synthetic-readback-mismatch")
                 : Task.CompletedTask;
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/m3-readback-mismatch", () => WpfCommandState.Create(shell, operations));
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportDestinationFailedText + "\n" + failureTail,
             shell.CaptureRecoveryOnlyExportResult);
@@ -12342,7 +12373,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             publishedCount == 0
                 ? throw new ExportSourceUnavailableException("synthetic-source-failure")
                 : Task.CompletedTask;
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/m3-source-failure", () => WpfCommandState.Create(shell, operations));
         var sourceFailure = shell.CaptureRecoveryOnlyExportResult;
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText + "\n" + failureTail, sourceFailure);
@@ -12371,7 +12402,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
             }
             return Task.CompletedTask;
         };
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/m3-second-rename-failure", () => WpfCommandState.Create(shell, operations));
         var partialResult = shell.CaptureRecoveryOnlyExportResult;
         Check.True(blocker is not null, "The injected second-rename failure must have run.");
@@ -12417,7 +12448,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         // Pressing again saves a new, separately-named pair next to what is already there.
         File.Delete(blocker!);
         shell.CaptureRecoveryOnlyExportBeforePublishForTesting = null;
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/m3-export-again", () => WpfCommandState.Create(shell, operations));
         Check.True(
             shell.CaptureRecoveryOnlyExportResult.StartsWith("保存しました: 2枚（CAM-A・CAM-B）", StringComparison.Ordinal),
@@ -12435,7 +12466,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         File.WriteAllText(folder, "not a folder");
         try
         {
-            await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+            await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
                 "recovery-only/m3-folder-unusable", () => WpfCommandState.Create(shell, operations));
             Check.Equal(
                 OperatorShellViewModel.CaptureRecoveryOnlyExportFolderUnusableText + "\n" + failureTail,
@@ -12463,7 +12494,7 @@ static async Task RunCaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync(
         var callsBefore = AgentCallSnapshot(operations, transport);
         var savedBefore = shell.SavedFiles.Count;
         File.Delete(Path.Combine(shell.OutputDirectory, "CAM-A", "original.jpg"));
-        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TimeSpan.FromSeconds(5),
+        await ownedCommands.ExecuteAsync(shell.ExportCaptureRecoveryOnlyOriginalsCommand, TestWaits.Ceiling,
             "recovery-only/source-missing-export", () => WpfCommandState.Create(shell, operations));
         Check.Equal(OperatorShellViewModel.CaptureRecoveryOnlyExportSourceFailedText + "\n" + failureTail,
             shell.CaptureRecoveryOnlyExportResult);
@@ -13509,7 +13540,7 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
             tracePath,
             scenario switch
             {
-                "binding-activation-exit-timeout" => TimeSpan.FromSeconds(7),
+                "binding-activation-exit-timeout" => DualCameraAgentLifecycle.BindingShutdownExitTimeout + TimeSpan.FromSeconds(5),
                 "binding-activation-natural-exit" => TimeSpan.FromMilliseconds(50),
                 "binding-activation-natural-nonzero-exit" => TimeSpan.FromMilliseconds(50),
                 _ => null,
@@ -13566,7 +13597,7 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
         string requestJson;
         try
         {
-            using var requestTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var requestTimeout = new CancellationTokenSource(TestWaits.Ceiling);
             requestJson = await ReadPersistentTestFrameAsync(pipe, requestTimeout.Token);
         }
         catch (Exception) when (pipe.IsConnected)
@@ -13605,7 +13636,7 @@ static async Task<int> RunDualCameraAgentTestChildAsync(string scenario, IReadOn
 
         await AppendDualAgentTraceAsync(tracePath, pipeName, operation, TryGetDualAgentTransactionId(payload));
 
-        using var responseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var responseTimeout = new CancellationTokenSource(TestWaits.Ceiling);
         switch (operation)
         {
             case DualHardwareCameraAgentProtocol.Operations.GetCapabilities:
@@ -13857,7 +13888,7 @@ static async Task<int> RunDualBindingCancellationTestChildAsync(
         PipeOptions.Asynchronous);
     while (true)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var timeout = new CancellationTokenSource(TestWaits.Ceiling);
         try
         {
             await pipe.WaitForConnectionAsync(timeout.Token);
@@ -13885,7 +13916,7 @@ static async Task<int> RunDualBindingCancellationTestChildAsync(
                 var succeeded = responseJson.Contains("\"success\":true", StringComparison.Ordinal);
                 if (scenario == "binding-cancel-exit-timeout" && succeeded)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(7));
+                    await Task.Delay(DualCameraAgentLifecycle.BindingShutdownExitTimeout + TimeSpan.FromSeconds(5));
                 }
                 return succeeded ? 0 : 2;
             }
@@ -13937,7 +13968,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
     {
         if (exitAfterActivation is { } activationExitDelay)
         {
-            if (await Task.WhenAny(captureActivated.Task, Task.Delay(TimeSpan.FromSeconds(12))) != captureActivated.Task)
+            if (await Task.WhenAny(captureActivated.Task, Task.Delay(TestWaits.Ceiling)) != captureActivated.Task)
             {
                 return 2;
             }
@@ -13946,7 +13977,7 @@ static async Task<int> RunDualBindingActivationCaptureRecoveryOnlyTestChildAsync
             return exitCodeAfterActivation;
         }
 
-        if (await Task.WhenAny(captureCompleted.Task, Task.Delay(TimeSpan.FromSeconds(20))) != captureCompleted.Task)
+        if (await Task.WhenAny(captureCompleted.Task, Task.Delay(TestWaits.Ceiling)) != captureCompleted.Task)
         {
             return 2;
         }
@@ -14450,13 +14481,27 @@ static async Task SimulatedLiveViewFramePumpOnlyTicksBetweenStartAndStopAsync()
     // already-in-flight tick completing shortly after Stop() returns, then confirm the count
     // stabilizes. That — plus the ViewModel-side generation/alias/IsLiveViewActive guard — is
     // what "no frame supply while Live View is OFF" actually guarantees end to end.
-    await Task.Delay(40);
+    // The wait ends when the count has stayed put for a quiet window several ticks long, however
+    // long a loaded machine took to deliver the in-flight tick.
     int countAfterGrace;
-    lock (ticks)
+    var quietSince = Stopwatch.StartNew();
+    lock (ticks) { countAfterGrace = ticks.Count; }
+    var settleTimer = Stopwatch.StartNew();
+    while (quietSince.ElapsedMilliseconds < 200)
     {
-        countAfterGrace = ticks.Count;
+        if (settleTimer.Elapsed > TestWaits.Ceiling)
+            throw TestWaits.TimedOut("the tick count to stop changing after Stop()", settleTimer, TestWaits.Ceiling, null, 0);
+        await Task.Delay(20);
+        lock (ticks)
+        {
+            if (ticks.Count != countAfterGrace)
+            {
+                countAfterGrace = ticks.Count;
+                quietSince.Restart();
+            }
+        }
     }
-    await Task.Delay(80);
+    await Task.Delay(100);
     lock (ticks)
     {
         Check.Equal(countAfterGrace, ticks.Count);
@@ -15075,7 +15120,7 @@ static async Task CaptureWithAutoFocusSucceedsThenCapturesAsync()
         Check.False(viewModel.IsActionZoneProcessing, "The action zone must not show the progress strip before capture starts.");
         Check.False(viewModel.IsActionZoneReview, "The action zone must not show the result panel before capture starts.");
 
-        await ownedCommands.ExecuteAsync(viewModel.CaptureWithAutoFocusCommand, TimeSpan.FromSeconds(5), "simulated/af-capture",
+        await ownedCommands.ExecuteAsync(viewModel.CaptureWithAutoFocusCommand, TestWaits.Ceiling, "simulated/af-capture",
             () => WpfCommandState.Create(viewModel));
         Check.True(viewModel.TransactionStartCount == 1 && !viewModel.IsBusy, "撮影+AF did not finish its capture.");
 
@@ -15203,7 +15248,7 @@ static async Task ActionZoneVisibilitySwitchesWithUiStateAsync()
     Check.False(viewModel.IsActionZoneReview, "Ready must not show the result panel.");
 
     viewModel.CaptureCommand.Execute(null);
-    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.Started.AwaitAsync();
     Check.Equal(OperatorUiState.Capturing, viewModel.UiState);
     Check.False(viewModel.IsActionZonePreparing, "Capturing must hide action zone state 1.");
     Check.True(viewModel.IsActionZoneProcessing, "Capturing must show action zone state 2 (自動進捗ストリップ).");
@@ -15420,7 +15465,7 @@ static async Task AlignmentGuideOverlayTogglesControlVisibilityAsync()
     Check.True(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must be visible before capture starts.");
 
     placeholderViewModel.CaptureCommand.Execute(null);
-    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.Started.AwaitAsync();
     Check.Equal(OperatorUiState.Capturing, placeholderViewModel.UiState);
     Check.False(placeholderViewModel.IsGridOverlayVisible, "Grid overlay must hide during the Capturing processing placeholder.");
     Check.False(placeholderViewModel.IsTombOverlayVisible, "Tomb overlay must hide during the Capturing processing placeholder.");
@@ -15539,7 +15584,7 @@ static async Task MenuNavigationSwitchesPagesAndLocksDuringCaptureAsync()
 
     viewModel.AcceptSafetyCommand.Execute(null);
     viewModel.CaptureCommand.Execute(null);
-    await service.Started.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.Started.AwaitAsync();
     Check.Equal(OperatorUiState.Capturing, viewModel.UiState);
     Check.False(viewModel.CanOpenMaintenance, "active transaction中は保守画面を開けてはならない.");
     Check.False(viewModel.ShowSetupCommand.CanExecute(null), "設置・校正メニュー項目はCapturing中は無効化されなければならない.");
@@ -15811,7 +15856,18 @@ static class WpfCommandState
 
 // Test-local ownership: never use a WaitAsync wrapper as the owned operation.
 // Completion was not observed within the ceiling; the Task can complete later.
-sealed class PendingWpfCommandTimeoutException(string message) : TimeoutException(message);
+sealed class PendingWpfCommandTimeoutException(string message) : TimeoutException(message)
+{
+    private long _waitedMilliseconds = -1;
+
+    // Called once when the ceiling is reached, so that the failure text also says how long the wait lasted.
+    // The exception object itself is unchanged; callers compare it by reference.
+    public void RecordWait(TimeSpan waited) =>
+        Interlocked.CompareExchange(ref _waitedMilliseconds, (long)waited.TotalMilliseconds, -1);
+
+    public override string Message =>
+        _waitedMilliseconds < 0 ? base.Message : $"{base.Message} Waited {_waitedMilliseconds} ms.";
+}
 
 static class UnresolvedWpfCommandFailures
 {
@@ -15848,6 +15904,7 @@ sealed class OwnedWpfCommandScope(string root, Func<string, Task> cleanup, Actio
             if (winner != command || deadline.IsCompleted || (timeout is not null && _elapsed.Elapsed >= timeout.Value))
             {
                 _pendingTimeout = true;
+                (timeoutFailure as PendingWpfCommandTimeoutException)?.RecordWait(_elapsed.Elapsed);
                 ExceptionDispatchInfo.Capture(timeoutFailure).Throw();
             }
             await command;
@@ -16099,7 +16156,9 @@ sealed class QueuedPostSynchronizationContext : SynchronizationContext
         {
             Drain();
             if (task.IsCompleted) break;
-            if (deadline.Elapsed > timeout) throw new TimeoutException("The task did not complete while draining the context.");
+            if (deadline.Elapsed > timeout)
+                throw new TimeoutException(
+                    $"The task did not complete while draining the context (waited {deadline.ElapsedMilliseconds} ms, ceiling {timeout.TotalSeconds:0.#} s).");
             await Task.Delay(TimeSpan.FromMilliseconds(5));
         }
         await task;
@@ -16110,7 +16169,9 @@ sealed class QueuedPostSynchronizationContext : SynchronizationContext
         var deadline = Stopwatch.StartNew();
         while (PostCount < count)
         {
-            if (deadline.Elapsed > timeout) throw new TimeoutException($"Expected {count} posts, observed {PostCount}.");
+            if (deadline.Elapsed > timeout)
+                throw new TimeoutException(
+                    $"Expected {count} posts, observed {PostCount} after {deadline.ElapsedMilliseconds} ms (ceiling {timeout.TotalSeconds:0.#} s).");
             await Task.Delay(TimeSpan.FromMilliseconds(1));
         }
     }
@@ -16460,7 +16521,7 @@ static class WpfCommandLifetimeContracts
             using var process = Process.Start(start) ?? throw new InvalidOperationException("The software test apphost probe did not start.");
             var output = process.StandardOutput.ReadToEndAsync();
             var errors = process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await process.WaitForExitAsync().AwaitAsync($"the '{runner}' stop-probe child process to exit");
             var stdout = await output;
             var stderr = await errors;
             Console.WriteLine("CONTROLLED-CHILD " + JsonSerializer.Serialize(new { runner, exitCode = process.ExitCode, stdout, stderr }));

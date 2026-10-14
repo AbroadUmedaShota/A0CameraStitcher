@@ -820,7 +820,7 @@ public sealed class DualCameraProductFlow : IDualCameraProductFlow
         DualCameraRigProfile profile)
     {
         var originals = new List<CanonicalJpegOriginal>();
-        using var timeout = new CancellationTokenSource(_failedOriginalDiscoveryTimeout);
+        using var timeout = new CancellationTokenSource(_failedOriginalDiscoveryTimeout, _timeProvider);
         foreach (var alias in new[] { "CAM-A", "CAM-B" })
         {
             if (timeout.IsCancellationRequested) break;

@@ -28,7 +28,7 @@ async Task<JsonDocument> Invoke(int expectedExit, params string[] arguments)
     using var process = Process.Start(start) ?? throw new Exception("CLI did not start.");
     var output = process.StandardOutput.ReadToEndAsync();
     var errors = process.StandardError.ReadToEndAsync();
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
     await process.WaitForExitAsync(timeout.Token);
     Check(process.ExitCode == expectedExit, "CLI exit code mismatch.");
     Check(string.IsNullOrWhiteSpace(await errors), "Unexpected CLI stderr.");

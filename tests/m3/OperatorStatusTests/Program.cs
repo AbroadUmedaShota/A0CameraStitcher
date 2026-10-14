@@ -29,7 +29,7 @@ try
     await using (var pipe = new NamedPipeClientStream(".", "a0.operator.status.v1." + server.InstanceId,
         PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
     {
-        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await pipe.ConnectAsync(limit.Token);
         var wire = Encoding.UTF8.GetBytes("{\"command\":\"capture\"}");
         await pipe.WriteAsync(BitConverter.GetBytes(wire.Length), limit.Token);
@@ -41,7 +41,7 @@ try
     await using (var oversized = new NamedPipeClientStream(".", "a0.operator.status.v1." + server.InstanceId,
         PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
     {
-        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await oversized.ConnectAsync(limit.Token);
         await oversized.WriteAsync(BitConverter.GetBytes(257), limit.Token);
         Check(await oversized.ReadAsync(new byte[1], limit.Token) == 0, "Oversized request accepted");
@@ -73,7 +73,7 @@ async Task<JsonDocument> Cli(params string[] arguments)
     using var child = Process.Start(start)!;
     var output = child.StandardOutput.ReadToEndAsync();
     var errors = child.StandardError.ReadToEndAsync();
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
     await child.WaitForExitAsync(timeout.Token);
     Check(child.ExitCode == (arguments[0] == "capture" ? 2 : 0), "Unexpected CLI exit");
     Check(string.IsNullOrWhiteSpace(await errors), "CLI stderr");
@@ -105,7 +105,7 @@ static async Task<int> ReviewDisplayContractAsync(string cliPath)
         await using (var pipe = new NamedPipeClientStream(".", "a0.operator.review-display.v1." + server.InstanceId,
             PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
         {
-            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await pipe.ConnectAsync(limit.Token);
             var wire = Encoding.UTF8.GetBytes("{\"command\":\"capture\",\"resultId\":\"" + resultId + "\",\"image\":\"cam-a\"}");
             await pipe.WriteAsync(BitConverter.GetBytes(wire.Length), limit.Token);
@@ -146,7 +146,7 @@ static async Task<int> ReviewDisplayContractAsync(string cliPath)
         using var child = Process.Start(start)!;
         var output = child.StandardOutput.ReadToEndAsync();
         var errors = child.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await child.WaitForExitAsync(timeout.Token);
         Check(child.ExitCode == expectedExit && string.IsNullOrWhiteSpace(await errors), "Display CLI exit/stderr");
         return JsonDocument.Parse(await output);

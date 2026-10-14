@@ -11,4 +11,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\m3\Foundation\A0CameraStitcher.M3.Foundation.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ceiling and failure text for waits on events a test expects to happen. -->
+    <Compile Include="..\Shared\TestWaits.cs" Link="Shared\TestWaits.cs" />
+  </ItemGroup>
 </Project>

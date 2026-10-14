@@ -35,4 +35,9 @@
           Link="fixtures\hardware-replay\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ceiling and failure text for waits on events a test expects to happen. -->
+    <Compile Include="..\Shared\TestWaits.cs" Link="Shared\TestWaits.cs" />
+  </ItemGroup>
 </Project>

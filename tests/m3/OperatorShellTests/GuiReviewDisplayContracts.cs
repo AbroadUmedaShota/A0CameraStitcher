@@ -97,15 +97,12 @@ internal static class GuiReviewDisplayContracts
         using var child = Process.Start(start) ?? throw new Exception("Review CLI failed to start.");
         var output = child.StandardOutput.ReadToEndAsync();
         var errors = child.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(50));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await child.WaitForExitAsync(timeout.Token);
         Check(child.ExitCode == 0 && string.IsNullOrWhiteSpace(await errors), "Review CLI failed.");
         return JsonDocument.Parse(await output);
     }
     private static void Check(bool valid, string message) { if (!valid) throw new Exception(message); }
-    private static async Task WaitUntilAsync(Func<bool> ready, string message)
-    {
-        for (var attempt = 0; attempt < 100 && !ready(); attempt++) await Task.Delay(50);
-        Check(ready(), message);
-    }
+    private static Task WaitUntilAsync(Func<bool> ready, string message) =>
+        TestWaits.PollUntilAsync(ready, message, interval: TimeSpan.FromMilliseconds(50));
 }

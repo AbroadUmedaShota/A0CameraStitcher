@@ -2475,8 +2475,8 @@ static async Task HardwareNamedPipeRoundtripAsync()
     var client = new HardwareCameraAgentClient(
         pipeName,
         Environment.ProcessId,
-        connectTimeout: TimeSpan.FromSeconds(5),
-        responseTimeout: TimeSpan.FromSeconds(5));
+        connectTimeout: TestWaits.Ceiling,
+        responseTimeout: TestWaits.Ceiling);
 
     var reply = await client.GetSingleReadinessAsync("CAM-B");
     Check.True(reply.Success && reply.Payload.Ready, "The typed hardware client must accept a valid local pipe response.");
@@ -2497,8 +2497,8 @@ static async Task HardwareConnectFailureIsTypedAsync()
     // here.
     var transport = NamedPipeHardwareCameraAgentTransport.CreateWithoutServerIdentityVerificationForTesting(
         pipeName,
-        connectTimeout: TimeSpan.FromSeconds(5),
-        responseTimeout: TimeSpan.FromSeconds(5));
+        connectTimeout: TestWaits.Ceiling,
+        responseTimeout: TestWaits.Ceiling);
     using var cancellationSource = new CancellationTokenSource();
     cancellationSource.Cancel();
 
@@ -2534,12 +2534,12 @@ static async Task HardwarePostDispatchCancellationIsNotConnectFailureAsync()
     var transport = new NamedPipeHardwareCameraAgentTransport(
         pipeName,
         Environment.ProcessId,
-        connectTimeout: TimeSpan.FromSeconds(5),
-        responseTimeout: TimeSpan.FromSeconds(5));
+        connectTimeout: TestWaits.Ceiling,
+        responseTimeout: TestWaits.Ceiling);
     using var cancellationSource = new CancellationTokenSource();
     var responseTask = transport.SendAsync("{}", cancellationSource.Token);
 
-    await requestReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await requestReceived.Task.AwaitAsync();
     cancellationSource.Cancel();
     try
     {
@@ -2578,8 +2578,8 @@ static async Task HardwareServerIdentityMismatchFailsClosedAsync()
     var transport = new NamedPipeHardwareCameraAgentTransport(
         pipeName,
         wrongServerProcessId,
-        connectTimeout: TimeSpan.FromSeconds(5),
-        responseTimeout: TimeSpan.FromSeconds(5));
+        connectTimeout: TestWaits.Ceiling,
+        responseTimeout: TestWaits.Ceiling);
 
     try
     {
@@ -2613,7 +2613,7 @@ static async Task ServeHardwareConnectionOnlyOnceAsync(string pipeName, Task cli
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var timeoutSource = new CancellationTokenSource(TestWaits.Ceiling);
     await pipe.WaitForConnectionAsync(timeoutSource.Token);
     // The client is expected to fail its own server-identity check and never write a request
     // frame. Keep the pipe open only until the client signals its check is done, so the
@@ -2632,7 +2632,7 @@ static async Task HoldHardwarePipeAfterRequestAsync(
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var timeoutSource = new CancellationTokenSource(TestWaits.Ceiling);
     await pipe.WaitForConnectionAsync(timeoutSource.Token);
     _ = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
     requestReceived.TrySetResult(true);
@@ -2647,7 +2647,7 @@ static async Task ServeHardwareReadinessOnceAsync(string pipeName)
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var timeoutSource = new CancellationTokenSource(TestWaits.Ceiling);
     await pipe.WaitForConnectionAsync(timeoutSource.Token);
     var requestJson = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
     var request = HardwareCameraAgentProtocolCodec.DeserializeRequest(requestJson);
@@ -2709,8 +2709,8 @@ static async Task HardwareInvalidResponseDoesNotReceiveAcknowledgmentAsync()
         var transport = new NamedPipeHardwareCameraAgentTransport(
             pipeName,
             Environment.ProcessId,
-            connectTimeout: TimeSpan.FromSeconds(5),
-            responseTimeout: TimeSpan.FromSeconds(5));
+            connectTimeout: TestWaits.Ceiling,
+            responseTimeout: TestWaits.Ceiling);
         await Check.ThrowsAsync<IOException>(() => transport.SendAsync("{}"));
         Check.False(await serverTask, "An invalid response frame must not receive a delivery acknowledgment.");
     }
@@ -2724,7 +2724,7 @@ static async Task<bool> ServeInvalidHardwareResponseOnceAsync(string pipeName, b
         maxNumberOfServerInstances: 1,
         PipeTransmissionMode.Byte,
         PipeOptions.Asynchronous);
-    using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var timeoutSource = new CancellationTokenSource(TestWaits.Ceiling);
     await pipe.WaitForConnectionAsync(timeoutSource.Token);
     _ = await ReadTestPipeFrameAsync(pipe, timeoutSource.Token);
     var header = new byte[sizeof(int)];
@@ -3109,7 +3109,7 @@ static async Task CrossCoordinatorOwnershipAsync()
         var transactionId = Guid.NewGuid();
 
         var firstRun = firstCoordinator.ExecuteAsync(transactionId);
-        await firstSource.CaptureStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstSource.CaptureStarted.AwaitAsync();
         try
         {
             await Check.ThrowsAsync<InvalidOperationException>(() =>

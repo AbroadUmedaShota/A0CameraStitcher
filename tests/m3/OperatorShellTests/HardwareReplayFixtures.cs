@@ -95,7 +95,7 @@ internal static class HardwareReplayFixtures
                 if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, recursive: true);
                 return;
             }
-            catch (IOException) when (attempt < 10)
+            catch (IOException) when (attempt < 100)
             {
                 Thread.Sleep(50);
             }
