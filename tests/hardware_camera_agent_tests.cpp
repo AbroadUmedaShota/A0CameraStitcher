@@ -4478,6 +4478,44 @@ void TestContinuousLiveViewV2Protocol() {
           backend.continuous_close_calls == 1 && dispatcher.ShouldStop(),
         "close-agent-session must request bounded process exit");
 
+    // The .NET side sends only lowercase and rejects anything else, so the agent
+    // must not accept an uppercase or mixed-case sessionId at any v2 entry.
+    {
+        FakeBackend case_backend;
+        HardwareCameraAgentDispatcher case_dispatcher(case_backend);
+        const std::vector<std::string> bad_sessions{
+            std::string(32, 'A'),
+            "0123456789ABCDEF0123456789abcdef",
+            std::string(31, 'a') + "F",
+        };
+        for (const auto& bad_session : bad_sessions) {
+            const auto bad_start = case_dispatcher.Handle(LiveViewV2Envelope(
+                "start-live-view",
+                "{\"cameraAlias\":\"CAM-A\",\"sessionId\":\"" + bad_session +
+                    "\",\"exclusiveCameraControlConfirmed\":true}"));
+            Check(bad_start.find("InvalidLiveViewRequest") != std::string::npos &&
+                  case_backend.continuous_start_calls == 0,
+                "start-live-view must reject an uppercase or mixed-case sessionId before backend access");
+            for (const char* operation : {"read-live-view-frame", "live-view-heartbeat",
+                                          "stop-live-view", "close-agent-session"}) {
+                const auto bad_op = case_dispatcher.Handle(LiveViewV2Envelope(
+                    operation, "{\"sessionId\":\"" + bad_session + "\"}"));
+                Check(bad_op.find("InvalidLiveViewRequest") != std::string::npos &&
+                      case_backend.continuous_frame_calls == 0 &&
+                      case_backend.continuous_stop_calls == 0 &&
+                      case_backend.continuous_close_calls == 0 && !case_dispatcher.ShouldStop(),
+                    "a Live View v2 operation must reject an uppercase or mixed-case sessionId before backend access");
+            }
+        }
+        const auto lower_start = case_dispatcher.Handle(LiveViewV2Envelope(
+            "start-live-view",
+            "{\"cameraAlias\":\"CAM-A\",\"sessionId\":\"0123456789abcdef0123456789abcdef\","
+            "\"exclusiveCameraControlConfirmed\":true}"));
+        Check(lower_start.find("\"resultCode\":\"Started\"") != std::string::npos &&
+              case_backend.continuous_start_calls == 1,
+            "a lowercase 32-hex sessionId must still be accepted");
+    }
+
     FakeBackend rejected_backend;
     HardwareCameraAgentDispatcher rejected_dispatcher(rejected_backend);
     const auto rejected = rejected_dispatcher.Handle(LiveViewV2Envelope(

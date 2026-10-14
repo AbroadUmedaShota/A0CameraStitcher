@@ -1610,6 +1610,26 @@ static void HardwareProtocolValidation()
             profileSnapshot,
             HardwareCaptureSafetyConfirmations.AllConfirmed,
             liveViewHandoffRequested: false));
+    // The Camera Agent accepts only lowercase transaction IDs at its entries, so
+    // an uppercase or mixed-case ID is refused here before it is sent.
+    foreach (var nonLowercaseId in new[]
+    {
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789ABCDEF0123456789abcdef",
+        "0123456789abcdef0123456789abcdeF",
+    })
+    {
+        Check.ThrowsHardwareProtocol("InvalidTransactionId", () =>
+            HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
+                nonLowercaseId,
+                "CAM-A",
+                profileSnapshot,
+                HardwareCaptureSafetyConfirmations.AllConfirmed,
+                liveViewHandoffRequested: false));
+        Check.ThrowsHardwareProtocol("InvalidTransactionId", () =>
+            HardwareCameraAgentProtocolCodec.SerializeRequest(
+                HardwareCameraAgentProtocolCodec.CreateTransactionResultRequest(nonLowercaseId)));
+    }
     Check.ThrowsHardwareProtocol("InvalidCaptureProfileSnapshot", () =>
         HardwareCameraAgentProtocolCodec.CreateCaptureRequest(
             transactionId,
@@ -2054,6 +2074,12 @@ static void HardwareProtocolValidation()
             captureResponseJson,
             "capture-response",
             "ffffffffffffffffffffffffffffffff",
+            "CAM-A"));
+    Check.ThrowsHardwareProtocol("InvalidTransactionId", () =>
+        HardwareCameraAgentProtocolCodec.DeserializeCaptureResponse(
+            captureResponseJson,
+            "capture-response",
+            "0123456789ABCDEF0123456789ABCDEF",
             "CAM-A"));
 
     var inProgress = capture with

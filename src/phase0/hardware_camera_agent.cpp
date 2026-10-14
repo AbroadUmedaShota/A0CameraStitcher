@@ -349,6 +349,11 @@ bool IsSafeRequestId(std::string_view value) noexcept {
     });
 }
 
+// Shape check for an ID that is already inside the agent (a journal field, a
+// path element, a lease name): 32 hex digits in either case. It is not the check
+// for a request entry. A request accepts only lowercase (IsLowerHex(value, 32)),
+// because the C# side and the on-disk directory names are lowercase, so use
+// IsLowerHex at any new entry.
 bool IsSafeTransactionId(std::string_view value) noexcept {
     return value.size() == 32 && std::all_of(value.begin(), value.end(), [](unsigned char character) {
         return std::isxdigit(character) != 0;
@@ -2840,11 +2845,11 @@ HardwareCameraAgentRequest ParseHardwareCameraAgentRequest(std::string_view json
                 RequireField(payload, "sessionId", JsonKind::string).string;
             request.exclusive_camera_control_confirmed = RequireField(
                 payload, "exclusiveCameraControlConfirmed", JsonKind::boolean).boolean;
-            if (!IsSafeTransactionId(request.session_id) ||
+            if (!IsLowerHex(request.session_id, 32) ||
                 !request.exclusive_camera_control_confirmed) {
                 ProtocolFailure(
                     "InvalidLiveViewRequest",
-                    "start-live-view requires a 32-hex session and exclusive confirmation");
+                    "start-live-view requires a 32-lowercase-hex session and exclusive confirmation");
             }
             return request;
         }
@@ -2863,9 +2868,9 @@ HardwareCameraAgentRequest ParseHardwareCameraAgentRequest(std::string_view json
         RequireExactFields(payload, {"sessionId"});
         request.session_id =
             RequireField(payload, "sessionId", JsonKind::string).string;
-        if (!IsSafeTransactionId(request.session_id)) {
+        if (!IsLowerHex(request.session_id, 32)) {
             ProtocolFailure(
-                "InvalidLiveViewRequest", "Live View sessionId must be 32 hexadecimal characters");
+                "InvalidLiveViewRequest", "Live View sessionId must be 32 lowercase hexadecimal characters");
         }
         return request;
     }

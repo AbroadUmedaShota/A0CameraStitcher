@@ -1575,7 +1575,7 @@ public static class HardwareCameraAgentProtocolCodec
     {
         if (!IsValidTransactionId(transactionId))
         {
-            throw Violation("InvalidTransactionId", "A transaction ID must contain exactly 32 hexadecimal characters.");
+            throw Violation("InvalidTransactionId", "A transaction ID must contain exactly 32 lowercase hexadecimal characters.");
         }
     }
 
@@ -1805,8 +1805,10 @@ public static class HardwareCameraAgentProtocolCodec
         }
     }
 
+    // 32 lowercase hexadecimal characters, the same shape the Camera Agent accepts
+    // at its capture-single and get-transaction-result entries.
     private static bool IsValidTransactionId(string? value) =>
-        value is { Length: 32 } && value.All(IsAsciiHex);
+        IsLowerHex(value, 32);
 
     private static bool IsLowerHex(string? value, int length) =>
         value is not null && value.Length == length && value.All(character =>
@@ -1815,9 +1817,6 @@ public static class HardwareCameraAgentProtocolCodec
     private static bool IsSafeToken(string? value, int maximumLength) =>
         !string.IsNullOrEmpty(value) && value.Length <= maximumLength && value.All(character =>
             IsAsciiLetter(character) || IsAsciiDigit(character) || character is '.' or '-' or '_');
-
-    private static bool IsAsciiHex(char character) =>
-        IsAsciiDigit(character) || character is >= 'a' and <= 'f' or >= 'A' and <= 'F';
 
     private static bool IsAsciiDigit(char character) => character is >= '0' and <= '9';
 
