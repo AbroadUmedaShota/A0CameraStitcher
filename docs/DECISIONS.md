@@ -112,6 +112,7 @@
 - 決定: Microsoft公式`WPD_COMMAND_MTP_EXT_GET_SUPPORTED_VENDOR_OPCODES`だけを独立status probeで送る。個別一覧、vendor extension文字列、実識別子は保存せず、件数と`0x9207`広告有無だけを匿名化する。撮影commandとvendor operationは送らない。既定read-only accessが拒否された場合も自動fallbackせず、明示的read/write query-only runを別証拠にする。
 - 実機証拠: 電源再投入後のquery-only [run-1785908518274-1](evidence/phase0/run-1785908518274-1/report.md)は34件と`0x9207`広告有無を匿名記録した。capture command・vendor operationは未送信である。
 - 影響: `0x9207`が広告されることだけを確認でき、意味、parameter、event、撮影・回収成立性、利用許可は未確認である。標準`0x100E`の広告有無もvendor APIからは推定しない。ADR-0017でhybrid経路は承認されたが、vendor-op評価・実装・実行は引き続き対象外である。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。ライブビューの3命令（開始・画像の取得・終了）だけをWPD経由で送る例外を提案している。撮影とカードに触る命令（`0x9207`を含む）の禁止は変えない。承認までは本ADRの文面が効く。
 
 ## ADR-0017: 標準WPD不成立後のone-shot hybrid評価
 
@@ -119,6 +120,7 @@
 - 決定: product ownerは、`WPD baseline + full close → Nikon SDK exactly-one capture to camera card + full close → WPD reopen, no capture command, recover exactly one new JPEG`をPhase 0の承認経路とした。
 - 根拠: 電源再投入後も[run-1785908732670-1](evidence/phase0/run-1785908732670-1/report.md)で標準`0x100E`は`0x2002`、ObjectAdded/JPEG 0件、`FailedPartial`だった。query-only [run-1785908518274-1](evidence/phase0/run-1785908518274-1/report.md)の`0x9207`広告は、operationの意味・実行許可・成功の証拠ではない。
 - 影響: vendor operationを実装・送信せず、SDK/WPD sessionを重複させない。hardware evidenceによりdatetime相関契約はADR-0019でRejectedとなり、captureは承認済みADR-0020のsingle-slot spool経路だけで評価する。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。vendor operationを送らない点について、ライブビューの3命令だけを例外とする案がある。hybridの経路の判断は変えない。承認までは本ADRの文面が効く。
 
 ## ADR-0018: PC原本を唯一の正本とし、camera cardは一過性の転送元にする
 
@@ -139,6 +141,7 @@
 - 決定: 専用empty/cleared cardだけをsingle-slot spoolとして使う。SDK exactly-one capture後にWPDで唯一のexact objectを回収し、PC `.partial`、JPEG・size検証、SHA-256、atomic `original.jpg`確定、再読込検証を完了してからそのobjectだけを削除し、spoolが空であることを確認する。
 - 失敗時: baseline、capture、recovery、候補0件・複数件・遅延・曖昧画像、JPEG/size検証、download、persist、delete、empty-after確認のいずれかに失敗した場合は削除しない。PC原本が確定済みなら保持し、transactionを`FailedPartial`で終了する。同一transactionをretryまたは再開しない。
 - 制約: existing cardのbulk delete/format、vendor operation（`0x9207`を含む）は禁止する。実機one-shot、10/10、fault、handoffの合格証拠はまだない。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。禁止するvendor operationのうち、ライブビューの3命令だけを例外とする案がある。`0x9207`とspoolの規則は変えない。承認までは本ADRの文面が効く。
 
 ## ADR-0021: 設置は自動補正可能範囲までとし固定profile＋上限付き補正を使う
 
@@ -226,6 +229,7 @@
 - 実機再開前の技術gate: pair-level read-only preflightでWPD D810 exact-two、CAM-A/B map exact-one、両card payload 0、全WPD session closeを一括確認する。さらにproduction adapterのread-only coexistence probeで、WPD open前のSDK source/capture session close、Module retained、WPD session close、WPD open中SDK operation 0を確認する。focused/full回帰と独立reviewの`PASS`後だけoperator-resume済みone-shotへ進む。
 - 受入境界: このADRはCaptureRecoveryOnlyのtransport検証だけを対象とし、合成、A0品質、実シャッター同期、releaseを承認しない。one-shot、10 pair、実測p95の製品責任者承認、100 pair、異常系の証跡は引き続き別gateである。
 - 追記（2026-10-14、ADR-0035・Issue #291）: Moduleを残す目的に「`Ready`の後のbound Live Viewのsourceを開くこと」を足す。WPDをopenする前に全Live ViewとSDK sourceをcloseする規則、WPD open中にSDK operationを行わない規則は変えない。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。WPD経由のライブビューの3命令の例外を提案している。SDKとWPDを同じカメラで重ねないこと、撮影の前にすべてのライブビュー（WPD・SDK）を閉じて確かめることは保つ。別々のカメラの間で重ねてよいかは決めておらず、それまでは本ADRの「WPD open中はSDK operationを行わない」が効く。
 
 ## ADR-0030: STEP4までの受入反復を最大5回へ変更する
 
@@ -261,6 +265,7 @@
 - 範囲外: リアルタイム合成、自由homography、previewからのA0品質判断、hardware shutter synchronizationの保証。実機PoCはこのdecisionだけでは開始せず、対象・回数・操作を明記した別承認を要する。
 - 状態の追記（2026-10-05）: 凍結（Blocked）。2プロセス×2 moduleの構成による二台Live Viewの実機PoCを、(i) ベンダーの書面確認、または (ii) 所有者が新しい実機予算を明示承認するまで止める。二画面Live Viewの目標そのものは放棄しない（PMの仮定）。根拠は4点。二台runはrun-04・run-05とも候補列挙の直後、最初の命令で失敗した（run-04の分類は記録が無く※推定、run-05はselectで `worker_selection_invalidated`）。run-05ではworker 1がSDKを読み込む前に止まったため、2 moduleの共存は試験できていない。実装前gate (1)「ライセンス下のSDK資料が独立session／sourceによる同時Live Viewを許可すること」は、手元の資料では満たせない。実機preview枠は5/5を消費した。MVPのLive Viewは一台選択式のまま（AGENTS.md）。経緯と証跡は `docs/DUAL_LIVE_WORKER_POC.md` の「二台実機run-05」節、作業順は `docs/CURRENT_STATUS.md` の2026-10-05 run-05節。計装 A（`853c075`）を 2026-10-05 に main へ入れた。同日時点でmainへは未着地）。凍結解除の判断材料はAの計装データで、データを取る次の実機1回には所有者の新たな承認が要る。
 - 状態の追記（2026-10-13の所有者の決定、2026-10-14記録、Issue #291）: 二台のライブビューは、当面「選んだ側をLive、反対側はその最終frameの静止画」と「両方を更新」ボタンで進める。最終目標の二台とも動く映像は放棄せず、別Issue（#292）で追う。所有者が確かめたいのは、設置時の構図合わせ・ピント・原稿ごとの収まり・2台が生きていることの4つで、当面の構成で4つとも満たせる。実装前gate (1)〜(5)と2026-10-05の凍結は#292の範囲にだけかかる。#291は一module・一Live Viewのままで、上の「1 moduleで複数台は不可」の制限に触れない。詳細はADR-0035。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。所有者の決定（2026-10-14、#306）に基づき、最終の操作者の画面を、承認済みrig profileで描く表示専用の合成Cにし、左右の二paneを技術担当者向けへ移す案。「保存した合成と表示しない」「同期と表示しない」は残す。承認までは本ADRの文面が効く。
 
 ## ADR-0032: 受入試行の定義・回数の数え方・USB抜去・保存の合格線を定める
 
@@ -603,3 +608,110 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 - 影響: 受入済みの撮影経路に入る変更は、撮影前のstop（使っていなければ何も送らない）と`activate-capture`の確認だけ。1回の照合で撮れる組数はLive Viewを使うと3〜4組の見込み（※推定）。
 - 実機で確かめる点（実機日の別系列、シャッターを切らないものと切るものがある）: Ready後のLive（A・B各60秒連続のframe率とSDKエラー頻度）、切り替えと「両方を更新」の所要時間、Live View後の撮影（撮影前に閉じる処理から1組）、Live中のUSB抜去での失効、Live中にアプリを閉じたときのstop。どれも※未検証。回数と系列は実機日の前に所有者の承認を取る。
 - 範囲外: 二台とも動く映像（#292）、vendor operation、SDKの2重読み込み、HDMIの取り込み、previewを撮影や合成の入力にすること。
+- 追記（2026-10-14、ADR-0036・Issue #307）: ADR-0036で改定（Proposed）。主画面を表示専用の合成Cにし、A・Bの表示を技術担当者向けへ移す案。不変条件6（previewを合成の入力にしない）は「保存の合成の入力にしない」に絞る案で、Cは保存せず、撮影・保存の合成の入力にもしない。範囲外の「二台とも動く映像」「vendor operation」はB案（ライブビューの3命令の例外）で改定する案。承認までは本ADRの文面が効く。
+
+## ADR-0036: ライブビューを承認済みrig profileで描く表示専用の合成Cにし、WPD経由のライブビュー3命令をvendor operationの例外にする
+
+- 状態: Proposed。所有者の承認待ち。実装も実機の試作も無い（※未実装・※未検証）。承認までは、改定の対象（下の「改定の対象」の表）の今の文面がそのまま効く。AGENTS.mdの安全規約も承認まで変えない。
+- 起票日: 2026-10-14
+- 関連: #307（本ADR）、#306（所有者の決定と技術の道筋）、#292（B案）、#293（今のスコープ）、#291・#295（ADR-0035）、#280・#281・#282（合成のレンダラー・reader・製品の入口）、#274・#277（profileの選択と校正）、#46（撮影ごとの補正）、#43・#42・#45（リグ・品質基準・承認済みprofile）、#233（pilot）、`HG-0010`・`HG-0011`
+- 背景: ADR-0031は、CAM-Aを左・CAM-Bを右に置く二paneを最終の操作者の画面とし、二paneを合成済みと見せないこと、リアルタイム合成を範囲外とすることを決めた。ADR-0035（#291）は、当面の形として選んだ1台をLive、反対側を静止画にした。所有者は2026-10-14に、操作者の画面ではA・Bの区別を見せず、2台の映像を合成した1枚（以下C）を出すこと、Cの両側を動かすためにB案（WPD経由でPTPのライブビュー命令を送る、#292）を今のスコープに入れることを決めた（#306）。B案は、vendor operationを送らないと定めたADR-0016・0017・0020・0028と`CON-003`に当たるため、例外を明文にする必要がある。
+
+### ADR-0036の所有者の決定（2026-10-14、#306）
+
+所有者が決めたのは次の6点。下の「決定1」「決定2」「不変条件」は、これを規則の形に落とした案で、案の部分は承認を要する。
+
+1. 時期: 今のスコープ（#293）に入れる。進め方は、先に合成の本体を作り、それを映像に反映する。
+2. Cの動き: 両側とも動くC。B案（#292）を今のスコープに入れる。
+3. 見た目: 保存される合成と同じにする。位置・継ぎ目（幾何）に加えて、明るさと色も合わせる（撮影ごとの補正#46をCにも当てる）。
+4. A・Bのカメラごとの表示: 技術担当者向けに残す（設置・ピント合わせ・不具合の切り分け）。操作者の通常の画面はCだけ。
+5. 校正（#277）の基準点の検出: OpenCVを開発ツールだけで使い、製品には同梱しない。製品への同梱の判断（`HG-0005`）は別。
+6. pilotの間、ライブビューのframeを操作PC-1の中に記録してよい。公開リポジトリとIssueには載せない。
+
+### 決定1: 表示専用の合成C（案）
+
+1. Cは承認済み（approved）のrig profileだけで描く。draft、期限切れ、fingerprintが一致しないprofileでは描かない。
+2. Cの写像は、approved profileの写像をライブビューの画素へ縮めたものとする（`K_lv = S·K`、`H_lv = S·H`、歪み係数はそのまま）。描画は保存の合成と同じレンダラー（#280）を通す。`S`はライブビューの画素と撮影画像の画素の対応（拡縮と平行移動）で、測定で決めた固定の値とし、frameごとに推定しない。`S`の値と置き場所（機種の定数か、profileの欄か）は測定の後に別に承認する。
+3. 明るさと色も保存の合成に合わせる。撮影ごとの補正（#46）を保存の合成に入れたら、Cにも同じ補正を当てる。Cに当てる補正の値をどこから得るかは#46の設計で決める（※未決）。どの方法でも、ライブビューのframeから自由なhomographyを推定しない。
+4. 「保存される合成と同じ見た目」と言えるのは、ライブビューが撮影画像の範囲を拡縮と平行移動だけで写していることを確かめた後とする。確かめ方は、ライセンス下の資料を読む（リポジトリには要旨だけを書く）、実機でシャッターを切らずに測る、pilotで原画像と比べる、の3段。確かめられなければCを出さない。拡大表示中など、撮影範囲の全体を写していないframeでは描かない。
+5. Cは表示専用とする。保存しない。画素をログ・journalに書かない。撮影、保存の合成、書き出し、補正の推定、profileの選択の入力にしない。Cの画像は、保存と書き出しのAPIが受け付けない型で持つ。
+6. A・Bのカメラごとの表示は技術担当者向けに残す。操作者の通常の画面はCだけで、CAM-A・CAM-Bの名前を出さない。技術担当者向けの表示を置く場所（保守画面か、表示の切り替えか）は`docs/OPERATOR_UI_SPEC.md`の改定で決める（※未決）。
+7. 承認済みのprofileが無い間は、操作者の画面にCを出さず、出せない理由を表示する。draftのprofileでCを描くことは、AGENTS.md（承認済みの固定rig profileを使う）、ADR-0033の4節、ADR-0034の不変条件1に反するため、本ADRでは認めない。#306の依存の順序5にある「開発用の画面で下書きのCを所有者に見せる」は、ADR-0033の4節の評価専用の入口の範囲で行い、製品の配布物に入れない（※この読み方は所有者の確認事項）。
+8. 片側のframeが全く無い時は描かない。片側が最終frameの静止画のまま描くCの扱い（B案が成り立つまで、ADR-0035の形のframeで描く場合）は`HG-0011`に含める。画面に「同時」「同期」と書かず、2台のframeの時刻が違うことを常設の注記で伝える。
+9. 計算は、保存の合成と同じC++を小さなDLLにしてWPFから呼ぶ案を採る（#306の技術の道筋）。1枚35〜65 ms、20 MB未満の見込み（※推定。実装の前に操作PC-1で計測する）。描画はUIスレッドの外で行い、最新のframeだけを描く。
+
+### 決定2: B案 — WPD経由のライブビュー3命令の例外（案）
+
+1. vendor operationのうち、ライブビューの3命令（開始・画像の取得・終了）だけを、WPD経由で送ってよい例外にする。対象はD810の写真ライブビュー。
+2. 撮影とカードに触る命令（`0x9207`を含む）は引き続き禁止する。カメラの設定を書き換える命令と、3命令以外のvendor operationも禁止のまま。3命令のどれかの前提として、設定の書き込みや別のvendor operationが要ると分かった場合は、例外を広げずにそこで止め、改めて判断を仰ぐ。
+3. 前提条件: 所有者がNikon SDKの使用許諾を読み直し、次の2点を確かめる（#292、所有者の作業）。(a) 同梱のMTP仕様書を実装に使ってよい範囲、(b) 命令の値と手順を公開リポジトリに書いてよいか。確認が済むまで、B案の実装と実機の試作に着手しない。資料は転載せず、参照は節の番号と要旨にとどめる。
+4. 実機の試作の前に、試作の対象（機体と系列）、回数、中止の条件を別に承認する（ADR-0031の「対象・回数・操作を明記した別承認」と同じ扱い）。本ADRの承認は試作の承認を含まない。
+5. B案で得るframeが、SDK経由のframeと同じ範囲を写すかは、試作で確かめ直す（決定1の4）。
+6. B案が実機で成り立たなかった場合の扱いは決まっていない（※未決、所有者の確認事項）。それまでの二台のライブビューはADR-0035の形のまま。
+
+### 守る不変条件
+
+1. SDKとWPDのsessionを同じカメラで重ねない。別々のカメラの間でSDKとWPDを同時に開いてよいかは本ADRでは決めない（※未決）。決めるまでは、ADR-0028の「WPD open中はSDK operationを行わない」をそのまま守る。
+2. 撮影の前に、すべてのライブビュー（WPD経由とSDK経由）を閉じ、閉じたことを確かめる。確かめられなければ試行に数えず、撮影を始めない（ADR-0035の不変条件3、ADR-0032の1-A）。
+3. no retry。ライブビューの失敗で自動の開き直しをしない。原本を保持する（ADR-0006・0018・0020）。
+4. 撮影ごとのhomographyの推定はしない（ADR-0021を維持）。Cでもframeごとに推定しない。profileを実行時に変更・学習しない。
+5. ライブビューのframeとCを保存・公開しない。例外は所有者が認めたpilotの間の記録だけで、操作PC-1の中に限り、公開リポジトリとIssueに載せない。この記録を有効にする手段（既定OFFの開発用の設定など）とholdoutに使わないことは、承認後にNFR-SEC-001の改定とあわせて決める（※案）。
+6. 画面に「同時」「同期」と書かない。シャッターの同期を保証しない（`CON-002`）。
+
+### 改定の対象と、承認後の差し替えの案
+
+本ADRがProposedの間は、各対象に「ADR-0036で改定（Proposed）」の追記だけを置き、本文は変えない。承認後に次の方向で本文を書き換える。
+
+| 対象 | 今の文面の要旨 | 承認後の改定の方向 |
+|---|---|---|
+| ADR-0016 | vendor operationは送らない | ライブビューの3命令だけを例外とし、`0x9207`の禁止は残す |
+| ADR-0017（Superseded） | vendor operationを実装・送信しない | 同上。hybridの経路の判断は変えない |
+| ADR-0020 | `0x9207`を含むvendor operationを禁止 | ライブビューの3命令だけを例外とする。spoolの規則は変えない |
+| ADR-0028 | WPD open中はSDK operationを行わない。vendor operation禁止 | ライブビューの3命令の例外を足す。別カメラ間の重なりは不変条件1のとおり未決 |
+| ADR-0031 | 最終の操作者の画面は二pane。合成済みと表示しない。リアルタイム合成は範囲外 | 最終の操作者の画面をCにし、二paneは技術担当者向けへ移す。「保存した合成と表示しない」「同期と表示しない」は残す |
+| ADR-0035 | 主画面はA・Bの固定配置。previewを合成の入力にしない（不変条件6） | 主画面をCにし、A・Bは技術担当者向けへ。不変条件6を「保存の合成の入力にしない」に絞る |
+| `FR-LV-001` | プレビュー画像を合成入力に使用しない | 対象を「保存する合成の入力」に絞り、表示専用のCを除く |
+| `FR-LV-003` | 実現方式は未決 | B案を今のスコープとし（所有者の決定）、操作者の画面はCにする |
+| `FR-LV-004` | 当面の形（選んだ側がLive、反対側は静止画） | B案が成り立つまでのCのframeの出どころとして残す。自動の交互表示はしないを維持 |
+| `CON-003` | vendor operation（`0x9207`を含む）は禁止 | ライブビューの3命令だけを例外とする |
+| `docs/OPERATOR_UI_SPEC.md` | ステージ、実機の二台構成のステージ、常時禁止 | 主画面をC、A・Bを技術担当者向けにする。半分を「左側／右側」など位置の言葉で呼び、古い半分は画素を変えない重ね表示で示す |
+| AGENTS.md | 下の2文 | 下の差し替えの案（承認後に人が変える） |
+| `HG-0011` | 静止画が古い時の扱い | 片側が静止画のCを含める |
+
+承認後に確かめる対象（本ADRでは追記を置かない）: `FR-UI-003`、`NFR-SEC-001`（pilotの記録）、PRODUCT_REQUIREMENTSの「MVP対象外」のLive Viewプレビューの行、`.autodev/requirements/normalized.json`、`HG-0010`、`docs/HARDWARE_CAMERA_AGENT_DUAL_BOUND_LIVE_VIEW_V1.md`（全体を写すframeかを示す欄）。
+
+AGENTS.mdの差し替えの案（承認までは今の文言が効く）:
+
+- 今: `One selected-camera Live View is in MVP; simultaneous two-camera Live View, preview-as-original/preview-as-stitch-input, RAW/NEF, GPU acceleration, and hardware shutter synchronization are deferred.`
+- 案: `One selected-camera Live View is in MVP. A display-only composite Live View may render Live View frames through an approved rig profile only (ADR-0036); it is never saved and never used as an original, stitch input, correction estimate, or profile input. Two-camera Live View through the WPD Live View exception follows ADR-0036. Preview-as-original/preview-as-stitch-input, RAW/NEF, GPU acceleration, and hardware shutter synchronization are deferred.`
+- 今: ``Never send vendor operation `0x9207` or retry the transaction.``
+- 案: ``The only permitted vendor operations are the three Live View operations (start, get frame, end) over WPD under ADR-0036. Never send any capture- or card-related vendor operation, including `0x9207`, and never retry the transaction.``
+
+### 範囲外と未決
+
+- B案の実現性: 実機で確かめていない。工数は10〜20人日の見込み（※推定、#292の机上検討）。
+- 承認済みのprofileの時期: #43（最終のリグ）と#42の一部の後、#45で決まる。Cが操作者の画面に出る時期はこれに依存する。
+- Cに明るさと色の補正を当てる方法（#46）。
+- `S`の値、機種の定数かprofileの欄か、2台で同じ値か。
+- 技術担当者向けの表示の置き場所。
+- 別々のカメラの間でSDKとWPDを同時に開いてよいか。
+- B案が成り立たなかった場合の扱い。
+- 本ADRの決定が`HG-0010`（二台とも動くライブビューをMVPに含めるか、実現方式）の回答に当たるか。
+- HDMIの取り込みの案と、SDKを2つ読み込む案（ADR-0031の凍結）は本ADRで扱わない。
+
+### ADR-0036で所有者に承認していただく点
+
+1. 決定1（表示専用の合成C）の1〜9。特に、承認済みのprofileが出るまで操作者の画面にCを出さないこと（7）と、開発用の画面で下書きのCを見せる手順をADR-0033の4節の範囲で行う読み方（7）。
+2. 決定2（ライブビューの3命令の例外）の1〜6。例外の範囲を3命令に限り、撮影とカードに触る命令（`0x9207`を含む）を禁止のまま残すこと。
+3. B案の前提条件として、使用許諾の確認（所有者の作業）を置くこと。
+4. 実機の試作の前に、対象・回数・中止の条件を別に承認する手順。
+5. 守る不変条件の1〜6。特に、別カメラ間のSDKとWPDの重なりを未決のまま残し、ADR-0028の規則を守ること（1）。
+6. 改定の対象の表と、AGENTS.mdの差し替えの案。
+7. 未決の項目を、本ADRの承認の後に別のIssueで決めること。
+
+### 承認後の作業
+
+- 状態をAcceptedにし、決定日を記入する。
+- 改定の対象の本文を、表の方向で書き換える。AGENTS.mdは人が差し替える。
+- `HG-0011`の問いにCを含めて回答を求める。`HG-0010`との関係を所有者に確かめる。
+- `.autodev`の要件と計画を正規化し直す。
