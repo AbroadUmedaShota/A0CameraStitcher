@@ -98,6 +98,10 @@
     <SolidColorBrush x:Key="ReticleIdleBrush" Color="#B39AA3A8" />
     <SolidColorBrush x:Key="ModalScrimBrush" Color="#E60B0C0D" />
 
+    <!-- 二台のライブ表示（Issue #291）: Live でない側の枠線は破線にする。色だけで Live と静止画を
+         分けないための線種。値は StrokeThickness 2 に対する倍率（実線 2px に対し 8px 線・6px 空き）。 -->
+    <DoubleCollection x:Key="StillPaneDashArray">4 3</DoubleCollection>
+
     <!-- ステージのプレースホルダ地。実LVフレーム未取得のときだけ見える斜線地。 -->
     <DrawingBrush x:Key="StageHatchBrush" TileMode="Tile" Viewport="0,0,13,13" ViewportUnits="Absolute">
         <DrawingBrush.Drawing>

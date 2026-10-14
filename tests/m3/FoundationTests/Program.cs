@@ -55,6 +55,15 @@ var tests = new (string Name, Func<Task> Run)[]
     ("dual binding re-binding starts clean and completes", DualBindingRebindStartsCleanAsync),
     ("dual binding previews are bounded and never truncated", DualBindingPreviewBoundsAsync),
     ("dual binding rejects foreign protocol envelopes", DualBindingRejectsForeignEnvelopesAsync),
+    ("bound Live View codec shapes requests and rejects forged or malformed responses (#291)", DualBoundLiveViewCodecAsync),
+    ("bound Live View opens, streams and closes one camera and reports the order of SDK steps (#291)", DualBoundLiveViewOpenStreamStopAsync),
+    ("bound Live View never has two sources open and never switches implicitly (#291)", DualBoundLiveViewNeverHasTwoOpenAsync),
+    ("bound Live View refusals: SDK failure invalidates, an empty frame does not, early refusals touch nothing (#291)", DualBoundLiveViewRefusalsAsync),
+    ("bound Live View closed means a confirmed stop, and an unconfirmed stop blocks further starts (#291)", DualBoundLiveViewClosedMeansConfirmedAsync),
+    ("bound Live View close sends nothing when nothing was ever opened (#291)", DualBoundLiveViewCloseSendsNothingWhenNeverOpenedAsync),
+    ("bound Live View blocks capture activation until the stop is confirmed (#291)", DualBoundLiveViewBlocksActivationUntilStoppedAsync),
+    ("bound Live View refuses the other host's marker and extra fields, and leaves binding operations alone (#291)", DualBoundLiveViewRejectsForeignMarkersAsync),
+    ("bound Live View treats an exited Agent generation as a lost binding (#291)", DualBoundLiveViewExitedAgentAsync),
 };
 
 var failures = new List<string>();
@@ -3722,6 +3731,414 @@ static Task DualBindingRejectsForeignEnvelopesAsync()
     }
 
     return Task.CompletedTask;
+}
+
+// ---------------------------------------------------------------------------
+// Bound Live View (Issue #291, ADR-0035): a Live View while the binding is Ready.
+// ---------------------------------------------------------------------------
+
+// The session id used by the codec tests lives in BoundLiveViewTestIds (types follow the top-level statements).
+
+static string BoundLiveViewResponse(
+    string requestId,
+    bool success,
+    string resultCode,
+    string payloadJson,
+    string marker = "HardwareBinding",
+    string schema = "a0.camera-agent.hardware-dual-bound-live-view.v1") =>
+    $$"""{"schemaVersion":"{{schema}}","simulation":false,"marker":"{{marker}}","requestId":"{{requestId}}","success":{{(success ? "true" : "false")}},"resultCode":"{{resultCode}}","payload":{{payloadJson}}}""";
+
+static async Task<(DualBindingSessionClient Session, DualBoundLiveViewClient Live, SimulatedDualBindingAgent Agent)>
+    ReadyForBoundLiveViewAsync(SimulatedDualBindingOptions? options = null)
+{
+    SimulatedDualBindingAgent? captured = null;
+    var session = await BoundToBothAliasesAsync(options, agent => captured = agent);
+    var completed = await session.CompleteBindingAsync();
+    Check.True(completed.Succeeded, "The binding must be Ready before a bound Live View.");
+    return (session, new DualBoundLiveViewClient(session), captured!);
+}
+
+// Open sources over time, from the agent's own call log. A start adds one, a close removes one.
+static int MaximumOpenBoundSources(IReadOnlyList<string> callLog)
+{
+    var open = 0;
+    var maximum = 0;
+    foreach (var entry in callLog)
+    {
+        if (entry.StartsWith("sdk-open:", StringComparison.Ordinal))
+        {
+            maximum = Math.Max(maximum, ++open);
+        }
+        else if (entry.StartsWith("sdk-close:", StringComparison.Ordinal))
+        {
+            open--;
+        }
+    }
+
+    return maximum;
+}
+
+static Task DualBoundLiveViewCodecAsync()
+{
+    var start = DualBoundLiveViewProtocolCodec.CreateStartRequest(
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A");
+    using (var document = JsonDocument.Parse(start))
+    {
+        var root = document.RootElement;
+        Check.Equal("a0.camera-agent.hardware-dual-bound-live-view.v1", root.GetProperty("schemaVersion").GetString());
+        Check.Equal("HardwareBinding", root.GetProperty("marker").GetString());
+        Check.Equal("start-bound-live-view", root.GetProperty("operation").GetString());
+        Check.False(root.GetProperty("simulation").GetBoolean(), "A hardware request is never simulated.");
+        Check.SequenceEqual(
+            new[] { "sessionId", "cameraAlias" },
+            root.GetProperty("payload").EnumerateObject().Select(property => property.Name));
+    }
+
+    using (var document = JsonDocument.Parse(DualBoundLiveViewProtocolCodec.CreateStopRequest(
+        "r-2", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId)))
+    {
+        Check.Equal("stop-bound-live-view", document.RootElement.GetProperty("operation").GetString());
+        Check.SequenceEqual(
+            new[] { "sessionId" },
+            document.RootElement.GetProperty("payload").EnumerateObject().Select(property => property.Name));
+    }
+
+    // The envelope marker belongs to the host the request is addressed to.
+    using (var document = JsonDocument.Parse(DualBoundLiveViewProtocolCodec.CreateFrameRequest(
+        "r-3", DualBoundLiveViewHost.Capture, BoundLiveViewTestIds.SessionId, "CAM-B")))
+    {
+        Check.Equal("Hardware", document.RootElement.GetProperty("marker").GetString());
+        Check.Equal("get-bound-live-view-frame", document.RootElement.GetProperty("operation").GetString());
+    }
+
+    Check.ThrowsHardwareProtocol("UnknownCameraAlias", () =>
+        DualBoundLiveViewProtocolCodec.CreateStartRequest(
+            "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-C"));
+    Check.ThrowsHardwareProtocol("InvalidSessionId", () =>
+        DualBoundLiveViewProtocolCodec.CreateStopRequest("r-1", DualBoundLiveViewHost.Binding, "not-a-session"));
+    Check.ThrowsHardwareProtocol("InvalidRequestId", () =>
+        DualBoundLiveViewProtocolCodec.CreateStopRequest("bad id", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId));
+
+    var liveStarted = $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","cameraAlias":"CAM-A","state":"Live","captureAdmissionRemainingMs":123456}""";
+    var accepted = DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted", liveStarted),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A");
+    Check.True(accepted.Succeeded, "A well-formed start response is accepted.");
+    Check.Equal(123456L, accepted.Value!.CaptureAdmissionRemainingMs!.Value);
+
+    var withoutRemaining = DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","cameraAlias":"CAM-A","state":"Live"}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A");
+    Check.True(withoutRemaining.Value!.CaptureAdmissionRemainingMs is null,
+        "A response without the admission time reports it as unknown, not as zero.");
+
+    Check.ThrowsHardwareProtocol("InvalidPayload", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","cameraAlias":"CAM-A","state":"Live","captureAdmissionRemainingMs":-1}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedBindingResponse", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","cameraAlias":"CAM-A","state":"Closed"}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A"));
+    Check.ThrowsHardwareProtocol("ForgedBindingResponse", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted", liveStarted),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-B"));
+    Check.ThrowsHardwareProtocol("SessionIdMismatch", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted", liveStarted),
+        "r-1", DualBoundLiveViewHost.Binding, "fedcba9876543210fedcba9876543210", "CAM-A"));
+    Check.ThrowsHardwareProtocol("RequestIdMismatch", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-9", true, "BoundLiveViewStarted", liveStarted),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A"));
+    // Another host's marker, and the binding schema, never parse as a bound Live View response.
+    Check.ThrowsHardwareProtocol("DualBoundLiveViewProtocolRequired", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted", liveStarted, marker: "Hardware"),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A"));
+    Check.ThrowsHardwareProtocol("DualBoundLiveViewProtocolRequired", () => DualBoundLiveViewProtocolCodec.DeserializeStartResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStarted", liveStarted,
+            schema: "a0.camera-agent.hardware-dual-binding.v1"),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A"));
+
+    var frameBytes = new byte[] { 1, 2, 3, 4 };
+    string FramePayload(int declared, string base64) =>
+        $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","cameraAlias":"CAM-B","frameBytes":{{declared}},"frameBase64":"{{base64}}"}""";
+    var frame = DualBoundLiveViewProtocolCodec.DeserializeFrameResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewFrame", FramePayload(4, Convert.ToBase64String(frameBytes))),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-B");
+    Check.SequenceEqual(frameBytes, frame.Value!.Frame);
+    foreach (var (declared, base64, label) in new[]
+    {
+        (5, Convert.ToBase64String(frameBytes), "a declared length that is not the decoded length"),
+        (0, string.Empty, "an empty frame"),
+        (4, "***", "invalid base64"),
+        (262145, Convert.ToBase64String(new byte[262145]), "a frame over the preview bound"),
+    })
+    {
+        Check.ThrowsHardwareProtocol("InvalidPayload", () => DualBoundLiveViewProtocolCodec.DeserializeFrameResponse(
+            BoundLiveViewResponse("r-1", true, "BoundLiveViewFrame", FramePayload(declared, base64)),
+            "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-B"));
+        _ = label;
+    }
+
+    var closed = DualBoundLiveViewProtocolCodec.DeserializeStopResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStopped",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","liveViewStopped":true,"sdkSourceClosed":true,"wasOpen":false}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId);
+    Check.True(closed.Value!.ConfirmedClosed && !closed.Value.WasOpen, "A stop that closed both halves is confirmed.");
+    var halfClosed = DualBoundLiveViewProtocolCodec.DeserializeStopResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStopped",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","liveViewStopped":true,"sdkSourceClosed":false,"wasOpen":true}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId);
+    Check.False(halfClosed.Value!.ConfirmedClosed, "A stop that left the SDK source open is not confirmed.");
+    // The stop command failed but the source was closed: closed is claimed only when the stop is confirmed.
+    var sourceClosedOnly = DualBoundLiveViewProtocolCodec.DeserializeStopResponse(
+        BoundLiveViewResponse("r-1", true, "BoundLiveViewStopped",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","liveViewStopped":false,"sdkSourceClosed":true,"wasOpen":true}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId);
+    Check.False(sourceClosedOnly.Value!.ConfirmedClosed, "A closed source without a confirmed stop is not confirmed.");
+    Check.True(sourceClosedOnly.Value.SdkSourceClosed && !sourceClosedOnly.Value.LiveViewStopped && sourceClosedOnly.Value.WasOpen,
+        "Each reported flag is kept as reported.");
+    var stopFailed = DualBoundLiveViewProtocolCodec.DeserializeStopResponse(
+        BoundLiveViewResponse("r-1", false, "BindingInvalidated",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","state":"Invalid","invalidationReason":"SdkError","liveViewStopped":false,"sdkSourceClosed":true,"wasOpen":true}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId);
+    Check.True(stopFailed.Value is null && stopFailed.Refusal!.RequiresRebinding,
+        "A refused stop carries no stop result; it asks for a new binding.");
+
+    var invalidated = DualBoundLiveViewProtocolCodec.DeserializeFrameResponse(
+        BoundLiveViewResponse("r-1", false, "BindingInvalidated",
+            $$"""{"sessionId":"{{BoundLiveViewTestIds.SessionId}}","state":"Invalid","invalidationReason":"UsbReconnect"}"""),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId, "CAM-A");
+    Check.True(invalidated.Refusal!.RequiresRebinding, "An invalidation requires a fresh binding.");
+    Check.Equal(DualBindingInvalidationReason.UsbReconnect, invalidated.Refusal.InvalidationReason);
+
+    var expired = DualBoundLiveViewProtocolCodec.DeserializeStopResponse(
+        DualBoundLiveViewProtocolCodec.CreateBindingHostExpiredResponse(
+            "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId),
+        "r-1", DualBoundLiveViewHost.Binding, BoundLiveViewTestIds.SessionId);
+    Check.Equal("BindingHostExpired", expired.Refusal!.ResultCode);
+    Check.True(expired.Refusal.RequiresRebinding, "A local host-expired refusal in this schema requires re-binding.");
+    return Task.CompletedTask;
+}
+
+static async Task DualBoundLiveViewOpenStreamStopAsync()
+{
+    var (_, live, agent) = await ReadyForBoundLiveViewAsync();
+    Check.Equal(DualBoundLiveViewState.ConfirmedClosed, live.State);
+
+    var started = await live.StartAsync("CAM-A");
+    Check.True(started.Succeeded, "A Ready binding must open CAM-A's Live View.");
+    Check.Equal("CAM-A", started.Value!.CameraAlias);
+    Check.Equal(400_000L, started.Value.CaptureAdmissionRemainingMs!.Value);
+    Check.Equal(DualBoundLiveViewState.Live, live.State);
+    Check.Equal("CAM-A", live.LiveAlias ?? string.Empty);
+
+    var frame = await live.GetFrameAsync("CAM-A");
+    Check.True(frame.Succeeded, "CAM-A's Live View must return a frame.");
+    Check.Equal(4096, frame.Value!.FrameBytes);
+
+    // The other camera is not Live: refused here, without a request.
+    var logLengthBefore = agent.BoundLiveViewCallLog.Count;
+    var other = await live.GetFrameAsync("CAM-B");
+    Check.Equal("BoundLiveViewNotActive", other.Refusal!.ResultCode);
+    Check.Equal(logLengthBefore, agent.BoundLiveViewCallLog.Count);
+
+    var stopped = await live.StopAsync();
+    Check.True(stopped.Value!.ConfirmedClosed && stopped.Value.WasOpen, "The stop must confirm both halves.");
+    Check.Equal(DualBoundLiveViewState.ConfirmedClosed, live.State);
+    Check.SequenceEqual(
+        new[] { "start:CAM-A", "sdk-open:CAM-A", "frame:CAM-A", "stop", "sdk-close:CAM-A" },
+        agent.BoundLiveViewCallLog);
+
+    // A stop with nothing open is answered, not an error (idempotent).
+    var again = await live.StopAsync();
+    Check.True(again.Value!.ConfirmedClosed && !again.Value.WasOpen, "A second stop confirms and reports nothing was open.");
+}
+
+static async Task DualBoundLiveViewNeverHasTwoOpenAsync()
+{
+    var (_, live, agent) = await ReadyForBoundLiveViewAsync();
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+
+    var lengthBefore = agent.BoundLiveViewCallLog.Count;
+    var implicitSwitch = await live.StartAsync("CAM-B");
+    Check.Equal("BoundLiveViewAlreadyOpen", implicitSwitch.Refusal!.ResultCode);
+    Check.Equal(lengthBefore, agent.BoundLiveViewCallLog.Count);
+    Check.Equal(0, agent.BoundLiveViewAlreadyOpenRefusalCount);
+
+    Check.True((await live.StopAsync()).Value!.ConfirmedClosed, "CAM-A must stop and be confirmed first.");
+    Check.True((await live.StartAsync("CAM-B")).Succeeded, "CAM-B opens after CAM-A's stop was confirmed.");
+    Check.Equal(2, agent.BoundLiveViewOpenCount);
+    Check.True(MaximumOpenBoundSources(agent.BoundLiveViewCallLog) <= 1,
+        "At most one SDK source may be open at any time: " + string.Join(",", agent.BoundLiveViewCallLog));
+    Check.Equal(0, agent.BoundLiveViewAlreadyOpenRefusalCount);
+}
+
+static async Task DualBoundLiveViewRefusalsAsync()
+{
+    // An SDK exception on start ends the SDK session and invalidates the binding.
+    var (session, live, agent) = await ReadyForBoundLiveViewAsync(
+        new SimulatedDualBindingOptions { FailBoundLiveViewStartAlias = "CAM-B" });
+    var failed = await live.StartAsync("CAM-B");
+    Check.Equal("BindingInvalidated", failed.Refusal!.ResultCode);
+    Check.Equal(DualBindingInvalidationReason.SdkError, failed.Refusal.InvalidationReason);
+    Check.Equal(DualBoundLiveViewState.Invalidated, live.State);
+    Check.Equal(DualBindingSessionState.Invalid, session.State);
+    var lengthAfterFailure = agent.BoundLiveViewCallLog.Count;
+    var retried = await live.StartAsync("CAM-A");
+    Check.False(retried.Succeeded, "Nothing opens on an invalidated binding.");
+    Check.Equal(lengthAfterFailure, agent.BoundLiveViewCallLog.Count);
+
+    // A frame that is not there yet (no SDK exception) leaves the Live View open and the state Live.
+    var (_, emptyLive, emptyAgent) = await ReadyForBoundLiveViewAsync(
+        new SimulatedDualBindingOptions { EmptyBoundLiveViewFramesAfterStart = 2 });
+    Check.True((await emptyLive.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+    for (var attempt = 0; attempt < 2; attempt++)
+    {
+        var empty = await emptyLive.GetFrameAsync("CAM-A");
+        Check.Equal("LiveViewFrameUnavailable", empty.Refusal!.ResultCode);
+        Check.Equal(DualBoundLiveViewState.Live, emptyLive.State);
+    }
+
+    Check.True((await emptyLive.GetFrameAsync("CAM-A")).Succeeded, "The third request gets the first frame.");
+    Check.Equal(emptyAgent.OpenBoundLiveViewAlias ?? string.Empty, "CAM-A");
+
+    // Refusals decided before the SDK are not "maybe open".
+    var (_, shortLive, shortAgent) = await ReadyForBoundLiveViewAsync(
+        new SimulatedDualBindingOptions { BoundHostRemainingMs = 10_000 });
+    var shortRefusal = await shortLive.StartAsync("CAM-A");
+    Check.Equal("HostLifetimeInsufficient", shortRefusal.Refusal!.ResultCode);
+    Check.Equal(DualBoundLiveViewState.ConfirmedClosed, shortLive.State);
+    Check.Equal(0, shortAgent.BoundLiveViewOpenCount);
+
+    // Not Ready: refused locally, nothing sent.
+    var session2 = BindingClient(null, out var agent2);
+    await session2.BeginBindingAsync();
+    var notReady = await new DualBoundLiveViewClient(session2).StartAsync("CAM-A");
+    Check.Equal("BindingNotReady", notReady.Refusal!.ResultCode);
+    Check.Equal(0, agent2.BoundLiveViewCallLog.Count);
+}
+
+static async Task DualBoundLiveViewClosedMeansConfirmedAsync()
+{
+    // The stop reports the source still open: not closed, and nothing starts on top of it.
+    var (_, live, agent) = await ReadyForBoundLiveViewAsync(
+        new SimulatedDualBindingOptions { BoundLiveViewStopLeavesSourceOpen = true });
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+    var stopped = await live.StopAsync();
+    Check.False(stopped.Value!.ConfirmedClosed, "The source is still open.");
+    Check.Equal(DualBoundLiveViewState.MaybeOpen, live.State);
+    var lengthBefore = agent.BoundLiveViewCallLog.Count;
+    var blocked = await live.StartAsync("CAM-B");
+    Check.Equal("BoundLiveViewAlreadyOpen", blocked.Refusal!.ResultCode);
+    Check.Equal(lengthBefore, agent.BoundLiveViewCallLog.Count);
+    var close = await live.CloseAsync();
+    Check.False(close.Confirmed, "Close reports what the Agent reported: not confirmed.");
+    Check.True(live.MayBeOpen, "An unconfirmed stop keeps the client from saying everything is closed.");
+
+    // An SDK failure while stopping invalidates the binding.
+    var (session, failingLive, _) = await ReadyForBoundLiveViewAsync(
+        new SimulatedDualBindingOptions { FailStopBoundLiveView = true });
+    Check.True((await failingLive.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+    var failedStop = await failingLive.StopAsync();
+    Check.Equal("BindingInvalidated", failedStop.Refusal!.ResultCode);
+    Check.Equal(DualBoundLiveViewState.Invalidated, failingLive.State);
+    Check.Equal(DualBindingSessionState.Invalid, session.State);
+    Check.False((await failingLive.CloseAsync()).Confirmed, "A lost binding is never reported as closed.");
+}
+
+static async Task DualBoundLiveViewCloseSendsNothingWhenNeverOpenedAsync()
+{
+    var (_, live, agent) = await ReadyForBoundLiveViewAsync();
+    var neverOpened = await live.CloseAsync();
+    Check.True(neverOpened.Confirmed && !neverOpened.RequestSent, "Nothing opened, nothing to confirm, nothing sent.");
+    Check.Equal(0, agent.BoundLiveViewCallLog.Count);
+
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+    var closed = await live.CloseAsync();
+    Check.True(closed.Confirmed && closed.RequestSent, "An open Live View is stopped and confirmed.");
+    var lengthAfterClose = agent.BoundLiveViewCallLog.Count;
+    var closedAgain = await live.CloseAsync();
+    Check.True(closedAgain.Confirmed && !closedAgain.RequestSent, "After a confirmed stop nothing more is sent.");
+    Check.Equal(lengthAfterClose, agent.BoundLiveViewCallLog.Count);
+}
+
+static async Task DualBoundLiveViewBlocksActivationUntilStoppedAsync()
+{
+    var (session, live, agent) = await ReadyForBoundLiveViewAsync();
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+
+    // The Agent's own guard against a client that got the order wrong. The binding stays Ready.
+    var early = await session.ActivateCaptureAsync();
+    Check.Equal("BoundLiveViewOpen", early.Refusal!.ResultCode);
+    Check.False(session.CaptureHostActivated, "A refused activation must not retire the binding pipe.");
+    Check.True(session.IsReady, "A refused activation leaves the binding Ready.");
+    Check.False(agent.CaptureHostActivated, "The Agent did not hand over to the capture host.");
+
+    Check.True((await live.CloseAsync()).Confirmed, "The stop must be confirmed.");
+    var activated = await session.ActivateCaptureAsync();
+    Check.True(activated.Succeeded, "After a confirmed stop the activation goes through.");
+
+    // The binding pipe is retired: bound Live View requests are refused here, not sent to it.
+    var lengthBefore = agent.BoundLiveViewCallLog.Count;
+    var afterActivation = await live.StartAsync("CAM-B");
+    Check.Equal("CaptureAlreadyActivated", afterActivation.Refusal!.ResultCode);
+    Check.Equal(lengthBefore, agent.BoundLiveViewCallLog.Count);
+}
+
+static async Task DualBoundLiveViewRejectsForeignMarkersAsync()
+{
+    var (session, live, agent) = await ReadyForBoundLiveViewAsync();
+
+    // A request addressed to the capture host's marker is refused by the binding host.
+    var wrongHost = agent.Handle(DualBoundLiveViewProtocolCodec.CreateStartRequest(
+        "r-1", DualBoundLiveViewHost.Capture, session.SessionId, "CAM-A"));
+    Check.True(wrongHost.Contains("DualBoundLiveViewProtocolRequired", StringComparison.Ordinal),
+        "The binding host must refuse the capture host's marker.");
+    Check.Equal(0, agent.BoundLiveViewOpenCount);
+
+    // An extra field is refused, not ignored.
+    var extra = DualBoundLiveViewProtocolCodec.CreateStopRequest(
+            "r-2", DualBoundLiveViewHost.Binding, session.SessionId)
+        .Replace("\"payload\":{", "\"payload\":{\"frameBase64\":\"AAAA\",", StringComparison.Ordinal);
+    Check.True(agent.Handle(extra).Contains("DualBoundLiveViewProtocolRequired", StringComparison.Ordinal),
+        "A payload field outside the operation must be refused.");
+
+    // Binding operations are unaffected while a bound Live View is open.
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+    Check.Equal(null, await session.VerifyBindingIsCurrentAsync());
+    Check.True(session.IsReady, "The freshness probe leaves the binding Ready.");
+}
+
+static async Task DualBoundLiveViewExitedAgentAsync()
+{
+    var agent = new SimulatedDualBindingAgent();
+    var transport = new ProcessGenerationHardwareTransport(agent.Handle);
+    var session = new DualBindingSessionClient(transport);
+    Check.True((await session.BeginBindingAsync()).Succeeded, "The first process must start binding.");
+    foreach (var (ordinal, alias) in new[] { (0, "CAM-A"), (1, "CAM-B") })
+    {
+        Check.True((await session.StartCandidateLiveViewAsync(ordinal)).Succeeded, $"{alias} candidate Live View must start.");
+        Check.True((await session.GetCandidateLiveViewFrameAsync(ordinal)).Succeeded, $"{alias} candidate must return a frame.");
+        Check.True((await session.ConfirmAliasAsync(ordinal, alias)).Succeeded, $"{alias} must bind.");
+    }
+
+    Check.True((await session.CompleteBindingAsync()).Succeeded, "The binding must be Ready.");
+    var live = new DualBoundLiveViewClient(session);
+    Check.True((await live.StartAsync("CAM-A")).Succeeded, "CAM-A must open.");
+
+    transport.ExitAndReplaceProcess();
+    var stop = await live.StopAsync();
+    Check.Equal("BindingHostExpired", stop.Refusal!.ResultCode);
+    Check.Equal(DualBoundLiveViewState.Invalidated, live.State);
+    Check.False((await live.CloseAsync()).Confirmed, "A lost binding is never reported as closed.");
+    Check.False((await live.StartAsync("CAM-B")).Succeeded, "Nothing opens on a replaced process.");
+}
+
+static class BoundLiveViewTestIds
+{
+    /// <summary>32 hex characters, not all zero: the shape of a real binding session id.</summary>
+    public const string SessionId = "0123456789abcdef0123456789abcdef";
 }
 
 sealed class RecordingHardwareTransport(

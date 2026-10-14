@@ -152,6 +152,7 @@ public:
     DualIdentityInvalidationReason PollInvalidation() override {
         return DualIdentityInvalidationReason::None;
     }
+    DualBindingSdkOpenState InspectOpenState() const noexcept override { return {}; }
 
 private:
     std::string category_;

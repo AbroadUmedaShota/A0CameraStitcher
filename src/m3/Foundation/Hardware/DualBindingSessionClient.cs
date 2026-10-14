@@ -470,6 +470,72 @@ public sealed class DualBindingSessionClient
     }
 
     /// <summary>
+    /// Whether the binding host can be asked for a bound Live View operation right now (Issue
+    /// #291). Null means it can. Nothing is sent. A refusal that requires re-binding has already
+    /// been applied to this client's own state, the same as for the other operations.
+    /// </summary>
+    /// <remarks>
+    /// Only the binding host serves the bound Live View in this change, so a session whose binding
+    /// pipe was retired by capture activation is refused here rather than sent to a pipe nobody is
+    /// listening on.
+    /// </remarks>
+    public DualBindingRefusal? CheckBoundLiveViewAvailable()
+    {
+        if (DetectExitedBindingHost() is { } bindingHostExited)
+        {
+            return bindingHostExited;
+        }
+        if (DetectExitedCaptureHost() is { } captureHostExited)
+        {
+            return captureHostExited;
+        }
+        if (RequireSession() is { } noSession)
+        {
+            return noSession;
+        }
+        if (CaptureHostActivated)
+        {
+            return new DualBindingRefusal
+            {
+                ResultCode = "CaptureAlreadyActivated",
+                SessionId = SessionId,
+                State = State,
+                Detail = "The binding pipe has already transitioned to capture.",
+            };
+        }
+        if (!IsReady)
+        {
+            return new DualBindingRefusal
+            {
+                ResultCode = DualBoundLiveViewProtocol.RefusalCodes.BindingNotReady,
+                SessionId = SessionId,
+                State = State,
+                Detail = "A bound Live View needs a Ready binding.",
+            };
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Sends one bound Live View request to the process generation that owns this binding. The
+    /// request is built and its response read by <see cref="DualBoundLiveViewClient"/>; this method
+    /// only supplies the generation-bound transport, so a replacement process can never receive it.
+    /// </summary>
+    public Task<string> SendBoundLiveViewRequestAsync(string requestJson, CancellationToken cancellationToken = default) =>
+        SendSessionRequestAsync(requestJson, cancellationToken);
+
+    /// <summary>
+    /// Applies a refusal from a bound Live View operation to this client's session state, with the
+    /// same rules as the binding operations: an invalidation discards the session artifacts.
+    /// </summary>
+    public void ApplyBoundLiveViewRefusal(DualBindingRefusal refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+        ApplyRefusal(refusal);
+    }
+
+    /// <summary>
     /// Applies a capture-pipe invalidation locally after activation. The binding pipe was retired
     /// by activation, so this deliberately sends no protocol operation.
     /// </summary>

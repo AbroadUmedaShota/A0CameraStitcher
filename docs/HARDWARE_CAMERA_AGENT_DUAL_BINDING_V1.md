@@ -40,6 +40,8 @@ View and closes its SDK session. Exposing a dedicated stop operation would let a
 reach a state — "assigned but still streaming" — that the binding core is
 specifically built to refuse.
 
+Ready の後に、候補を選び直さずに CAM-A／CAM-B の Live View を開く命令は、別の schema `a0.camera-agent.hardware-dual-bound-live-view.v1` にある（#291）。仕様は [Dual Bound Live View v1](HARDWARE_CAMERA_AGENT_DUAL_BOUND_LIVE_VIEW_V1.md)。
+
 The envelope is the same shape as v2: `schemaVersion`, `simulation` (must be
 `false`), `marker`, `requestId`, `operation`, `payload`, and every field must be
 present exactly once with no extras. Responses echo `requestId`; session-scoped
@@ -68,6 +70,8 @@ successful `activate-capture` may perform the one-way transition. Capture then
 reaches the bound source object through
 `BoundSourceObjectForCapture`, which is a process-local seam and never appears
 on the wire.
+
+`activate-capture` は、bound Live View の source か Live View が開いている間は `BoundLiveViewOpen` で拒否する。SDK は呼ばず、binding は Ready のまま。評価の順は `CaptureTransitionUnavailable` → `BindingNotReady` → `BoundLiveViewOpen`（#291）。
 
 ## What the wire is allowed to carry
 

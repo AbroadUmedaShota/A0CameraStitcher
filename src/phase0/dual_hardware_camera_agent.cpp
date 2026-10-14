@@ -43,17 +43,6 @@ struct DualHardwareJsonFailure {
 
 using JsonParser = ::a0::common::protocol_json::BasicJsonParser<DualHardwareJsonFailure>;
 
-// A pair capture reserves 180 seconds for its transaction watchdog. The
-// persistent host must also retain enough time to return an acknowledged
-// response and perform bounded cleanup before admitting camera work.
-constexpr std::uint64_t kDualTransactionWatchdogMilliseconds = 180'000;
-constexpr std::uint64_t kDualReplyAndAcknowledgementMilliseconds = 3'000;
-constexpr std::uint64_t kDualMinimumCleanupReserveMilliseconds = 2'000;
-constexpr std::uint64_t kDualMinimumHostAdmissionMilliseconds =
-    kDualTransactionWatchdogMilliseconds +
-    kDualReplyAndAcknowledgementMilliseconds +
-    kDualMinimumCleanupReserveMilliseconds;
-
 [[nodiscard]] bool HasSufficientHostAdmissionBudget(
     const std::function<std::uint64_t()>& remaining_host_milliseconds) noexcept {
     if (!remaining_host_milliseconds) return true;

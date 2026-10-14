@@ -271,7 +271,8 @@ public sealed class OperatorShellViewModel : ObservableObject
         IHardwareCameraAgentTransport? dualBindingTransport = null,
         IHardwareDualCaptureRecoveryOnlyWorkflow? captureRecoveryOnlyWorkflow = null,
         CaptureRecoveryOnlyFiveRunCoordinator? captureRecoveryOnlyFiveRunCoordinator = null,
-        IOperatorReviewStore? operatorReviewStore = null)
+        IOperatorReviewStore? operatorReviewStore = null,
+        DualLiveStageOptions? dualLiveStageOptions = null)
     {
         _transactionService = transactionService ?? throw new ArgumentNullException(nameof(transactionService));
         _dualCameraFlow = dualCameraFlow;
@@ -316,14 +317,31 @@ public sealed class OperatorShellViewModel : ObservableObject
                 : "実機2台の撮影・回収専用モードです。安全確認と機体照合が完了するまで撮影は禁止です。";
             _technicalDetail = "execution=HardwareDual / capture=not-started / automatic retry count: 0";
         }
-        DualBinding = new DualBindingViewModel(
-            new DualBindingSessionClient(dualBindingTransport ?? (isHardwareDual
-                ? new NamedPipeHardwareCameraAgentTransport(
-                    DualBindingCameraAgentProtocol.DefaultPipeName,
-                    NamedPipeServerIdentity.NoLauncherProcessId)
-                : new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()))),
-            isRequired: isHardwareDual);
+        IHardwareCameraAgentTransport bindingTransport = dualBindingTransport ?? (isHardwareDual
+            ? new NamedPipeHardwareCameraAgentTransport(
+                DualBindingCameraAgentProtocol.DefaultPipeName,
+                NamedPipeServerIdentity.NoLauncherProcessId)
+            : new SimulatedDualBindingAgentTransport(new SimulatedDualBindingAgent()));
+        var bindingSession = new DualBindingSessionClient(bindingTransport);
+        DualBinding = new DualBindingViewModel(bindingSession, isRequired: isHardwareDual);
         DualBinding.PropertyChanged += OnDualBindingChanged;
+
+        // 二台のライブ表示（Issue #291）。機体照合と同じセッションを共有し、同じ transport で
+        // 同じ子Agentへ送る。Agent の起動時刻が読めない transport では、撮影できる残り時間が
+        // 分からないので切り替えを出さない（残り時間を捏造しない）。
+        var liveStageOptions = dualLiveStageOptions ?? new DualLiveStageOptions();
+        if (liveStageOptions.AgentStartTimeUtc is null && bindingTransport is IHardwareCameraAgentStartTimeSource startTimeSource)
+        {
+            liveStageOptions = liveStageOptions with { AgentStartTimeUtc = () => startTimeSource.CurrentProcessStartTimeUtc };
+        }
+
+        DualLiveStage = new DualLiveStageViewModel(
+            new DualBoundLiveViewClient(bindingSession),
+            DualBinding,
+            () => IsDualLiveStageCaptureActive,
+            liveStageOptions);
+        DualLiveStage.NoticeRaised += text => Notify(text, true);
+        DualBinding.BeforeShutdownCancelAsync = DualLiveStage.StopForShutdownAsync;
         _showBindingDemoCommand = new RelayCommand(
             () => DualBinding.IsRequired = true,
             () => !DualBinding.IsRequired && !IsBusy);
@@ -431,6 +449,25 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// 開始できない唯一のゲートで、Single へのフォールバックは無い。
     /// </summary>
     public DualBindingViewModel DualBinding { get; }
+
+    /// <summary>
+    /// 二台のライブ表示（Issue #291）。左に CAM-A、右に CAM-B を固定し、選んだ側を Live、
+    /// 反対側を最終 frame の静止画にする。機体照合が Ready になるまで操作できない。
+    /// </summary>
+    public DualLiveStageViewModel DualLiveStage { get; }
+
+    /// <summary>
+    /// 実機の二台構成でだけ、主画面のステージに二台のライブ表示を出す。模擬動作の標準ステージ
+    /// （<see cref="IsStandardStageVisible"/>）とは同時に出ない。
+    /// </summary>
+    public bool IsDualLiveStageVisible => IsHardwareDualEnvironment;
+
+    /// <summary>
+    /// ライブ表示の操作を止める撮影側の状態。撮影の準備から結果確認までの間は、切り替えも
+    /// 更新も受け付けない。
+    /// </summary>
+    internal bool IsDualLiveStageCaptureActive =>
+        IsBusy || _isCaptureStarting || UiState is OperatorUiState.Capturing or OperatorUiState.Stitching or OperatorUiState.Review;
 
     /// <summary>
     /// 模擬動作で機体照合の流れを確認するための表示切替。実機の合格判定ではない。
@@ -853,7 +890,7 @@ public sealed class OperatorShellViewModel : ObservableObject
     public string SelectedPage { get => _selectedPage; private set { if (SetProperty(ref _selectedPage, value)) OnPropertyChanged(nameof(PageTitle)); } }
     public string PageTitle => SelectedPage switch { "Setup" => "設置・校正", "CameraSettings" => "カメラ設定（read-only）", "Diagnostics" => "保存・診断", _ => "撮影ダッシュボード" };
     public string LiveViewPlaceholder => IsHardwareDualEnvironment
-        ? HardwareDualStagePendingText
+        ? "実機のライブ表示は、機体照合の後にステージで切り替えます。\n主画面には模擬画像を表示しません。"
         : $"{SelectedCamera}\n\n模擬動作のライブ表示（実画像ではありません）\n原画像・合成入力には使いません";
     public string LiveViewButtonText => IsLiveViewActive ? $"{SelectedCamera} ライブ表示を停止" : $"{SelectedCamera} ライブ表示を開始";
     public string LiveViewButtonAutomationName => LiveViewButtonText + " ライブ表示の開始と停止を切り替える";
@@ -951,6 +988,19 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// 切替できない状態のときは黙って無視する（キーで状態ゲートを迂回させない）。</summary>
     public void SelectStageCamera(string alias)
     {
+        if (IsHardwareDualEnvironment)
+        {
+            // Issue #291: on the real rig the same keys move the Live View, through the same gates
+            // as the pane's own button (including the time left to capture). ※要確認: one key press
+            // starts a few seconds of Agent traffic; remove the keys if mistaken presses show up.
+            if (DualLiveStage.SwitchLiveCommand.CanExecute(alias))
+            {
+                DualLiveStage.SwitchLiveCommand.Execute(alias);
+            }
+
+            return;
+        }
+
         if (!CanChangeStageMode)
         {
             return;
@@ -966,7 +1016,6 @@ public sealed class OperatorShellViewModel : ObservableObject
     public bool IsStageProcessingPlaceholder => UiState is OperatorUiState.Capturing or OperatorUiState.Stitching;
     public bool IsStageReviewMode => UiState == OperatorUiState.Review;
     public bool IsStandardStageVisible => !IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
-    public bool IsHardwareDualStagePendingVisible => IsHardwareDualEnvironment && !IsCaptureRecoveryOnlyMode;
     /// <summary>GitHub Issue #226: the generic 合成結果/単体原画像 export button
     /// (<see cref="ExportCommand"/>) is meaningless for CaptureRecoveryOnly, which never
     /// stitches. It is hidden there in favor of the dedicated
@@ -974,8 +1023,6 @@ public sealed class OperatorShellViewModel : ObservableObject
     /// <see cref="IsStandardStageVisible"/> this does not also hide the button for ordinary
     /// HardwareDual, which still exports its stitched result through the generic path.</summary>
     public bool IsStandardExportVisible => !IsCaptureRecoveryOnlyMode;
-    public string HardwareDualStagePendingText =>
-        "実機Live Viewは機体照合画面で確認します。\n主画面には模擬画像を表示しません。";
     public bool IsStageLiveNoteVisible => !IsStageProcessingPlaceholder && !IsStageReviewMode;
     public bool IsStageSingleLiveMode => IsStageLiveNoteVisible && SelectedStageMode != StageModeCompositePreview;
     public bool IsStageCompositePreviewMode => IsStageLiveNoteVisible && SelectedStageMode == StageModeCompositePreview;
@@ -2781,6 +2828,21 @@ public sealed class OperatorShellViewModel : ObservableObject
         var routeIsSingleCamera = IsSingleCameraMode;
         var recoverPending = routeIsCaptureRecoveryOnly && HasRecoverableCaptureRecoveryOnlyTransaction;
         var recoverOrdinaryTransaction = HasRecoverableHardwareDualTransaction;
+
+        // Issue #291: ライブ表示を開いたことがあるなら、撮影の transaction ID を作る前に、Agent が
+        // Live View と SDK の source を閉じたことを確かめる。確かめられなければ試行に数えずに止まる
+        // （この時点ではまだ transaction ID を作っておらず、予約も開始も送っていない）。開いたことが
+        // ないなら何も送らない。ordinary HardwareDual の同一撮影ID読み直しは機体照合の対象外なので、
+        // ここでも対象外にする。
+        if (!recoverOrdinaryTransaction &&
+            !await DualLiveStage.PrepareForCaptureAsync().ConfigureAwait(true))
+        {
+            StatusMessage = "ライブ表示を閉じたことを確認できなかったため、撮影は開始していません。機体照合をやり直してください。";
+            Notify(StatusMessage, false);
+            OnPropertyChanged(nameof(CanCapture));
+            OnPropertyChanged(nameof(CaptureDisabledReason));
+            return;
+        }
 
         // 機体照合が確定してからシャッターを切るまでの間にも本体は抜ける。request/response の
         // protocol は誰かが訊ねるまで無効化を伝えられないので、撮影を始める直前にここで訊ねる。

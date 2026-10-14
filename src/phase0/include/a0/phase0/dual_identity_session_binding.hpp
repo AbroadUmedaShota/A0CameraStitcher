@@ -195,6 +195,15 @@ public:
     // invalidate-and-rebind would read freed memory.
     [[nodiscard]] std::string BoundSourceObjectForCapture(std::string_view camera_alias);
 
+    // The session-local candidate ordinal of a bound alias, for the process that
+    // owns the SDK adapter to reopen that candidate's Live View while Ready.
+    // Same restrictions as the capture seam: only while Ready, in-process only,
+    // and never placed on the wire or in evidence (an ordinal is a selector, not
+    // identity). Unlike BoundSourceObjectForCapture it does not count as capture
+    // reusing a source object.
+    [[nodiscard]] std::size_t BoundCandidateOrdinalForLiveView(
+        std::string_view camera_alias) const;
+
     // Only a completed binding (Ready, or a Ready one later invalidated) has
     // evidence to publish. A half-assigned session would otherwise emit records
     // shaped exactly like a confirmed binding, differing only by an empty

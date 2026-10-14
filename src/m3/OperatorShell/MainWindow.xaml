@@ -388,7 +388,7 @@
                                             AutomationProperties.Name="{Binding LiveViewButtonAutomationName}" />
                                 </DockPanel>
 
-                                <TextBlock Grid.Row="0" Text="撮影・回収のみ（実機プレビューは機体照合画面で確認）"
+                                <TextBlock Grid.Row="0" Text="撮影・回収のみ（ライブ表示は確認用）"
                                            Style="{StaticResource SectionTitleStyle}"
                                            Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}" />
 
@@ -727,36 +727,232 @@
                                         </Border>
                                         </Grid>
 
-                                        <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
-                                                Visibility="{Binding IsHardwareDualStagePendingVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                AutomationProperties.Name="実機2台 主画面プレビュー無効 機体照合で確認">
-                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">
-                                                <TextBlock Text="実機Live Viewは機体照合画面で確認"
-                                                           TextAlignment="Center" FontWeight="Bold"
-                                                           FontSize="{StaticResource FontSizeSection}"
-                                                           Foreground="{StaticResource AccentBrightBrush}" />
-                                                <TextBlock Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center"
-                                                           Style="{StaticResource MutedTextStyle}"
-                                                           Text="主画面には模擬画像を表示しません。CAM-A / CAM-Bの目視割当では、機体照合画面で候補を1台ずつ確認してください。" />
-                                            </StackPanel>
-                                        </Border>
+                                        <!-- ==================== 二台のライブ表示（Issue #291） ==================== -->
+                                        <!-- 実機の二台構成だけ。CAM-A を左、CAM-B を右に固定し、選んだ側を Live、反対側を最終 frame の
+                                             静止画にする。Live かどうかは、文字（Live／静止画）・枠の線種（実線／破線）・位置の
+                                             組で分け、色だけに頼らない。模擬画像は出さない。
+                                             DataContext を DualLiveStage へ切り替えるので、外側の Grid が表示可否を受け持つ。 -->
+                                        <Grid Background="{StaticResource StageBrush}" Panel.ZIndex="1"
+                                              Visibility="{Binding IsDualLiveStageVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <Grid DataContext="{Binding DualLiveStage}" Margin="16"
+                                                  AutomationProperties.Name="二台のライブ表示 CAM-A が左 CAM-B が右">
+                                                <Grid.Resources>
+                                                    <!-- Live でない側の枠は破線。Live は実線、停止は赤の実線。 -->
+                                                    <Style x:Key="DualLiveFrameStyle" TargetType="Rectangle">
+                                                        <Setter Property="IsHitTestVisible" Value="False" />
+                                                        <Setter Property="Fill" Value="Transparent" />
+                                                        <Setter Property="StrokeThickness" Value="2" />
+                                                        <Setter Property="Stroke" Value="{StaticResource BorderStrongBrush}" />
+                                                        <Setter Property="StrokeDashArray" Value="{StaticResource StillPaneDashArray}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding StateKey}" Value="live">
+                                                                <Setter Property="Stroke" Value="{StaticResource AccentBrush}" />
+                                                                <Setter Property="StrokeDashArray" Value="{x:Null}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding StateKey}" Value="failed">
+                                                                <Setter Property="Stroke" Value="{StaticResource BlockerBorderBrush}" />
+                                                                <Setter Property="StrokeDashArray" Value="{x:Null}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
 
-                                        <Border Background="{StaticResource StageBrush}" Panel.ZIndex="1"
-                                                Visibility="{Binding ShowCaptureRecoveryOnlyInstruction, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                AutomationProperties.Name="撮影回収専用モードの検証範囲">
-                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620" Margin="28">
-                                                <TextBlock Text="実機2台の撮影・原画像回収のみ"
-                                                           TextAlignment="Center" FontWeight="Bold"
-                                                           FontSize="{StaticResource FontSizeSection}"
-                                                           Foreground="{StaticResource AccentBrightBrush}" />
-                                                <TextBlock Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                                                    <Style x:Key="DualLiveBadgeStyle" TargetType="Border">
+                                                        <Setter Property="Padding" Value="8,2" />
+                                                        <Setter Property="Background" Value="{StaticResource ControlSunkenBrush}" />
+                                                        <Setter Property="TextElement.Foreground" Value="{StaticResource TextSecondaryBrush}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding StateKey}" Value="live">
+                                                                <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+                                                                <Setter Property="TextElement.Foreground" Value="{StaticResource AccentOnBrush}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding StateKey}" Value="failed">
+                                                                <Setter Property="TextElement.Foreground" Value="{StaticResource BlockerBrush}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+
+                                                    <DataTemplate x:Key="DualLivePaneTemplate">
+                                                        <Grid AutomationProperties.Name="{Binding AccessibleName}">
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition Height="Auto" />
+                                                                <RowDefinition Height="*" />
+                                                                <RowDefinition Height="Auto" />
+                                                            </Grid.RowDefinitions>
+
+                                                            <DockPanel Grid.Row="0" Margin="0,0,0,6" LastChildFill="False">
+                                                                <Border DockPanel.Dock="Right" Style="{StaticResource DualLiveBadgeStyle}">
+                                                                    <TextBlock Text="{Binding BadgeText}" TextWrapping="NoWrap"
+                                                                               FontFamily="{StaticResource MonoFontFamily}"
+                                                                               FontSize="{StaticResource FontSizeBody}"
+                                                                               FontWeight="Medium" />
+                                                                </Border>
+                                                                <TextBlock DockPanel.Dock="Left" Text="{Binding Alias}" VerticalAlignment="Center"
+                                                                           FontFamily="{StaticResource MonoFontFamily}"
+                                                                           FontSize="{StaticResource FontSizeSection}"
+                                                                           FontWeight="Bold" />
+                                                            </DockPanel>
+
+                                                            <Grid Grid.Row="1">
+                                                                <Border Background="{StaticResource StageHatchBrush}"
+                                                                        Visibility="{Binding IsPlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                                <Image Source="{Binding Image}" Stretch="Uniform" Margin="4"
+                                                                       Visibility="{Binding IsImageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                                       AutomationProperties.Name="ライブ表示の画像 確認用のみ" />
+                                                                <Border VerticalAlignment="Center" HorizontalAlignment="Center" Padding="10,6"
+                                                                        Background="{StaticResource StageChipBrush}"
+                                                                        Visibility="{Binding IsPlaceholderVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                                    <TextBlock Text="{Binding PlaceholderText}" TextAlignment="Center"
+                                                                               Style="{StaticResource MutedTextStyle}" />
+                                                                </Border>
+                                                                <Border VerticalAlignment="Bottom" HorizontalAlignment="Stretch" Padding="10,4" Margin="4"
+                                                                        Background="{StaticResource StageChipBrush}"
+                                                                        Visibility="{Binding IsStoppedImageNoteVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                                    <TextBlock Text="{Binding StoppedImageNoteText}" TextAlignment="Center"
+                                                                               Foreground="{StaticResource BlockerBrush}" />
+                                                                </Border>
+                                                                <Rectangle Style="{StaticResource DualLiveFrameStyle}" />
+                                                            </Grid>
+
+                                                            <Grid Grid.Row="2" Margin="0,6,0,0" MinHeight="28">
+                                                                <TextBlock Text="{Binding FooterText}" VerticalAlignment="Center"
+                                                                           FontFamily="{StaticResource MonoFontFamily}"
+                                                                           FontSize="{StaticResource FontSizeBody}"
+                                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                                           Visibility="{Binding IsFooterTextVisible, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                                <Button Content="{Binding SwitchButtonText}" HorizontalAlignment="Left" Padding="12,3"
+                                                                        Command="{Binding SwitchLiveCommand}" CommandParameter="{Binding Alias}"
+                                                                        Visibility="{Binding IsSwitchButtonVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                                        AutomationProperties.Name="{Binding SwitchButtonAutomationName}" />
+                                                            </Grid>
+                                                        </Grid>
+                                                    </DataTemplate>
+                                                </Grid.Resources>
+
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="*" />
+                                                    <RowDefinition Height="Auto" />
+                                                </Grid.RowDefinitions>
+
+                                                <!-- 見出し行: 二台の状態、撮影できる残り時間、「両方を更新」。更新ボタンは撮影の主ボタン
+                                                     （右カラム）から離れた見出し行の右端に置き、押し間違えで撮影が始まる距離にしない。 -->
+                                                <Grid Grid.Row="0" Margin="0,0,0,8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding HeadingText}" FontWeight="Bold"
+                                                                   FontSize="{StaticResource FontSizeSection}"
+                                                                   Foreground="{StaticResource TextPrimaryBrush}" />
+                                                        <TextBlock Text="{Binding StatusText}" Margin="0,2,0,0"
+                                                                   Style="{StaticResource MutedTextStyle}"
+                                                                   AutomationProperties.LiveSetting="Polite"
+                                                                   controls:LiveRegion.Announce="True" />
+                                                    </StackPanel>
+                                                    <Border Grid.Column="1" Margin="12,0,0,0" Padding="10,3" VerticalAlignment="Center"
+                                                            BorderThickness="1">
+                                                        <Border.Style>
+                                                            <Style TargetType="Border">
+                                                                <Setter Property="BorderBrush" Value="{StaticResource BorderStrongBrush}" />
+                                                                <Setter Property="Background" Value="{StaticResource ControlSunkenBrush}" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding RemainingKind}" Value="caution">
+                                                                        <Setter Property="Background" Value="{StaticResource CautionBadgeBrush}" />
+                                                                        <Setter Property="BorderBrush" Value="{StaticResource CautionBorderBrush}" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding RemainingKind}" Value="unknown">
+                                                                        <Setter Property="BorderBrush" Value="{StaticResource CautionBorderBrush}" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding RemainingKind}" Value="expired">
+                                                                        <Setter Property="Background" Value="{StaticResource BlockerTintBrush}" />
+                                                                        <Setter Property="BorderBrush" Value="{StaticResource BlockerBorderBrush}" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Border.Style>
+                                                        <TextBlock Text="{Binding RemainingText}" TextWrapping="NoWrap"
+                                                                   FontFamily="{StaticResource MonoFontFamily}"
+                                                                   FontSize="{StaticResource FontSizeBody}"
+                                                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                                                   AutomationProperties.LiveSetting="Off"
+                                                                   AutomationProperties.Name="{Binding RemainingAutomationName}" />
+                                                    </Border>
+                                                    <Button Grid.Column="2" Margin="12,0,0,0" Padding="14,4" VerticalAlignment="Center"
+                                                            Content="{Binding RefreshButtonText}"
+                                                            Command="{Binding RefreshBothCommand}"
+                                                            ToolTip="{Binding RefreshButtonHelpText}"
+                                                            ToolTipService.ShowOnDisabled="True"
+                                                            AutomationProperties.Name="{Binding RefreshButtonAutomationName}"
+                                                            AutomationProperties.HelpText="{Binding RefreshButtonHelpText}" />
+                                                </Grid>
+
+                                                <!-- 押せない理由。無効なボタンの理由が分からない状態にしない。 -->
+                                                <TextBlock Grid.Row="1" Margin="0,0,0,8" Text="{Binding RefreshDisabledReason}"
                                                            Style="{StaticResource MutedTextStyle}"
-                                                           Text="このメイン画面には実機Live Viewを表示しません。CAM-A / CAM-Bの目視割当は、機体照合画面で1台ずつ確認します。" />
-                                                <TextBlock Margin="0,10,0,0" TextWrapping="Wrap" TextAlignment="Center"
-                                                           Foreground="{StaticResource CautionBrush}"
-                                                           Text="合成・A0品質判定・実シャッター同期保証は本試験の対象外です。確認対象は、撮影後に検証してアプリ内に保管した原画像2枚です。" />
-                                            </StackPanel>
-                                        </Border>
+                                                           Visibility="{Binding IsRefreshDisabledReasonVisible, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                                                <!-- 操作者が対応する必要のある状態: 失効・撮影受付の終了・撮影後。 -->
+                                                <Border Grid.Row="2" Margin="0,0,0,8" Padding="10,6" BorderThickness="1"
+                                                        Visibility="{Binding IsAlertVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Background" Value="{StaticResource CautionTintBrush}" />
+                                                            <Setter Property="BorderBrush" Value="{StaticResource CautionBorderBrush}" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding AlertKind}" Value="block">
+                                                                    <Setter Property="Background" Value="{StaticResource BlockerTintBrush}" />
+                                                                    <Setter Property="BorderBrush" Value="{StaticResource BlockerBorderBrush}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <TextBlock Text="{Binding AlertText}"
+                                                               Foreground="{StaticResource TextPrimaryBrush}"
+                                                               AutomationProperties.LiveSetting="Assertive"
+                                                               controls:LiveRegion.Announce="True" />
+                                                </Border>
+
+                                                <!-- 二つの pane。CAM-A が左、CAM-B が右で、選択で入れ替えない。 -->
+                                                <Grid Grid.Row="3">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="26" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <ContentControl Grid.Column="0" Content="{Binding PaneA}"
+                                                                    ContentTemplate="{StaticResource DualLivePaneTemplate}"
+                                                                    IsTabStop="False" />
+                                                    <Border Grid.Column="1" Margin="0,30,0,34" Background="{StaticResource OverlapBandFillBrush}"
+                                                            BorderBrush="{StaticResource OverlapBandEdgeBrush}" BorderThickness="1,0"
+                                                            Visibility="{Binding DataContext.IsOverlapBandVisible, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                        <TextBlock Text="{Binding DataContext.StageCompositeOverlapBandText, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                   TextWrapping="NoWrap" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0"
+                                                                   FontFamily="{StaticResource MonoFontFamily}"
+                                                                   FontSize="{StaticResource FontSizeSmall}"
+                                                                   Foreground="{StaticResource OverlapBandTextBrush}">
+                                                            <TextBlock.LayoutTransform>
+                                                                <RotateTransform Angle="90" />
+                                                            </TextBlock.LayoutTransform>
+                                                        </TextBlock>
+                                                    </Border>
+                                                    <ContentControl Grid.Column="2" Content="{Binding PaneB}"
+                                                                    ContentTemplate="{StaticResource DualLivePaneTemplate}"
+                                                                    IsTabStop="False" />
+                                                </Grid>
+
+                                                <!-- 常設の注記。撮影回収専用モードでは、検証の範囲をもう一行足す。 -->
+                                                <StackPanel Grid.Row="4" Margin="0,8,0,0">
+                                                    <TextBlock Text="{Binding PermanentNoteText}" Style="{StaticResource MutedTextStyle}" />
+                                                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource CautionBrush}"
+                                                               Text="撮影・原画像の回収のみ。合成とA0品質判定は本試験の対象外です。確認対象は、撮影後に検証してアプリ内に保管した原画像2枚です。"
+                                                               Visibility="{Binding DataContext.ShowCaptureRecoveryOnlyInstruction, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </Grid>
 
                                         <!-- 通知はステージ上端に出して、操作した直後の視線の先で気づけるようにする。 -->
                                         <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,10,0,0"
@@ -897,7 +1093,7 @@
                                            AutomationProperties.Name="撮影回収専用モードの補足">
                                     <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center"
                                                Style="{StaticResource MutedTextStyle}"
-                                               Text="実機Live Viewは機体照合専用 ／ 合成・A0品質判定なし ／ 実シャッター同期未保証" />
+                                               Text="ライブ表示は確認用のみ ／ 合成・A0品質判定なし ／ 実シャッター同期未保証" />
                                     <TextBlock DockPanel.Dock="Right" Text="CaptureRecoveryOnly" VerticalAlignment="Center"
                                                FontFamily="{StaticResource MonoFontFamily}"
                                                Foreground="{StaticResource CautionBrush}" />

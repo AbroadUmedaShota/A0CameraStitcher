@@ -217,6 +217,27 @@ try {
         Assert-Condition ($closeSequenceIndexes[$closeSequenceStep] -gt $closeSequenceIndexes[$closeSequenceStep - 1]) 'HardwareDualWindowCloseSequence must keep its order: stop monitor, show the indicator, disable the window, cancel the lifetime, run the gate, then report, hide the indicator, re-enable and restart the monitor (issues #228, #239).'
     }
 
+    # 二台のライブ表示（Issue #291）。文言の規則（「同時」「同期」と書かない）と、CAM-A が左・CAM-B が右の固定は
+    # markup に書かれているので、ここで固定する。撮影前に閉じる処理が機体照合の再確認と撮影処理への引継ぎより
+    # 前にあることも、順序の文字列で固定する（動作は DualLiveStageContracts が見る）。
+    $liveStageBegin = $windowText.IndexOf('二台のライブ表示（Issue #291）')
+    $liveStageEnd = $windowText.IndexOf('通知はステージ上端に出して')
+    Assert-Condition ($liveStageBegin -ge 0 -and $liveStageEnd -gt $liveStageBegin) 'The dual Live stage block was not found in MainWindow.xaml (issue #291).'
+    $liveStageText = $windowText.Substring($liveStageBegin, $liveStageEnd - $liveStageBegin)
+    foreach ($bannedWord in @('同時', '同期')) {
+        Assert-Condition (-not $liveStageText.Contains($bannedWord)) "The dual Live stage must not say '$bannedWord' (issue #291)."
+    }
+    $paneAIndex = $liveStageText.IndexOf('{Binding PaneA}')
+    $paneBIndex = $liveStageText.IndexOf('{Binding PaneB}')
+    Assert-Condition ($paneAIndex -ge 0 -and $paneBIndex -gt $paneAIndex) 'CAM-A must be laid out before (left of) CAM-B on the dual Live stage (issue #291).'
+    Assert-Condition ($liveStageText.Contains('DualLiveStage') -and $liveStageText.Contains('RefreshBothCommand') -and $liveStageText.Contains('SwitchLiveCommand')) 'The dual Live stage must bind the update-both and switch commands (issue #291).'
+    $latchedBegin = $viewModelText.IndexOf('private async Task RunLatchedCaptureAsync')
+    Assert-Condition ($latchedBegin -ge 0) 'RunLatchedCaptureAsync was not found in OperatorShellViewModel (issue #291).'
+    $prepareIndex = $viewModelText.IndexOf('DualLiveStage.PrepareForCaptureAsync()', $latchedBegin)
+    $verifyIndex = $viewModelText.IndexOf('DualBinding.VerifyBindingIsCurrentAsync()', $latchedBegin)
+    $activateIndex = $viewModelText.IndexOf('DualBinding.ActivateCaptureAsync(', $latchedBegin)
+    Assert-Condition ($prepareIndex -gt $latchedBegin -and $verifyIndex -gt $prepareIndex -and $activateIndex -gt $verifyIndex) 'The bound Live View must be closed and confirmed before the binding is re-verified and capture is activated (issue #291).'
+
     $fractionConverterPath = Join-Path $RepositoryRoot 'src/m3/OperatorShell/Converters/FractionToMarginConverter.cs'
     Assert-Condition (Test-Path -LiteralPath $fractionConverterPath -PathType Leaf) 'FractionToMarginConverter.cs must exist to position the target reticle and loupe marker overlays.'
     Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot 'src/m3/OperatorShell/MainWindow.xaml.cs')).Contains('MoveTargetByStageDrag')) 'MainWindow code-behind must wire stage drag input to the target reticle view model method.'

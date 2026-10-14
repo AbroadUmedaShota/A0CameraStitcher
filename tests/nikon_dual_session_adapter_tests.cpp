@@ -287,6 +287,7 @@ public:
     std::vector<std::string> tokens{"session-token-a", "session-token-b"};
     DualIdentityInvalidationReason invalidation{DualIdentityInvalidationReason::None};
     bool fail_close{};
+    bool fail_stop{};
     bool fail_capture{};
     bool fail_pc_direct_original_read{};
     bool fail_pc_direct_select_readback{};
@@ -427,6 +428,7 @@ public:
     }
 
     void StopLiveView(std::chrono::seconds) override {
+        if (fail_stop) throw std::runtime_error("injected live view stop failure");
         if (!live_view_active) throw std::runtime_error("live view is not active");
         live_view_active = false;
     }
@@ -1703,6 +1705,239 @@ void TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed() {
         "unconfirmed cleanup output must remain anonymous and fixed-schema");
 }
 
+// ---------------------------------------------------------------------------
+// Bound Live View (Issue #291) through the real NikonDualBindingSdkAdapter, on
+// the recording transport. The fake-adapter tests prove the protocol; these
+// prove that the adapter's own open/closed reporting and failure handling are
+// what the protocol relies on.
+// ---------------------------------------------------------------------------
+
+std::string BoundLiveViewBindingRequest(
+    std::string_view operation, std::string_view payload) {
+    return std::string(R"({"schemaVersion":")") +
+        std::string(kDualBindingCameraAgentSchemaVersion) +
+        R"(","simulation":false,"marker":"HardwareBinding","requestId":"r-nikon",)" +
+        R"("operation":")" + std::string(operation) + R"(","payload":)" +
+        std::string(payload) + "}";
+}
+
+std::string BoundLiveViewRequest(
+    std::string_view operation, std::string_view payload) {
+    return std::string(R"({"schemaVersion":")") +
+        std::string(kDualBoundLiveViewSchemaVersion) +
+        R"(","simulation":false,"marker":"HardwareBinding","requestId":"r-nikon",)" +
+        R"("operation":")" + std::string(operation) + R"(","payload":)" +
+        std::string(payload) + "}";
+}
+
+std::string BoundLiveViewField(std::string_view response, std::string_view field) {
+    const std::string key = "\"" + std::string(field) + "\":\"";
+    const auto start = response.find(key);
+    if (start == std::string_view::npos) return {};
+    const auto value_start = start + key.size();
+    const auto end = response.find('"', value_start);
+    return end == std::string_view::npos
+        ? std::string{}
+        : std::string(response.substr(value_start, end - value_start));
+}
+
+bool BoundLiveViewSucceeded(std::string_view response) {
+    return response.find("\"success\":true") != std::string_view::npos;
+}
+
+struct NikonBoundLiveViewHarness {
+    std::shared_ptr<RecordingDualSessionTransport> transport =
+        std::make_shared<RecordingDualSessionTransport>();
+    std::shared_ptr<NikonDualBindingSdkAdapter> adapter =
+        std::make_shared<NikonDualBindingSdkAdapter>(transport);
+    DualBindingCameraAgentDispatcher dispatcher{adapter, true};
+    std::uint64_t remaining{600'000};
+    DualBoundLiveViewController live;
+    std::string session;
+
+    NikonBoundLiveViewHarness()
+        : live(*adapter, DualBoundLiveViewOptions{[this] { return remaining; }, {}}) {
+        dispatcher.AttachBoundLiveView(&live);
+    }
+
+    std::string Handle(const std::string& request) { return dispatcher.Handle(request); }
+
+    std::string Payload(std::string_view extra = {}) const {
+        return R"({"sessionId":")" + session + "\"" + std::string(extra) + "}";
+    }
+
+    std::string StartLive(std::string_view alias) {
+        return Handle(BoundLiveViewRequest(
+            "start-bound-live-view",
+            Payload(R"(,"cameraAlias":")" + std::string(alias) + "\"")));
+    }
+    std::string FrameLive(std::string_view alias) {
+        return Handle(BoundLiveViewRequest(
+            "get-bound-live-view-frame",
+            Payload(R"(,"cameraAlias":")" + std::string(alias) + "\"")));
+    }
+    std::string StopLive() {
+        return Handle(BoundLiveViewRequest("stop-bound-live-view", Payload()));
+    }
+    std::string Activate() {
+        return Handle(BoundLiveViewBindingRequest("activate-capture", Payload()));
+    }
+
+    void Bind() {
+        session = BoundLiveViewField(
+            Handle(BoundLiveViewBindingRequest("begin-binding", R"({"cameraMode":"DualCamera"})")),
+            "sessionId");
+        for (std::size_t ordinal = 0; ordinal < 2; ++ordinal) {
+            const std::string candidate =
+                Payload(R"(,"candidateOrdinal":)" + std::to_string(ordinal));
+            (void)Handle(BoundLiveViewBindingRequest("start-candidate-live-view", candidate));
+            (void)Handle(BoundLiveViewBindingRequest("get-candidate-live-view-frame", candidate));
+            (void)Handle(BoundLiveViewBindingRequest(
+                "confirm-alias",
+                Payload(R"(,"candidateOrdinal":)" + std::to_string(ordinal) +
+                    R"(,"cameraAlias":")" + (ordinal == 0 ? "CAM-A" : "CAM-B") + "\"")));
+        }
+        const std::string complete = Handle(BoundLiveViewBindingRequest(
+            "complete-binding", Payload(R"(,"confirmedAtUtc":"2026-10-14T00:00:00Z")")));
+        Check(BoundLiveViewSucceeded(complete) &&
+                  dispatcher.BindingState() == DualIdentitySessionBindingState::Ready,
+            "test setup: the Nikon-backed binding must reach Ready");
+    }
+};
+
+void TestBoundLiveViewReopensAnAssignedCandidateAndClosesBeforeActivation() {
+    NikonBoundLiveViewHarness harness;
+    harness.Bind();
+    Check(!harness.transport->source_open && harness.transport->module_active &&
+              harness.adapter->InspectOpenState().IsClosed(),
+        "a Ready binding holds only the manager module: no source, no Live View");
+    const std::size_t begin_count = harness.transport->begin_count;
+    const std::size_t opens_before = harness.transport->source_open_count;
+
+    const std::string started = harness.StartLive("CAM-B");
+    Check(BoundLiveViewSucceeded(started) &&
+              BoundLiveViewField(started, "resultCode") == "BoundLiveViewStarted",
+        "CAM-B's Live View reopens on the retained module after Ready");
+    Check(harness.transport->source_open && harness.transport->live_view_active &&
+              harness.transport->opened_tokens.back() == "session-token-b" &&
+              harness.transport->source_open_count == opens_before + 1 &&
+              harness.transport->begin_count == begin_count,
+        "it opened CAM-B's candidate source once, without re-enumerating");
+    Check(harness.adapter->InspectOpenState().source_open &&
+              harness.adapter->InspectOpenState().live_view_open,
+        "the adapter reports the source and the Live View as open");
+
+    const std::string frame = harness.FrameLive("CAM-B");
+    Check(BoundLiveViewSucceeded(frame) &&
+              frame.find("\"frameBytes\":4") != std::string::npos,
+        "the transient frame comes back through the same adapter");
+
+    const std::string second = harness.StartLive("CAM-A");
+    Check(!BoundLiveViewSucceeded(second) &&
+              BoundLiveViewField(second, "resultCode") == "BoundLiveViewAlreadyOpen" &&
+              harness.transport->source_open_count == opens_before + 1 &&
+              harness.transport->concurrent_source_violation_count == 0,
+        "a second camera is refused before any second source-open call");
+
+    const std::string refused = harness.Activate();
+    Check(!BoundLiveViewSucceeded(refused) &&
+              BoundLiveViewField(refused, "resultCode") == "BoundLiveViewOpen" &&
+              !harness.dispatcher.CaptureTransitionRequested(),
+        "capture activation is refused while the Nikon adapter has a Live View open");
+
+    const std::size_t closes_before = harness.transport->source_close_count;
+    const std::string stopped = harness.StopLive();
+    Check(BoundLiveViewSucceeded(stopped) &&
+              !harness.transport->live_view_active && !harness.transport->source_open &&
+              harness.transport->source_close_count == closes_before + 1 &&
+              harness.transport->module_active &&
+              harness.adapter->InspectOpenState().IsClosed(),
+        "stop stops the stream and closes the source but keeps the manager module");
+
+    const std::string accepted = harness.Activate();
+    Check(BoundLiveViewSucceeded(accepted) && harness.dispatcher.CaptureTransitionRequested(),
+        "with everything closed the same activation is accepted");
+    Check(harness.transport->end_count == 0 &&
+              harness.transport->concurrent_source_violation_count == 0,
+        "no session was ended and no two sources overlapped along the way");
+}
+
+void TestBoundLiveViewSdkFailureEndsTheSessionAndInvalidates() {
+    NikonBoundLiveViewHarness harness;
+    harness.Bind();
+    (void)harness.StartLive("CAM-A");
+    harness.transport->fail_close = true;
+
+    const std::string failed = harness.StopLive();
+    Check(!BoundLiveViewSucceeded(failed) &&
+              BoundLiveViewField(failed, "resultCode") == "BindingInvalidated" &&
+              BoundLiveViewField(failed, "invalidationReason") == "SdkError",
+        "a source that will not close invalidates the binding");
+    Check(!harness.transport->module_active && !harness.transport->source_open &&
+              harness.transport->end_count == 1,
+        "the adapter ends the whole SDK session exactly once, with no retry");
+    Check(failed.find("\"liveViewStopped\":true") != std::string::npos &&
+              failed.find("\"sdkSourceClosed\":true") != std::string::npos,
+        "the response reports the closed state the adapter confirms after ending the session");
+    const std::string after = harness.StartLive("CAM-A");
+    Check(BoundLiveViewField(after, "resultCode") == "BindingInvalidated" &&
+              harness.transport->source_open_count == 3,
+        "an invalidated binding is not reopened: the opens are the two binding-time ones "
+        "and the Live View that was closed");
+    Check(!BoundLiveViewSucceeded(harness.Activate()) &&
+              !harness.dispatcher.CaptureTransitionRequested(),
+        "capture cannot be activated afterwards");
+}
+
+void TestBoundLiveViewFailedStopIsNotReportedAsStopped() {
+    NikonBoundLiveViewHarness harness;
+    harness.Bind();
+    (void)harness.StartLive("CAM-A");
+    harness.transport->fail_stop = true;
+
+    const std::string failed = harness.StopLive();
+    Check(!BoundLiveViewSucceeded(failed) &&
+              BoundLiveViewField(failed, "resultCode") == "BindingInvalidated" &&
+              BoundLiveViewField(failed, "invalidationReason") == "SdkError",
+        "a Live View that will not stop invalidates the binding");
+    Check(!harness.transport->module_active && !harness.transport->source_open &&
+              harness.transport->end_count == 1,
+        "the adapter ends the whole SDK session exactly once, with no retry");
+    Check(failed.find("\"liveViewStopped\":false") != std::string::npos &&
+              failed.find("\"sdkSourceClosed\":true") != std::string::npos &&
+              failed.find("\"wasOpen\":true") != std::string::npos,
+        "ending the session closes the source but does not make the stop confirmed");
+    Check(harness.adapter->InspectOpenState().live_view_open &&
+              !harness.adapter->InspectOpenState().IsClosed() &&
+              harness.adapter->InspectRetainedModuleState().live_view_active,
+        "the adapter still reports a Live View open until the session is ended explicitly");
+    Check(!BoundLiveViewSucceeded(harness.Activate()) &&
+              !harness.dispatcher.CaptureTransitionRequested(),
+        "capture cannot be activated afterwards");
+
+    Check(harness.adapter->EndBindingSession(std::chrono::seconds(2)) &&
+              harness.adapter->InspectOpenState().IsClosed(),
+        "an explicit end of the session clears the unconfirmed stream");
+}
+
+void TestBoundLiveViewUsbEventEndsTheSessionBeforeItIsReported() {
+    NikonBoundLiveViewHarness harness;
+    harness.Bind();
+    (void)harness.StartLive("CAM-A");
+    harness.transport->invalidation = DualIdentityInvalidationReason::UsbReconnect;
+
+    const std::string response = harness.FrameLive("CAM-A");
+    Check(BoundLiveViewField(response, "resultCode") == "BindingInvalidated" &&
+              BoundLiveViewField(response, "invalidationReason") == "UsbReconnect",
+        "a USB event while Live is reported with its typed reason");
+    Check(!harness.transport->module_active && !harness.transport->source_open &&
+              !harness.transport->live_view_active,
+        "the adapter ended the session when it observed the event");
+    Check(response.find("\"liveViewStopped\":true") != std::string::npos &&
+              response.find("\"sdkSourceClosed\":true") != std::string::npos,
+        "and the response says nothing is left open");
+}
+
 } // namespace
 
 int main() {
@@ -1733,6 +1968,10 @@ int main() {
         TestReadOnlyProbePreservesSharedInventoryUncertaintyAfterCleanup();
         TestReadOnlyProbeBlocksCleanupErrorAfterConfirmedEnd();
         TestReadOnlyProbeBlocksWhenCleanupCannotBeConfirmed();
+        TestBoundLiveViewReopensAnAssignedCandidateAndClosesBeforeActivation();
+        TestBoundLiveViewSdkFailureEndsTheSessionAndInvalidates();
+        TestBoundLiveViewFailedStopIsNotReportedAsStopped();
+        TestBoundLiveViewUsbEventEndsTheSessionBeforeItIsReported();
         std::cout << "Nikon Dual session adapter contracts passed\n";
         return 0;
     } catch (const std::exception& error) {

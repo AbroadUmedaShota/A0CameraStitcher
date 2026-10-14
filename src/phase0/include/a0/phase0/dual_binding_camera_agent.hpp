@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "a0/phase0/dual_bound_live_view.hpp"
 #include "a0/phase0/dual_identity_session_binding.hpp"
 
 namespace a0::phase0 {
@@ -92,12 +93,24 @@ struct DualBindingCameraAgentRequest {
 [[nodiscard]] DualBindingCameraAgentRequest ParseDualBindingCameraAgentRequest(
     std::string_view json);
 
+// What the adapter itself reports as open right now. Read back from the SDK
+// owner, never reconstructed from what a caller believes it asked for.
+struct DualBindingSdkOpenState {
+    // An SDK source (camera session) is open under the retained Module.
+    bool source_open{};
+    // A Live View handle is held, whether or not frames are still flowing.
+    bool live_view_open{};
+
+    [[nodiscard]] bool IsClosed() const noexcept {
+        return !source_open && !live_view_open;
+    }
+};
+
 // The SDK candidate/Live View lifecycle the binding protocol drives.
 //
-// Only the fake implementation below exists today. The real Nikon SDK one is
-// Issue #10 and is not part of this protocol's scope -- which is the point of
-// having the seam: the whole binding flow, including every rejection path, is
-// reachable and testable without a camera.
+// Implemented by the fake below and by NikonDualBindingSdkAdapter. The seam is
+// what makes the whole binding flow, including every rejection path, reachable
+// and testable without a camera.
 class DualBindingSdkAdapter {
 public:
     virtual ~DualBindingSdkAdapter() = default;
@@ -138,6 +151,14 @@ public:
     // moment it could possibly act on one, and never gets a success built on a
     // binding that stopped being trustworthy in between.
     [[nodiscard]] virtual DualIdentityInvalidationReason PollInvalidation() = 0;
+
+    // Whether any SDK source or Live View handle is open. A pure read: it must
+    // not call into the SDK. Used to confirm "everything is closed" before a
+    // capture is activated and before a bound Live View is started, so those
+    // decisions rest on the SDK owner's state and not on a flag kept by the
+    // caller.
+    [[nodiscard]] virtual DualBindingSdkOpenState InspectOpenState()
+        const noexcept = 0;
 };
 
 // How the fake SDK should behave for one test. Everything here exists because
@@ -169,6 +190,19 @@ struct DualBindingFakeSdkOptions {
     // that, because begin-binding drains stale events first.
     DualIdentityInvalidationReason invalidation_during_enumeration{
         DualIdentityInvalidationReason::None};
+    // A Live View frame read returns nothing. Together with a raised
+    // invalidation this models an SDK exception during the read; without one it
+    // models a camera that has not produced a frame yet (live_view_frame_bytes
+    // = 0 does that too, but this one can be switched on mid-test).
+    bool fail_read_live_view_frame{};
+    // Behave like NikonDualBindingSdkAdapter when something goes wrong: an
+    // injected failure (fail_start_live_view, fail_stop_live_view,
+    // fail_close_candidate_session, fail_read_live_view_frame) queues an SdkError
+    // invalidation and ends the whole SDK session, and any invalidation reported
+    // by PollInvalidation ends the session too. Off by default because the
+    // binding protocol's own tests rely on a failure that leaves the session
+    // untouched.
+    bool nikon_like_failure_semantics{};
 };
 
 // Fake SDK candidate/Live View lifecycle adapter.
@@ -191,8 +225,12 @@ public:
     [[nodiscard]] bool EndBindingSession(
         std::chrono::seconds timeout) noexcept override;
     [[nodiscard]] DualIdentityInvalidationReason PollInvalidation() override;
+    [[nodiscard]] DualBindingSdkOpenState InspectOpenState() const noexcept override;
 
     void RaiseInvalidation(DualIdentityInvalidationReason reason) noexcept;
+    // Test-time knob: lets a test flip a failure on after a Live View is
+    // already running, which the constructor options cannot express.
+    [[nodiscard]] DualBindingFakeSdkOptions& MutableOptions() noexcept;
 
     [[nodiscard]] std::size_t EnumerationCount() const noexcept;
     [[nodiscard]] std::size_t ActiveLiveViewCount() const noexcept;
@@ -200,13 +238,31 @@ public:
     [[nodiscard]] std::size_t ConcurrentLiveViewViolationCount() const noexcept;
     [[nodiscard]] std::size_t ClosedCandidateSessionCount() const noexcept;
     [[nodiscard]] std::size_t EndBindingSessionCount() const noexcept;
+    // Number of SDK sources open right now.
+    [[nodiscard]] std::size_t OpenSourceCount() const noexcept;
+    // Non-zero means a Live View was started for one candidate while another
+    // candidate's SDK source was still open: two camera sessions at once.
+    [[nodiscard]] std::size_t ConcurrentSourceViolationCount() const noexcept;
+    // Every adapter call in order, as "Method:ordinal" ("Method" when it has no
+    // ordinal). PollInvalidation and InspectOpenState are not recorded: they are
+    // reads, not commands to the camera.
+    [[nodiscard]] const std::vector<std::string>& CallLog() const noexcept;
 
 private:
+    // Applies Nikon-like failure semantics (see the option) when enabled.
+    void EndSessionAfterFailure() noexcept;
+
     DualBindingFakeSdkOptions options_;
     std::vector<bool> live_view_active_;
     std::vector<bool> session_closed_;
+    std::vector<bool> source_open_;
+    // Mirrors the Nikon adapter: a failed stop keeps reporting a Live View open
+    // even after the failure ended the session.
+    bool live_view_stop_unconfirmed_{};
+    std::vector<std::string> call_log_;
     std::size_t enumeration_count_{};
     std::size_t concurrent_live_view_violations_{};
+    std::size_t concurrent_source_violations_{};
     std::size_t end_binding_session_count_{};
 };
 
@@ -233,12 +289,19 @@ struct DualBindingCameraAgentSafetyCounters {
 // Without an adapter every operation fails closed with SdkUnavailable: an agent
 // that cannot see any candidates must not invent a session for the operator to
 // confirm.
-class DualBindingCameraAgentDispatcher final {
+class DualBindingCameraAgentDispatcher final : private DualBoundLiveViewBindingPort {
 public:
     DualBindingCameraAgentDispatcher() noexcept = default;
     explicit DualBindingCameraAgentDispatcher(
         std::shared_ptr<DualBindingSdkAdapter> adapter,
         bool capture_transition_enabled = false) noexcept;
+
+    // Lets the bound Live View schema (`a0.camera-agent.hardware-dual-bound-live-view.v1`)
+    // be served on this binding pipe. Not owned: the caller keeps the controller
+    // alive for as long as this dispatcher can receive requests. Without one,
+    // every request in that schema is refused with BoundLiveViewUnavailable, and
+    // every other binding operation behaves exactly as it did before.
+    void AttachBoundLiveView(DualBoundLiveViewController* controller) noexcept;
 
     [[nodiscard]] std::string Handle(std::string_view request_json) noexcept;
 
@@ -270,7 +333,9 @@ public:
     [[nodiscard]] bool CancellationSucceeded() const noexcept;
 
     // Named-pipe host lifecycle hooks, same shape as the Dual v2 dispatcher.
-    // Idle remains a no-op. ShouldStop becomes true only after a delivered
+    // Idle is a no-op unless a bound Live View controller is attached, in which
+    // case it gives that controller the chance to close a Live View whose client
+    // has gone quiet. ShouldStop becomes true only after a delivered
     // activate-capture or cancel-binding terminal request; Ready by itself
     // stays addressable for a freshness probe, re-bind, or safe cancellation.
     void OnIdle() noexcept;
@@ -292,10 +357,25 @@ private:
     [[nodiscard]] std::string HandleCancelBinding(
         const DualBindingCameraAgentRequest& request);
 
+    [[nodiscard]] std::string HandleBoundLiveView(std::string_view request_json);
+
     void InvalidateSession(DualIdentityInvalidationReason reason) noexcept;
     [[nodiscard]] std::string InvalidatedRejection(std::string_view request_id) const;
 
+    // DualBoundLiveViewBindingPort
+    [[nodiscard]] std::string BoundLiveViewSessionId() const override;
+    [[nodiscard]] DualIdentitySessionBindingState BoundLiveViewBindingState()
+        const noexcept override;
+    [[nodiscard]] DualIdentityInvalidationReason BoundLiveViewInvalidationReason()
+        const noexcept override;
+    [[nodiscard]] std::size_t BoundLiveViewCandidateOrdinal(
+        std::string_view camera_alias) override;
+    void InvalidateBoundLiveViewBinding(
+        DualIdentityInvalidationReason reason) noexcept override;
+
     std::shared_ptr<DualBindingSdkAdapter> adapter_;
+    // Not owned. Null unless AttachBoundLiveView was called.
+    DualBoundLiveViewController* bound_live_view_{nullptr};
     DualIdentitySessionBinding binding_;
     std::string session_id_;
     // Empty session id plus this being set is impossible; both are cleared and

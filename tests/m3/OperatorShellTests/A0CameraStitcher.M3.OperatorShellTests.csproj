@@ -21,6 +21,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Copied next to the test binary so the test can compare the 185-second capture reserve the
+         operator screen subtracts from the Agent lifetime with the native constant (issue #291). -->
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\src\phase0\include\a0\phase0\dual_bound_live_view.hpp"
+          Link="native\dual_bound_live_view.hpp"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The push check script, copied next to the test binary so that the test can compare its copy of
          the pinned dummy image hashes with PinnedSha256 (issue #260). -->
     <None Include="$(MSBuildThisFileDirectory)..\..\..\scripts\Test-ReplayFixtureLeak.ps1"

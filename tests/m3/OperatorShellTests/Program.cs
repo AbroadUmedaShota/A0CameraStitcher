@@ -118,6 +118,10 @@ if (args is ["--hardware-single-history"])
         return 1;
     }
 }
+if (args is ["--dual-live-stage"])
+{
+    return await DualLiveStageContracts.RunVerboseAsync();
+}
 if (args is ["--wpf-command-stop-probe", var runnerProbe])
 {
     return await WpfCommandLifetimeContracts.RunStopProbeAsync(runnerProbe);
@@ -327,7 +331,7 @@ if (await WpfCommandLifetimeContracts.RunAsync(reportCases: false) != 0)
     Console.Error.WriteLine("FAIL WPF command ownership and failure preservation contracts");
     // remaining= is the number of checks after the one that stopped the run (every top-level try block and
     // RunScenarioAsync call below); scripts/Test-M3Simulated.ps1 derives it from this file and compares.
-    Console.Error.WriteLine("UNRUN runner=normal remaining=121 reason=lifetime-contract-failure; exit=1");
+    Console.Error.WriteLine("UNRUN runner=normal remaining=122 reason=lifetime-contract-failure; exit=1");
     return 1;
 }
 Console.WriteLine("PASS WPF command ownership and failure preservation contracts");
@@ -1109,12 +1113,12 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly workflow and WPF path retain originals without invoking ordinary stitch flow",
-    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 50) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyWorkflowAndWpfPathAsync, failures, "normal-recovery", remaining: 51) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly original export through the ViewModel reports failures by cause, keeps partial results visible and never touches the camera or Agent",
-    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 49) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyOriginalsExportViewModelScenariosAsync, failures, "normal-recovery", remaining: 50) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1317,7 +1321,7 @@ catch (Exception exception)
 
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "撮影+AF converges on every required camera then runs the unchanged existing capture flow",
-    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 30) == WpfScenarioOutcome.PendingStop)
+    CaptureWithAutoFocusSucceedsThenCapturesAsync, failures, "normal-af", remaining: 31) == WpfScenarioOutcome.PendingStop)
     return 1;
 
 try
@@ -1603,20 +1607,31 @@ catch (Exception exception)
 }
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "replayed real Agent terminal results (Succeeded pair and Failed/CaptureCameraA) go through the shell CaptureRecoveryOnly capture and save path (#231)",
-    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 3) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyRealAgentReplayThroughShellAsync, failures, "normal-recovery", remaining: 4) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly does not treat a stale ordinary response-unknown transaction as its own recovery and still requires approval and binding re-verification (#253)",
-    CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 2) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyIgnoresStaleOrdinaryResponseUnknownAsync, failures, "normal-recovery", remaining: 3) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly keeps the approval and the route fixed while the Agent response is awaited after the main button is pressed (#254)",
-    CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync, failures, "normal-recovery", remaining: 1) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyAgentWaitKeepsApprovalAndRouteAsync, failures, "normal-recovery", remaining: 2) == WpfScenarioOutcome.PendingStop)
     return 1;
 if (await WpfCommandTestRunner.RunScenarioAsync(
     "CaptureRecoveryOnly blocks new captures while an ordinary transaction result is unconfirmed, keeps its own same-ID check, and leaves the ordinary record in place (#256)",
-    CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnconfirmedAsync, failures, "normal-recovery", remaining: 0) == WpfScenarioOutcome.PendingStop)
+    CaptureRecoveryOnlyBlocksNewCaptureWhileOrdinaryTransactionUnconfirmedAsync, failures, "normal-recovery", remaining: 1) == WpfScenarioOutcome.PendingStop)
     return 1;
+try
+{
+    await DualLiveStageContracts.RunAsync();
+    await DualLiveStageIsClosedByTheShellCaptureButtonAsync();
+    Console.WriteLine("PASS the dual Live stage switches, updates both, closes before a capture, shows the time left to capture, and never reopens by itself (#291)");
+}
+catch (Exception exception)
+{
+    failures.Add("the dual Live stage switches, updates both, closes before a capture, shows the time left to capture, and never reopens by itself (#291)");
+    Console.Error.WriteLine($"FAIL the dual Live stage switches, updates both, closes before a capture, shows the time left to capture, and never reopens by itself (#291): {exception}");
+}
 Console.WriteLine($"Operator shell tests: {passLines.Count}/{passLines.Count + failures.Count} passed.");
 return failures.Count == 0 ? 0 : 1;
 
@@ -7672,11 +7687,18 @@ static async Task HardwareDualDoesNotExposeSimulatedMainStageAsync()
         Check.False(shell.CanUseSimulationStageControls, "HardwareDual must not expose simulated stage controls.");
         Check.False(shell.CanChangeStageMode, "HardwareDual must not switch among simulated stage modes.");
         Check.False(shell.IsStandardStageVisible, "HardwareDual must hide the simulated standard stage.");
-        Check.True(shell.IsHardwareDualStagePendingVisible, "HardwareDual must show an explicit non-simulated placeholder.");
-        Check.True(
-            shell.HardwareDualStagePendingText.Contains("機体照合画面", StringComparison.Ordinal) &&
-            shell.HardwareDualStagePendingText.Contains("模擬画像を表示しません", StringComparison.Ordinal),
-            "The placeholder must direct the operator to binding and explicitly deny simulated imagery.");
+        // Issue #291: the main stage shows the real dual Live stage -- CAM-A left, CAM-B right, nothing
+        // simulated -- and offers nothing until the binding is Ready.
+        Check.True(shell.IsDualLiveStageVisible, "HardwareDual must show the dual Live stage.");
+        Check.Equal("CAM-A", shell.DualLiveStage.Panes[0].Alias);
+        Check.Equal("CAM-B", shell.DualLiveStage.Panes[1].Alias);
+        Check.False(shell.DualLiveStage.PaneA.HasImage || shell.DualLiveStage.PaneB.HasImage,
+            "The dual Live stage must start with no picture: nothing simulated is ever drawn there.");
+        Check.False(shell.DualLiveStage.RefreshBothCommand.CanExecute(null),
+            "Update both must not be offered before the binding is Ready.");
+        Check.False(shell.DualLiveStage.SwitchLiveCommand.CanExecute("CAM-A"),
+            "Switching must not be offered before the binding is Ready.");
+        Check.Equal(DualLiveStageText.DisabledNotBound, shell.DualLiveStage.RefreshDisabledReason);
 
         shell.ToggleLiveViewCommand.Execute(null);
         Check.False(shell.IsLiveViewActive, "The blocked command must not activate simulated Live View.");
@@ -7958,6 +7980,108 @@ static async Task CompleteDualBindingAsync(DualBindingViewModel binding)
         "The binding screen did not reach the confirmation summary.");
     binding.CompleteBindingCommand.Execute(null);
     await WaitUntilAsync(() => binding.IsReady, "The binding did not complete.");
+}
+
+// Issue #291: the shell's own capture path closes an open Live View, and confirms it, before it reserves
+// a transaction or activates the capture host. The stage contracts call PrepareForCaptureAsync directly;
+// this runs the real capture button so the wiring itself is pinned.
+static async Task DualLiveStageIsClosedByTheShellCaptureButtonAsync()
+{
+    var adapterPath = Path.Combine(AppContext.BaseDirectory, "A0CameraStitcher.M2Adapter.exe");
+    Check.True(File.Exists(adapterPath), "The shell wiring scenario requires the bundled deterministic JPEG adapter.");
+    var root = CreateHardwareTestRoot();
+    var ownedCommands = new OwnedWpfCommandScope(root, DeleteHardwareTestRootAsync);
+    await ownedCommands.RunAsync(async () =>
+    {
+        var adapter = new M2OfflineStitcherProcessAdapter(adapterPath);
+        var stageOptions = new DualLiveStageOptions
+        {
+            AgentStartTimeUtc = () => DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10),
+            Delay = (_, _) => Task.CompletedTask,
+            RunFrameLoop = false,
+        };
+
+        async Task<(OperatorShellViewModel Shell, CaptureRecoveryOnlyFakeOperations Operations, CountingBindingTransport Transport, SimulatedDualBindingAgent Agent, List<string?> OpenAtActivation)> NewLiveShellAsync(
+            string name, SimulatedDualBindingOptions options)
+        {
+            var agent = new SimulatedDualBindingAgent(options);
+            var transport = new CountingBindingTransport(agent);
+            var openAtActivation = new List<string?>();
+            var operations = new CaptureRecoveryOnlyFakeOperations(adapter);
+            var workflow = new HardwareDualCaptureRecoveryOnlyWorkflow(
+                Path.Combine(root, name + "-products"), operations, operations, ApprovedCaptureRecoveryOnlyProfile());
+            var ordinaryProductRoot = Path.Combine(root, name + "-ordinary-products");
+            var ordinaryFlow = new DualCameraProductFlow(
+                ordinaryProductRoot,
+                new HardwareDualCaptureSource(
+                    new CaptureRecoveryOnlyFakeOperations(adapter),
+                    recoveryStore: new HardwareDualTransactionSnapshotStore(ordinaryProductRoot)),
+                new NeverCaptureDualBridge(),
+                new FixedDualCameraIdentitySnapshotSource(DualCameraIdentitySnapshot.AnonymousTestSyntheticReady()));
+            var shell = new OperatorShellViewModel(
+                new SimulationFoundationService(Path.Combine(root, name + "-journals")),
+                ordinaryFlow,
+                dualBindingTransport: new ActivationHookTransport(transport, () => openAtActivation.Add(agent.OpenBoundLiveViewAlias)),
+                captureRecoveryOnlyWorkflow: workflow,
+                dualLiveStageOptions: stageOptions);
+            await shell.InitializeAsync(CancellationToken.None);
+            shell.IsPhysicalShutterAckAccepted = true;
+            shell.IsExclusiveUseAckAccepted = true;
+            shell.AcceptSafetyCommand.Execute(null);
+            shell.IsCaptureRecoveryOnlyOperatorApproved = true;
+            await CompleteDualBindingAsync(shell.DualBinding);
+            return (shell, operations, transport, agent, openAtActivation);
+        }
+
+        var live = new SimulatedDualBindingOptions
+        {
+            LiveViewFrameBase64 = DualLiveStageContracts.DecodablePngBase64,
+        };
+
+        // 1. Live is open and the stop is confirmed: the capture proceeds, and the Agent had nothing open
+        //    at the moment of activation, which comes after the Live View was stopped and its source closed.
+        var ok = await NewLiveShellAsync("live-closed", live);
+        await ok.Shell.DualLiveStage.SwitchAsync("CAM-A");
+        Check.True(ok.Agent.OpenBoundLiveViewAlias == "CAM-A", "CAM-A's Live View must be open before the capture.");
+        var logBefore = ok.Agent.BoundLiveViewCallLog.Count;
+        await ownedCommands.ExecuteAsync(ok.Shell.CaptureCommand, TestWaits.Ceiling, "dual-live/capture-closes-live",
+            () => WpfCommandState.Create(ok.Shell, ok.Operations));
+        var closing = ok.Agent.BoundLiveViewCallLog.Skip(logBefore).ToArray();
+        Check.True(closing.SequenceEqual(["stop", "sdk-close:CAM-A"]),
+            "The capture button must stop the Live View and close its source, in that order. Actual: " + string.Join(",", closing));
+        Check.Equal(1, ok.Transport.ActivateCaptureCalls);
+        Check.True(ok.OpenAtActivation.Count == 1 && ok.OpenAtActivation[0] is null,
+            "Nothing may be open when the capture host is activated.");
+        Check.Equal(1, ok.Operations.ReserveCalls);
+
+        // 2. A Live View that was never opened: the capture sends the Agent nothing extra (no stop).
+        var never = await NewLiveShellAsync("live-never", live);
+        var neverLogBefore = never.Agent.BoundLiveViewCallLog.Count;
+        await ownedCommands.ExecuteAsync(never.Shell.CaptureCommand, TestWaits.Ceiling, "dual-live/capture-never-opened",
+            () => WpfCommandState.Create(never.Shell, never.Operations));
+        Check.Equal(neverLogBefore, never.Agent.BoundLiveViewCallLog.Count);
+        Check.Equal(1, never.Transport.ActivateCaptureCalls);
+        Check.Equal(1, never.Operations.ReserveCalls);
+
+        // 3. The stop cannot be confirmed: no transaction is reserved, nothing is activated, and the
+        //    attempt is not counted.
+        var failing = await NewLiveShellAsync("live-stop-fails", live with { FailStopBoundLiveView = true });
+        await failing.Shell.DualLiveStage.SwitchAsync("CAM-A");
+        var startCountBefore = failing.Shell.TransactionStartCount;
+        var lastIdBefore = failing.Shell.LastTransactionId;
+        await ownedCommands.ExecuteAsync(failing.Shell.CaptureCommand, TestWaits.Ceiling, "dual-live/capture-stop-fails",
+            () => WpfCommandState.Create(failing.Shell, failing.Operations));
+        Check.Equal(0, failing.Operations.ReserveCalls);
+        Check.Equal(0, failing.Operations.CaptureRecoveryOnlyStartCalls);
+        Check.Equal(0, failing.Transport.ActivateCaptureCalls);
+        Check.Equal(startCountBefore, failing.Shell.TransactionStartCount);
+        Check.Equal(lastIdBefore, failing.Shell.LastTransactionId);
+        Check.True(failing.Shell.StatusMessage.Contains("ライブ表示を閉じたことを確認できなかった", StringComparison.Ordinal),
+            "The operator must be told why the capture did not start. Actual: " + failing.Shell.StatusMessage);
+        Check.False(failing.Agent.CaptureHostActivated, "The Agent must not hand over to the capture host.");
+        Check.False(failing.Shell.DualLiveStage.PaneA.IsLive || failing.Shell.DualLiveStage.PaneB.IsLive,
+            "No pane may be shown as Live after the stop failed.");
+    });
 }
 
 static async Task AsyncCommandCompletionAsync()

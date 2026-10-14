@@ -22,6 +22,17 @@ public interface IHardwareCameraAgentProcessLifetime
 }
 
 /// <summary>
+/// Optional: when the transport owns an Agent process, the wall-clock time that process started
+/// (UTC). The operator screen derives the time left to admit a capture from it (Agent lifetime
+/// 600 seconds minus the 185 seconds a capture needs). Null means unknown, which the screen treats
+/// as "cannot tell" and never as "plenty of time".
+/// </summary>
+public interface IHardwareCameraAgentStartTimeSource
+{
+    DateTimeOffset? CurrentProcessStartTimeUtc { get; }
+}
+
+/// <summary>
 /// Sends a session-scoped request only to the exact process generation that created
 /// the session. Implementations must perform the generation check inside the same
 /// serialization boundary as dispatch so a replacement process can never receive a

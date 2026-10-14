@@ -32,6 +32,7 @@ public sealed class DualCameraAgentLifecycle :
     IHardwareCameraAgentTransport,
     IHardwareCameraAgentGenerationBoundTransport,
     IHardwareCameraAgentProcessLifetime,
+    IHardwareCameraAgentStartTimeSource,
     IAsyncDisposable
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
@@ -509,6 +510,17 @@ public sealed class DualCameraAgentLifecycle :
             ?? throw new InvalidDataException("Dual binding requestId is missing.");
         var sessionId = root.GetProperty("payload").GetProperty("sessionId").GetString()
             ?? throw new InvalidDataException("Dual binding sessionId is missing.");
+        // A bound Live View request (Issue #291) travels the same binding pipe with its own
+        // schema, so its refusal has to be written in that schema or the client would read the
+        // local refusal as a foreign envelope.
+        if (root.TryGetProperty("schemaVersion", out var schemaVersion) &&
+            schemaVersion.ValueKind == JsonValueKind.String &&
+            schemaVersion.GetString() == DualBoundLiveViewProtocol.SchemaVersion)
+        {
+            return DualBoundLiveViewProtocolCodec.CreateBindingHostExpiredResponse(
+                requestId, DualBoundLiveViewHost.Binding, sessionId);
+        }
+
         return DualBindingCameraAgentProtocolCodec.CreateBindingHostExpiredResponse(requestId, sessionId);
     }
 

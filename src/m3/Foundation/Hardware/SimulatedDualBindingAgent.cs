@@ -38,6 +38,10 @@ public sealed class SimulatedDualBindingAgent
     private int _sessionCounter;
     private bool _enumerationInvalidationArmed;
     private bool _captureHostActivated;
+    private string? _boundLiveViewAlias;
+    private int _boundLiveViewFramesSinceStart;
+    private readonly List<string> _boundLiveViewCallLog = [];
+    private readonly Dictionary<string, int> _boundLiveViewOpenCounts = new(StringComparer.Ordinal);
 
     public SimulatedDualBindingAgent(SimulatedDualBindingOptions? options = null)
     {
@@ -59,6 +63,41 @@ public sealed class SimulatedDualBindingAgent
     public int EndBindingSessionCount { get; private set; }
 
     public bool CaptureHostActivated => _captureHostActivated;
+
+    /// <summary>The camera whose bound Live View (Issue #291) is open, or null.</summary>
+    public string? OpenBoundLiveViewAlias => _boundLiveViewAlias;
+
+    /// <summary>
+    /// Every bound Live View request and SDK step in order: <c>start:CAM-A</c>, <c>sdk-open:CAM-A</c>,
+    /// <c>frame:CAM-A</c>, <c>stop</c>, <c>sdk-close:CAM-A</c>. A request that was refused before the
+    /// SDK is still listed by its request entry, with no SDK entry after it.
+    /// </summary>
+    public IReadOnlyList<string> BoundLiveViewCallLog => _boundLiveViewCallLog;
+
+    /// <summary>SDK sources opened for bound Live Views, in total.</summary>
+    public int BoundLiveViewOpenCount { get; private set; }
+
+    /// <summary>SDK sources closed for bound Live Views, in total.</summary>
+    public int BoundLiveViewCloseCount { get; private set; }
+
+    /// <summary>
+    /// Non-zero means a start reached the agent while a bound Live View was already open, i.e. the
+    /// client did not stop and confirm first.
+    /// </summary>
+    public int BoundLiveViewAlreadyOpenRefusalCount { get; private set; }
+
+    /// <summary>Frame requests answered with a frame.</summary>
+    public int BoundLiveViewFrameCount { get; private set; }
+
+    public int BoundLiveViewOpenCountFor(string cameraAlias) =>
+        _boundLiveViewOpenCounts.TryGetValue(cameraAlias, out var count) ? count : 0;
+
+    /// <summary>
+    /// Called with <c>operation</c> or <c>operation:alias</c> for each bound Live View request, after
+    /// the request is accepted as addressed to the live session and before the invalidation poll.
+    /// A test uses it to raise an invalidation or flip a failure at an exact step.
+    /// </summary>
+    public Action<string>? BoundLiveViewRequestObserver { get; set; }
 
     /// <summary>
     /// Raises a typed invalidation, as an Agent restart, USB reconnect, topology change, SDK
@@ -92,6 +131,13 @@ public sealed class SimulatedDualBindingAgent
             requestId = root.TryGetProperty("requestId", out var id) && id.ValueKind == JsonValueKind.String
                 ? id.GetString() ?? "rejected"
                 : "rejected";
+            if (IsBoundLiveViewSchema(root))
+            {
+                // A different schema with its own vocabulary (Issue #291), decided before the
+                // binding envelope check so the binding parser never has to refuse it.
+                return HandleBoundLiveView(requestId, root);
+            }
+
             if (!IsBindingEnvelope(root))
             {
                 return Rejection(
@@ -177,6 +223,7 @@ public sealed class SimulatedDualBindingAgent
         _state = DualBindingSessionState.None;
         _captureHostActivated = false;
         _candidates.Clear();
+        CloseBoundLiveView();
 
         // Drain whatever was queued for the session just discarded. Acting on it would refuse the
         // replacement session for something that happened before it existed.
@@ -538,6 +585,17 @@ public sealed class SimulatedDualBindingAgent
                 "Capture activation requires a completed Ready binding.");
         }
 
+        if (_boundLiveViewAlias is not null)
+        {
+            // The SDK is not touched and the binding stays Ready: the client has to stop the Live
+            // View and ask again. This is the Agent's own guard against a client that got the order
+            // wrong; the client's guard is that it confirms the stop before it activates.
+            return Rejection(
+                requestId,
+                "BoundLiveViewOpen",
+                "A bound Live View is open; stop it before activating capture.");
+        }
+
         _captureHostActivated = true;
         return Success(requestId, "CaptureHostActivated", writer =>
         {
@@ -575,6 +633,7 @@ public sealed class SimulatedDualBindingAgent
         _sessionId = string.Empty;
         _captureHostActivated = false;
         _candidates.Clear();
+        CloseBoundLiveView();
         return Success(requestId, "BindingCancelled", writer =>
         {
             writer.WriteString("sessionId", cancelledSession);
@@ -602,7 +661,306 @@ public sealed class SimulatedDualBindingAgent
 
         _activeLiveViewOrdinal = null;
         _previewedLiveViewOrdinal = null;
+        // An invalidation ends the whole SDK session, the bound Live View's source included.
+        CloseBoundLiveView();
     }
+
+    private void CloseBoundLiveView()
+    {
+        if (_boundLiveViewAlias is not { } alias)
+        {
+            return;
+        }
+
+        _boundLiveViewCallLog.Add($"sdk-close:{alias}");
+        BoundLiveViewCloseCount++;
+        _boundLiveViewAlias = null;
+    }
+
+    private static bool IsBoundLiveViewSchema(JsonElement root) =>
+        root.ValueKind == JsonValueKind.Object &&
+        root.TryGetProperty("schemaVersion", out var schema) &&
+        schema.ValueKind == JsonValueKind.String &&
+        schema.GetString() == DualBoundLiveViewProtocol.SchemaVersion;
+
+    /// <summary>
+    /// The bound Live View schema on the binding pipe. The checks run in the order the native
+    /// controller runs them (schema, session, invalidation, Ready, then the operation's own), so a
+    /// test of one order is a test of the other.
+    /// </summary>
+    private string HandleBoundLiveView(string requestId, JsonElement root)
+    {
+        var operation = root.TryGetProperty("operation", out var op) && op.ValueKind == JsonValueKind.String
+            ? op.GetString() ?? string.Empty
+            : string.Empty;
+
+        // 1. schema, marker, simulation flag, operation, exact payload fields.
+        if (!root.TryGetProperty("marker", out var marker) ||
+            marker.ValueKind != JsonValueKind.String ||
+            marker.GetString() != DualBindingCameraAgentProtocol.Marker ||
+            !root.TryGetProperty("simulation", out var simulation) ||
+            simulation.ValueKind != JsonValueKind.False ||
+            !DualBoundLiveViewProtocol.Operations.Required.Contains(operation, StringComparer.Ordinal) ||
+            !root.TryGetProperty("payload", out var payload) ||
+            payload.ValueKind != JsonValueKind.Object)
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.ProtocolRequired,
+                "The request is not a valid bound Live View request for the binding host.");
+        }
+
+        var needsAlias = operation != DualBoundLiveViewProtocol.Operations.Stop;
+        foreach (var property in payload.EnumerateObject())
+        {
+            if (property.Name != "sessionId" && !(needsAlias && property.Name == "cameraAlias"))
+            {
+                return BoundRejection(
+                    requestId,
+                    DualBoundLiveViewProtocol.RefusalCodes.ProtocolRequired,
+                    $"The payload field '{property.Name}' is not part of this operation.");
+            }
+        }
+
+        var alias = payload.TryGetProperty("cameraAlias", out var aliasElement) &&
+            aliasElement.ValueKind == JsonValueKind.String
+                ? aliasElement.GetString() ?? string.Empty
+                : string.Empty;
+        if (needsAlias && !DualBindingCameraAgentProtocol.OrderedAliases.Contains(alias, StringComparer.Ordinal))
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.ProtocolRequired,
+                "The rig defines only CAM-A and CAM-B.");
+        }
+
+        // 2. session identity, before the pending invalidation is consumed.
+        var sessionId = payload.TryGetProperty("sessionId", out var session) &&
+            session.ValueKind == JsonValueKind.String
+                ? session.GetString() ?? string.Empty
+                : string.Empty;
+        if (_sessionId.Length == 0 || !string.Equals(sessionId, _sessionId, StringComparison.Ordinal))
+        {
+            return BoundRejection(
+                requestId,
+                "SessionMismatch",
+                "The named binding session is not the one this agent is serving.");
+        }
+
+        var step = needsAlias ? $"{operation}:{alias}" : operation;
+        _boundLiveViewCallLog.Add(operation switch
+        {
+            DualBoundLiveViewProtocol.Operations.Start => $"start:{alias}",
+            DualBoundLiveViewProtocol.Operations.GetFrame => $"frame:{alias}",
+            _ => "stop",
+        });
+        BoundLiveViewRequestObserver?.Invoke(step);
+
+        // 3. invalidation event or state.
+        if (_pendingInvalidation != DualBindingInvalidationReason.None)
+        {
+            Invalidate(_pendingInvalidation);
+            _pendingInvalidation = DualBindingInvalidationReason.None;
+        }
+
+        if (_state == DualBindingSessionState.Invalid)
+        {
+            return BoundInvalidatedRejection(requestId);
+        }
+
+        // 4. Ready.
+        if (_state != DualBindingSessionState.Ready)
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.BindingNotReady,
+                "A bound Live View needs a Ready binding.",
+                writer =>
+                {
+                    writer.WriteString("sessionId", _sessionId);
+                    writer.WriteString("state", _state.ToString());
+                    writer.WriteString("detail", "A bound Live View needs a Ready binding.");
+                });
+        }
+
+        return operation switch
+        {
+            DualBoundLiveViewProtocol.Operations.Start => StartBoundLiveView(requestId, alias),
+            DualBoundLiveViewProtocol.Operations.GetFrame => GetBoundLiveViewFrame(requestId, alias),
+            _ => StopBoundLiveView(requestId),
+        };
+    }
+
+    private string StartBoundLiveView(string requestId, string alias)
+    {
+        // 5. host lifetime (before anything is opened).
+        if (_options.BoundHostRemainingMs < BoundLiveViewMinimumHostRemainingMs)
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.HostLifetimeInsufficient,
+                "The host has too little lifetime left to start a Live View.");
+        }
+
+        // 6. something already open. Never an implicit switch.
+        if (_boundLiveViewAlias is not null)
+        {
+            BoundLiveViewAlreadyOpenRefusalCount++;
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.AlreadyOpen,
+                "A bound Live View is already open; stop it first.");
+        }
+
+        // 8. SDK result. An SDK exception ends the SDK session and invalidates the binding.
+        _boundLiveViewCallLog.Add($"sdk-open:{alias}");
+        if (string.Equals(_options.FailBoundLiveViewStartAlias, alias, StringComparison.Ordinal))
+        {
+            Invalidate(DualBindingInvalidationReason.SdkError);
+            return BoundInvalidatedRejection(requestId);
+        }
+
+        _boundLiveViewAlias = alias;
+        _boundLiveViewFramesSinceStart = 0;
+        BoundLiveViewOpenCount++;
+        _boundLiveViewOpenCounts[alias] = BoundLiveViewOpenCountFor(alias) + 1;
+        return BoundSuccess(requestId, DualBoundLiveViewProtocol.ResultCodes.Started, writer =>
+        {
+            writer.WriteString("sessionId", _sessionId);
+            writer.WriteString("cameraAlias", alias);
+            writer.WriteString("state", DualBoundLiveViewProtocol.LiveState);
+            writer.WriteNumber("captureAdmissionRemainingMs", _options.BoundCaptureAdmissionRemainingMs);
+        });
+    }
+
+    private string GetBoundLiveViewFrame(string requestId, string alias)
+    {
+        // 7. the camera is not the one that is Live.
+        if (!string.Equals(_boundLiveViewAlias, alias, StringComparison.Ordinal))
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.NotActive,
+                "No bound Live View is open for this camera.");
+        }
+
+        if (string.Equals(_options.FailBoundLiveViewFrameAlias, alias, StringComparison.Ordinal))
+        {
+            Invalidate(DualBindingInvalidationReason.SdkError);
+            return BoundInvalidatedRejection(requestId);
+        }
+
+        // An empty frame is not an error and does not stop the Live View: a camera that has just
+        // started has not produced one yet. The client decides how long that may last.
+        var sinceStart = _boundLiveViewFramesSinceStart++;
+        if (_options.EmptyBoundLiveViewFrames ||
+            sinceStart < _options.EmptyBoundLiveViewFramesAfterStart ||
+            (_options.StallBoundLiveViewFramesAfter is { } stallAfter && sinceStart >= stallAfter))
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.FrameUnavailable,
+                "The SDK returned no Live View frame.");
+        }
+
+        var frame = _options.LiveViewFrameBase64 is { Length: > 0 } encoded
+            ? Convert.FromBase64String(encoded)
+            : new byte[_options.LiveViewFrameBytes];
+        if (frame.Length > DualBoundLiveViewProtocol.MaximumFrameBytes)
+        {
+            return BoundRejection(
+                requestId,
+                DualBoundLiveViewProtocol.RefusalCodes.FrameTooLarge,
+                "The Live View frame exceeds the bounded preview size.");
+        }
+
+        if (_options.LiveViewFrameBase64 is null)
+        {
+            var aliasIndex = alias == DualBindingCameraAgentProtocol.CameraAliasA ? 0 : 1;
+            for (var index = 0; index < frame.Length; index++)
+            {
+                frame[index] = (byte)((index + aliasIndex + sinceStart) & 0xFF);
+            }
+        }
+
+        BoundLiveViewFrameCount++;
+        return BoundSuccess(requestId, DualBoundLiveViewProtocol.ResultCodes.Frame, writer =>
+        {
+            writer.WriteString("sessionId", _sessionId);
+            writer.WriteString("cameraAlias", alias);
+            writer.WriteNumber("frameBytes", frame.Length);
+            writer.WriteString("frameBase64", Convert.ToBase64String(frame));
+            writer.WriteNumber("captureAdmissionRemainingMs", _options.BoundCaptureAdmissionRemainingMs);
+        });
+    }
+
+    private string StopBoundLiveView(string requestId)
+    {
+        var wasOpen = _boundLiveViewAlias is not null;
+        if (wasOpen && _options.FailStopBoundLiveView)
+        {
+            // The SDK threw while stopping. The native adapter ends the SDK session so the source is
+            // reported closed, but the stop command itself failed, so the Live View is still reported
+            // as not stopped and something was open when the stop began. The binding is no longer
+            // trustworthy, and activate-capture stays refused until cancel-binding ends the session.
+            Invalidate(DualBindingInvalidationReason.SdkError);
+            return BoundRejection(
+                requestId,
+                "BindingInvalidated",
+                "The bound Live View could not be stopped.",
+                writer =>
+                {
+                    WriteInvalidState(writer);
+                    writer.WriteBoolean("liveViewStopped", false);
+                    writer.WriteBoolean("sdkSourceClosed", true);
+                    writer.WriteBoolean("wasOpen", true);
+                });
+        }
+
+        var sourceClosed = true;
+        if (wasOpen)
+        {
+            if (_options.BoundLiveViewStopLeavesSourceOpen)
+            {
+                // The Live View stopped but the source did not close. Reported as it is.
+                sourceClosed = false;
+            }
+            else
+            {
+                CloseBoundLiveView();
+            }
+        }
+
+        return BoundSuccess(requestId, DualBoundLiveViewProtocol.ResultCodes.Stopped, writer =>
+        {
+            writer.WriteString("sessionId", _sessionId);
+            writer.WriteBoolean("liveViewStopped", true);
+            writer.WriteBoolean("sdkSourceClosed", sourceClosed);
+            writer.WriteBoolean("wasOpen", wasOpen);
+            writer.WriteNumber("captureAdmissionRemainingMs", _options.BoundCaptureAdmissionRemainingMs);
+        });
+    }
+
+    private string BoundInvalidatedRejection(string requestId) =>
+        BoundRejection(requestId, "BindingInvalidated", "The binding session is no longer trustworthy.", WriteInvalidState);
+
+    private static string BoundSuccess(string requestId, string resultCode, Action<Utf8JsonWriter> writePayload) =>
+        Envelope(requestId, true, resultCode, writePayload, DualBoundLiveViewProtocol.SchemaVersion);
+
+    private static string BoundRejection(
+        string requestId,
+        string resultCode,
+        string detail,
+        Action<Utf8JsonWriter>? writePayload = null) =>
+        Envelope(
+            requestId,
+            false,
+            resultCode,
+            writePayload ?? (writer => writer.WriteString("detail", detail)),
+            DualBoundLiveViewProtocol.SchemaVersion);
+
+    // Not configurable: the Agent's minimum is a protocol constant (※仮 20 seconds).
+    private const long BoundLiveViewMinimumHostRemainingMs = 20_000;
 
     private Candidate? FindCandidate(int ordinal) =>
         _candidates.FirstOrDefault(candidate => candidate.Ordinal == ordinal);
@@ -664,13 +1022,14 @@ public sealed class SimulatedDualBindingAgent
         string requestId,
         bool success,
         string resultCode,
-        Action<Utf8JsonWriter> writePayload)
+        Action<Utf8JsonWriter> writePayload,
+        string schemaVersion = DualBindingCameraAgentProtocol.SchemaVersion)
     {
         using var buffer = new MemoryStream();
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("schemaVersion", DualBindingCameraAgentProtocol.SchemaVersion);
+            writer.WriteString("schemaVersion", schemaVersion);
             writer.WriteBoolean("simulation", false);
             writer.WriteString("marker", DualBindingCameraAgentProtocol.Marker);
             writer.WriteString("requestId", requestId);
@@ -718,6 +1077,36 @@ public sealed record SimulatedDualBindingOptions
     public bool FailCloseCandidateSessionOnLiveViewSwitch { get; init; }
     public bool FailCloseCandidateSession { get; init; }
     public bool FailEndBindingSession { get; init; }
+
+    // Bound Live View (Issue #291). Each knob exists because a required refusal path needs it.
+
+    /// <summary>Milliseconds the simulated host will still admit a capture for, reported on every success.</summary>
+    public long BoundCaptureAdmissionRemainingMs { get; init; } = 400_000;
+
+    /// <summary>Milliseconds of host lifetime left. A start under 20 seconds is refused (※仮).</summary>
+    public long BoundHostRemainingMs { get; init; } = 500_000;
+
+    /// <summary>The SDK throws when this camera's Live View is started: the binding is invalidated (SdkError).</summary>
+    public string? FailBoundLiveViewStartAlias { get; init; }
+
+    /// <summary>The SDK throws when a frame is read for this camera: the binding is invalidated (SdkError).</summary>
+    public string? FailBoundLiveViewFrameAlias { get; init; }
+
+    /// <summary>Every frame request is answered "no frame" without an SDK exception; the Live View stays open.</summary>
+    public bool EmptyBoundLiveViewFrames { get; init; }
+
+    /// <summary>The first N frame requests after a start are answered "no frame" (a camera that is still starting).</summary>
+    public int EmptyBoundLiveViewFramesAfterStart { get; init; }
+
+    /// <summary>After this many frame requests following a start, every later one is answered "no frame" (a camera that stalls).</summary>
+    public int? StallBoundLiveViewFramesAfter { get; init; }
+
+    /// <summary>The SDK throws when the Live View is stopped: the binding is invalidated, neither half confirmed.</summary>
+    public bool FailStopBoundLiveView { get; init; }
+
+    /// <summary>The stop reports the Live View stopped but the SDK source still open.</summary>
+    public bool BoundLiveViewStopLeavesSourceOpen { get; init; }
+
     public int LiveViewFrameBytes { get; init; } = 4096;
     public string? LiveViewFrameBase64 { get; init; }
     public DualBindingInvalidationReason PendingInvalidation { get; init; } = DualBindingInvalidationReason.None;

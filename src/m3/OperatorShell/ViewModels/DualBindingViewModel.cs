@@ -577,6 +577,15 @@ public sealed class DualBindingViewModel : ObservableObject
             return null;
         }
 
+        // Issue #291: a bound Live View that may still be open gets one stop request first, so the
+        // cleanup below starts from the Agent's side being closed. A stop that cannot be confirmed
+        // does not change what happens next: cancel-binding is the backstop that ends the SDK
+        // session, and a cleanup refusal is what blocks the close.
+        if (BeforeShutdownCancelAsync is { } beforeCancel)
+        {
+            await beforeCancel(cancellationToken).ConfigureAwait(true);
+        }
+
         var reply = await _client.CancelBindingAsync(cancellationToken).ConfigureAwait(true);
         if (reply.Value is not null)
         {
@@ -763,6 +772,34 @@ public sealed class DualBindingViewModel : ObservableObject
         }
 
         return new DateTimeOffset(ticks, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// Set by the owner of the bound Live View (Issue #291). Awaited once, before the shutdown
+    /// path sends cancel-binding, and only on the path that still has a binding pipe.
+    /// </summary>
+    public Func<CancellationToken, Task>? BeforeShutdownCancelAsync { get; set; }
+
+    /// <summary>
+    /// A bound Live View operation (Issue #291) found the binding no longer trustworthy: the Agent
+    /// invalidated it, the host is gone, or a stop could not be confirmed. Shows the same overlay
+    /// and the same message the binding operations show. A refusal that does not say so is
+    /// treated as an SDK error, because the caller only reports a refusal here once it has
+    /// decided the binding cannot be used.
+    /// </summary>
+    public void ReportBoundLiveViewRefusal(DualBindingRefusal refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+        ApplyRefusal(refusal.RequiresRebinding
+            ? refusal
+            : refusal with
+            {
+                ResultCode = "BindingInvalidated",
+                State = DualBindingSessionState.Invalid,
+                InvalidationReason = refusal.InvalidationReason == DualBindingInvalidationReason.None
+                    ? DualBindingInvalidationReason.SdkError
+                    : refusal.InvalidationReason,
+            });
     }
 
     /// <summary>

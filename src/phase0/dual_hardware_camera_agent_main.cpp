@@ -1,5 +1,6 @@
 #include "a0/phase0/dual_hardware_camera_agent.hpp"
 #include "a0/phase0/agent_host_lifetime.hpp"
+#include "a0/phase0/dual_bound_live_view.hpp"
 #include "a0/phase0/dual_hardware_capture_backend.hpp"
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
 #include "a0/phase0/dual_binding_camera_agent.hpp"
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace fs = std::filesystem;
 using namespace a0::phase0;
@@ -449,6 +451,16 @@ int wmain(int argc, wchar_t** argv) {
             HardwareProcessLease camera_control_lease;
             auto sdk_adapter = std::make_shared<NikonDualBindingSdkAdapter>();
             DualBindingCameraAgentDispatcher binding_dispatcher(sdk_adapter, true);
+            // Ready-time Live View is served on the binding pipe only. It shares
+            // the host's one lifetime budget and never extends it, and it must be
+            // closed before activate-capture is accepted. The capture host does
+            // not serve it yet.
+            DualBoundLiveViewOptions bound_live_view_options;
+            bound_live_view_options.host_remaining_milliseconds =
+                [&host_lifetime] { return host_lifetime.RemainingMilliseconds(); };
+            DualBoundLiveViewController bound_live_view(
+                *sdk_adapter, std::move(bound_live_view_options));
+            binding_dispatcher.AttachBoundLiveView(&bound_live_view);
             const int binding_exit = RunDualBindingCameraAgentNamedPipeServer(
                 *binding_pipe_name, binding_dispatcher, false, {}, std::nullopt,
                 &host_lifetime);

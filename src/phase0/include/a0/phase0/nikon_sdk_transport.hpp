@@ -408,6 +408,7 @@ public:
     [[nodiscard]] bool EndBindingSession(
         std::chrono::seconds timeout) noexcept override;
     [[nodiscard]] DualIdentityInvalidationReason PollInvalidation() override;
+    [[nodiscard]] DualBindingSdkOpenState InspectOpenState() const noexcept override;
 
     // Capture-side seam. The token comes only from a Ready
     // DualIdentitySessionBinding and is never logged or persisted.
@@ -442,6 +443,11 @@ private:
     std::shared_ptr<INikonDualSessionTransport> transport_;
     std::vector<std::string> candidate_tokens_;
     std::optional<std::size_t> open_live_view_ordinal_;
+    // A Live View stop command failed. Ending the session afterwards closes the
+    // source but does not prove the stream stopped, so this stays set (and is
+    // reported as a Live View still open) until the owner's explicit end of the
+    // session succeeds or a new session is enumerated.
+    bool live_view_stop_unconfirmed_{};
     DualIdentityInvalidationReason pending_invalidation_{
         DualIdentityInvalidationReason::None};
     bool explicit_end_attempted_{};

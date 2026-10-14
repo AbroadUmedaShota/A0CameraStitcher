@@ -68,6 +68,19 @@ inline constexpr std::string_view
         "a0.camera-agent.hardware-dual-capture-recovery-only.v1";
 inline constexpr std::string_view kDualHardwareCameraAgentMarker = "Hardware";
 
+// A pair capture reserves 180 seconds for its transaction watchdog. The
+// persistent host must also retain enough time to return an acknowledged
+// response and perform bounded cleanup before admitting camera work.
+// kBoundLiveViewCaptureAdmissionReserveMilliseconds (dual_bound_live_view.hpp)
+// repeats the total; dual_bound_live_view_tests.cpp asserts the two are equal.
+inline constexpr std::uint64_t kDualTransactionWatchdogMilliseconds = 180'000;
+inline constexpr std::uint64_t kDualReplyAndAcknowledgementMilliseconds = 3'000;
+inline constexpr std::uint64_t kDualMinimumCleanupReserveMilliseconds = 2'000;
+inline constexpr std::uint64_t kDualMinimumHostAdmissionMilliseconds =
+    kDualTransactionWatchdogMilliseconds +
+    kDualReplyAndAcknowledgementMilliseconds +
+    kDualMinimumCleanupReserveMilliseconds;
+
 enum class DualHardwareCameraAgentOperation {
     get_dual_capabilities,
     reserve_pair_transaction,

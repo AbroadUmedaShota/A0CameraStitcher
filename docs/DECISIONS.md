@@ -192,6 +192,7 @@
 - recovery: SDK撮影後、対応するWPD aliasからexactly one objectを回収できなければ、取得済みPC原本を保持して`FailedPartial`にする。他aliasの探索、別objectの削除、自動retryは行わない。
 - residual risk: 操作者がLive Viewを見誤ってCAM-A/Bを逆に割り当てるriskは受容して残す。transaction順序は`CAM-A → CAM-B`だが、実シャッター開口時刻の同期や時刻差上限は保証しない。
 - gate境界: `HG-0003B`はこのrelaxation決定としてopen/unresolvedから除く。ただし決定だけでは`Hardware Ready`にしない。Issue #9のcore、binding protocol、WPF、capture backendと、実機one-shot、10回、100回が完了するまでDualCameraは`HardwarePending`を維持する。
+- 追記（2026-10-14、ADR-0035・Issue #291）: bindingが`Ready`の間、割り当て済みのaliasについて、操作者が選んだ1台のLive Viewを開いてよい。候補選択の`start-candidate-live-view`は再開せず、別schema `a0.camera-agent.hardware-dual-bound-live-view.v1`で行う（既存schemaは変えない追加）。同時に開くSDK sourceとLive Viewは1つまでで、切り替えのたびに前のLive Viewの停止とSDK sourceのcloseを確認してから次を開く。操作者が1回押したときだけ動く「両方を更新」（CAM-A、CAM-Bの順に1 frameずつ取り直し、選んでいた側のLive Viewに戻す）は自動の繰り返しではない。撮影のtransaction IDを作る前に、すべてのLive ViewとSDK sourceが閉じたことを確認する。SDK errorと失効の事象はbindingを失効させ、開き直しも再試行もしない。previewの保存・公開・撮影入力への使用の禁止は変えない。
 
 ## ADR-0026: StitchJobのdurable commit pointをversioned manifestの検証済みpublishに固定する
 
@@ -224,6 +225,7 @@
 - 不変条件: source objectの再列挙・再bindingなし、no retry、camera setting writeなし、vendor operation、existing cardのbulk delete/format禁止、PC canonical originalの再読込検証後だけのexact-object delete、CAM-A失敗時はCAM-Bを開始しない、CAM-B失敗時はCAM-A originalを保持する、を維持する。
 - 実機再開前の技術gate: pair-level read-only preflightでWPD D810 exact-two、CAM-A/B map exact-one、両card payload 0、全WPD session closeを一括確認する。さらにproduction adapterのread-only coexistence probeで、WPD open前のSDK source/capture session close、Module retained、WPD session close、WPD open中SDK operation 0を確認する。focused/full回帰と独立reviewの`PASS`後だけoperator-resume済みone-shotへ進む。
 - 受入境界: このADRはCaptureRecoveryOnlyのtransport検証だけを対象とし、合成、A0品質、実シャッター同期、releaseを承認しない。one-shot、10 pair、実測p95の製品責任者承認、100 pair、異常系の証跡は引き続き別gateである。
+- 追記（2026-10-14、ADR-0035・Issue #291）: Moduleを残す目的に「`Ready`の後のbound Live Viewのsourceを開くこと」を足す。WPDをopenする前に全Live ViewとSDK sourceをcloseする規則、WPD open中にSDK operationを行わない規則は変えない。
 
 ## ADR-0030: STEP4までの受入反復を最大5回へ変更する
 
@@ -258,6 +260,7 @@
 - 失敗時: 片側のframe取得停止、session close未確認、SDK error、USB topology変化、candidate count変化は両paneをLive成功と見せず、bindingをinvalidにして`HardwarePending`へ戻す。capture transaction開始は拒否する。
 - 範囲外: リアルタイム合成、自由homography、previewからのA0品質判断、hardware shutter synchronizationの保証。実機PoCはこのdecisionだけでは開始せず、対象・回数・操作を明記した別承認を要する。
 - 状態の追記（2026-10-05）: 凍結（Blocked）。2プロセス×2 moduleの構成による二台Live Viewの実機PoCを、(i) ベンダーの書面確認、または (ii) 所有者が新しい実機予算を明示承認するまで止める。二画面Live Viewの目標そのものは放棄しない（PMの仮定）。根拠は4点。二台runはrun-04・run-05とも候補列挙の直後、最初の命令で失敗した（run-04の分類は記録が無く※推定、run-05はselectで `worker_selection_invalidated`）。run-05ではworker 1がSDKを読み込む前に止まったため、2 moduleの共存は試験できていない。実装前gate (1)「ライセンス下のSDK資料が独立session／sourceによる同時Live Viewを許可すること」は、手元の資料では満たせない。実機preview枠は5/5を消費した。MVPのLive Viewは一台選択式のまま（AGENTS.md）。経緯と証跡は `docs/DUAL_LIVE_WORKER_POC.md` の「二台実機run-05」節、作業順は `docs/CURRENT_STATUS.md` の2026-10-05 run-05節。計装 A（`853c075`）を 2026-10-05 に main へ入れた。同日時点でmainへは未着地）。凍結解除の判断材料はAの計装データで、データを取る次の実機1回には所有者の新たな承認が要る。
+- 状態の追記（2026-10-13の所有者の決定、2026-10-14記録、Issue #291）: 二台のライブビューは、当面「選んだ側をLive、反対側はその最終frameの静止画」と「両方を更新」ボタンで進める。最終目標の二台とも動く映像は放棄せず、別Issue（#292）で追う。所有者が確かめたいのは、設置時の構図合わせ・ピント・原稿ごとの収まり・2台が生きていることの4つで、当面の構成で4つとも満たせる。実装前gate (1)〜(5)と2026-10-05の凍結は#292の範囲にだけかかる。#291は一module・一Live Viewのままで、上の「1 moduleで複数台は不可」の制限に触れない。詳細はADR-0035。
 
 ## ADR-0032: 受入試行の定義・回数の数え方・USB抜去・保存の合格線を定める
 
@@ -578,3 +581,25 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 
 - 承認後の作業: 本ADRをAcceptedにし、決定日と承認者を記入する（2026-10-08に済み）。#274でC++と.NETのreader・実行時の検査・fingerprintを実装し、両方に同じ試験ベクトルを置く。#277・#273・#269を本ADRの規約に合わせる。`docs/M2_PRE_GATE.md`と`docs/ARCHITECTURE.md`のrig profileの記述を更新する。
 - 範囲外: C++・.NETの実装（#274）、数値（DPI・閾値・レンズ係数）の決定、リグの決定（#43）、合成の段階とpilot（#272のADR草案）。
+
+## ADR-0035: 照合がReadyの間、選んだ1台のLive Viewを開けるようにする
+
+- 状態: Proposed。前半（binding host側）の実装は書き終えたが、ビルドも実機の確認もしていない（※未検証）。所有者の承認が要るかは※要確認。製品の方向は2026-10-13の所有者の決定で決まっており、要件はFR-LV-001（Dualで選んだ1台の継続Live View）がすでに許している。
+- 決定日: 2026-10-14（案）
+- 関連: Issue #291（前半）、#295（後半）、ADR-0025・0028・0031、`docs/HARDWARE_CAMERA_AGENT_DUAL_BOUND_LIVE_VIEW_V1.md`、`docs/OPERATOR_UI_SPEC.md`の「実機の二台構成のステージ」
+- 決定: 照合（binding）が`Ready`の間、割り当て済みのaliasについて、操作者が選んだ1台のLive Viewを開けるようにする。Live Viewを受け持つ部品はAgentの中に1つだけ置き、binding hostから呼ぶ。schemaは`a0.camera-agent.hardware-dual-bound-live-view.v1`で、命令は`start-bound-live-view`、`get-bound-live-view-frame`、`stop-bound-live-view`の3つ。「両方を更新」の命令は作らず、WPFが3命令を組み合わせる。封筒の`marker`は受ける側のhostのもの（binding pipeは`HardwareBinding`）で、各hostは自分のmarkerの要求だけを受ける。既存のbinding v1・Dual v2の命令と形は変えない。
+- 範囲: 前半（#291）はbinding host（`Ready`から`activate-capture`まで）と、WPFのステージ・撮影前に閉じる処理。撮影の後のLive View（capture host側の受付判定、`OnIdle`の接続、`activate-capture`後のWPDの振り分け、古い静止画の警告）は後半（#295）。前半だけが着地している間は、撮影の後の画面に「撮影後は機体照合のやり直しが必要です」を出す。
+- 守る不変条件:
+  1. SDKのsourceとLive Viewは、2つのhostを通して同時に1つまで。開いているかどうかの正はadapterの報告で、部品の記録から推測しない。
+  2. 開けるのは、bindingが`Ready`で、予約・dispatch中・未確定のtransactionが無いときだけ（後半）。
+  3. WPFはLive Viewが閉じたことを確かめてから撮影のtransaction IDを作る。確かめられなければ試行に数えずに止まる（ADR-0032の1-A）。何も開いたことがなければ、Agentへ何も送らない。
+  4. WPDを開くのは、sourceもLive Viewも開いていないときだけ（ADR-0028のまま）。`activate-capture`は、開いているLive Viewがあれば`BoundLiveViewOpen`で拒否し、bindingは`Ready`のまま残す。
+  5. SDKの例外と失効の事象はbindingを失効させる。開き直しも再試行もしない。復旧は照合のやり直しだけ。
+  6. previewのframeは保存・公開せず、撮影や合成の入力にも使わない。
+  7. 既存の命令と形、capabilitiesを変えない。Live Viewを使わない撮影では、Agentへ送る命令の列が今と同じ。
+  8. Live ViewでAgentの寿命を延ばさない。keep-aliveは作らない。クライアントが黙った場合に備え、Agent側が一定時間で自分で止めて閉じる（`OnIdle`）。
+- 時間の定義: 照合そのものに「確定から何分」という期限は無い。画面に出す時間は「撮影できる残り」で、Agentの起動時刻＋600秒−185秒（watchdog 180秒、応答3秒、後始末2秒）から導く。WPFが読むプロセスの起動時刻はnativeの時計より早いので、値は短めに出る（失敗側に倒れる）。Agentが応答に載せる`captureAdmissionRemainingMs`は、受け取ってからの経過を引いて、短い方を使う。起動時刻が分からないときは「残り時間を確認できません」と出し、切り替えと「両方を更新」を押せなくする。5分は、主ボタンを押したときにWPFが作る撮影開始snapshotの有効時間で、照合の期限ではない。
+- 選ばなかった案: (B) 撮影の後にbinding hostへ戻す。受入済みの一方向のactivate契約と終了処理（#225・#228）を作り直すことになり、往復の途中でどちらのpipeが生きているかをWPFが取り違える。(C) 1組ごとにAgentを作り直す。capture hostは自然終了（最長10分）するまで次を起動できず、照合のやり直しとキャップの付け外しが組の数だけ増える。
+- 影響: 受入済みの撮影経路に入る変更は、撮影前のstop（使っていなければ何も送らない）と`activate-capture`の確認だけ。1回の照合で撮れる組数はLive Viewを使うと3〜4組の見込み（※推定）。
+- 実機で確かめる点（実機日の別系列、シャッターを切らないものと切るものがある）: Ready後のLive（A・B各60秒連続のframe率とSDKエラー頻度）、切り替えと「両方を更新」の所要時間、Live View後の撮影（撮影前に閉じる処理から1組）、Live中のUSB抜去での失効、Live中にアプリを閉じたときのstop。どれも※未検証。回数と系列は実機日の前に所有者の承認を取る。
+- 範囲外: 二台とも動く映像（#292）、vendor operation、SDKの2重読み込み、HDMIの取り込み、previewを撮影や合成の入力にすること。

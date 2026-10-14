@@ -3502,6 +3502,7 @@ std::vector<std::string> NikonDualBindingSdkAdapter::EnumerateCandidates() {
     explicit_end_attempted_ = false;
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
+    live_view_stop_unconfirmed_ = false;
     pending_invalidation_ = DualIdentityInvalidationReason::None;
     try {
         candidate_tokens_ = transport_->BeginDualSession(std::chrono::seconds(10));
@@ -3536,6 +3537,10 @@ bool NikonDualBindingSdkAdapter::StopLiveView(std::size_t ordinal) {
         return true;
     } catch (...) {
         FailAndInvalidate();
+        // FailAndInvalidate ends the SDK session, which clears the ordinal. That
+        // closes the source but does not confirm that this stop took effect, so
+        // the Live View keeps reporting as open.
+        live_view_stop_unconfirmed_ = true;
         return false;
     }
 }
@@ -3576,6 +3581,7 @@ bool NikonDualBindingSdkAdapter::EndBindingSession(
         transport_->EndDualSession(timeout);
         candidate_tokens_.clear();
         open_live_view_ordinal_.reset();
+        live_view_stop_unconfirmed_ = false;
         return true;
     } catch (...) {
         pending_invalidation_ = DualIdentityInvalidationReason::SdkError;
@@ -3605,6 +3611,18 @@ DualIdentityInvalidationReason NikonDualBindingSdkAdapter::PollInvalidation() {
         pending_invalidation_ = DualIdentityInvalidationReason::None;
         return reason;
     }
+}
+
+DualBindingSdkOpenState NikonDualBindingSdkAdapter::InspectOpenState() const noexcept {
+    // A pure read of the SDK owner's own flags: no SDK call. The Live View
+    // handle is held from StartLiveView until CloseCandidateSession succeeds (or
+    // the session is ended), so it stays set after StopLiveView on purpose. A
+    // stop that failed also keeps it set, even though the failure ended the
+    // session: the stream was never confirmed stopped.
+    return {
+        transport_->InspectDualSessionExitState().source_open,
+        open_live_view_ordinal_.has_value() || live_view_stop_unconfirmed_,
+    };
 }
 
 void NikonDualBindingSdkAdapter::OpenBoundCapture(
@@ -3704,6 +3722,7 @@ void NikonDualBindingSdkAdapter::EndSession(std::chrono::seconds timeout) {
     transport_->EndDualSession(timeout);
     candidate_tokens_.clear();
     open_live_view_ordinal_.reset();
+    live_view_stop_unconfirmed_ = false;
 }
 
 void NikonDualBindingSdkAdapter::AbandonSessionNoSdkCalls() noexcept {
@@ -3721,7 +3740,7 @@ NikonDualBindingSdkAdapter::InspectRetainedModuleState() const noexcept {
         exit_state.process_claim_retained,
         exit_state.module_retained,
         exit_state.source_open ? std::size_t{1} : std::size_t{0},
-        open_live_view_ordinal_.has_value(),
+        open_live_view_ordinal_.has_value() || live_view_stop_unconfirmed_,
         candidate_tokens_.size(),
     };
 }

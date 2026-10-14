@@ -408,8 +408,14 @@ public partial class MainWindow : Window
         Close();
     }
 
-    private void OnDualBindingHostLifetimeMonitorTick(object? sender, EventArgs eventArgs) =>
+    private async void OnDualBindingHostLifetimeMonitorTick(object? sender, EventArgs eventArgs)
+    {
         _viewModel.DualBinding.ObserveBindingHostLifetime();
+        // Issue #291: the same half-second tick keeps the time left to capture and the "N seconds
+        // ago" texts current, and closes the stage when the time to capture runs out. TickAsync
+        // does not throw.
+        await _viewModel.DualLiveStage.TickAsync().ConfigureAwait(true);
+    }
 
     // メニューバー（issue #34）の code-behind ハンドラ。「保存先を指定」「技術情報」
     // 「バージョン」「終了」はVMへ新しいコマンド/状態を追加しない純粋なUI操作（既存の

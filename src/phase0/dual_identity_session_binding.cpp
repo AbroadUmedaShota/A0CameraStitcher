@@ -266,6 +266,24 @@ std::string DualIdentitySessionBinding::BoundSourceObjectForCapture(
     return assignment->source_object_token;
 }
 
+std::size_t DualIdentitySessionBinding::BoundCandidateOrdinalForLiveView(
+    std::string_view camera_alias) const {
+    if (state_ != DualIdentitySessionBindingState::Ready) {
+        throw DualIdentitySessionBindingError(
+            "BindingNotReady",
+            "A bound Live View may only be opened from a Ready binding.");
+    }
+
+    const auto* assignment = FindByAlias(camera_alias);
+    if (assignment == nullptr) {
+        throw DualIdentitySessionBindingError(
+            "UnknownCameraAlias",
+            "The alias has no bound candidate in this session.");
+    }
+
+    return assignment->ordinal;
+}
+
 std::vector<DualIdentitySessionBindingEvidence>
 DualIdentitySessionBinding::PublishableEvidence() const {
     std::vector<DualIdentitySessionBindingEvidence> evidence;

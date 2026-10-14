@@ -686,7 +686,7 @@ public static class DualBindingCameraAgentProtocolCodec
         }
     }
 
-    private static DualBindingRefusal ReadRefusal(string resultCode, JsonElement payload) => new()
+    internal static DualBindingRefusal ReadRefusal(string resultCode, JsonElement payload) => new()
     {
         ResultCode = resultCode,
         SessionId = payload.TryGetProperty("sessionId", out var sessionId) && sessionId.ValueKind == JsonValueKind.String
@@ -763,7 +763,7 @@ public static class DualBindingCameraAgentProtocolCodec
             ? parsed
             : throw Violation("InvalidPayload", $"The Dual binding field '{name}' is missing or not an integer.");
 
-    private static string ValidatedSessionId(string sessionId)
+    internal static string ValidatedSessionId(string sessionId)
     {
         // Same shape the agent emits and accepts back: 32 hex characters, never all zero.
         if (sessionId.Length != 32 ||
@@ -781,7 +781,7 @@ public static class DualBindingCameraAgentProtocolCodec
             ? candidateOrdinal
             : throw Violation("UnknownCandidateOrdinal", "A candidate ordinal is outside this session's candidates.");
 
-    private static void ValidateRequestId(string requestId)
+    internal static void ValidateRequestId(string requestId)
     {
         if (string.IsNullOrEmpty(requestId) || requestId.Length > 128 ||
             !requestId.All(character =>
@@ -791,7 +791,7 @@ public static class DualBindingCameraAgentProtocolCodec
         }
     }
 
-    private static HardwareProtocolViolationException Violation(
+    internal static HardwareProtocolViolationException Violation(
         string errorCode,
         string message,
         Exception? innerException = null) =>
