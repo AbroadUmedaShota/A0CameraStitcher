@@ -143,6 +143,47 @@ function(a0_assert_no_calibration_view_dependency target)
             "offline_stitcher" "synthetic_pair" "rig_profile_v2")
 endfunction()
 
+# The development-only fiducial detector (Issue #310) is the one place OpenCV
+# may be linked. It must stay independent of the generator and of the product
+# stitch, so that nothing about the ground truth reaches it.
+function(a0_assert_fiducial_detector_independent target)
+    a0_assert_no_link_dependency("${target}"
+        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher a0_m2_synthetic_pair a0_m2_rig_profile_v2
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher" "synthetic_pair" "rig_profile_v2")
+endfunction()
+
+# OpenCV may be linked, or its headers included, by the allowed targets only.
+# Every other target of the top-level directory (the product libraries and
+# executables, the calibration libraries and every test) is checked, through
+# LINK_LIBRARIES, INTERFACE_LINK_LIBRARIES, link options and its own include
+# directories. Call it through a0_defer_to_end_of_configure so that targets
+# added later are covered. Pass the targets with ALLOWED.
+function(a0_assert_opencv_only_in_allowed_targets)
+    cmake_parse_arguments(PARSE_ARGV 0 opencv "" "" "ALLOWED")
+    if(opencv_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unknown OpenCV isolation arguments: ${opencv_UNPARSED_ARGUMENTS}")
+    endif()
+    get_property(all_targets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS all_targets)
+        if("${target}" IN_LIST opencv_ALLOWED)
+            continue()
+        endif()
+        a0_assert_no_link_dependency("${target}"
+            FORBIDDEN_LIBRARIES a0_opencv_placeholder_no_such_library
+            FORBIDDEN_LIBRARY_PATTERNS "^(lib)?opencv($|[_:])" "^cv2$")
+        foreach(property INCLUDE_DIRECTORIES INTERFACE_INCLUDE_DIRECTORIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+            get_target_property(entries "${target}" ${property})
+            if("${entries}" STREQUAL "" OR "${entries}" MATCHES "NOTFOUND$")
+                continue()
+            endif()
+            string(TOLOWER "${entries}" lowered_entries)
+            if("${lowered_entries}" MATCHES "opencv")
+                message(FATAL_ERROR "${target} must not use OpenCV headers (found in ${property}: ${entries})")
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
 function(a0_defer_to_end_of_configure function_name)
     # DEFER evaluates ${...} in its arguments when the call runs, after this
     # function's scope is gone, so the arguments are expanded here first.

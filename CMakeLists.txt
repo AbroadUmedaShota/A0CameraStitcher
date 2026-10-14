@@ -465,6 +465,75 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_calibration_lens_formula COMMAND m2_calibration_lens_formula)
 endif()
+
+# Development-only fiducial detector (Issue #310, #277 stage 3b). It is the one
+# place that links OpenCV, and only when this option is ON (default OFF). With
+# the option OFF, OpenCV is not searched for and configure does not need it.
+# The product libraries and executables, the pure calibration libraries and
+# every other test must not reach OpenCV; the check below enforces it for every
+# target that is not listed here. OpenCV is not in the source tree: point
+# OpenCV_DIR at the directory that holds OpenCVConfig.cmake (see
+# docs/M2_FIDUCIAL_DETECTOR.md).
+option(A0_BUILD_FIDUCIAL_DETECTOR "Build the development-only fiducial detector that links OpenCV (#310)" OFF)
+set(A0_FIDUCIAL_DETECTOR_TARGETS a0_m2_fiducial_detector A0CameraStitcher.FiducialDetector m2_fiducial_detector_contracts)
+if(A0_BUILD_FIDUCIAL_DETECTOR)
+    find_package(OpenCV 4.14 CONFIG QUIET)
+    if(NOT OpenCV_FOUND)
+        message(FATAL_ERROR
+            "A0_BUILD_FIDUCIAL_DETECTOR is ON but OpenCV 4.14 or later (4.x) was not found. "
+            "Set OpenCV_DIR to the directory with OpenCVConfig.cmake, see docs/M2_FIDUCIAL_DETECTOR.md.")
+    endif()
+    message(STATUS "Fiducial detector: OpenCV ${OpenCV_VERSION} from ${OpenCV_DIR} (development tool only)")
+
+    add_library(a0_m2_fiducial_detector src/m2/fiducial_detector.cpp)
+    target_include_directories(a0_m2_fiducial_detector PUBLIC src/m2/include PRIVATE src/common/include)
+    target_link_libraries(a0_m2_fiducial_detector PUBLIC a0_m2_calibration_observation_session ${OpenCV_LIBS} PRIVATE bcrypt)
+    target_compile_definitions(a0_m2_fiducial_detector PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(a0_m2_fiducial_detector PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_fiducial_detector_independent a0_m2_fiducial_detector)
+
+    add_executable(A0CameraStitcher.FiducialDetector src/m2/fiducial_detector_main.cpp)
+    target_link_libraries(A0CameraStitcher.FiducialDetector PRIVATE a0_m2_fiducial_detector)
+    target_compile_definitions(A0CameraStitcher.FiducialDetector PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(A0CameraStitcher.FiducialDetector PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_fiducial_detector_independent A0CameraStitcher.FiducialDetector)
+    # The OpenCV runtime library is a DLL; place it next to the executable.
+    add_custom_command(TARGET A0CameraStitcher.FiducialDetector POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:A0CameraStitcher.FiducialDetector> $<TARGET_FILE_DIR:A0CameraStitcher.FiducialDetector>
+        COMMAND_EXPAND_LISTS)
+
+    if(BUILD_TESTING)
+        # Links the synthetic pair generator on purpose: the generator is the
+        # source of the images and of the ground truth, which only the test
+        # sees. The detector library and executable are checked above.
+        add_executable(m2_fiducial_detector_contracts tests/fiducial_detector_tests.cpp)
+        target_link_libraries(m2_fiducial_detector_contracts PRIVATE
+            a0_m2_fiducial_detector a0_m2_synthetic_pair a0_m2_calibration_lens)
+        target_compile_definitions(m2_fiducial_detector_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(m2_fiducial_detector_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+        endif()
+        add_custom_command(TARGET m2_fiducial_detector_contracts POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:m2_fiducial_detector_contracts> $<TARGET_FILE_DIR:m2_fiducial_detector_contracts>
+            COMMAND_EXPAND_LISTS)
+        add_dependencies(m2_fiducial_detector_contracts A0CameraStitcher.FiducialDetector)
+        add_test(NAME m2_fiducial_detector_contracts
+            COMMAND m2_fiducial_detector_contracts --exe $<TARGET_FILE:A0CameraStitcher.FiducialDetector>)
+        set_tests_properties(m2_fiducial_detector_contracts PROPERTIES TIMEOUT 1800)
+    endif()
+endif()
+a0_defer_to_end_of_configure(a0_assert_opencv_only_in_allowed_targets ALLOWED ${A0_FIDUCIAL_DETECTOR_TARGETS})
+if(BUILD_TESTING)
+    add_test(NAME m2_fiducial_detector_link_isolation
+        COMMAND "${CMAKE_COMMAND}" "-DISOLATION_MODULE=${CMAKE_SOURCE_DIR}/cmake/a0_link_isolation.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/fid-i"
+            -P "${CMAKE_SOURCE_DIR}/tests/fiducial_detector_isolation_tests.cmake")
+endif()
+
 if(BUILD_TESTING)
     add_executable(m2_stitch_evaluation_contracts tests/stitch_evaluation_tests.cpp)
     # The existing library validates the schema contract only. No measurement

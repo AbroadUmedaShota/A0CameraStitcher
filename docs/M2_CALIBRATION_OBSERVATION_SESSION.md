@@ -19,7 +19,7 @@ libraryが使うのはSTLと共有の`protocol_json.hpp`だけ。Win32・OpenCV�
 | --- | --- |
 | CLI、画像hashの照合、ファイルIO | IO段階 |
 | numerical policy、K/pose推定、#283への接続 | 段階2 |
-| レンズ推定、検出器、OpenCV | 段階3 |
+| レンズ推定、検出器、OpenCV | 段階3（検出器とOpenCVは開発用のexeだけ。[基準点の検出器](M2_FIDUCIAL_DETECTOR.md)） |
 | reference placement | 段階4 |
 | rigMeasurements、provenanceId、report/draft writer | 段階5 |
 | 真値との比較 | 段階6 |
