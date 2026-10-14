@@ -31,6 +31,7 @@ PCへ`.partial`、JPEG・size検証、SHA-256、atomic rename、再読込検証�
 
 ## ドキュメント
 
+- [社内PCへの導入・アンインストール・診断情報の回収](docs/INSTALL_GUIDE.md)
 - [正規機械操作の入口（開発候補・読取り専用CLI）](docs/MACHINE_OPERATION.md)
 - [Phase 0 二台カメラ・ショーケース](docs/PHASE0_SHOWCASE.md)
 - [現在の開発状況](docs/CURRENT_STATUS.md)
