@@ -2,6 +2,8 @@
 
 2026-10-15の所有者の決定に従い、既存のrig profile v2と、全校正画像の来歴を持つ詳細レポートを一組で生成する。新しいprofile形式には移行しない。計算は[固定文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)を呼び、保存用の画像合成本体を先に進めるための開発ツールとする。
 
+JPEGの検出から一度に実行する場合は[1コマンドの校正](M2_CALIBRATION_COMMAND.md)（#315）を使う。以下はwriter単体の契約。
+
 ## ビルドと実行
 
 ```powershell
