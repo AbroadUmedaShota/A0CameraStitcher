@@ -100,7 +100,7 @@ referenceのチャートは文書面と同じ平面上にあることを要件�
 3. レンズ歪みの推定とJPEGの検出を、2つに分ける。
    - 3a（実装済み、#290）: OpenCVを使わず、歪みを含む解析的観測からK・Brown–Conradyの5係数・training viewのposeをLevenberg–Marquardtで推定し、validation viewで未使用点を測る。歪みなし→歪みあり→ノイズありの順で、未使用点への再投影を独立の投影で検算。契約は[レンズ歪み](M2_CALIBRATION_LENS.md)。結果は「解析的観測」で、校正の成功ではない。#277は閉じない。
    - 3b（実装済み、#310）: 開発用のexe `A0CameraStitcher.FiducialDetector`（CMake option `A0_BUILD_FIDUCIAL_DETECTOR`、既定OFF）が、OpenCV 4.14.0（公式のビルド済みバイナリ、Apache 2.0、`.tools/` に置き、SHA-256をdocsに記録）で合成JPEGのリング基準点を検出し、観測session（schema v1）を書き出す。OpenCVは開発用のexeとその試験だけにリンクし、製品の全target・校正のpure libraryに入らないことをconfigureの検査で守る。製品への同梱の判断（HG-0005）は別。点IDの対応づけは、operatorがanchor（節点・おおよその画素位置・探索半径、3つ以上）を記録して与え、そこから格子を広げる。anchorは検出器の公開入力でreportに残り、生成器の真値は検出器に渡さない（試験だけが真値を見る）。歪みなし→歪みあり→ノイズ・JPEG圧縮の順の検出誤差（rms約0.04〜0.06 px）と、16枚のJPEGから作ったsessionを3aのLMに通した写像の差（rms約0.01 px）は[基準点の検出器](M2_FIDUCIAL_DETECTOR.md)に記録した。合成画像だけの結果で、校正の成功ではない。実写の検出と3aのcutoff・ノイズの扱いの再検討は段階6。#277は閉じない。
-4. reference pair/配置から固定文書写像を求める。異なる学習poseを固定写像に選んだ誤り、reference欠損、片方の失敗を負の対照にし、いずれもprofile非発行を確認。
+4. reference pair/配置から固定文書写像を求める（#312、[固定文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)）。異なる学習poseを固定写像に選んだ誤り、reference欠損、片方の失敗を負の対照にし、いずれもprofile非発行を確認。
 5. 上記のprovenance/残差集計の判断を正本へ反映した後、report/draft writerを実装。既存C++ strict reader、schema、.NET fingerprint、#273との接続と非上書きIOを検証。approved欄の混入は拒否。
 6. #277の受入に対応する合成試験を実施し、真値写像との差・失敗理由・draft provenanceを記録。これで実写や#45/#49まで完了したとしない。
 

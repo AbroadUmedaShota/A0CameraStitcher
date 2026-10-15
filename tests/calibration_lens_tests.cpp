@@ -1,4 +1,5 @@
 #include "a0/m2/calibration_lens.hpp"
+#include "a0/m2/reference_document_mapping.hpp"
 
 #include "calibration_lens_model.hpp"
 
@@ -1747,6 +1748,132 @@ void TestSingularNormalEquations() {
     Check(a.intrinsics && b.intrinsics && Bitwise(a.intrinsics->fx, b.intrinsics->fx) && Bitwise(a.intrinsics->cy, b.intrinsics->cy), "SN: both runs report the start (the problem is already at zero cost)");
 }
 
+// Stage 4: exercise the public session -> learned K/distortion -> explicitly
+// selected reference pair -> document mapping seam. The expected projection
+// uses the fixture's independent camera equations, never the fitted poses.
+Projected ProjectFixedMapping(const FixedDocumentCameraMapping& mapping, double x, double y) {
+    const auto& h = mapping.document_to_image;
+    const double w = h[6] * x + h[7] * y + h[8];
+    const double xn = ((h[0] * x + h[1] * y + h[2]) / w - mapping.intrinsics.cx) / mapping.intrinsics.fx;
+    const double yn = ((h[3] * x + h[4] * y + h[5]) / w - mapping.intrinsics.cy) / mapping.intrinsics.fy;
+    const double r2 = xn * xn + yn * yn;
+    const auto& d = mapping.distortion;
+    const double radial = 1 + d.k1 * r2 + d.k2 * r2 * r2 + d.k3 * r2 * r2 * r2;
+    return {mapping.intrinsics.fx * (xn * radial + 2 * d.p1 * xn * yn + d.p2 * (r2 + 2 * xn * xn)) + mapping.intrinsics.cx,
+        mapping.intrinsics.fy * (yn * radial + d.p1 * (r2 + 2 * yn * yn) + 2 * d.p2 * xn * yn) + mapping.intrinsics.cy, w};
+}
+
+void TestReferenceDocumentMapping() {
+    auto specs = Layout();
+    for (auto view : Layout("CAM-B")) { view.id = "B" + view.id; specs.push_back(std::move(view)); }
+    const Pose reference_a = MakePose(0.08, -0.12, 0.15, -12, 17, 580);
+    const Pose reference_b = MakePose(-0.10, 0.06, -0.08, 23, -13, 600);
+    for (auto& view : specs) {
+        if (view.id == "R1") view.pose = reference_a;
+        if (view.id == "BR1") view.pose = reference_b;
+    }
+    const auto session = MakeSession(Chart(), specs);
+    const auto learned = EstimateLensIntrinsics(session, Policy());
+    const ReferenceMappingPolicy policy{Policy(), 40, 1e-9};
+    ReferencePairRequest request{{"R1", "BR1"}, DocumentPlanePlacement{0, 0, 0, true}};
+    const std::array<DocumentPlanePlacement, 2> placements{{{0, 0, 0, true}, {0.23, 21, -14, true}}};
+    for (const auto& placement : placements) {
+        request.placement = placement;
+        const auto result = EstimateReferenceDocumentMapping(session, request, policy);
+        Check(result.mapping.has_value(), "RM: both reference mappings are estimated");
+        Check(result.lens && Fingerprint(*result.lens) == Fingerprint(learned), "RM: reference fitting does not change learned K, distortion or training/validation results");
+        if (!result.mapping) continue;
+        double max_error = 0.0;
+        double wrong_training_pose_error = 0.0;
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto& mapping = (*result.mapping)[i];
+            Check(result.cameras[i].outcome == ReferenceMappingOutcome::MappingEstimated
+                && result.cameras[i].pose && result.cameras[i].residual && result.cameras[i].solver,
+                "RM: each camera has a pose, raw pixel residual and solver evidence");
+            Check(mapping.document_to_image[8] == 1.0, "RM: normalized homography element 8 is exactly one");
+            Check(mapping.reference_view_id == request.view_ids[i]
+                && mapping.reference_image_sha256.size() == 64, "RM: mapping identifies its reference image");
+            Check(result.cameras[i].residual && result.cameras[i].residual->point_count == Chart().size(),
+                "RM: residual counts the reference's used points");
+            for (const double x : {-75.0, 0.0, 75.0}) for (const double y : {-50.0, 0.0, 50.0}) {
+                const double chart_x = std::cos(placement.angle_radians) * x - std::sin(placement.angle_radians) * y + placement.translation_x_mm;
+                const double chart_y = std::sin(placement.angle_radians) * x + std::cos(placement.angle_radians) * y + placement.translation_y_mm;
+                const auto expected = ProjectTruth(kTrue, kTrueDist, i == 0 ? reference_a : reference_b, chart_x, chart_y);
+                const auto actual = ProjectFixedMapping(mapping, x, y);
+                max_error = std::max(max_error, std::hypot(actual.u - expected.u, actual.v - expected.v));
+                const auto wrong = ProjectTruth(kTrue, kTrueDist, kPoseT1, chart_x, chart_y);
+                wrong_training_pose_error = std::max(wrong_training_pose_error, std::hypot(wrong.u - expected.u, wrong.v - expected.v));
+            }
+        }
+        std::cout << "reference_mapping max_pixel_error=" << max_error << '\n';
+        Check(max_error < 0.002, "RM: independently projected document pixels agree, including rotation and translation placement");
+        Check(wrong_training_pose_error > 5.0, "RM: the oracle detects copying a training pose instead of the reference pose");
+    }
+    request.placement = placements[0];
+    {
+        auto changed = specs;
+        for (auto& view : changed) if (view.id == "R1") view.pose.t[0] += 30;
+        const auto changed_session = MakeSession(Chart(), changed);
+        const auto moved = EstimateReferenceDocumentMapping(changed_session, request, policy);
+        const auto original = EstimateReferenceDocumentMapping(session, request, policy);
+        Check(moved.mapping && original.mapping
+            && (*moved.mapping)[0].document_to_image != (*original.mapping)[0].document_to_image,
+            "RM: changing the reference placement changes its fixed mapping");
+        Check(moved.lens && Fingerprint(*moved.lens) == Fingerprint(learned),
+            "RM: changing reference pixels cannot retrain K or distortion");
+    }
+    for (int invalid = 0; invalid < 8; ++invalid) {
+        auto bad = request;
+        ReferenceMappingOutcome expected;
+        std::size_t camera = 0;
+        switch (invalid) {
+        case 0: bad.view_ids[0] = "absent"; expected = ReferenceMappingOutcome::ReferenceMissing; break;
+        case 1: bad.view_ids[0] = "T1"; expected = ReferenceMappingOutcome::ReferenceRoleMismatch; break;
+        case 2: bad.view_ids[0] = "V1"; expected = ReferenceMappingOutcome::ReferenceRoleMismatch; break;
+        case 3: std::swap(bad.view_ids[0], bad.view_ids[1]); expected = ReferenceMappingOutcome::ReferenceCameraMismatch; break;
+        case 4: bad.placement.reset(); expected = ReferenceMappingOutcome::PlacementMissing; break;
+        case 5: bad.placement->coplanar_confirmed = false; expected = ReferenceMappingOutcome::PlacementInvalid; break;
+        case 6: bad.placement->angle_radians = std::numeric_limits<double>::quiet_NaN(); expected = ReferenceMappingOutcome::PlacementInvalid; break;
+        default: bad.view_ids[1].clear(); expected = ReferenceMappingOutcome::ReferenceMissing; camera = 1; break;
+        }
+        const auto result = EstimateReferenceDocumentMapping(session, bad, policy);
+        Check(!result.mapping && !result.lens && result.cameras[camera].outcome == expected,
+            "RM: invalid reference or placement blocks before estimation " + std::to_string(invalid));
+    }
+    {
+        auto short_policy = policy;
+        short_policy.max_undistortion_iterations = 1;
+        short_policy.undistortion_tolerance_pixels = 1e-15;
+        const auto result = EstimateReferenceDocumentMapping(session, request, short_policy);
+        Check(!result.mapping && result.cameras[0].outcome == ReferenceMappingOutcome::UndistortionUnavailable,
+            "RM: inverse distortion exhaustion does not silently drop reference points");
+    }
+    {
+        std::vector<ViewSpec> partial = Layout();
+        for (auto view : Frontal("BF", "CAM-B")) partial.push_back(std::move(view));
+        partial.push_back(FullView("BR1", reference_b, "CAM-B", "reference"));
+        const auto result = EstimateReferenceDocumentMapping(MakeSession(Chart(), partial), request, policy);
+        Check(!result.mapping && result.cameras[0].outcome == ReferenceMappingOutcome::MappingEstimated
+            && result.cameras[0].pose && result.cameras[1].outcome == ReferenceMappingOutcome::LensUnavailable,
+            "RM: one camera failure keeps diagnostics but never emits a pair mapping");
+    }
+    {
+        auto bad = request;
+        bad.placement->translation_x_mm = 1e308;
+        const auto result = EstimateReferenceDocumentMapping(session, bad, policy);
+        Check(!result.mapping && result.cameras[0].outcome == ReferenceMappingOutcome::NumericalFailure,
+            "RM: non-finite composed mapping is not clamped into success");
+    }
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        auto bad = policy;
+        if (invalid == 0) bad.max_undistortion_iterations = 0;
+        if (invalid == 1) bad.undistortion_tolerance_pixels = std::numeric_limits<double>::infinity();
+        if (invalid == 2) bad.lens.relative_singular_cutoff = 0;
+        Rejects([&] { (void)EstimateReferenceDocumentMapping(session, request, bad); }, "RM: invalid numerical policy is rejected");
+    }
+    Check(ReferenceMappingOutcomeCode(static_cast<ReferenceMappingOutcome>(999)).empty(), "RM: unknown outcome has no fabricated code");
+}
+
 } // namespace
 
 int main() {
@@ -1774,6 +1901,7 @@ int main() {
         TestDeterminantOnlyInvalid();
         TestMeasurementPointsBehindTheCamera();
         TestSingularNormalEquations();
+        TestReferenceDocumentMapping();
 #ifdef NDEBUG
         TestLargeProblem();
 #endif
