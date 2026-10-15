@@ -11,7 +11,7 @@
 - `document_mm`: 出力文書における対応点
 - `camera_document_mm`: 補正対象カメラの固定写像・レンズモデルの逆を通した、公称文書座標における同じ点
 
-raw camera pixelをこの欄へそのまま渡さない。画像上の対応点検出と、公称文書mmへの変換は後続の入力側の責務。座標だけから論理的な点IDの正しさは証明できず、対応の来歴も呼出側で保持する。
+raw camera pixelをこの欄へそのまま渡さない。[#317のraw画素→文書座標の接続](M2_RAW_DOCUMENT_CORRECTION.md)が、対応済みの両画像の画素からこの入力を作る。画像上の対応点検出は後続の入力側の責務。座標だけから論理的な点IDの正しさは証明できず、対応の来歴も呼出側で保持する。
 
 推定するのは`q = T*p`。
 
@@ -75,4 +75,4 @@ ctest --test-dir build/reference -C Release -R '^m2_document_correction_contract
 
 2026-10-15: MSVC x64、SDKなし。新規304チェックはRelease/Debugとも成功。231点の独立oracleとの最大差は約1.4e-12 px（両構成同値）。既存のrender・document render・MTF・v2 readerを含む関連CTestはDebug 5/5（7.94秒）、Release 6/6（106.64秒、生成器の依存分離20ケースを含む）成功。実写や全体suiteを再実行した記録ではない。
 
-実画像の対応点検出、raw→公称文書の逆変換、外れ値選別、承認profile/setup/撮影jobへの接続、露出/色、実写での受入は#46の後続として残る。
+raw→公称文書の逆変換と両側の接続は#317で追加。実画像の対応点検出、外れ値選別、承認profile/setup/撮影jobへの接続、露出/色、実写での受入は#46の後続として残る。
