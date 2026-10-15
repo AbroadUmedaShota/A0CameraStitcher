@@ -1,6 +1,6 @@
 # draft校正の入出力設計案（#285、#277前段）
 
-この文書は次の実装を分けるための設計案。観測session（reader、validator、schema v1）は実装済み（#286、[観測session](M2_CALIBRATION_OBSERVATION_SESSION.md)）。歪みなしの観測からの内部パラメータとposeの閉形式推定も実装済み（#289、[内部パラメータ](M2_CALIBRATION_INTRINSICS.md)）。歪みを含む解析的観測からのレンズ歪みと内部パラメータの推定も実装済み（#290、[レンズ歪み](M2_CALIBRATION_LENS.md)）。合成JPEGからの開発用の検出器も実装済み（#310、[基準点の検出器](M2_FIDUCIAL_DETECTOR.md)。OpenCVは開発用のexeだけ）。reference pair、report/schema、draft writerはまだ実装していない。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。新しい欄名や失敗コードはこの文書だけでは製品契約にならない。
+この文書はdraft校正の実装を分けた入出力設計。観測session（#286）、内部パラメータとpose（#289）、レンズ歪み（#290）、合成JPEGの検出（#310・#311）に続き、2026-10-15に[固定文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)（#312）と[既存形式のdraft＋詳細レポート](M2_DRAFT_CALIBRATION_ARTIFACTS.md)（#313）を実装した。既存の拘束は[profile v2設計](design/rig-profile-v2.md)、[v2 schema](schemas/rig-profile.v2.schema.json)、[ADR-0034](DECISIONS.md#adr-0034-rig-profile-200を文書平面基準にしカメラごとのレンズ係数とmmdpiの出力ラスタを持たせる)（Accepted）に従う。実機や品質の承認をこの文書だけで追加しない。
 
 ## 1. 既存契約と今回の境界
 
@@ -8,7 +8,7 @@
 - 校正の出力は両カメラ分の値がそろったdraftのみ。文書面・projection・calibrationをすべて入れ、所有者の決定であるoutputRaster、correctionEnvelope、qualityContract、approvalはすべてnull。physicalIdentityもnull。
 - 同一カメラの内部パラメータを傾いた複数視点から求める。一枚の正対画像や同じ傾きの繰返しを「枚数が足りた」で成功にしない。[線形制約検査](M2_CALIBRATION_VIEW_GEOMETRY.md)は必要な前段であり、校正成功の証明ではない。
 - approved発行・期限・再校正triggerは#45、実写リグ決定は#43。rigMeasurementsブロックと必須欄はdraftでも用意し、未実測の各測定値だけをnullにする。
-- 今回は入出力と試験を設計する。既存schema/fingerprint、製品経路、実機条件を変更せず、OpenCVも導入しない。
+- 既存schema/fingerprint、製品経路、実機条件は変更しない。OpenCVは所有者が#306で認めた開発用の検出器とその試験だけに限る。
 
 ## 2. 入力を三つに分ける
 
@@ -104,6 +104,6 @@ profileと詳細レポートは一組として保管・移管する。レポー�
    - 3b（実装済み、#310）: 開発用のexe `A0CameraStitcher.FiducialDetector`（CMake option `A0_BUILD_FIDUCIAL_DETECTOR`、既定OFF）が、OpenCV 4.14.0（公式のビルド済みバイナリ、Apache 2.0、`.tools/` に置き、SHA-256をdocsに記録）で合成JPEGのリング基準点を検出し、観測session（schema v1）を書き出す。OpenCVは開発用のexeとその試験だけにリンクし、製品の全target・校正のpure libraryに入らないことをconfigureの検査で守る。製品への同梱の判断（HG-0005）は別。点IDの対応づけは、operatorがanchor（節点・おおよその画素位置・探索半径、3つ以上）を記録して与え、そこから格子を広げる。anchorは検出器の公開入力でreportに残り、生成器の真値は検出器に渡さない（試験だけが真値を見る）。歪みなし→歪みあり→ノイズ・JPEG圧縮の順の検出誤差（rms約0.04〜0.06 px）と、16枚のJPEGから作ったsessionを3aのLMに通した写像の差（rms約0.01 px）は[基準点の検出器](M2_FIDUCIAL_DETECTOR.md)に記録した。合成画像だけの結果で、校正の成功ではない。実写の検出と3aのcutoff・ノイズの扱いの再検討は段階6。#277は閉じない。
 4. reference pair/配置から固定文書写像を求める（実装済み、#312、[固定文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)）。異なる学習poseを固定写像に選んだ誤り、reference欠損、片方の失敗を負の対照にし、いずれもprofile非発行を確認。
 5. provenance/残差集計の所有者決定を反映し、report/draft writerを実装（#313、[書き出しツール](M2_DRAFT_CALIBRATION_ARTIFACTS.md)）。既存C++ strict reader、schema、.NET fingerprint、#273の評価reader/gateから実レンダラーへの接続と非上書きIOを検証。approved欄の混入、独立検証の欠損/失敗を拒否。
-6. #277の受入に対応する合成試験を実施し、真値写像との差・失敗理由・draft provenanceを記録。これで実写や#45/#49まで完了したとしない。
+6. #277の受入に対応する合成試験を実施（#314、[全工程の合成試験](M2_FULL_CALIBRATION_PIPELINE.md)）。7360×4912のJPEG18枚からdraftとA0評価合成まで通し、真値との差・draft provenanceを記録。実写や#45/#49まで完了したとはしない。
 
 設計案を作成した時点の確認は既存schema/API/文書との照合、相対リンク、差分、独立レビューのみだった。各段階の追加実装と新しい検証結果は、上記の個別文書と各Issueに区別して記録する。

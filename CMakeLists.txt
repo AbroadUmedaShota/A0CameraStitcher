@@ -544,6 +544,12 @@ if(A0_BUILD_FIDUCIAL_DETECTOR)
         add_executable(m2_fiducial_detector_contracts tests/fiducial_detector_tests.cpp)
         target_link_libraries(m2_fiducial_detector_contracts PRIVATE
             a0_m2_fiducial_detector a0_m2_synthetic_pair a0_m2_calibration_lens)
+        if(A0_BUILD_DRAFT_CALIBRATOR)
+            # Explicit heavy test mode only; no product/detector dependency.
+            target_link_libraries(m2_fiducial_detector_contracts PRIVATE
+                a0_m2_draft_calibration a0_m2_rig_profile_v2)
+            target_compile_definitions(m2_fiducial_detector_contracts PRIVATE A0_TEST_DRAFT_CALIBRATOR=1)
+        endif()
         target_compile_definitions(m2_fiducial_detector_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
         if(MSVC)
             target_compile_options(m2_fiducial_detector_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)

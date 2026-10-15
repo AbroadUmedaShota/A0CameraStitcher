@@ -72,4 +72,6 @@ schemaVersionは`a0.draft-calibration-report.v1`。以下を記録する。
 dotnet run --project tests/m3/RigProfileV2Tests -c Release -- --generated-artifacts <合成テスト成果物フォルダ>
 ```
 
-実JPEGからのD810実寸校正・実写・合成品質の受入はこの結果から主張しない。後続は#277の段階6、#45、#42/#43/#49。
+この試験単体は解析的観測の結果。D810寸法の**合成JPEG**を実際に読み、draftと評価合成まで通す試験は[段階6](M2_FULL_CALIBRATION_PIPELINE.md)（#314）に分ける。実写・合成品質の受入、approvedの発行は#45、#42/#43/#49に残る。
+
+2026-10-15の結果: writerの44チェックはRelease/Debugとも成功。既存.NET共有vectorは163チェック、生成artifactの互換性は7チェック成功。既存profile/sessionのJSON schemaと独立SHA-256も一致した。

@@ -39,7 +39,9 @@ DLTとpose分解の共通入口は内部の`calibration_planar_pose.hpp`。既�
 
 ```powershell
 cmake --build build/reference --config Release --target m2_calibration_lens_contracts --parallel 1
-ctest --test-dir build/reference -C Release -R '^m2_calibration_' --output-on-failure --parallel 1
+ctest --test-dir build/reference -C Release -R '^m2_calibration_lens_(contracts|link_isolation)$' --output-on-failure --parallel 1
 ```
 
-provenanceとwriterは段階5（[入出力設計](M2_DRAFT_CALIBRATION_IO_PLAN.md)第4節）、approvedの発行は#45、実写の受入と品質の承認は#42/#43/#49に残る。
+2026-10-15: lens suite 7080チェック、Releaseのintrinsics/lensと依存分離4/4、Debugの数値計算2/2が成功。無ノイズの解析的観測における独立写像照合の最大誤差は約1.1e-10 px。合成JPEGの数値とは区別する。
+
+provenanceとwriterは[段階5](M2_DRAFT_CALIBRATION_ARTIFACTS.md)（#313）で実装。approvedの発行は#45、実写の受入と品質の承認は#42/#43/#49に残る。
