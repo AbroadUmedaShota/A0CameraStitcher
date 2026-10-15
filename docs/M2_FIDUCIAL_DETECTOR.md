@@ -90,15 +90,26 @@ A0CameraStitcher.FiducialDetector.exe --job <job.json> --output <出力フォル
 
 1. operatorがviewごとに3つ以上のリングについて、節点（column, row）と、おおよその画素位置（`xPx`、`yPx`）、探索半径（`radiusPx`）を与える
 2. 探索半径の中に、検出したリングがちょうど1つあれば、そのリングをその節点に結びつける。0個は `anchor-not-found`、2個以上は `anchor-ambiguous`、同じ節点や同じリングへの重複は `anchor-duplicate`、チャートの外の節点は `anchor-outside-chart`、格子の2方向に張らない（共線）は `anchor-collinear`、3つ未満は `anchor-count`
-3. anchorの組から、格子の向き（鏡像かどうか）を決める
+3. anchorの非共線な三つ組をすべて調べ、チャートを表から見た向きと逆なら `anchor-mirrored` で拒否する。最初の三点だけで決めない
 4. 解決済みの節点に隣り合う節点を、近くの解決済みの節点（格子の距離3以内、最大12個）の最小二乗のアフィン写像で予測する。予測位置から格子間隔の30%（`acceptFraction`）以内に、未使用のリングがちょうど1つあれば結びつける。2つ以上は `ambiguous`、0個は `missing`。向きが逆になる写像と、画像の縁から（白リング半径の2.2倍）以内の予測は調べない
 5. 新しく結びつく節点が無くなるまで繰り返す。どの節点にも結びつかなかったリングは、reportに数だけ残す
+6. 四隅が検出されたセルの模様とグレーパッチを、チャートの設計と照合する（下記）。照合に失敗したviewの観測は出さない
 
 生成器の真値は経路に入らない。anchorは**operatorの入力**で、`detection-report.json` に節点ID・指定した位置・探索半径・結びついたリングの位置をviewごとに記録する。
 
 試験では、operatorの役を、真値の投影位置を12 pxの倍数に丸めた位置と、半径30 pxで代行する（`OperatorAnchors`）。真値を渡すのは、この3つの節点のanchorだけで、丸めと半径は報告に残る入力である。
 
-**限界**: anchorの節点の取り違えは、検出器には分からない。1節点ずらしたanchor、2つのanchorのIDを入れ替えた（鏡像の）anchorは、整合した別の格子として受理される（試験が真値で、IDが全て違うことを確かめる）。チャートのセル模様（`(3 × column + 5 × row) mod 8` で決まる）は、取り違えの一部を検出できるが、この段階では使っていない。operatorがanchorを記録し、人が見直す前提。
+### 目印の取り違えの照合（#311）
+
+格子が整合していても、節点の名前をずらすと誤ったposeが小さな残差で推定される。残差の大小をIDの証明にせず、印刷されたセルの模様を使う。
+
+- 四隅からセル内だけの射影写像を作り、中央・模様の外側・白紙の帯を標本化する。この局所写像は開発用の照合だけに使い、製品の合成や固定リグ写像の推定には使わない
+- `(3 × column + 5 × row) mod 8` の模様（白紙、暗/明の斜辺、色、グレー、縦線、横線）を、白紙に対する明るさ・変動幅・セルの軸方向の明暗の交差数で照合する
+- 斜め `(1,1)` のずれは模様の種類が同じになるため、グレーの6段階 `(column + row) mod 6` も照合する
+- `identityMaxMismatchFraction` と `identityMinMismatches` を超える不一致は `identity-mismatch`。セルが小さい（辺80 px未満）などの理由で測れず、`identityMinCells`（既定8）・`identityMinGrayCells`（既定2）を満たさない場合は `identity-unverifiable`。どちらもviewの観測を破棄し、job全体のsessionを出さない
+- 各viewの `identity` に、照合結果・三つ組の数・セルとグレーの測定数/不一致数・測れないセル数・最初の最大16件の不一致と測定値を残す。設定値もreportに残す
+
+**限界**: このチャートの模様には周期があり、すべての取り違えを一意に検出するものではない（例: `(3,3)` のずれは種類とグレーが繰り返す）。operatorの入力は人も見直す。明るさの比の照合は線形の画像応答を仮定し、実写の照明・印刷・JPEGの応答は未検証。これらの数値は開発用の合成チャートに対する設定で、製品の光学・品質合格線ではない。
 
 ## 検出
 
@@ -111,14 +122,16 @@ A0CameraStitcher.FiducialDetector.exe --job <job.json> --output <出力フォル
 
 ## 出力
 
-- `session.json`: schema v1。`chartPoints` は格子の全節点。views は入力の順。`observations` はそのviewで調べた節点（`detected`、`missing`、`ambiguous`）で、調べていない節点は載せない。出す前に `CalibrationObservationSession::Parse` で自分の出力を検証する（拒否されたらsessionを出さず、reportに理由を残す）。`provenance.tool` は `a0-fiducial-detector` / `1.0.0`
-- `detection-report.json`: schema `a0.fiducial-detector-report/1`。ID対応づけの方法、検証の振り分け規則、`params`、viewごとの画像名・SHA-256・寸法・状態（`ok` か失敗コード）・暗の閾値・候補数・検出/missing/ambiguousの数・未使用のリングの数・anchorの記録。絶対パス、PC名、ユーザー名は書かない
+- `session.json`: schema v1。`chartPoints` は格子の全節点。views は入力の順。`observations` はそのviewで調べた節点（`detected`、`missing`、`ambiguous`）で、調べていない節点は載せない。出す前に `CalibrationObservationSession::Parse` で自分の出力を検証する（拒否されたらsessionを出さず、reportに理由を残す）。`provenance.tool` は `a0-fiducial-detector` / `1.1.0`（#311）
+- `detection-report.json`: schema `a0.fiducial-detector-report/1`。ID対応づけの方法、検証の振り分け規則、`params`、viewごとの画像名・SHA-256・寸法・状態（`ok` か失敗コード）・暗の閾値・候補数・検出/missing/ambiguousの数・未使用のリングの数・anchorとidentityの記録。絶対パス、PC名、ユーザー名は書かない
+
+exeは処理の前に両出力名の存在を確認する。どちらかが既存ならexit 2で止まり、既存内容を変更せず、もう一方も新規作成しない。この事前検査は複数プロセスによる同時書込みやディスク障害時の二ファイルのatomic commitを保証するものではない。出力先は一つのjobだけで使う。
 
 ## 試験と結果
 
 `m2_fiducial_detector_contracts`（Release）。合成画像は#269の生成器（1800×1200、supersample 2、リングの外半径は約15〜25 px（代表の1視点の輪郭からの見積もりで、全viewの範囲は集計していない））。傾いた視点の作り方は`H = K [r1 r2 t]`（[生成器](SYNTHETIC_PAIR_GENERATOR.md)の限界の節）。許容値は試験の入力で、製品の閾値ではない（`kUndistorted`、`kDistorted`、`kNoisyJpeg`、`kHarshJpeg`、`kMapping`）。
 
-実行日 2026-10-14、Windows、Release、`ctest -C Release -R m2_fiducial`。結果は82チェック、失敗0。
+以下の数値は#310の記録（実行日 2026-10-14、Windows、Release、`ctest -C Release -R m2_fiducial`、82チェック・失敗0）。#311の変更後の結果とは区別する。
 
 ### 検出した中心と真値の差（1つの視点、25° / −10° のあおり）
 
@@ -162,7 +175,7 @@ A0CameraStitcher.FiducialDetector.exe --job <job.json> --output <出力フォル
 
 | # | 内容 |
 | --- | --- |
-| 1 | operatorのanchorが正しい。取り違えは検出されない（上記）。実写ではanchorの記録を人が見直す |
+| 1 | 模様とグレーで取り違えを照合するが、周期的に同じ模様になる大きなずれは区別できない（上記）。実写ではanchorの記録も人が見直す |
 | 2 | チャートは生成器のチャートの比率（白リングと中央の点を持つリング）と点IDの書式。別のチャートには `DetectorParams` と `ChartDefinition` の見直しが要る |
 | 3 | 合成画像だけの結果。実レンズのぼけ・照明のむら・紙の浮き・焦点ずれは入っていない。実写の検出精度はこの試験から言えない（段階6） |
 | 4 | リングの外半径が約15〜25 pxの画像で測った。より小さいリングでは暗の閾値の側の効きが大きくなる（面積比の下限7%に近づく）。実寸の画像（外半径約50 px）は未測定 |

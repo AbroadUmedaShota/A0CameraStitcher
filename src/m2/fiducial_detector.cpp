@@ -294,6 +294,47 @@ std::string PointId(std::uint32_t column, std::uint32_t row) {
     return text;
 }
 
+// ---------------------------------------------------------------------------
+// The chart's cell pattern rule (see CellPattern in the header). These are
+// design values of the in-house chart, copied here so that the detector does
+// not link the generator; the contract test compares them with the generator.
+
+namespace {
+constexpr double kChartPaperLevel = 0.92;
+constexpr double kChartEdgeDarkLevel = 0.08;
+constexpr double kChartEdgeLightLevel = 0.96;
+constexpr std::array<double, 6> kChartGrayLevels{0.05, 0.2, 0.4, 0.6, 0.8, 0.95};
+} // namespace
+
+CellPattern ExpectedCellPattern(const std::uint32_t column, const std::uint32_t row) noexcept {
+    switch ((3U * column + 5U * row) % 8U) {
+    case 1: return CellPattern::SlantedEdgeDarkOnLight;
+    case 2: return CellPattern::ColorPatch;
+    case 3: return CellPattern::FineLinesVertical;
+    case 4: return CellPattern::FineLinesHorizontal;
+    case 5: return CellPattern::GrayPatch;
+    case 7: return CellPattern::SlantedEdgeLightOnDark;
+    default: return CellPattern::Blank;
+    }
+}
+
+const char* CellPatternCode(const CellPattern pattern) noexcept {
+    switch (pattern) {
+    case CellPattern::Blank: return "blank";
+    case CellPattern::SlantedEdgeDarkOnLight: return "slanted-edge-dark-on-light";
+    case CellPattern::SlantedEdgeLightOnDark: return "slanted-edge-light-on-dark";
+    case CellPattern::ColorPatch: return "color-patch";
+    case CellPattern::GrayPatch: return "gray-patch";
+    case CellPattern::FineLinesVertical: return "fine-lines-vertical";
+    case CellPattern::FineLinesHorizontal: return "fine-lines-horizontal";
+    }
+    return "";
+}
+
+double ExpectedGrayPatchLevel(const std::uint32_t column, const std::uint32_t row) noexcept {
+    return kChartGrayLevels[(column + row) % kChartGrayLevels.size()];
+}
+
 namespace {
 
 struct Slot {
@@ -336,8 +377,6 @@ public:
         used_[static_cast<std::size_t>(candidate)] = true;
     }
 
-    void SetOrientation(double sign) { orientation_ = sign; }
-
     // Local affine map of the lattice index to pixels, from the nearest detected
     // nodes. Lens distortion and perspective are handled by keeping it local.
     std::optional<Prediction> Predict(std::uint32_t column, std::uint32_t row) const {
@@ -373,7 +412,7 @@ public:
         std::array<double, 3> ay{};
         if (!Solve3(nx, ax) || !Solve3(ny, ay)) return std::nullopt;
         const double determinant = ax[1] * ay[2] - ax[2] * ay[1];
-        if (!(determinant * orientation_ > 0.0)) return std::nullopt;
+        if (!(determinant > 0.0)) return std::nullopt; // a mirrored local map is never accepted
         return Prediction{ax[0], ay[0], std::min(std::hypot(ax[1], ay[1]), std::hypot(ax[2], ay[2]))};
     }
 
@@ -456,7 +495,6 @@ private:
     std::vector<Slot> slots_;
     std::vector<bool> used_;
     double median_radius_{};
-    double orientation_{1.0};
 };
 
 ViewDetection Fail(ViewDetection result, std::string code, std::string detail) {
@@ -466,11 +504,278 @@ ViewDetection Fail(ViewDetection result, std::string code, std::string detail) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Identity check: does the pattern printed in a cell agree with the node names?
+//
+// A cell whose four corner nodes are detected is mapped to the image by the
+// homography of its corners (a local map, so lens distortion stays small
+// inside one cell). Positions inside the cell are in units of the lattice
+// pitch from the middle of the cell: s along the columns, t along the rows.
+// Four zones are measured, all as a ratio to the white of the same cell, which
+// cancels exposure and vignetting:
+//   white  - strips near the middle of the cell edges (paper everywhere);
+//   ring   - a thin band just outside the pattern area but inside the backing
+//            of a slanted edge (paper, except dark around a light-on-dark edge);
+//   centre - the middle of the pattern area.
+// In the centre the spread of the levels (90th - 10th percentile) tells a flat
+// patch from fine lines, and the direction of the lines is read from how often
+// the level crosses its mid value along the columns and along the rows of a
+// regular resampling of the centre (a gradient direction is not used: the
+// widest bands of the lines are only a few pixels wide and the narrow ones
+// alias, which makes a gradient direction unreliable).
+
+constexpr double kCenterHalf = 0.15;
+constexpr double kRingInner = 0.272;
+constexpr double kRingOuter = 0.288;
+constexpr double kRingHalfLength = 0.10;
+constexpr double kWhiteInner = 0.34;
+constexpr double kWhiteOuter = 0.41;
+constexpr double kWhiteHalfLength = 0.18;
+constexpr double kMinimumCellSidePx = 80.0;
+constexpr std::size_t kMinimumZoneSamples = 60;
+constexpr std::size_t kMaximumRecordedMismatches = 16;
+constexpr double kResampleStepPx = 0.5;
+constexpr double kCrossingHysteresis = 0.15; // of the (90th - 10th percentile) range, each side of the mid value
+
+struct CellMeasurement {
+    double center_ratio{};  // median of the centre / white
+    double ring_ratio{};    // median of the ring band / white
+    double spread{};        // (90th - 10th percentile of the centre) / white
+    double axis_share{0.5}; // crossings along the columns / all crossings; 0.5 when the centre is flat
+};
+
+// Pixel at a fractional position (bilinear). The caller keeps the position inside the image.
+double Bilinear(const cv::Mat& gray, double x, double y) {
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const double fx = x - x0;
+    const double fy = y - y0;
+    const auto* r0 = gray.ptr<std::uint8_t>(y0);
+    const auto* r1 = gray.ptr<std::uint8_t>(y0 + 1);
+    return (1.0 - fy) * ((1.0 - fx) * r0[x0] + fx * r0[x0 + 1]) + fy * ((1.0 - fx) * r1[x0] + fx * r1[x0 + 1]);
+}
+
+// Number of times a sequence moves from below to above the band around `mid`, or back.
+std::uint32_t Crossings(const std::vector<double>& line, double mid, double margin) {
+    std::uint32_t count = 0;
+    int state = 0;
+    for (const double value : line) {
+        const int now = value > mid + margin ? 1 : (value < mid - margin ? -1 : 0);
+        if (now == 0) continue;
+        if (state != 0 && now != state) ++count;
+        state = now;
+    }
+    return count;
+}
+
+double MedianOf(std::vector<float>& values) {
+    const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
+    std::nth_element(values.begin(), middle, values.end());
+    return *middle;
+}
+
+// `corners` are top-left, top-right, bottom-right and bottom-left in pixels.
+std::optional<CellMeasurement> MeasureCell(const cv::Mat& gray, const std::array<std::array<double, 2>, 4>& corners,
+    const DetectorParams& params) {
+    cv::Point2f source[4] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+    cv::Point2f target[4];
+    double min_x = 1e30, max_x = -1e30, min_y = 1e30, max_y = -1e30;
+    for (std::size_t i = 0; i < 4; ++i) {
+        target[i] = {static_cast<float>(corners[i][0]), static_cast<float>(corners[i][1])};
+        min_x = std::min(min_x, corners[i][0]);
+        max_x = std::max(max_x, corners[i][0]);
+        min_y = std::min(min_y, corners[i][1]);
+        max_y = std::max(max_y, corners[i][1]);
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto& a = corners[i];
+        const auto& b = corners[(i + 1) % 4];
+        if (std::hypot(b[0] - a[0], b[1] - a[1]) < kMinimumCellSidePx) return std::nullopt;
+    }
+    const int x0 = static_cast<int>(std::floor(min_x));
+    const int x1 = static_cast<int>(std::ceil(max_x));
+    const int y0 = static_cast<int>(std::floor(min_y));
+    const int y1 = static_cast<int>(std::ceil(max_y));
+    if (x0 < 2 || y0 < 2 || x1 > gray.cols - 3 || y1 > gray.rows - 3) return std::nullopt;
+
+    const cv::Mat forward = cv::getPerspectiveTransform(source, target);
+    cv::Mat inverse;
+    if (cv::invert(forward, inverse, cv::DECOMP_LU) == 0.0) return std::nullopt;
+    const auto f = [&](int r, int c) { return forward.at<double>(r, c); };
+    const auto g = [&](int r, int c) { return inverse.at<double>(r, c); };
+
+    std::vector<float> center;
+    std::vector<float> ring;
+    std::vector<float> white;
+    for (int y = y0; y <= y1; ++y) {
+        const auto* row = gray.ptr<std::uint8_t>(y);
+        for (int x = x0; x <= x1; ++x) {
+            const double w = g(2, 0) * x + g(2, 1) * y + g(2, 2);
+            if (!(std::abs(w) > 1e-12)) return std::nullopt;
+            const double u = (g(0, 0) * x + g(0, 1) * y + g(0, 2)) / w;
+            const double v = (g(1, 0) * x + g(1, 1) * y + g(1, 2)) / w;
+            const double s = u - 0.5;
+            const double t = v - 0.5;
+            const double as = std::abs(s);
+            const double at = std::abs(t);
+            const double m = std::max(as, at);
+            if (m > kWhiteOuter) continue;
+            const float value = row[x];
+            if (m <= kCenterHalf) {
+                center.push_back(value);
+            } else if ((as >= kRingInner && as <= kRingOuter && at <= kRingHalfLength)
+                || (at >= kRingInner && at <= kRingOuter && as <= kRingHalfLength)) {
+                ring.push_back(value);
+            } else if (m >= kWhiteInner && std::min(as, at) <= kWhiteHalfLength) {
+                white.push_back(value);
+            }
+        }
+    }
+    if (center.size() < kMinimumZoneSamples || ring.size() < kMinimumZoneSamples || white.size() < kMinimumZoneSamples) return std::nullopt;
+    const double paper = MedianOf(white);
+    if (!(paper >= 16.0)) return std::nullopt;
+
+    CellMeasurement measurement;
+    std::sort(center.begin(), center.end());
+    measurement.center_ratio = center[center.size() / 2] / paper;
+    measurement.spread = (center[center.size() * 9 / 10] - center[center.size() / 10]) / paper;
+    measurement.ring_ratio = MedianOf(ring) / paper;
+    if (measurement.spread < params.identity_line_spread) return measurement; // flat: no line direction to read
+
+    // Resample the centre on a regular grid of the cell axes (about half a pixel apart) and count
+    // the level crossings along each row (the columns direction s) and each column (the rows direction t).
+    const double side_px = 0.25 * (std::hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1])
+        + std::hypot(corners[2][0] - corners[1][0], corners[2][1] - corners[1][1])
+        + std::hypot(corners[3][0] - corners[2][0], corners[3][1] - corners[2][1])
+        + std::hypot(corners[0][0] - corners[3][0], corners[0][1] - corners[3][1]));
+    const int n = std::clamp(static_cast<int>(std::ceil(2.0 * kCenterHalf * side_px / kResampleStepPx)), 16, 400);
+    std::vector<double> grid(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
+    for (int j = 0; j < n; ++j) {
+        const double v = 0.5 - kCenterHalf + 2.0 * kCenterHalf * (j + 0.5) / n;
+        for (int i = 0; i < n; ++i) {
+            const double u = 0.5 - kCenterHalf + 2.0 * kCenterHalf * (i + 0.5) / n;
+            const double w = f(2, 0) * u + f(2, 1) * v + f(2, 2);
+            if (!std::isfinite(w) || !(std::abs(w) > 1e-12)) return std::nullopt;
+            const double x = (f(0, 0) * u + f(0, 1) * v + f(0, 2)) / w;
+            const double y = (f(1, 0) * u + f(1, 1) * v + f(1, 2)) / w;
+            if (!std::isfinite(x) || !std::isfinite(y)
+                || x < 0.0 || y < 0.0 || x >= gray.cols - 1.0 || y >= gray.rows - 1.0) return std::nullopt;
+            grid[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)] = Bilinear(gray, x, y);
+        }
+    }
+    const double low = center[center.size() / 10];
+    const double high = center[center.size() * 9 / 10];
+    const double mid = 0.5 * (low + high);
+    const double margin = kCrossingHysteresis * (high - low);
+    std::uint32_t along_s = 0;
+    std::uint32_t along_t = 0;
+    std::vector<double> line(static_cast<std::size_t>(n));
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) line[static_cast<std::size_t>(i)] = grid[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)];
+        along_s += Crossings(line, mid, margin);
+    }
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) line[static_cast<std::size_t>(j)] = grid[static_cast<std::size_t>(j) * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)];
+        along_t += Crossings(line, mid, margin);
+    }
+    const double total = static_cast<double>(along_s) + static_cast<double>(along_t);
+    if (total > 0.0) measurement.axis_share = static_cast<double>(along_s) / total;
+    return measurement;
+}
+
+// Structure of the pattern an expected kind has: where the levels are.
+bool StructureAgrees(const CellPattern expected, const CellMeasurement& m, const DetectorParams& params) {
+    const double tolerance = params.identity_level_tolerance;
+    const double dark = kChartEdgeDarkLevel / kChartPaperLevel;
+    const double light = kChartEdgeLightLevel / kChartPaperLevel;
+    const bool ring_is_paper = std::abs(m.ring_ratio - 1.0) <= tolerance;
+    const bool flat = m.spread < params.identity_line_spread;
+    switch (expected) {
+    case CellPattern::Blank:
+        return ring_is_paper && flat && std::abs(m.center_ratio - 1.0) <= tolerance;
+    case CellPattern::SlantedEdgeDarkOnLight:
+        return std::abs(m.ring_ratio - light) <= tolerance && std::abs(m.center_ratio - dark) <= tolerance;
+    case CellPattern::SlantedEdgeLightOnDark:
+        return std::abs(m.ring_ratio - dark) <= tolerance && std::abs(m.center_ratio - light) <= tolerance;
+    case CellPattern::ColorPatch:
+        // The colour is not compared: the image is read as grey, and the patch levels overlap the grey ones.
+        return ring_is_paper && flat && m.center_ratio >= 0.25 && m.center_ratio <= 0.95;
+    case CellPattern::GrayPatch:
+        return ring_is_paper && flat;
+    case CellPattern::FineLinesVertical:
+        return ring_is_paper && !flat && m.axis_share >= params.identity_line_share;
+    case CellPattern::FineLinesHorizontal:
+        return ring_is_paper && !flat && m.axis_share <= 1.0 - params.identity_line_share;
+    }
+    return false;
+}
+
+bool Rejects(const std::uint32_t mismatched, const std::uint32_t examined, const DetectorParams& params) {
+    return mismatched >= params.identity_min_mismatches
+        && static_cast<double>(mismatched) > params.identity_max_mismatch_fraction * static_cast<double>(examined);
+}
+
+void CheckIdentity(const cv::Mat& gray, const ChartDefinition& chart, const std::vector<NodeObservation>& nodes,
+    const DetectorParams& params, IdentityCheck& identity) {
+    const std::size_t stride = static_cast<std::size_t>(chart.columns) + 1U;
+    std::vector<const NodeObservation*> detected(chart.NodeCount(), nullptr);
+    for (const auto& node : nodes) {
+        if (node.state == NodeState::Detected) detected[node.row * stride + node.column] = &node;
+    }
+    const auto record = [&](std::uint32_t column, std::uint32_t row, CellPattern expected, const char* check, const CellMeasurement& m) {
+        if (identity.mismatches.size() >= kMaximumRecordedMismatches) return;
+        identity.mismatches.push_back({column, row, expected, check, m.center_ratio, m.ring_ratio, m.spread, m.axis_share});
+    };
+    for (std::uint32_t row = 0; row < chart.rows; ++row) {
+        for (std::uint32_t column = 0; column < chart.columns; ++column) {
+            const auto* tl = detected[row * stride + column];
+            const auto* tr = detected[row * stride + column + 1];
+            const auto* br = detected[(row + 1) * stride + column + 1];
+            const auto* bl = detected[(row + 1) * stride + column];
+            if (tl == nullptr || tr == nullptr || br == nullptr || bl == nullptr) continue;
+            const std::array<std::array<double, 2>, 4> corners{{{tl->x_px, tl->y_px}, {tr->x_px, tr->y_px}, {br->x_px, br->y_px}, {bl->x_px, bl->y_px}}};
+            const auto measurement = MeasureCell(gray, corners, params);
+            if (!measurement) { ++identity.cells_skipped; continue; }
+            ++identity.cells_examined;
+            const auto expected = ExpectedCellPattern(column, row);
+            if (!StructureAgrees(expected, *measurement, params)) {
+                ++identity.cells_mismatched;
+                record(column, row, expected, "structure", *measurement);
+                continue;
+            }
+            if (expected == CellPattern::GrayPatch) {
+                ++identity.gray_cells_examined;
+                const double level = ExpectedGrayPatchLevel(column, row) / kChartPaperLevel;
+                if (std::abs(measurement->center_ratio - level) > params.identity_level_tolerance) {
+                    ++identity.gray_cells_mismatched;
+                    record(column, row, expected, "gray-level", *measurement);
+                }
+            }
+        }
+    }
+    if (Rejects(identity.cells_mismatched, identity.cells_examined, params)
+        || Rejects(identity.gray_cells_mismatched, identity.gray_cells_examined, params)) {
+        identity.result = "mismatch";
+    } else if (identity.cells_examined < params.identity_min_cells || identity.gray_cells_examined < params.identity_min_gray_cells) {
+        identity.result = "unverifiable";
+    } else {
+        identity.result = "verified";
+    }
+}
+
 } // namespace
 
 ViewDetection DetectView(const cv::Mat& gray, const ChartDefinition& chart,
     std::span<const LatticeAnchor> anchors, const DetectorParams& params) {
     ValidateChart(chart);
+    if (!std::isfinite(params.identity_level_tolerance) || !(params.identity_level_tolerance > 0.0 && params.identity_level_tolerance < 0.5)
+        || !std::isfinite(params.identity_line_spread) || !(params.identity_line_spread > 0.0)
+        || !std::isfinite(params.identity_line_share) || !(params.identity_line_share > 0.5 && params.identity_line_share <= 1.0)
+        || !std::isfinite(params.identity_max_mismatch_fraction)
+        || !(params.identity_max_mismatch_fraction >= 0.0 && params.identity_max_mismatch_fraction < 1.0)
+        || params.identity_min_cells == 0 || params.identity_min_gray_cells == 0 || params.identity_min_mismatches == 0) {
+        Reject("identity check parameters must be finite and cannot disable verification");
+    }
     ViewDetection result;
     result.candidates = FindRingCandidates(gray, params, &result.dark_threshold);
     if (result.candidates.empty()) return Fail(std::move(result), "no-rings", "no ring fiducial was found in the image");
@@ -511,14 +816,14 @@ ViewDetection DetectView(const cv::Mat& gray, const ChartDefinition& chart,
         lattice.Detect(anchor.column, anchor.row, found);
     }
 
-    // The anchors must span the lattice in two directions, and they fix the
-    // orientation (a mirrored lattice is rejected from here on).
+    // The anchors must span the lattice in two directions, and no triple of
+    // them may be mirrored: the chart is seen from the front, so the lattice
+    // axes (column right, row down) keep their handedness in the image. Every
+    // non-degenerate triple is checked, not only the first.
     {
-        double sign = 0.0;
-        bool spans = false;
-        for (std::size_t i = 0; i + 2 < anchors.size() && !spans; ++i) {
-            for (std::size_t j = i + 1; j < anchors.size() && !spans; ++j) {
-                for (std::size_t k = j + 1; k < anchors.size() && !spans; ++k) {
+        for (std::size_t i = 0; i + 2 < anchors.size(); ++i) {
+            for (std::size_t j = i + 1; j + 1 < anchors.size(); ++j) {
+                for (std::size_t k = j + 1; k < anchors.size(); ++k) {
                     const double lattice_area =
                         (static_cast<double>(anchors[j].column) - anchors[i].column) * (static_cast<double>(anchors[k].row) - anchors[i].row)
                         - (static_cast<double>(anchors[k].column) - anchors[i].column) * (static_cast<double>(anchors[j].row) - anchors[i].row);
@@ -528,13 +833,16 @@ ViewDetection DetectView(const cv::Mat& gray, const ChartDefinition& chart,
                     const auto& c = *result.anchors[k].ring;
                     const double pixel_area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
                     if (pixel_area == 0.0) continue;
-                    sign = (lattice_area > 0.0) == (pixel_area > 0.0) ? 1.0 : -1.0;
-                    spans = true;
+                    ++result.identity.anchor_triples;
+                    if ((lattice_area > 0.0) != (pixel_area > 0.0)) ++result.identity.mirrored_triples;
                 }
             }
         }
-        if (!spans) return Fail(std::move(result), "anchor-collinear", "the anchors do not span two lattice directions");
-        lattice.SetOrientation(sign);
+        if (result.identity.anchor_triples == 0) return Fail(std::move(result), "anchor-collinear", "the anchors do not span two lattice directions");
+        if (result.identity.mirrored_triples != 0) {
+            result.identity.result = "mismatch";
+            return Fail(std::move(result), "anchor-mirrored", "the node names of the anchors give a mirrored lattice, which a chart seen from the front cannot have");
+        }
     }
 
     lattice.Grow();
@@ -552,6 +860,14 @@ ViewDetection DetectView(const cv::Mat& gray, const ChartDefinition& chart,
         }
     }
     result.unmatched_candidates = lattice.UnmatchedCandidates();
+
+    CheckIdentity(gray, chart, result.nodes, params, result.identity);
+    if (result.identity.result == "mismatch") {
+        return Fail(std::move(result), "identity-mismatch", "the cell patterns do not agree with the node names the anchors gave");
+    }
+    if (result.identity.result == "unverifiable") {
+        return Fail(std::move(result), "identity-unverifiable", "too few cells with four detected corners could be checked against the chart");
+    }
     return result;
 }
 
@@ -854,13 +1170,20 @@ std::string BuildReport(const Job& job, const std::vector<ViewOutcome>& outcomes
     out += ",\"chart\":{\"columns\":" + std::to_string(job.chart.columns) + ",\"rows\":" + std::to_string(job.chart.rows)
         + ",\"originXMm\":" + Num(job.chart.origin_x_mm) + ",\"originYMm\":" + Num(job.chart.origin_y_mm) + ",\"pitchMm\":" + Num(job.chart.pitch_mm) + '}';
     out += ",\"idAssignment\":\"operator anchors, then lattice growth by local affine prediction; no ground truth is read\"";
+    out += ",\"identityCheck\":\"anchor triples must not be mirrored; the pattern in each cell with four detected corners (kind = (3 * column + 5 * row) mod 8, "
+           "grey patch level by (column + row) mod 6) must agree with the node names; levels are ratios to the white of the same cell\"";
     out += ",\"validationSplit\":\"detected nodes with even (column + row) give the pose; the others are measured\"";
     out += ",\"params\":{\"darkFraction\":" + Num(params.dark_fraction) + ",\"blurSigma\":" + Num(params.blur_sigma)
         + ",\"minHoleRadiusPx\":" + Num(params.min_hole_radius_px) + ",\"maxHoleRadiusPx\":" + Num(params.max_hole_radius_px)
         + ",\"minAxisRatio\":" + Num(params.min_axis_ratio) + ",\"ellipseAreaTolerance\":" + Num(params.ellipse_area_tolerance)
         + ",\"minDotAreaRatio\":" + Num(params.min_dot_area_ratio) + ",\"maxDotAreaRatio\":" + Num(params.max_dot_area_ratio)
         + ",\"concentricTolerance\":" + Num(params.concentric_tolerance) + ",\"minRingDarkFraction\":" + Num(params.min_ring_dark_fraction)
-        + ",\"refineIterations\":" + std::to_string(params.refine_iterations) + ",\"acceptFraction\":" + Num(params.accept_fraction) + '}';
+        + ",\"refineIterations\":" + std::to_string(params.refine_iterations) + ",\"acceptFraction\":" + Num(params.accept_fraction)
+        + ",\"identityLevelTolerance\":" + Num(params.identity_level_tolerance) + ",\"identityLineSpread\":" + Num(params.identity_line_spread)
+        + ",\"identityLineShare\":" + Num(params.identity_line_share) + ",\"identityMinCells\":" + std::to_string(params.identity_min_cells)
+        + ",\"identityMinGrayCells\":" + std::to_string(params.identity_min_gray_cells)
+        + ",\"identityMaxMismatchFraction\":" + Num(params.identity_max_mismatch_fraction)
+        + ",\"identityMinMismatches\":" + std::to_string(params.identity_min_mismatches) + '}';
     out += ",\"views\":[";
     bool first = true;
     for (const auto& outcome : outcomes) {
@@ -890,7 +1213,22 @@ std::string BuildReport(const Job& job, const std::vector<ViewOutcome>& outcomes
             if (r.ring) out += ",\"ringXPx\":" + Num(r.ring->x) + ",\"ringYPx\":" + Num(r.ring->y);
             out += '}';
         }
-        out += "]}";
+        out += ']';
+        const auto& identity = d.identity;
+        out += ",\"identity\":{\"result\":" + Quote(identity.result) + ",\"anchorTriples\":" + std::to_string(identity.anchor_triples)
+            + ",\"mirroredTriples\":" + std::to_string(identity.mirrored_triples) + ",\"cellsExamined\":" + std::to_string(identity.cells_examined)
+            + ",\"cellsSkipped\":" + std::to_string(identity.cells_skipped) + ",\"cellsMismatched\":" + std::to_string(identity.cells_mismatched)
+            + ",\"grayCellsExamined\":" + std::to_string(identity.gray_cells_examined)
+            + ",\"grayCellsMismatched\":" + std::to_string(identity.gray_cells_mismatched) + ",\"mismatches\":[";
+        for (std::size_t i = 0; i < identity.mismatches.size(); ++i) {
+            const auto& m = identity.mismatches[i];
+            if (i != 0) out += ',';
+            out += "{\"cellColumn\":" + std::to_string(m.column) + ",\"cellRow\":" + std::to_string(m.row)
+                + ",\"expected\":" + Quote(CellPatternCode(m.expected)) + ",\"check\":" + Quote(m.check)
+                + ",\"centerRatio\":" + Num(m.center_ratio) + ",\"ringRatio\":" + Num(m.ring_ratio)
+                + ",\"spread\":" + Num(m.spread) + ",\"axisShare\":" + Num(m.axis_share) + '}';
+        }
+        out += "]}}";
     }
     out += "]}";
     return out;

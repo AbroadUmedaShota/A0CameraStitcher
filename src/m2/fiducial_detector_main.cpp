@@ -82,6 +82,13 @@ int wmain(const int argc, wchar_t* argv[]) {
         }
         const std::filesystem::path job_path = job_option->second;
         const std::filesystem::path output = output_option->second;
+        // Refuse either collision before computing or writing anything. In
+        // particular, an existing report must not leave a newly written session.
+        for (const auto* name : {L"session.json", L"detection-report.json"}) {
+            if (std::filesystem::exists(output / name)) {
+                throw std::runtime_error("output file already exists");
+            }
+        }
         const auto result = a0::m2::fiducial::RunJob(ReadJob(job_path), job_path.parent_path());
 
         std::filesystem::create_directories(output);

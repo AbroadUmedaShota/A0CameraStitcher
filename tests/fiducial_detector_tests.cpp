@@ -36,6 +36,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -311,6 +312,13 @@ void CheckScore(const Score& score, const Tolerances& tolerance, const std::stri
     Check(score.error.max <= tolerance.max_px, label + ": max within the test tolerance");
 }
 
+void CheckVerified(const fid::ViewDetection& detection, const std::string& label) {
+    Check(detection.failure.empty(), label + ": detection succeeds (" + detection.failure + ")");
+    Check(detection.identity.result == "verified", label + ": chart identity is verified");
+    Check(detection.identity.cells_examined >= 8 && detection.identity.gray_cells_examined >= 2,
+        label + ": verification measured sufficient chart cells and grey patches");
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: two lens models and the views of each.
 
@@ -401,7 +409,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         const auto gray = RenderGray(spec, 0);
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), "stage 1: detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, "stage 1");
         CheckScore(ScoreDetection(detection, camera, chart), kUndistorted, "stage 1, no distortion, uncompressed");
     }
 
@@ -412,7 +420,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         const auto gray = RenderGray(spec, 0);
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), "stage 2: detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, "stage 2");
         CheckScore(ScoreDetection(detection, camera, chart), kDistorted, "stage 2, lens distortion, uncompressed");
     }
 
@@ -436,7 +444,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         Check(gray.cols == static_cast<int>(kWidth) && gray.rows == static_cast<int>(kHeight), std::string("stage 3 ") + c.name + ": the JPEG decodes at the right size");
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), std::string("stage 3 ") + c.name + ": detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, std::string("stage 3 ") + c.name);
         Info(std::string("stage 3 ") + c.name + ": JPEG " + std::to_string(bytes.size()) + " bytes");
         CheckScore(ScoreDetection(detection, camera, chart), c.tolerance, std::string("stage 3, lens distortion, noise, JPEG ") + c.name);
         ++index;
@@ -497,28 +505,104 @@ void TestFailurePaths() {
         Check(fid::DetectView(blank, chart, anchors, params).failure == "no-rings", "a blank image has no rings");
     }
     {
-        // Identity is the operator's responsibility: anchors shifted by one column give a
-        // consistent but wrong lattice. The test measures it against the truth; the
-        // detector cannot know.
+        // A coherent shift used to produce plausible observations with wrong IDs.
         auto shifted = anchors;
         for (auto& a : shifted) a.column += 1;
         const auto detection = fid::DetectView(gray, chart, shifted, params);
-        if (detection.failure.empty()) {
-            const auto score = ScoreDetection(detection, camera, chart);
-            Check(score.wrong_identity > 0, "anchors shifted by one lattice step give wrong identities, which only the truth reveals");
-        }
+        Check(detection.failure == "identity-mismatch" && detection.nodes.empty(),
+            "anchors shifted by one lattice step are rejected without observations");
     }
     {
         auto mirrored = anchors;
         std::swap(mirrored[1].column, mirrored[2].column);
         std::swap(mirrored[1].row, mirrored[2].row);
         const auto detection = fid::DetectView(gray, chart, mirrored, params);
-        // Two anchors with swapped identities describe a mirrored lattice. It is either
-        // refused or wrong, and only the truth can say which; it is never right.
-        const bool refused = !detection.failure.empty();
-        const bool wrong = !refused && ScoreDetection(detection, camera, chart).wrong_identity > 0;
-        Info("mirrored anchors: " + std::string(refused ? "refused (" + detection.failure + ")" : "accepted with wrong identities"));
-        Check(refused || wrong, "anchors with swapped identities never give a correct lattice");
+        Check(detection.failure == "anchor-mirrored" && detection.nodes.empty(),
+            "anchors with swapped identities are rejected without observations");
+    }
+}
+
+// The oracle is the chart's printed identity, not reprojection residuals: a
+// translated or reflected chart can fit a wrong pose with a tiny residual.
+void TestIdentityChecks(const std::filesystem::path& temp) {
+    const auto camera = MakeCamera("CAM-A", kModelA, {15, 5, 0, 560, 420, 560}, false);
+    const auto spec = MakeSpec({camera}, 0.95, synth::ChromaSubsampling::s444, 51);
+    const auto chart = ChartOf(spec.chart);
+    const auto gray = RenderGray(spec, 0);
+    const auto anchors = OperatorAnchors(camera, chart);
+    CheckVerified(fid::DetectView(gray, chart, anchors, fid::DetectorParams{}), "identity baseline");
+
+    struct WrongAnchors { std::string name; std::vector<fid::LatticeAnchor> anchors; std::string failure; };
+    std::vector<WrongAnchors> wrong;
+    for (const auto& [dc, dr] : std::array<std::pair<int, int>, 6>{{{1, 0}, {0, 1}, {1, 1}, {-1, 0}, {0, -1}, {-1, -1}}}) {
+        auto shifted = anchors;
+        for (auto& a : shifted) {
+            a.column = static_cast<std::uint32_t>(static_cast<int>(a.column) + dc);
+            a.row = static_cast<std::uint32_t>(static_cast<int>(a.row) + dr);
+        }
+        wrong.push_back({"shift " + std::to_string(dc) + "," + std::to_string(dr), shifted, "identity-mismatch"});
+    }
+    auto mirrored = anchors;
+    std::swap(mirrored[1].column, mirrored[2].column);
+    std::swap(mirrored[1].row, mirrored[2].row);
+    wrong.push_back({"swap", mirrored, "anchor-mirrored"});
+    auto typo = anchors;
+    ++typo[1].column;
+    wrong.push_back({"one-node typo", typo, ""});
+    auto cycled = anchors;
+    for (std::size_t i = 0; i < anchors.size(); ++i) {
+        cycled[i].column = anchors[(i + 1) % anchors.size()].column;
+        cycled[i].row = anchors[(i + 1) % anchors.size()].row;
+    }
+    wrong.push_back({"cycle", cycled, ""});
+
+    // First three anchors have the correct handedness. A later triple must
+    // still be checked; only checking the first triple would miss this.
+    auto four = anchors;
+    const auto fourth = *TrueCentre(camera, chart, anchors[1].column, anchors[2].row);
+    four.push_back({anchors[0].column - 1, anchors[2].row,
+        std::round(fourth.x / kAnchorRoundingPx) * kAnchorRoundingPx,
+        std::round(fourth.y / kAnchorRoundingPx) * kAnchorRoundingPx, kAnchorRadiusPx});
+    wrong.push_back({"later mirrored triple", four, "anchor-mirrored"});
+
+    const auto image = temp / "identity.png";
+    Check(cv::imwrite(image.string(), gray), "identity fixture is written");
+    for (const auto& c : wrong) {
+        const auto detection = fid::DetectView(gray, chart, c.anchors, fid::DetectorParams{});
+        Info(c.name + ": " + detection.failure + ", cells " + std::to_string(detection.identity.cells_examined)
+            + ", mismatched " + std::to_string(detection.identity.cells_mismatched)
+            + ", grey mismatched " + std::to_string(detection.identity.gray_cells_mismatched));
+        Check(!detection.failure.empty() && detection.nodes.empty(), c.name + ": no wrong observations escape");
+        if (!c.failure.empty()) Check(detection.failure == c.failure, c.name + ": expected refusal reason");
+        else Check(detection.failure == "identity-mismatch" || detection.failure == "identity-unverifiable",
+            c.name + ": the identity check rejects the otherwise valid anchor input");
+        if (c.name == "shift 1,1" || c.name == "shift -1,-1") {
+            Check(detection.identity.gray_cells_mismatched > 0,
+                c.name + ": grey levels catch the diagonal shift invisible to the pattern kind");
+        }
+        // A reference observation is the next stage's public input. It must
+        // never be emitted on a bad identity, even when the geometry fits.
+        const auto result = fid::RunJob(JobJson(chart, {{"reference-A", "CAM-A", "reference", "identity.png", c.anchors}}), temp);
+        Check(!result.ok && result.session_json.empty(), c.name + ": no reference session is emitted");
+        Check(result.report_json.find("\"status\":\"" + detection.failure + "\"") != std::string::npos
+            && result.report_json.find("\"identity\":{") != std::string::npos,
+            c.name + ": refusal and identity evidence are reported");
+    }
+    {
+        fid::DetectorParams params;
+        params.identity_min_cells = static_cast<std::uint32_t>(chart.NodeCount() + 1);
+        const auto detection = fid::DetectView(gray, chart, anchors, params);
+        Check(detection.failure == "identity-unverifiable" && detection.nodes.empty(),
+            "insufficient identity evidence refuses observations");
+    }
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        fid::DetectorParams params;
+        if (invalid == 0) params.identity_max_mismatch_fraction = std::numeric_limits<double>::quiet_NaN();
+        if (invalid == 1) params.identity_min_gray_cells = 0;
+        if (invalid == 2) params.identity_line_share = std::numeric_limits<double>::infinity();
+        bool rejected = false;
+        try { (void)fid::DetectView(gray, chart, anchors, params); } catch (const std::invalid_argument&) { rejected = true; }
+        Check(rejected, "invalid identity parameters cannot disable verification " + std::to_string(invalid));
     }
 }
 
@@ -706,6 +790,18 @@ void TestEndToEnd(const std::filesystem::path& temp, const std::filesystem::path
         }
         Check(run(job_file, out_ok) == 2, "the executable refuses to overwrite an earlier output");
 
+        // Either pre-existing output blocks the whole job. In particular a
+        // report collision must not leave a new, apparently usable session.
+        for (const auto* existing : {"session.json", "detection-report.json"}) {
+            const auto collision = temp / (std::string("collision-") + existing);
+            std::filesystem::create_directories(collision);
+            { std::ofstream file(collision / existing, std::ios::binary); file << "sentinel"; }
+            Check(run(job_file, collision) == 2, "either existing output blocks the job");
+            Check(ReadText(collision / existing) == "sentinel", "existing output bytes are unchanged");
+            const auto* other = std::string(existing) == "session.json" ? "detection-report.json" : "session.json";
+            Check(!std::filesystem::exists(collision / other), "collision leaves no second output");
+        }
+
         auto short_views = job_views;
         short_views.resize(2);
         short_views[0].anchors.pop_back();
@@ -759,10 +855,13 @@ void TestEndToEnd(const std::filesystem::path& temp, const std::filesystem::path
 int main(const int argc, char* argv[]) {
     // Usage: m2_fiducial_detector_contracts [--exe <A0CameraStitcher.FiducialDetector.exe>]
     std::filesystem::path executable;
+    bool identity_only = false;
     if (argc == 3 && std::string(argv[1]) == "--exe") {
         executable = argv[2];
+    } else if (argc == 2 && std::string(argv[1]) == "--identity-only") {
+        identity_only = true;
     } else if (argc != 1) {
-        std::cerr << "usage: m2_fiducial_detector_contracts [--exe <detector executable>]\n";
+        std::cerr << "usage: m2_fiducial_detector_contracts [--exe <detector executable> | --identity-only]\n";
         return 2;
     }
     const auto temp = std::filesystem::temp_directory_path() / ("a0_fiducial_detector_test_" + std::to_string(GetCurrentProcessId()));
@@ -772,9 +871,12 @@ int main(const int argc, char* argv[]) {
     try {
         const auto started = std::chrono::steady_clock::now();
         Info(std::string("OpenCV ") + CV_VERSION);
-        TestDetectionStages(temp);
-        TestFailurePaths();
-        TestEndToEnd(temp, executable);
+        TestIdentityChecks(temp);
+        if (!identity_only) {
+            TestDetectionStages(temp);
+            TestFailurePaths();
+            TestEndToEnd(temp, executable);
+        }
         Info("elapsed " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()) + " s");
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
