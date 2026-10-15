@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "a0.draft-calibration-job.v1",
+  "profileId": "synthetic-draft-example",
+  "provenanceId": "synthetic-provenance-example",
+  "measuredAt": "2000-01-02T00:00:00Z",
+  "documentPlane": {
+    "orientation": "landscape",
+    "cameraOrder": "CAM-A-left-CAM-B-right"
+  },
+  "referencePair": { "CAM-A": "A-reference", "CAM-B": "B-reference" },
+  "referencePlacement": {
+    "angleRadians": 0,
+    "translationXMm": -594.5,
+    "translationYMm": -420.5,
+    "coplanarConfirmed": true
+  },
+  "numericalPolicy": {
+    "minimumViews": 2,
+    "relativeSingularCutoff": 0.01,
+    "maxIterations": 100,
+    "relativeCostTolerance": 1e-10,
+    "relativeStepTolerance": 1e-12,
+    "initialDamping": 0.001,
+    "maxUndistortionIterations": 40,
+    "undistortionTolerancePixels": 1e-9
+  },
+  "rigMeasurements": {
+    "baselineMm": null,
+    "overlapMm": null,
+    "cameraToDocumentMm": { "CAM-A": null, "CAM-B": null },
+    "lensFocalLengthMm": { "CAM-A": null, "CAM-B": null }
+  }
+}
