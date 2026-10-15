@@ -230,6 +230,17 @@ else()
     target_compile_options(a0_m2_render PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Pure bounded document-similarity calculation. Not wired into product capture.
+add_library(a0_m2_document_correction src/m2/document_correction.cpp)
+target_include_directories(a0_m2_document_correction PUBLIC src/m2/include)
+target_link_libraries(a0_m2_document_correction PUBLIC a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_document_correction)
+if(MSVC)
+    target_compile_options(a0_m2_document_correction PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_document_correction PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Strict immutable v2 document reader. The renderer does not depend on this
 # Windows hashing boundary, and the synthetic generator remains independent.
 add_library(a0_m2_rig_profile_v2 src/m2/rig_profile_v2.cpp)
@@ -1093,6 +1104,12 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
+    add_executable(m2_document_correction_contracts tests/document_correction_tests.cpp)
+    target_link_libraries(m2_document_correction_contracts PRIVATE a0_m2_document_correction)
+    if(MSVC)
+        target_compile_options(m2_document_correction_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_document_correction_contracts COMMAND m2_document_correction_contracts)
     target_link_libraries(m2_document_render_contracts PRIVATE a0_m2_render)
     add_executable(m2_document_render_mtf_contracts tests/document_render_mtf_tests.cpp)
     target_link_libraries(m2_document_render_mtf_contracts PRIVATE a0_m2_render)

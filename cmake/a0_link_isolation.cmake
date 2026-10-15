@@ -118,8 +118,8 @@ endfunction()
 # independent ground-truth image generator.
 function(a0_assert_no_product_stitch_dependency target)
     a0_assert_no_link_dependency("${target}"
-        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher
-        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher" "stitch_job_manifest")
+        FORBIDDEN_LIBRARIES a0_m2_render a0_m2_document_correction a0_m2_offline_stitcher
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "/document_correction\\.cpp$" "offline_stitcher" "stitch_job_manifest")
 endfunction()
 
 # An image evaluator may consume independent oracle data, never the code that

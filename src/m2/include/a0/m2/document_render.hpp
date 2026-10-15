@@ -79,6 +79,9 @@ bool TryProjectDocument(const CameraProjection& camera, Point document_mm, Point
 // 1+3*k1*t+5*k2*t^2+7*k3*t^3 for 0<=t<=maximum_radius_squared.
 void ValidateRadialMonotonicity(const LensDistortion& lens, double maximum_radius_squared);
 void ValidateOutputRaster(const OutputRaster& raster);
+// Same outer ceil-raster rectangle used by projection-domain validation.
+// Validates the raster; includes the fractional extension beyond region_um.
+std::array<Point, 4> DocumentRasterCorners(const OutputRaster& raster);
 void ValidateCameraProjection(const CameraProjection& camera, const OutputRaster& raster);
 
 // Coverage is computed on the actual output sample grid. Every contiguous

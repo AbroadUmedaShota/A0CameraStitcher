@@ -136,6 +136,11 @@ void ValidateOutputRaster(const OutputRaster& raster) {
     (void)PixelCount(raster.width_pixels, raster.height_pixels);
 }
 
+std::array<Point, 4> DocumentRasterCorners(const OutputRaster& raster) {
+    ValidateOutputRaster(raster);
+    return RasterCorners(raster);
+}
+
 void ValidateCameraProjection(const CameraProjection& camera, const OutputRaster& raster) {
     ValidateOutputRaster(raster);
     const auto& i = camera.intrinsics;

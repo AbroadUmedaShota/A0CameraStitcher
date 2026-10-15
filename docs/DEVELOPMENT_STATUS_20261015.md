@@ -1,4 +1,4 @@
-# 開発状況 2026-10-15（#306、#311〜#315）
+# 開発状況 2026-10-15（#306、#311〜#316）
 
 本日のローカル候補の状況。mainには未反映。昨日までのClaudeの#311作業を確認し、未検証だった変更を仕上げた。所有者の方針は**先に保存画像の合成本体、その後にLive Viewの合成C**（#306）。`CURRENT_STATUS.md`の10月13日時点の「合成は後回し」は過去の記録で、現在の優先順ではない。
 
@@ -7,6 +7,7 @@
 - #313: 所有者の回答「既存形式＋詳細レポート」に従い、既存profile v2のdraftと全観測・学習・独立検証のreportを生成。provenanceId＋fingerprintで結合。独立検証が欠ける入力ではprofileを発行しない。writerはRelease/Debug各44チェック、既存.NET共有vector163＋生成互換性7チェック成功
 - #314: 7360×4912の合成JPEG18枚から検出、校正、draft、既存レンダラーのA0全域の評価プレビューまで成功。検出3882点のID取り違え0。固定写像と独立真値の差はCAM-A rms 0.0076 / max 0.0160 px、CAM-B rms 0.0062 / max 0.0176 px。詳細と再実行方法は[全工程の合成試験](M2_FULL_CALIBRATION_PIPELINE.md)
 - #315: [1コマンドの開発用校正](M2_CALIBRATION_COMMAND.md)。用意したJPEGと2つのjobから、既存native CLIで観測・draft・詳細レポートを一式保存。入力jobのロック、段階ごとの失敗、非上書き公開、入力と成果物のhashを記録する。実CLIの46チェック、生成profileの.NET互換性7チェックと既存schemaが成功。実機操作や品質承認は追加しない
+- #316: [文書座標の上限つき相似補正](M2_DOCUMENT_CORRECTION.md)の計算部。対応済みの点から平行移動・回転・倍率だけを推定し、明示したpolicy内の候補を固定Hへ合成。上限超過・反射・縮退・不成立の投影は適用可能な写像を返さない。新規304チェックはRelease/Debug成功、関連CTestはRelease 6/6・Debug 5/5成功。画像からの対応点検出、既存profileの上限との対応づけ、製品経路は後続
 
 統合後の関連Release CTestは7/7成功（144.66秒）。合成JPEG由来profileの.NET互換性7チェックと既存profile/sessionのJSON schemaも通過。重い18枚の全工程はReleaseだけで実行した。
 
