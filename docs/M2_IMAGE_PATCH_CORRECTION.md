@@ -67,7 +67,7 @@ reportは`synthetic=true / productApproved=false / qualityAssessment=not-assesse
 
 実rendererでは両kernel・両layoutの修正結果、未補正の負の対照、反復byte一致、原本buffer不変を検査する。unsnappedな浮動小数点fitでcubic量子化の半整数境界を跨ぐ可能性があるため、基準画像との差は1 DN以内かつ未補正より100倍以上小さいことを要求する。repeat同士は厳密なbyte一致を要求する。合成JPEGの試験は別途、誤差が未補正の1/10未満になることを要求する。
 
-seed自動配置/選定・汎用特徴点検出、探索精度の実写評価、承認profile値との対応、setup/撮影job来歴・アプリ本体への接続、露出/色補正、実写での受入は後続。
+seedの自動配置/選定とこの入力への接続は[#319](M2_AUTOMATIC_PATCH_SEEDS.md)で追加した。汎用特徴点検出、探索精度の実写評価、承認profile値との対応、setup/撮影job来歴・アプリ本体への接続、露出/色補正、実写での受入は後続。
 
 2026-10-15、MSVC x64、SDKなし: 新規90チェックはRelease/Debugとも成功。関連CTestはRelease 8/8（13.05秒、生成器依存分離26ケースを含む）、Debug 7/7（3.88秒）成功。明示した日本語・空白・角括弧の出力先へ保存したJPEGの再読込みも両構成で成功し、4 JPEG＋reportの全5ファイルがSHA-256比較でbyte一致した。
 

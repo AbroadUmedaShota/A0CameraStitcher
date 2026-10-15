@@ -242,7 +242,7 @@ else()
 endif()
 
 # Pure, fixed-projection-guided image matching; not linked into product entry.
-add_library(a0_m2_image_patch_correction src/m2/image_patch_correction.cpp)
+add_library(a0_m2_image_patch_correction src/m2/image_patch_correction.cpp src/m2/image_patch_seed_selection.cpp)
 target_include_directories(a0_m2_image_patch_correction PUBLIC src/m2/include)
 target_link_libraries(a0_m2_image_patch_correction PUBLIC a0_m2_document_correction)
 a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_image_patch_correction)
