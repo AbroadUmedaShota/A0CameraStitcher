@@ -1,6 +1,6 @@
 # raw対応画素から文書補正への接続（#317、#46先行）
 
-対応済みのCAM-A/CAM-Bの画素を固定校正で公称文書mmへ戻し、[#316の上限つき相似補正](M2_DOCUMENT_CORRECTION.md)へ渡すpure計算部。保存画像の合成を先に進める#306の続き。画像の検出器・マッチャー、profileの承認、製品adapterへの接続は含まない。
+対応済みのCAM-A/CAM-Bの画素を固定校正で公称文書mmへ戻し、[#316の上限つき相似補正](M2_DOCUMENT_CORRECTION.md)へ渡すpure計算部。保存画像の合成を先に進める#306の続き。入力側の開発用マッチャーは[#318の固定写像に誘導されたpatch照合](M2_IMAGE_PATCH_CORRECTION.md)に追加した。profileの承認、製品adapterへの接続は含まない。
 
 既存`a0_m2_document_correction`へ`raw_document_correction.cpp`を追加した。公開headerは`a0/m2/raw_document_correction.hpp`。STLとpure rendererだけに依存し、画像を読む処理、OpenCV、校正solver、SDK/WPD、ファイル、時刻には依存しない。独立画像生成器へのlink/source混入も禁止する。
 
