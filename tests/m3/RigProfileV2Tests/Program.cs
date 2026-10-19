@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -153,10 +154,31 @@ internal static class Program
         Reject(()=>new RigOutputRasterV2(0,0,2000000,2000000,254,20000,20000), "total pixel bound");
         Reject(()=>new RigOutputRasterV2(0,0,long.MaxValue,100,65535,1,1), "extreme arithmetic fails exact dimension check without wrapping");
     }
+    private static void TestGeneratedArtifacts(string directory)
+    {
+        var profile = RigProfileV2.Parse(File.ReadAllText(Path.Combine(directory, "profile.json")));
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "calibration-report.json")));
+        var report = document.RootElement;
+        Check(profile.Status == "draft" && profile.Calibration is not null, "generated artifact is a calibrated draft in the unchanged .NET reader");
+        Check(profile.Approval is null && profile.OutputRaster is null && profile.CorrectionEnvelope is null && profile.QualityContract is null,
+            "generated artifact contains no owner approval decisions");
+        Check(profile.FingerprintSha256 == report.GetProperty("profileFingerprintSha256").GetString(), "C++ and .NET canonical fingerprints agree for estimated nonzero coefficients");
+        Check(profile.Calibration!.ProvenanceId == report.GetProperty("provenanceId").GetString() && profile.ProfileId == report.GetProperty("profileId").GetString(),
+            "profile and detailed report identities agree");
+        string sessionHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "session.json"))));
+        Check(sessionHash == report.GetProperty("sessionSha256").GetString(), "independent .NET SHA-256 agrees with the recorded observation bytes");
+        Check(report.GetProperty("result").GetString() == "draft-produced" && report.GetProperty("quality").GetString() == "not-assessed", "detailed report grants no quality approval");
+        Reject(() => profile.ValidateApprovedForUse(Assessment), "generated draft remains blocked at the product-use gate");
+    }
     public static int Main(string[] args)
     {
         try
         {
+            if(args.Length == 2 && args[0] == "--generated-artifacts")
+            {
+                TestGeneratedArtifacts(Path.GetFullPath(args[1]));
+                Console.WriteLine($"generated_draft_dotnet checks={checks} failures=0"); return 0;
+            }
             if(args.Length!=1) throw new ArgumentException("One shared fixture directory is required.");
             string root=Path.GetFullPath(args[0]); var template=File.ReadAllText(Path.Combine(root,"template.json"));
             var draft=File.ReadAllText(Path.Combine(root,"calibrated-draft.json")); var approved=File.ReadAllText(Path.Combine(root,"approved.json"));

@@ -14,6 +14,10 @@ function(check_case name reject body)
     file(MAKE_DIRECTORY "${source_dir}/src/m2")
     file(WRITE "${source_dir}/src/m2/synthetic_pair_render.cpp" "")
     file(WRITE "${source_dir}/src/m2/document_render.cpp" "")
+    file(WRITE "${source_dir}/src/m2/document_correction.cpp" "")
+    file(WRITE "${source_dir}/src/m2/raw_document_correction.cpp" "")
+    file(WRITE "${source_dir}/src/m2/image_patch_correction.cpp" "")
+    file(WRITE "${source_dir}/src/m2/image_patch_seed_selection.cpp" "")
     file(WRITE "${source_dir}/CMakeLists.txt"
         "cmake_minimum_required(VERSION 3.24)\nproject(isolation NONE)\n"
         "include([==[${ISOLATION_MODULE}]==])\n"
@@ -47,6 +51,18 @@ check_case(stitch_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/
 check_case(allowed_synthetic_source FALSE "set_property(TARGET subject PROPERTY SOURCES src/m2/synthetic_pair_render.cpp)")
 check_case(document_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/document_render.cpp)")
 check_case(document_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/document_render.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(correction_direct TRUE "target_link_libraries(subject INTERFACE a0_m2_document_correction)")
+check_case(correction_transitive TRUE "target_link_libraries(subject INTERFACE bridge)\ntarget_link_libraries(bridge INTERFACE a0_m2_document_correction)")
+check_case(correction_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/document_correction.cpp)")
+check_case(correction_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/document_correction.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(raw_correction_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/raw_document_correction.cpp)")
+check_case(raw_correction_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/raw_document_correction.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(patch_correction_direct TRUE "target_link_libraries(subject INTERFACE a0_m2_image_patch_correction)")
+check_case(patch_correction_transitive TRUE "target_link_libraries(subject INTERFACE bridge)\ntarget_link_libraries(bridge INTERFACE a0_m2_image_patch_correction)")
+check_case(patch_correction_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/image_patch_correction.cpp)")
+check_case(patch_correction_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/image_patch_correction.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(seed_selection_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/image_patch_seed_selection.cpp)")
+check_case(seed_selection_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/image_patch_seed_selection.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
 
 # Preserve the original pure-render rule, including flags and late additions.
 check_case(system_default TRUE "a0_defer_to_end_of_configure(a0_assert_no_link_dependency bridge)\ntarget_link_options(bridge INTERFACE /DEFAULTLIB:bcrypt.lib)")

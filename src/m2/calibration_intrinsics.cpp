@@ -1,4 +1,5 @@
 #include "a0/m2/calibration_intrinsics.hpp"
+#include "calibration_planar_pose.hpp"
 
 #include "calibration_exact_predicates.hpp"
 #include "calibration_jacobi.hpp"
@@ -426,6 +427,24 @@ CameraIntrinsicsResult EvaluateCamera(const CalibrationObservationSession& sessi
     return out;
 }
 } // namespace
+
+std::optional<ChartPose> pose_detail::EstimatePlanarPose(
+    std::span<const PlanarObservation> observations, const PinholeIntrinsics& k) {
+    if (observations.size() < kMinimumMappingPoints || !std::isfinite(k.fx) || !std::isfinite(k.fy)
+        || !std::isfinite(k.cx) || !std::isfinite(k.cy) || !(k.fx > 0 && k.fy > 0)) return std::nullopt;
+    std::vector<Correspondence> points;
+    points.reserve(observations.size());
+    for (const auto& point : observations) {
+        if (!std::isfinite(point.x_mm) || !std::isfinite(point.y_mm)
+            || !std::isfinite(point.u) || !std::isfinite(point.v)) return std::nullopt;
+        points.push_back({point.x_mm, point.y_mm, point.u, point.v});
+    }
+    const auto h = FitHomography(points);
+    if (!h) return std::nullopt;
+    const auto pose = EstimatePose(k, *h);
+    if (!pose || !AllInFront(*pose, points)) return std::nullopt;
+    return pose;
+}
 
 UndistortedIntrinsicsResult EstimateUndistortedIntrinsics(const CalibrationObservationSession& session,
     const UndistortedIntrinsicsPolicy& policy) {

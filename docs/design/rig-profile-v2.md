@@ -204,8 +204,8 @@ us = fx * xd + cx;   vs = fy * yd + cy   # 生 pixel
 | `/calibration/chartId`、`/provenanceId` | 文字列 | | | 識別子 |
 | `/calibration/measuredAt` | 文字列 | | | UTC、秒まで、`Z` |
 | `/calibration/tool/toolId`、`/tool/version` | 文字列 | | | 校正ツールの識別 |
-| `/calibration/inputSha256/CAM-A`、`/CAM-B` | 文字列 | | | 校正に使った画像の SHA-256（画像そのものは置かない） |
-| `/calibration/fitResidualPixels/CAM-A/rms`、`/max`、`/CAM-B/…` | 数 | | | 基準点の再投影残差（カメラの pixel）。測った値で、閾値ではない |
+| `/calibration/inputSha256/CAM-A`、`/CAM-B` | 文字列 | | | 固定写像を決めた各reference画像のSHA-256。全学習・検証画像の来歴はprovenanceIdで結ぶ詳細レポートへ（2026-10-15所有者決定、#313） |
+| `/calibration/fitResidualPixels/CAM-A/rms`、`/max`、`/CAM-B/…` | 数 | | | 各referenceのusedPointIdsのraw pixel fit残差。学習・validationとは別集計。測った値で、閾値ではない（#313） |
 | `/calibration/rigMeasurements/baselineMm`、`/overlapMm` | 数 | null 可 | 必須 | 手で測ったリグの値（#276 の実測項目） |
 | `/calibration/rigMeasurements/cameraToDocumentMm/CAM-A`、`/CAM-B` | 数 | null 可 | 必須 | 同上 |
 | `/calibration/rigMeasurements/lensFocalLengthMm/CAM-A`、`/CAM-B` | 数 | null 可 | 必須 | 同上 |

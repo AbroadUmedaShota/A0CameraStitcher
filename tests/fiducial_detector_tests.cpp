@@ -13,13 +13,18 @@
 // the detected observations as an observation session through the lens
 // estimator (#290), compared with the true mapping.
 //
-// Every image is written under a throw-away folder in the system temp
-// directory. No file is written in the repository and no camera is touched.
+// Ordinary contracts use a throw-away system temp folder. The explicit full
+// calibration mode retains synthetic artifacts in a new caller-named folder.
+// No camera is touched.
 
 #include "a0/m2/calibration_lens.hpp"
 #include "a0/m2/calibration_observation_session.hpp"
 #include "a0/m2/fiducial_detector.hpp"
 #include "a0/m2/synthetic_pair.hpp"
+#ifdef A0_TEST_DRAFT_CALIBRATOR
+#include "a0/m2/draft_calibration_artifacts.hpp"
+#include "a0/m2/rig_profile_v2.hpp"
+#endif
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -36,6 +41,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -173,11 +179,12 @@ synth::CameraSpec MakeCamera(const std::string& alias, const CameraModel& model,
 }
 
 synth::PairSpec MakeSpec(std::vector<synth::CameraSpec> cameras, const double jpeg_quality,
-    const synth::ChromaSubsampling subsampling, const std::uint64_t seed) {
+    const synth::ChromaSubsampling subsampling, const std::uint64_t seed,
+    const std::uint32_t width = kWidth, const std::uint32_t height = kHeight) {
     synth::PairSpec spec;
     spec.seed = seed;
-    spec.image_width_px = kWidth;
-    spec.image_height_px = kHeight;
+    spec.image_width_px = width;
+    spec.image_height_px = height;
     spec.supersample = 2;
     spec.jpeg = {jpeg_quality, subsampling};
     spec.chart = {1189.0, 841.0, 20.0, 10.0, 0.3, 50.0, 7.0, 0.0875, 0.2};
@@ -221,14 +228,15 @@ std::optional<synth::Vec2> TrueCentre(const synth::CameraSpec& camera, const fid
     return p;
 }
 
-bool Inside(const synth::Vec2& p, const double margin) {
-    return p.x >= margin && p.y >= margin && p.x <= kWidth - 1 - margin && p.y <= kHeight - 1 - margin;
+bool Inside(const synth::Vec2& p, const double margin, const std::uint32_t width = kWidth, const std::uint32_t height = kHeight) {
+    return p.x >= margin && p.y >= margin && p.x <= width - 1 - margin && p.y <= height - 1 - margin;
 }
 
 constexpr double kAnchorRoundingPx = 12.0;
 constexpr double kAnchorRadiusPx = 30.0;
 
-std::vector<fid::LatticeAnchor> OperatorAnchors(const synth::CameraSpec& camera, const fid::ChartDefinition& chart) {
+std::vector<fid::LatticeAnchor> OperatorAnchors(const synth::CameraSpec& camera, const fid::ChartDefinition& chart,
+    const std::uint32_t width = kWidth, const std::uint32_t height = kHeight) {
     // The visible node nearest the picture centre, and the nodes two steps right and two steps down of it.
     std::optional<std::pair<std::uint32_t, std::uint32_t>> best;
     double best_distance = 1e30;
@@ -237,8 +245,8 @@ std::vector<fid::LatticeAnchor> OperatorAnchors(const synth::CameraSpec& camera,
             const auto a = TrueCentre(camera, chart, column, row);
             const auto b = TrueCentre(camera, chart, column + 2, row);
             const auto c = TrueCentre(camera, chart, column, row + 2);
-            if (!a || !b || !c || !Inside(*a, 100) || !Inside(*b, 100) || !Inside(*c, 100)) continue;
-            const double distance = std::hypot(a->x - kWidth / 2.0, a->y - kHeight / 2.0);
+            if (!a || !b || !c || !Inside(*a, 100, width, height) || !Inside(*b, 100, width, height) || !Inside(*c, 100, width, height)) continue;
+            const double distance = std::hypot(a->x - width / 2.0, a->y - height / 2.0);
             if (distance < best_distance) { best_distance = distance; best = {{column, row}}; }
         }
     }
@@ -311,6 +319,13 @@ void CheckScore(const Score& score, const Tolerances& tolerance, const std::stri
     Check(score.error.max <= tolerance.max_px, label + ": max within the test tolerance");
 }
 
+void CheckVerified(const fid::ViewDetection& detection, const std::string& label) {
+    Check(detection.failure.empty(), label + ": detection succeeds (" + detection.failure + ")");
+    Check(detection.identity.result == "verified", label + ": chart identity is verified");
+    Check(detection.identity.cells_examined >= 8 && detection.identity.gray_cells_examined >= 2,
+        label + ": verification measured sufficient chart cells and grey patches");
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: two lens models and the views of each.
 
@@ -353,9 +368,9 @@ struct JobView {
 };
 
 std::string JobJson(const fid::ChartDefinition& chart, const std::vector<JobView>& views, const std::string& extra_key = {},
-    std::uint32_t width = kWidth, std::uint32_t height = kHeight) {
+    std::uint32_t width = kWidth, std::uint32_t height = kHeight, const std::string& measured_at = "2026-10-14T00:00:00Z") {
     std::string text = "{\"schema\":\"a0.fiducial-detector-job/1\",\"sessionId\":\"synthetic-fiducial-session\",\"chartId\":\"synthetic-chart\","
-                       "\"measuredAtUtc\":\"2026-10-14T00:00:00Z\"";
+                       "\"measuredAtUtc\":\"" + measured_at + '"';
     text += ",\"chart\":{\"columns\":" + std::to_string(chart.columns) + ",\"rows\":" + std::to_string(chart.rows)
         + ",\"originXMm\":" + Number(chart.origin_x_mm) + ",\"originYMm\":" + Number(chart.origin_y_mm) + ",\"pitchMm\":" + Number(chart.pitch_mm) + '}';
     text += ",\"cameras\":{";
@@ -401,7 +416,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         const auto gray = RenderGray(spec, 0);
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), "stage 1: detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, "stage 1");
         CheckScore(ScoreDetection(detection, camera, chart), kUndistorted, "stage 1, no distortion, uncompressed");
     }
 
@@ -412,7 +427,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         const auto gray = RenderGray(spec, 0);
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), "stage 2: detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, "stage 2");
         CheckScore(ScoreDetection(detection, camera, chart), kDistorted, "stage 2, lens distortion, uncompressed");
     }
 
@@ -436,7 +451,7 @@ void TestDetectionStages(const std::filesystem::path& temp) {
         Check(gray.cols == static_cast<int>(kWidth) && gray.rows == static_cast<int>(kHeight), std::string("stage 3 ") + c.name + ": the JPEG decodes at the right size");
         const auto anchors = OperatorAnchors(camera, chart);
         const auto detection = fid::DetectView(gray, chart, anchors, params);
-        Check(detection.failure.empty(), std::string("stage 3 ") + c.name + ": detection succeeds (" + detection.failure + ")");
+        CheckVerified(detection, std::string("stage 3 ") + c.name);
         Info(std::string("stage 3 ") + c.name + ": JPEG " + std::to_string(bytes.size()) + " bytes");
         CheckScore(ScoreDetection(detection, camera, chart), c.tolerance, std::string("stage 3, lens distortion, noise, JPEG ") + c.name);
         ++index;
@@ -497,28 +512,104 @@ void TestFailurePaths() {
         Check(fid::DetectView(blank, chart, anchors, params).failure == "no-rings", "a blank image has no rings");
     }
     {
-        // Identity is the operator's responsibility: anchors shifted by one column give a
-        // consistent but wrong lattice. The test measures it against the truth; the
-        // detector cannot know.
+        // A coherent shift used to produce plausible observations with wrong IDs.
         auto shifted = anchors;
         for (auto& a : shifted) a.column += 1;
         const auto detection = fid::DetectView(gray, chart, shifted, params);
-        if (detection.failure.empty()) {
-            const auto score = ScoreDetection(detection, camera, chart);
-            Check(score.wrong_identity > 0, "anchors shifted by one lattice step give wrong identities, which only the truth reveals");
-        }
+        Check(detection.failure == "identity-mismatch" && detection.nodes.empty(),
+            "anchors shifted by one lattice step are rejected without observations");
     }
     {
         auto mirrored = anchors;
         std::swap(mirrored[1].column, mirrored[2].column);
         std::swap(mirrored[1].row, mirrored[2].row);
         const auto detection = fid::DetectView(gray, chart, mirrored, params);
-        // Two anchors with swapped identities describe a mirrored lattice. It is either
-        // refused or wrong, and only the truth can say which; it is never right.
-        const bool refused = !detection.failure.empty();
-        const bool wrong = !refused && ScoreDetection(detection, camera, chart).wrong_identity > 0;
-        Info("mirrored anchors: " + std::string(refused ? "refused (" + detection.failure + ")" : "accepted with wrong identities"));
-        Check(refused || wrong, "anchors with swapped identities never give a correct lattice");
+        Check(detection.failure == "anchor-mirrored" && detection.nodes.empty(),
+            "anchors with swapped identities are rejected without observations");
+    }
+}
+
+// The oracle is the chart's printed identity, not reprojection residuals: a
+// translated or reflected chart can fit a wrong pose with a tiny residual.
+void TestIdentityChecks(const std::filesystem::path& temp) {
+    const auto camera = MakeCamera("CAM-A", kModelA, {15, 5, 0, 560, 420, 560}, false);
+    const auto spec = MakeSpec({camera}, 0.95, synth::ChromaSubsampling::s444, 51);
+    const auto chart = ChartOf(spec.chart);
+    const auto gray = RenderGray(spec, 0);
+    const auto anchors = OperatorAnchors(camera, chart);
+    CheckVerified(fid::DetectView(gray, chart, anchors, fid::DetectorParams{}), "identity baseline");
+
+    struct WrongAnchors { std::string name; std::vector<fid::LatticeAnchor> anchors; std::string failure; };
+    std::vector<WrongAnchors> wrong;
+    for (const auto& [dc, dr] : std::array<std::pair<int, int>, 6>{{{1, 0}, {0, 1}, {1, 1}, {-1, 0}, {0, -1}, {-1, -1}}}) {
+        auto shifted = anchors;
+        for (auto& a : shifted) {
+            a.column = static_cast<std::uint32_t>(static_cast<int>(a.column) + dc);
+            a.row = static_cast<std::uint32_t>(static_cast<int>(a.row) + dr);
+        }
+        wrong.push_back({"shift " + std::to_string(dc) + "," + std::to_string(dr), shifted, "identity-mismatch"});
+    }
+    auto mirrored = anchors;
+    std::swap(mirrored[1].column, mirrored[2].column);
+    std::swap(mirrored[1].row, mirrored[2].row);
+    wrong.push_back({"swap", mirrored, "anchor-mirrored"});
+    auto typo = anchors;
+    ++typo[1].column;
+    wrong.push_back({"one-node typo", typo, ""});
+    auto cycled = anchors;
+    for (std::size_t i = 0; i < anchors.size(); ++i) {
+        cycled[i].column = anchors[(i + 1) % anchors.size()].column;
+        cycled[i].row = anchors[(i + 1) % anchors.size()].row;
+    }
+    wrong.push_back({"cycle", cycled, ""});
+
+    // First three anchors have the correct handedness. A later triple must
+    // still be checked; only checking the first triple would miss this.
+    auto four = anchors;
+    const auto fourth = *TrueCentre(camera, chart, anchors[1].column, anchors[2].row);
+    four.push_back({anchors[0].column - 1, anchors[2].row,
+        std::round(fourth.x / kAnchorRoundingPx) * kAnchorRoundingPx,
+        std::round(fourth.y / kAnchorRoundingPx) * kAnchorRoundingPx, kAnchorRadiusPx});
+    wrong.push_back({"later mirrored triple", four, "anchor-mirrored"});
+
+    const auto image = temp / "identity.png";
+    Check(cv::imwrite(image.string(), gray), "identity fixture is written");
+    for (const auto& c : wrong) {
+        const auto detection = fid::DetectView(gray, chart, c.anchors, fid::DetectorParams{});
+        Info(c.name + ": " + detection.failure + ", cells " + std::to_string(detection.identity.cells_examined)
+            + ", mismatched " + std::to_string(detection.identity.cells_mismatched)
+            + ", grey mismatched " + std::to_string(detection.identity.gray_cells_mismatched));
+        Check(!detection.failure.empty() && detection.nodes.empty(), c.name + ": no wrong observations escape");
+        if (!c.failure.empty()) Check(detection.failure == c.failure, c.name + ": expected refusal reason");
+        else Check(detection.failure == "identity-mismatch" || detection.failure == "identity-unverifiable",
+            c.name + ": the identity check rejects the otherwise valid anchor input");
+        if (c.name == "shift 1,1" || c.name == "shift -1,-1") {
+            Check(detection.identity.gray_cells_mismatched > 0,
+                c.name + ": grey levels catch the diagonal shift invisible to the pattern kind");
+        }
+        // A reference observation is the next stage's public input. It must
+        // never be emitted on a bad identity, even when the geometry fits.
+        const auto result = fid::RunJob(JobJson(chart, {{"reference-A", "CAM-A", "reference", "identity.png", c.anchors}}), temp);
+        Check(!result.ok && result.session_json.empty(), c.name + ": no reference session is emitted");
+        Check(result.report_json.find("\"status\":\"" + detection.failure + "\"") != std::string::npos
+            && result.report_json.find("\"identity\":{") != std::string::npos,
+            c.name + ": refusal and identity evidence are reported");
+    }
+    {
+        fid::DetectorParams params;
+        params.identity_min_cells = static_cast<std::uint32_t>(chart.NodeCount() + 1);
+        const auto detection = fid::DetectView(gray, chart, anchors, params);
+        Check(detection.failure == "identity-unverifiable" && detection.nodes.empty(),
+            "insufficient identity evidence refuses observations");
+    }
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        fid::DetectorParams params;
+        if (invalid == 0) params.identity_max_mismatch_fraction = std::numeric_limits<double>::quiet_NaN();
+        if (invalid == 1) params.identity_min_gray_cells = 0;
+        if (invalid == 2) params.identity_line_share = std::numeric_limits<double>::infinity();
+        bool rejected = false;
+        try { (void)fid::DetectView(gray, chart, anchors, params); } catch (const std::invalid_argument&) { rejected = true; }
+        Check(rejected, "invalid identity parameters cannot disable verification " + std::to_string(invalid));
     }
 }
 
@@ -706,6 +797,18 @@ void TestEndToEnd(const std::filesystem::path& temp, const std::filesystem::path
         }
         Check(run(job_file, out_ok) == 2, "the executable refuses to overwrite an earlier output");
 
+        // Either pre-existing output blocks the whole job. In particular a
+        // report collision must not leave a new, apparently usable session.
+        for (const auto* existing : {"session.json", "detection-report.json"}) {
+            const auto collision = temp / (std::string("collision-") + existing);
+            std::filesystem::create_directories(collision);
+            { std::ofstream file(collision / existing, std::ios::binary); file << "sentinel"; }
+            Check(run(job_file, collision) == 2, "either existing output blocks the job");
+            Check(ReadText(collision / existing) == "sentinel", "existing output bytes are unchanged");
+            const auto* other = std::string(existing) == "session.json" ? "detection-report.json" : "session.json";
+            Check(!std::filesystem::exists(collision / other), "collision leaves no second output");
+        }
+
         auto short_views = job_views;
         short_views.resize(2);
         short_views[0].anchors.pop_back();
@@ -754,15 +857,197 @@ void TestEndToEnd(const std::filesystem::path& temp, const std::filesystem::path
     }
 }
 
+#ifdef A0_TEST_DRAFT_CALIBRATOR
+// Explicit, retained-artifact integration run (#314). Ground truth belongs to
+// this test only. The public detector receives JPEGs and coarse operator hints;
+// the public writer receives only the resulting session and explicit job.
+void TestFullResolutionCalibration(const std::filesystem::path& output) {
+    constexpr std::uint32_t width = 7360, height = 4912;
+    // Test tolerances chosen before this run; never optical acceptance limits.
+    constexpr Tolerances tolerance{0.5, 1.5};
+    const std::array<CameraModel, 2> models{{
+        {{6200, 6250, 3679.5, 2455.5}, {-.04, .008, 0, .0003, -.0002}},
+        {{6230, 6190, 3684.5, 2451.5}, {-.03, .006, 0, -.0002, .0001}}
+    }};
+    const std::array<NamedView, 9> views{{
+        {"T1", "training", {25, 7, 82, 290, 410, 840}, {-22, 8, 97, 880, 420, 850}},
+        {"T2", "training", {-25, 6, 100, 320, 400, 850}, {24, -8, 80, 860, 430, 840}},
+        {"T3", "training", {7, 25, 72, 280, 430, 830}, {-8, 25, 110, 910, 400, 860}},
+        {"T4", "training", {-6, -25, 112, 330, 390, 850}, {25, 6, 75, 870, 440, 850}},
+        {"T5", "training", {18, 18, 130, 300, 440, 840}, {-18, 18, 120, 900, 420, 840}},
+        {"T6", "training", {-20, -14, 62, 310, 420, 860}, {20, -14, 65, 890, 410, 850}},
+        {"V1", "validation", {12, -20, 96, 300, 420, 840}, {20, 12, 105, 880, 390, 850}},
+        {"V2", "validation", {-10, 16, 70, 320, 400, 850}, {-12, -20, 85, 900, 430, 840}},
+        {"reference", "reference", {0, 0, 90, 300, 420.5, 840}, {0, 0, 90, 890, 420.5, 840}}
+    }};
+    auto write = [&](const char* name, const std::string& value) {
+        std::ofstream file(output / name, std::ios::binary);
+        file << value;
+        if (!file) throw std::runtime_error("cannot retain integration artifact");
+    };
+    const auto chart = ChartOf(MakeSpec({}, .95, synth::ChromaSubsampling::s444, 1).chart);
+    std::vector<JobView> job_views;
+    std::map<std::string, synth::CameraSpec> truth_cameras;
+    std::size_t index = 0;
+    for (const auto& view : views) {
+        const std::array<synth::CameraSpec, 2> cameras{
+            MakeCamera("CAM-A", models[0], view.pose_a, true),
+            MakeCamera("CAM-B", models[1], view.pose_b, true)};
+        auto spec = MakeSpec({cameras[0], cameras[1]}, .95, synth::ChromaSubsampling::s444, 31400 + index, width, height);
+        spec.supersample = 1;
+        const std::string folder = "view-" + std::string(view.id);
+        Info("full-resolution generate " + folder);
+        std::cout.flush();
+        (void)synth::GeneratePair(spec, {output / folder, 4});
+        for (std::size_t c = 0; c < 2; ++c) {
+            const std::string prefix = c == 0 ? "A-" : "B-";
+            const std::string alias = c == 0 ? "CAM-A" : "CAM-B";
+            const auto id = prefix + view.id;
+            job_views.push_back({id, alias, view.role, folder + '/' + alias + "/original.jpg",
+                OperatorAnchors(cameras[c], chart, width, height)});
+            truth_cameras.emplace(id, cameras[c]);
+        }
+        ++index;
+    }
+    const auto detection_job = JobJson(chart, job_views, {}, width, height, "2000-01-01T00:00:00Z");
+    write("detection-job.json", detection_job);
+    Info("full-resolution detect 18 JPEGs");
+    std::cout.flush();
+    const auto detected = fid::RunJob(detection_job, output);
+    write("detection-report.json", detected.report_json);
+    Check(detected.ok && !detected.session_json.empty(), "all full-resolution JPEGs resolve and emit a session");
+    if (!detected.ok) return;
+    write("session.json", detected.session_json);
+    const auto session = cal::CalibrationObservationSession::Parse(detected.session_json);
+    Check(session.Views().size() == 18, "six training, two validation and one reference per camera retained");
+    std::string scores = "{\"schema\":\"a0.synthetic-full-calibration-test/1\",\"quality\":\"not-assessed\","
+        "\"testTolerancePixels\":{\"rms\":0.5,\"max\":1.5},\"detection\":[";
+    bool first = true;
+    for (const auto& view : session.Views()) {
+        Stats stats;
+        std::size_t wrong = 0;
+        for (const auto& observation : view.observations) {
+            if (observation.state != cal::ObservationState::Detected) continue;
+            const auto* point = session.FindChartPoint(observation.point_id);
+            const auto truth = synth::ProjectDocumentPoint(truth_cameras.at(view.id), {point->x_mm, point->y_mm});
+            if (!truth) { ++wrong; continue; }
+            const double error = std::hypot(observation.pixel->x - truth->x, observation.pixel->y - truth->y);
+            stats.Add(error);
+            if (error > 5) ++wrong;
+        }
+        Check(wrong == 0 && stats.n >= 40 && stats.Rms() <= tolerance.rms_px && stats.max <= tolerance.max_px,
+            view.id + ": detected point identities/positions agree with independent truth");
+        Info(view.id + " detection: n=" + std::to_string(stats.n) + " rms=" + Fixed(stats.Rms()) + " max=" + Fixed(stats.max));
+        if (!first) scores += ',';
+        first = false;
+        scores += "{\"viewId\":\"" + view.id + "\",\"pointCount\":" + std::to_string(stats.n)
+            + ",\"wrongIdentityCount\":" + std::to_string(wrong) + ",\"rmsPixels\":" + Number(stats.Rms()) + ",\"maxPixels\":" + Number(stats.max) + '}';
+    }
+    // Chart mm already coincide with document mm; no learned pose is supplied.
+    const std::string job = R"({"schemaVersion":"a0.draft-calibration-job.v1","profileId":"synthetic-full-draft","provenanceId":"synthetic-full-provenance","measuredAt":"2000-01-02T00:00:00Z","documentPlane":{"orientation":"landscape","cameraOrder":"CAM-A-left-CAM-B-right"},"referencePair":{"CAM-A":"A-reference","CAM-B":"B-reference"},"referencePlacement":{"angleRadians":0,"translationXMm":0,"translationYMm":0,"coplanarConfirmed":true},"numericalPolicy":{"minimumViews":2,"relativeSingularCutoff":0.01,"maxIterations":100,"relativeCostTolerance":1e-10,"relativeStepTolerance":1e-12,"initialDamping":0.001,"maxUndistortionIterations":40,"undistortionTolerancePixels":1e-9},"rigMeasurements":{"baselineMm":null,"overlapMm":null,"cameraToDocumentMm":{"CAM-A":null,"CAM-B":null},"lensFocalLengthMm":{"CAM-A":null,"CAM-B":null}}})";
+    write("job.json", job);
+    Info("full-resolution estimate fixed mapping and write draft/report");
+    std::cout.flush();
+    const auto artifacts = cal::RunDraftCalibrationJob(detected.session_json, job);
+    write("calibration-report.json", artifacts.report_json);
+    Check(artifacts.ok && !artifacts.profile_json.empty(), "JPEG observations produce both reference mappings and independently evaluated validation views");
+    if (!artifacts.ok) { write("truth-comparison.json", scores + "],\"draftProduced\":false}"); return; }
+    write("profile.json", artifacts.profile_json);
+    const auto profile = a0::m2::RigProfileV2::Parse(artifacts.profile_json);
+    Check(profile.IsCalibrated() && !profile.IsApproved(), "existing profile reader accepts only a calibrated draft");
+    using namespace a0::m2::render;
+    // Deliberately low-resolution A0 evaluation preview; no product raster or
+    // optical threshold is being selected by this synthetic test.
+    const OutputRaster raster{{0, 0, 1189000, 841000}, 4, 188, 133};
+    const auto parameters = profile.ValidateCalibrationForEvaluation(raster, Resampling::bilinear);
+    scores += "],\"draftProduced\":true,\"referenceMapping\":[";
+    for (std::size_t c = 0; c < 2; ++c) {
+        Stats stats;
+        bool projects = true;
+        const auto& projection = c == 0 ? parameters.camera_a : parameters.camera_b;
+        const std::string id = c == 0 ? "A-reference" : "B-reference";
+        // Dense grid DIFFERENT from detected lattice centres. This tests the
+        // serialized profile's production projection against generator truth.
+        for (double y = 11.3; y < 841; y += 17.1) for (double x = 13.7; x < 1189; x += 17.3) {
+            const auto truth = synth::ProjectDocumentPoint(truth_cameras.at(id), {x, y});
+            if (!truth || !Inside(*truth, 30, width, height)) continue;
+            Point estimated;
+            if (!TryProjectDocument(projection, {x, y}, estimated)) { projects = false; continue; }
+            stats.Add(std::hypot(estimated.x - truth->x, estimated.y - truth->y));
+        }
+        Check(projects && stats.n > 500 && stats.Rms() <= tolerance.rms_px && stats.max <= tolerance.max_px,
+            id + ": serialized fixed mapping agrees with independent dense-grid truth");
+        Info(id + " mapping: n=" + std::to_string(stats.n) + " rms=" + Fixed(stats.Rms()) + " max=" + Fixed(stats.max));
+        if (c) scores += ',';
+        scores += "{\"viewId\":\"" + id + "\",\"pointCount\":" + std::to_string(stats.n)
+            + ",\"rmsPixels\":" + Number(stats.Rms()) + ",\"maxPixels\":" + Number(stats.max);
+        const auto& k = projection.intrinsics;
+        const auto& d = projection.distortion;
+        const auto& model = models[c];
+        const std::array<double, 9> estimated{k.fx_pixels, k.fy_pixels, k.cx_pixels, k.cy_pixels, d.k1, d.k2, d.k3, d.p1, d.p2};
+        const std::array<double, 9> expected{model.k.fx, model.k.fy, model.k.cx, model.k.cy,
+            model.d.k1, model.d.k2, model.d.k3, model.d.p1, model.d.p2};
+        const std::array<const char*, 9> names{"fxPixels", "fyPixels", "cxPixels", "cyPixels", "k1", "k2", "k3", "p1", "p2"};
+        scores += ",\"parameters\":{";
+        for (std::size_t p = 0; p < names.size(); ++p) {
+            if (p) scores += ',';
+            scores += std::string("\"") + names[p] + "\":{\"truth\":" + Number(expected[p])
+                + ",\"estimated\":" + Number(estimated[p]) + ",\"difference\":" + Number(estimated[p] - expected[p]) + '}';
+        }
+        scores += "}}";
+    }
+    write("truth-comparison.json", scores + "]}");
+    auto decode = [&](const char* alias) {
+        const auto bytes = ReadText(output / "view-reference" / alias / "original.jpg");
+        const cv::Mat encoded(1, static_cast<int>(bytes.size()), CV_8UC1, const_cast<char*>(bytes.data()));
+        const auto decoded = cv::imdecode(encoded, cv::IMREAD_COLOR | cv::IMREAD_IGNORE_ORIENTATION);
+        if (decoded.cols != width || decoded.rows != height || !decoded.isContinuous()) throw std::runtime_error("full reference JPEG decode");
+        return BgrImage{width, height, std::vector<std::uint8_t>(decoded.data, decoded.data + decoded.total() * decoded.elemSize())};
+    };
+    const auto a = decode("CAM-A"), b = decode("CAM-B");
+    const auto rendered = RenderDocumentPair(a, b, parameters);
+    Check(rendered.image.width == 188 && rendered.image.height == 133 && rendered.seam_navigation.available,
+        "real JPEG buffers compose the whole A0 evaluation raster with overlap");
+    const cv::Mat preview(133, 188, CV_8UC3, const_cast<std::uint8_t*>(rendered.image.bgr.data()));
+    Check(cv::imwrite((output / "evaluation-preview.png").string(), preview), "evaluation preview retained");
+    Check(std::filesystem::exists(output / "view-reference/CAM-A/original.jpg")
+        && std::filesystem::exists(output / "view-reference/CAM-B/original.jpg"), "both synthetic reference originals retained");
+}
+#endif
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
+#ifdef A0_TEST_DRAFT_CALIBRATOR
+    if (argc == 3 && std::string(argv[1]) == "--full-resolution-calibration") {
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            const std::filesystem::path output(argv[2]);
+            // Never remove an existing directory, even an empty one. Failed
+            // runs retain their diagnostics and inputs in their new directory.
+            if (!std::filesystem::create_directory(output)) {
+                std::cerr << "output must be a new directory with an existing parent\n";
+                return 2;
+            }
+            TestFullResolutionCalibration(output);
+        } catch (const std::exception& error) {
+            std::cerr << "FAIL: " << error.what() << '\n';
+            return 1;
+        }
+        Info("full-resolution elapsed " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()) + " s");
+        std::cout << "checks=" << checks << " failures=" << failures << '\n';
+        return failures == 0 ? 0 : 1;
+    }
+#endif
     // Usage: m2_fiducial_detector_contracts [--exe <A0CameraStitcher.FiducialDetector.exe>]
     std::filesystem::path executable;
+    bool identity_only = false;
     if (argc == 3 && std::string(argv[1]) == "--exe") {
         executable = argv[2];
+    } else if (argc == 2 && std::string(argv[1]) == "--identity-only") {
+        identity_only = true;
     } else if (argc != 1) {
-        std::cerr << "usage: m2_fiducial_detector_contracts [--exe <detector executable>]\n";
+        std::cerr << "usage: m2_fiducial_detector_contracts [--exe <detector executable> | --identity-only]\n";
         return 2;
     }
     const auto temp = std::filesystem::temp_directory_path() / ("a0_fiducial_detector_test_" + std::to_string(GetCurrentProcessId()));
@@ -772,9 +1057,12 @@ int main(const int argc, char* argv[]) {
     try {
         const auto started = std::chrono::steady_clock::now();
         Info(std::string("OpenCV ") + CV_VERSION);
-        TestDetectionStages(temp);
-        TestFailurePaths();
-        TestEndToEnd(temp, executable);
+        TestIdentityChecks(temp);
+        if (!identity_only) {
+            TestDetectionStages(temp);
+            TestFailurePaths();
+            TestEndToEnd(temp, executable);
+        }
         Info("elapsed " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()) + " s");
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';

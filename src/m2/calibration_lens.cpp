@@ -1,6 +1,9 @@
 #include "a0/m2/calibration_lens.hpp"
+#include "a0/m2/reference_document_mapping.hpp"
 
 #include "calibration_lens_model.hpp"
+#include "calibration_planar_pose.hpp"
+#include "calibration_exact_predicates.hpp"
 
 #include <algorithm>
 #include <array>
@@ -492,6 +495,156 @@ LensIntrinsicsResult EstimateLensIntrinsics(const CalibrationObservationSession&
     return LensIntrinsicsResult{policy.observation_model, DistortionModel::BrownConradyK1K2K3P1P2, {
         EvaluateCamera(session, CameraAlias::CamA, policy, std::move(initialization.cameras[0])),
         EvaluateCamera(session, CameraAlias::CamB, policy, std::move(initialization.cameras[1]))}};
+}
+
+namespace {
+
+std::optional<PixelPosition> UndistortReferencePixel(const PinholeIntrinsics& k,
+    const BrownConradyDistortion& d, double u, double v, const ReferenceMappingPolicy& policy) {
+    const double xd = (u - k.cx) / k.fx, yd = (v - k.cy) / k.fy;
+    double x = xd, y = yd;
+    // Check the final iterate too: the limit counts Newton updates.
+    for (std::uint32_t iteration = 0; iteration <= policy.max_undistortion_iterations; ++iteration) {
+        if (!std::isfinite(x) || !std::isfinite(y)) return std::nullopt;
+        const auto projected = lens_detail::DistortNormalized(d, x, y);
+        const double du = projected.x - xd, dv = projected.y - yd;
+        const auto derivative = lens_detail::DistortionDerivativesAt(d, x, y);
+        const double determinant = derivative.a * derivative.c - derivative.b * derivative.b;
+        if (!std::isfinite(determinant) || !(determinant > 0.0)) return std::nullopt;
+        if (std::isfinite(du) && std::isfinite(dv)
+            && std::abs(du * k.fx) <= policy.undistortion_tolerance_pixels
+            && std::abs(dv * k.fy) <= policy.undistortion_tolerance_pixels) {
+            const double radial_slope = lens_detail::MinimumRadialSlope(d.k1, d.k2, d.k3, x * x + y * y);
+            const PixelPosition point{k.fx * x + k.cx, k.fy * y + k.cy};
+            if (!std::isfinite(radial_slope) || !(radial_slope > 0.0)
+                || !std::isfinite(point.x) || !std::isfinite(point.y)) return std::nullopt;
+            return point;
+        }
+        if (iteration == policy.max_undistortion_iterations) break;
+        x -= (derivative.c * du - derivative.b * dv) / determinant;
+        y -= (derivative.a * dv - derivative.b * du) / determinant;
+    }
+    return std::nullopt;
+}
+
+std::optional<Matrix3> ComposeReferenceMapping(const PinholeIntrinsics& k, const ChartPose& pose,
+    const DocumentPlanePlacement& placement) {
+    const Matrix3 kk{k.fx, 0, k.cx, 0, k.fy, k.cy, 0, 0, 1};
+    const auto& r = pose.rotation;
+    const auto& t = pose.translation_mm;
+    const Matrix3 plane{r[0], r[1], t[0], r[3], r[4], t[1], r[6], r[7], t[2]};
+    const double c = std::cos(placement.angle_radians), s = std::sin(placement.angle_radians);
+    const Matrix3 transform{c, -s, placement.translation_x_mm, s, c, placement.translation_y_mm, 0, 0, 1};
+    auto h = Multiply(Multiply(kk, plane), transform);
+    for (const double value : h) if (!std::isfinite(value)) return std::nullopt;
+    if (h[8] == 0.0 || !exact_detail::ExactNonzeroDeterminant(h)) return std::nullopt;
+    const double scale = h[8];
+    for (auto& value : h) {
+        value /= scale;
+        if (!std::isfinite(value)) return std::nullopt;
+    }
+    h[8] = 1.0;
+    if (!exact_detail::ExactNonzeroDeterminant(h)) return std::nullopt;
+    return h;
+}
+
+std::optional<FixedDocumentCameraMapping> MapReference(const CalibrationObservationSession& session,
+    const SessionView& view, const CameraLensResult& lens, const DocumentPlanePlacement& placement,
+    const ReferenceMappingPolicy& policy, ReferenceViewMappingResult& result) {
+    if (lens.status != LensStatus::LensIntrinsicsEstimated || !lens.intrinsics || !lens.distortion) {
+        result.outcome = ReferenceMappingOutcome::LensUnavailable;
+        return std::nullopt;
+    }
+    const auto raw = Gather(session, view, view.used_point_ids);
+    if (!raw || raw->size() < kMinimumMappingPoints) {
+        result.outcome = ReferenceMappingOutcome::PoseUnavailable;
+        return std::nullopt;
+    }
+    const auto& k = *lens.intrinsics;
+    const auto& d = *lens.distortion;
+    std::vector<pose_detail::PlanarObservation> undistorted;
+    undistorted.reserve(raw->size());
+    for (const auto& point : *raw) {
+        const auto pixel = UndistortReferencePixel(k, d, point.u, point.v, policy);
+        if (!pixel) {
+            result.outcome = ReferenceMappingOutcome::UndistortionUnavailable;
+            return std::nullopt;
+        }
+        undistorted.push_back({point.x, point.y, pixel->x, pixel->y});
+    }
+    const auto seed = pose_detail::EstimatePlanarPose(undistorted, k);
+    if (!seed) {
+        result.outcome = ReferenceMappingOutcome::PoseUnavailable;
+        return std::nullopt;
+    }
+    const auto refined = RunLevenbergMarquardt(Parameters{k, d, {*seed}}, {*raw}, policy.lens, true);
+    if (!refined) {
+        result.outcome = ReferenceMappingOutcome::PoseUnavailable;
+        return std::nullopt;
+    }
+    result.solver = refined->record;
+    if (refined->record.stop_reason == SolverStopReason::MaximumIterations
+        || refined->record.stop_reason == SolverStopReason::NumericalFailure) {
+        result.outcome = refined->record.stop_reason == SolverStopReason::MaximumIterations
+            ? ReferenceMappingOutcome::SolverNonconvergence : ReferenceMappingOutcome::NumericalFailure;
+        return std::nullopt;
+    }
+    const auto& pose = refined->parameters.poses[0];
+    ResidualSum residual;
+    const Parameters fixed{k, d, {pose}};
+    if (!Accumulate(residual, fixed, pose, *raw)) {
+        result.outcome = ReferenceMappingOutcome::NumericalFailure;
+        return std::nullopt;
+    }
+    const auto mapping = ComposeReferenceMapping(k, pose, placement);
+    if (!mapping) {
+        result.outcome = ReferenceMappingOutcome::NumericalFailure;
+        return std::nullopt;
+    }
+    result.pose = pose;
+    result.residual = Summarize(residual);
+    result.outcome = ReferenceMappingOutcome::MappingEstimated;
+    return FixedDocumentCameraMapping{view.camera, view.id, view.image_sha256, k, d, *mapping};
+}
+
+} // namespace
+
+ReferenceDocumentMappingResult EstimateReferenceDocumentMapping(const CalibrationObservationSession& session,
+    const ReferencePairRequest& request, const ReferenceMappingPolicy& policy) {
+    ValidatePolicy(policy.lens);
+    if (policy.max_undistortion_iterations < 1 || policy.max_undistortion_iterations > 1000
+        || !std::isfinite(policy.undistortion_tolerance_pixels) || !(policy.undistortion_tolerance_pixels > 0.0)) {
+        throw std::invalid_argument("reference document mapping: invalid policy");
+    }
+    ReferenceDocumentMappingResult result{{{
+        {CameraAlias::CamA, request.view_ids[0], ReferenceMappingOutcome::NotReached, {}, {}, {}},
+        {CameraAlias::CamB, request.view_ids[1], ReferenceMappingOutcome::NotReached, {}, {}, {}}}}, {}, {}};
+    std::array<const SessionView*, 2> references{};
+    bool valid = true;
+    for (std::size_t i = 0; i < references.size(); ++i) {
+        for (const auto& view : session.Views()) if (view.id == request.view_ids[i]) references[i] = &view;
+        auto& status = result.cameras[i].outcome;
+        if (!references[i]) status = ReferenceMappingOutcome::ReferenceMissing;
+        else if (references[i]->role != ViewRole::Reference) status = ReferenceMappingOutcome::ReferenceRoleMismatch;
+        else if (references[i]->camera != result.cameras[i].camera) status = ReferenceMappingOutcome::ReferenceCameraMismatch;
+        valid = valid && status == ReferenceMappingOutcome::NotReached;
+    }
+    if (!valid) return result;
+    if (!request.placement) {
+        for (auto& camera : result.cameras) camera.outcome = ReferenceMappingOutcome::PlacementMissing;
+        return result;
+    }
+    const auto& placement = *request.placement;
+    if (!placement.coplanar_confirmed || !std::isfinite(placement.angle_radians)
+        || !std::isfinite(placement.translation_x_mm) || !std::isfinite(placement.translation_y_mm)) {
+        for (auto& camera : result.cameras) camera.outcome = ReferenceMappingOutcome::PlacementInvalid;
+        return result;
+    }
+    result.lens = EstimateLensIntrinsics(session, policy.lens);
+    const auto a = MapReference(session, *references[0], result.lens->cameras[0], placement, policy, result.cameras[0]);
+    const auto b = MapReference(session, *references[1], result.lens->cameras[1], placement, policy, result.cameras[1]);
+    if (a && b) result.mapping = std::array<FixedDocumentCameraMapping, 2>{*a, *b};
+    return result;
 }
 
 } // namespace a0::m2::calibration
