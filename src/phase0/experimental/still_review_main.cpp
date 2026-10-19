@@ -37,6 +37,7 @@ struct Inspector {
     std::optional<review::ReviewSessionState> last_work_state;
     unsigned sessions_saved{},sessions_loaded{};
     bool resume_smoke{},resume_verified{};
+    std::optional<review::ReviewSessionState> resume_expected;
     std::wstring status=L"画像をドラッグして移動できます。調整値は「再Merge・別保存」で反映します。";
     bool smoke{},closing{},failed{},dragging{};
     POINT drag{};
@@ -322,11 +323,21 @@ struct Inspector {
         auto click=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(100+index,BN_CLICKED),reinterpret_cast<LPARAM>(buttons[index]));};
         if(Clock::now()-started>std::chrono::seconds(210) || failed){failed=true;SendMessageW(window,WM_CLOSE,0,0);return;}
         if(resume_smoke){
-            if(mode_paints[1] && marker_pixels && verified_paints){
+            if(mode_paints[1] && (points.empty() || marker_pixels) && verified_paints){
                 const auto fitting=review::MeasureReviewCorrespondences(points,preview_parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting);
                 const auto validation=review::MeasureReviewCorrespondences(points,preview_parameters,sources[0].width,sources[0].height,review::ReviewPointRole::validation);
-                resume_verified=points.size()==3 && fitting.points.size()==2 && validation.points.size()==1 && fitting.rms<1e-8 && std::abs(validation.rms-5)<1e-8 &&
-                    draft_x==4887 && draft_y==58 && std::abs(draft_degrees-.05)<1e-9 && std::abs(draft_scale-1.0001)<1e-12 && next_point_role==review::ReviewPointRole::validation && !proposal && sessions_loaded==1 && !saved && !sessions_saved;
+                // Check the explicitly selected file, not coordinates from a
+                // historical fixture. Empty and validation-only work is valid.
+                if(resume_expected){
+                    const auto& expected=*resume_expected;
+                    const auto parameters=review::SimilarityReviewGeometry(expected.x,expected.y,expected.degrees,expected.scale,sources[0].width,sources[0].height);
+                    const auto expected_fitting=review::MeasureReviewCorrespondences(expected.points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting);
+                    const auto expected_validation=review::MeasureReviewCorrespondences(expected.points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::validation);
+                    const auto same=[](const auto& actual,const auto& wanted){return actual.points.size()==wanted.points.size() &&
+                        std::abs(actual.rms-wanted.rms)<1e-8 && std::abs(actual.maximum-wanted.maximum)<1e-8;};
+                    resume_verified=MatchesWork(expected) && same(fitting,expected_fitting) && same(validation,expected_validation) &&
+                        !pending_a && pick_stage==0 && sessions_loaded==1 && !saved && !sessions_saved;
+                }
                 if(!resume_verified)failed=true;std::cout<<"resume_verified="<<resume_verified<<" fitting_count="<<fitting.points.size()<<" validation_count="<<validation.points.size()<<" validation_rms="<<validation.rms<<" automatically_fitted=0\n"<<std::flush;
                 SendMessageW(window,WM_CLOSE,0,0);
             }return;
@@ -525,6 +536,7 @@ int wmain(int argc,wchar_t** argv){
         auto initial=Load(from_session?resumed->review.report:fs::path(argv[2]));
         if(resumed && initial.record.report_sha256!=resumed->state.review_report_sha256)throw std::invalid_argument("work baseline changed during open");
         auto app=std::make_unique<Inspector>(std::move(initial),argc==4);app->resume_smoke=resume_test;
+        if(resume_test && resumed)app->resume_expected=resumed->state;
         const auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0SavedStillReview";wc.hCursor=LoadCursor(nullptr,IDC_HAND);
         if(!RegisterClassW(&wc))throw std::runtime_error("register inspector failed");
         auto window=CreateWindowExW(0,wc.lpszClassName,L"A0 保存画像の比較・位置/回転/倍率・再Merge（未校正）",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1440,1000,nullptr,nullptr,instance,app.get());
