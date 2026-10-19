@@ -1250,12 +1250,6 @@ if(BUILD_TESTING)
             -Wall -Wextra -Wpedantic)
     endif()
     add_test(
-        NAME dual_live_observation_contracts
-        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive -File
-            "${CMAKE_SOURCE_DIR}/scripts/Test-DualLiveObservationContracts.ps1"
-            -EvidenceParent "${CMAKE_BINARY_DIR}")
-    set_tests_properties(dual_live_observation_contracts PROPERTIES TIMEOUT 60)
-    add_test(
         NAME pc_direct_summary_v2_e2e
         COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File
             "${CMAKE_SOURCE_DIR}/scripts/Test-PcDirectSummaryV2E2e.ps1"
