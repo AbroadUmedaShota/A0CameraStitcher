@@ -11,6 +11,9 @@ namespace a0::phase0::agent_pipe_timing {
 
 // Serve-once hosts: how long the host waits for its one client to connect.
 inline constexpr std::chrono::milliseconds kAcceptTimeout{15000};
+// Persistent hosts recheck authority after an idle accept. Process exit also
+// requires cancellation and teardown after this polling interval.
+inline constexpr std::chrono::milliseconds kContinuousAcceptTimeout{5000};
 // Each request read stage (header, then body).
 inline constexpr std::chrono::milliseconds kFrameReadTimeout{5000};
 // Each of the three post-dispatch stages: response header write, response

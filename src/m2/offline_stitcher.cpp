@@ -3,6 +3,12 @@
 #include "a0/m2/render.hpp"
 #include "a0/m2/rig_profile_v2.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
+#if defined(A0_ENABLE_UNCALIBRATED_REVIEW)
+#include "a0/m2/experimental/still_review.hpp"
+#include "a0/m2/experimental/review_session.hpp"
+#include "a0/common/protocol_json.hpp"
+#include <charconv>
+#endif
 
 #include <Windows.h>
 #include <bcrypt.h>
@@ -1436,4 +1442,8 @@ void ExportStitchedJpeg(
     partial_guard.Release();
 }
 
+#if defined(A0_ENABLE_UNCALIBRATED_REVIEW)
+#include "uncalibrated_review_impl.hpp"
+#include "review_session_impl.hpp"
+#endif
 } // namespace a0::m2
