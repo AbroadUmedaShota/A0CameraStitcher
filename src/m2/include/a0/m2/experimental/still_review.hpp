@@ -73,6 +73,9 @@ inline render::PairRenderParameters StillPixelReviewGeometry(int x,int y,std::ui
 // Camera-free, explicit-report loading. Verifies schema, false quality flags,
 // aliases, immutable input/output hashes/dimensions and immediate parent link.
 SavedStillReview LoadSavedStillReview(const std::filesystem::path& report);
+// Local, camera-free handoff. Uses the same strict reader and carries paths
+// only to the explicitly invoked development tool; never publish this JSON.
+std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& report);
 render::BgrImage LoadStillReviewImage(const SavedStillReview& review);
 std::array<render::BgrImage,2> LoadStillReviewSources(const SavedStillReview& review);
 }

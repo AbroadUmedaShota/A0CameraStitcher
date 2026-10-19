@@ -101,3 +101,35 @@ native `--report ... --smoke` は作業の明示保存、点/用途/調整値の
 `--seconds 20 --af-prepare-smoke` は、別途承認済みのA/BのAF buttonを各一回だけ実行する準備確認。撮影・近遠drive・AFモードwriteは0で、両側の完了応答とLive終了を確認する。これは撮影処理への自動AF追加ではなく、光学的な合焦や図面品質の保証でもない。AFも拒否される場合は被写体の距離・明るさ・模様を確認し、撮影の再試行を進めない。
 
 `--capture-event-diagnostics` は既存の読み取り状態診断に、Live offで各側四回のイベント読取を加える。通知コード/件数だけを記録し、storage ID/object handle/画像は出さない。イベント読取専用gateはCheckEvent/READ/ENDのみ。原画像のdownload・撮影・設定変更・Live開始・AFは行わず、通知を消費したことを画像帰属や撮影許可に置き換えない。最新の成功系列と別系列の拒否は [継続開発時開発状況](DEVELOPMENT_STATUS_20261019.md) に区別して記録する。
+
+## 保存ペアから位置・色補正評価へ接続する (#352)
+
+`scripts/Invoke-StillPairCorrection.ps1` は、明示選択した保存reviewの原画像二枚を、既存のdraft校正・幾何補正・任意の色補正評価へ渡すカメラ不要の開発用入口。PowerShell 7.2以上を使用する。撮影やLive Viewを開始せず、通常の撮影画面の動作も変更しない。元の手動translation/回転/倍率はreviewの来歴として保持し、この評価では明示したdraft profileと補正jobを適用する。
+
+最初に `A0CameraStitcher.StillReview --report <絶対パス> --evaluation-inputs` を実行する。既存strict readerでv1/v2/v3のschema、品質未承認flags、A/B alias、原画像/保存JPEGのsize・hash・寸法と直前の親revisionを検証する。画面は作らず、失敗時にもdialogを出さない。戻る `a0.saved-review-evaluation-inputs.v1` JSONはローカルの橋渡し専用で、実ファイルの絶対パスを含むため公開しない。
+
+scriptはreview・保存JPEG・親report・原画像・profile・jobのfile/ancestorを読み取り用に保持して検証し、既存 `StitchEval` を一度だけ呼ぶ。profile、幾何job、出力ラスタ、resampling、未使用の出力directoryと、既存評価CLIの除外対象product rootをすべて明示する。色jobは任意。人工fixtureのpolicyを実写用の承認値として自動採用しない。
+
+```powershell
+# 各変数は利用者が明示した通常local固定drive上の絶対パス、または評価条件。
+pwsh -NoProfile -File scripts/Invoke-StillPairCorrection.ps1 `
+  -Report $reviewReport -Inspector $stillReviewExe -Evaluator $stitchEvalExe `
+  -ProfileFile $draftProfile -CorrectionJob $geometryJob -ColorJob $colorJob `
+  -ProductRoot $excludedProductRoot -OutputDirectory $newEvaluationDirectory `
+  -LeftUm $left -TopUm $top -RightUm $right -BottomUm $bottom `
+  -Dpi $dpi -WidthPixels $width -HeightPixels $height -Resampling $resampling
+```
+
+幾何補正だけの評価では `-ColorJob` を省略する。`StitchEval` と `StillReview` はSDKなしで `A0_BUILD_STITCH_EVAL=ON` / `A0_BUILD_WPD_DUAL_PREVIEW=ON` を明示した開発buildから指定する。
+
+| exit | 結果 |
+| --- | --- |
+| 0 | 既存の評価JPEG/report/manifestを保存・照合し、元reviewへのbindingも確定 |
+| 3 | 幾何または色補正の数値的拒否。診断reportと拒否bindingを保持し、成功JPEG/manifestなし |
+| 2 | review・引数・入力・子process・保存/照合等の失敗。既存入力と生成済みの診断候補を保持 |
+
+最終 `review-evaluation-binding.json` は別の `a0.saved-review-evaluation-binding.v1`。選択したpair ID、review/reportと保存JPEGのhash、A/B原画像hash/size、profile/各jobのhash、実際の成果物の相対名/hash/sizeを結ぶ。実ファイルの絶対パスは書かない。`productApproved=false` / `quality=not-evaluated` のまま。既存の評価manifest形式は変更しない。
+
+bindingはCREATE_NEWのpartialを保持handleでflushし、置換禁止rename・同handleでの再読を行って最後に確定する。exit0と最終bindingの両方を確認して初めて、この保存ペアに結び付いた評価成功と扱う。子のJPEG/manifestだけを見て本接続の成功としない。既存directory・原画像・過去review・profile・jobは上書きせず、自動再試行や最新画像の探索もしない。
+
+`saved_review_evaluation_contracts` は製品renderer/readerをlinkしないprocess-only harnessから、実StillReview・実script・実StitchEvalを呼ぶ。人工7360×4912 JPEG、独立に記述したreview、空白/日本語を含むpathで幾何のみ/色併用の成功、直接CLIと同一JPEG、幾何/色の拒否、改変/誤pair/誤hash、既存出力、子の形式拒否、原画像と条件の不変を確認する。strict readerの既存試験も追加入口に適用する。実図面品質・承認profile・通常画面への組込・映像Cの校正反映は後続工程。

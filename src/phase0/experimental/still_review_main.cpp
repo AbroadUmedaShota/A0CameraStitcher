@@ -524,7 +524,13 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM w,LPARAM l){
 }
 }
 int wmain(int argc,wchar_t** argv){
+    const bool evaluation_inputs=std::any_of(argv+1,argv+argc,[](const wchar_t* value){return std::wstring_view(value)==L"--evaluation-inputs";});
     try{
+        if(evaluation_inputs){
+            if(argc!=4 || std::wstring_view(argv[1])!=L"--report" || std::wstring_view(argv[3])!=L"--evaluation-inputs")
+                throw std::invalid_argument("explicit report required");
+            std::cout<<review::DescribeSavedReviewEvaluationInputs(fs::path(argv[2]))<<std::endl;return 0;
+        }
         const bool from_session=argc>=3 && std::wstring(argv[1])==L"--session";
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:std::wstring(argv[3])!=L"--smoke")))
@@ -565,6 +571,7 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"fit_paints="<<app->zoom_paints[0]<<" native_paints="<<app->zoom_paints[1]<<" double_paints="<<app->zoom_paints[2]<<" verified_gdi_paints="<<app->verified_paints<<" pan_events="<<app->pan_events<<" revisions="<<app->saved<<" shutter_operations=0 result="<<(pass?"PASS":"FAIL")<<std::endl;
         return pass?0:1;
     }catch(const std::exception& error){
+        if(evaluation_inputs){std::cerr<<"error=review-inputs-failed\n";return 1;}
         std::cerr<<"still review failed: "<<error.what()<<'\n';
         if(!(argc==4 && (std::wstring(argv[3])==L"--smoke" || std::wstring(argv[3])==L"--resume-smoke")))MessageBoxW(nullptr,L"確認用レポート・作業ファイルと画像を開けませんでした。参照先が揃い、内容が変更されていないか確認してください。",L"A0 撮影JPEGの確認",MB_OK|MB_ICONERROR);
         return 1;

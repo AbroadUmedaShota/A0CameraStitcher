@@ -114,6 +114,29 @@ SavedStillReview LoadSavedStillReview(const std::filesystem::path& path){
     }
     VerifyReviewParent(record);return record;
 }
+std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& path){
+    const auto record=LoadSavedStillReview(path);
+    const auto file=[](const std::filesystem::path& p,const std::string& hash,std::uint64_t size){
+        const auto utf8=p.generic_u8string();
+        return std::string("{\"path\":\"")+ReviewJson::JsonEscape(std::string_view(reinterpret_cast<const char*>(utf8.data()),utf8.size()))+
+            "\",\"sha256\":\""+hash+"\",\"encodedSizeBytes\":"+std::to_string(size)+"}";
+    };
+    std::ostringstream out;out.imbue(std::locale::classic());
+    out<<"{\"schemaVersion\":\"a0.saved-review-evaluation-inputs.v1\",\"pairId\":\""<<record.pair_id
+        <<"\",\"productApproved\":false,\"quality\":\"not-evaluated\",\"sourceDimensions\":{\"width\":"<<record.source_width
+        <<",\"height\":"<<record.source_height<<"},\"reviewReport\":"<<file(record.report,record.report_sha256,std::filesystem::file_size(record.report))
+        <<",\"reviewImage\":"<<file(record.jpeg,record.jpeg_sha256,record.jpeg_bytes)<<",\"inputs\":[";
+    for(int i=0;i<2;++i){
+        auto input=file(i==0?record.camera_a_original:record.camera_b_original,i==0?record.camera_a_sha256:record.camera_b_sha256,
+            i==0?record.camera_a_bytes:record.camera_b_bytes);
+        if(i)out<<',';out<<"{\"cameraAlias\":\""<<(i==0?"CAM-A":"CAM-B")<<"\","<<input.substr(1);
+    }
+    out<<"],\"parentReview\":";
+    if(record.manual_revision){const auto& parent=*record.manual_revision;
+        out<<file(parent.parent_report,parent.parent_report_sha256,std::filesystem::file_size(parent.parent_report));
+    }else out<<"null";
+    return out.str()+"}";
+}
 render::BgrImage LoadStillReviewImage(const SavedStillReview& record){
     V2PathPins pins;pins.Pin(record.jpeg);LockedReadFile file(record.jpeg,false,true);ComApartment apartment;auto factory=CreateFactory();
     auto image=ReadJpegSnapshot(factory.get(),file,"review inspection image",true);

@@ -1,5 +1,7 @@
 # calibrated-draft の評価合成（#273）
 
+#353 で、補正済み条件を保存画像と人工Live対応の縮小C評価で共有する [評価専用の描画条件](M2_EVALUATION_RENDER_CONDITIONS.md) を追加した。保存側のCLI引数・出力契約は維持し、実機対応の推定や製品Cへの接続は行わない。
+
 `A0CameraStitcher.StitchEval` は ADR-0033 の段階0/1用の評価専用exe。schema 2.0.0 の校正済みdraft、二つのD810サイズJPEG、明示した評価用ラスタとkernelを受け取る。profileの所有者決定欄はnullのまま保持する。製品adapterにdraftを許す分岐は追加しない。
 
 ## ビルドと呼出し

@@ -4,6 +4,7 @@
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/rig_profile_v2.hpp"
 #include "a0/m2/stitch_correction_job.hpp"
+#include "a0/m2/experimental/evaluation_render_conditions.hpp"
 #include "a0/m2/stitch_color_job.hpp"
 
 #include <Windows.h>
@@ -526,7 +527,12 @@ int wmain(int argc, wchar_t* argv[]) {
                 color_record=ColorRecord{Hex(Sha(color_report_bytes)),color_bindings.job_sha256,color_report_bytes.size()};
             }
         }
-        stage = "render"; auto rendered = color_transform ? render::RenderDocumentPair(a,b,parameters,*color_transform) : render::RenderDocumentPair(a, b, parameters);
+        stage = "render";
+        const a0::m2::experimental::EvaluationRenderIdentity identity{fingerprint,Hex(Sha(profile_bytes)),
+            correction_record ? std::optional<a0::m2::experimental::EvaluationCorrectionIdentity>{{correction_record->job_sha,correction_record->sha}} : std::nullopt,
+            color_record ? std::optional<a0::m2::experimental::EvaluationCorrectionIdentity>{{color_record->job_sha,color_record->sha}} : std::nullopt};
+        const a0::m2::experimental::EvaluationRenderConditions conditions(parameters,{a.width,a.height},{b.width,b.height},color_transform,identity);
+        auto rendered = conditions.RenderStill(a,b);
         stage = "output";
         if (!job && (!CreateDirectoryW(output_path.c_str(), nullptr) || !EqualPath(pins.Pin(output_path), candidate))) Fail();
         Com<OutputStream> jpeg(new OutputStream(output_path / L"evaluation.jpg.partial", jpeg_limit));
