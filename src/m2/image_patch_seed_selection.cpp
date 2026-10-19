@@ -131,18 +131,34 @@ PatchSeedSelectionResult SelectImagePatchSeeds(const BgrImage& a, const BgrImage
     return result;
 }
 
-AutoImagePatchCorrectionResult EstimateAutoImagePatchCorrection(const BgrImage& a, const BgrImage& b,
+namespace {
+AutoImagePatchCorrectionResult EstimateAuto(const BgrImage& a, const BgrImage& b,
     const CameraProjection& ca, const CameraProjection& cb, const OutputRaster& raster,
     const PatchSeedSelectionPolicy& selection, const ImagePatchPolicy& matching, const RawInversePolicy& inverse,
-    const DocumentCorrectionPolicy& correction) {
+    const DocumentCorrectionPolicy& correction, const PatchRefinementPolicy* refinement) {
     (void)EstimateRawPairDocumentCorrection(ca,cb,raster,{a.width,a.height},{b.width,b.height},{},inverse,correction);
     AutoImagePatchCorrectionResult result{AutoImagePatchOutcome::SelectionRejected,
         SelectImagePatchSeeds(a,b,ca,cb,raster,selection,matching,correction),{}};
     if (result.selection.outcome != PatchSeedSelectionOutcome::Selected) return result;
     std::vector<Point> seeds;
     for (const auto index : result.selection.selected_indices) seeds.push_back(result.selection.candidates[index].document_mm);
-    result.correction = EstimateImagePatchCorrection(a,b,ca,cb,raster,seeds,matching,inverse,correction);
+    result.correction = refinement ? EstimateImagePatchCorrection(a,b,ca,cb,raster,seeds,matching,*refinement,inverse,correction) :
+        EstimateImagePatchCorrection(a,b,ca,cb,raster,seeds,matching,inverse,correction);
     result.outcome = result.correction->outcome == ImagePatchCorrectionOutcome::Estimated ? AutoImagePatchOutcome::Estimated : AutoImagePatchOutcome::MatchingRejected;
     return result;
+}
+} // namespace
+AutoImagePatchCorrectionResult EstimateAutoImagePatchCorrection(const BgrImage& a, const BgrImage& b,
+    const CameraProjection& ca, const CameraProjection& cb, const OutputRaster& raster,
+    const PatchSeedSelectionPolicy& selection, const ImagePatchPolicy& matching, const RawInversePolicy& inverse,
+    const DocumentCorrectionPolicy& correction) {
+    return EstimateAuto(a,b,ca,cb,raster,selection,matching,inverse,correction,nullptr);
+}
+AutoImagePatchCorrectionResult EstimateAutoImagePatchCorrection(const BgrImage& a, const BgrImage& b,
+    const CameraProjection& ca, const CameraProjection& cb, const OutputRaster& raster,
+    const PatchSeedSelectionPolicy& selection, const ImagePatchPolicy& matching, const PatchRefinementPolicy& refinement,
+    const RawInversePolicy& inverse, const DocumentCorrectionPolicy& correction) {
+    Validate(refinement);
+    return EstimateAuto(a,b,ca,cb,raster,selection,matching,inverse,correction,&refinement);
 }
 } // namespace a0::m2::correction

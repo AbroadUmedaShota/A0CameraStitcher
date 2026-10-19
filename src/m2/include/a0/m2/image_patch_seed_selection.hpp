@@ -73,4 +73,11 @@ struct AutoImagePatchCorrectionResult {
     const render::OutputRaster& raster, const PatchSeedSelectionPolicy& selection_policy,
     const ImagePatchPolicy& matching_policy, const RawInversePolicy& inverse_policy,
     const DocumentCorrectionPolicy& correction_policy);
+// Same frozen selection, with explicit opt-in local refinement in both searches.
+[[nodiscard]] AutoImagePatchCorrectionResult EstimateAutoImagePatchCorrection(
+    const render::BgrImage& a, const render::BgrImage& b,
+    const render::CameraProjection& camera_a, const render::CameraProjection& camera_b,
+    const render::OutputRaster& raster, const PatchSeedSelectionPolicy& selection_policy,
+    const ImagePatchPolicy& matching_policy, const PatchRefinementPolicy& refinement_policy,
+    const RawInversePolicy& inverse_policy, const DocumentCorrectionPolicy& correction_policy);
 } // namespace a0::m2::correction

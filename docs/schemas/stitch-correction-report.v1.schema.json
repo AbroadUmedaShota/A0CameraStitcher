@@ -1,0 +1,1131 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileStatus",
+    "quality",
+    "productApproved",
+    "previewRequiresManifest",
+    "outcome",
+    "profileFileSha256",
+    "profileFingerprintSha256",
+    "jobSha256",
+    "outputRaster",
+    "policy",
+    "inputs",
+    "selection",
+    "matching"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-correction-report.v1"
+    },
+    "profileStatus": {
+      "const": "draft"
+    },
+    "quality": {
+      "const": "not-evaluated"
+    },
+    "productApproved": {
+      "const": false
+    },
+    "previewRequiresManifest": {
+      "const": true
+    },
+    "outcome": {
+      "enum": [
+        "correction-estimated",
+        "selection-rejected",
+        "matching-or-correction-rejected"
+      ]
+    },
+    "profileFileSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "profileFingerprintSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "jobSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "outputRaster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regionUm",
+        "dpi",
+        "widthPixels",
+        "heightPixels"
+      ],
+      "properties": {
+        "regionUm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "left",
+            "top",
+            "right",
+            "bottom"
+          ],
+          "properties": {
+            "left": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "top": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "right": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "bottom": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "widthPixels": {
+          "$ref": "#/$defs/dimension"
+        },
+        "heightPixels": {
+          "$ref": "#/$defs/dimension"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "seedSelection",
+        "matching",
+        "inverse",
+        "correction"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "a0.stitch-correction-job.v1"
+        },
+        "seedSelection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gridColumns",
+            "gridRows",
+            "maximumSeeds",
+            "minimumSpacingMm",
+            "minimumMinorGradientEigenvalue",
+            "minimumGradientAxisRatio"
+          ],
+          "properties": {
+            "gridColumns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "gridRows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "maximumSeeds": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 256
+            },
+            "minimumSpacingMm": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumMinorGradientEigenvalue": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumGradientAxisRatio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            }
+          }
+        },
+        "matching": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "patchRadiusSamples",
+            "patchSpacingMm",
+            "searchRadiusSteps",
+            "searchStepMm",
+            "minimumIntensityStddev",
+            "minimumCorrelation",
+            "minimumBestSecondGap",
+            "maximumReverseErrorMm"
+          ],
+          "properties": {
+            "patchRadiusSamples": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            },
+            "patchSpacingMm": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "searchRadiusSteps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "searchStepMm": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumIntensityStddev": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumCorrelation": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            },
+            "minimumBestSecondGap": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 2
+            },
+            "maximumReverseErrorMm": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "inverse": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maximumNewtonUpdates",
+            "maximumBacktrackingSteps",
+            "maximumRoundTripErrorPixels"
+          ],
+          "properties": {
+            "maximumNewtonUpdates": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "maximumBacktrackingSteps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "maximumRoundTripErrorPixels": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "correction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimumPoints",
+            "minimumRmsSpreadMm",
+            "minimumAxisVarianceRatio",
+            "maximumFitResidualOutputPixels",
+            "maximumDisplacementOutputPixels",
+            "maximumRotationDegrees",
+            "maximumScaleDifferencePercent"
+          ],
+          "properties": {
+            "minimumPoints": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 4096
+            },
+            "minimumRmsSpreadMm": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumAxisVarianceRatio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "maximumFitResidualOutputPixels": {
+              "type": "number",
+              "minimum": 0
+            },
+            "maximumDisplacementOutputPixels": {
+              "type": "number",
+              "minimum": 0
+            },
+            "maximumRotationDegrees": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 180
+            },
+            "maximumScaleDifferencePercent": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input"
+            },
+            {
+              "properties": {
+                "cameraAlias": {
+                  "const": "CAM-A"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input"
+            },
+            {
+              "properties": {
+                "cameraAlias": {
+                  "const": "CAM-B"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometryOutcome",
+        "selectedIndices",
+        "candidates"
+      ],
+      "properties": {
+        "geometryOutcome": {
+          "enum": [
+            "correction-estimated",
+            "insufficient-points",
+            "invalid-observations",
+            "degenerate-geometry",
+            "reflected-correspondences",
+            "numerical-failure",
+            "fit-residual-exceeded",
+            "displacement-exceeded",
+            "rotation-exceeded",
+            "scale-exceeded",
+            "projection-unavailable"
+          ]
+        },
+        "selectedIndices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4095
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "column",
+              "row",
+              "documentMm",
+              "outcome",
+              "texture"
+            ],
+            "properties": {
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "row": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "documentMm": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "outcome": {
+                "enum": [
+                  "seed-selected",
+                  "seed-coverage-a-unavailable",
+                  "seed-coverage-b-unavailable",
+                  "seed-source-patch-unavailable",
+                  "seed-low-contrast",
+                  "seed-one-dimensional-texture",
+                  "seed-weak-texture",
+                  "seed-duplicate-position",
+                  "seed-numerical-failure",
+                  "seed-spacing-excluded",
+                  "seed-selection-limit"
+                ]
+              },
+              "texture": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "intensityStddev",
+                      "minorGradientEigenvalue",
+                      "majorGradientEigenvalue",
+                      "gradientAxisRatio"
+                    ],
+                    "properties": {
+                      "intensityStddev": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "minorGradientEigenvalue": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "majorGradientEigenvalue": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "gradientAxisRatio": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        }
+      }
+    },
+    "matching": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "points",
+            "rawMapping"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "estimated",
+                "work-limit-exceeded",
+                "invalid-seeds",
+                "matching-failed",
+                "correction-rejected"
+              ]
+            },
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "seedDocumentMm",
+                  "outcome",
+                  "forward",
+                  "reverse",
+                  "reverseErrorMm",
+                  "rawCorrespondence"
+                ],
+                "properties": {
+                  "seedDocumentMm": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  },
+                  "outcome": {
+                    "enum": [
+                      "patch-matched",
+                      "invalid-patch-seed",
+                      "source-patch-unavailable",
+                      "source-texture-insufficient",
+                      "search-window-unavailable",
+                      "target-texture-insufficient",
+                      "correlation-insufficient",
+                      "ambiguous-patch",
+                      "search-boundary",
+                      "patch-numerical-failure",
+                      "reverse-inconsistent"
+                    ]
+                  },
+                  "forward": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "outcome",
+                      "bestDocumentMm",
+                      "bestScore",
+                      "secondScore",
+                      "sourceIntensityStddev",
+                      "maximumTargetIntensityStddev",
+                      "examinedCandidates",
+                      "eligibleCandidates"
+                    ],
+                    "properties": {
+                      "outcome": {
+                        "enum": [
+                          "patch-matched",
+                          "invalid-patch-seed",
+                          "source-patch-unavailable",
+                          "source-texture-insufficient",
+                          "search-window-unavailable",
+                          "target-texture-insufficient",
+                          "correlation-insufficient",
+                          "ambiguous-patch",
+                          "search-boundary",
+                          "patch-numerical-failure",
+                          "reverse-inconsistent"
+                        ]
+                      },
+                      "bestDocumentMm": {
+                        "anyOf": [
+                          {
+                            "type": "array",
+                            "items": {
+                              "type": "number"
+                            },
+                            "minItems": 2,
+                            "maxItems": 2
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "bestScore": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "secondScore": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sourceIntensityStddev": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "maximumTargetIntensityStddev": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "examinedCandidates": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4225
+                      },
+                      "eligibleCandidates": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4225
+                      }
+                    }
+                  },
+                  "reverse": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "outcome",
+                          "bestDocumentMm",
+                          "bestScore",
+                          "secondScore",
+                          "sourceIntensityStddev",
+                          "maximumTargetIntensityStddev",
+                          "examinedCandidates",
+                          "eligibleCandidates"
+                        ],
+                        "properties": {
+                          "outcome": {
+                            "enum": [
+                              "patch-matched",
+                              "invalid-patch-seed",
+                              "source-patch-unavailable",
+                              "source-texture-insufficient",
+                              "search-window-unavailable",
+                              "target-texture-insufficient",
+                              "correlation-insufficient",
+                              "ambiguous-patch",
+                              "search-boundary",
+                              "patch-numerical-failure",
+                              "reverse-inconsistent"
+                            ]
+                          },
+                          "bestDocumentMm": {
+                            "anyOf": [
+                              {
+                                "type": "array",
+                                "items": {
+                                  "type": "number"
+                                },
+                                "minItems": 2,
+                                "maxItems": 2
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "bestScore": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "secondScore": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "sourceIntensityStddev": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "maximumTargetIntensityStddev": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "examinedCandidates": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4225
+                          },
+                          "eligibleCandidates": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4225
+                          }
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reverseErrorMm": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "rawCorrespondence": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "rawMapping": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "outcome",
+                    "points",
+                    "fit"
+                  ],
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "estimated",
+                        "invalid-correspondences",
+                        "point-mapping-failed",
+                        "correction-rejected"
+                      ]
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "outcome",
+                            "documentMm",
+                            "roundTripErrorPixels",
+                            "newtonUpdates"
+                          ],
+                          "properties": {
+                            "outcome": {
+                              "enum": [
+                                "raw-document-mapped",
+                                "invalid-raw-pixel",
+                                "lens-domain-unavailable",
+                                "undistortion-nonconvergence",
+                                "inverse-numerical-failure",
+                                "outside-document-domain",
+                                "round-trip-exceeded"
+                              ]
+                            },
+                            "documentMm": {
+                              "anyOf": [
+                                {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "number"
+                                  },
+                                  "minItems": 2,
+                                  "maxItems": 2
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "roundTripErrorPixels": {
+                              "anyOf": [
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "newtonUpdates": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000
+                            }
+                          }
+                        },
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "minItems": 0,
+                      "maxItems": 256
+                    },
+                    "fit": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "outcome",
+                            "estimate",
+                            "metrics",
+                            "violations",
+                            "candidateAvailable"
+                          ],
+                          "properties": {
+                            "outcome": {
+                              "enum": [
+                                "correction-estimated",
+                                "insufficient-points",
+                                "invalid-observations",
+                                "degenerate-geometry",
+                                "reflected-correspondences",
+                                "numerical-failure",
+                                "fit-residual-exceeded",
+                                "displacement-exceeded",
+                                "rotation-exceeded",
+                                "scale-exceeded",
+                                "projection-unavailable"
+                              ]
+                            },
+                            "estimate": {
+                              "anyOf": [
+                                {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "number"
+                                  },
+                                  "minItems": 4,
+                                  "maxItems": 4
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "metrics": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "pointCount",
+                                    "rmsFitResidualOutputPixels",
+                                    "maximumFitResidualOutputPixels",
+                                    "maximumDisplacementOutputPixels",
+                                    "rotationDegrees",
+                                    "scaleDifferencePercent"
+                                  ],
+                                  "properties": {
+                                    "pointCount": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 4096
+                                    },
+                                    "rmsFitResidualOutputPixels": {
+                                      "anyOf": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "maximumFitResidualOutputPixels": {
+                                      "anyOf": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "maximumDisplacementOutputPixels": {
+                                      "anyOf": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "rotationDegrees": {
+                                      "anyOf": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "scaleDifferencePercent": {
+                                      "anyOf": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "violations": {
+                              "type": "array",
+                              "items": {
+                                "enum": [
+                                  "correction-estimated",
+                                  "insufficient-points",
+                                  "invalid-observations",
+                                  "degenerate-geometry",
+                                  "reflected-correspondences",
+                                  "numerical-failure",
+                                  "fit-residual-exceeded",
+                                  "displacement-exceeded",
+                                  "rotation-exceeded",
+                                  "scale-exceeded",
+                                  "projection-unavailable"
+                                ]
+                              },
+                              "minItems": 0,
+                              "maxItems": 12
+                            },
+                            "candidateAvailable": {
+                              "type": "boolean"
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "jpegSize": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cameraAlias",
+        "sha256",
+        "encodedSizeBytes"
+      ],
+      "properties": {
+        "cameraAlias": {
+          "enum": [
+            "CAM-A",
+            "CAM-B"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "encodedSizeBytes": {
+          "$ref": "#/$defs/jpegSize"
+        }
+      }
+    }
+  },
+  "description": "Diagnostic only. Even correction-estimated requires the final v2 eval manifest and matching hashes before preview. Does not approve profile or quality.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "correction-estimated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "matching": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "const": "estimated"
+              },
+              "rawMapping": {
+                "type": "object",
+                "properties": {
+                  "outcome": {
+                    "const": "estimated"
+                  },
+                  "fit": {
+                    "type": "object",
+                    "properties": {
+                      "outcome": {
+                        "const": "correction-estimated"
+                      },
+                      "candidateAvailable": {
+                        "const": true
+                      },
+                      "violations": {
+                        "maxItems": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "selection-rejected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "matching": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "matching-or-correction-rejected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "matching": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "work-limit-exceeded",
+                  "invalid-seeds",
+                  "matching-failed",
+                  "correction-rejected"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Test-only synthetic JPEG provenance and independent raw-pixel oracle; rawSimilarity = [a,b,dx,dy,cx,cy]. No product approval or optical-quality claim.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "synthetic",
+    "productApproved",
+    "quality",
+    "widthPixels",
+    "heightPixels",
+    "encoderQualitySetting",
+    "encoderSubsamplingSetting",
+    "cases"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.synthetic-similarity-jpeg-test.v1"
+    },
+    "synthetic": {
+      "const": true
+    },
+    "productApproved": {
+      "const": false
+    },
+    "quality": {
+      "const": "not-evaluated"
+    },
+    "widthPixels": {
+      "const": 7360
+    },
+    "heightPixels": {
+      "const": 4912
+    },
+    "encoderQualitySetting": {
+      "const": 1
+    },
+    "encoderSubsamplingSetting": {
+      "const": "444"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sign",
+          "color",
+          "resampling",
+          "repeat",
+          "rawSimilarity",
+          "cameraASha256",
+          "cameraBSha256",
+          "geometryReportSha256",
+          "maximumCorrespondenceErrorRawPixels",
+          "maximumCornerErrorRawPixels",
+          "meanAbsoluteErrorDn",
+          "fixedOnlyMeanAbsoluteErrorDn"
+        ],
+        "properties": {
+          "sign": {
+            "enum": [
+              1,
+              -1
+            ]
+          },
+          "color": {
+            "type": "boolean"
+          },
+          "resampling": {
+            "enum": [
+              "bilinear",
+              "bicubic-catmull-rom"
+            ]
+          },
+          "repeat": {
+            "enum": [
+              0,
+              1
+            ]
+          },
+          "rawSimilarity": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "items": {
+              "type": "number"
+            }
+          },
+          "cameraASha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "cameraBSha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "geometryReportSha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "maximumCorrespondenceErrorRawPixels": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maximumCornerErrorRawPixels": {
+            "type": "number",
+            "minimum": 0
+          },
+          "meanAbsoluteErrorDn": {
+            "type": "number",
+            "minimum": 0
+          },
+          "fixedOnlyMeanAbsoluteErrorDn": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

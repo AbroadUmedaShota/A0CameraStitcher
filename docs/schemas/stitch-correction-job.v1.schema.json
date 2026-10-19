@@ -1,0 +1,183 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "seedSelection",
+    "matching",
+    "inverse",
+    "correction"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-correction-job.v1"
+    },
+    "seedSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gridColumns",
+        "gridRows",
+        "maximumSeeds",
+        "minimumSpacingMm",
+        "minimumMinorGradientEigenvalue",
+        "minimumGradientAxisRatio"
+      ],
+      "properties": {
+        "gridColumns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "gridRows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "maximumSeeds": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 256
+        },
+        "minimumSpacingMm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimumMinorGradientEigenvalue": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimumGradientAxisRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        }
+      }
+    },
+    "matching": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patchRadiusSamples",
+        "patchSpacingMm",
+        "searchRadiusSteps",
+        "searchStepMm",
+        "minimumIntensityStddev",
+        "minimumCorrelation",
+        "minimumBestSecondGap",
+        "maximumReverseErrorMm"
+      ],
+      "properties": {
+        "patchRadiusSamples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "patchSpacingMm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "searchRadiusSteps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "searchStepMm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimumIntensityStddev": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimumCorrelation": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "minimumBestSecondGap": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 2
+        },
+        "maximumReverseErrorMm": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "inverse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximumNewtonUpdates",
+        "maximumBacktrackingSteps",
+        "maximumRoundTripErrorPixels"
+      ],
+      "properties": {
+        "maximumNewtonUpdates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maximumBacktrackingSteps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "maximumRoundTripErrorPixels": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimumPoints",
+        "minimumRmsSpreadMm",
+        "minimumAxisVarianceRatio",
+        "maximumFitResidualOutputPixels",
+        "maximumDisplacementOutputPixels",
+        "maximumRotationDegrees",
+        "maximumScaleDifferencePercent"
+      ],
+      "properties": {
+        "minimumPoints": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 4096
+        },
+        "minimumRmsSpreadMm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimumAxisVarianceRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "maximumFitResidualOutputPixels": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximumDisplacementOutputPixels": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximumRotationDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180
+        },
+        "maximumScaleDifferencePercent": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Development-only explicit policy. Native parser also rejects duplicate keys, non-digit integer lexemes, nonfinite values, nesting over 8 and input over 65536 bytes. No product approval."
+}

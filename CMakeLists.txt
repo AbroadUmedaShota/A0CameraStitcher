@@ -252,6 +252,39 @@ else()
     target_compile_options(a0_m2_image_patch_correction PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Pure bounded photometric estimation, no product/profile acceptance gate.
+add_library(a0_m2_color_correction src/m2/color_correction.cpp)
+target_include_directories(a0_m2_color_correction PUBLIC src/m2/include)
+target_link_libraries(a0_m2_color_correction PUBLIC a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_color_correction)
+if(MSVC)
+    target_compile_options(a0_m2_color_correction PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_color_correction PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# Pure strict policy parser and detailed diagnostics for opt-in correction eval.
+add_library(a0_m2_stitch_correction_job src/m2/stitch_correction_job.cpp)
+target_include_directories(a0_m2_stitch_correction_job PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_stitch_correction_job PUBLIC a0_m2_image_patch_correction)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_stitch_correction_job)
+if(MSVC)
+    target_compile_options(a0_m2_stitch_correction_job PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_stitch_correction_job PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# Pure strict color policy reader and hash-bound detailed diagnostics.
+add_library(a0_m2_stitch_color_job src/m2/stitch_color_job.cpp)
+target_include_directories(a0_m2_stitch_color_job PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_stitch_color_job PUBLIC a0_m2_color_correction)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_stitch_color_job)
+if(MSVC)
+    target_compile_options(a0_m2_stitch_color_job PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_stitch_color_job PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Strict immutable v2 document reader. The renderer does not depend on this
 # Windows hashing boundary, and the synthetic generator remains independent.
 add_library(a0_m2_rig_profile_v2 src/m2/rig_profile_v2.cpp)
@@ -353,7 +386,7 @@ if(A0_BUILD_STITCH_EVAL)
     add_executable(A0CameraStitcher.StitchEval src/m2/stitch_eval_main.cpp)
     target_include_directories(A0CameraStitcher.StitchEval PRIVATE src/common/include)
     target_link_libraries(A0CameraStitcher.StitchEval PRIVATE
-        a0_m2_render a0_m2_rig_profile_v2 ole32 windowscodecs bcrypt shell32 uuid)
+        a0_m2_render a0_m2_rig_profile_v2 a0_m2_stitch_correction_job a0_m2_stitch_color_job ole32 windowscodecs bcrypt shell32 uuid)
     target_compile_definitions(A0CameraStitcher.StitchEval PRIVATE UNICODE _UNICODE NOMINMAX)
     if(MSVC)
         target_compile_options(A0CameraStitcher.StitchEval PRIVATE /W4 /permissive- /EHsc /fp:precise)
@@ -655,6 +688,16 @@ if(BUILD_TESTING AND A0_BUILD_STITCH_EVAL)
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
         $<TARGET_FILE:A0CameraStitcher.StitchEval> $<TARGET_FILE:A0CameraStitcher.M2Adapter>)
     set_tests_properties(m2_stitch_eval_contracts PROPERTIES TIMEOUT 1800)
+    find_program(A0_STITCH_CORRECTION_PWSH_EXECUTABLE pwsh REQUIRED)
+    add_test(NAME m2_stitch_correction_schema_contracts
+        COMMAND "${A0_STITCH_CORRECTION_PWSH_EXECUTABLE}" -NoProfile -File
+            "${CMAKE_SOURCE_DIR}/scripts/Test-StitchCorrectionSchema.ps1"
+            -RepositoryRoot "${CMAKE_SOURCE_DIR}"
+            -Harness $<TARGET_FILE:m2_stitch_eval_contracts>
+            -Evaluator $<TARGET_FILE:A0CameraStitcher.StitchEval>
+            -Adapter $<TARGET_FILE:A0CameraStitcher.M2Adapter>
+            -EvidenceParent "${CMAKE_BINARY_DIR}")
+    set_tests_properties(m2_stitch_correction_schema_contracts PROPERTIES TIMEOUT 1800)
 endif()
 if(BUILD_TESTING AND A0_BUILD_RENDER_BENCHMARK)
     add_test(NAME m2_render_benchmark_self_test
@@ -1121,6 +1164,12 @@ if(BUILD_TESTING)
         target_compile_options(m2_document_correction_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
     endif()
     add_test(NAME m2_document_correction_contracts COMMAND m2_document_correction_contracts)
+    add_executable(m2_color_correction_contracts tests/color_correction_tests.cpp)
+    target_link_libraries(m2_color_correction_contracts PRIVATE a0_m2_color_correction a0_m2_document_correction)
+    if(MSVC)
+        target_compile_options(m2_color_correction_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_color_correction_contracts COMMAND m2_color_correction_contracts)
     add_executable(m2_raw_document_correction_contracts tests/raw_document_correction_tests.cpp)
     target_link_libraries(m2_raw_document_correction_contracts PRIVATE a0_m2_document_correction)
     if(MSVC)
@@ -1134,6 +1183,19 @@ if(BUILD_TESTING)
         target_compile_options(m2_image_patch_correction_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
     endif()
     add_test(NAME m2_image_patch_correction_contracts COMMAND m2_image_patch_correction_contracts)
+    add_executable(m2_image_patch_refinement_contracts tests/image_patch_refinement_tests.cpp)
+    target_link_libraries(m2_image_patch_refinement_contracts PRIVATE a0_m2_image_patch_correction)
+    if(MSVC)
+        target_compile_options(m2_image_patch_refinement_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_image_patch_refinement_contracts COMMAND m2_image_patch_refinement_contracts)
+    add_executable(m2_stitch_correction_job_contracts tests/stitch_correction_job_tests.cpp)
+    target_link_libraries(m2_stitch_correction_job_contracts PRIVATE a0_m2_stitch_correction_job)
+    if(MSVC)
+        target_compile_options(m2_stitch_correction_job_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_stitch_correction_job_contracts COMMAND m2_stitch_correction_job_contracts
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stitch-correction")
     target_link_libraries(m2_document_render_contracts PRIVATE a0_m2_render)
     add_executable(m2_document_render_mtf_contracts tests/document_render_mtf_tests.cpp)
     target_link_libraries(m2_document_render_mtf_contracts PRIVATE a0_m2_render)

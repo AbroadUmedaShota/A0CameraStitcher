@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "a0.stitch-correction-job.v1",
+  "seedSelection": {
+    "gridColumns": 5,
+    "gridRows": 4,
+    "maximumSeeds": 6,
+    "minimumSpacingMm": 1,
+    "minimumMinorGradientEigenvalue": 25,
+    "minimumGradientAxisRatio": 0.02
+  },
+  "matching": {
+    "patchRadiusSamples": 3,
+    "patchSpacingMm": 0.125,
+    "searchRadiusSteps": 4,
+    "searchStepMm": 0.125,
+    "minimumIntensityStddev": 5,
+    "minimumCorrelation": 0.9,
+    "minimumBestSecondGap": 0.04,
+    "maximumReverseErrorMm": 1e-8
+  },
+  "inverse": {
+    "maximumNewtonUpdates": 40,
+    "maximumBacktrackingSteps": 32,
+    "maximumRoundTripErrorPixels": 1e-9
+  },
+  "correction": {
+    "minimumPoints": 3,
+    "minimumRmsSpreadMm": 0.01,
+    "minimumAxisVarianceRatio": 1e-6,
+    "maximumFitResidualOutputPixels": 1e-6,
+    "maximumDisplacementOutputPixels": 20,
+    "maximumRotationDegrees": 2,
+    "maximumScaleDifferencePercent": 2
+  }
+}

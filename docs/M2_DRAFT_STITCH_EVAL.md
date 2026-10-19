@@ -13,6 +13,8 @@ cmake --build build/eval-stub --config Release --target A0CameraStitcher.StitchE
 
 CLIは次の13個をすべて要求する。未知・重複・不足、整数の小数/指数/符号/先行zero表記を拒否する。
 
+2026-10-15追記（#320）: 任意の`--correction-job`で[保存JPEGの自動補正つき評価](M2_CORRECTION_EVAL.md)を選べる。未指定時の本書の動作とv1記録は維持する。指定時は別の詳細reportとv2評価manifestを使い、数値的な不成立はreportのみ保存してexit 3を返す。
+
 | option | 値 |
 | --- | --- |
 | `--camera-a` / `--camera-b` | 別々の7360×4912 JPEG。保存された画素順で読み、EXIF Orientationを適用しない |

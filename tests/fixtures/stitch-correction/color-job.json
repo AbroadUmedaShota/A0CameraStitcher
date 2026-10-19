@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "a0.stitch-color-job.v1",
+  "minimumSamples": 3,
+  "minimumSampleDn": 0,
+  "maximumSampleDn": 255,
+  "minimumStddevDn": 2,
+  "maximumGainDifferencePercent": 150,
+  "maximumOffsetDn": 80,
+  "maximumResidualDn": 6
+}
