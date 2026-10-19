@@ -1,0 +1,37 @@
+Public reference for the three Live View operation identifiers in
+src/phase0/experimental/wpd_live_view_codec.cpp:
+https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl.Devices/Nikon/NikonBase.cs
+Upstream file SHA-256: 4328ec2fb6f31fc4b1cd04d643d2dd8aa2e7ade72c9bd4f37a083e9b0975abbc
+
+No upstream driver class, retry loop, settings/capture/card implementation,
+or SDK material is included. The WPD message codec is written for this repository.
+The D810 preview's 384-byte JPEG prefix offset also references NikonD600Base.cs
+at the same fixed commit (D810 -> D600 -> D600Base inheritance):
+https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl.Devices/Nikon/NikonD600Base.cs
+Read-only Live View status/prohibition/focus-mode identifiers 0xD1A2/0xD1A4/0xD061
+also reference NikonBase.cs at that commit. No upstream implementation is copied.
+AF-only 0x90C1, manual-focus-drive 0x9204 (direction 1 near / 2 far),
+the small step value 10, and readiness query 0x90C8 also reference NikonBase.cs
+at that fixed commit. The bounded mailbox/readiness/UI implementation is new.
+The development still-capture codec also references the public no-AF SDRAM
+capture 0x90C0 / 0xFFFFFFFF, GetEvent 0x90C7 and Nikon event framing/codes,
+CompressionSetting 0x5004 and ImageSize 0x5003 in NikonBase.cs, and the standard
+GetObjectInfo/GetObject identifiers and ObjectInfo fields in BaseMTPCamera.cs
+at the same fixed commit. No upstream capture/retry loop or settings writer
+is copied. The single-use shutter, strict attribution, partial retention and
+verified PC persistence workflow are implemented for this repository.
+The upstream copyright and MIT license follow.
+The development level display uses only the public numeric facts for signed
+big-endian roll/pitch integer words at payload offsets 52/56 in NikonD600Base.cs,
+BaseMTPCamera.ToInt16, and degree-based RotateTransform in LiveViewWnd.xaml
+at the same fixed commit. No fractional encoding or sensor validity is inferred.
+https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl.Devices/BaseMTPCamera.cs
+https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl/windows/LiveViewWnd.xaml
+
+digiCamControl - DSLR camera remote control open source software Copyright (C) 2014 Duka Istvan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
