@@ -947,6 +947,15 @@ if(BUILD_TESTING)
     add_executable(a0_still_pair_tests tests/still_pair_tests.cpp)
     target_include_directories(a0_still_pair_tests PRIVATE src/phase0/include)
     add_test(NAME still_pair_contracts COMMAND a0_still_pair_tests)
+    # Observation-policy regression belongs to the development preview slice,
+    # and remains camera-free even when the interactive window is disabled.
+    find_program(A0_DUAL_OBSERVATION_PWSH_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_test(
+        NAME dual_live_observation_contracts
+        COMMAND "${A0_DUAL_OBSERVATION_PWSH_EXECUTABLE}" -NoProfile -NonInteractive -File
+            "${CMAKE_SOURCE_DIR}/scripts/Test-DualLiveObservationContracts.ps1"
+            -EvidenceParent "${CMAKE_BINARY_DIR}")
+    set_tests_properties(dual_live_observation_contracts PROPERTIES TIMEOUT 60)
     option(A0_BUILD_WPD_DUAL_PREVIEW "Build development-only real WPD A/B Live View window (#330)" OFF)
     if(A0_BUILD_WPD_DUAL_PREVIEW)
         if(A0_NIKON_SDK_AVAILABLE)
@@ -1348,12 +1357,6 @@ if(BUILD_TESTING)
         target_compile_options(a0_pc_direct_summary_v2_fixture PRIVATE
             -Wall -Wextra -Wpedantic)
     endif()
-    add_test(
-        NAME dual_live_observation_contracts
-        COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive -File
-            "${CMAKE_SOURCE_DIR}/scripts/Test-DualLiveObservationContracts.ps1"
-            -EvidenceParent "${CMAKE_BINARY_DIR}")
-    set_tests_properties(dual_live_observation_contracts PROPERTIES TIMEOUT 60)
     add_test(
         NAME pc_direct_summary_v2_e2e
         COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File
