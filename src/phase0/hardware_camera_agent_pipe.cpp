@@ -385,7 +385,8 @@ int RunNamedPipeServerLoop(
         budget.Before("accept");
         const auto accept_timeout = [&] {
             return static_cast<DWORD>(std::min<std::uint64_t>(
-                serve_once ? kAcceptTimeoutMs : 5000U, budget.Remaining()));
+                serve_once ? kAcceptTimeoutMs :
+                    static_cast<DWORD>(agent_pipe_timing::kContinuousAcceptTimeout.count()), budget.Remaining()));
         };
         if (accept_timeout() == 0) {
             CloseHandle(connect_overlapped.hEvent);

@@ -1064,7 +1064,7 @@ if(BUILD_TESTING)
             target_link_libraries(a0_preview_worker_owner_tests PRIVATE a0_phase0_core)
             add_dependencies(a0_preview_worker_owner_tests A0CameraStitcher.PreviewWorker)
             add_test(NAME preview_worker_owner_contracts COMMAND a0_preview_worker_owner_tests)
-            set_tests_properties(preview_worker_owner_contracts PROPERTIES TIMEOUT 20)
+            set_tests_properties(preview_worker_owner_contracts PROPERTIES TIMEOUT 30)
             add_test(NAME preview_worker_owner_reply_contracts COMMAND a0_preview_worker_owner_tests --reply-contract)
             set_tests_properties(preview_worker_owner_reply_contracts PROPERTIES TIMEOUT 30)
             add_test(NAME preview_worker_owner_ack_failure_contracts

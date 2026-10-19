@@ -2596,8 +2596,18 @@ void CheckAbandonedOwner(const fs::path& executable, const fs::path& root, const
     if (WaitForSingleObject(parent.value, 5000) != WAIT_OBJECT_0 || !GetExitCodeProcess(parent.value, &code))
         throw std::runtime_error("parent exit unconfirmed");
     Check(code == 91, "parent exited without destructors");
+    // No requests were sent: allow startup or the remaining idle accept,
+    // then process teardown. Waiting only one accept interval races the
+    // worker's authority recheck. One deadline covers both real processes.
+    const auto exit_budget = (std::max)(timing::kWorkerStartupAllowance,
+        agent_pipe_timing::kContinuousAcceptTimeout) + timing::kExitWindowAfterSafeReceipt;
+    const auto workers_exit_deadline = GetTickCount64() + static_cast<ULONGLONG>(exit_budget.count());
+    std::cout << "abandoned worker exit observation budget ms=" << exit_budget.count() << '\n';
     for (auto& worker : workers) {
-        if (WaitForSingleObject(worker.value, 5000) != WAIT_OBJECT_0 || !GetExitCodeProcess(worker.value, &code))
+        const auto now = GetTickCount64();
+        const auto remaining = now < workers_exit_deadline
+            ? static_cast<DWORD>(workers_exit_deadline - now) : 0;
+        if (WaitForSingleObject(worker.value, remaining) != WAIT_OBJECT_0 || !GetExitCodeProcess(worker.value, &code))
             throw std::runtime_error("worker exit unconfirmed: preserve marker");
         // Parent may disappear before bootstrap validation (2), between the
         // delegation check and the host's own parent check (4, an exception in
@@ -2620,6 +2630,11 @@ int main(int argc, char** argv) {
     const auto worker = fs::path(executable).parent_path() / L"A0CameraStitcher.PreviewWorker.exe";
     const auto name = "A0.Poc.TestLease.WorkerOwner." + std::to_string(GetCurrentProcessId());
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--abandoned-owner") {
+            CheckAbandonedOwner(executable, root, name);
+            Check(RemoveDirectoryW(root.c_str()), "abandoned fixture root removed");
+            return failures ? 1 : 0;
+        }
         if (argc == 4 && std::string_view(argv[1]) == "--delegated-worker") return FakeReplyWorker(argv);
         if (argc == 2 && std::string_view(argv[1]) == "--reply-contract") return ReplyContract(executable, temporary);
         if (argc == 2 && std::string_view(argv[1]) == "--ack-failure-contract")
