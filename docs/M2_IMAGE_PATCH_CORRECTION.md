@@ -1,5 +1,7 @@
 # 固定写像に誘導された画像patch照合（#318、#46先行）
 
+ローカル検証時追記: 明示指定した場合だけ格子を細かくする[細探索overload（#323）](M2_PATCH_REFINEMENT.md)を追加した。本書の既存overload・粗探索の契約は維持する。CLIへの細探索接続は後続。
+
 保存画像から補正用の対応点を得る、開発用pure計算部。指定した文書mm位置（seed）でCAM-Aの小領域を取り、固定校正付近のCAM-Bの画像内容を探索する。全seedの両方向照合が成立した場合だけ[#317のraw対応→文書補正](M2_RAW_DOCUMENT_CORRECTION.md)へ接続し、Bの一時的なH*T候補を返す。
 
 公開headerは`a0/m2/image_patch_correction.hpp`、libraryは`a0_m2_image_patch_correction`。STL、pure renderer、既存のpure補正libだけに依存する。ファイル、JPEG decoder、OpenCV、機器、SDK/WPD、時計、校正solverには依存しない。製品adapter・アプリへはlinkしない。独立画像生成器へこのlibrary/sourceが混ざることもconfigure時に拒否する。

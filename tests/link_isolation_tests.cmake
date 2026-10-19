@@ -18,6 +18,9 @@ function(check_case name reject body)
     file(WRITE "${source_dir}/src/m2/raw_document_correction.cpp" "")
     file(WRITE "${source_dir}/src/m2/image_patch_correction.cpp" "")
     file(WRITE "${source_dir}/src/m2/image_patch_seed_selection.cpp" "")
+    file(WRITE "${source_dir}/src/m2/stitch_correction_job.cpp" "")
+    file(WRITE "${source_dir}/src/m2/color_correction.cpp" "")
+    file(WRITE "${source_dir}/src/m2/stitch_color_job.cpp" "")
     file(WRITE "${source_dir}/CMakeLists.txt"
         "cmake_minimum_required(VERSION 3.24)\nproject(isolation NONE)\n"
         "include([==[${ISOLATION_MODULE}]==])\n"
@@ -63,6 +66,18 @@ check_case(patch_correction_source TRUE "set_property(TARGET subject PROPERTY SO
 check_case(patch_correction_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/image_patch_correction.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
 check_case(seed_selection_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/image_patch_seed_selection.cpp)")
 check_case(seed_selection_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/image_patch_seed_selection.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(correction_job_direct TRUE "target_link_libraries(subject INTERFACE a0_m2_stitch_correction_job)")
+check_case(correction_job_transitive TRUE "target_link_libraries(subject INTERFACE bridge)\ntarget_link_libraries(bridge INTERFACE a0_m2_stitch_correction_job)")
+check_case(correction_job_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/stitch_correction_job.cpp)")
+check_case(correction_job_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/stitch_correction_job.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(color_direct TRUE "target_link_libraries(subject INTERFACE a0_m2_color_correction)")
+check_case(color_transitive TRUE "target_link_libraries(subject INTERFACE bridge)\ntarget_link_libraries(bridge INTERFACE a0_m2_color_correction)")
+check_case(color_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/color_correction.cpp)")
+check_case(color_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/color_correction.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
+check_case(color_job_direct TRUE "target_link_libraries(subject INTERFACE a0_m2_stitch_color_job)")
+check_case(color_job_transitive TRUE "target_link_libraries(subject INTERFACE bridge)\ntarget_link_libraries(bridge INTERFACE a0_m2_stitch_color_job)")
+check_case(color_job_source TRUE "set_property(TARGET subject PROPERTY SOURCES src/m2/stitch_color_job.cpp)")
+check_case(color_job_interface_source TRUE "set_property(TARGET bridge PROPERTY INTERFACE_SOURCES src/m2/stitch_color_job.cpp)\ntarget_link_libraries(subject INTERFACE bridge)")
 
 # Preserve the original pure-render rule, including flags and late additions.
 check_case(system_default TRUE "a0_defer_to_end_of_configure(a0_assert_no_link_dependency bridge)\ntarget_link_options(bridge INTERFACE /DEFAULTLIB:bcrypt.lib)")

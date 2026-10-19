@@ -1,0 +1,675 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileStatus",
+    "quality",
+    "productApproved",
+    "previewRequiresManifest",
+    "model",
+    "channelOrder",
+    "outcome",
+    "profileFileSha256",
+    "profileFingerprintSha256",
+    "jobSha256",
+    "geometryReportSha256",
+    "outputRaster",
+    "policy",
+    "inputs",
+    "points",
+    "fit"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-color-report.v1"
+    },
+    "profileStatus": {
+      "const": "draft"
+    },
+    "quality": {
+      "const": "not-evaluated"
+    },
+    "productApproved": {
+      "const": false
+    },
+    "previewRequiresManifest": {
+      "const": true
+    },
+    "model": {
+      "const": "encoded-dn-diagonal-affine"
+    },
+    "channelOrder": {
+      "const": "BGR"
+    },
+    "outcome": {
+      "enum": [
+        "color-estimated",
+        "color-sampling-failed",
+        "too-many-color-seeds",
+        "color-fit-rejected"
+      ]
+    },
+    "profileFileSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "profileFingerprintSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "jobSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "geometryReportSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "outputRaster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regionUm",
+        "dpi",
+        "widthPixels",
+        "heightPixels"
+      ],
+      "properties": {
+        "regionUm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "left",
+            "top",
+            "right",
+            "bottom"
+          ],
+          "properties": {
+            "left": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "top": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "right": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "bottom": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "widthPixels": {
+          "$ref": "#/$defs/dimension"
+        },
+        "heightPixels": {
+          "$ref": "#/$defs/dimension"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "minimumSamples",
+        "minimumSampleDn",
+        "maximumSampleDn",
+        "minimumStddevDn",
+        "maximumGainDifferencePercent",
+        "maximumOffsetDn",
+        "maximumResidualDn"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "a0.stitch-color-job.v1"
+        },
+        "minimumSamples": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 4096
+        },
+        "minimumSampleDn": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "maximumSampleDn": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "minimumStddevDn": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximumGainDifferencePercent": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximumOffsetDn": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximumResidualDn": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input"
+            },
+            {
+              "properties": {
+                "cameraAlias": {
+                  "const": "CAM-A"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input"
+            },
+            {
+              "properties": {
+                "cameraAlias": {
+                  "const": "CAM-B"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "documentMm",
+          "outcome",
+          "cameraABgr",
+          "cameraBBgr"
+        ],
+        "properties": {
+          "documentMm": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "outcome": {
+            "enum": [
+              "color-sampled",
+              "invalid-color-seed",
+              "color-sample-unavailable"
+            ]
+          },
+          "cameraABgr": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cameraBBgr": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "fit": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "sampleCount",
+            "channels",
+            "violations",
+            "candidateAvailable"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "color-estimated",
+                "insufficient-color-samples",
+                "too-many-color-samples",
+                "invalid-color-samples",
+                "color-sample-range-rejected",
+                "insufficient-color-contrast",
+                "nonpositive-color-gain",
+                "color-numerical-failure",
+                "color-gain-exceeded",
+                "color-offset-exceeded",
+                "color-residual-exceeded"
+              ]
+            },
+            "sampleCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "channels": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "cameraAStddevDn",
+                      "cameraBStddevDn",
+                      "estimate",
+                      "residuals"
+                    ],
+                    "properties": {
+                      "cameraAStddevDn": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cameraBStddevDn": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "estimate": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "gain",
+                              "offsetDn"
+                            ],
+                            "properties": {
+                              "gain": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "offsetDn": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "residuals": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "rmsDn",
+                              "maximumDn"
+                            ],
+                            "properties": {
+                              "rmsDn": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "maximumDn": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "violations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason",
+                  "channelIndex",
+                  "sampleIndex"
+                ],
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "color-estimated",
+                      "insufficient-color-samples",
+                      "too-many-color-samples",
+                      "invalid-color-samples",
+                      "color-sample-range-rejected",
+                      "insufficient-color-contrast",
+                      "nonpositive-color-gain",
+                      "color-numerical-failure",
+                      "color-gain-exceeded",
+                      "color-offset-exceeded",
+                      "color-residual-exceeded"
+                    ]
+                  },
+                  "channelIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
+                  "sampleIndex": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4095
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "minItems": 0,
+              "maxItems": 9
+            },
+            "candidateAvailable": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "jpegSize": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cameraAlias",
+        "sha256",
+        "encodedSizeBytes"
+      ],
+      "properties": {
+        "cameraAlias": {
+          "enum": [
+            "CAM-A",
+            "CAM-B"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "encodedSizeBytes": {
+          "$ref": "#/$defs/jpegSize"
+        }
+      }
+    }
+  },
+  "description": "Diagnostic only. Requires a matching final v3 evaluation manifest and both report/JPEG hashes for preview success. Does not approve profile, optical color or product use.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "color-estimated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fit": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "const": "color-estimated"
+              },
+              "sampleCount": {
+                "minimum": 3
+              },
+              "candidateAvailable": {
+                "const": true
+              },
+              "violations": {
+                "maxItems": 0
+              },
+              "channels": {
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "estimate": {
+                      "type": "object",
+                      "properties": {
+                        "gain": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        },
+                        "offsetDn": {
+                          "type": "number"
+                        }
+                      }
+                    },
+                    "residuals": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "points": {
+            "minItems": 3,
+            "items": {
+              "properties": {
+                "outcome": {
+                  "const": "color-sampled"
+                },
+                "documentMm": {
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                "cameraABgr": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                },
+                "cameraBBgr": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "color-fit-rejected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fit": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "insufficient-color-samples",
+                  "too-many-color-samples",
+                  "invalid-color-samples",
+                  "color-sample-range-rejected",
+                  "insufficient-color-contrast",
+                  "nonpositive-color-gain",
+                  "color-numerical-failure",
+                  "color-gain-exceeded",
+                  "color-offset-exceeded",
+                  "color-residual-exceeded"
+                ]
+              },
+              "candidateAvailable": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "color-sampling-failed",
+              "too-many-color-seeds"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fit": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

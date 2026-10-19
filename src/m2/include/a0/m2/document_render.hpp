@@ -48,6 +48,14 @@ struct DocumentRenderParameters {
         : raster(output), camera_a(a), camera_b(b), layout(order), resampling(kernel) {}
 };
 
+// Stored 8-bit BGR DN transform of CAM-B, AFTER sampling and BEFORE blending.
+// Caller owns acceptance/budgets; the renderer checks only mathematical validity.
+// Not a linear-light, camera response or colorimetric calibration model.
+struct BgrAffineTransform {
+    std::array<double,3> gain, offset_dn;
+    BgrAffineTransform(std::array<double,3> g, std::array<double,3> o) : gain(g), offset_dn(o) {}
+};
+
 // Caller-supplied pure mapping from output sample index (i,j) directly to raw
 // camera sample coordinates. Used for the exact v1 pixel-space compatibility
 // check (ADR-0034 design section 3.4). A false return means no valid projection.
@@ -91,5 +99,9 @@ void ValidateCameraProjection(const CameraProjection& camera, const OutputRaster
 // Inputs are immutable and the result holds only BGR and seam navigation.
 PairRenderResult RenderMappedPair(const BgrImage& a, const BgrImage& b, const MappedRenderParameters& parameters);
 PairRenderResult RenderDocumentPair(const BgrImage& a, const BgrImage& b, const DocumentRenderParameters& parameters);
+PairRenderResult RenderMappedPair(const BgrImage& a, const BgrImage& b, const MappedRenderParameters& parameters,
+    const BgrAffineTransform& camera_b_color);
+PairRenderResult RenderDocumentPair(const BgrImage& a, const BgrImage& b, const DocumentRenderParameters& parameters,
+    const BgrAffineTransform& camera_b_color);
 
 } // namespace a0::m2::render

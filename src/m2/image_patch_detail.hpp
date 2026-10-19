@@ -25,6 +25,9 @@ inline bool InDomain(Point p, const std::array<Point,4>& corners) {
     return std::isfinite(p.x) && std::isfinite(p.y) && p.x >= corners[0].x && p.x <= corners[2].x &&
         p.y >= corners[0].y && p.y <= corners[2].y;
 }
+inline void Validate(const PatchRefinementPolicy& p) {
+    if (p.levels < 1 || p.levels > 8) throw std::invalid_argument("patch matching: invalid refinement levels");
+}
 inline bool Patch(const BgrImage& image, const CameraProjection& camera, Point center,
     const std::array<Point,4>& domain, const ImagePatchPolicy& policy, std::vector<double>& values) {
     values.clear();

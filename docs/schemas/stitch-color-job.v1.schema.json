@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "minimumSamples",
+    "minimumSampleDn",
+    "maximumSampleDn",
+    "minimumStddevDn",
+    "maximumGainDifferencePercent",
+    "maximumOffsetDn",
+    "maximumResidualDn"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "a0.stitch-color-job.v1"
+    },
+    "minimumSamples": {
+      "type": "integer",
+      "minimum": 3,
+      "maximum": 4096
+    },
+    "minimumSampleDn": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "maximumSampleDn": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "minimumStddevDn": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "maximumGainDifferencePercent": {
+      "type": "number",
+      "minimum": 0
+    },
+    "maximumOffsetDn": {
+      "type": "number",
+      "minimum": 0
+    },
+    "maximumResidualDn": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Explicit development DN policy. Native parser also validates minimumSampleDn < maximumSampleDn, integer lexemes, duplicate keys, finite doubles, nesting <= 8 and <= 65536 input bytes. No product approval."
+}

@@ -19,6 +19,11 @@ struct ImagePatchPolicy {
           minimum_intensity_stddev(contrast), minimum_correlation(correlation), minimum_best_second_gap(separation),
           maximum_reverse_error_mm(reverse_error) {}
 };
+// Opt-in local search after all coarse gates pass. No optical defaults.
+struct PatchRefinementPolicy {
+    std::uint32_t levels; // 1..8; each level halves the previous spacing
+    explicit PatchRefinementPolicy(std::uint32_t count) : levels(count) {}
+};
 enum class ImagePatchOutcome {
     Matched, InvalidSeed, SourcePatchUnavailable, SourceTextureInsufficient,
     SearchWindowUnavailable, TargetTextureInsufficient, CorrelationInsufficient,
@@ -40,12 +45,23 @@ constexpr std::string_view ImagePatchOutcomeCode(ImagePatchOutcome v) {
     }
     return {};
 }
+struct PatchRefinementLevel {
+    double step_mm;
+    ImagePatchOutcome outcome;
+    std::optional<render::Point> best_document_mm;
+    std::optional<double> best_score, second_score, maximum_target_intensity_stddev;
+    std::size_t examined_candidates, eligible_candidates;
+};
 struct PatchSearchResult {
     ImagePatchOutcome outcome;
     std::optional<render::Point> best_document_mm; // diagnostic even on rejection
     std::optional<double> best_score, second_score;
     std::optional<double> source_intensity_stddev, maximum_target_intensity_stddev;
     std::size_t examined_candidates, eligible_candidates;
+    // Empty for the original API. Position/scores/texture/counts above describe
+    // COARSE search; outcome describes the complete search including refinement.
+    // A successful refined search uses the last level's best_document_mm.
+    std::vector<PatchRefinementLevel> refinement{};
 };
 struct ImagePatchPointResult {
     render::Point seed_document_mm;
@@ -64,7 +80,8 @@ struct ImagePatchCorrectionResult {
 };
 // Given explicit document seeds, searches image CONTENT near fixed prediction.
 // Mean BGR intensity, bilinear sampling, zero-mean normalized correlation.
-// All requested seed matches are required; no pruning/RANSAC/subpixel fitting.
+// All requested seed matches are required; no pruning/RANSAC. This overload
+// returns coarse-grid positions only.
 // This is not a general keypoint detector or product profile/setup/job gate.
 [[nodiscard]] ImagePatchCorrectionResult EstimateImagePatchCorrection(
     const render::BgrImage& image_a, const render::BgrImage& image_b,
@@ -72,4 +89,13 @@ struct ImagePatchCorrectionResult {
     const render::OutputRaster& raster, std::span<const render::Point> document_seeds_mm,
     const ImagePatchPolicy& matching_policy, const RawInversePolicy& inverse_policy,
     const DocumentCorrectionPolicy& correction_policy);
+// Adds explicit 3x3 half-step search, in both directions, on original images.
+// Preserves coarse uniqueness/boundary gates; requires a strictly unique local
+// maximum at every level. Resource bound includes all extra candidates.
+[[nodiscard]] ImagePatchCorrectionResult EstimateImagePatchCorrection(
+    const render::BgrImage& image_a, const render::BgrImage& image_b,
+    const render::CameraProjection& camera_a, const render::CameraProjection& camera_b,
+    const render::OutputRaster& raster, std::span<const render::Point> document_seeds_mm,
+    const ImagePatchPolicy& matching_policy, const PatchRefinementPolicy& refinement_policy,
+    const RawInversePolicy& inverse_policy, const DocumentCorrectionPolicy& correction_policy);
 } // namespace a0::m2::correction

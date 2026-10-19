@@ -3,6 +3,8 @@
 // are shared. A DRAFT output can never acquire a product success record here.
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/rig_profile_v2.hpp"
+#include "a0/m2/stitch_correction_job.hpp"
+#include "a0/m2/stitch_color_job.hpp"
 
 #include <Windows.h>
 #include <ShlObj.h>
@@ -28,6 +30,7 @@
 namespace {
 namespace fs = std::filesystem;
 namespace render = a0::m2::render;
+namespace correction = a0::m2::correction;
 constexpr std::uint64_t jpeg_limit = 64ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t profile_limit = 256ULL * 1024ULL;
 constexpr std::string_view label = "profileStatus=draft;quality=not-evaluated";
@@ -353,9 +356,9 @@ std::vector<std::uint8_t> Encode(IWICImagingFactory* factory, render::BgrImage& 
 
 using Options = std::map<std::wstring, std::wstring>;
 Options ParseOptions(int argc, wchar_t* argv[]) {
-    constexpr std::array<std::wstring_view, 13> allowed{L"camera-a", L"camera-b", L"profile-file", L"product-root", L"output-directory",
-        L"left-um", L"top-um", L"right-um", L"bottom-um", L"dpi", L"width-pixels", L"height-pixels", L"resampling"};
-    if (argc != 27) Fail(); Options options;
+    constexpr std::array<std::wstring_view, 15> allowed{L"camera-a", L"camera-b", L"profile-file", L"product-root", L"output-directory",
+        L"left-um", L"top-um", L"right-um", L"bottom-um", L"dpi", L"width-pixels", L"height-pixels", L"resampling",L"correction-job",L"color-job"};
+    if (argc != 27 && argc != 29 && argc != 31) Fail(); Options options;
     for (int i = 1; i < argc; i += 2) {
         const std::wstring_view arg(argv[i]);
         if (!arg.starts_with(L"--") || arg.size() <= 2 || !*argv[i + 1]) Fail();
@@ -363,6 +366,8 @@ Options ParseOptions(int argc, wchar_t* argv[]) {
         if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()
             || !options.emplace(name, argv[i + 1]).second) Fail();
     }
+    for (std::size_t n=0;n<13;++n) if(!options.contains(std::wstring(allowed[n])))Fail();
+    if(options.contains(L"color-job")&&!options.contains(L"correction-job"))Fail();
     return options;
 }
 std::uint64_t Integer(const std::wstring& value, std::uint64_t maximum) {
@@ -375,10 +380,14 @@ std::uint64_t Integer(const std::wstring& value, std::uint64_t maximum) {
     return number;
 }
 struct InputRecord { std::string sha; std::uint64_t size; };
+struct CorrectionRecord { std::string sha, job_sha, profile_sha; std::uint64_t size; };
+struct ColorRecord { std::string sha,job_sha;std::uint64_t size; };
 std::string Manifest(const std::string& fingerprint, std::string_view kernel, const render::OutputRaster& raster,
-    const std::array<InputRecord, 2>& inputs, const std::string& output_sha, std::uint64_t output_size) {
+    const std::array<InputRecord, 2>& inputs, const std::string& output_sha, std::uint64_t output_size,
+    const std::optional<CorrectionRecord>& correction_record = {},const std::optional<ColorRecord>& color_record = {},bool refined=false) {
+    if((color_record||refined)&&!correction_record)Fail();
     const auto& r = raster.region_um; std::ostringstream json; json.imbue(std::locale::classic());
-    json << "{\"schemaVersion\":\"a0.stitch-eval-manifest.v1\",\"profileStatus\":\"draft\",\"quality\":\"not-evaluated\","
+    json << "{\"schemaVersion\":\"" << (refined ? "a0.stitch-eval-manifest.v4" : color_record ? "a0.stitch-eval-manifest.v3" : correction_record ? "a0.stitch-eval-manifest.v2" : "a0.stitch-eval-manifest.v1") << "\",\"profileStatus\":\"draft\",\"quality\":\"not-evaluated\","
         << "\"profileVersion\":\"2.0.0\",\"profileFingerprintSha256\":\"" << fingerprint << "\",\"resampling\":\"" << kernel
         << "\",\"outputRaster\":{\"regionUm\":{\"left\":" << r.left << ",\"top\":" << r.top << ",\"right\":" << r.right
         << ",\"bottom\":" << r.bottom << "},\"dpi\":" << raster.dpi << ",\"widthPixels\":" << raster.width_pixels
@@ -386,7 +395,12 @@ std::string Manifest(const std::string& fingerprint, std::string_view kernel, co
         << inputs[0].sha << "\",\"encodedSizeBytes\":" << inputs[0].size << "},{\"cameraAlias\":\"CAM-B\",\"sha256\":\""
         << inputs[1].sha << "\",\"encodedSizeBytes\":" << inputs[1].size << "}],\"output\":{\"relativePath\":\"evaluation.jpg\","
         << "\"sha256\":\"" << output_sha << "\",\"encodedSizeBytes\":" << output_size << ",\"widthPixels\":" << raster.width_pixels
-        << ",\"heightPixels\":" << raster.height_pixels << "},\"engine\":{\"name\":\"a0.m2.stitch-eval\",\"version\":\"1.0.0\"}}\n";
+        << ",\"heightPixels\":" << raster.height_pixels << '}';
+    if(correction_record)json << ",\"correction\":{\"report\":{\"relativePath\":\"correction-report.json\",\"sha256\":\"" << correction_record->sha
+        << "\",\"encodedSizeBytes\":" << correction_record->size << "},\"jobSha256\":\"" << correction_record->job_sha << "\",\"profileFileSha256\":\"" << correction_record->profile_sha << "\"}";
+    if(color_record)json << ",\"colorCorrection\":{\"report\":{\"relativePath\":\"color-report.json\",\"sha256\":\"" << color_record->sha
+        << "\",\"encodedSizeBytes\":" << color_record->size << "},\"jobSha256\":\"" << color_record->job_sha << "\"}";
+    json << ",\"engine\":{\"name\":\"a0.m2.stitch-eval\",\"version\":\"" << (refined ? "4.0.0" : color_record ? "3.0.0" : correction_record ? "2.0.0" : "1.0.0") << "\"}}\n";
     return json.str();
 }
 void GuardDefaultProductRoot(Directories& pins, const std::wstring& candidate) {
@@ -421,6 +435,8 @@ int wmain(int argc, wchar_t* argv[]) {
         const auto a_path = OrdinaryPath(options.at(L"camera-a")), b_path = OrdinaryPath(options.at(L"camera-b"));
         const auto profile_path = OrdinaryPath(options.at(L"profile-file")), product_root = OrdinaryPath(options.at(L"product-root"));
         const auto output_path = OrdinaryPath(options.at(L"output-directory"));
+        const auto job_path = options.contains(L"correction-job") ? std::optional<fs::path>{OrdinaryPath(options.at(L"correction-job"))} : std::nullopt;
+        const auto color_path=options.contains(L"color-job")?std::optional<fs::path>{OrdinaryPath(options.at(L"color-job"))}:std::nullopt;
         if (output_path.filename().empty()) Fail();
         Directories pins;
         const auto output_parent = pins.Pin(output_path.parent_path());
@@ -428,40 +444,107 @@ int wmain(int argc, wchar_t* argv[]) {
         Separate(candidate, pins.Pin(product_root));
         Separate(candidate, pins.Pin(a_path.parent_path())); Separate(candidate, pins.Pin(b_path.parent_path()));
         (void)pins.Pin(profile_path.parent_path()); GuardDefaultProductRoot(pins, candidate);
+        if(job_path)(void)pins.Pin(job_path->parent_path());
+        if(color_path)(void)pins.Pin(color_path->parent_path());
         const auto occupied = GetFileAttributesW(output_path.c_str());
         if (occupied != INVALID_FILE_ATTRIBUTES) Fail();
         if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) Fail();
         stage = "inputs";
         ImmutableFile a_file(a_path), b_file(b_path), profile_file(profile_path);
+        std::unique_ptr<ImmutableFile> job_file;
+        std::vector<std::uint8_t> job_bytes;
+        if(job_path) {
+            job_file=std::make_unique<ImmutableFile>(*job_path);
+            for(const auto h:{a_file.Get(),b_file.Get(),profile_file.Get()})if(SameIdentity(Information(h),Information(job_file->Get())))Fail();
+            job_bytes=job_file->Snapshot(correction::kMaximumCorrectionJobBytes);
+        }
+        std::unique_ptr<ImmutableFile> color_file;std::vector<std::uint8_t> color_bytes;
+        if(color_path){
+            color_file=std::make_unique<ImmutableFile>(*color_path);
+            for(const auto h:{a_file.Get(),b_file.Get(),profile_file.Get(),job_file->Get()})if(SameIdentity(Information(h),Information(color_file->Get())))Fail();
+            color_bytes=color_file->Snapshot(correction::kMaximumColorJobBytes);
+        }
         if (SameIdentity(Information(a_file.Get()), Information(b_file.Get()))) Fail();
         const auto a_bytes = a_file.Snapshot(jpeg_limit), b_bytes = b_file.Snapshot(jpeg_limit);
         const auto profile_bytes = profile_file.Snapshot(profile_limit);
         const std::array<InputRecord, 2> input_records{{{Hex(Sha(a_bytes)), a_bytes.size()}, {Hex(Sha(b_bytes)), b_bytes.size()}}};
         stage = "profile";
         const auto profile = a0::m2::RigProfileV2::Parse(std::string_view(reinterpret_cast<const char*>(profile_bytes.data()), profile_bytes.size()));
-        const auto parameters = profile.ValidateCalibrationForEvaluation(raster, kernel);
+        auto parameters = profile.ValidateCalibrationForEvaluation(raster, kernel);
         const auto fingerprint = profile.FingerprintSha256();
+        std::optional<correction::StitchCorrectionJob> job;
+        if(job_file) { stage="correction-job"; job.emplace(correction::ParseStitchCorrectionJob(std::string_view(reinterpret_cast<const char*>(job_bytes.data()),job_bytes.size()))); }
+        std::optional<correction::StitchColorJob> color_job;
+        if(color_file){stage="color-job";color_job.emplace(correction::ParseStitchColorJob(std::string_view(reinterpret_cast<const char*>(color_bytes.data()),color_bytes.size())));}
         stage = "jpeg"; Apartment apartment; auto factory = Factory();
         const auto a = DecodeInput(factory.get(), a_bytes), b = DecodeInput(factory.get(), b_bytes);
-        a_file.Verify(a_bytes, jpeg_limit); b_file.Verify(b_bytes, jpeg_limit); profile_file.Verify(profile_bytes, profile_limit);
-        stage = "render"; auto rendered = render::RenderDocumentPair(a, b, parameters);
+        const auto verify_inputs=[&] {
+            a_file.Verify(a_bytes,jpeg_limit); b_file.Verify(b_bytes,jpeg_limit); profile_file.Verify(profile_bytes,profile_limit);
+            if(job_file)job_file->Verify(job_bytes,correction::kMaximumCorrectionJobBytes);
+            if(color_file)color_file->Verify(color_bytes,correction::kMaximumColorJobBytes);
+        };
+        verify_inputs();
+        Com<OutputStream> report_stream;
+        std::vector<std::uint8_t> report_bytes;
+        std::optional<CorrectionRecord> correction_record;
+        Com<OutputStream> color_report_stream;std::vector<std::uint8_t> color_report_bytes;
+        std::optional<ColorRecord> color_record;std::optional<render::BgrAffineTransform> color_transform;
+        if(job) {
+            stage="correction";
+            const auto result=job->refinement ? correction::EstimateAutoImagePatchCorrection(a,b,parameters.camera_a,parameters.camera_b,raster,
+                job->selection,job->matching,*job->refinement,job->inverse,job->correction) :
+                correction::EstimateAutoImagePatchCorrection(a,b,parameters.camera_a,parameters.camera_b,raster,
+                job->selection,job->matching,job->inverse,job->correction);
+            const correction::CorrectionReportBindings bindings{{{{input_records[0].sha,input_records[0].size},{input_records[1].sha,input_records[1].size}}},Hex(Sha(profile_bytes)),fingerprint,Hex(Sha(job_bytes)),raster};
+            const auto text=correction::StitchCorrectionReport(*job,result,bindings); report_bytes.assign(text.begin(),text.end());
+            verify_inputs(); stage="correction-report";
+            if(!CreateDirectoryW(output_path.c_str(),nullptr) || !EqualPath(pins.Pin(output_path),candidate))Fail();
+            report_stream.reset(new OutputStream(output_path/L"correction-report.json.partial",correction::kMaximumCorrectionReportBytes));
+            report_stream->ReplaceBytes(report_bytes); report_stream->Flush();
+            report_stream->Publish(output_path/L"correction-report.json",report_bytes,candidate+L"\\correction-report.json");
+            verify_inputs();
+            if(result.outcome!=correction::AutoImagePatchOutcome::Estimated) {
+                std::cout << "result=correction-rejected\nprofileStatus=draft\nquality=not-evaluated\nreport=correction-report.json\n"; return 3;
+            }
+            if(!result.correction || !result.correction->correction || !result.correction->correction->correction || !result.correction->correction->correction->corrected_camera)Fail();
+            parameters.camera_b=*result.correction->correction->correction->corrected_camera;
+            correction_record=CorrectionRecord{Hex(Sha(report_bytes)),bindings.job_sha256,bindings.profile_file_sha256,report_bytes.size()};
+            if(color_job){
+                stage="color-correction";std::vector<render::Point> seeds;
+                for(const auto index:result.selection.selected_indices)seeds.push_back(result.selection.candidates.at(index).document_mm);
+                const auto color_result=correction::EstimateImageColorCorrection(a,b,parameters.camera_a,parameters.camera_b,raster,seeds,color_job->policy);
+                const correction::StitchColorReportBindings color_bindings{{{{input_records[0].sha,input_records[0].size},{input_records[1].sha,input_records[1].size}}},bindings.profile_file_sha256,fingerprint,Hex(Sha(color_bytes)),correction_record->sha,raster};
+                const auto color_text=correction::StitchColorReport(*color_job,color_result,color_bindings);color_report_bytes.assign(color_text.begin(),color_text.end());
+                verify_inputs();stage="color-report";
+                color_report_stream.reset(new OutputStream(output_path/L"color-report.json.partial",correction::kMaximumColorReportBytes));
+                color_report_stream->ReplaceBytes(color_report_bytes);color_report_stream->Flush();
+                color_report_stream->Publish(output_path/L"color-report.json",color_report_bytes,candidate+L"\\color-report.json");
+                verify_inputs();if(report_stream->Snapshot()!=report_bytes)Fail();
+                if(color_result.outcome!=correction::ImageColorOutcome::Estimated){std::cout<<"result=color-rejected\nprofileStatus=draft\nquality=not-evaluated\nreport=color-report.json\n";return 3;}
+                if(!color_result.correction||!color_result.correction->transform)Fail();
+                color_transform=color_result.correction->transform;
+                color_record=ColorRecord{Hex(Sha(color_report_bytes)),color_bindings.job_sha256,color_report_bytes.size()};
+            }
+        }
+        stage = "render"; auto rendered = color_transform ? render::RenderDocumentPair(a,b,parameters,*color_transform) : render::RenderDocumentPair(a, b, parameters);
         stage = "output";
-        if (!CreateDirectoryW(output_path.c_str(), nullptr)) Fail();
-        if (!EqualPath(pins.Pin(output_path), candidate)) Fail();
+        if (!job && (!CreateDirectoryW(output_path.c_str(), nullptr) || !EqualPath(pins.Pin(output_path), candidate))) Fail();
         Com<OutputStream> jpeg(new OutputStream(output_path / L"evaluation.jpg.partial", jpeg_limit));
         const auto generated = Encode(factory.get(), rendered.image, jpeg.get(), raster);
         const auto generated_sha = Hex(Sha(generated));
-        a_file.Verify(a_bytes, jpeg_limit); b_file.Verify(b_bytes, jpeg_limit); profile_file.Verify(profile_bytes, profile_limit);
+        verify_inputs();
         jpeg->Publish(output_path / jpeg_name, generated, candidate + L"\\evaluation.jpg");
         const auto json = Manifest(fingerprint, kernel == render::Resampling::bilinear ? "bilinear" : "bicubic-catmull-rom",
-            raster, input_records, generated_sha, generated.size());
+            raster, input_records, generated_sha, generated.size(),correction_record,color_record,job&&job->refinement.has_value());
         const std::vector<std::uint8_t> record(json.begin(), json.end());
         Com<OutputStream> manifest(new OutputStream(output_path / L"stitch-eval.manifest.json.partial", profile_limit));
         manifest->ReplaceBytes(record); manifest->Flush();
         // All verification that can fail is completed before the final commit.
         // Held handles exclude external mutation through the entire operation.
         if (jpeg->Snapshot() != generated || Hex(Sha(jpeg->Snapshot())) != generated_sha) Fail();
-        VerifyMetadata(generated, raster.dpi); profile_file.Verify(profile_bytes, profile_limit);
+        VerifyMetadata(generated, raster.dpi); verify_inputs();
+        if(report_stream && (report_stream->Snapshot()!=report_bytes || Hex(Sha(report_stream->Snapshot()))!=correction_record->sha))Fail();
+        if(color_report_stream&&(color_report_stream->Snapshot()!=color_report_bytes||Hex(Sha(color_report_stream->Snapshot()))!=color_record->sha))Fail();
         manifest->Publish(output_path / manifest_name, record, candidate + L"\\stitch-eval.manifest.json");
         std::cout << "result=evaluated\nprofileStatus=draft\nquality=not-evaluated\nmanifest=stitch-eval.manifest.json\n";
         return 0;

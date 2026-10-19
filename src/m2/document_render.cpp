@@ -171,8 +171,12 @@ void ValidateCameraProjection(const CameraProjection& camera, const OutputRaster
     ValidateRadialMonotonicity(camera.distortion, maximum_r2);
 }
 
-PairRenderResult RenderMappedPair(const BgrImage& a, const BgrImage& b, const MappedRenderParameters& parameters) {
+namespace {
+PairRenderResult RenderMappedPairImpl(const BgrImage& a, const BgrImage& b, const MappedRenderParameters& parameters,
+    const BgrAffineTransform* color) {
     ValidateImage(a); ValidateImage(b);
+    if(color)for(std::size_t c=0;c<3;++c)
+        Require(std::isfinite(color->gain[c]) && color->gain[c]>0 && std::isfinite(color->offset_dn[c]), "invalid CAM-B color transform");
     const auto count = PixelCount(parameters.width, parameters.height);
     Require(parameters.camera_a && parameters.camera_b, "both output-to-camera mappings are required");
     Require(parameters.layout == StitchLayout::camera_a_left_camera_b_right ||
@@ -223,6 +227,10 @@ PairRenderResult RenderMappedPair(const BgrImage& a, const BgrImage& b, const Ma
             std::array<double, 3> pixel_a{}, pixel_b{};
             const bool has_a = MapSample(parameters.camera_a, {static_cast<double>(x), static_cast<double>(y)}, pa) && sample(a, pa, pixel_a);
             const bool has_b = MapSample(parameters.camera_b, {static_cast<double>(x), static_cast<double>(y)}, pb) && sample(b, pb, pixel_b);
+            if(has_b && color)for(std::size_t channel=0;channel<3;++channel) {
+                pixel_b[channel]=color->gain[channel]*pixel_b[channel]+color->offset_dn[channel];
+                Require(std::isfinite(pixel_b[channel]), "CAM-B color transform is not representable");
+            }
             const auto offset = (static_cast<std::size_t>(y) * parameters.width + x) * 3;
             Require(coverage[offset / 3] == ((has_a ? 1 : 0) | (has_b ? 2 : 0)), "mapping changed coverage between traversals");
             double weight = has_b ? 1.0 : 0.0;
@@ -237,14 +245,18 @@ PairRenderResult RenderMappedPair(const BgrImage& a, const BgrImage& b, const Ma
             result.seam_navigation.Observe(parameters.layout, x, y, parameters.width, parameters.height, has_a, has_b, weight);
             for (std::size_t channel = 0; channel < 3; ++channel) {
                 const double value = (1 - weight) * pixel_a[channel] + weight * pixel_b[channel];
-                result.image.bgr[offset + channel] = static_cast<std::uint8_t>(std::clamp(std::lround(value), 0L, 255L));
+                Require(std::isfinite(value), "blended color is not representable");
+                // Quantize only after the blend. Clamp double before lround so
+                // finite but very large explicit transforms cannot overflow long.
+                result.image.bgr[offset + channel] = static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0, 255.0)));
             }
         }
     }
     return result;
 }
 
-PairRenderResult RenderDocumentPair(const BgrImage& a, const BgrImage& b, const DocumentRenderParameters& parameters) {
+PairRenderResult RenderDocumentPairImpl(const BgrImage& a, const BgrImage& b, const DocumentRenderParameters& parameters,
+    const BgrAffineTransform* color) {
     ValidateCameraProjection(parameters.camera_a, parameters.raster);
     ValidateCameraProjection(parameters.camera_b, parameters.raster);
     const double pitch = 25.4 / parameters.raster.dpi;
@@ -257,8 +269,13 @@ PairRenderResult RenderDocumentPair(const BgrImage& a, const BgrImage& b, const 
             return true;
         };
     };
-    return RenderMappedPair(a, b, {parameters.raster.width_pixels, parameters.raster.height_pixels,
-        mapping(parameters.camera_a), mapping(parameters.camera_b), parameters.layout, parameters.resampling});
+    return RenderMappedPairImpl(a, b, {parameters.raster.width_pixels, parameters.raster.height_pixels,
+        mapping(parameters.camera_a), mapping(parameters.camera_b), parameters.layout, parameters.resampling},color);
 }
+} // namespace
+PairRenderResult RenderMappedPair(const BgrImage& a,const BgrImage& b,const MappedRenderParameters& p) {return RenderMappedPairImpl(a,b,p,nullptr);}
+PairRenderResult RenderMappedPair(const BgrImage& a,const BgrImage& b,const MappedRenderParameters& p,const BgrAffineTransform& color) {return RenderMappedPairImpl(a,b,p,&color);}
+PairRenderResult RenderDocumentPair(const BgrImage& a,const BgrImage& b,const DocumentRenderParameters& p) {return RenderDocumentPairImpl(a,b,p,nullptr);}
+PairRenderResult RenderDocumentPair(const BgrImage& a,const BgrImage& b,const DocumentRenderParameters& p,const BgrAffineTransform& color) {return RenderDocumentPairImpl(a,b,p,&color);}
 
 } // namespace a0::m2::render
