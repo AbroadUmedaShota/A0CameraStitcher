@@ -44,7 +44,9 @@ jobs:
   software-only:
     name: "Software-only build/test (no camera/SDK hardware)"
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Full native + packaging + M3 validation can consume almost 45 minutes
+    # before the final WPF flow starts. Keep every check and allow it to finish.
+    timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
@@ -267,3 +269,70 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Build/test time はステップの実測秒数（失敗したステップは `-`）。Issue #28 のビルド重複が再発すると、まずこの数字が伸びる。'
+
+  # Separate runner: keep opt-in artifacts and execution time out of the
+  # existing product/M3 job, even with its extended time budget (#354).
+  review-eval-contracts:
+    name: "Saved-pair evaluation contracts (no camera)"
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify validation scope
+        id: scope
+        run: |
+          . (Join-Path $env:GITHUB_WORKSPACE 'scripts/Resolve-CiValidationScope.ps1')
+          $runFull = $true
+          if ('${{ github.event_name }}' -eq 'pull_request') {
+            $baseSha = '${{ github.event.pull_request.base.sha }}'
+            $changedFiles = @(git diff --name-only --no-renames "$baseSha...HEAD")
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to classify changed paths.' }
+            $runFull = [bool](Get-CiValidationScope -ChangedPaths $changedFiles).RunFull
+          }
+          elseif ('${{ inputs.full_validation }}' -ne 'true') {
+            $runFull = $false
+          }
+          "run_full=$($runFull.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Only camera-free contracts run. The product/M3 build and its default
+      # OFF checks stay in the original job; no WpdDualPreview target is run.
+      - name: Configure saved-pair evaluation contracts (SDK-less, opt-in)
+        id: configure
+        if: ${{ steps.scope.outputs.run_full == 'true' }}
+        run: cmake -S . -B build/review-eval-ci -A x64 -DA0_BUILD_STITCH_EVAL=ON -DA0_BUILD_WPD_DUAL_PREVIEW=ON
+
+      - name: Build saved-pair evaluation contracts (Debug)
+        id: debug-build
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.configure.outcome == 'success' }}
+        run: cmake --build build/review-eval-ci --config Debug --target m2_stitch_eval_contracts a0_still_review_tests m2_evaluation_render_conditions_contracts -- /m:1 /nodeReuse:false
+
+      - name: Test saved-pair evaluation contracts (Debug)
+        id: debug-test
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.debug-build.outcome == 'success' }}
+        run: ctest --test-dir build/review-eval-ci -C Debug -j 1 -R '^(m2_stitch_eval_contracts|m2_stitch_correction_schema_contracts|saved_review_evaluation_contracts|still_review_contracts|m2_evaluation_render_conditions_contracts)$' --output-on-failure
+
+      - name: Build saved-pair evaluation contracts (Release)
+        id: release-build
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.configure.outcome == 'success' }}
+        run: cmake --build build/review-eval-ci --config Release --target m2_stitch_eval_contracts a0_still_review_tests m2_evaluation_render_conditions_contracts -- /m:1 /nodeReuse:false
+
+      - name: Test saved-pair evaluation contracts (Release)
+        id: release-test
+        if: ${{ !cancelled() && steps.scope.outputs.run_full == 'true' && steps.release-build.outcome == 'success' }}
+        run: ctest --test-dir build/review-eval-ci -C Release -j 1 -R '^(m2_stitch_eval_contracts|m2_stitch_correction_schema_contracts|saved_review_evaluation_contracts|still_review_contracts|m2_evaluation_render_conditions_contracts)$' --output-on-failure
+
+      - name: Saved-pair evaluation summary
+        if: always()
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Saved-pair evaluation contracts'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Camera-free synthetic/file tests only; no hardware or optical acceptance.'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Debug: ${{ steps.debug-test.outcome }}; Release: ${{ steps.release-test.outcome }}.'

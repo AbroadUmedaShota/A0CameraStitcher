@@ -53,6 +53,10 @@ int main(){
         const auto original_jpeg=Read(output.jpeg);
         const auto saved=LoadSavedStillReview(output.report);const auto full=LoadStillReviewImage(saved);
         check(saved.pair_id==r.pair_id && saved.translation_x==32 && saved.translation_y==4 && !saved.manual_revision);
+        const auto evaluation_inputs=DescribeSavedReviewEvaluationInputs(output.report);
+        check(evaluation_inputs.find("a0.saved-review-evaluation-inputs.v1")!=std::string::npos);
+        check(evaluation_inputs.find(saved.report_sha256)!=std::string::npos && evaluation_inputs.find(r.camera_a_sha256)!=std::string::npos);
+        check(evaluation_inputs.find("\"productApproved\":false")!=std::string::npos);
         check(full.width==96 && full.height==44 && saved.report_sha256==a0::phase0::Sha256Hex(report_bytes));
         auto revised=r;revised.output_directory=root/"revision";
         revised.manual_revision=StillReviewRequest::ManualRevision{33,3,output.report,saved.report_sha256};
@@ -61,6 +65,7 @@ int main(){
         check(parent_write_denied);const auto child=LoadSavedStillReview(revision.report);
         check(child.width==97 && child.height==45 && child.translation_x==33 && child.translation_y==3);
         check(child.manual_revision && child.manual_revision->parent_report==output.report && child.manual_revision->parent_report_sha256==saved.report_sha256);
+        check(DescribeSavedReviewEvaluationInputs(revision.report).find(saved.report_sha256)!=std::string::npos);
         check(child.pair_id==saved.pair_id && child.camera_a_sha256==saved.camera_a_sha256 && child.camera_b_sha256==saved.camera_b_sha256);
         auto next_revision=revised;next_revision.output_directory=root/"revision-2";
         next_revision.manual_revision=StillReviewRequest::ManualRevision{31,-2,revision.report,child.report_sha256};
@@ -80,6 +85,7 @@ int main(){
         auto reject_report=[&](std::string text){
             {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<text;}
             reject([&]{LoadSavedStillReview(damaged/"uncalibrated-review.json");});
+            reject([&]{DescribeSavedReviewEvaluationInputs(damaged/"uncalibrated-review.json");});
         };
         reject_report("{\"schema\":\"a0.uncalibrated-still-review.v1\","+report.substr(1));
         reject_report("{\"unknown\":0,"+report.substr(1));
@@ -100,6 +106,7 @@ int main(){
         similarity.manual_revision=StillReviewRequest::ManualRevision{32,0,output.report,saved.report_sha256,1,1.125};
         const auto similarity_output=WriteUncalibratedStillReview(similarity);const auto similarity_record=LoadSavedStillReview(similarity_output.report);
         check(similarity_record.rotation_degrees==1 && similarity_record.scale==1.125 && similarity_record.manual_revision->rotation_degrees==1);
+        check(DescribeSavedReviewEvaluationInputs(similarity_output.report).find(similarity_record.report_sha256)!=std::string::npos);
         const auto source_images=LoadStillReviewSources(similarity_record);check(source_images[0].width==64 && source_images[1].height==48);
         check(LoadStillReviewImage(similarity_record).width==similarity_output.width);
         const auto similarity_bytes=Read(similarity_output.report);const std::string similarity_text(similarity_bytes.begin(),similarity_bytes.end());

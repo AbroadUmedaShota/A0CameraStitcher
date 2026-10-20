@@ -679,11 +679,13 @@ void Tests(const fs::path& fixtures,const fs::path& eval,const fs::path& product
     RefinementTests(fixtures,eval,root,evidence);
     SimilarityJpegTests(fixtures,eval,root,evidence);
 }
+#include "review_evaluation_bridge_cases.hpp"
 }
 int wmain(int argc,wchar_t* argv[]) {
+    const bool review_bridge=argc==9&&std::wstring_view(argv[5])==L"--review-evaluation-only";
     const bool refinement_only=argc==6&&std::wstring_view(argv[5])==L"--refinement-only";
     const bool similarity_only=argc==6&&std::wstring_view(argv[5])==L"--similarity-only";
-    if(argc!=4&&argc!=5&&!refinement_only&&!similarity_only){std::cerr<<"fixture-dir eval-exe product-adapter-exe [existing-owned-evidence-directory [--refinement-only|--similarity-only]] required\n";return 2;}
+    if(argc!=4&&argc!=5&&!refinement_only&&!similarity_only&&!review_bridge){std::cerr<<"fixture-dir eval-exe product-adapter-exe [existing-owned-evidence-directory [--refinement-only|--similarity-only]] required\n";return 2;}
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
-    int result=0;try{Temp temp;const auto evidence=argc>=5?fs::absolute(argv[4]):fs::path{};if(refinement_only)RefinementTests(fs::absolute(argv[1]),fs::absolute(argv[2]),temp.root,evidence);else if(similarity_only)SimilarityJpegTests(fs::absolute(argv[1]),fs::absolute(argv[2]),temp.root,evidence);else Tests(fs::absolute(argv[1]),fs::absolute(argv[2]),fs::absolute(argv[3]),temp.root,evidence);std::cout<<"stitch_eval checks="<<checks<<" failures=0\n";}catch(const std::exception& error){std::cerr<<error.what()<<'\n';result=1;}CoUninitialize();return result;
+    int result=0;try{Temp temp;const auto evidence=argc>=5?fs::absolute(argv[4]):fs::path{};if(review_bridge)ReviewEvaluationBridgeTests(fs::absolute(argv[1]),fs::absolute(argv[2]),temp.root,fs::absolute(argv[6]),fs::absolute(argv[7]),fs::absolute(argv[8]));else if(refinement_only)RefinementTests(fs::absolute(argv[1]),fs::absolute(argv[2]),temp.root,evidence);else if(similarity_only)SimilarityJpegTests(fs::absolute(argv[1]),fs::absolute(argv[2]),temp.root,evidence);else Tests(fs::absolute(argv[1]),fs::absolute(argv[2]),fs::absolute(argv[3]),temp.root,evidence);std::cout<<"stitch_eval checks="<<checks<<" failures=0\n";}catch(const std::exception& error){std::cerr<<error.what()<<'\n';result=1;}CoUninitialize();return result;
 }

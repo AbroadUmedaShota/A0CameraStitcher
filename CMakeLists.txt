@@ -219,6 +219,7 @@ endif()
 add_library(a0_m2_render
     src/m2/render.cpp
     src/m2/document_render.cpp
+    src/m2/evaluation_render_conditions.cpp
 )
 target_include_directories(a0_m2_render PUBLIC src/m2/include)
 include(cmake/a0_link_isolation.cmake)
@@ -982,6 +983,15 @@ if(BUILD_TESTING)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
         target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher user32 gdi32 windowscodecs ole32 comdlg32)
         target_compile_definitions(A0CameraStitcher.StillReview PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(A0_BUILD_STITCH_EVAL)
+            add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StillReview)
+            add_test(NAME saved_review_evaluation_contracts COMMAND m2_stitch_eval_contracts
+                "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+                $<TARGET_FILE:A0CameraStitcher.StitchEval> $<TARGET_FILE:A0CameraStitcher.M2Adapter>
+                "${CMAKE_BINARY_DIR}" --review-evaluation-only $<TARGET_FILE:A0CameraStitcher.StillReview>
+                "${CMAKE_SOURCE_DIR}/scripts/Invoke-StillPairCorrection.ps1" "${A0_STITCH_CORRECTION_PWSH_EXECUTABLE}")
+            set_tests_properties(saved_review_evaluation_contracts PROPERTIES TIMEOUT 300)
+        endif()
         a0_defer_to_end_of_configure(a0_assert_no_link_dependency A0CameraStitcher.StillReview
             FORBIDDEN_LIBRARIES a0_phase0_core a0_wpd_live_view_transfer portabledeviceguids
             FORBIDDEN_SOURCES "/wpd_.*\\.cpp$" "/nikon_.*\\.cpp$")
@@ -1266,6 +1276,13 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
+    add_executable(m2_evaluation_render_conditions_contracts tests/evaluation_render_conditions_tests.cpp)
+    target_link_libraries(m2_evaluation_render_conditions_contracts PRIVATE a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_evaluation_render_conditions_contracts)
+    if(MSVC)
+        target_compile_options(m2_evaluation_render_conditions_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_evaluation_render_conditions_contracts COMMAND m2_evaluation_render_conditions_contracts)
     add_executable(m2_document_correction_contracts tests/document_correction_tests.cpp)
     target_link_libraries(m2_document_correction_contracts PRIVATE a0_m2_document_correction)
     if(MSVC)

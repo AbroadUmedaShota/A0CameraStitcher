@@ -119,7 +119,7 @@ endfunction()
 function(a0_assert_no_product_stitch_dependency target)
     a0_assert_no_link_dependency("${target}"
         FORBIDDEN_LIBRARIES a0_m2_render a0_m2_document_correction a0_m2_image_patch_correction a0_m2_color_correction a0_m2_stitch_correction_job a0_m2_stitch_color_job a0_m2_offline_stitcher
-        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "/document_correction\\.cpp$" "/raw_document_correction\\.cpp$" "/image_patch_correction\\.cpp$" "/image_patch_seed_selection\\.cpp$" "/color_correction\\.cpp$" "/stitch_correction_job\\.cpp$" "/stitch_color_job\\.cpp$" "offline_stitcher" "stitch_job_manifest")
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "/evaluation_render_conditions\\.cpp$" "/document_correction\\.cpp$" "/raw_document_correction\\.cpp$" "/image_patch_correction\\.cpp$" "/image_patch_seed_selection\\.cpp$" "/color_correction\\.cpp$" "/stitch_correction_job\\.cpp$" "/stitch_color_job\\.cpp$" "offline_stitcher" "stitch_job_manifest")
 endfunction()
 
 # An image evaluator may consume independent oracle data, never the code that
@@ -128,7 +128,7 @@ endfunction()
 function(a0_assert_no_stitch_evaluator_dependency target)
     a0_assert_no_link_dependency("${target}"
         FORBIDDEN_LIBRARIES a0_m2_render a0_m2_offline_stitcher a0_m2_synthetic_pair a0_m2_rig_profile_v2
-        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "offline_stitcher"
+        FORBIDDEN_SOURCES "/render\\.cpp$" "/document_render\\.cpp$" "/evaluation_render_conditions\\.cpp$" "offline_stitcher"
             "stitch_job_manifest" "synthetic_pair" "rig_profile_v2" "stitch_eval_main")
 endfunction()
 
