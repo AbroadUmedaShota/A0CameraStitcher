@@ -44,7 +44,9 @@ jobs:
   software-only:
     name: "Software-only build/test (no camera/SDK hardware)"
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Full native + packaging + M3 validation can consume almost 45 minutes
+    # before the final WPF flow starts. Keep every check and allow it to finish.
+    timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
@@ -268,8 +270,8 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Build/test time はステップの実測秒数（失敗したステップは `-`）。Issue #28 のビルド重複が再発すると、まずこの数字が伸びる。'
 
-  # Separate runner: the existing product/M3 job is close to its 45-minute
-  # budget. Keep opt-in artifacts and execution time out of that job (#354).
+  # Separate runner: keep opt-in artifacts and execution time out of the
+  # existing product/M3 job, even with its extended time budget (#354).
   review-eval-contracts:
     name: "Saved-pair evaluation contracts (no camera)"
     runs-on: windows-latest
