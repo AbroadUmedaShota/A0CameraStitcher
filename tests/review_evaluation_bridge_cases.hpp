@@ -1,7 +1,7 @@
 // Included by the existing process-only harness. Uses its independent WIC,
 // SHA and child-process helpers; no production review/renderer is linked.
 void ReviewEvaluationBridgeTests(const fs::path& fixtures,const fs::path& eval,const fs::path& parent,
-    const fs::path& inspector,const fs::path& script,const fs::path& pwsh) {
+    const fs::path& inspector,const fs::path& script,const fs::path& pwsh,const fs::path& evidence) {
     const auto root=parent/L"review evaluation \u65e5\u672c\u8a9e";
     fs::create_directory(root);fs::create_directory(root/"product");
     Synthetic(root/"CAM-A/original.jpg",7360,4912,2);
@@ -88,6 +88,7 @@ void ReviewEvaluationBridgeTests(const fs::path& fixtures,const fs::path& eval,c
         const auto prior=Sha(output/"review-evaluation-binding.json");
         Require(invoke(report,output,color).exit==2&&Sha(output/"review-evaluation-binding.json")==prior,"existing output is never replaced");
     }
+    ReviewConditionSetTests(eval,root,inspector,script,pwsh,report,evidence);
     WriteText(root/"reject-job.json",Replace(geometry,"\"maximumDisplacementOutputPixels\": 20","\"maximumDisplacementOutputPixels\": 0.01"));
     const auto rejected=root/"rejected";const auto refusal=invoke(report,rejected,false,root/"reject-job.json");
     Require(refusal.exit==3&&refusal.error.empty(),"numeric refusal preserves exit3: "+refusal.error+refusal.out);

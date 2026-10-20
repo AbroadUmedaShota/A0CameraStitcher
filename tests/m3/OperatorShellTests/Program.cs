@@ -34,6 +34,20 @@ if (args is ["--software-candidate-launch"] or ["--software-candidate-launch", _
         return 1;
     }
 }
+if (args is ["--saved-evaluation-conditions-window"] or ["--saved-evaluation-conditions-window", _])
+{
+    try
+    {
+        RunOnStaRenderThread(() => SavedEvaluationConditionsWindowContracts.RunAsync(args.Length == 2 ? args[1] : null));
+        Console.WriteLine("PASS saved evaluation conditions window, strict input and exclusive gates; hardwareOperations=0");
+        return 0;
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL saved evaluation conditions window: {error}");
+        return 1;
+    }
+}
 if (args is ["--historical-review-window"])
 {
     try

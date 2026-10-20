@@ -1,22 +1,25 @@
 #requires -Version 7.2
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName='Explicit')]
 param(
     [Parameter(Mandatory)][string]$Report,
     [Parameter(Mandatory)][string]$Inspector,
     [Parameter(Mandatory)][string]$Evaluator,
-    [Parameter(Mandatory)][string]$ProfileFile,
-    [Parameter(Mandatory)][string]$CorrectionJob,
-    [string]$ColorJob,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][string]$ProfileFile,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][string]$CorrectionJob,
+    [Parameter(ParameterSetName='Explicit')][string]$ColorJob,
     [Parameter(Mandatory)][string]$ProductRoot,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [Parameter(Mandatory)][uint64]$LeftUm,
-    [Parameter(Mandatory)][uint64]$TopUm,
-    [Parameter(Mandatory)][uint64]$RightUm,
-    [Parameter(Mandatory)][uint64]$BottomUm,
-    [Parameter(Mandatory)][uint32]$Dpi,
-    [Parameter(Mandatory)][uint32]$WidthPixels,
-    [Parameter(Mandatory)][uint32]$HeightPixels,
-    [Parameter(Mandatory)][ValidateSet('bilinear','bicubic-catmull-rom')][string]$Resampling
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint64]$LeftUm,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint64]$TopUm,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint64]$RightUm,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint64]$BottomUm,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint32]$Dpi,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint32]$WidthPixels,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][uint32]$HeightPixels,
+    [Parameter(Mandatory,ParameterSetName='Explicit')][ValidateSet('bilinear','bicubic-catmull-rom')][string]$Resampling,
+    [Parameter(Mandatory,ParameterSetName='Saved')][string]$ConditionsFile,
+    [Parameter(Mandatory,ParameterSetName='Saved')][Parameter(ParameterSetName='Explicit')][string]$ConditionsRoot,
+    [Parameter(ParameterSetName='Explicit')][switch]$SaveConditions
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -130,6 +133,24 @@ public static class A0SavedReviewEvaluationFiles {
                 $Items[$i].encodedSizeBytes -ne $Expected[$i].encodedSizeBytes) {throw 'Pair binding mismatch'}
         }
     }
+    . (Join-Path $PSScriptRoot 'StillPairEvaluationConditions.ps1')
+    $conditionFile=$null;$conditionRecord=$null
+    if($PSCmdlet.ParameterSetName -eq 'Saved' -or $SaveConditions) {
+        if(-not $ConditionsRoot) {throw 'Explicit conditions root required'}
+        $ConditionsRoot=Local-Path $ConditionsRoot;Pin-Directory $ConditionsRoot
+    }
+    if($PSCmdlet.ParameterSetName -eq 'Saved') {
+        $phase='conditions'
+        $conditionFile=Pin-File $ConditionsFile (64KB)
+        $conditionRecord=Read-ConditionSet $conditionFile
+        $ProfileFile=Resolve-ConditionReference $ConditionsRoot $conditionRecord.profile.relativePath
+        $CorrectionJob=Resolve-ConditionReference $ConditionsRoot $conditionRecord.correction.relativePath
+        $ColorJob=if($conditionRecord.color){Resolve-ConditionReference $ConditionsRoot $conditionRecord.color.relativePath}else{''}
+        $LeftUm=$conditionRecord.raster.leftUm;$TopUm=$conditionRecord.raster.topUm
+        $RightUm=$conditionRecord.raster.rightUm;$BottomUm=$conditionRecord.raster.bottomUm
+        $Dpi=$conditionRecord.raster.dpi;$WidthPixels=$conditionRecord.raster.widthPixels;$HeightPixels=$conditionRecord.raster.heightPixels
+        $Resampling=$conditionRecord.raster.resampling
+    }
     $inspectorPath=Local-Path $Inspector; $evaluatorPath=Local-Path $Evaluator
     $reportPath=Local-Path $Report; $outputPath=Local-Path $OutputDirectory
     if(-not [IO.File]::Exists($inspectorPath) -or -not [IO.File]::Exists($evaluatorPath) -or [IO.File]::Exists($outputPath) -or [IO.Directory]::Exists($outputPath)) {throw 'Executable/output selection'}
@@ -144,6 +165,22 @@ public static class A0SavedReviewEvaluationFiles {
     }
     $profile=Pin-File $ProfileFile (256KB); $geometry=Pin-File $CorrectionJob (64KB)
     $color=$null; if($ColorJob) {$color=Pin-File $ColorJob (64KB)}
+    $raster=[ordered]@{leftUm=$LeftUm;topUm=$TopUm;rightUm=$RightUm;bottomUm=$BottomUm;dpi=$Dpi;widthPixels=$WidthPixels;heightPixels=$HeightPixels;resampling=$Resampling}
+    if($SaveConditions -or $conditionRecord) {
+        $phase='conditions';Assert-ConditionRaster $raster
+        $profileReference=New-ConditionReference $profile $ConditionsRoot
+        $geometryReference=New-ConditionReference $geometry $ConditionsRoot
+        $colorReference=if($color){New-ConditionReference $color $ConditionsRoot}else{$null}
+        if($conditionRecord) {
+            if($conditionRecord.pairId -cne $selected.pairId -or $conditionRecord.reviewReportSha256 -cne $selected.reviewReport.sha256 -or
+                $conditionRecord.reviewImageSha256 -cne $selected.reviewImage.sha256) {throw 'Condition review mismatch'}
+            Same-Inputs $conditionRecord.inputs $selected.inputs
+            foreach($name in @('profile','correction','color')) {
+                $expected=$conditionRecord[$name];$actual=switch($name){'profile'{$profileReference};'correction'{$geometryReference};'color'{$colorReference}}
+                if(($null -eq $expected) -ne ($null -eq $actual) -or ($expected -and ($expected.sha256 -cne $actual.sha256 -or $expected.encodedSizeBytes -ne $actual.encodedSizeBytes))) {throw 'Condition source mismatch'}
+            }
+        }
+    }
     $again=Invoke-Tool $inspectorPath @('--report',$reportPath,'--evaluation-inputs')
     if($again.Code -ne 0 -or $again.Out -cne $selection.Out) {throw 'Selected review changed'}
     $phase='evaluator'
@@ -187,6 +224,14 @@ public static class A0SavedReviewEvaluationFiles {
             $record.correction.profileFileSha256 -cne $profile.sha256) {throw 'Manifest binding mismatch'}
         if($color -and $record.colorCorrection.report.sha256 -cne $colorReport.sha256) {throw 'Color manifest mismatch'}
     } elseif([IO.File]::Exists((Join-Path $outputPath 'evaluation.jpg')) -or [IO.File]::Exists((Join-Path $outputPath 'stitch-eval.manifest.json'))) {throw 'Rejected evaluation published success'}
+    if($SaveConditions) {
+        $conditionSet=[ordered]@{schemaVersion='a0.saved-review-evaluation-conditions.v1';productApproved=$false;quality='not-evaluated';
+            pairId=$selected.pairId;reviewReportSha256=$selected.reviewReport.sha256;reviewImageSha256=$selected.reviewImage.sha256;
+            inputs=@($selected.inputs|ForEach-Object {[ordered]@{cameraAlias=$_.cameraAlias;sha256=$_.sha256;encodedSizeBytes=$_.encodedSizeBytes}});
+            profile=$profileReference;correction=$geometryReference;color=$colorReference;raster=$raster}
+        Write-PinnedJson (Join-Path $outputPath 'evaluation-conditions.json') $conditionSet
+        $conditionFile=Artifact 'evaluation-conditions.json' (64KB)
+    }
     $again=Invoke-Tool $inspectorPath @('--report',$reportPath,'--evaluation-inputs')
     if($again.Code -ne 0 -or $again.Out -cne $selection.Out) {throw 'Review changed during evaluation'}
     foreach($item in $files) {if($item.Stream.Length -ne $item.encodedSizeBytes -or (Stream-Hash $item.Stream) -cne $item.sha256) {throw 'Held snapshot changed'}}
@@ -196,6 +241,10 @@ public static class A0SavedReviewEvaluationFiles {
         inputs=@($selected.inputs|ForEach-Object {[ordered]@{cameraAlias=$_.cameraAlias;sha256=$_.sha256;encodedSizeBytes=$_.encodedSizeBytes}})
         profileFileSha256=$profile.sha256;correctionJobSha256=$geometry.sha256;colorJobSha256=$(if($color){$color.sha256}else{$null})
         artifacts=@($artifacts)
+    }
+    if($conditionFile) {
+        $binding.schemaVersion='a0.saved-review-evaluation-binding.v2'
+        $binding.conditionSet=[ordered]@{sha256=$conditionFile.sha256;encodedSizeBytes=$conditionFile.encodedSizeBytes}
     }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($binding|ConvertTo-Json -Depth 12 -Compress))
     $destination=Join-Path $outputPath 'review-evaluation-binding.json'
