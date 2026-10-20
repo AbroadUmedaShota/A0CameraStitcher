@@ -65,6 +65,9 @@ try {
         Assert-Condition ([int]$Matches[1] -eq $dualCameraPassLines.Count -and [int]$Matches[2] -eq $dualCameraPassLines.Count) 'DualCamera flow test summary does not match emitted PASS lines.'
 
         Assert-Condition (Test-Path -LiteralPath $operatorShellTestExecutable -PathType Leaf) 'M3 operator shell test executable was not produced by the solution build.'
+        $conditionsWindowOutput = & $operatorShellTestExecutable --saved-evaluation-conditions-window 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Saved evaluation conditions window contracts failed: $($conditionsWindowOutput -join [Environment]::NewLine)" }
+        Assert-Condition (@($conditionsWindowOutput | Where-Object { $_ -match '^PASS saved evaluation conditions window,' }).Count -eq 1) 'Saved evaluation conditions window contracts did not report success.'
         $operatorShellTestOutput = & $operatorShellTestExecutable 2>&1
         if ($LASTEXITCODE -ne 0) { throw "M3 operator shell tests failed: $($operatorShellTestOutput -join [Environment]::NewLine)" }
         $operatorPassLines = @($operatorShellTestOutput | Where-Object { $_ -match '^PASS ' })

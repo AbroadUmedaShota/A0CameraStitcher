@@ -254,6 +254,13 @@ public partial class MainWindow : Window
         finally { _viewModel.EndHistoricalReview(); }
     }
 
+    private void OnOpenSavedEvaluationConditions(object sender, RoutedEventArgs eventArgs)
+    {
+        if (_shutdownStarted || !_viewModel.TryBeginHistoricalReview()) return;
+        try { new SavedEvaluationConditionsWindow { Owner = this }.ShowDialog(); }
+        finally { _viewModel.EndHistoricalReview(); }
+    }
+
     private async Task<ReviewDisplayOutcome> ShowVerifiedReviewAsync(ReviewDisplayRequest request, CancellationToken token)
     {
         var reserved = await Dispatcher.InvokeAsync(() =>

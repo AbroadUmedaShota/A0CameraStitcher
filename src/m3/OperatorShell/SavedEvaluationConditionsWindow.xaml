@@ -1,0 +1,36 @@
+<Window x:Class="A0CameraStitcher.M3.OperatorShell.SavedEvaluationConditionsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="保存した補正条件の確認（開発用）" Width="860" Height="640" MinWidth="760" MinHeight="560"
+        WindowStartupLocation="CenterOwner" FontFamily="Yu Gothic UI" FontSize="16"
+        Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+        Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}">
+    <Grid Margin="24" Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="保存した補正条件" FontSize="24" FontWeight="SemiBold"/>
+            <TextBlock Text="保存済みの設定内容を確認します。" Margin="0,6,0,16"/>
+        </StackPanel>
+        <DockPanel Grid.Row="1" Margin="0,0,0,16">
+            <Button x:Name="ChooseConditionsButton" Content="条件ファイルを選ぶ…" Click="OnChooseConditions"
+                    Padding="14,7" AutomationProperties.AutomationId="ChooseSavedEvaluationConditions"/>
+            <TextBlock Text="{Binding SelectedFile}" Margin="16,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        </DockPanel>
+        <Border Grid.Row="2" BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}" BorderThickness="1" Padding="16">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+                    <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="0,0,0,12"
+                               AutomationProperties.LiveSetting="Polite"/>
+                    <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" LineHeight="30"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+        <TextBlock Grid.Row="3" Margin="0,16,0,16" TextWrapping="Wrap"
+                   Text="開発評価用の設定内容です。元画像との照合・補正評価・品質確認はまだ実行していません。"/>
+        <Button Grid.Row="4" Content="閉じる" HorizontalAlignment="Right" MinWidth="100" Padding="14,7"
+                Click="OnClose" IsCancel="True"/>
+    </Grid>
+</Window>
