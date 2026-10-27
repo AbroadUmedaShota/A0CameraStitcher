@@ -24,4 +24,20 @@ inline double NormalizedDot(const std::vector<double>& a, double norm_a, const s
     double dot = 0; for (std::size_t i = 0; i < n; ++i) dot += pa[i]*pb[i];
     return (dot/norm_a)/norm_b;
 }
+// Template t centered by Center (norm_t its return value) against a window
+// read in place, row by row. For a zero-mean t, sum(t*(w-mean)) equals
+// sum(t*w), so the window needs no copy; its norm comes from the same pass.
+// False for a flat window or a non-finite result.
+inline bool WindowCorrelation(const std::vector<double>& t, double norm_t, std::size_t width, std::size_t height,
+    const double* window, std::size_t stride, double& r) {
+    double sum = 0, square = 0, dot = 0;
+    for (std::size_t y = 0; y < height; ++y) {
+        const double* const row = window+y*stride; const double* const tr = t.data()+y*width;
+        for (std::size_t x = 0; x < width; ++x) { const double w = row[x]; sum += w; square += w*w; dot += tr[x]*w; }
+    }
+    const double variance = square-sum*sum/static_cast<double>(width*height);
+    if (!(variance > 0)) return false;
+    r = dot/norm_t/std::sqrt(variance);
+    return std::isfinite(r);
+}
 } // namespace a0::m2::correlation_detail

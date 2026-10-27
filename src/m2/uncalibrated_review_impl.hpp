@@ -28,6 +28,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(!hash_valid(r.camera_a_sha256) || !hash_valid(r.camera_b_sha256) || r.pair_id.empty() || r.pair_id.size()>80 ||
         r.pair_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")!=std::string::npos)
         throw std::invalid_argument("review needs exact source hashes and pair identity");
+    if(r.manual_revision && r.automatic_alignment)throw std::invalid_argument("manual revision and automatic alignment are exclusive");
+    if(r.automatic_alignment && r.automatic_alignment->policy)ValidateStillMergePolicy(*r.automatic_alignment->policy);
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
     if(a_path.parent_path().filename()!=L"CAM-A" || b_path.parent_path().filename()!=L"CAM-B")throw std::invalid_argument("review A/B original paths are not alias-bound");
@@ -61,6 +63,24 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     active();
     // Only the decoded copies turn; the locked originals stay byte-identical.
     OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);
+    int translation_x=static_cast<int>(parameters.camera_b_to_camera_a[2]),translation_y=static_cast<int>(parameters.camera_b_to_camera_a[5]);
+    if(r.manual_revision){translation_x=r.manual_revision->x;translation_y=r.manual_revision->y;}
+    std::optional<AutomaticStillAlignment> automatic;double alignment_milliseconds{};
+    if(r.automatic_alignment){
+        // Starts at the live translation scaled to the still; undetermined
+        // keeps exactly that translation and render.
+        const auto started=std::chrono::steady_clock::now();
+        automatic=DecideStillAlignment(EstimateOverlapSimilarity(a.image,b.image,translation_x,translation_y),r.automatic_alignment->policy);
+        alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        if(automatic->similarity){
+            // The applied geometry, not the estimate: scale stays 1 unless the
+            // policy's scale limit admits it (the estimator checked all fits render).
+            const auto applied=AppliedStillAlignment(*automatic);
+            parameters=SimilarityReviewGeometry(applied.x,applied.y,applied.rotation_degrees,applied.scale,width,height);
+            translation_x=applied.x;translation_y=applied.y;
+        }
+        active();
+    }
     auto rendered=render::RenderPair(a.image,b.image,parameters);a.image={};b.image={};active();
     std::filesystem::create_directories(job.parent_path());pins.Pin(job.parent_path(),true);
     if(!std::filesystem::create_directory(job))throw std::runtime_error("cannot reserve new review directory");pins.Pin(job,true);
@@ -95,22 +115,47 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    report<<"{\"schema\":\""<<(similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1")<<"\",\"pairId\":\""<<r.pair_id
+    const char* schema=automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
         <<"{\"alias\":\"CAM-B\",\"path\":\""<<ReviewPathJson(b_path)<<"\",\"sha256\":\""<<r.camera_b_sha256<<"\",\"bytes\":"<<b.compressed.size()<<"}],"
         <<"\"previewGeometry\":{\"width\":"<<r.geometry.width<<",\"height\":"<<r.geometry.height<<",\"overlap\":"<<r.geometry.overlap<<",\"vertical\":"<<r.geometry.vertical<<",\"revision\":"<<r.geometry.revision<<"},";
     // Absent means normal, so normal reports keep their previous bytes.
     if(r.geometry.orientation!=MountOrientation::normal)report<<"\"mountOrientation\":\""<<MountOrientationName(r.geometry.orientation)<<"\",";
-    report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},\"translation\":{\"x\":"<<(r.manual_revision?r.manual_revision->x:parameters.camera_b_to_camera_a[2])<<",\"y\":"<<(r.manual_revision?r.manual_revision->y:parameters.camera_b_to_camera_a[5])<<"},"
+    report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},\"translation\":{\"x\":"<<translation_x<<",\"y\":"<<translation_y<<"},"
         <<"\"output\":{\"path\":\"uncalibrated-review.jpg\",\"width\":"<<output_width<<",\"height\":"<<output_height<<",\"bytes\":"<<encoded.size<<",\"sha256\":\""<<result.sha256<<"\"}";
     if(r.manual_revision)report<<",\"geometryBasis\":\""<<(similarity?"manual-still-similarity":"manual-still-pixels")<<"\",\"parentReview\":{\"path\":\""<<ReviewPathJson(NormalizedAbsolute(r.manual_revision->parent_report))<<"\",\"sha256\":\""<<r.manual_revision->parent_report_sha256<<"\"}";
     if(similarity)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<r.manual_revision->rotation_degrees<<",\"scale\":"<<r.manual_revision->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
+    if(automatic){
+        const auto& m=*automatic;
+        report<<",\"geometryBasis\":\""<<StillAlignmentBasis(m)<<"\"";
+        // adjustment: the rotation and scale actually applied; the estimate
+        // stays in automaticAlignment.similarity.
+        if(m.decision==StillAlignmentDecision::corrected){const auto applied=AppliedStillAlignment(m);
+            report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<applied.rotation_degrees<<",\"scale\":"<<applied.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";}
+        report<<",\"automaticAlignment\":{\"estimator\":\"a0.overlap-similarity.v2\",\"status\":\""<<OverlapEstimateStatusCode(m.status)<<"\",\"reason\":\""<<SimilarityUndeterminedReasonCode(m.reason)
+            <<"\",\"initialPosition\":\""<<(m.wide_search?"still-wide-search":"live-preview")<<"\",\"tiles\":{\"searched\":"<<m.tiles_searched<<",\"matched\":"<<m.tiles_matched<<",\"agreed\":"<<m.tiles_agreed<<"},\"similarity\":";
+        if(m.similarity)report<<"{\"x\":"<<m.similarity->x<<",\"y\":"<<m.similarity->y<<",\"rotationDegrees\":"<<m.similarity->rotation_degrees<<",\"scale\":"<<m.similarity->scale<<"},\"rigid\":{\"x\":"<<m.rigid->x<<",\"y\":"<<m.rigid->y
+            <<"},\"translationOnly\":{\"x\":"<<m.translation_x<<",\"y\":"<<m.translation_y
+            <<"},\"residualPixels\":{\"similarityRms\":"<<m.similarity_residual.rms<<",\"similarityMax\":"<<m.similarity_residual.maximum<<",\"rigidRms\":"<<m.rigid_residual.rms<<",\"rigidMax\":"<<m.rigid_residual.maximum
+            <<",\"translationOnlyRms\":"<<m.translation_residual.rms<<",\"translationOnlyMax\":"<<m.translation_residual.maximum<<"}";
+        else report<<"null,\"rigid\":null,\"translationOnly\":null,\"residualPixels\":null";
+        report<<",\"decision\":\""<<StillAlignmentDecisionCode(m.decision)<<"\",\"scaleDecision\":\""<<StillScaleDecisionCode(m.scale_decision)<<"\",\"warnings\":[";
+        bool first=true;for(const auto w:StillAlignmentWarnings(m)){report<<(first?"":",")<<'"'<<w<<'"';first=false;}
+        report<<"],\"policy\":";
+        const auto optional=[&](const std::optional<double>& v){if(v)report<<*v;else report<<"null";};
+        if(m.policy){report<<"{\"sha256\":\""<<m.policy->sha256<<"\",\"rotationAutoCorrectionMaxDegrees\":"<<m.policy->rotation_max_degrees<<",\"scaleAutoCorrectionMaxPercent\":";
+            optional(m.policy->scale_max_percent);report<<",\"similarityResidualMaxWarningPixels\":";optional(m.policy->residual_max_pixels);report<<"}";
+        }else report<<"null";
+        report<<"}";
+    }
     report<<"}";
     const auto document=report.str();const std::vector<std::uint8_t> report_bytes(document.begin(),document.end());
     const auto report_partial=job/L"uncalibrated-review.json.partial";active();WriteBytesToNewFile(report_partial,report_bytes);
     {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
+    result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
     active();return result;
 }
 }

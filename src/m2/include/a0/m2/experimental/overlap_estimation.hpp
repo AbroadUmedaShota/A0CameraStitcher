@@ -48,4 +48,60 @@ struct OverlapEstimate {
 // threshold-free check passes: a strict best, no search-range or refinement
 // edge, and the swapped turned search returning the same position.
 [[nodiscard]] OverlapEstimate EstimateOverlapTranslation(const render::BgrImage& a,const render::BgrImage& b);
+
+// Uncalibrated still similarity (#365). Same oriented A|B inputs at any size
+// within the render limits. prior_x/prior_y is the expected B-to-A translation
+// in these pixels (the live C geometry scaled to the still). The overlap band
+// is cut into a fixed grid of tiles; each A tile is found in B by the same
+// gradient correlation with a pyramid search around the prior, then kept only
+// when every threshold-free check passes: a strict best, no window or range
+// edge, the reverse B-to-A search returning the same integer position, and a
+// structure tensor with two non-zero eigenvalues (two-dimensional texture).
+// Among kept tiles, the least median of squares over every tile pair picks
+// the consensus; tiles within a robust spread of it (spread re-estimated
+// after each refit until the set repeats) fit a similarity about
+// B's image center by least squares, in the SimilarityReviewGeometry
+// convention (x/y: B center relative to A, positive rotation clockwise on
+// screen, scale as a factor). Besides the prior, the best candidates of the
+// translation search above on a reduced copy are tried as starts, since a
+// wrong start can still give a few consistent random tiles. The attempt with
+// the most agreed tiles, then the smaller residual, wins; an exact tie between
+// different fits is undetermined. No random sampling; equal inputs give equal
+// results. The same agreed tiles also give a rigid fit (the similarity's
+// rotation, scale fixed to 1, translation solved again by least squares) and
+// a translation-only fit. All three must render, so the caller may apply any
+// of them. Rotation and scale limits, residual warnings and quality are
+// decided by the caller.
+enum class SimilarityUndeterminedReason {none,no_tiles,insufficient_tiles,outside_image,tied_starts};
+constexpr std::string_view SimilarityUndeterminedReasonCode(SimilarityUndeterminedReason v){
+    switch(v){
+    case SimilarityUndeterminedReason::none:return "none";
+    case SimilarityUndeterminedReason::no_tiles:return "no-tiles";
+    case SimilarityUndeterminedReason::insufficient_tiles:return "insufficient-tiles";
+    case SimilarityUndeterminedReason::outside_image:return "outside-image";
+    case SimilarityUndeterminedReason::tied_starts:return "tied-starts";
+    }
+    return {};
+}
+struct SimilarityFit {double x{},y{},rotation_degrees{},scale{1};};
+struct FitResidual {double rms{},maximum{};};
+// a: tile center in A, b: the matched point in B (pixel-corner coordinates).
+struct SimilarityTile {double a_x{},a_y{},b_x{},b_y{};unsigned row{},column{};bool matched{},agreed{};};
+struct OverlapSimilarityEstimate {
+    OverlapEstimateStatus status{OverlapEstimateStatus::undetermined};
+    SimilarityUndeterminedReason reason{SimilarityUndeterminedReason::no_tiles};
+    bool wide_search{};                // the chosen start came from the wide search
+    unsigned levels{},tile_side{},search_radius{},matched{},agreed{};
+    std::vector<SimilarityTile> tiles; // every searched tile, row-major
+    // matched: passed the per-tile checks; agreed: inside the consensus. The
+    // fits below use the agreed tiles and are valid only when status is
+    // estimated_not_judged. rigid carries similarity.rotation_degrees and
+    // scale 1. The translation-only fit is the comparison baseline.
+    SimilarityFit similarity,rigid;
+    double translation_x{},translation_y{};
+    FitResidual similarity_residual,rigid_residual,translation_residual;
+};
+// Throws std::invalid_argument for differing sizes, broken buffers, sizes
+// outside the render limits or a prior outside the frame.
+[[nodiscard]] OverlapSimilarityEstimate EstimateOverlapSimilarity(const render::BgrImage& a,const render::BgrImage& b,int prior_x,int prior_y);
 }

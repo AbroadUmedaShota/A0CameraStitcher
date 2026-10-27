@@ -25,6 +25,8 @@
 #include <numbers>
 #include "a0/phase0/experimental/preview_merge.hpp"
 #include "a0/phase0/experimental/preview_mount_settings.hpp"
+#include "a0/phase0/experimental/preview_merge_policy.hpp"
+#include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
@@ -738,6 +740,15 @@ int main(int argc,char** argv){
             mount_orientation=requested_orientation.value_or(configured.value_or(MountOrientation::normal));
             Log(std::string("mount_orientation=")+a0::m2::experimental::MountOrientationName(mount_orientation)+" source="+
                 (requested_orientation?"argument":configured?"settings":"default")+" originals_rotated=0");
+            auto policy_file=DefaultIdentityMapPath();policy_file.replace_filename(kMergePolicySettingsName);
+            merge_policy=LoadMergePolicySettings(policy_file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
+            std::ostringstream policy_log;policy_log.imbue(std::locale::classic());policy_log<<"merge_policy=";
+            if(merge_policy){policy_log<<"settings sha256="<<merge_policy->sha256<<" rotation_max_degrees="<<merge_policy->rotation_max_degrees<<" scale_max_percent=";
+                if(merge_policy->scale_max_percent)policy_log<<*merge_policy->scale_max_percent;else policy_log<<"none";
+                policy_log<<" residual_warning_pixels=";
+                if(merge_policy->residual_max_pixels)policy_log<<*merge_policy->residual_max_pixels;else policy_log<<"none";
+            }else policy_log<<"none rotation_correction=0 scale_correction=0";
+            Log(policy_log.str());
         }
         ComScope com;HardwareProcessLease lease;return RunPreviewWindow(Discover());
     }catch(const std::exception& e){Log(std::string("failure: ")+e.what());return 2;}
