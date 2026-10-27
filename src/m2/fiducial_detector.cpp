@@ -14,10 +14,12 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 
@@ -300,9 +302,9 @@ std::string PointId(std::uint32_t column, std::uint32_t row) {
 // not link the generator; the contract test compares them with the generator.
 
 namespace {
+// The slanted edges' design levels (0.08 and 0.96) are not used: the dark side
+// is held to the view's own dark reference and the light side to paper (#375).
 constexpr double kChartPaperLevel = 0.92;
-constexpr double kChartEdgeDarkLevel = 0.08;
-constexpr double kChartEdgeLightLevel = 0.96;
 constexpr std::array<double, 6> kChartGrayLevels{0.05, 0.2, 0.4, 0.6, 0.8, 0.95};
 } // namespace
 
@@ -683,20 +685,57 @@ std::optional<CellMeasurement> MeasureCell(const cv::Mat& gray, const std::array
     return measurement;
 }
 
+// Tone of the view (#375). A printed and photographed chart does not keep the
+// design levels: the dark side lifts (ink, flare, the camera's tone curve) and
+// the middle greys move. The levels that the design cannot fix are measured in
+// the view itself, from the cells the node names expect, and then every cell is
+// held to them with the same tolerance as before:
+//   - the dark side of the slanted edges is compared with the median dark side
+//     of all the expected slanted edges of the view;
+//   - the grey patches are compared through the view's tone map: piecewise
+//     linear from each expected level to the median measured level of its
+//     cells. The residual of a cell is its distance from its level's median,
+//     taken back to design units through the map.
+// Both references come from the assignment under test. A wrong assignment gives
+// references that do not fit (a dark reference near paper, a grey map that is
+// flat or falls, large residuals), so both are bounded.
+
+// The median dark side of the expected slanted edges must be at most this
+// fraction of the paper: the dark side is printed as near black, and halfway to
+// paper is the most a view may lift it and still call it dark.
+constexpr double kEdgeDarkReferenceMaximum = 0.5;
+// From each expected grey level to the next, the view's map must rise by at least
+// this fraction of the design step. Without a lower bound a flat map (for
+// example blank cells in the place of the grey patches) would fit every level
+// with no residual, and a map that falls would accept levels in the wrong order.
+constexpr double kGrayMinimumRise = 0.5;
+// The map needs this many distinct expected levels: the chart's grey patches
+// show three ((column + row) is odd in a grey cell, so the levels are the
+// second, fourth and sixth), and all three must be seen for the order to be checked.
+constexpr std::size_t kGrayMinimumFitLevels = 3;
+
+double MedianValue(std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    const std::size_t n = values.size();
+    return n % 2 == 1 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
+}
+
 // Structure of the pattern an expected kind has: where the levels are.
-bool StructureAgrees(const CellPattern expected, const CellMeasurement& m, const DetectorParams& params) {
+// `edge_dark` is the view's dark reference; absent when no slanted edge was measured.
+bool StructureAgrees(const CellPattern expected, const CellMeasurement& m, const DetectorParams& params,
+    const std::optional<double> edge_dark) {
     const double tolerance = params.identity_level_tolerance;
-    const double dark = kChartEdgeDarkLevel / kChartPaperLevel;
-    const double light = kChartEdgeLightLevel / kChartPaperLevel;
     const bool ring_is_paper = std::abs(m.ring_ratio - 1.0) <= tolerance;
     const bool flat = m.spread < params.identity_line_spread;
+    const bool dark_known = edge_dark.has_value() && *edge_dark <= kEdgeDarkReferenceMaximum;
     switch (expected) {
     case CellPattern::Blank:
         return ring_is_paper && flat && std::abs(m.center_ratio - 1.0) <= tolerance;
     case CellPattern::SlantedEdgeDarkOnLight:
-        return std::abs(m.ring_ratio - light) <= tolerance && std::abs(m.center_ratio - dark) <= tolerance;
+        // The light side is printed as paper (the generator's 0.96 / 0.92 lies within the tolerance).
+        return dark_known && flat && ring_is_paper && std::abs(m.center_ratio - *edge_dark) <= tolerance;
     case CellPattern::SlantedEdgeLightOnDark:
-        return std::abs(m.ring_ratio - dark) <= tolerance && std::abs(m.center_ratio - light) <= tolerance;
+        return dark_known && flat && std::abs(m.center_ratio - 1.0) <= tolerance && std::abs(m.ring_ratio - *edge_dark) <= tolerance;
     case CellPattern::ColorPatch:
         // The colour is not compared: the image is read as grey, and the patch levels overlap the grey ones.
         return ring_is_paper && flat && m.center_ratio >= 0.25 && m.center_ratio <= 0.95;
@@ -726,6 +765,16 @@ void CheckIdentity(const cv::Mat& gray, const ChartDefinition& chart, const std:
         if (identity.mismatches.size() >= kMaximumRecordedMismatches) return;
         identity.mismatches.push_back({column, row, expected, check, m.center_ratio, m.ring_ratio, m.spread, m.axis_share});
     };
+
+    // Measure every cell with four detected corners first: the view's references need all of them.
+    struct MeasuredCell {
+        std::uint32_t column;
+        std::uint32_t row;
+        CellPattern expected;
+        CellMeasurement m;
+    };
+    std::vector<MeasuredCell> cells;
+    std::vector<double> dark_sides;
     for (std::uint32_t row = 0; row < chart.rows; ++row) {
         for (std::uint32_t column = 0; column < chart.columns; ++column) {
             const auto* tl = detected[row * stride + column];
@@ -738,25 +787,77 @@ void CheckIdentity(const cv::Mat& gray, const ChartDefinition& chart, const std:
             if (!measurement) { ++identity.cells_skipped; continue; }
             ++identity.cells_examined;
             const auto expected = ExpectedCellPattern(column, row);
-            if (!StructureAgrees(expected, *measurement, params)) {
-                ++identity.cells_mismatched;
-                record(column, row, expected, "structure", *measurement);
-                continue;
-            }
-            if (expected == CellPattern::GrayPatch) {
-                ++identity.gray_cells_examined;
-                const double level = ExpectedGrayPatchLevel(column, row) / kChartPaperLevel;
-                if (std::abs(measurement->center_ratio - level) > params.identity_level_tolerance) {
-                    ++identity.gray_cells_mismatched;
-                    record(column, row, expected, "gray-level", *measurement);
-                }
-            }
+            if (expected == CellPattern::SlantedEdgeDarkOnLight) dark_sides.push_back(measurement->center_ratio);
+            if (expected == CellPattern::SlantedEdgeLightOnDark) dark_sides.push_back(measurement->ring_ratio);
+            cells.push_back({column, row, expected, *measurement});
         }
     }
+    identity.edge_cells_examined = static_cast<std::uint32_t>(dark_sides.size());
+    if (!dark_sides.empty()) identity.edge_dark_reference = MedianValue(dark_sides);
+
+    std::vector<const MeasuredCell*> grays;
+    for (const auto& cell : cells) {
+        if (!StructureAgrees(cell.expected, cell.m, params, identity.edge_dark_reference)) {
+            ++identity.cells_mismatched;
+            record(cell.column, cell.row, cell.expected, "structure", cell.m);
+            continue;
+        }
+        if (cell.expected == CellPattern::GrayPatch) grays.push_back(&cell);
+    }
+    identity.gray_cells_examined = static_cast<std::uint32_t>(grays.size());
+
+    // Grey levels through the view's tone map: piecewise linear through the median measured
+    // level of each expected level, which must rise from each level to the next.
+    auto& fit = identity.gray_fit;
+    std::map<double, std::vector<double>> by_level;
+    for (const auto* cell : grays) {
+        const double x = ExpectedGrayPatchLevel(cell->column, cell->row) / kChartPaperLevel;
+        by_level[x].push_back(cell->m.center_ratio);
+        fit.cells.push_back({cell->column, cell->row, x, cell->m.center_ratio, 0.0});
+    }
+    for (const auto& [x, values] : by_level) {
+        fit.knots.push_back({x, MedianValue(values), static_cast<std::uint32_t>(values.size())});
+    }
+    const auto rise = [&fit](std::size_t i) {
+        return (fit.knots[i + 1].measured - fit.knots[i].measured) / (fit.knots[i + 1].expected - fit.knots[i].expected);
+    };
+    if (fit.knots.size() < kGrayMinimumFitLevels) {
+        fit.status = "too-few-levels";
+    } else {
+        fit.min_rise_ratio = rise(0);
+        for (std::size_t i = 1; i + 1 < fit.knots.size(); ++i) fit.min_rise_ratio = std::min(fit.min_rise_ratio, rise(i));
+        fit.status = fit.min_rise_ratio >= kGrayMinimumRise ? "fitted" : "not-rising";
+    }
+    if (fit.status == "fitted") {
+        double sum2 = 0.0;
+        for (std::size_t i = 0; i < grays.size(); ++i) {
+            auto& c = fit.cells[i];
+            // Residual in design units: the level the map gives for the measurement, minus the
+            // expected level. The map is inverted on the segment the measurement lies towards.
+            std::size_t k = 0;
+            while (fit.knots[k].expected != c.expected) ++k;
+            const double difference = c.measured - fit.knots[k].measured;
+            const bool up = difference >= 0.0 ? k + 1 < fit.knots.size() : k == 0;
+            c.residual = difference / rise(up ? k : k - 1);
+            sum2 += c.residual * c.residual;
+            fit.residual_max_abs = std::max(fit.residual_max_abs, std::abs(c.residual));
+            if (std::abs(c.residual) > params.identity_level_tolerance) {
+                ++identity.gray_cells_mismatched;
+                record(grays[i]->column, grays[i]->row, CellPattern::GrayPatch, "gray-level", grays[i]->m);
+            }
+        }
+        fit.residual_rms = grays.empty() ? 0.0 : std::sqrt(sum2 / static_cast<double>(grays.size()));
+    } else if (fit.status == "not-rising") {
+        // The levels do not rise in the order the node names give: no grey patch shows its level.
+        identity.gray_cells_mismatched = identity.gray_cells_examined;
+        for (const auto* cell : grays) record(cell->column, cell->row, CellPattern::GrayPatch, "gray-tone", cell->m);
+    }
+
     if (Rejects(identity.cells_mismatched, identity.cells_examined, params)
         || Rejects(identity.gray_cells_mismatched, identity.gray_cells_examined, params)) {
         identity.result = "mismatch";
-    } else if (identity.cells_examined < params.identity_min_cells || identity.gray_cells_examined < params.identity_min_gray_cells) {
+    } else if (identity.cells_examined < params.identity_min_cells || identity.gray_cells_examined < params.identity_min_gray_cells
+        || fit.status != "fitted") {
         identity.result = "unverifiable";
     } else {
         identity.result = "verified";
@@ -1171,7 +1272,11 @@ std::string BuildReport(const Job& job, const std::vector<ViewOutcome>& outcomes
         + ",\"originXMm\":" + Num(job.chart.origin_x_mm) + ",\"originYMm\":" + Num(job.chart.origin_y_mm) + ",\"pitchMm\":" + Num(job.chart.pitch_mm) + '}';
     out += ",\"idAssignment\":\"operator anchors, then lattice growth by local affine prediction; no ground truth is read\"";
     out += ",\"identityCheck\":\"anchor triples must not be mirrored; the pattern in each cell with four detected corners (kind = (3 * column + 5 * row) mod 8, "
-           "grey patch level by (column + row) mod 6) must agree with the node names; levels are ratios to the white of the same cell\"";
+           "grey patch level by (column + row) mod 6) must agree with the node names; levels are ratios to the white of the same cell; "
+           "the dark side of a slanted edge is compared with the median dark side of the view's expected slanted edges (at most "
+        + Num(kEdgeDarkReferenceMaximum) + "); grey levels are compared through the view's piecewise linear map from expected level to "
+           "the median measured level of its cells (" + std::to_string(kGrayMinimumFitLevels) + " levels at least, each step rising by at least "
+        + Num(kGrayMinimumRise) + " of the design step), residuals in design units\"";
     out += ",\"validationSplit\":\"detected nodes with even (column + row) give the pose; the others are measured\"";
     out += ",\"params\":{\"darkFraction\":" + Num(params.dark_fraction) + ",\"blurSigma\":" + Num(params.blur_sigma)
         + ",\"minHoleRadiusPx\":" + Num(params.min_hole_radius_px) + ",\"maxHoleRadiusPx\":" + Num(params.max_hole_radius_px)
@@ -1219,7 +1324,29 @@ std::string BuildReport(const Job& job, const std::vector<ViewOutcome>& outcomes
             + ",\"mirroredTriples\":" + std::to_string(identity.mirrored_triples) + ",\"cellsExamined\":" + std::to_string(identity.cells_examined)
             + ",\"cellsSkipped\":" + std::to_string(identity.cells_skipped) + ",\"cellsMismatched\":" + std::to_string(identity.cells_mismatched)
             + ",\"grayCellsExamined\":" + std::to_string(identity.gray_cells_examined)
-            + ",\"grayCellsMismatched\":" + std::to_string(identity.gray_cells_mismatched) + ",\"mismatches\":[";
+            + ",\"grayCellsMismatched\":" + std::to_string(identity.gray_cells_mismatched)
+            + ",\"edgeCellsExamined\":" + std::to_string(identity.edge_cells_examined)
+            + ",\"edgeDarkReference\":" + (identity.edge_dark_reference ? Num(*identity.edge_dark_reference) : std::string("null"));
+        const auto& fit = identity.gray_fit;
+        out += ",\"grayFit\":{\"status\":" + Quote(fit.status) + ",\"cells\":" + std::to_string(fit.cells.size()) + ",\"knots\":[";
+        for (std::size_t i = 0; i < fit.knots.size(); ++i) {
+            const auto& k = fit.knots[i];
+            if (i != 0) out += ',';
+            out += "{\"expected\":" + Num(k.expected) + ",\"measured\":" + Num(k.measured) + ",\"cells\":" + std::to_string(k.cells) + '}';
+        }
+        out += ']';
+        if (fit.status == "fitted" || fit.status == "not-rising") out += ",\"minRiseRatio\":" + Num(fit.min_rise_ratio);
+        if (fit.status == "fitted") out += ",\"residualRms\":" + Num(fit.residual_rms) + ",\"residualMaxAbs\":" + Num(fit.residual_max_abs);
+        out += ",\"levelsByCell\":[";
+        for (std::size_t i = 0; i < fit.cells.size(); ++i) {
+            const auto& c = fit.cells[i];
+            if (i != 0) out += ',';
+            out += "{\"cellColumn\":" + std::to_string(c.column) + ",\"cellRow\":" + std::to_string(c.row)
+                + ",\"expected\":" + Num(c.expected) + ",\"measured\":" + Num(c.measured);
+            if (fit.status == "fitted") out += ",\"residual\":" + Num(c.residual);
+            out += '}';
+        }
+        out += "]},\"mismatches\":[";
         for (std::size_t i = 0; i < identity.mismatches.size(); ++i) {
             const auto& m = identity.mismatches[i];
             if (i != 0) out += ',';

@@ -614,6 +614,148 @@ void TestIdentityChecks(const std::filesystem::path& temp) {
 }
 
 // ---------------------------------------------------------------------------
+// Tone of a printed and photographed chart (#375). The design levels are not
+// kept: the dark side lifts to about 0.2 of the paper and the grey 0.6 / 0.92
+// = 0.652 is read near 0.74. The rendered image (linear, paper 0.92) is passed
+// through a monotone curve of the ratio to paper with those points.
+
+constexpr double kRenderedPaper = 0.92 * 255.0;
+
+double LiftedTone(const double ratio) {
+    // (ratio to paper -> lifted ratio): black and the edge's dark side lift, the middle greys compress.
+    constexpr std::array<std::array<double, 2>, 4> knots{{{0.0, 0.17}, {0.087, 0.20}, {0.652, 0.74}, {1.0, 1.0}}};
+    if (ratio >= knots.back()[0]) return ratio;
+    for (std::size_t i = 1; i < knots.size(); ++i) {
+        if (ratio <= knots[i][0]) {
+            const double f = (ratio - knots[i - 1][0]) / (knots[i][0] - knots[i - 1][0]);
+            return knots[i - 1][1] + f * (knots[i][1] - knots[i - 1][1]);
+        }
+    }
+    return ratio;
+}
+
+cv::Mat LiftTone(const cv::Mat& gray) {
+    cv::Mat table(1, 256, CV_8UC1);
+    for (int v = 0; v < 256; ++v) {
+        const double out = LiftedTone(v / kRenderedPaper) * kRenderedPaper;
+        table.at<std::uint8_t>(0, v) = static_cast<std::uint8_t>(std::clamp(std::lround(out), 0L, 255L));
+    }
+    cv::Mat lifted;
+    cv::LUT(gray, table, lifted);
+    return lifted;
+}
+
+// Paints a square of half size `half` (in pitches, around the cell centre) of
+// every grey cell of one level with a value, in the picture. The grey patch has
+// half size 0.25 and the band the detector reads around it starts at 0.272.
+// Test side only: it uses the true projection.
+void PaintGrayCells(cv::Mat& gray, const synth::CameraSpec& camera, const fid::ChartDefinition& chart,
+    const double expected_level, const double half, const std::uint8_t value) {
+    for (std::uint32_t row = 0; row < chart.rows; ++row) {
+        for (std::uint32_t column = 0; column < chart.columns; ++column) {
+            if (fid::ExpectedCellPattern(column, row) != fid::CellPattern::GrayPatch) continue;
+            if (fid::ExpectedGrayPatchLevel(column, row) != expected_level) continue;
+            std::array<cv::Point, 4> corners;
+            bool visible = true;
+            const std::array<std::array<double, 2>, 4> cell{{{0.5 - half, 0.5 - half}, {0.5 + half, 0.5 - half},
+                {0.5 + half, 0.5 + half}, {0.5 - half, 0.5 + half}}};
+            for (std::size_t i = 0; i < 4; ++i) {
+                const auto p = synth::ProjectDocumentPoint(camera, {chart.origin_x_mm + (column + cell[i][0]) * chart.pitch_mm,
+                    chart.origin_y_mm + (row + cell[i][1]) * chart.pitch_mm});
+                if (!p) { visible = false; break; }
+                corners[i] = cv::Point(static_cast<int>(std::lround(p->x)), static_cast<int>(std::lround(p->y)));
+            }
+            if (visible) cv::fillConvexPoly(gray, corners.data(), 4, cv::Scalar(value));
+        }
+    }
+}
+
+void TestToneLiftedIdentity(const std::filesystem::path& temp) {
+    const auto camera = MakeCamera("CAM-A", kModelA, {15, 5, 0, 560, 420, 560}, false);
+    const auto spec = MakeSpec({camera}, 0.95, synth::ChromaSubsampling::s444, 51);
+    const auto chart = ChartOf(spec.chart);
+    const auto design = RenderGray(spec, 0);
+    const auto gray = LiftTone(design);
+    const auto anchors = OperatorAnchors(camera, chart);
+    const fid::DetectorParams params;
+    const double design_dark = 0.08 / 0.92;
+    const double design_mid_gray = 0.6 / 0.92;
+
+    const auto right = fid::DetectView(gray, chart, anchors, params);
+    CheckVerified(right, "lifted tone");
+    const auto& identity = right.identity;
+    Info("lifted tone: cells " + std::to_string(identity.cells_examined) + ", mismatched " + std::to_string(identity.cells_mismatched)
+        + ", grey " + std::to_string(identity.gray_cells_examined) + " / mismatched " + std::to_string(identity.gray_cells_mismatched)
+        + ", edge dark reference " + (identity.edge_dark_reference ? Fixed(*identity.edge_dark_reference, 3) : std::string("none"))
+        + ", grey residual rms " + Fixed(identity.gray_fit.residual_rms) + ", max " + Fixed(identity.gray_fit.residual_max_abs));
+    // The case must exercise the change: the design levels with the same tolerance would not hold.
+    Check(identity.edge_dark_reference && *identity.edge_dark_reference > design_dark + params.identity_level_tolerance
+            && *identity.edge_dark_reference < 0.3,
+        "lifted tone: the measured dark side is outside the design level's tolerance (about 0.2)");
+    bool middle_moved = false;
+    for (const auto& knot : identity.gray_fit.knots) {
+        if (std::abs(knot.expected - design_mid_gray) < 1e-9) {
+            middle_moved = knot.measured - design_mid_gray > params.identity_level_tolerance;
+        }
+    }
+    Check(identity.gray_fit.status == "fitted" && identity.gray_fit.knots.size() == 3 && middle_moved,
+        "lifted tone: three grey levels are fitted and the middle one is outside the design level's tolerance");
+    Check(identity.cells_mismatched == 0 && identity.gray_cells_mismatched == 0, "lifted tone: no cell disagrees with the right names");
+
+    // Wrong names on the same lifted picture.
+    for (const auto& [dc, dr] : std::array<std::pair<int, int>, 6>{{{1, 0}, {0, 1}, {1, 1}, {-1, 0}, {0, -1}, {-1, -1}}}) {
+        auto shifted = anchors;
+        for (auto& a : shifted) {
+            a.column = static_cast<std::uint32_t>(static_cast<int>(a.column) + dc);
+            a.row = static_cast<std::uint32_t>(static_cast<int>(a.row) + dr);
+        }
+        const std::string name = "lifted tone, shift " + std::to_string(dc) + "," + std::to_string(dr);
+        const auto detection = fid::DetectView(gray, chart, shifted, params);
+        const auto& id = detection.identity;
+        Info(name + ": " + detection.failure + ", cells " + std::to_string(id.cells_examined) + ", mismatched "
+            + std::to_string(id.cells_mismatched) + ", grey " + std::to_string(id.gray_cells_examined) + " / mismatched "
+            + std::to_string(id.gray_cells_mismatched) + ", grey map " + id.gray_fit.status);
+        Check(detection.failure == "identity-mismatch" && detection.nodes.empty(), name + ": rejected without observations");
+        if (dc == dr) {
+            // The pattern kinds repeat on the diagonal; the grey order is what tells.
+            Check(id.gray_fit.status == "not-rising" && id.gray_cells_mismatched == id.gray_cells_examined,
+                name + ": the grey levels are not in the order the names give");
+        }
+    }
+
+    // Right names, but the chart's greys are not in order: the lightest level printed as the middle one.
+    {
+        auto flat = gray.clone();
+        PaintGrayCells(flat, camera, chart, 0.95, 0.22, static_cast<std::uint8_t>(std::lround(LiftedTone(design_mid_gray) * kRenderedPaper)));
+        const auto detection = fid::DetectView(flat, chart, anchors, params);
+        Check(detection.failure == "identity-mismatch" && detection.identity.gray_fit.status == "not-rising",
+            "lifted tone: grey levels that do not rise are rejected even with the right names");
+    }
+    // Right names, but one grey level cannot be read (its cells disagree in structure): the map is not made.
+    {
+        auto missing = gray.clone();
+        PaintGrayCells(missing, camera, chart, 0.95, 0.30, static_cast<std::uint8_t>(std::lround(0.2 * kRenderedPaper)));
+        const auto detection = fid::DetectView(missing, chart, anchors, params);
+        Info("lifted tone, one grey level unreadable: " + detection.failure + ", grey map " + detection.identity.gray_fit.status
+            + ", cells mismatched " + std::to_string(detection.identity.cells_mismatched));
+        Check(detection.failure == "identity-unverifiable" && detection.identity.gray_fit.status == "too-few-levels",
+            "lifted tone: fewer than three grey levels leave the view unverifiable");
+    }
+
+    // The report keeps the view's references and the grey map for diagnosis.
+    const auto image = temp / "lifted.png";
+    Check(cv::imwrite(image.string(), gray), "lifted tone fixture is written");
+    const auto result = fid::RunJob(JobJson(chart, {{"lifted-A", "CAM-A", "training", "lifted.png", anchors}}), temp);
+    Check(result.ok && !result.session_json.empty(), "lifted tone: the job writes a session");
+    Check(result.report_json.find("\"edgeDarkReference\":0.") != std::string::npos
+            && result.report_json.find("\"grayFit\":{\"status\":\"fitted\"") != std::string::npos
+            && result.report_json.find("\"knots\":[{") != std::string::npos
+            && result.report_json.find("\"residualRms\":") != std::string::npos
+            && result.report_json.find("\"levelsByCell\":[{") != std::string::npos,
+        "lifted tone: the report records the dark reference, the grey map and its residuals");
+}
+
+// ---------------------------------------------------------------------------
 // Job: end to end through JPEG files, the session, and the lens estimator.
 
 struct Mapping {
@@ -1058,6 +1200,7 @@ int main(const int argc, char* argv[]) {
         const auto started = std::chrono::steady_clock::now();
         Info(std::string("OpenCV ") + CV_VERSION);
         TestIdentityChecks(temp);
+        TestToneLiftedIdentity(temp);
         if (!identity_only) {
             TestDetectionStages(temp);
             TestFailurePaths();

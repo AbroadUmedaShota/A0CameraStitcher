@@ -33,7 +33,7 @@
 namespace a0::m2::fiducial {
 
 inline constexpr std::string_view kDetectorToolId = "a0-fiducial-detector";
-inline constexpr std::string_view kDetectorVersion = "1.1.0";
+inline constexpr std::string_view kDetectorVersion = "1.2.0";
 inline constexpr std::string_view kJobSchemaVersion = "a0.fiducial-detector-job/1";
 inline constexpr std::string_view kReportSchemaVersion = "a0.fiducial-detector-report/1";
 inline constexpr std::uint64_t kMaximumImageFileBytes = 256ULL * 1024ULL * 1024ULL;
@@ -99,9 +99,11 @@ struct DetectorParams {
     double accept_fraction{0.3};         // match radius, in local lattice spacings
 
     // Identity check of the anchors against the cell patterns (#311). Levels are
-    // compared as a ratio to the white of the same cell, which assumes a linear
-    // response; vignetting and exposure cancel in the ratio.
-    double identity_level_tolerance{0.08};     // |measured ratio - expected ratio| for a flat patch
+    // compared as a ratio to the white of the same cell; vignetting and exposure
+    // cancel in the ratio. The tone of the print and the camera is not assumed
+    // linear (#375): the dark side of the slanted edges is held to the view's
+    // median dark side, and the grey patches to a per-view linear tone map.
+    double identity_level_tolerance{0.08};     // |measured - expected| in ratios to paper, after the view's tone references
     double identity_line_spread{0.30};         // fine lines: (90th - 10th percentile) / white, at least
     double identity_line_share{0.75};          // fine lines: share of level crossings along one cell axis
     std::uint32_t identity_min_cells{8};       // cells that must be checked, else the view is not verifiable
@@ -146,11 +148,40 @@ struct CellMismatch {
     std::uint32_t column{};   // top-left node of the cell
     std::uint32_t row{};
     CellPattern expected{CellPattern::Blank};
-    std::string check;        // "structure" or "gray-level"
+    std::string check;        // "structure", "gray-level" (residual outside the tolerance) or "gray-tone" (grey map not rising)
     double center_ratio{};    // middle of the cell / white of the cell
     double ring_ratio{};      // band just outside the pattern / white of the cell
     double spread{};          // (90th - 10th percentile of the middle) / white
     double axis_share{};      // share of the gradient energy along the column direction
+};
+
+// A grey patch as the per-view tone fit saw it (#375).
+struct GrayCellLevel {
+    std::uint32_t column{};   // top-left node of the cell
+    std::uint32_t row{};
+    double expected{};        // design level / design paper
+    double measured{};        // middle of the cell / white of the cell
+    double residual{};        // design level the view's map gives for `measured`, minus expected; 0 when no map was made
+};
+
+// One expected level of the per-view tone map: the median measured level of its cells.
+struct GrayToneKnot {
+    double expected{};
+    double measured{};
+    std::uint32_t cells{};
+};
+
+// Per-view tone map of the grey patches (#375): piecewise linear through the
+// knots, over the grey patches whose structure agrees.
+struct GrayToneFit {
+    // "fitted", "too-few-levels" (fewer distinct expected levels than the map needs),
+    // "not-rising" (a step between neighbouring knots rises less than the minimum) or "not-run".
+    std::string status{"not-run"};
+    std::vector<GrayToneKnot> knots;  // ascending expected level
+    double min_rise_ratio{};  // smallest (measured step / expected step) between neighbouring knots
+    double residual_rms{};    // in design units (ratio to paper); only when fitted
+    double residual_max_abs{};
+    std::vector<GrayCellLevel> cells;
 };
 
 // Result of checking the anchors against the chart (#311).
@@ -164,6 +195,9 @@ struct IdentityCheck {
     std::uint32_t cells_mismatched{};       // pattern disagrees with the one the node names expect
     std::uint32_t gray_cells_examined{};    // expected grey patches that could be measured
     std::uint32_t gray_cells_mismatched{};  // grey level disagrees with the expected level
+    std::uint32_t edge_cells_examined{};    // expected slanted edges that could be measured
+    std::optional<double> edge_dark_reference; // median of their dark sides (ratio to paper), when any
+    GrayToneFit gray_fit;
     std::vector<CellMismatch> mismatches;   // the first ones, for the report
 };
 
