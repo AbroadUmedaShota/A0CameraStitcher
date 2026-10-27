@@ -133,3 +133,15 @@ pwsh -NoProfile -File scripts/Invoke-StillPairCorrection.ps1 `
 bindingはCREATE_NEWのpartialを保持handleでflushし、置換禁止rename・同handleでの再読を行って最後に確定する。exit0と最終bindingの両方を確認して初めて、この保存ペアに結び付いた評価成功と扱う。子のJPEG/manifestだけを見て本接続の成功としない。既存directory・原画像・過去review・profile・jobは上書きせず、自動再試行や最新画像の探索もしない。
 
 `saved_review_evaluation_contracts` は製品renderer/readerをlinkしないprocess-only harnessから、実StillReview・実script・実StitchEvalを呼ぶ。人工7360×4912 JPEG、独立に記述したreview、空白/日本語を含むpathで幾何のみ/色併用の成功、直接CLIと同一JPEG、幾何/色の拒否、改変/誤pair/誤hash、既存出力、子の形式拒否、原画像と条件の不変を確認する。strict readerの既存試験も追加入口に適用する。実図面品質・承認profile・通常画面への組込・映像Cの校正反映は後続工程。
+
+## 取り付けの向きと保存結果・再Merge (#361)
+
+ライブCで `rotated-180`（設定は [WPD_PREVIEW_MERGE.md](WPD_PREVIEW_MERGE.md) の #361 の節）を選んで「両台撮影 → 仮Merge保存」すると、A/Bの `original.jpg` は撮ったまま保存し、撮影時のhashで結び付ける。合成JPEGを作るときだけ、復号したメモリ上のA/Bを180°回してからAを左に並べる。translation、crop、回転・倍率、対応点はすべて回した後の座標で表す。原画像ファイルの回転・書き換えはしない。
+
+確認レポートv1/v2/v3には、`rotated-180` のときだけ `"mountOrientation":"rotated-180"` を加える。`normal` では欄を書かないので、従来と同じバイト列になる。欄の無い既存レポートは `normal` として読む。`"normal"` を明示した欄、未知の値、文字列以外、重複は拒否する。同じ状態を二通りのhashで表さないためで、schema名は進めていない。この欄を知らない旧版のreaderは未知欄として拒否するので、回したレポートを `normal` と取り違えない。向きの記録はレポートの欄だけで、出力JPEGの画素から向きを検証し直すことはしない。
+
+再Merge（手動改訂）は親と同じ向きでなければ保存前に拒否し、出力folderも作らない。読込時も即時親と向きが違えば拒否する。StillReviewはレポートの向きで原画像を復号後に回し、半透明・差分・Aのみ・Bのみの表示と再Mergeに使う。画面上部の数値行の末尾に「取付: 180°回転（A/Bを回して表示・合成）」または「取付: 通常」を出す。「保存条件を読込」と「作業を読込」は向きの違うものを拒否する。作業ファイル `a0.still-review-session.v1` の形式は変えない。点の座標は参照レポートの向きで回した後の原画像pxで、`normal` では従来どおり原画像そのままの座標。
+
+補正評価への受け渡し `a0.saved-review-evaluation-inputs.v1` には `mountOrientation`（`normal` か `rotated-180`）を常に加える。`Invoke-StillPairCorrection.ps1` はこの欄が二値のどちらかであることを確かめるだけで、StitchEvalには従来どおり回していない原画像を渡す。draft profileの射影変換が取り付けの向きを吸収するため、評価の画素は回さない。bindingの形式は変えず、向きはreview reportのhashを通じて結び付く。
+
+`still_review_contracts` は左右で色の違う人工原画像を使い、`rotated-180` の合成の両端が元のAの右側・元のBの左側になること、`normal` では従来どおりAの左側が左端になること、レポートの記録と再読、欄の無い旧レポート、明示normal・未知値・重複・未知欄の拒否、親と違う向きの改訂の拒否（書込時・読込時）、原画像のbyte列とhashの不変を検査する。`saved_review_evaluation_contracts` は受け渡しの向きと、`rotated-180` のreviewから作った評価JPEGが回していない直接評価と同じhashになることを確認する。

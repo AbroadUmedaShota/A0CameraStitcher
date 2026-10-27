@@ -28,6 +28,8 @@ struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::exper
 std::future<CaptureUiOutcome> capture_future;
 using ReviewGeometry=a0::m2::experimental::PreviewReviewGeometry;
 ReviewGeometry pending_geometry;
+// Fixed before any worker starts; C and the saved Merge use the same frame.
+a0::m2::experimental::MountOrientation mount_orientation{};
 Clock::time_point capture_deadline;
 Pixels review_pixels;bool review_visible=false;
 std::filesystem::path review_path;
@@ -108,6 +110,8 @@ void MergeLoop(std::stop_token stop){
             (sequence_a!=last_a || sequence_b!=last_b || revision!=last_revision)){
             try{
                 auto small_a=SmallBgr(a),small_b=SmallBgr(b);
+                // Proposal, manual shifts and render all share the oriented frame.
+                a0::m2::experimental::OrientRenderInput(small_a,mount_orientation);a0::m2::experimental::OrientRenderInput(small_b,mount_orientation);
                 bool align=false;
                 {std::lock_guard lock(merged.mutex);
                     merged.source_width=small_a.width;merged.source_height=small_a.height;
@@ -291,7 +295,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         return drawn;
     }
     std::lock_guard lock(merged.mutex);
-    std::wstring title=L"C 仮Merge（未校正） A:左 + B:右 / 重なり "+std::to_wstring(merged.overlap_pixels)+L"px / B上下 "+std::to_wstring(merged.vertical_pixels)+L"px";
+    const auto title=PreviewMergeTitle(mount_orientation,merged.overlap_pixels,merged.vertical_pixels);
     TextOutW(dc,12,client.bottom/2+88,title.c_str(),static_cast<int>(title.size()));
     TextOutW(dc,12,client.bottom/2+110,merged.alignment_status.c_str(),static_cast<int>(merged.alignment_status.size()));
     if(!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b)){
@@ -304,7 +308,7 @@ void RequestCapture(int index){
     if(index<0 || index>2 || !CanFocus(*cameras[0]) || !CanFocus(*cameras[1]))return;
     if(index==2){std::lock_guard lock(merged.mutex);
         if(merged.pixels.bytes.empty() || merged.rendered_revision!=merged.revision || !PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b))return;
-        pending_geometry={merged.source_width,merged.source_height,merged.overlap_pixels,merged.vertical_pixels,merged.revision};
+        pending_geometry={merged.source_width,merged.source_height,merged.overlap_pixels,merged.vertical_pixels,merged.revision,mount_orientation};
     }
     capture_stop_requested=false;review_visible=false;capture_deadline=Clock::now()+std::chrono::seconds(180);
     capture_pending=index;capture_status=index==0?L"Aを撮影する準備中：両Liveを停止しています…":L"Bを撮影する準備中：両Liveを停止しています…";
@@ -325,7 +329,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         if(Clock::now()>=deadline)throw std::runtime_error("pair deadline after review; all files retained");
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
-        Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" calibrated=0");
+        Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
     }catch(const std::exception& error){result.capture.success=false;result.capture.error=error.what();evidence.RecordState("pair","FailedPartial",{},error.what());Log(std::string("pair_review_failure: ")+error.what());}
     return result;

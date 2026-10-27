@@ -7,12 +7,16 @@
 #include <stdexcept>
 #include <optional>
 #include "a0/m2/experimental/review_alignment.hpp"
+#include "a0/m2/experimental/mount_orientation.hpp"
 
 namespace a0::m2::experimental {
+// Every translation, crop and adjustment below is expressed in the frame of
+// the oriented render inputs. Reports omit orientation when it is normal.
 struct PreviewReviewGeometry {
     std::uint32_t width{},height{},overlap{};
     int vertical{};
     std::uint64_t revision{};
+    MountOrientation orientation{MountOrientation::normal};
 };
 // Approximate normalized-frame translation only. Optical field-of-view
 // equivalence has NOT been measured. Never produces a rig profile or approval.
@@ -21,7 +25,7 @@ inline render::PairRenderParameters ScalePreviewReviewGeometry(
     if(g.width<2 || g.width>640 || !g.height || g.height>640 || !g.overlap || g.overlap>=g.width ||
         g.vertical<=-static_cast<int>(g.height) || g.vertical>=static_cast<int>(g.height))
         throw std::invalid_argument("invalid review preview geometry");
-    (void)render::PixelCount(width,height);
+    (void)MountOrientationName(g.orientation);(void)render::PixelCount(width,height);
     const auto dx=std::llround(double(g.width-g.overlap)*width/g.width);
     const auto dy=std::llround(double(g.vertical)*height/g.height);
     if(dx<=0 || dx>=width || std::abs(dy)>=height)throw std::invalid_argument("review translation is outside image");
@@ -77,5 +81,6 @@ SavedStillReview LoadSavedStillReview(const std::filesystem::path& report);
 // only to the explicitly invoked development tool; never publish this JSON.
 std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& report);
 render::BgrImage LoadStillReviewImage(const SavedStillReview& review);
+// Decoded A/B render inputs, turned in memory by the report's orientation.
 std::array<render::BgrImage,2> LoadStillReviewSources(const SavedStillReview& review);
 }

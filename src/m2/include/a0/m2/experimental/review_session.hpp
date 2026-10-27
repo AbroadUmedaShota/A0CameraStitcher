@@ -20,7 +20,8 @@ inline bool ReviewSessionBelongsToPair(const SavedReviewSession& session,const S
     const auto& source=session.review;
     return source.pair_id==current.pair_id && source.camera_a_original==current.camera_a_original && source.camera_b_original==current.camera_b_original &&
         source.camera_a_sha256==current.camera_a_sha256 && source.camera_b_sha256==current.camera_b_sha256 && source.camera_a_bytes==current.camera_a_bytes &&
-        source.camera_b_bytes==current.camera_b_bytes && source.source_width==current.source_width && source.source_height==current.source_height;
+        source.camera_b_bytes==current.camera_b_bytes && source.source_width==current.source_width && source.source_height==current.source_height &&
+        source.geometry.orientation==current.geometry.orientation; // points live in the oriented input frame
 }
 // Explicit private work files, separate from merged JPEGs and calibration.
 SavedReviewSession LoadReviewSession(const std::filesystem::path& file);

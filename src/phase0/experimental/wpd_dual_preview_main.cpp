@@ -24,6 +24,7 @@
 #include <cmath>
 #include <numbers>
 #include "a0/phase0/experimental/preview_merge.hpp"
+#include "a0/phase0/experimental/preview_mount_settings.hpp"
 #include "a0/phase0/experimental/preview_alignment.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
@@ -704,10 +705,18 @@ int main(int argc,char** argv){
         if(argc==2 && (std::string(argv[1])=="--capture-diagnostics" || std::string(argv[1])=="--capture-event-diagnostics")){
             ComScope com;HardwareProcessLease lease;return ReadCaptureDiagnostics(Discover(),std::string(argv[1])=="--capture-event-diagnostics");
         }
-        if((argc!=3 && argc!=4) || std::string(argv[1])!="--seconds")throw std::runtime_error("usage: A0CameraStitcher.WpdDualPreview --seconds 0..3600 [--focus-smoke|--af-prepare-smoke|--stop-live-only|--capture-a|--capture-b|--capture-smoke|--merge-smoke|--pair-smoke|--pair-cycle-smoke|--level-smoke|--restart-smoke|--camera-end-restart-smoke]; or --capture-diagnostics / --capture-event-diagnostics / --pair-preflight-diagnostics / --isolated-a-start-diagnostics / --isolated-a-busy-frame-diagnostics / --camera-state-diagnostics (no shutter)");
-        size_t used{};run_seconds=std::stoi(argv[2],&used);if(used!=std::string(argv[2]).size() || run_seconds<0 || run_seconds>3600)throw std::runtime_error("invalid duration");
-        if(argc==4){
-            const std::string mode=argv[3];
+        // Optional trailing pair for the timed window only; the earlier forms
+        // keep their exact argument counts.
+        std::vector<std::string> args(argv,argv+argc);std::optional<MountOrientation> requested_orientation;
+        if(args.size()>=5 && args[1]=="--seconds" && args[args.size()-2]=="--mount-orientation"){
+            requested_orientation=a0::m2::experimental::ParseMountOrientation(args.back());
+            if(!requested_orientation)throw std::runtime_error("invalid mount orientation; use normal or rotated-180");
+            args.resize(args.size()-2);
+        }
+        if((args.size()!=3 && args.size()!=4) || args[1]!="--seconds")throw std::runtime_error("usage: A0CameraStitcher.WpdDualPreview --seconds 0..3600 [--focus-smoke|--af-prepare-smoke|--stop-live-only|--capture-a|--capture-b|--capture-smoke|--merge-smoke|--pair-smoke|--pair-cycle-smoke|--level-smoke|--restart-smoke|--camera-end-restart-smoke] [--mount-orientation normal|rotated-180]; or --capture-diagnostics / --capture-event-diagnostics / --pair-preflight-diagnostics / --isolated-a-start-diagnostics / --isolated-a-busy-frame-diagnostics / --camera-state-diagnostics (no shutter)");
+        size_t used{};run_seconds=std::stoi(args[2],&used);if(used!=args[2].size() || run_seconds<0 || run_seconds>3600)throw std::runtime_error("invalid duration");
+        if(args.size()==4){
+            const std::string mode=args[3];
             if(mode=="--stop-live-only"){cleanup_only=true;closing=true;}
             else if(mode=="--capture-a" || mode=="--capture-b"){cleanup_only=true;closing=true;capture_once_alias=mode=="--capture-a"?0:1;}
             else if(mode=="--focus-smoke" && run_seconds>=30)focus_smoke=true;
@@ -720,6 +729,15 @@ int main(int argc,char** argv){
             else if(mode=="--pair-cycle-smoke" && run_seconds>=60)pair_cycle_smoke=true;
             else if(mode=="--af-prepare-smoke" && run_seconds>=15)af_prepare_smoke=true;
             else throw std::runtime_error("invalid test mode or duration");
+        }
+        if(!cleanup_only){
+            // Settings sit beside camera-map-wpd.json. A rejected file stops
+            // startup before the hardware lease or any camera session.
+            auto settings=DefaultIdentityMapPath();settings.replace_filename(kMountOrientationSettingsName);
+            const auto configured=LoadMountOrientationSettings(settings);
+            mount_orientation=requested_orientation.value_or(configured.value_or(MountOrientation::normal));
+            Log(std::string("mount_orientation=")+a0::m2::experimental::MountOrientationName(mount_orientation)+" source="+
+                (requested_orientation?"argument":configured?"settings":"default")+" originals_rotated=0");
         }
         ComScope com;HardwareProcessLease lease;return RunPreviewWindow(Discover());
     }catch(const std::exception& e){Log(std::string("failure: ")+e.what());return 2;}

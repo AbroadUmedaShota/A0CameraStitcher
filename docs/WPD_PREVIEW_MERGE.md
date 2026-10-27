@@ -9,3 +9,22 @@
 推定をフレームごとに更新せず、rig profileを自動学習しない。手動操作でrevisionが変われば計算中の古い結果を適用しない。カメラsession切り替え時も古いCを消す。A/Bのどちらかの入力が2秒以上古ければCを表示しない。片側の過去画像で現在の二台合成を偽らない。取得workerとは別の最新画像だけを処理するworkerで合成し、カメラ制御・セッション・ファイル保存をC側に持たせない。これは撮影時刻の同期を保証しない。
 
 人工平面の既知移動、明るさ差、端数の縮小対応、上下crop、画素feather、無地、不正入力、片側更新停止を `preview_merge_contracts` で検査する。Release/Debugのソフトウェア合格と実機描画、本人の継ぎ目目視確認、最終設置後の校正受入は別々に記録する。#306の承認profileと保存JPEGと同じ幾何・色の製品Cは別の統合工程として残る。
+
+## 取り付けの向き（normal / rotated-180） (#361)
+
+吊り下げリグでは二台とも画像の左右が部屋と逆に写り、実際の重なりがAの左端とBの右端に来る。所有者の決定によりカメラはそのままにし、アプリ側で取り付けの向きを `normal`（既定、従来どおり）と `rotated-180` から選ぶ。`rotated-180` ではCに使う縮小A/Bを両方とも180°回転（行と列を同時に反転）してから、Aを左、Bを右に並べる。自動位置合わせ、重なりとB上下の手動調整、合成はすべて回した後の座標で行う。上段のA/B表示は受け取ったままで回さない。90°・鏡像・片側だけの回転、Bの数度の回転、明るさ・色の差は対象外。
+
+向きは起動引数、ローカル設定ファイル、`normal` の順に決める。
+
+- 起動引数: `A0CameraStitcher.WpdDualPreview.exe --seconds 0 --mount-orientation rotated-180`。`--seconds N [試験mode]` の後ろに付く一組だけを受け付け、従来の引数の形は変えない。`scripts/Start-WpdDualLivePreview.ps1 -MountOrientation rotated-180` も同じ値を渡す。省略時は引数を渡さない。
+- 設定ファイル: カメラ登録 `camera-map-wpd.json` と同じフォルダ（`%LOCALAPPDATA%\A0CameraStitcher\phase0`）の `wpd-mount-orientation.json`。
+
+```json
+{"schema":"a0.wpd-mount-orientation.v1","mountOrientation":"rotated-180"}
+```
+
+ファイルが無ければ `normal`。二つの欄以外の欄、重複欄、未知のschemaや値、大文字違い、4096byte超、通常ファイル以外は起動を拒否し、hardware leaseの取得やカメラのopenに進まない。先頭のUTF-8 BOMだけは許す。値は起動時に一度だけ読み、表示中は変わらない。ログに `mount_orientation=<値> source=argument|settings|default originals_rotated=0` を残す。Cを作らない後片付け（`--stop-live-only`、`--capture-a/-b`）では読まない。
+
+Cの見出しに「取付の向き: 通常」または「取付の向き: 180°回転（A/Bを回して合成）」を表示する。「両台撮影 → 仮Merge保存」はCの重なり・上下位置と一緒にこの向きを保存JPEG側へ渡し、原画像を復号した後のメモリ上の入力だけを同じ向きで回して合成する（[WPD_STILL_REVIEW.md](WPD_STILL_REVIEW.md) の #361 の節）。PCに保存する `original.jpg` は撮ったままで、回転も書き換えもしない。
+
+`normal` の画素、自動位置合わせ、既存試験の期待値は変わらない。相関値に合格線を設けず、自動候補の採否条件も変えない。`preview_merge_contracts` は奇数・偶数の幅と高さでの180°回転の画素対応、`rotated-180` の合成で回したAの外側（元のAの右端）が左端に来ること、Aの左端とBの右端が重なる人工画像を回した後の座標で既知の移動量を見つけること、見出しの文字、設定ファイルの厳格な読込を検査する。吊り下げリグでの実機確認（#360 で記録した回転前の自動位置合わせ結果との比較）は別に記録する。

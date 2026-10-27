@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
+#include <array>
 #include <fstream>
 #include <iostream>
 using namespace a0::m2::experimental;
@@ -22,15 +23,17 @@ void ProbeParentWriteLock(){
     if(file!=INVALID_HANDLE_VALUE)CloseHandle(file); // Probe only, never alter bytes.
 }
 void Hr(HRESULT hr){if(FAILED(hr))throw std::runtime_error("fixture WIC failure");}
-void Fixture(const fs::path& path,unsigned char red,unsigned char blue){
+// Left 32 columns use left_bgr, the rest right_bgr; uniform fixtures pass both equal.
+void HalfFixture(const fs::path& path,std::array<BYTE,3> left_bgr,std::array<BYTE,3> right_bgr){
     ComPtr<IWICImagingFactory> factory;Hr(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
     ComPtr<IWICStream> stream;Hr(factory->CreateStream(&stream));Hr(stream->InitializeFromFilename(path.c_str(),GENERIC_WRITE));
     ComPtr<IWICBitmapEncoder> encoder;Hr(factory->CreateEncoder(GUID_ContainerFormatJpeg,nullptr,&encoder));Hr(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));
     ComPtr<IWICBitmapFrameEncode> frame;ComPtr<IPropertyBag2> props;Hr(encoder->CreateNewFrame(&frame,&props));Hr(frame->Initialize(props.Get()));Hr(frame->SetSize(64,48));
     auto format=GUID_WICPixelFormat24bppBGR;Hr(frame->SetPixelFormat(&format));std::vector<BYTE> pixels(64*48*3);
-    for(size_t i=0;i<pixels.size();i+=3){pixels[i]=blue;pixels[i+1]=30;pixels[i+2]=red;}
+    for(size_t i=0;i<pixels.size();i+=3){const auto& bgr=(i/3)%64<32?left_bgr:right_bgr;std::copy(bgr.begin(),bgr.end(),pixels.begin()+i);}
     Hr(frame->WritePixels(48,64*3,static_cast<UINT>(pixels.size()),pixels.data()));Hr(frame->Commit());Hr(encoder->Commit());
 }
+void Fixture(const fs::path& path,unsigned char red,unsigned char blue){HalfFixture(path,{blue,30,red},{blue,30,red});}
 std::vector<unsigned char> Read(const fs::path& path){std::ifstream f(path,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
 int main(){
     int checks=0,failures=0;auto check=[&](bool value){++checks;if(!value)++failures;};
@@ -53,7 +56,10 @@ int main(){
         const auto original_jpeg=Read(output.jpeg);
         const auto saved=LoadSavedStillReview(output.report);const auto full=LoadStillReviewImage(saved);
         check(saved.pair_id==r.pair_id && saved.translation_x==32 && saved.translation_y==4 && !saved.manual_revision);
+        // Normal reports keep their earlier bytes: no orientation field, read as normal.
+        check(saved.geometry.orientation==MountOrientation::normal && report.find("mountOrientation")==std::string::npos);
         const auto evaluation_inputs=DescribeSavedReviewEvaluationInputs(output.report);
+        check(evaluation_inputs.find("\"mountOrientation\":\"normal\"")!=std::string::npos);
         check(evaluation_inputs.find("a0.saved-review-evaluation-inputs.v1")!=std::string::npos);
         check(evaluation_inputs.find(saved.report_sha256)!=std::string::npos && evaluation_inputs.find(r.camera_a_sha256)!=std::string::npos);
         check(evaluation_inputs.find("\"productApproved\":false")!=std::string::npos);
@@ -134,6 +140,7 @@ int main(){
         check(ReviewSessionBelongsToPair(loaded_work,saved) && ReviewSessionBelongsToPair(loaded_work,child));
         auto other_pair=saved;other_pair.pair_id="different-pair";check(!ReviewSessionBelongsToPair(loaded_work,other_pair));
         other_pair=saved;other_pair.camera_b_sha256=std::string(64,'0');check(!ReviewSessionBelongsToPair(loaded_work,other_pair));
+        other_pair=saved;other_pair.geometry.orientation=MountOrientation::rotated_180;check(!ReviewSessionBelongsToPair(loaded_work,other_pair));
         auto empty_work=work;empty_work.points.clear();empty_work.next_point_role=ReviewPointRole::fitting;
         const auto empty_saved=WriteReviewSession(empty_work,root/"work-empty",std::chrono::steady_clock::now()+std::chrono::seconds(20));
         check(LoadReviewSession(empty_saved.file).state.points.empty() && empty_saved.state.next_point_role==ReviewPointRole::fitting);
@@ -186,6 +193,60 @@ int main(){
         if(!CreateHardLinkW(hardlink.c_str(),r.camera_a_original.c_str(),nullptr))throw std::runtime_error("fixture hardlink creation failed");
         bad=r;bad.output_directory=root/"hardlink-review";bad.camera_b_original=hardlink;bad.camera_b_sha256=r.camera_a_sha256;
         reject([&]{WriteUncalibratedStillReview(bad);});check(!fs::exists(bad.output_directory));
+        // rotated-180 mounting: render inputs turn in memory, originals never do.
+        const auto turned_root=root/"rotated";fs::create_directories(turned_root/"CAM-A");fs::create_directories(turned_root/"CAM-B");
+        HalfFixture(turned_root/"CAM-A/original.jpg",{10,30,220},{10,220,10});   // A: red left, green right
+        HalfFixture(turned_root/"CAM-B/original.jpg",{220,30,10},{200,200,200}); // B: blue left, grey right
+        const auto ta=Read(turned_root/"CAM-A/original.jpg"),tb=Read(turned_root/"CAM-B/original.jpg");
+        StillReviewRequest turned{turned_root/"CAM-A/original.jpg",turned_root/"CAM-B/original.jpg",turned_root/"review",a0::phase0::Sha256Hex(ta),a0::phase0::Sha256Hex(tb),
+            "synthetic-pair-turned",{16,12,8,0,9,MountOrientation::rotated_180},std::chrono::steady_clock::now()+std::chrono::seconds(20)};
+        auto pixel=[](const a0::m2::render::BgrImage& image,unsigned x,unsigned y){const auto i=(static_cast<size_t>(y)*image.width+x)*3;return std::array<int,3>{image.bgr[i],image.bgr[i+1],image.bgr[i+2]};};
+        auto close_to=[](std::array<int,3> actual,std::array<int,3> expected){for(int c=0;c<3;++c)if(std::abs(actual[c]-expected[c])>40)return false;return true;};
+        const auto turned_output=WriteUncalibratedStillReview(turned);check(turned_output.width==96 && turned_output.height==48);
+        const auto turned_record=LoadSavedStillReview(turned_output.report);
+        check(turned_record.geometry.orientation==MountOrientation::rotated_180 && turned_record.translation_x==32 && turned_record.translation_y==0);
+        const auto turned_bytes=Read(turned_output.report);const std::string turned_text(turned_bytes.begin(),turned_bytes.end());
+        check(turned_text.find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos && turned_text.find("a0.uncalibrated-still-review.v1")!=std::string::npos);
+        const auto turned_image=LoadStillReviewImage(turned_record);
+        check(close_to(pixel(turned_image,4,24),{10,220,10}) && close_to(pixel(turned_image,91,24),{220,30,10})); // raw A right / raw B left at the outer edges
+        const auto turned_sources=LoadStillReviewSources(turned_record);
+        check(close_to(pixel(turned_sources[0],4,24),{10,220,10}) && close_to(pixel(turned_sources[1],60,24),{220,30,10}));
+        check(Read(turned.camera_a_original)==ta && Read(turned.camera_b_original)==tb && a0::phase0::Sha256Hex(Read(turned.camera_a_original))==turned.camera_a_sha256);
+        check(DescribeSavedReviewEvaluationInputs(turned_output.report).find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
+        auto upright=turned;upright.output_directory=turned_root/"upright";upright.geometry.orientation=MountOrientation::normal;
+        const auto upright_record=LoadSavedStillReview(WriteUncalibratedStillReview(upright).report);
+        check(upright_record.geometry.orientation==MountOrientation::normal && close_to(pixel(LoadStillReviewImage(upright_record),4,24),{10,30,220}));
+        // A manual revision inherits the parent's orientation; another one is refused.
+        auto turned_revision=turned;turned_revision.output_directory=turned_root/"revision";
+        turned_revision.manual_revision=StillReviewRequest::ManualRevision{30,2,turned_output.report,turned_record.report_sha256};
+        const auto turned_child_output=WriteUncalibratedStillReview(turned_revision);const auto turned_child=LoadSavedStillReview(turned_child_output.report);
+        const auto child_bytes=Read(turned_child_output.report);const std::string child_text(child_bytes.begin(),child_bytes.end());
+        check(turned_child.geometry.orientation==MountOrientation::rotated_180 && turned_child.translation_x==30 && child_text.find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
+        check(close_to(pixel(LoadStillReviewImage(turned_child),4,24),{10,220,10}));
+        auto flipped=turned_revision;flipped.output_directory=turned_root/"flipped";flipped.geometry.orientation=MountOrientation::normal;
+        reject([&]{WriteUncalibratedStillReview(flipped);});check(!fs::exists(flipped.output_directory));
+        auto turned_from_upright=r;turned_from_upright.output_directory=root/"turned-from-upright";turned_from_upright.geometry.orientation=MountOrientation::rotated_180;
+        turned_from_upright.manual_revision=StillReviewRequest::ManualRevision{33,3,output.report,saved.report_sha256};
+        reject([&]{WriteUncalibratedStillReview(turned_from_upright);});check(!fs::exists(turned_from_upright.output_directory));
+        auto bad_turn=turned;bad_turn.output_directory=turned_root/"unknown";bad_turn.geometry.orientation=static_cast<MountOrientation>(7);
+        reject([&]{WriteUncalibratedStillReview(bad_turn);});check(!fs::exists(bad_turn.output_directory));
+        // Strict reader: only the canonical rotated value; a child whose field is
+        // removed no longer matches its rotated parent.
+        auto reject_in=[&](const fs::path& folder,const fs::path& jpeg,const std::string& text,bool valid){
+            fs::create_directories(folder);fs::copy_file(jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+            {std::ofstream f(folder/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<text;}
+            if(valid){check(LoadSavedStillReview(folder/"uncalibrated-review.json").geometry.orientation==MountOrientation::rotated_180);return;}
+            reject([&]{LoadSavedStillReview(folder/"uncalibrated-review.json");});reject([&]{DescribeSavedReviewEvaluationInputs(folder/"uncalibrated-review.json");});
+        };
+        const auto field=std::string("\"mountOrientation\":\"rotated-180\"");
+        auto with=[&](const std::string& text,const std::string& to){auto changed=text;changed.replace(changed.find(field),field.size(),to);return changed;};
+        const auto turned_damaged=turned_root/"damaged";reject_in(turned_damaged,turned_output.jpeg,turned_text,true);
+        for(const auto& to:{std::string("\"mountOrientation\":\"normal\""),std::string("\"mountOrientation\":\"rotated-90\""),std::string("\"mountOrientation\":180"),
+            std::string("\"mountOrientation\":\"\""),field+","+field,field+",\"extra\":0"})reject_in(turned_damaged,turned_output.jpeg,with(turned_text,to),false);
+        const auto child_damaged=turned_root/"damaged-child";reject_in(child_damaged,turned_child_output.jpeg,child_text,true);
+        auto stripped=child_text;stripped.erase(stripped.find(field),field.size()+1); // the field and its comma
+        check(stripped.find("mountOrientation")==std::string::npos);reject_in(child_damaged,turned_child_output.jpeg,stripped,false);
+        check(Read(turned.camera_a_original)==ta && Read(turned.camera_b_original)==tb && Read(turned_output.report)==turned_bytes);
         CoUninitialize();
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;

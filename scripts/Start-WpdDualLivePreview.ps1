@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param([ValidateRange(0,3600)][int]$Seconds=0)
+param(
+    [ValidateRange(0,3600)][int]$Seconds=0,
+    # Omitted: use the local wpd-mount-orientation.json beside the camera map, else normal.
+    [ValidateSet('normal','rotated-180',IgnoreCase=$false)][string]$MountOrientation
+)
 $ErrorActionPreference='Stop'
 $previewExe=Join-Path $PSScriptRoot '../build/reference/Release/A0CameraStitcher.WpdDualPreview.exe'
 if(-not (Test-Path -LiteralPath $previewExe -PathType Leaf)) {
@@ -7,5 +11,7 @@ if(-not (Test-Path -LiteralPath $previewExe -PathType Leaf)) {
 }
 # This interactive development preview holds the hardware-control lease itself.
 # Esc/window close stops both cameras; 0 means display until window close.
-& $previewExe --seconds $Seconds
+$arguments=@('--seconds',"$Seconds")
+if($PSBoundParameters.ContainsKey('MountOrientation')) {$arguments+=@('--mount-orientation',$MountOrientation)}
+& $previewExe @arguments
 exit $LASTEXITCODE
