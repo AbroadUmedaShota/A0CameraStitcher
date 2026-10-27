@@ -202,6 +202,21 @@ struct SavedStillReview {
     std::optional<AutomaticStillAlignment> automatic; // v5 reports only
     std::optional<SeamBlendRecord> blend; // seam-cut only; absent is the linear feather
 };
+// StillReview manual fields (#382). They start at the geometry the report
+// actually rendered, so a re-Merge without edits keeps the parent geometry.
+inline StillAlignmentGeometry SavedStillReviewGeometry(const SavedStillReview& r){
+    return {r.translation_x,r.translation_y,r.rotation_degrees,r.scale};
+}
+// The estimated similarity, entered only by an explicit operator action.
+// Absent without an estimate or when it cannot be rendered for this pair.
+inline std::optional<StillAlignmentGeometry> EstimatedStillReviewGeometry(const SavedStillReview& r){
+    if(!r.automatic || !r.automatic->similarity)return std::nullopt;
+    const auto& s=*r.automatic->similarity;
+    const StillAlignmentGeometry g{static_cast<int>(std::llround(s.x)),static_cast<int>(std::llround(s.y)),s.rotation_degrees,s.scale};
+    try{(void)SimilarityReviewGeometry(g.x,g.y,g.rotation_degrees,g.scale,r.source_width,r.source_height);}
+    catch(const std::invalid_argument&){return std::nullopt;}
+    return g;
+}
 inline render::PairRenderParameters StillPixelReviewGeometry(int x,int y,std::uint32_t width,std::uint32_t height){
     (void)render::PixelCount(width,height);
     if(x<=0 || x>=static_cast<int>(width) || y<=-static_cast<int>(height) || y>=static_cast<int>(height))

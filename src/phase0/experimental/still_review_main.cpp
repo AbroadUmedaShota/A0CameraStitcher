@@ -31,7 +31,7 @@ struct Inspector {
     Loaded current;
     std::array<a0::m2::render::BgrImage,2> sources;
     review::ReviewViewport viewport;
-    std::array<HWND,32> buttons{};
+    std::array<HWND,33> buttons{};
     std::array<HWND,4> edits{};
     HWND residual_text{};
     std::future<Loaded> save;
@@ -64,6 +64,9 @@ struct Inspector {
     // #368: seam line over the saved JPEG (display only, off by default) and
     // the blend used by the next re-Merge (starts as the loaded report's).
     bool show_seam{};review::BlendMethod blend{review::BlendMethod::linear_feather};unsigned seam_pixels{};
+    // #382 smoke: checked before the stages below, whose counters restart after it.
+    unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
+    review::StillAlignmentGeometry draft_parent_geometry{};std::optional<review::StillAlignmentGeometry> draft_estimate;
     explicit Inspector(Loaded loaded,bool test):current(std::move(loaded)),sources(review::LoadStillReviewSources(current.record)),smoke(test){
         viewport={current.image.width,current.image.height,1,1,0,current.image.width/2.0,current.image.height/2.0};
         displayed_x=current.record.translation_x;displayed_y=current.record.translation_y;
@@ -82,6 +85,7 @@ struct Inspector {
     bool Busy() const {return save.valid() || work_save.valid();}
     void EnableChanges(bool enabled){
         for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],enabled);for(auto edit:edits)EnableWindow(edit,enabled);
+        EnableWindow(buttons[32],enabled && review::EstimatedStillReviewGeometry(current.record));
     }
     review::ReviewSessionState WorkState() const {
         return {current.record.report,current.record.report_sha256,draft_x,draft_y,draft_degrees,draft_scale,points,next_point_role};
@@ -109,6 +113,7 @@ struct Inspector {
         (void)review::SimilarityReviewGeometry(state.x,state.y,state.degrees,state.scale,b.source_width,b.source_height);
         review::ValidateReviewCorrespondences(state.points,b.source_width,b.source_height);
         current=std::move(baseline);displayed_x=current.record.translation_x;displayed_y=current.record.translation_y;
+        EnableWindow(buttons[32],review::EstimatedStillReviewGeometry(current.record).has_value());
         points=state.points;next_point_role=state.next_point_role;proposal.reset();pending_a.reset();pick_stage=0;
         SetWindowTextW(edits[0],std::to_wstring(state.x).c_str());SetWindowTextW(edits[1],std::to_wstring(state.y).c_str());
         SetWindowTextW(edits[2],Number(state.degrees).c_str());SetWindowTextW(edits[3],Number(state.scale).c_str());
@@ -127,30 +132,27 @@ struct Inspector {
         }
         RestoreWork(window,review::LoadReviewSession(path));
     }
+    void ShowDraft(const review::StillAlignmentGeometry& g){
+        SetWindowTextW(edits[0],std::to_wstring(g.x).c_str());SetWindowTextW(edits[1],std::to_wstring(g.y).c_str());
+        SetWindowTextW(edits[2],Number(g.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(g.scale).c_str());
+    }
     void SetDraft(){
-        draft_x=current.record.translation_x;draft_y=current.record.translation_y;
-        SetWindowTextW(edits[0],std::to_wstring(draft_x).c_str());SetWindowTextW(edits[1],std::to_wstring(draft_y).c_str());
-        draft_degrees=current.record.rotation_degrees;draft_scale=current.record.scale;
-        SetWindowTextW(edits[2],Number(draft_degrees).c_str());SetWindowTextW(edits[3],Number(draft_scale).c_str());
+        const auto g=review::SavedStillReviewGeometry(current.record);ShowDraft(g);
+        draft_x=g.x;draft_y=g.y;draft_degrees=g.rotation_degrees;draft_scale=g.scale;
         preview_parameters=review::SimilarityReviewGeometry(draft_x,draft_y,draft_degrees,draft_scale,current.record.source_width,current.record.source_height);
         proposal.reset();
     }
-    // An automatic estimate that was not fully applied (no policy, a limit
-    // exceeded or unset, scale kept at 1) becomes the starting manual value;
-    // the saved JPEG stays displayed and nothing is saved until the operator does.
+    static bool SameGeometry(const review::StillAlignmentGeometry& a,const review::StillAlignmentGeometry& b){
+        return a.x==b.x && a.y==b.y && a.rotation_degrees==b.rotation_degrees && a.scale==b.scale;
+    }
+    // The fields start at the saved geometry (#382). An estimate the policy did
+    // not apply enters them only through 「推定値を入力欄へ」, never on opening,
+    // so a re-Merge that changes only the blend keeps the parent geometry.
     void InitialDraft(){
-        SetDraft();
+        SetDraft();const auto estimate=review::EstimatedStillReviewGeometry(current.record);EnableWindow(buttons[32],estimate.has_value());
         const auto& automatic=current.record.automatic;if(!automatic)return;
         status=a0::phase0::experimental::StillAlignmentLine(*automatic);
-        if(!automatic->similarity || (automatic->decision==review::StillAlignmentDecision::corrected &&
-            automatic->scale_decision==review::StillScaleDecision::corrected))return;
-        const auto& s=*automatic->similarity;const int x=static_cast<int>(std::llround(s.x)),y=static_cast<int>(std::llround(s.y));
-        try{preview_parameters=review::SimilarityReviewGeometry(x,y,s.rotation_degrees,s.scale,current.record.source_width,current.record.source_height);}
-        catch(const std::invalid_argument&){return;}
-        draft_x=x;draft_y=y;draft_degrees=s.rotation_degrees;draft_scale=s.scale;
-        SetWindowTextW(edits[0],std::to_wstring(x).c_str());SetWindowTextW(edits[1],std::to_wstring(y).c_str());
-        SetWindowTextW(edits[2],Number(s.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(s.scale).c_str());
-        status+=L" 手動調整の初期値に推定値を入れました（未保存）。";
+        if(estimate && !SameGeometry(*estimate,review::SavedStillReviewGeometry(current.record)))status+=L" 入力欄は保存JPEGの値です。推定値は「推定値を入力欄へ」で入れます。";
     }
     int Integer(HWND edit){
         wchar_t buffer[32]{};const int length=GetWindowTextLengthW(edit);
@@ -279,8 +281,8 @@ struct Inspector {
             condition.camera_a_sha256!=r.camera_a_sha256 || condition.camera_b_sha256!=r.camera_b_sha256 || condition.source_width!=r.source_width || condition.source_height!=r.source_height ||
             condition.geometry.orientation!=r.geometry.orientation)
             throw std::invalid_argument("conditions belong to another original pair or mounting");
-        SetWindowTextW(edits[0],std::to_wstring(condition.translation_x).c_str());SetWindowTextW(edits[1],std::to_wstring(condition.translation_y).c_str());
-        SetWindowTextW(edits[2],Number(condition.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(condition.scale).c_str());
+        // The condition's saved geometry, never its estimate (#382).
+        ShowDraft(review::SavedStillReviewGeometry(condition));
         blend=condition.blend?review::BlendMethod::seam_cut:review::BlendMethod::linear_feather;BlendLabels();
         mode=1;ApplyView(window);++conditions_loaded;status=L"同じ原画像組の保存条件を読み込みました。調整プレビューに反映しています。";
     }
@@ -293,15 +295,16 @@ struct Inspector {
         for(int i=4;i<8;++i)if(buttons[i])MoveWindow(buttons[i],12+(i-4)*130,92,120,30,TRUE);
         for(int i=10;i<15;++i)if(buttons[i])MoveWindow(buttons[i],12+(i-10)*140,52,130,30,TRUE);
         for(int i=15;i<19;++i)if(buttons[i])MoveWindow(buttons[i],12+(i-15)*130,132,120,30,TRUE);
-        if(buttons[19])MoveWindow(buttons[19],995,12,180,30,TRUE);
+        if(buttons[19])MoveWindow(buttons[19],1030,12,150,30,TRUE);
         if(buttons[20])MoveWindow(buttons[20],920,132,255,30,TRUE);
         if(buttons[28])MoveWindow(buttons[28],730,52,210,30,TRUE);
         if(buttons[29])MoveWindow(buttons[29],965,52,210,30,TRUE);
         for(int i=21;i<28;++i)if(buttons[i])MoveWindow(buttons[i],12+(i-21)*168,172,160,30,TRUE);
         if(buttons[30])MoveWindow(buttons[30],905,92,130,30,TRUE);
         if(buttons[31])MoveWindow(buttons[31],1045,92,135,30,TRUE);
-        if(buttons[8])MoveWindow(buttons[8],545,12,170,30,TRUE);
-        if(buttons[9])MoveWindow(buttons[9],730,12,250,30,TRUE);
+        if(buttons[8])MoveWindow(buttons[8],535,12,125,30,TRUE);
+        if(buttons[32])MoveWindow(buttons[32],670,12,155,30,TRUE);
+        if(buttons[9])MoveWindow(buttons[9],835,12,185,30,TRUE);
         viewport.view_width=static_cast<unsigned>(std::max(1L,r.right-350));
         viewport.view_height=static_cast<unsigned>(std::max(1L,r.bottom-(image_top+95)));viewport.Constrain();
         if(residual_text)MoveWindow(residual_text,r.right-326,image_top,314,viewport.view_height,TRUE);
@@ -380,6 +383,43 @@ struct Inspector {
                 if(!resume_verified)failed=true;std::cout<<"resume_verified="<<resume_verified<<" fitting_count="<<fitting.points.size()<<" validation_count="<<validation.points.size()<<" validation_rms="<<validation.rms<<" automatically_fitted=0\n"<<std::flush;
                 SendMessageW(window,WM_CLOSE,0,0);
             }return;
+        }
+        // #382: the fields open at the saved geometry, a blend-only re-Merge keeps
+        // the parent geometry, and only the explicit button enters the estimate.
+        // The saved work returns to the opened parent between the re-Merges.
+        if(draft_stage<4){
+            const auto draft_is=[&](const review::StillAlignmentGeometry& g){ReadDraft();return SameGeometry({draft_x,draft_y,draft_degrees,draft_scale},g);};
+            const auto button_matches=[&]{return (IsWindowEnabled(buttons[32])!=FALSE)==review::EstimatedStillReviewGeometry(current.record).has_value();};
+            const auto child_is=[&](const review::StillAlignmentGeometry& g){const auto& c=current.record;
+                return c.manual_revision && c.manual_revision->parent_report==draft_parent && SameGeometry(review::SavedStillReviewGeometry(c),g) && draft_is(g);};
+            if(draft_stage==0 && zoom_paints[0]){
+                ++draft_stage;draft_parent=current.record.report;draft_parent_geometry=review::SavedStillReviewGeometry(current.record);
+                draft_estimate=review::EstimatedStillReviewGeometry(current.record);
+                if(!draft_is(draft_parent_geometry) || !button_matches() || mode)failed=true;
+                click(28);
+            }else if(draft_stage==1 && sessions_saved){
+                ++draft_stage;const auto before=blend;click(31);if(blend==before)failed=true;click(9); // blend only
+            }else if(draft_stage==2 && saved==1){
+                ++draft_stage;
+                if(!child_is(draft_parent_geometry) || IsWindowEnabled(buttons[32]))failed=true;
+                std::cout<<"blend_only_child_kept_parent_geometry="<<!failed<<" x="<<draft_parent_geometry.x<<" y="<<draft_parent_geometry.y<<" rotation="<<draft_parent_geometry.rotation_degrees<<" scale="<<draft_parent_geometry.scale<<'\n'<<std::flush;
+                click(29);
+                if(current.record.report!=draft_parent || !draft_is(draft_parent_geometry) || !button_matches())failed=true;
+                if(draft_estimate){
+                    click(32);if(!draft_is(*draft_estimate) || status.rfind(L"推定値を入れました（未保存）",0)!=0 || mode!=1)failed=true;click(9);
+                }else{
+                    const auto count=expected_rejections;expect_rejection=true;click(32);expect_rejection=false;if(expected_rejections!=count+1)failed=true;
+                }
+            }else if(draft_stage==3 && (!draft_estimate || saved==2)){
+                ++draft_stage;
+                if(draft_estimate && !child_is(*draft_estimate))failed=true;
+                draft_verified=!failed;draft_saved=saved;draft_rejections=expected_rejections;
+                std::cout<<"estimate_available="<<draft_estimate.has_value()<<" estimate_child_manual="<<(draft_estimate && draft_verified)<<" draft_verified="<<draft_verified<<'\n'<<std::flush;
+                click(29);click(10);if(current.record.report!=draft_parent || mode || !draft_is(draft_parent_geometry))failed=true;
+                // The stages below start from the opened parent with fresh counts.
+                saved=0;sessions_saved=0;sessions_loaded=0;expected_rejections=0;zoom_paints={};mode_paints={};verified_paints=0;
+            }
+            return;
         }
         if(smoke_stage==0 && zoom_paints[0]){
             wchar_t initial_metrics[16384]{};GetWindowTextW(residual_text,initial_metrics,static_cast<int>(std::size(initial_metrics)));
@@ -559,6 +599,11 @@ struct Inspector {
             status=L"調整値を変更しました。「再Merge・別保存」で画像に反映します。";InvalidateRect(window,nullptr,FALSE);
             if(mode)ApplyView(window);
         }else if(id==108){SetDraft();ApplyView(window);status=L"調整値を表示中の画像に戻しました。";InvalidateRect(window,nullptr,FALSE);}
+        else if(id==132){
+            const auto estimate=review::EstimatedStillReviewGeometry(current.record);if(!estimate)throw std::invalid_argument("report has no usable estimate");
+            ShowDraft(*estimate);const auto previous=mode;if(!mode)mode=1;try{ApplyView(window);}catch(...){mode=previous;throw;}
+            status=L"推定値を入れました（未保存）。調整プレビューで確かめ、記録するなら「再Merge・条件保存」。";InvalidateRect(window,nullptr,FALSE);
+        }
         else if(id==109)StartSave(window);
     }
 };
@@ -571,7 +616,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM w,LPARAM l){
     case WM_SIZE:app->Layout(window);InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_DPICHANGED:{const auto* suggested=reinterpret_cast<RECT*>(l);SetWindowPos(window,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
     case WM_COMMAND:
-        if(LOWORD(w)>=100 && LOWORD(w)<132 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[LOWORD(w)-100])app->Command(window,LOWORD(w));return 0;
+        if(LOWORD(w)>=100 && LOWORD(w)<133 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[LOWORD(w)-100])app->Command(window,LOWORD(w));return 0;
     case WM_TIMER:app->Advance(window);return 0;
     case WM_LBUTTONDOWN:
         if(app->pick_stage){app->PickPoint(window,GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;}
@@ -633,8 +678,8 @@ int wmain(int argc,wchar_t** argv){
         if(!RegisterClassW(&wc))throw std::runtime_error("register inspector failed");
         auto window=CreateWindowExW(0,wc.lpszClassName,L"A0 保存画像の比較・位置/回転/倍率・再Merge（未校正）",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1440,1000,nullptr,nullptr,instance,app.get());
         if(!window)throw std::runtime_error("create inspector failed");
-        constexpr std::array<const wchar_t*,32> labels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込",L"継ぎ目を表示",L"合成: 線形"};
-        for(int i=0;i<32;++i){
+        constexpr std::array<const wchar_t*,33> labels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込",L"継ぎ目を表示",L"合成: 線形",L"推定値を入力欄へ"};
+        for(int i=0;i<static_cast<int>(labels.size());++i){
             app->buttons[i]=CreateWindowExW(0,L"BUTTON",labels[i],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(100+i)),instance,nullptr);
             if(!app->buttons[i])throw std::runtime_error("create inspector button failed");
         }
@@ -649,11 +694,12 @@ int wmain(int argc,wchar_t** argv){
         MSG message{};BOOL result{};while((result=GetMessageW(&message,nullptr,0,0))>0){if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
         if(result<0)throw std::runtime_error("inspector message loop failed");
         const bool pass=!app->failed && (!app->smoke || (app->resume_smoke?app->resume_verified && app->layout_verified:
-            app->smoke_stage==11 && app->seam_pixels && app->current.record.blend && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
+            app->draft_verified && app->smoke_stage==11 && app->seam_pixels && app->current.record.blend && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
         std::cout<<"sessions_saved="<<app->sessions_saved<<" sessions_loaded="<<app->sessions_loaded<<" resume_verified="<<app->resume_verified<<'\n';
         std::cout<<"point_pairs="<<app->points.size()<<" point_picks="<<app->point_picks<<" point_proposals="<<app->point_proposals<<" point_applications="<<app->point_applications<<" point_undos="<<app->point_undos<<" outside_point_rejections="<<app->point_rejections<<" verified_marker_pixels="<<app->marker_pixels<<" point_role_changes="<<app->point_role_changes<<" unverified_displays="<<app->unverified_displays<<'\n';
         std::cout<<"overlay_paints="<<app->mode_paints[1]<<" difference_paints="<<app->mode_paints[2]<<" a_paints="<<app->mode_paints[3]<<" b_paints="<<app->mode_paints[4]<<" conditions_loaded="<<app->conditions_loaded<<" invalid_input_rejections="<<app->expected_rejections<<'\n';
         std::cout<<"ui_controls_fit="<<app->layout_verified<<" seam_line_paints="<<app->seam_pixels<<'\n';
+        std::cout<<"draft_verified="<<app->draft_verified<<" draft_revisions="<<app->draft_saved<<" draft_rejections="<<app->draft_rejections<<'\n';
         std::cout<<"fit_paints="<<app->zoom_paints[0]<<" native_paints="<<app->zoom_paints[1]<<" double_paints="<<app->zoom_paints[2]<<" verified_gdi_paints="<<app->verified_paints<<" pan_events="<<app->pan_events<<" revisions="<<app->saved<<" shutter_operations=0 result="<<(pass?"PASS":"FAIL")<<std::endl;
         return pass?0:1;
     }catch(const std::exception& error){
