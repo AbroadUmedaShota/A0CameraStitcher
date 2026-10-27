@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 
@@ -110,6 +111,39 @@ inline bool PhysicalDistortion(double minimum_radial_slope, double minimum_jacob
 inline bool PhysicalIntrinsics(const PinholeIntrinsics& k) {
     return std::isfinite(k.fx) && std::isfinite(k.fy) && std::isfinite(k.cx) && std::isfinite(k.cy)
         && k.fx > 0 && k.fy > 0;
+}
+
+// Raw stored-order pixel -> undistorted pixel by Newton's method on the
+// distortion map, in normalized coordinates. Null when an iterate is not
+// finite, the Jacobian is not positive, the radial map is not increasing at
+// the solution, or the tolerance (raw pixels, per axis) is not reached within
+// max_iterations Newton updates.
+inline std::optional<PixelPosition> UndistortPixel(const PinholeIntrinsics& k, const BrownConradyDistortion& d,
+    double u, double v, std::uint32_t max_iterations, double tolerance_pixels) {
+    const double xd = (u - k.cx) / k.fx, yd = (v - k.cy) / k.fy;
+    double x = xd, y = yd;
+    // Check the final iterate too: the limit counts Newton updates.
+    for (std::uint32_t iteration = 0; iteration <= max_iterations; ++iteration) {
+        if (!std::isfinite(x) || !std::isfinite(y)) return std::nullopt;
+        const auto projected = DistortNormalized(d, x, y);
+        const double du = projected.x - xd, dv = projected.y - yd;
+        const auto derivative = DistortionDerivativesAt(d, x, y);
+        const double determinant = derivative.a * derivative.c - derivative.b * derivative.b;
+        if (!std::isfinite(determinant) || !(determinant > 0.0)) return std::nullopt;
+        if (std::isfinite(du) && std::isfinite(dv)
+            && std::abs(du * k.fx) <= tolerance_pixels
+            && std::abs(dv * k.fy) <= tolerance_pixels) {
+            const double radial_slope = MinimumRadialSlope(d.k1, d.k2, d.k3, x * x + y * y);
+            const PixelPosition point{k.fx * x + k.cx, k.fy * y + k.cy};
+            if (!std::isfinite(radial_slope) || !(radial_slope > 0.0)
+                || !std::isfinite(point.x) || !std::isfinite(point.y)) return std::nullopt;
+            return point;
+        }
+        if (iteration == max_iterations) break;
+        x -= (derivative.c * du - derivative.b * dv) / determinant;
+        y -= (derivative.a * dv - derivative.b * du) / determinant;
+    }
+    return std::nullopt;
 }
 
 // Exp(omega) for a rotation vector. theta = |omega|; the small-angle case needs

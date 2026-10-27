@@ -2,6 +2,7 @@
 #include "a0/m2/reference_document_mapping.hpp"
 
 #include "calibration_lens_model.hpp"
+#include "calibration_levenberg_marquardt.hpp"
 #include "calibration_planar_pose.hpp"
 #include "calibration_exact_predicates.hpp"
 
@@ -122,43 +123,6 @@ bool Assemble(const Parameters& parameters, const std::vector<Points>& views, bo
     return true;
 }
 
-// In-place lower Cholesky factor of the symmetric matrix held in the lower
-// triangle of l (row major). False if a pivot is not strictly positive and finite.
-bool Factorize(std::vector<double>& l, std::size_t n) {
-    double* base = l.data();
-    for (std::size_t j = 0; j < n; ++j) {
-        double* row_j = base + j * n;
-        double pivot = row_j[j];
-        for (std::size_t k = 0; k < j; ++k) pivot -= row_j[k] * row_j[k];
-        if (!std::isfinite(pivot) || !(pivot > 0)) return false;
-        const double diagonal = std::sqrt(pivot);
-        row_j[j] = diagonal;
-        for (std::size_t i = j + 1; i < n; ++i) {
-            double* row_i = base + i * n;
-            double sum = row_i[j];
-            for (std::size_t k = 0; k < j; ++k) sum -= row_i[k] * row_j[k];
-            row_i[j] = sum / diagonal;
-        }
-    }
-    return true;
-}
-
-// Solves L L^T x = b in place (b becomes x).
-void SolveFactored(const std::vector<double>& l, std::size_t n, std::vector<double>& b) {
-    const double* base = l.data();
-    for (std::size_t i = 0; i < n; ++i) {
-        const double* row = base + i * n;
-        double sum = b[i];
-        for (std::size_t k = 0; k < i; ++k) sum -= row[k] * b[k];
-        b[i] = sum / row[i];
-    }
-    for (std::size_t i = n; i-- > 0;) {
-        double sum = b[i];
-        for (std::size_t k = i + 1; k < n; ++k) sum -= base[k * n + i] * b[k];
-        b[i] = sum / base[i * n + i];
-    }
-}
-
 Parameters Apply(const Parameters& base, const std::vector<double>& delta, bool fixed) {
     Parameters next = base;
     std::size_t offset = 0;
@@ -199,92 +163,24 @@ struct LmOutcome {
     SolverRecord record;
 };
 
+struct LensProblem {
+    const std::vector<Points>& views;
+    bool fixed;
+    std::size_t Size() const { return (fixed ? 0 : lens_detail::kIntrinsicColumns) + 6 * views.size(); }
+    std::optional<double> Evaluate(const Parameters& parameters) const { return Cost(parameters, views); }
+    bool Linearize(const Parameters& parameters, std::vector<double>& a, std::vector<double>& g) const {
+        return Assemble(parameters, views, fixed, Size(), a, g);
+    }
+    Parameters Step(const Parameters& base, const std::vector<double>& delta) const { return Apply(base, delta, fixed); }
+    double Norm(const Parameters& parameters) const { return ParameterNorm(parameters, fixed); }
+};
+
 // Null when the start is unusable (a point behind the camera or not finite).
 std::optional<LmOutcome> RunLevenbergMarquardt(Parameters start, const std::vector<Points>& views,
     const LensIntrinsicsPolicy& policy, bool fixed) {
-    const auto initial_cost = Cost(start, views);
-    if (!initial_cost) return std::nullopt;
-    const std::size_t n = (fixed ? 0 : lens_detail::kIntrinsicColumns) + 6 * views.size();
-    LmOutcome outcome{std::move(start), SolverRecord{0, 0, *initial_cost, *initial_cost, SolverStopReason::MaximumIterations}};
-    auto& current = outcome.parameters;
-    auto& record = outcome.record;
-    double cost = *initial_cost;
-    double damping = policy.initial_damping;
-    bool stopped = false;
-
-    std::vector<double> a, g, factor(n * n), scale(n), step(n);
-    if (!Assemble(current, views, fixed, n, a, g)) {
-        record.stop_reason = SolverStopReason::NumericalFailure;
-        return outcome;
-    }
-    while (record.iterations < policy.max_iterations && !stopped) {
-        ++record.iterations;
-        bool scale_ok = true;
-        for (std::size_t j = 0; j < n; ++j) {
-            scale[j] = std::sqrt(a[j * n + j]);
-            if (!std::isfinite(scale[j]) || !(scale[j] > 0)) scale_ok = false;
-        }
-        if (!scale_ok) {
-            record.stop_reason = SolverStopReason::NumericalFailure;
-            stopped = true;
-            break;
-        }
-        // (A^ + damping I) s^ = -g^ with A^ = S^-1 A S^-1 (unit diagonal) and g^ = S^-1 g.
-        for (std::size_t i = 0; i < n; ++i) {
-            double* row = factor.data() + i * n;
-            const double* source = a.data() + i * n;
-            for (std::size_t j = 0; j < i; ++j) row[j] = source[j] / (scale[i] * scale[j]);
-            row[i] = 1.0 + damping;
-            step[i] = -g[i] / scale[i];
-        }
-        if (!Factorize(factor, n)) {
-            damping *= 10.0;
-            if (!std::isfinite(damping)) { record.stop_reason = SolverStopReason::NumericalFailure; stopped = true; }
-            continue;
-        }
-        SolveFactored(factor, n, step);
-        double step_squares = 0;
-        for (std::size_t j = 0; j < n; ++j) {
-            step[j] /= scale[j];
-            step_squares += step[j] * step[j];
-        }
-        const double step_norm = std::sqrt(step_squares);
-        if (!std::isfinite(step_norm)) {
-            damping *= 10.0;
-            if (!std::isfinite(damping)) { record.stop_reason = SolverStopReason::NumericalFailure; stopped = true; }
-            continue;
-        }
-        const double tolerance = policy.relative_step_tolerance;
-        if (step_norm <= tolerance * (ParameterNorm(current, fixed) + tolerance)) {
-            record.stop_reason = SolverStopReason::RelativeStepSize;
-            stopped = true;
-            break;
-        }
-        auto candidate = Apply(current, step, fixed);
-        const auto candidate_cost = Cost(candidate, views);
-        if (candidate_cost && *candidate_cost < cost) {
-            const double previous_cost = cost;
-            current = std::move(candidate);
-            cost = *candidate_cost;
-            record.final_cost = cost;
-            ++record.accepted_steps;
-            damping = std::max(damping / 10.0, std::numeric_limits<double>::min());
-            if (previous_cost - cost <= policy.relative_cost_tolerance * previous_cost) {
-                record.stop_reason = SolverStopReason::RelativeCostReduction;
-                stopped = true;
-                break;
-            }
-            if (!Assemble(current, views, fixed, n, a, g)) {
-                record.stop_reason = SolverStopReason::NumericalFailure;
-                stopped = true;
-                break;
-            }
-        } else {
-            damping *= 10.0;
-            if (!std::isfinite(damping)) { record.stop_reason = SolverStopReason::NumericalFailure; stopped = true; }
-        }
-    }
-    return outcome;
+    auto outcome = lm_detail::Run(LensProblem{views, fixed}, std::move(start), policy);
+    if (!outcome) return std::nullopt;
+    return LmOutcome{std::move(outcome->parameters), outcome->record};
 }
 
 // ---------------------------------------------------------------------------
@@ -501,30 +397,7 @@ namespace {
 
 std::optional<PixelPosition> UndistortReferencePixel(const PinholeIntrinsics& k,
     const BrownConradyDistortion& d, double u, double v, const ReferenceMappingPolicy& policy) {
-    const double xd = (u - k.cx) / k.fx, yd = (v - k.cy) / k.fy;
-    double x = xd, y = yd;
-    // Check the final iterate too: the limit counts Newton updates.
-    for (std::uint32_t iteration = 0; iteration <= policy.max_undistortion_iterations; ++iteration) {
-        if (!std::isfinite(x) || !std::isfinite(y)) return std::nullopt;
-        const auto projected = lens_detail::DistortNormalized(d, x, y);
-        const double du = projected.x - xd, dv = projected.y - yd;
-        const auto derivative = lens_detail::DistortionDerivativesAt(d, x, y);
-        const double determinant = derivative.a * derivative.c - derivative.b * derivative.b;
-        if (!std::isfinite(determinant) || !(determinant > 0.0)) return std::nullopt;
-        if (std::isfinite(du) && std::isfinite(dv)
-            && std::abs(du * k.fx) <= policy.undistortion_tolerance_pixels
-            && std::abs(dv * k.fy) <= policy.undistortion_tolerance_pixels) {
-            const double radial_slope = lens_detail::MinimumRadialSlope(d.k1, d.k2, d.k3, x * x + y * y);
-            const PixelPosition point{k.fx * x + k.cx, k.fy * y + k.cy};
-            if (!std::isfinite(radial_slope) || !(radial_slope > 0.0)
-                || !std::isfinite(point.x) || !std::isfinite(point.y)) return std::nullopt;
-            return point;
-        }
-        if (iteration == policy.max_undistortion_iterations) break;
-        x -= (derivative.c * du - derivative.b * dv) / determinant;
-        y -= (derivative.a * dv - derivative.b * du) / determinant;
-    }
-    return std::nullopt;
+    return lens_detail::UndistortPixel(k, d, u, v, policy.max_undistortion_iterations, policy.undistortion_tolerance_pixels);
 }
 
 std::optional<Matrix3> ComposeReferenceMapping(const PinholeIntrinsics& k, const ChartPose& pose,

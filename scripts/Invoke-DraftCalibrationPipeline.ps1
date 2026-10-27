@@ -9,6 +9,10 @@ modified. A new directory holds observations, draft artifacts, job snapshots,
 private child logs and a hash inventory. This does not approve calibration or
 optical quality and does not control a camera.
 
+With -Planar the calibration job is a0.planar-calibration-job.v1 and the
+calibrator runs the flat-placement estimator (--planar-job, nominal K, #374);
+without it, the reference-pair job a0.draft-calibration-job.v1 (--job).
+
 Exit 0: draft produced. Exit 3: recorded detection/calibration failure, no
 profile. Exit 2: input, tool-protocol or IO error; any partial folder is retained.
 PowerShell parameter-binding errors use PowerShell's own exit code.
@@ -19,7 +23,8 @@ param(
     [Parameter(Mandatory)][string]$CalibrationJob,
     [Parameter(Mandatory)][string]$DetectorExecutable,
     [Parameter(Mandatory)][string]$CalibratorExecutable,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [switch]$Planar
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,6 +103,7 @@ function Save-Report([string]$Result, [int]$ExitCode) {
         exitCode = $ExitCode
         phase = $phase
         quality = 'not-assessed'
+        calibrationKind = $(if ($Planar) { 'planar-nominal-k' } else { 'reference-pair' })
         imageBase = 'original-detection-job-directory'
         inputImagesCopied = $false
         automaticRetryCount = 0
@@ -163,11 +169,12 @@ public static class A0DraftCalibrationDirectory {
         Require-File 'observations/session.json' (8MB)
         $phase = 'calibration'
         $steps.calibration = Run-Tool $calibrator @('--session', (Join-Path $stage 'observations/session.json'),
-            '--job', $calibrationPath, '--output', (Join-Path $stage 'draft')) 'calibration'
+            $(if ($Planar) { '--planar-job' } else { '--job' }), $calibrationPath, '--output', (Join-Path $stage 'draft')) 'calibration'
         if ($steps.calibration -notin @(0, 3)) { throw 'Calibrator input or IO error.' }
         Require-File 'draft/calibration-report.json' (16MB)
         $report = Json-Artifact 'draft/calibration-report.json'
-        if ($report['schemaVersion'] -cne 'a0.draft-calibration-report.v1' -or $report['quality'] -cne 'not-assessed') { throw 'Unexpected calibration report.' }
+        $reportSchema = if ($Planar) { 'a0.planar-calibration-report.v1' } else { 'a0.draft-calibration-report.v1' }
+        if ($report['schemaVersion'] -cne $reportSchema -or $report['quality'] -cne 'not-assessed') { throw 'Unexpected calibration report.' }
         $sessionHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
             [IO.File]::ReadAllBytes((Join-Path $stage 'observations/session.json')))).ToLowerInvariant()
         if ($report['sessionSha256'] -cne $sessionHash) { throw 'Calibration report refers to another session.' }

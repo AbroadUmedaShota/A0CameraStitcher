@@ -1,4 +1,5 @@
 #include "a0/m2/draft_calibration_artifacts.hpp"
+#include "a0/m2/planar_calibration_artifacts.hpp"
 
 #include <Windows.h>
 
@@ -43,20 +44,25 @@ void WriteNew(const std::filesystem::path& path, const std::string& text) {
 } // namespace
 
 // Development-only: --session <observations.json> --job <job.json> --output <NEW directory>
+// or (planar, #374): --session <observations.json> --planar-job <job.json> --output <NEW directory>
 int wmain(int argc, wchar_t* argv[]) {
     try {
         std::map<std::wstring, std::wstring> options;
         for (int i = 1; i < argc; i += 2) {
             if (i + 1 >= argc || std::wstring_view(argv[i]).find(L"--") != 0) throw std::invalid_argument("options need name and value");
             const std::wstring name = argv[i] + 2;
-            if ((name != L"session" && name != L"job" && name != L"output") || !options.emplace(name, argv[i + 1]).second)
+            if ((name != L"session" && name != L"job" && name != L"planar-job" && name != L"output") || !options.emplace(name, argv[i + 1]).second)
                 throw std::invalid_argument("unknown or repeated option");
         }
-        if (options.size() != 3) throw std::invalid_argument("--session, --job and --output are required");
+        const bool planar = options.contains(L"planar-job");
+        if (options.size() != 3 || !options.contains(L"session") || !options.contains(L"output") || planar == options.contains(L"job"))
+            throw std::invalid_argument("--session, one of --job or --planar-job, and --output are required");
         const std::filesystem::path output = options.at(L"output");
         if (output.empty() || std::filesystem::exists(output)) throw std::invalid_argument("output directory must be new");
-        const auto artifacts = a0::m2::calibration::RunDraftCalibrationJob(
-            Read(options.at(L"session"), a0::m2::calibration::kMaximumObservationSessionJsonBytes), Read(options.at(L"job"), 65536));
+        const auto session = Read(options.at(L"session"), a0::m2::calibration::kMaximumObservationSessionJsonBytes);
+        const auto artifacts = planar
+            ? a0::m2::calibration::RunPlanarCalibrationJob(session, Read(options.at(L"planar-job"), 65536))
+            : a0::m2::calibration::RunDraftCalibrationJob(session, Read(options.at(L"job"), 65536));
         auto staging = output;
         staging += L".partial-" + std::to_wstring(GetCurrentProcessId());
         // The parent must already exist. Do not create or replace an arbitrary
