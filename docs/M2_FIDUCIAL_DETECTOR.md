@@ -13,6 +13,8 @@
 
 校正（K・歪み・pose）、reference pair、文書写像、draft profile、真値との比較は作らない。段階4以降。
 
+印刷して実写に使うチャート（この検出器の規則に合わせた等倍のベクターPDF、chart定義、検出jobの雛形）は `scripts/Export-DetectorChartPdf.ps1` で作る。寸法の根拠と校正撮影の手順は [CALIBRATION_CAPTURE_PROCEDURE.md](CALIBRATION_CAPTURE_PROCEDURE.md)（#371）。
+
 ## OpenCVの入手と記録
 
 ソースツリーには入れない。`.gitignore` 済みの `.tools/` に置く。
