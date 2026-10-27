@@ -159,7 +159,10 @@ public static class A0SavedReviewEvaluationFiles {
     $selection=Invoke-Tool $inspectorPath @('--report',$reportPath,'--evaluation-inputs')
     if($selection.Code -ne 0 -or $selection.Error) {throw 'Review validation failed'}
     $selected=$selection.Out|ConvertFrom-Json -AsHashtable -Depth 32
-    if($selected.schemaVersion -cne 'a0.saved-review-evaluation-inputs.v1' -or $selected.productApproved -ne $false -or $selected.quality -cne 'not-evaluated') {throw 'Review handoff contract'}
+    # mountOrientation is a record only: StitchEval reads the unrotated originals and
+    # the draft profile projection absorbs the mounting, so no pixels are turned here.
+    if($selected.schemaVersion -cne 'a0.saved-review-evaluation-inputs.v1' -or $selected.productApproved -ne $false -or $selected.quality -cne 'not-evaluated' -or
+        $selected.mountOrientation -isnot [string] -or $selected.mountOrientation -cnotin @('normal','rotated-180')) {throw 'Review handoff contract'}
     foreach($inputFile in @($selected.reviewReport,$selected.reviewImage)+@($selected.inputs)+@($selected.parentReview)|Where-Object {$null -ne $_}) {
         $null=Pin-File $inputFile.path (64MB) $inputFile.sha256 $inputFile.encodedSizeBytes
     }

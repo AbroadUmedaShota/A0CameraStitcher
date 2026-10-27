@@ -59,6 +59,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         parameters=SimilarityReviewGeometry(revision.x,revision.y,revision.rotation_degrees,revision.scale,width,height);
     }
     active();
+    // Only the decoded copies turn; the locked originals stay byte-identical.
+    OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);
     auto rendered=render::RenderPair(a.image,b.image,parameters);a.image={};b.image={};active();
     std::filesystem::create_directories(job.parent_path());pins.Pin(job.parent_path(),true);
     if(!std::filesystem::create_directory(job))throw std::runtime_error("cannot reserve new review directory");pins.Pin(job,true);
@@ -97,8 +99,10 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
         <<"{\"alias\":\"CAM-B\",\"path\":\""<<ReviewPathJson(b_path)<<"\",\"sha256\":\""<<r.camera_b_sha256<<"\",\"bytes\":"<<b.compressed.size()<<"}],"
-        <<"\"previewGeometry\":{\"width\":"<<r.geometry.width<<",\"height\":"<<r.geometry.height<<",\"overlap\":"<<r.geometry.overlap<<",\"vertical\":"<<r.geometry.vertical<<",\"revision\":"<<r.geometry.revision<<"},"
-        <<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},\"translation\":{\"x\":"<<(r.manual_revision?r.manual_revision->x:parameters.camera_b_to_camera_a[2])<<",\"y\":"<<(r.manual_revision?r.manual_revision->y:parameters.camera_b_to_camera_a[5])<<"},"
+        <<"\"previewGeometry\":{\"width\":"<<r.geometry.width<<",\"height\":"<<r.geometry.height<<",\"overlap\":"<<r.geometry.overlap<<",\"vertical\":"<<r.geometry.vertical<<",\"revision\":"<<r.geometry.revision<<"},";
+    // Absent means normal, so normal reports keep their previous bytes.
+    if(r.geometry.orientation!=MountOrientation::normal)report<<"\"mountOrientation\":\""<<MountOrientationName(r.geometry.orientation)<<"\",";
+    report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},\"translation\":{\"x\":"<<(r.manual_revision?r.manual_revision->x:parameters.camera_b_to_camera_a[2])<<",\"y\":"<<(r.manual_revision?r.manual_revision->y:parameters.camera_b_to_camera_a[5])<<"},"
         <<"\"output\":{\"path\":\"uncalibrated-review.jpg\",\"width\":"<<output_width<<",\"height\":"<<output_height<<",\"bytes\":"<<encoded.size<<",\"sha256\":\""<<result.sha256<<"\"}";
     if(r.manual_revision)report<<",\"geometryBasis\":\""<<(similarity?"manual-still-similarity":"manual-still-pixels")<<"\",\"parentReview\":{\"path\":\""<<ReviewPathJson(NormalizedAbsolute(r.manual_revision->parent_report))<<"\",\"sha256\":\""<<r.manual_revision->parent_report_sha256<<"\"}";
     if(similarity)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<r.manual_revision->rotation_degrees<<",\"scale\":"<<r.manual_revision->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";

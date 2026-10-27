@@ -6,7 +6,7 @@ SDKなしの既存buildに `-DA0_BUILD_WPD_DUAL_PREVIEW=ON` を指定し、`cmak
 
 実行例: `build/reference/Release/A0CameraStitcher.WpdDualPreview.exe --seconds 60`。`--seconds 0` はウィンドウを閉じるまで表示する。Escまたは閉じる操作で両側停止処理を始める。描画は各側の最新フレームだけ、2秒以上更新が途切れた映像は非表示とする。
 
-再起動用に `powershell -ExecutionPolicy Bypass -File scripts/Start-WpdDualLivePreview.ps1` も用意した（既定は閉じるまで表示）。実カメラ制御アプリを同時起動しないこと。
+再起動用に `powershell -ExecutionPolicy Bypass -File scripts/Start-WpdDualLivePreview.ps1` も用意した（既定は閉じるまで表示）。取り付けの向きは `-MountOrientation normal|rotated-180` で選べる（[WPD_PREVIEW_MERGE.md](WPD_PREVIEW_MERGE.md) の #361 の節）。実カメラ制御アプリを同時起動しないこと。
 
 operator-session-wide HardwareProcessLeaseを列挙開始前から両workerの終了まで保持する。列挙順でA/Bを割り当てず、既存のWPD serial digest登録に照合し、実接続後にも再確認する。workerごとにCOM MTA / IPortableDeviceFTM / WIC decoderを持つ。WPD送信直前にStart(0x9201)/Frame(0x9203)/Stop(0x9202)およびREAD/ENDだけを許可し、取得は#329の上限・最終MTP応答検証を使う。D810の384byteヘッダー後のJPEGを厳密に検査し、WICで最大2048x2048へ制限してメモリ内で復号する。実画像ファイルは書かない。
 

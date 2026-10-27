@@ -4,8 +4,8 @@ namespace ReviewJson=a0::common::protocol_json;
 using ReviewValue=ReviewJson::JsonValue;
 [[noreturn]] void ReviewReject(){throw std::invalid_argument("saved uncalibrated review failed validation");}
 struct ReviewJsonFailure {[[noreturn]] static void Fail(std::string_view,std::string_view){ReviewReject();}};
-void ReviewFields(const ReviewValue& value,std::initializer_list<const char*> fields){
-    if(value.kind!=ReviewJson::JsonKind::object || value.object.size()!=fields.size())ReviewReject();
+void ReviewFields(const ReviewValue& value,std::initializer_list<const char*> fields,const char* optional=nullptr){
+    if(value.kind!=ReviewJson::JsonKind::object || value.object.size()!=fields.size()+(optional && value.object.contains(optional)?1u:0u))ReviewReject();
     for(const auto* field:fields)if(!value.object.contains(field))ReviewReject();
 }
 const ReviewValue& ReviewAt(const ReviewValue& value,const char* field){
@@ -37,16 +37,17 @@ std::filesystem::path ReviewPath(const ReviewValue& value){
     std::filesystem::path path(wide);if(!path.is_absolute() || path.lexically_normal()!=path)ReviewReject();return path.make_preferred();
 }
 bool SameReviewGeometry(const PreviewReviewGeometry& a,const PreviewReviewGeometry& b){
-    return a.width==b.width && a.height==b.height && a.overlap==b.overlap && a.vertical==b.vertical && a.revision==b.revision;
+    return a.width==b.width && a.height==b.height && a.overlap==b.overlap && a.vertical==b.vertical && a.revision==b.revision && a.orientation==b.orientation;
 }
 SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto full=NormalizedAbsolute(path);if(full.filename()!=L"uncalibrated-review.json")ReviewReject();
     V2PathPins pins;pins.Pin(full);LockedReadFile file(full,false,true);const auto bytes=file.ReadAll(256*1024);
     const auto root=ReviewJson::BasicJsonParser<ReviewJsonFailure>(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size())).Parse();
     const auto schema=ReviewString(ReviewAt(root,"schema"));const bool similarity=schema=="a0.uncalibrated-still-review.v3",manual=similarity || schema=="a0.uncalibrated-still-review.v2";
-    if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"});
-    else if(manual)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview"});
-    else{if(schema!="a0.uncalibrated-still-review.v1")ReviewReject();ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output"});}
+    // mountOrientation is the only optional field in v1/v2/v3: absent is normal.
+    if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},"mountOrientation");
+    else if(manual)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview"},"mountOrientation");
+    else{if(schema!="a0.uncalibrated-still-review.v1")ReviewReject();ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output"},"mountOrientation");}
     if(ReviewString(ReviewAt(root,"state"))!="UncalibratedReviewReady" || ReviewUnsigned(ReviewAt(root,"automaticRetryCount"),0)!=0)ReviewReject();
     for(const auto* flag:{"productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified"})ReviewFalse(ReviewAt(root,flag));
     SavedStillReview record;record.report=full;Sha256Provider sha;record.report_sha256=ToLowerHex(sha.Compute(bytes));
@@ -61,6 +62,11 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     }
     const auto& geometry=ReviewAt(root,"previewGeometry");ReviewFields(geometry,{"width","height","overlap","vertical","revision"});
     record.geometry={static_cast<unsigned>(ReviewUnsigned(ReviewAt(geometry,"width"),640)),static_cast<unsigned>(ReviewUnsigned(ReviewAt(geometry,"height"),640)),static_cast<unsigned>(ReviewUnsigned(ReviewAt(geometry,"overlap"),640)),ReviewSigned(ReviewAt(geometry,"vertical"),-639,639),ReviewUnsigned(ReviewAt(geometry,"revision"),std::numeric_limits<std::uint64_t>::max())};
+    if(root.object.contains("mountOrientation")){
+        // One state, one report hash: an explicit "normal" is not canonical.
+        if(ParseMountOrientation(ReviewString(ReviewAt(root,"mountOrientation")))!=MountOrientation::rotated_180)ReviewReject();
+        record.geometry.orientation=MountOrientation::rotated_180;
+    }
     const auto& source=ReviewAt(root,"sourceDimensions");ReviewFields(source,{"width","height"});
     record.source_width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"width"),render::kMaximumImageDimension));record.source_height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"height"),render::kMaximumImageDimension));
     const auto base=ScalePreviewReviewGeometry(record.geometry,record.source_width,record.source_height);
@@ -121,10 +127,12 @@ std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& pat
         return std::string("{\"path\":\"")+ReviewJson::JsonEscape(std::string_view(reinterpret_cast<const char*>(utf8.data()),utf8.size()))+
             "\",\"sha256\":\""+hash+"\",\"encodedSizeBytes\":"+std::to_string(size)+"}";
     };
+    // Orientation travels as a record only. The evaluator keeps reading the
+    // unrotated originals; its draft profile projection absorbs the mount.
     std::ostringstream out;out.imbue(std::locale::classic());
     out<<"{\"schemaVersion\":\"a0.saved-review-evaluation-inputs.v1\",\"pairId\":\""<<record.pair_id
         <<"\",\"productApproved\":false,\"quality\":\"not-evaluated\",\"sourceDimensions\":{\"width\":"<<record.source_width
-        <<",\"height\":"<<record.source_height<<"},\"reviewReport\":"<<file(record.report,record.report_sha256,std::filesystem::file_size(record.report))
+        <<",\"height\":"<<record.source_height<<"},\"mountOrientation\":\""<<MountOrientationName(record.geometry.orientation)<<"\",\"reviewReport\":"<<file(record.report,record.report_sha256,std::filesystem::file_size(record.report))
         <<",\"reviewImage\":"<<file(record.jpeg,record.jpeg_sha256,record.jpeg_bytes)<<",\"inputs\":[";
     for(int i=0;i<2;++i){
         auto input=file(i==0?record.camera_a_original:record.camera_b_original,i==0?record.camera_a_sha256:record.camera_b_sha256,
@@ -149,6 +157,6 @@ std::array<render::BgrImage,2> LoadStillReviewSources(const SavedStillReview& re
     ComApartment apartment;auto factory=CreateFactory();std::array<render::BgrImage,2> images;
     for(int i=0;i<2;++i){auto image=ReadJpegSnapshot(factory.get(),i==0?a:b,"comparison source",true);
         if(ToLowerHex(image.sha256)!=(i==0?record.camera_a_sha256:record.camera_b_sha256) || image.compressed.size()!=(i==0?record.camera_a_bytes:record.camera_b_bytes) || image.image.width!=record.source_width || image.image.height!=record.source_height)ReviewReject();
-        images[i]=std::move(image.image);
+        images[i]=std::move(image.image);OrientRenderInput(images[i],record.geometry.orientation);
     }return images;
 }

@@ -1,7 +1,9 @@
 #pragma once
 #include "a0/m2/render.hpp"
+#include "a0/m2/experimental/mount_orientation.hpp"
 #include <chrono>
 #include <cstdlib>
+#include <string>
 
 namespace a0::phase0::experimental {
 // Development review only: A is left, B is right. No learned calibration,
@@ -18,6 +20,13 @@ inline a0::m2::render::PairRenderResult RenderPreviewMerge(
         {1,0,static_cast<double>(a.width-overlap_pixels),0,1,static_cast<double>(b_vertical_pixels),0,0,1},
         a0::m2::StitchLayout::camera_a_left_camera_b_right,{0,trim,0,trim}};
     return a0::m2::render::RenderPair(a,b,parameters);
+}
+// C heading. A/B panes stay as received; only C inputs follow the mounting.
+inline std::wstring PreviewMergeTitle(a0::m2::experimental::MountOrientation orientation,unsigned overlap_pixels,int b_vertical_pixels){
+    using a0::m2::experimental::MountOrientation;
+    (void)a0::m2::experimental::MountOrientationName(orientation);
+    return std::wstring(L"C 仮Merge（未校正） 取付の向き: ")+(orientation==MountOrientation::rotated_180?L"180°回転（A/Bを回して合成）":L"通常")+
+        L" / A:左 + B:右 / 重なり "+std::to_wstring(overlap_pixels)+L"px / B上下 "+std::to_wstring(b_vertical_pixels)+L"px";
 }
 // Same expiry rule for A, B and C. A rendered C must also match the current
 // session and geometry revision; callers discard it on either transition.

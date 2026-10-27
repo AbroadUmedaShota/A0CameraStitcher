@@ -53,8 +53,17 @@ void ReviewEvaluationBridgeTests(const fs::path& fixtures,const fs::path& eval,c
         Require(described.exit==0&&described.error.empty(),"headless review v1/v2/v3 validation succeeds: "+described.error);
         const auto json=a0::common::protocol_json::BasicJsonParser<Failure>(described.out).Parse();
         String(json,"schemaVersion","a0.saved-review-evaluation-inputs.v1");String(json,"pairId","synthetic-review-352");
-        String(At(json,"reviewReport"),"sha256",Sha(selected));
+        String(At(json,"reviewReport"),"sha256",Sha(selected));String(json,"mountOrientation","normal");
         Require(At(json,"inputs").array.size()==2&&!At(json,"productApproved").boolean,"headless pair remains unapproved");
+    }
+    // A rotated-180 review carries its mounting as a record only.
+    const auto rotated=root/"rotated/uncalibrated-review.json";
+    fs::create_directory(rotated.parent_path());fs::copy_file(image,rotated.parent_path()/"uncalibrated-review.jpg");
+    WriteText(rotated,Replace(base,"\"sourceDimensions\":","\"mountOrientation\":\"rotated-180\",\"sourceDimensions\":"));
+    {
+        const auto described=Run(inspector,root,{L"--report",rotated.native(),L"--evaluation-inputs"});
+        Require(described.exit==0&&described.error.empty(),"rotated review validation succeeds: "+described.error);
+        String(a0::common::protocol_json::BasicJsonParser<Failure>(described.out).Parse(),"mountOrientation","rotated-180");
     }
     Require(Run(inspector,root,{L"--report",report.native(),L"--evaluation-inputs",L"extra"}).exit==1,"malformed headless call exits without a dialog");
     const auto invoke=[&](const fs::path& selected,const fs::path& output,bool color=false,const fs::path& job=fs::path{}) {
@@ -87,6 +96,11 @@ void ReviewEvaluationBridgeTests(const fs::path& fixtures,const fs::path& eval,c
         }
         const auto prior=Sha(output/"review-evaluation-binding.json");
         Require(invoke(report,output,color).exit==2&&Sha(output/"review-evaluation-binding.json")==prior,"existing output is never replaced");
+    }
+    {
+        const auto output=root/"rotated-success";const auto result=invoke(rotated,output);
+        Require(result.exit==0&&result.error.empty(),"rotated saved-pair evaluation succeeds: "+result.error+result.out);
+        Require(Sha(output/"evaluation.jpg")==Sha(root/"geometry-direct/evaluation.jpg"),"mount orientation never rotates evaluator pixels");
     }
     ReviewConditionSetTests(eval,root,inspector,script,pwsh,report,evidence);
     WriteText(root/"reject-job.json",Replace(geometry,"\"maximumDisplacementOutputPixels\": 20","\"maximumDisplacementOutputPixels\": 0.01"));

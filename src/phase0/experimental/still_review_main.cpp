@@ -242,8 +242,9 @@ struct Inspector {
         }
         const auto condition=review::LoadSavedStillReview(path);const auto& r=current.record;
         if(condition.pair_id!=r.pair_id || condition.camera_a_original!=r.camera_a_original || condition.camera_b_original!=r.camera_b_original ||
-            condition.camera_a_sha256!=r.camera_a_sha256 || condition.camera_b_sha256!=r.camera_b_sha256 || condition.source_width!=r.source_width || condition.source_height!=r.source_height)
-            throw std::invalid_argument("conditions belong to another original pair");
+            condition.camera_a_sha256!=r.camera_a_sha256 || condition.camera_b_sha256!=r.camera_b_sha256 || condition.source_width!=r.source_width || condition.source_height!=r.source_height ||
+            condition.geometry.orientation!=r.geometry.orientation)
+            throw std::invalid_argument("conditions belong to another original pair or mounting");
         SetWindowTextW(edits[0],std::to_wstring(condition.translation_x).c_str());SetWindowTextW(edits[1],std::to_wstring(condition.translation_y).c_str());
         SetWindowTextW(edits[2],Number(condition.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(condition.scale).c_str());
         mode=1;ApplyView(window);++conditions_loaded;status=L"同じ原画像組の保存条件を読み込みました。調整プレビューに反映しています。";
@@ -419,6 +420,7 @@ struct Inspector {
         TextOutW(dc,550,98,L"X (px)",6);TextOutW(dc,735,98,L"Y (px)",6);TextOutW(dc,550,138,L"回転 (度)",6);TextOutW(dc,735,138,L"倍率 (倍)",6);
         const auto degrees=mode?draft_degrees:current.record.rotation_degrees,scale=mode?draft_scale:current.record.scale;
         std::wstring summary=(mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(mode?draft_x:displayed_x)+L", "+std::to_wstring(mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
+        summary+=current.record.geometry.orientation==review::MountOrientation::rotated_180?L"  取付: 180°回転（A/Bを回して表示・合成）":L"  取付: 通常";
         TextOutW(dc,12,218,summary.c_str(),static_cast<int>(summary.size()));
         const wchar_t* help=L"未校正・操作検証用 / 回転・倍率で周辺を切り取ります。差分は重なり部分のみ。比較不可の範囲は格子表示。";
         TextOutW(dc,12,242,help,lstrlenW(help));
