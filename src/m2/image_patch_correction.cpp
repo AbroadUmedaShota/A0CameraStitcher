@@ -34,8 +34,7 @@ PatchSearchResult Search(const BgrImage& source, const BgrImage& target, const C
         result.maximum_target_intensity_stddev = std::max(result.maximum_target_intensity_stddev.value_or(0),target_stddev);
         if (target_stddev < p.minimum_intensity_stddev) continue;
         ++result.eligible_candidates;
-        double dot = 0; for (std::size_t i = 0; i < a.size(); ++i) dot += a[i]*b[i];
-        const double score = (dot/norm_a)/norm_b;
+        const double score = NormalizedDot(a,norm_a,b,norm_b);
         if (!std::isfinite(score)) { result.outcome = Outcome::NumericalFailure; return result; }
         if (score > best) {
             second = best; best = score; best_x = x; best_y = y;
@@ -72,8 +71,7 @@ PatchSearchResult Search(const BgrImage& source, const BgrImage& target, const C
             detail.maximum_target_intensity_stddev = std::max(detail.maximum_target_intensity_stddev.value_or(0),target_stddev);
             if (target_stddev < p.minimum_intensity_stddev) continue;
             ++detail.eligible_candidates;
-            double dot = 0; for (std::size_t i = 0; i < a.size(); ++i) dot += a[i]*b[i];
-            const double score = (dot/norm_a)/norm_b;
+            const double score = NormalizedDot(a,norm_a,b,norm_b);
             if (!std::isfinite(score)) { complete = false; break; }
             if (score > local_best) { local_second = local_best; local_best = score; detail.best_document_mm = candidate; }
             else if (score > local_second) local_second = score;

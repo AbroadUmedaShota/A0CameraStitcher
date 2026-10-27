@@ -12,7 +12,7 @@
 
 1. Aのseed周辺の正方形patchを文書mmで定義し、各sampleを固定投影でraw画素へ写す。既存bilinear samplingを使い、BGR三成分の算術平均を8-bit DNの強度とする。線形radianceや色の品質を推定したという意味ではない。
 2. Bの同じ文書位置の周辺を、明示した文書mmの平行移動gridで探索。各候補のpatchもBの固定写像を通すので、両カメラの倍率・姿勢・歪みの既知の違いを利用する。
-3. 各patchから平均を引き、L2 normで正規化した内積（zero-mean normalized correlation）を比較。sourceのpopulation標準偏差と、候補の標準偏差が明示下限未満なら利用しない。候補のcontrast不足は数を記録し、相関scoreを捏造しない。
+3. 各patchから平均を引き、L2 normで正規化した内積（zero-mean normalized correlation）を比較。sourceのpopulation標準偏差と、候補の標準偏差が明示下限未満なら利用しない。候補のcontrast不足は数を記録し、相関scoreを捏造しない。平均を引く処理と正規化した内積は `src/m2/zero_mean_correlation.hpp` にあり、未校正の重なり推定 v2（#364）と同じ関数を使う。演算の順序は変えていない。
 4. 最大相関が下限以上、最大と次点の差が下限以上、かつ最大が探索gridの外周でない場合だけforward成立。比較できる候補が二つ未満なら曖昧として拒否する。同点を探索順で成功へ変えない。
 5. 見つかったBの位置からAへ同じ探索を行い、戻った位置と元seedの文書mm距離を検査。reverseでもscore・contrast・次点・外周・被覆条件を省略しない。
 6. 両方向成立時だけ両側の位置を固定写像でraw画素へ写し、#317へ渡す。全seedの成功が必要。逆変換/相似fit/各補正上限/補正後投影の既存検査もすべて通す。
