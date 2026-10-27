@@ -9,6 +9,7 @@
 #include "a0/m2/experimental/review_alignment.hpp"
 #include "a0/m2/experimental/mount_orientation.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
+#include "a0/m2/experimental/seam_blend.hpp"
 #include <array>
 #include <string_view>
 #include <vector>
@@ -171,6 +172,9 @@ struct StillReviewRequest {
     // revision. Absent keeps the earlier v1 report and render unchanged.
     struct AutomaticAlignment {std::optional<StillMergePolicy> policy;};
     std::optional<AutomaticAlignment> automatic_alignment;
+    // #368: seam_cut adds the report blend record; linear_feather keeps the
+    // earlier render and report bytes.
+    BlendMethod blend{BlendMethod::linear_feather};
 };
 struct StillReviewResult {
     std::filesystem::path jpeg,report;
@@ -179,6 +183,8 @@ struct StillReviewResult {
     render::BgrImage thumbnail;
     std::optional<AutomaticStillAlignment> automatic;
     double alignment_milliseconds{};
+    std::optional<SeamBlendRecord> blend;
+    double blend_milliseconds{};
 };
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
@@ -194,6 +200,7 @@ struct SavedStillReview {
     double rotation_degrees{},scale{1};
     StitchCropPixels crop;
     std::optional<AutomaticStillAlignment> automatic; // v5 reports only
+    std::optional<SeamBlendRecord> blend; // seam-cut only; absent is the linear feather
 };
 inline render::PairRenderParameters StillPixelReviewGeometry(int x,int y,std::uint32_t width,std::uint32_t height){
     (void)render::PixelCount(width,height);
@@ -212,4 +219,16 @@ std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& rep
 render::BgrImage LoadStillReviewImage(const SavedStillReview& review);
 // Decoded A/B render inputs, turned in memory by the report's orientation.
 std::array<render::BgrImage,2> LoadStillReviewSources(const SavedStillReview& review);
+// Development comparison (#368): renders the report's pair with the linear
+// feather and with the seam cut into new files <prefix>-feather.jpg,
+// <prefix>-seam.jpg and native-size crops around the seam middle
+// (<prefix>-feather-crop.jpg, <prefix>-seam-crop.jpg). Never overwrites.
+struct StillBlendComparison {
+    double feather_milliseconds{},seam_milliseconds{};
+    bool feather_matches_saved{};
+    SeamBlendRecord seam;
+    std::vector<SeamDisplacementProbe> probes;
+    std::uint32_t crop_left{},crop_top{},crop_width{},crop_height{};
+};
+StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height);
 }

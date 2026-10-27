@@ -493,6 +493,55 @@ int main(){
         check(turned_auto_record.geometry.orientation==MountOrientation::rotated_180 && turned_auto_record.automatic->decision==StillAlignmentDecision::corrected &&
             std::abs(turned_auto_record.automatic->similarity->rotation_degrees-0.4)<0.02 && Read(turned_auto.camera_a_original)==ra && Read(turned_auto.camera_b_original)==rb);
         check(DescribeSavedReviewEvaluationInputs(turned_auto_record.report).find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
+        // #368 seam cut: a separate blend record on the same geometry; the
+        // feather reports above keep their bytes and carry no blend field.
+        auto cut_request=automatic;cut_request.output_directory=auto_root/"seam";cut_request.blend=BlendMethod::seam_cut;
+        const auto fresh=[]{return std::chrono::steady_clock::now()+std::chrono::seconds(240);};cut_request.deadline=fresh();
+        const auto cut=WriteUncalibratedStillReview(cut_request);const auto cut_record=LoadSavedStillReview(cut.report);
+        std::cout<<"seam_blend_ms="<<cut.blend_milliseconds<<" seam_x="<<cut.blend->summary.x_minimum<<".."<<cut.blend->summary.x_maximum<<" ratio="<<cut.blend->ratio_minimum<<".."<<cut.blend->ratio_maximum<<'\n';
+        check(cut.blend && cut_record.blend && cut_record.blend->seam_x==cut.blend->seam_x && cut_record.blend->summary.x_mean==cut.blend->summary.x_mean &&
+            cut_record.blend->ratio_minimum==cut.blend->ratio_minimum && cut_record.blend->settings.width_pixels==kSeamBlendDesign.width_pixels && !corrected_record.blend);
+        check(cut_record.width==corrected_record.width && cut_record.height==corrected_record.height && cut_record.translation_x==corrected_record.translation_x &&
+            cut_record.automatic->decision==StillAlignmentDecision::corrected && Read(cut.jpeg)!=Read(corrected.jpeg));
+        check(cut.blend->ratio_minimum>1 && cut.blend->ratio_maximum<1.11); // B rendered at gain 0.95
+        const auto cut_bytes=Read(cut.report);const std::string cut_text(cut_bytes.begin(),cut_bytes.end());
+        check(cut_text.find("\"blend\":{\"method\":\"seam-cut\",\"widthPixels\":8,")!=std::string::npos && cut_text.find("\"productQualityAccepted\":false")!=std::string::npos &&
+            corrected_text.find("blend")==std::string::npos && report.find("blend")==std::string::npos);
+        // v5: blend is the last field, after automaticAlignment.
+        check(cut_text.find("\"schema\":\"a0.uncalibrated-still-review.v5\"")!=std::string::npos &&
+            cut_text.find(",\"blend\":{")>cut_text.find("\"automaticAlignment\":{") && cut_text.ends_with("}}}"));
+        auto cut_again=cut_request;cut_again.output_directory=auto_root/"seam-again";cut_again.deadline=fresh();const auto again=WriteUncalibratedStillReview(cut_again);
+        check(Read(again.jpeg)==Read(cut.jpeg) && Read(again.report)==cut_bytes);
+        check(Read(automatic.camera_a_original)==aa && Read(automatic.camera_b_original)==ab && Read(corrected.report)==corrected_bytes);
+        // A manual revision may change the method; its feather parent is untouched.
+        auto seam_child=r;seam_child.output_directory=root/"seam-revision";seam_child.blend=BlendMethod::seam_cut;seam_child.deadline=fresh();
+        seam_child.manual_revision=StillReviewRequest::ManualRevision{33,3,output.report,saved.report_sha256};
+        const auto seam_child_record=LoadSavedStillReview(WriteUncalibratedStillReview(seam_child).report);
+        check(seam_child_record.blend && seam_child_record.manual_revision && seam_child_record.width==97 && seam_child_record.blend->seam_x.size()==seam_child_record.height);
+        auto turned_cut=turned;turned_cut.output_directory=turned_root/"seam";turned_cut.blend=BlendMethod::seam_cut;turned_cut.deadline=fresh();
+        const auto turned_cut_record=LoadSavedStillReview(WriteUncalibratedStillReview(turned_cut).report);
+        check(turned_cut_record.blend && turned_cut_record.geometry.orientation==MountOrientation::rotated_180 && Read(turned.camera_a_original)==ta && Read(turned.camera_b_original)==tb);
+        auto unknown_blend=r;unknown_blend.output_directory=root/"unknown-blend";unknown_blend.blend=static_cast<BlendMethod>(5);unknown_blend.deadline=fresh();
+        reject([&]{WriteUncalibratedStillReview(unknown_blend);});check(!fs::exists(unknown_blend.output_directory));
+        // Strict reader: the path summary is recomputed; the feather is the absent field.
+        fs::create_directories(auto_damaged);fs::copy_file(cut.jpeg,auto_damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+        {std::ofstream f(auto_damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<cut_text;}
+        check(LoadSavedStillReview(auto_damaged/"uncalibrated-review.json").blend->seam_x==cut.blend->seam_x);
+        reject_auto(cut_text,"\"method\":\"seam-cut\"","\"method\":\"linear-feather\"",cut.jpeg);
+        reject_auto(cut_text,"\"blend\":{","\"blend\":{\"extra\":0,",cut.jpeg);
+        reject_auto(cut_text,"\"steps\":\"","\"steps\":\"0",cut.jpeg);
+        reject_auto(cut_text,"\"ratioMinimum\":","\"ratioMinimum\":-",cut.jpeg);
+        reject_auto(cut_text,"\"widthPixels\":8","\"widthPixels\":0",cut.jpeg);
+        reject_auto(cut_text,"\"xMinimum\":"+std::to_string(cut.blend->summary.x_minimum),"\"xMinimum\":"+std::to_string(cut.blend->summary.x_minimum+1),cut.jpeg);
+        reject_auto(cut_text,"\"productQualityAccepted\":false","\"productQualityAccepted\":true",cut.jpeg);
+        {const auto at=cut_text.find("\"steps\":\"")+9;auto bad=cut_text;bad[at]='x';const auto mark=bad.substr(at-9,10);reject_auto(bad,mark,mark,cut.jpeg);}
+        {const auto at=cut_text.find("\"xMean\":")+8;const auto end=cut_text.find(',',at);reject_auto(cut_text,cut_text.substr(at-8,end-at+8),"\"xMean\":1",cut.jpeg);}
+        // Development comparison: both methods into new files, never overwriting.
+        const auto comparison=CompareStillReviewBlends(corrected_record,auto_root/"compare",400,300);
+        check(comparison.feather_matches_saved && comparison.seam.seam_x==cut.blend->seam_x && comparison.crop_width==400 && comparison.crop_height==300);
+        for(const auto* suffix:{"-feather.jpg","-seam.jpg","-feather-crop.jpg","-seam-crop.jpg"})check(fs::exists(auto_root/("compare"+std::string(suffix))));
+        check(Read(auto_root/"compare-seam.jpg").size()>0 && Read(corrected.jpeg)==Read(corrected.jpeg));
+        reject([&]{(void)CompareStillReviewBlends(corrected_record,auto_root/"compare",400,300);});
         check(Read(output.report)==report_bytes && Read(output.jpeg)==original_jpeg && Read(r.camera_a_original)==a && Read(r.camera_b_original)==b);
         CoUninitialize();
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}

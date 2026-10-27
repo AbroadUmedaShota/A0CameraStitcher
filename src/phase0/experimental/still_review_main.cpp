@@ -7,7 +7,9 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include <windowsx.h>
 #include <commdlg.h>
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <future>
 #include <iostream>
@@ -29,7 +31,7 @@ struct Inspector {
     Loaded current;
     std::array<a0::m2::render::BgrImage,2> sources;
     review::ReviewViewport viewport;
-    std::array<HWND,30> buttons{};
+    std::array<HWND,32> buttons{};
     std::array<HWND,4> edits{};
     HWND residual_text{};
     std::future<Loaded> save;
@@ -59,9 +61,23 @@ struct Inspector {
     std::array<double,4> proposal_basis{};
     unsigned point_picks{},point_proposals{},point_applications{},point_undos{},point_rejections{},marker_pixels{};
     unsigned point_role_changes{},unverified_displays{},layout_verified{};
+    // #368: seam line over the saved JPEG (display only, off by default) and
+    // the blend used by the next re-Merge (starts as the loaded report's).
+    bool show_seam{};review::BlendMethod blend{review::BlendMethod::linear_feather};unsigned seam_pixels{};
     explicit Inspector(Loaded loaded,bool test):current(std::move(loaded)),sources(review::LoadStillReviewSources(current.record)),smoke(test){
         viewport={current.image.width,current.image.height,1,1,0,current.image.width/2.0,current.image.height/2.0};
         displayed_x=current.record.translation_x;displayed_y=current.record.translation_y;
+        blend=current.record.blend?review::BlendMethod::seam_cut:review::BlendMethod::linear_feather;
+    }
+    void BlendLabels(){
+        SetWindowTextW(buttons[30],show_seam?L"継ぎ目を隠す":L"継ぎ目を表示");
+        SetWindowTextW(buttons[31],blend==review::BlendMethod::seam_cut?L"合成: 継ぎ目":L"合成: 線形");
+    }
+    std::wstring BlendText() const {
+        const auto& b=current.record.blend;const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
+        if(!b)return L"合成（保存JPEG）: 線形 feather\r\n"+next;
+        return L"合成（保存JPEG）: 継ぎ目で切替\r\n継ぎ目 x: "+std::to_wstring(b->summary.x_minimum)+L"〜"+std::to_wstring(b->summary.x_maximum)+L" px\r\n混ぜる幅: "+std::to_wstring(b->settings.width_pixels)+
+            L" px\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
     }
     bool Busy() const {return save.valid() || work_save.valid();}
     void EnableChanges(bool enabled){
@@ -172,7 +188,7 @@ struct Inspector {
             return GroupMetrics(review::ReviewPointRole::fitting,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting))+L"\r\n"+
                 GroupMetrics(review::ReviewPointRole::validation,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::validation));
         };
-        std::wstring text=(current.record.automatic?a0::phase0::experimental::StillAlignmentDetails(*current.record.automatic)+L"\r\n":std::wstring())+L"調整値での残差（A原画像px）\r\n全点: "+std::to_wstring(points.size())+L" / 32\r\n\r\n"+groups(preview_parameters);
+        std::wstring text=BlendText()+(current.record.automatic?a0::phase0::experimental::StillAlignmentDetails(*current.record.automatic)+L"\r\n":std::wstring())+L"調整値での残差（A原画像px）\r\n全点: "+std::to_wstring(points.size())+L" / 32\r\n\r\n"+groups(preview_parameters);
         if(proposal)text+=L"\r\n候補での残差（未適用）\r\n"+groups(proposal->parameters);
         text+=L"\r\n各点（現在の調整値）\r\n";
         for(size_t i=0;i<measured.points.size();++i){const auto& p=measured.points[i];text+=std::to_wstring(i+1)+L" ["+RoleName(points[i].role)+L"] dx="+Number(p.dx)+L"\r\n   dy="+Number(p.dy)+L"\r\n   距離="+Number(p.distance)+L"\r\n";}
@@ -265,6 +281,7 @@ struct Inspector {
             throw std::invalid_argument("conditions belong to another original pair or mounting");
         SetWindowTextW(edits[0],std::to_wstring(condition.translation_x).c_str());SetWindowTextW(edits[1],std::to_wstring(condition.translation_y).c_str());
         SetWindowTextW(edits[2],Number(condition.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(condition.scale).c_str());
+        blend=condition.blend?review::BlendMethod::seam_cut:review::BlendMethod::linear_feather;BlendLabels();
         mode=1;ApplyView(window);++conditions_loaded;status=L"同じ原画像組の保存条件を読み込みました。調整プレビューに反映しています。";
     }
     void Layout(HWND window){
@@ -281,6 +298,8 @@ struct Inspector {
         if(buttons[28])MoveWindow(buttons[28],730,52,210,30,TRUE);
         if(buttons[29])MoveWindow(buttons[29],965,52,210,30,TRUE);
         for(int i=21;i<28;++i)if(buttons[i])MoveWindow(buttons[i],12+(i-21)*168,172,160,30,TRUE);
+        if(buttons[30])MoveWindow(buttons[30],905,92,130,30,TRUE);
+        if(buttons[31])MoveWindow(buttons[31],1045,92,135,30,TRUE);
         if(buttons[8])MoveWindow(buttons[8],545,12,170,30,TRUE);
         if(buttons[9])MoveWindow(buttons[9],730,12,250,30,TRUE);
         viewport.view_width=static_cast<unsigned>(std::max(1L,r.right-350));
@@ -308,10 +327,11 @@ struct Inspector {
         const auto id=std::to_wstring(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count())+L"-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(saved);
         const auto destination=r.report.parent_path().parent_path()/(L"revision-"+id);
         review::StillReviewRequest request{r.camera_a_original,r.camera_b_original,destination,r.camera_a_sha256,r.camera_b_sha256,r.pair_id,r.geometry,Clock::now()+std::chrono::seconds(180),review::StillReviewRequest::ManualRevision{draft_x,draft_y,r.report,r.report_sha256,draft_degrees,draft_scale}};
+        request.blend=blend;
         save=std::async(std::launch::async,[request]{auto result=review::WriteUncalibratedStillReview(request);return Load(result.report);});
         EnableChanges(false);
         status=L"保存済みのA/B原画像から再Mergeしています。以前の結果は保持します…";
-        std::cout<<"ui_restitch_requested=1 x="<<draft_x<<" y="<<draft_y<<" rotation="<<draft_degrees<<" scale="<<draft_scale<<" shutter_operations=0\n"<<std::flush;
+        std::cout<<"ui_restitch_requested=1 x="<<draft_x<<" y="<<draft_y<<" rotation="<<draft_degrees<<" scale="<<draft_scale<<" blend="<<review::BlendMethodCode(blend)<<" shutter_operations=0\n"<<std::flush;
         InvalidateRect(window,nullptr,FALSE);
     }
     void Advance(HWND window){
@@ -423,13 +443,14 @@ struct Inspector {
             if(expected_rejections!=rejects+1 || !MatchesWork(changed))failed=true; // failed load preserves all current work
             last_session_path=valid_path;click(23);click(26);click(15);click(29);
             if(!last_work_state || !MatchesWork(*last_work_state) || sessions_loaded!=1)failed=true;
+            if(blend!=review::BlendMethod::seam_cut)click(31);
             click(9);click(9);
         }
-        else if(smoke_stage==9 && saved){++smoke_stage;click(15);click(19);
+        else if(smoke_stage==9 && saved){++smoke_stage;if(!current.record.blend)failed=true;click(30);click(15);click(19);
             if(draft_x!=current.record.translation_x || draft_y!=current.record.translation_y || draft_degrees!=current.record.rotation_degrees || draft_scale!=current.record.scale)failed=true;
             click(10);click(0);
         }
-        else if(smoke_stage==10 && zoom_paints[0]>=2 && mode_paints[0]>=2 && verified_paints>=9){++smoke_stage;SendMessageW(window,WM_CLOSE,0,0);}
+        else if(smoke_stage==10 && zoom_paints[0]>=2 && mode_paints[0]>=2 && verified_paints>=9 && seam_pixels){++smoke_stage;SendMessageW(window,WM_CLOSE,0,0);}
     }
     void Paint(HWND window,HDC target){
         RECT r{};GetClientRect(window,&r);a0::phase0::experimental::PreviewBackBuffer frame(target,r.right,r.bottom);
@@ -453,6 +474,7 @@ struct Inspector {
             // smoke mode. This checks the display path, not merely WM_PAINT.
             const auto x=viewport.view_width/2,y=viewport.view_height/2;const auto index=(static_cast<size_t>(y)*viewport.view_width+x)*4;
             const bool pixel_ok=GetPixel(dc,12+x,image_top+y)==RGB(pixels[index+2],pixels[index+1],pixels[index]);
+            if(!mode && show_seam && current.record.blend)PaintSeam(dc);
             if(drawn>0 && pixel_ok && frame.Present(target)){++zoom_paints[viewport.zoom==0?0:viewport.zoom==1?1:2];++mode_paints[mode];++verified_paints;}
             if(mode){
                 const auto plan=a0::m2::render::PlanPairCanvas(sources[0].width,sources[0].height,sources[1].width,sources[1].height,preview_parameters);
@@ -478,15 +500,38 @@ struct Inspector {
         RECT status_rect{12,r.bottom-80,r.right-12,r.bottom-8};DrawTextW(dc,status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
         (void)frame.Present(target);
     }
+    // Saved JPEG pixel (x,y) center at 12+origin+(x+0.5)*scale, as the markers.
+    void PaintSeam(HDC dc){
+        const auto& seam=current.record.blend->seam_x;const auto origin=viewport.Origin();const auto scale=viewport.Scale();
+        const auto first=static_cast<long long>(std::max(0.0,std::floor(-origin.y/scale))),last=std::min<long long>(static_cast<long long>(seam.size()),static_cast<long long>(std::ceil((viewport.view_height-origin.y)/scale))+1);
+        if(first>=last)return;const auto step=std::max<long long>(1,static_cast<long long>(1/scale));
+        std::vector<POINT> line;
+        for(auto y=first;y<last;y+=step)line.push_back({static_cast<LONG>(std::lround(12+origin.x+(seam[static_cast<size_t>(y)]+.5)*scale)),static_cast<LONG>(std::lround(image_top+origin.y+(y+.5)*scale))});
+        if(line.size()==1)line.push_back({line[0].x,line[0].y+1});
+        const auto color=RGB(255,0,255);const int state=SaveDC(dc);
+        IntersectClipRect(dc,12,image_top,12+viewport.view_width,image_top+viewport.view_height);SelectObject(dc,GetStockObject(DC_PEN));SetDCPenColor(dc,color);
+        Polyline(dc,line.data(),static_cast<int>(line.size()));
+        const auto probe=line[line.size()/2];
+        if(probe.x>=12 && probe.x<12+static_cast<LONG>(viewport.view_width) && probe.y>=image_top && probe.y<image_top+static_cast<LONG>(viewport.view_height) && GetPixel(dc,probe.x,probe.y)==color)++seam_pixels;
+        RestoreDC(dc,state);
+    }
     void Command(HWND window,int id){
         if(id>=100 && id<=103){
             if(id<103)viewport.zoom=id==100?0:id==101?1:2;
-            else{
+            else if(current.record.blend && !mode){
+                // A seam-cut result: its seam at the middle row.
+                const auto& seam=current.record.blend->seam_x;viewport.center_x=seam[seam.size()/2]+0.5;viewport.center_y=current.record.height/2.0;
+            }else{
                 // Center on the midpoint of the saved overlap for seam review.
                 viewport.center_x=(current.record.source_width+current.record.translation_x)/2.0;
                 viewport.center_y=current.record.height/2.0;
             }
             viewport.Constrain();InvalidateRect(window,nullptr,FALSE);return;
+        }
+        if(id==130){
+            show_seam=!show_seam;BlendLabels();
+            status=!show_seam?L"継ぎ目の線を隠しました。":!current.record.blend?L"この保存結果は線形 feather の合成で、継ぎ目の線はありません。":mode?L"継ぎ目の線は「保存JPEG」の表示に重ねます。":L"保存JPEGの継ぎ目を桃色の線で表示しています（確認用）。";
+            InvalidateRect(window,nullptr,FALSE);return;
         }
         if(Busy() || closing)return;
         if(id==128 || id==129){if(pick_stage)throw std::invalid_argument("finish or cancel the pending point");if(id==128)StartWorkSave(window);else LoadWork(window);return;}
@@ -494,6 +539,11 @@ struct Inspector {
         if(pick_stage)throw std::invalid_argument("finish or cancel the pending correspondence");
         if(id>=110 && id<=114){const int previous=mode;mode=id-110;try{ApplyView(window);}catch(...){mode=previous;throw;}return;}
         if(id==119){LoadConditions(window);return;}
+        if(id==131){
+            blend=blend==review::BlendMethod::seam_cut?review::BlendMethod::linear_feather:review::BlendMethod::seam_cut;BlendLabels();UpdateMeasurements();
+            status=blend==review::BlendMethod::seam_cut?L"次の再Mergeは継ぎ目で切り替えて合成し、継ぎ目に沿って明るさを合わせます。":L"次の再Mergeは従来の線形 feather で合成します。";
+            InvalidateRect(window,nullptr,FALSE);return;
+        }
         if(id==120){const auto previous=mode;mode=1;try{ApplyView(window);}catch(...){mode=previous;throw;}status=L"入力した条件を半透明プレビューに反映しました。保存は別操作です。";return;}
         if(id>=115 && id<=118){ReadDraft();double degrees=draft_degrees,scale=draft_scale;
             if(id==115)degrees-=0.05;if(id==116)degrees+=0.05;if(id==117)scale-=0.0001;if(id==118)scale+=0.0001;
@@ -521,7 +571,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM w,LPARAM l){
     case WM_SIZE:app->Layout(window);InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_DPICHANGED:{const auto* suggested=reinterpret_cast<RECT*>(l);SetWindowPos(window,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
     case WM_COMMAND:
-        if(LOWORD(w)>=100 && LOWORD(w)<130 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[LOWORD(w)-100])app->Command(window,LOWORD(w));return 0;
+        if(LOWORD(w)>=100 && LOWORD(w)<132 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[LOWORD(w)-100])app->Command(window,LOWORD(w));return 0;
     case WM_TIMER:app->Advance(window);return 0;
     case WM_LBUTTONDOWN:
         if(app->pick_stage){app->PickPoint(window,GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;}
@@ -551,10 +601,26 @@ int wmain(int argc,wchar_t** argv){
                 throw std::invalid_argument("explicit report required");
             std::cout<<review::DescribeSavedReviewEvaluationInputs(fs::path(argv[2]))<<std::endl;return 0;
         }
+        if(argc==5 && std::wstring_view(argv[1])==L"--report" && std::wstring_view(argv[3])==L"--blend-compare"){
+            // Development comparison (#368): file-only, new files, no window.
+            const auto record=review::LoadSavedStillReview(fs::path(argv[2]));
+            const auto c=review::CompareStillReviewBlends(record,fs::path(argv[4]),1600,1000);
+            std::vector<double> distance;int max_dx=0,max_dy=0;
+            for(const auto& p:c.probes)if(p.valid){distance.push_back(std::hypot(p.dx,p.dy));if(std::abs(p.dx)>std::abs(max_dx))max_dx=p.dx;if(std::abs(p.dy)>std::abs(max_dy))max_dy=p.dy;}
+            std::sort(distance.begin(),distance.end());
+            std::cout<<"blend_compare=1 width="<<record.width<<" height="<<record.height<<" seam_x_min="<<c.seam.summary.x_minimum<<" seam_x_max="<<c.seam.summary.x_maximum<<" seam_x_mean="<<c.seam.summary.x_mean
+                <<" ratio_min="<<c.seam.ratio_minimum<<" ratio_max="<<c.seam.ratio_maximum<<" difference_mean="<<c.seam.difference_mean<<" difference_max="<<c.seam.difference_maximum
+                <<" saturation_limited="<<c.seam.saturation_limited_pixels<<" probes="<<c.probes.size()<<" probes_valid="<<distance.size()
+                <<" displacement_median="<<(distance.empty()?0:distance[distance.size()/2])<<" displacement_max="<<(distance.empty()?0:distance.back())<<" max_dx="<<max_dx<<" max_dy="<<max_dy
+                <<" feather_ms="<<c.feather_milliseconds<<" seam_ms="<<c.seam_milliseconds<<" feather_matches_saved="<<c.feather_matches_saved
+                <<" crop="<<c.crop_left<<","<<c.crop_top<<","<<c.crop_width<<"x"<<c.crop_height<<" quality_accepted=0\n";
+            for(const auto& p:c.probes)std::cout<<"seam_probe y="<<p.y<<" valid="<<p.valid<<" dx="<<p.dx<<" dy="<<p.dy<<" r="<<p.correlation<<"\n";
+            return 0;
+        }
         const bool from_session=argc>=3 && std::wstring(argv[1])==L"--session";
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:std::wstring(argv[3])!=L"--smoke")))
-            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke] | --session <explicit work file> [--resume-smoke]");
+            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke]");
         // Opt out of Windows bitmap scaling so 100% is one physical display
         // pixel per saved image pixel, including on a scaled desktop.
         if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))throw std::runtime_error("per-monitor pixel display awareness unavailable");
@@ -567,15 +633,15 @@ int wmain(int argc,wchar_t** argv){
         if(!RegisterClassW(&wc))throw std::runtime_error("register inspector failed");
         auto window=CreateWindowExW(0,wc.lpszClassName,L"A0 保存画像の比較・位置/回転/倍率・再Merge（未校正）",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1440,1000,nullptr,nullptr,instance,app.get());
         if(!window)throw std::runtime_error("create inspector failed");
-        constexpr std::array<const wchar_t*,30> labels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込"};
-        for(int i=0;i<30;++i){
+        constexpr std::array<const wchar_t*,32> labels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込",L"継ぎ目を表示",L"合成: 線形"};
+        for(int i=0;i<32;++i){
             app->buttons[i]=CreateWindowExW(0,L"BUTTON",labels[i],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(100+i)),instance,nullptr);
             if(!app->buttons[i])throw std::runtime_error("create inspector button failed");
         }
         for(int i=0;i<4;++i){app->edits[i]=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(200+i)),instance,nullptr);if(!app->edits[i])throw std::runtime_error("create translation edit failed");}
         app->residual_text=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(300),instance,nullptr);
         if(!app->residual_text)throw std::runtime_error("create residual display failed");
-        app->InitialDraft();app->UpdateMeasurements();app->Layout(window);SetTimer(window,1,100,nullptr);
+        app->BlendLabels();app->InitialDraft();app->UpdateMeasurements();app->Layout(window);SetTimer(window,1,100,nullptr);
         if(resumed)app->RestoreWork(window,*resumed);
         if(app->smoke)app->VerifyControlLayout(window);
         ShowWindow(window,SW_SHOWNORMAL);if(!IsWindowVisible(window))ShowWindow(window,SW_SHOW);UpdateWindow(window);
@@ -583,11 +649,11 @@ int wmain(int argc,wchar_t** argv){
         MSG message{};BOOL result{};while((result=GetMessageW(&message,nullptr,0,0))>0){if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
         if(result<0)throw std::runtime_error("inspector message loop failed");
         const bool pass=!app->failed && (!app->smoke || (app->resume_smoke?app->resume_verified && app->layout_verified:
-            app->smoke_stage==11 && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
+            app->smoke_stage==11 && app->seam_pixels && app->current.record.blend && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
         std::cout<<"sessions_saved="<<app->sessions_saved<<" sessions_loaded="<<app->sessions_loaded<<" resume_verified="<<app->resume_verified<<'\n';
         std::cout<<"point_pairs="<<app->points.size()<<" point_picks="<<app->point_picks<<" point_proposals="<<app->point_proposals<<" point_applications="<<app->point_applications<<" point_undos="<<app->point_undos<<" outside_point_rejections="<<app->point_rejections<<" verified_marker_pixels="<<app->marker_pixels<<" point_role_changes="<<app->point_role_changes<<" unverified_displays="<<app->unverified_displays<<'\n';
         std::cout<<"overlay_paints="<<app->mode_paints[1]<<" difference_paints="<<app->mode_paints[2]<<" a_paints="<<app->mode_paints[3]<<" b_paints="<<app->mode_paints[4]<<" conditions_loaded="<<app->conditions_loaded<<" invalid_input_rejections="<<app->expected_rejections<<'\n';
-        std::cout<<"ui_controls_fit="<<app->layout_verified<<'\n';
+        std::cout<<"ui_controls_fit="<<app->layout_verified<<" seam_line_paints="<<app->seam_pixels<<'\n';
         std::cout<<"fit_paints="<<app->zoom_paints[0]<<" native_paints="<<app->zoom_paints[1]<<" double_paints="<<app->zoom_paints[2]<<" verified_gdi_paints="<<app->verified_paints<<" pan_events="<<app->pan_events<<" revisions="<<app->saved<<" shutter_operations=0 result="<<(pass?"PASS":"FAIL")<<std::endl;
         return pass?0:1;
     }catch(const std::exception& error){
