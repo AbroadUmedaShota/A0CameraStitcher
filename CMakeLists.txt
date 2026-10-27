@@ -629,6 +629,14 @@ if(A0_BUILD_FIDUCIAL_DETECTOR)
         add_test(NAME m2_fiducial_detector_contracts
             COMMAND m2_fiducial_detector_contracts --exe $<TARGET_FILE:A0CameraStitcher.FiducialDetector>)
         set_tests_properties(m2_fiducial_detector_contracts PROPERTIES TIMEOUT 1800)
+
+        # Printable detector chart (#371): export, PDF checks, and detection of a
+        # simulated capture of the generated chart. Needs Chrome or Edge.
+        find_program(A0_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+        add_test(NAME m2_detector_chart
+            COMMAND "${A0_POWERSHELL_EXECUTABLE}" -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/Test-DetectorChart.ps1"
+                -DetectorExecutable $<TARGET_FILE:A0CameraStitcher.FiducialDetector>)
+        set_tests_properties(m2_detector_chart PROPERTIES TIMEOUT 900)
     endif()
 endif()
 a0_defer_to_end_of_configure(a0_assert_opencv_only_in_allowed_targets ALLOWED ${A0_FIDUCIAL_DETECTOR_TARGETS})

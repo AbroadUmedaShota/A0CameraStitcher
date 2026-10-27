@@ -1,0 +1,202 @@
+# 校正撮影の手順（検出器用チャート）
+
+Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レンズの歪みと机に対する傾きを測るための撮影を、印刷から draft 校正の実行まで 1 回で準備できるように書く。撮影は所有者の GO の後に行う。
+
+この文書とチャートは撮影の準備物で、校正精度・合成品質の合格を意味しない。校正データの承認は #45・#43、Live 側への反映は #308・#309 で、ここでは扱わない。
+
+## 1. 全体の流れ
+
+| 段 | すること | 所要の目安 |
+| --- | --- | --- |
+| 1 | チャートを作り、A3 で 2 枚印刷して板に貼る（2・3 節） | 印刷と貼り付けで 30 分ほど（※推定） |
+| 2 | 印刷の倍率を 100 mm の目盛りで確かめる（3 節） | 5 分 |
+| 3 | 両台撮影を 9 回（傾けて 6 回、平らに 2 回、reference 1 回、4〜6 節） | 30〜45 分（※推定） |
+| 4 | 画像を並べ、検出 job に anchor を書く（7 節） | 18 枚で 30 分ほど（※推定） |
+| 5 | 検出器と draft 校正を流す（8 節） | 数分 |
+
+必要なもの: A3 を印刷できるプリンタ、厚手のマット紙 2 枚、貼り付け用の板 2 枚（A3 以上、5 mm 前後のスチレンボードなど）、傾けるための台（高さ 100〜150 mm の箱や本、2 組）、1 mm 目盛りの定規（300 mm 以上）、巻尺、マスキングテープ。
+
+## 2. チャートを作る
+
+```powershell
+pwsh -NoProfile -File scripts/Export-DetectorChartPdf.ps1 -OutputDirectory <リポジトリの外のフォルダ>
+```
+
+既定は A3 縦（所有者が A3 で印刷できるため。承認された値ではなく、引数で変えられる）。引数は `-Paper A4|A3|A0`、`-Orientation portrait|landscape`、`-MarginMm`（既定 20）、`-PitchMm`（既定 20）、`-Version`（既定 `v1`）。出力先に次の 4 つを新規に書く（同名があれば上書きせずに止まる。出力先がリポジトリの中なら止まる）。
+
+| ファイル | 中身 |
+| --- | --- |
+| `<chart id>.svg` | 図面。同じ引数から同じバイト列になる。A3 縦の既定は `samples/public/detector-chart/` に正本として置いた |
+| `<chart id>.pdf` | 印刷用。1 ページ、用紙の寸法から 0.5 mm 以内、画像オブジェクトなし（ベクターのみ）を確かめてから書く。作成日時が入るので毎回バイト列が変わる（[PILOT_CHART.md](PILOT_CHART.md) の 2 節と同じ） |
+| `<chart id>.chart.json` | チャートの定義（下記） |
+| `<chart id>.detector-job.template.json` | 検出 job の雛形（7 節） |
+
+画面に chart id、格子、リングの寸法、SVG と PDF の SHA-256 が出る。この 2 つのハッシュを撮影の記録に残す。A3 縦の既定の chart id は `a0cs-detector-chart-a3-portrait-p20-m20-v1`。
+
+### チャートの定義（`.chart.json`）
+
+`schema` は `a0.detector-chart/1`。検出 job の `chart`（`columns`、`rows`、`originXMm`、`originYMm`、`pitchMm`）をそのまま持ち、用紙、余白、節点の数と最初・最後の点 ID、リングと模様の寸法、模様とグレーの規則、グレーのセルの数、SVG の SHA-256 を添える。座標は用紙の左上を原点とする mm で、節点 (column, row) の中心は `origin + pitch × (column, row)`、点 ID は `F-<column 3 桁>-<row 3 桁>`（[検出器](M2_FIDUCIAL_DETECTOR.md)と同じ）。
+
+### 用紙ごとの値（ピッチ 20 mm、余白 20 mm）
+
+| 用紙 | セル（列 × 行） | 節点 | 節点 F-000-000 の位置 | グレーのセル | 最後の点 ID |
+| --- | --- | --- | --- | --- | --- |
+| A3 縦（既定） | 12 × 19 | 260 | (28.5, 20) mm | 29 | F-012-019 |
+| A3 横 | 19 × 12 | 260 | (20, 28.5) mm | 30 | F-019-012 |
+| A4 縦 | 8 × 12 | 117 | (25, 28.5) mm | 12 | F-008-012 |
+| A4 横 | 12 × 8 | 117 | (28.5, 25) mm | 12 | F-012-008 |
+| A0 縦 | 40 × 57 | 2378 | (20.5, 24.5) mm | 285 | F-040-057 |
+| A0 横 | 57 × 40 | 2378 | (24.5, 20.5) mm | 285 | F-057-040 |
+
+格子は用紙の中央に寄せる。余白は用紙の端から外側の節点までの最小の距離で、リングの外の帯（15 mm 以上を要求）に chart id・セル数・ピッチ・「等倍で印刷」の注意（上）、縦と横の 100 mm の目盛り（左と下）、四隅の節点の点 ID（四隅のリングの外側）を置く。
+
+### 設計値と根拠
+
+模様の規則と大きさの比は、検出器を作った人工チャート（`src/m2/synthetic_pair_chart.cpp`）と検出器（`src/m2/fiducial_detector.cpp`）に合わせた。作動距離での解像は約 9 px/mm（※推定。実測していない）として決めた。どれも設計値で、品質の合格線ではない。
+
+| 項目 | 値（ピッチ 20 mm） | 根拠 |
+| --- | --- | --- |
+| ピッチ | 20 mm | 検出器の模様の照合は、セルの辺が 80 px 以上のセルだけを数える（`kMinimumCellSidePx`）。9 px/mm で 20 mm のセルは約 180 px で、60° 傾けて縮んでも約 90 px 残る。A3 で照合に使えるセルが 228、グレーが 29 あり、照合の最小数（セル 8、グレー 2）を大きく超える。ピッチを小さくすると点は増えるが 80 px の下限に近づく |
+| リングの外半径 R | 2.8 mm（0.14 × ピッチ） | 生成器の上限（0.15 × ピッチ）の内側で、検出器の試験のチャート（50 mm に 7 mm）と同じ比。生成器の試験の仕様（ピッチ 20 mm に 2.8 mm）とも同じ。9 px/mm で外半径約 25 px・白リング約 15 px・点の半径約 6 px。検出器を試した外半径（約 15〜25 px）の範囲に入る |
+| 白リング・中央の点 | 0.6 R（1.68 mm）・0.25 R（0.7 mm） | 生成器と検出器の比（黒リング 0.6R〜R、白リング 0.25R〜0.6R、点 0.25R 未満）そのもの |
+| 模様の大きさ | 半辺 0.25 × ピッチ（5 mm）、斜めエッジの下地 0.3 × ピッチ（6 mm）、傾き 0.0875（約 5°） | 生成器と同じ比。検出器はセルの中の位置（中央・模様の外の帯・白紙の帯）をピッチに対する比で測る |
+| 細線の基本幅 | 0.5 mm（ピッチ / 40）、4 帯で 0.5〜2.0 mm | 検出器の試験のチャートの比（50 mm に 0.2 mm）では 20 mm で 0.08 mm になり、印刷も 9 px/mm での解像もできない。検出器は線の幅ではなく、明暗の幅（10〜90 パーセンタイル）と線の向きを読むので、最も細い帯でも約 4.5 px になる幅にした。生成器の上限（ピッチ / 16）の内側 |
+| 格子線 | 節点の行と列だけ、0.3 mm | 生成器の太線（節点の格子）に当たる。生成器の細線（格子の中間）は、ピッチ 20 mm だと照合で測る帯に入るので描かない。生成器の外枠も、検出に使わず、印刷できない縁にかかるので描かない |
+| グレーの値 | 生成器の値を生成器の紙の値 0.92 で割った値（1 を超えるものは 1） | 検出器は明るさを同じセルの白紙に対する比で比べる（許容 0.08）。印刷では紙そのものが白紙になるので、比が生成器と同じになるように割った。0.95 のグレーと明るい斜めエッジ（0.96）は紙と同じ白になり、期待の比（1.033、1.043）との差は許容の内側 |
+
+グレーの値は SVG の 8 bit の値（sRGB）として書いた。印刷とカメラの階調がおおむね逆の関係にあれば、JPEG の上でも同じ比になるという仮定で、実写では確かめていない（※要確認。10 節）。
+
+## 3. 印刷と貼り付け
+
+1. PDF を開き、**実際のサイズ（100 %）** で印刷する。「用紙に合わせる」「ページに合わせる」「縮小」は切る。用紙は A3、向きは縦
+2. 紙は厚手のマット紙（つや消し）にする。光沢紙は照明が映り込む
+3. 同じ PDF を 2 枚印刷する（2 枚は同じ版。chart id が同じなので 1 つの検出 job で扱える）
+4. **倍率を確かめる**: 左の縦の目盛りと下の横の目盛り（どちらも 100 mm）を定規で測り、実測値を記録する。四隅のリングの中心の間（A3 縦なら F-000-000〜F-012-000 が 240 mm、F-000-000〜F-000-019 が 380 mm）も測ると、ずれが大きく見える。100 mm からずれていれば（目安 ±0.5 mm、※所有者が決める）印刷の設定を見直す。校正はチャートの設計値を使うので、倍率のずれは reference の位置合わせに残る
+5. 板に全面を貼る（スプレーのりか、四辺をテープで留める）。紙のままだと、傾けた時にたわんで平面でなくなる。浮きや波打ちがないことを、斜めから光を当てて見る
+
+## 4. チャートを 2 枚使う理由
+
+- A3 は 1 台の撮影範囲より小さい。左右のカメラの範囲に 1 枚ずつ置けば、1 回の両台撮影で 2 台とも 1 枚ずつ使える。1 枚を交互に置くと撮影が倍の 18 回になる
+- 最後の reference は、2 台の重なる範囲に 1 枚を平らに置き、2 台が同じチャートを写す。2 台を同じ文書面に結びつけるのに使う
+- 2 枚は同じ版なので、どちらを CAM-A 側に置いてもよい。検出 job では、view ごとにそのとき写ったチャートの節点を anchor で与える
+
+## 5. 置き方と撮影の回数（両台撮影 9 回）
+
+1 回の撮影で、CAM-A の範囲にチャート 1、CAM-B の範囲にチャート 2 を置き、2 台で 1 組撮る。各カメラに training 6、validation 2、reference 1 の 9 枚ができる（人工画像で実績のある構成、[全工程の試験](M2_FULL_CALIBRATION_PIPELINE.md)）。
+
+| 回 | 置き方（各カメラの範囲で） | role | 画像名（雛形） |
+| --- | --- | --- | --- |
+| 1 | 上辺を台に載せて傾ける。範囲の中央 | training | `training-01` |
+| 2 | 下辺を台に載せる。範囲の上寄り | training | `training-02` |
+| 3 | 左辺を台に載せる。範囲の右寄り | training | `training-03` |
+| 4 | 右辺を台に載せる。範囲の左寄り | training | `training-04` |
+| 5 | 左上の角を台に載せる。範囲の下寄り | training | `training-05` |
+| 6 | 右下の角を台に載せる。範囲の右上寄り | training | `training-06` |
+| 7 | 平らに置く。範囲の左上寄り、少し回す（10° ほど） | validation | `validation-01` |
+| 8 | 平らに置く。範囲の右下寄り | validation | `validation-02` |
+| 9 | 1 枚だけを、2 台の重なる範囲に平らに縦置き（下記） | reference | `reference` |
+
+- 傾きは 20〜35° ほど（台の高さ 100〜150 mm で A3 の辺を持ち上げる）。照合の制約（セルの辺 80 px 以上、リングの短径/長径 0.4 以上）からは 60° 前後まで許すが、ピントの深さと紙のたわみを考えて控えめにした
+- 置く場所を毎回変え、8 回を通して画面の四隅と縁の近くにもリングが写るようにする。歪みは画面の縁で大きい
+- チャートは画面からはみ出してよい（縁で切れたリングは検出しないだけ）。ただし anchor にする 3 つのリングと、その周りの 3 × 3 セルほどは画面の中に入れる
+- 印刷の文字（chart id）が画面で読める向きに置くと、anchor の節点を数えやすい
+- 照明はむらと映り込みを避ける。リグや人の影がチャートにかからないようにする
+
+### reference（9 回目）
+
+- A3 縦の 1 枚を、2 台の重なる範囲に、文書面の縦横に合わせて平らに置く。チャートの上辺を文書面の上辺と平行にする（回転 0）
+- **収まるかを確かめる**: 重なる範囲の幅は約 390 mm（※推定）で、A3 縦の幅 297 mm なら左右に約 45 mm ずつ余る。撮る前に 2 台の Live View で、四隅のリング（F-000-000、F-012-000、F-000-019、F-012-019）が両方の画面に、画面の縁から 1 セル（20 mm）以上離れて写ることを見る。収まらなければ、A4 縦（幅 210 mm）を reference に使う（A4 の定義と雛形を別に作る）
+- チャートは図面を置く面と同じ平面（机の上に直に）に置く。板の厚みの分だけ浮くので、reference は板に貼っていない紙で撮るか、板の厚みを記録する（※要確認: 板の厚みを校正でどう扱うか）
+- 文書面（A0 横、左上が原点、mm）に対する、チャートの用紙の左上の角の位置 x・y を巻尺で測って記録する。8 節の `referencePlacement` に使う
+
+### 撮影の設定
+
+- 2 台とも MF。ピントは作動距離でチャートの面に合わせ、合わせたらピントリングをテープで留める（[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) 6 節と同じ）。歪みはピントの位置で変わるので、校正の後に図面を撮る時も同じピントにする
+- 絞り F8。図面を撮る時と同じ絞りにする（本番の絞りは ADR-0033 6 節で未決。※要確認）
+- 露出モード M、2 台とも同じシャッター速度・ISO・WB。ISO・WB は固定、Auto ISO・VR は切る。画質は JPEG Fine・L（7360 × 4912）
+- 白い紙が飛ばない露出にする（ヒストグラムの右端に張りつかない）。検出器は明るさを白紙に対する比で読むので、白が飛ぶと照合が崩れる
+- 傾けたチャートの持ち上げた側は、平らな面よりカメラに近い。1 回目に Live View を拡大し、持ち上げた辺の細線が分かれて見えることを確かめる（被写界深度は ※要確認）
+- 9 回の間、リグとカメラを動かさない。reference は後で図面を撮るのと同じリグの状態で撮る
+- ピクチャーコントロールなどの階調の設定は、2 台で同じにする（どの設定が検出に向くかは ※要確認）
+
+## 6. 撮影の記録
+
+[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) の 8 節に合わせ、記録はリポジトリの外に置く。1 回ごとに、回の番号、時刻、置き方、撮影設定、2 台の結果、画像のファイル名と SHA-256 を書く。加えて、chart id、SVG と PDF の SHA-256、100 mm の目盛りの実測値、reference の位置 x・y を書く。本体の識別子は外部の記録にだけ書く。
+
+## 7. 画像の整理と anchor
+
+1. 検出 job の雛形（`.detector-job.template.json`）を、画像を置くフォルダにコピーする。画像のパスは job のフォルダからの相対で、雛形は `CAM-A/training-01.jpg` のように並ぶ。画像をこの名前で置くか、`image` を書き換える
+2. `sessionId`（英数字・`-`・`_`）、`measuredAtUtc`（撮影の時刻、UTC、`YYYY-MM-DDThh:mm:ssZ`）、各カメラの `lensLabel`・`focalLengthLabel`・`focusLabel` を書く。`measuredAtUtc` が雛形のままだと、session の検査で止まる
+3. 各 view の `anchors` に、**3 つ以上**のリングを書く。同じ行や同じ列に並べない（例: ある節点と、その 2 つ右、2 つ下）
+
+```json
+"anchors": [
+  { "column": 5, "row": 8,  "xPx": 3612, "yPx": 2440, "radiusPx": 50 },
+  { "column": 7, "row": 8,  "xPx": 3960, "yPx": 2452, "radiusPx": 50 },
+  { "column": 5, "row": 10, "xPx": 3600, "yPx": 2796, "radiusPx": 50 }
+]
+```
+
+- `column`・`row` は印刷した格子の節点。四隅のリングの外に点 ID が印刷されている。`column` は F-000-000 から F-012-000 の方向（印刷の右）に、`row` は F-000-019 の方向（印刷の下）に増える。チャートが画面で回っていても、印刷の向きで数える
+- `xPx`・`yPx` はリングの中心のおおよその画素位置。画像を**保存されたままの向き**（EXIF の回転を適用しない、7360 × 4912 の横長）で読む。表示を自動で回転するビューアだと座標が入れ替わる（※要確認: 使うビューアの挙動）。数十 px ずれていてもよい
+- `radiusPx` は探索半径。その円の中にリングがちょうど 1 つ入る大きさにする。9 px/mm なら隣のリングまで約 180 px なので、50 px ほど
+- 間違った節点の名前は、セルの模様とグレーの照合（`identity`）でたいてい見つかる。ただし 3 列 3 行ずれた名前のように、模様が周期的に同じになるずれは見つからない（[検出器](M2_FIDUCIAL_DETECTOR.md)の限界）。数え直してから書く
+
+## 8. 検出と draft 校正の実行
+
+ビルド（OpenCV の入手と置き場所は[検出器](M2_FIDUCIAL_DETECTOR.md)のとおり。どちらの開発ツールも既定 OFF で、製品には入らない）:
+
+```powershell
+cmake -S . -B build/reference -G "Visual Studio 17 2022" -A x64 `
+  -DA0_BUILD_FIDUCIAL_DETECTOR=ON -DA0_BUILD_DRAFT_CALIBRATOR=ON `
+  -DOpenCV_DIR="<OpenCVのbuild/x64/vc16/lib>"
+cmake --build build/reference --config Release --target A0CameraStitcher.FiducialDetector A0CameraStitcher.DraftCalibrator --parallel 1
+```
+
+1. まず検出だけを流し、anchor を直す
+
+   ```powershell
+   build/reference/Release/A0CameraStitcher.FiducialDetector.exe --job <detection-job.json> --output <新しいフォルダ>
+   ```
+
+   exit 0 で `session.json` が出る。exit 3 なら `detection-report.json` の各 view の `status` を見る。`anchor-not-found`（半径の中にリングがない）・`anchor-ambiguous`（2 つ以上）は位置か半径、`anchor-collinear` は 3 点が一直線、`identity-mismatch` は節点の名前の数え違い、`identity-unverifiable` は照合できるセルが足りない（チャートが小さく写っているか、画面から大きくはみ出している）。出力先は毎回新しいフォルダにする（既存のファイルを上書きせずに止まる）
+2. 校正 job を作る。`samples/public/draft-calibration-job.v1.example.json` をコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` は `landscape`・`CAM-A-left-CAM-B-right`（リグに合わせる）、`referencePair` は `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする
+3. `referencePlacement` は、文書 mm からチャート mm への写像 `chart = R(angle) × document + translation`（[文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)）。チャートの上辺を文書面の上辺と平行に置き、用紙の左上の角を文書面の (x, y) mm に置いたなら、`angleRadians` 0、`translationXMm` = −x、`translationYMm` = −y。チャートが図面と同じ平面にあるときだけ `coplanarConfirmed` を true にする
+4. `rigMeasurements` は実測した値だけを書き、測っていない値は null のままにする
+5. まとめて流す（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
+
+   ```powershell
+   pwsh -NoProfile -File scripts/Invoke-DraftCalibrationPipeline.ps1 `
+     -DetectionJob <画像の隣にあるdetection-job.json> `
+     -CalibrationJob <calibration-job.json> `
+     -DetectorExecutable build/reference/Release/A0CameraStitcher.FiducialDetector.exe `
+     -CalibratorExecutable build/reference/Release/A0CameraStitcher.DraftCalibrator.exe `
+     -OutputDirectory <親が存在する新規出力フォルダ>
+   ```
+
+   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。draft であり、承認された校正ではない
+
+## 9. A4 と A0 を使う場合（代替）
+
+- **A4**: `-Paper A4` で作る。A4 縦は 8 × 12 セル（117 節点）で、A3 より 1 枚が写す範囲が狭い。画面の縁を覆うには置き場所を増やす必要がある（※推定）。reference は幅 210 mm なので重なる範囲に収めやすい
+- **A0**: `-Paper A0` で作る（印刷所に頼む。版は 40 × 57 セル、2378 節点）。1 枚で文書面の全体を覆えるので、平らな validation と reference には向くが、大きくて傾けにくく、training の 6 回には向かない。A0 の一枚ものの印刷仕様は [PILOT_CHART.md](PILOT_CHART.md) の 3 節に合わせる
+
+## 10. 試験と限界
+
+`scripts/Test-DetectorChart.ps1`（CTest `m2_detector_chart`。`A0_BUILD_FIDUCIAL_DETECTOR=ON` と `BUILD_TESTING=ON` のときだけ登録される）。
+
+```powershell
+pwsh -NoProfile -File scripts/Test-DetectorChart.ps1 -DetectorExecutable <build>/Release/A0CameraStitcher.FiducialDetector.exe
+```
+
+- 書き出し: A3 縦・A4 横・A0 縦で、PDF が 1 ページ・用紙から 0.5 mm 以内・画像オブジェクトなし、定義と SVG と雛形の整合（格子の数、中央寄せ、リングの寸法、リングの数、最後の点 ID、模様の規則、グレーのセルの数、SHA-256、9 view × 2 台）、既定の A3 の SVG が正本と同じバイト列、2 回目も同じ SVG、出力先がリポジトリの中・既存のファイル・ラベルの入らない余白を拒否すること
+- 検出: A3 の SVG をブラウザで 18 px/mm にラスタ化し、ピンホールのカメラ（チャートの中央で約 9 px/mm）で、傾けた view（25° / −12°、回転 3°、training）と平らな view（回転 −2°、validation）を作る。1 画素を 3 × 3 で積分し、ガウスぼかし σ 0.9 px、明るさの傾き（画面の中で 0.6〜1.0 倍）、ノイズ σ 1.5、JPEG 品質 90。anchor は投影した節点の位置を 12 px の倍数に丸め、半径 40 px（[検出器の試験](M2_FIDUCIAL_DETECTOR.md)と同じく、operator の役を代わりに行う）。検出器が exit 0 で session を出し、各 view が `ok`・identity が `verified` で全節点を検出し、検出した中心と投影した節点の差が rms 0.5 px・max 1.0 px 以内（試験の入力で、品質の基準ではない）
+- この試験を Release で流した時の出力: 87 チェック・失敗 0、検出器の終了コード 0。2 つの view とも 260 節点のうち 260 を検出、identity は `verified`（照合したセル 228、グレー 29）。中心の差は training が rms 0.024 px・max 0.047 px、validation が rms 0.028 px・max 0.045 px
+- 参考: 試験の条件を一時的に厳しくした 1 回の実行（傾き 45° / −20°・回転 8°、別の view は 40° 傾け、チャートの中央で約 7 px/mm、ぼかし σ 1.4 px、明るさ 0.45〜1.0 倍）でも、2 つの view とも 260 節点を検出し identity は `verified` だった。試験には入れていない
+
+限界（※要確認）:
+
+- 人工の画像だけの結果。実際の印刷の階調と網点、紙のたわみ、レンズのぼけと歪み、被写界深度、照明のむら、カメラの階調（ピクチャーコントロール）は入っていない
+- 約 9 px/mm と、重なる範囲の幅約 390 mm は推定。撮影の前に Live View で確かめる
+- グレーと明るさの照合は、印刷とカメラの階調で比が保たれることを仮定している。実写で `identity-mismatch` が出る場合は、まず露出（白の飛び）と階調の設定を見る
+- PDF のバイト列は作るたびに変わる。版の正本は SVG とそのハッシュ。図面を 1 か所でも変えたら `-Version` を上げ、正本の SVG と試験を更新する
