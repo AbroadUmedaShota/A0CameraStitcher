@@ -1,5 +1,6 @@
 // Still similarity estimator (#365) on generated drawing-like scenes.
 #include "a0/m2/experimental/overlap_estimation.hpp"
+#include "a0/m2/experimental/still_review.hpp"
 #include "similarity_scene.hpp"
 #include <chrono>
 #include <cstring>
@@ -31,6 +32,25 @@ int main(){
         close(e1,t1,"positive rotation");
         check(e1.similarity_residual.rms<e1.translation_residual.rms && e1.similarity_residual.maximum<e1.translation_residual.maximum,"similarity residual below translation only");
         check(e1.levels==4 && e1.tile_side==256 && e1.search_radius==200 && e1.agreed>=3 && e1.agreed<=e1.matched,"full size plan");
+        // Rigid fit (#365 review): the similarity's rotation, scale 1, the
+        // translation solved again. Its residual lies between the similarity's
+        // and translation alone, so fixing scale to 1 still beats translation.
+        std::cout<<"rigid x="<<e1.rigid.x<<" y="<<e1.rigid.y<<" rigid_rms="<<e1.rigid_residual.rms<<" rigid_max="<<e1.rigid_residual.maximum
+            <<" similarity_rms="<<e1.similarity_residual.rms<<" translation_rms="<<e1.translation_residual.rms<<'\n';
+        check(e1.rigid.rotation_degrees==e1.similarity.rotation_degrees && e1.rigid.scale==1,"rigid keeps the rotation, scale 1");
+        check(e1.similarity_residual.rms<=e1.rigid_residual.rms && e1.rigid_residual.rms<e1.translation_residual.rms,"rigid residual between similarity and translation only");
+        // Applied geometry by policy on the estimated scale 1.0015: no scale
+        // limit and a limit below 0.15% keep scale 1; a 1% limit applies it.
+        const std::string hash(64,'a');
+        const auto no_scale=DecideStillAlignment(e1,StillMergePolicy{hash,2,{},{}});const auto kept=AppliedStillAlignment(no_scale);
+        check(no_scale.decision==StillAlignmentDecision::corrected && no_scale.scale_decision==StillScaleDecision::no_scale_policy && !no_scale.scale_exceeded &&
+            kept.scale==1 && kept.rotation_degrees==e1.similarity.rotation_degrees && kept.x==std::llround(e1.rigid.x) && kept.y==std::llround(e1.rigid.y),"no scale limit applies scale 1");
+        check(AppliedStillResidual(no_scale).rms==e1.rigid_residual.rms && AppliedStillResidual(no_scale).rms<e1.translation_residual.rms,"no scale limit residual is the rigid fit");
+        const auto within=DecideStillAlignment(e1,StillMergePolicy{hash,2,{},1.0});const auto full=AppliedStillAlignment(within);
+        check(within.scale_decision==StillScaleDecision::corrected && full.scale==e1.similarity.scale && full.x==std::llround(e1.similarity.x),"scale inside 1% applied");
+        const auto over=DecideStillAlignment(e1,StillMergePolicy{hash,2,{},0.1});const auto rigid=AppliedStillAlignment(over);
+        check(over.decision==StillAlignmentDecision::corrected && over.scale_decision==StillScaleDecision::scale_exceeded && over.scale_exceeded &&
+            rigid.scale==1 && rigid.rotation_degrees==e1.similarity.rotation_degrees && rigid.x==std::llround(e1.rigid.x),"scale over 0.1% keeps scale 1, rotation applied");
         const Truth t2{3690.2,-22.4,-0.9,0.998};
         const auto b2=scene::ViewB(world,w,h,t2.x,t2.y,t2.degrees,t2.scale,1.0);
         close(EstimateOverlapSimilarity(a,b2,3750,-62),t2,"negative rotation, offset prior");

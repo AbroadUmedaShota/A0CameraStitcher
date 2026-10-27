@@ -67,7 +67,10 @@ struct OverlapEstimate {
 // wrong start can still give a few consistent random tiles. The attempt with
 // the most agreed tiles, then the smaller residual, wins; an exact tie between
 // different fits is undetermined. No random sampling; equal inputs give equal
-// results. Rotation and scale limits, residual warnings and quality are
+// results. The same agreed tiles also give a rigid fit (the similarity's
+// rotation, scale fixed to 1, translation solved again by least squares) and
+// a translation-only fit. All three must render, so the caller may apply any
+// of them. Rotation and scale limits, residual warnings and quality are
 // decided by the caller.
 enum class SimilarityUndeterminedReason {none,no_tiles,insufficient_tiles,outside_image,tied_starts};
 constexpr std::string_view SimilarityUndeterminedReasonCode(SimilarityUndeterminedReason v){
@@ -92,10 +95,11 @@ struct OverlapSimilarityEstimate {
     std::vector<SimilarityTile> tiles; // every searched tile, row-major
     // matched: passed the per-tile checks; agreed: inside the consensus. The
     // fits below use the agreed tiles and are valid only when status is
-    // estimated_not_judged. The translation-only fit is the comparison baseline.
-    SimilarityFit similarity;
+    // estimated_not_judged. rigid carries similarity.rotation_degrees and
+    // scale 1. The translation-only fit is the comparison baseline.
+    SimilarityFit similarity,rigid;
     double translation_x{},translation_y{};
-    FitResidual similarity_residual,translation_residual;
+    FitResidual similarity_residual,rigid_residual,translation_residual;
 };
 // Throws std::invalid_argument for differing sizes, broken buffers, sizes
 // outside the render limits or a prior outside the frame.

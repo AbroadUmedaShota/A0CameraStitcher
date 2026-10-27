@@ -258,13 +258,25 @@ int main(){
         auto stripped=child_text;stripped.erase(stripped.find(field),field.size()+1); // the field and its comma
         check(stripped.find("mountOrientation")==std::string::npos);reject_in(child_damaged,turned_child_output.jpeg,stripped,false);
         check(Read(turned.camera_a_original)==ta && Read(turned.camera_b_original)==tb && Read(turned_output.report)==turned_bytes);
-        // #365 merge policy file: strict, no defaults, residual value optional.
+        // #365 merge policy file: strict, no defaults, residual and scale values
+        // optional. The 1% scale limit is a test policy file, not a code default.
         namespace px=a0::phase0::experimental;
         const auto sha=[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);};
         const std::string policy_text="{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2}";
+        const std::string scale_policy_text="{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":1}";
         const auto parsed_policy=px::ParseMergePolicySettings(policy_text,std::string(64,'a'));
-        check(parsed_policy.rotation_max_degrees==2 && !parsed_policy.residual_max_pixels);
-        check(px::ParseMergePolicySettings("\xEF\xBB\xBF{ \"similarityResidualMaxWarningPixels\" : 12.5,\r\n \"rotationAutoCorrectionMaxDegrees\":0.75, \"schema\":\"a0.wpd-merge-policy.v1\" }\r\n",std::string(64,'b')).residual_max_pixels==12.5);
+        check(parsed_policy.rotation_max_degrees==2 && !parsed_policy.residual_max_pixels && !parsed_policy.scale_max_percent);
+        check(px::ParseMergePolicySettings(scale_policy_text,std::string(64,'a')).scale_max_percent==1.0);
+        check(px::ParseMergePolicySettings("{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":0}",std::string(64,'a')).scale_max_percent==0.0);
+        const auto all_fields=px::ParseMergePolicySettings("\xEF\xBB\xBF{ \"similarityResidualMaxWarningPixels\" : 12.5,\r\n \"scaleAutoCorrectionMaxPercent\":0.5, \"rotationAutoCorrectionMaxDegrees\":0.75, \"schema\":\"a0.wpd-merge-policy.v1\" }\r\n",std::string(64,'b'));
+        check(all_fields.residual_max_pixels==12.5 && all_fields.scale_max_percent==0.5 && all_fields.rotation_max_degrees==0.75);
+        for(const auto* text:{"{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":null}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":-0.5}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":\"1\"}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":1,\"scaleAutoCorrectionMaxPercent\":1}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"scaleAutoCorrectionMaxPercent\":1}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMax\":1}"})
+            reject([&]{(void)px::ParseMergePolicySettings(text,std::string(64,'a'));});
         for(const auto* text:{"","{}","{\"schema\":\"a0.wpd-merge-policy.v1\"}","{\"rotationAutoCorrectionMaxDegrees\":2}",
             "{\"schema\":\"a0.wpd-merge-policy.v2\",\"rotationAutoCorrectionMaxDegrees\":2}",
             "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":\"2\"}",
@@ -282,46 +294,100 @@ int main(){
         {std::ofstream f(policy_root/"large.json",std::ios::binary);f<<std::string(5000,' ');}reject([&]{(void)px::LoadMergePolicySettings(policy_root/"large.json",sha);});
         {std::ofstream f(policy_root/"wpd-merge-policy.json",std::ios::binary);f<<policy_text;}
         const auto loaded_policy=px::LoadMergePolicySettings(policy_root/"wpd-merge-policy.json",sha);
-        check(loaded_policy && loaded_policy->sha256==a0::phase0::Sha256Hex(Read(policy_root/"wpd-merge-policy.json")) && loaded_policy->rotation_max_degrees==2);
-        // The decision rule: equal to the limit is inside, either sign; above
-        // it nothing is clamped; the residual warning needs the policy value.
+        check(loaded_policy && loaded_policy->sha256==a0::phase0::Sha256Hex(Read(policy_root/"wpd-merge-policy.json")) && loaded_policy->rotation_max_degrees==2 && !loaded_policy->scale_max_percent);
+        fs::create_directories(policy_root/"scale");{std::ofstream f(policy_root/"scale/wpd-merge-policy.json",std::ios::binary);f<<scale_policy_text;}
+        const auto scale_policy=px::LoadMergePolicySettings(policy_root/"scale/wpd-merge-policy.json",sha);
+        check(scale_policy && scale_policy->scale_max_percent==1.0 && scale_policy->sha256!=loaded_policy->sha256);
+        // The decision rule: rotation and scale each against their own limit;
+        // equal to a limit is inside, either sign; nothing is clamped; the
+        // residual warning needs the policy value.
+        using S=StillScaleDecision;
         OverlapSimilarityEstimate synthetic;synthetic.status=OverlapEstimateStatus::estimated_not_judged;synthetic.reason=SimilarityUndeterminedReason::none;
-        synthetic.similarity={900.4,10.6,2,1.001};synthetic.translation_x=901.2;synthetic.translation_y=9.4;synthetic.similarity_residual={1,3};synthetic.agreed=5;
-        auto decided=DecideStillAlignment(synthetic,*loaded_policy);check(decided.decision==StillAlignmentDecision::corrected && !decided.rotation_exceeded && !decided.residual_exceeded);
-        check(StillAlignmentTranslation(decided)==std::array<int,2>{900,11});
+        synthetic.similarity={900.4,10.6,2,1.001};synthetic.rigid={898.7,12.2,2,1};synthetic.translation_x=901.2;synthetic.translation_y=9.4;
+        synthetic.similarity_residual={1,3};synthetic.rigid_residual={1.5,4};synthetic.translation_residual={2,6};synthetic.agreed=5;
+        const auto applied_is=[](const AutomaticStillAlignment& a,int x,int y,double degrees,double scale){const auto g=AppliedStillAlignment(a);return g.x==x && g.y==y && g.rotation_degrees==degrees && g.scale==scale;};
+        // No scale limit: rotation corrected, scale kept at 1 with the rigid fit.
+        auto decided=DecideStillAlignment(synthetic,*loaded_policy);
+        check(decided.decision==StillAlignmentDecision::corrected && decided.scale_decision==S::no_scale_policy && !decided.rotation_exceeded && !decided.scale_exceeded && !decided.residual_exceeded);
+        check(applied_is(decided,899,12,2,1) && StillAlignmentBasis(decided)=="auto-still-rotation" && AppliedStillResidual(decided).rms==1.5 && StillAlignmentWarnings(decided).empty());
+        check(px::StillAlignmentLine(decided).find(L"倍率 100.10% は上限が未設定のため補正していません")!=std::wstring::npos &&
+            px::StillAlignmentLine(decided).find(L"一致タイル 5、残差 RMS 1.5 px")!=std::wstring::npos);
+        // A scale limit with the scale inside: the similarity is applied.
+        decided=DecideStillAlignment(synthetic,*scale_policy);
+        check(decided.scale_decision==S::corrected && applied_is(decided,900,11,2,1.001) && StillAlignmentBasis(decided)=="auto-still-similarity" && AppliedStillResidual(decided).rms==1);
+        for(const double inside:{1.01,0.99}){synthetic.similarity.scale=inside;check(DecideStillAlignment(synthetic,*scale_policy).scale_decision==S::corrected);}
+        for(const double outside:{std::nextafter(1.01,2.0),std::nextafter(0.99,0.0),1.5}){synthetic.similarity.scale=outside;
+            decided=DecideStillAlignment(synthetic,*scale_policy);
+            check(decided.decision==StillAlignmentDecision::corrected && decided.scale_decision==S::scale_exceeded && decided.scale_exceeded && applied_is(decided,899,12,2,1));
+            check(StillAlignmentWarnings(decided)==std::vector<std::string_view>{"scale-exceeded"} && StillAlignmentBasis(decided)=="auto-still-rotation");}
+        check(px::StillAlignmentLine(decided).find(L"警告: 倍率が上限を超えたため倍率は補正していません")!=std::wstring::npos && px::StillAlignmentDetails(decided).find(L"倍率は上限超えのため 1")!=std::wstring::npos);
+        synthetic.similarity.scale=1.001;
         synthetic.similarity.rotation_degrees=-2;check(DecideStillAlignment(synthetic,*loaded_policy).decision==StillAlignmentDecision::corrected);
         synthetic.similarity.rotation_degrees=std::nextafter(2.0,3.0);decided=DecideStillAlignment(synthetic,*loaded_policy);
-        check(decided.decision==StillAlignmentDecision::rotation_exceeded && decided.rotation_exceeded && StillAlignmentTranslation(decided)==std::array<int,2>{901,9});
+        check(decided.decision==StillAlignmentDecision::rotation_exceeded && decided.rotation_exceeded && applied_is(decided,901,9,0,1) && StillAlignmentBasis(decided)=="auto-still-translation");
         check(px::StillAlignmentLine(decided).find(L"時計回り")!=std::wstring::npos && px::StillAlignmentLine(decided).find(L"反時計回り")==std::wstring::npos);
+        // Rotation over its limit: only translation; the scale is still judged.
+        check(DecideStillAlignment(synthetic,*scale_policy).scale_decision==S::not_applied && !DecideStillAlignment(synthetic,*scale_policy).scale_exceeded);
+        synthetic.similarity.scale=1.02;decided=DecideStillAlignment(synthetic,*scale_policy);
+        check(decided.scale_decision==S::scale_exceeded && applied_is(decided,901,9,0,1) && StillAlignmentWarnings(decided)==std::vector<std::string_view>{"rotation-exceeded","scale-exceeded"});
+        synthetic.similarity.scale=1.001;
         synthetic.similarity.rotation_degrees=-2.5;check(px::StillAlignmentLine(DecideStillAlignment(synthetic,*loaded_policy)).find(L"反時計回り")!=std::wstring::npos);
-        check(DecideStillAlignment(synthetic,std::nullopt).decision==StillAlignmentDecision::no_policy && !DecideStillAlignment(synthetic,std::nullopt).rotation_exceeded);
+        decided=DecideStillAlignment(synthetic,std::nullopt);
+        check(decided.decision==StillAlignmentDecision::no_policy && decided.scale_decision==S::no_policy && !decided.rotation_exceeded && applied_is(decided,901,9,0,1));
         auto warn_policy=*loaded_policy;warn_policy.residual_max_pixels=3;check(!DecideStillAlignment(synthetic,warn_policy).residual_exceeded);
         warn_policy.residual_max_pixels=2.5;check(DecideStillAlignment(synthetic,warn_policy).residual_exceeded);
+        auto bad_scale=*scale_policy;bad_scale.scale_max_percent=-1;reject([&]{(void)DecideStillAlignment(synthetic,bad_scale);});
+        bad_scale.scale_max_percent=INFINITY;reject([&]{(void)DecideStillAlignment(synthetic,bad_scale);});
         synthetic.status=OverlapEstimateStatus::undetermined;synthetic.reason=SimilarityUndeterminedReason::insufficient_tiles;
-        check(DecideStillAlignment(synthetic,*loaded_policy).decision==StillAlignmentDecision::undetermined && !DecideStillAlignment(synthetic,*loaded_policy).similarity);
+        decided=DecideStillAlignment(synthetic,*scale_policy);
+        check(decided.decision==StillAlignmentDecision::undetermined && decided.scale_decision==S::undetermined && !decided.similarity && !decided.rigid);
         // Automatic still alignment on generated JPEGs. Live geometry 460 x 307
-        // scales by 4 to a 924, 12 start; the truth is 930.3, 9.2, +0.4 deg.
+        // scales by 4 to a 924, 12 start; the truth is 930.3, 9.2, +0.4 deg,
+        // scale 1.004 (0.4%: inside a 1% limit, over a 0.2% limit).
         const unsigned sw=1840,sh=1228;const auto world=similarity_scene::MakeScene(sw,sh,960,40,17);
-        const auto scene_a=similarity_scene::ViewA(world,sw,sh),scene_b=similarity_scene::ViewB(world,sw,sh,930.3,9.2,0.4,1.0,0.95);
+        const auto scene_a=similarity_scene::ViewA(world,sw,sh),scene_b=similarity_scene::ViewB(world,sw,sh,930.3,9.2,0.4,1.004,0.95);
         const auto auto_root=root/"auto";fs::create_directories(auto_root/"CAM-A");fs::create_directories(auto_root/"CAM-B");
         WriteJpeg(auto_root/"CAM-A/original.jpg",scene_a);WriteJpeg(auto_root/"CAM-B/original.jpg",scene_b);
         const auto aa=Read(auto_root/"CAM-A/original.jpg"),ab=Read(auto_root/"CAM-B/original.jpg");
         StillReviewRequest automatic{auto_root/"CAM-A/original.jpg",auto_root/"CAM-B/original.jpg",auto_root/"corrected",a0::phase0::Sha256Hex(aa),a0::phase0::Sha256Hex(ab),
             "synthetic-pair-auto",{460,307,229,3,11},std::chrono::steady_clock::now()+std::chrono::seconds(240)};
-        automatic.automatic_alignment=StillReviewRequest::AutomaticAlignment{loaded_policy};
+        // Scale limit present (1%) and the scale inside it: similarity applied.
+        automatic.automatic_alignment=StillReviewRequest::AutomaticAlignment{scale_policy};
         const auto corrected=WriteUncalibratedStillReview(automatic);const auto corrected_record=LoadSavedStillReview(corrected.report);
         std::cout<<"auto_alignment_ms="<<corrected.alignment_milliseconds<<" "<<px::StillAlignmentLog(*corrected.automatic,corrected.alignment_milliseconds)<<'\n';
         const auto corrected_bytes=Read(corrected.report);const std::string corrected_text(corrected_bytes.begin(),corrected_bytes.end());
-        check(corrected.automatic && corrected.automatic->decision==StillAlignmentDecision::corrected && corrected_record.automatic && corrected_record.automatic->decision==StillAlignmentDecision::corrected);
-        check(corrected_text.find("a0.uncalibrated-still-review.v4")!=std::string::npos && corrected_text.find("\"geometryBasis\":\"auto-still-similarity\"")!=std::string::npos &&
-            corrected_text.find("\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false")!=std::string::npos && corrected_text.find("\"warnings\":[]")!=std::string::npos);
-        const auto& fitted=*corrected_record.automatic->similarity;
-        check(std::abs(fitted.rotation_degrees-0.4)<0.02 && std::abs(fitted.x-930.3)<1.5 && std::abs(fitted.y-9.2)<1.5 && std::abs(fitted.scale-1)<5e-4);
+        check(corrected.automatic && corrected.automatic->decision==StillAlignmentDecision::corrected && corrected_record.automatic && corrected_record.automatic->decision==StillAlignmentDecision::corrected &&
+            corrected_record.automatic->scale_decision==S::corrected);
+        check(corrected_text.find("a0.uncalibrated-still-review.v5")!=std::string::npos && corrected_text.find("\"geometryBasis\":\"auto-still-similarity\"")!=std::string::npos &&
+            corrected_text.find("\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false")!=std::string::npos && corrected_text.find("\"warnings\":[]")!=std::string::npos &&
+            corrected_text.find("\"estimator\":\"a0.overlap-similarity.v2\"")!=std::string::npos && corrected_text.find("\"scaleDecision\":\"corrected\"")!=std::string::npos &&
+            corrected_text.find("\"scaleAutoCorrectionMaxPercent\":1,")!=std::string::npos);
+        const auto& fitted=*corrected_record.automatic->similarity;const auto& fitted_rigid=*corrected_record.automatic->rigid;
+        check(std::abs(fitted.rotation_degrees-0.4)<0.02 && std::abs(fitted.x-930.3)<1.5 && std::abs(fitted.y-9.2)<1.5 && std::abs(fitted.scale-1.004)<5e-4);
         check(corrected_record.rotation_degrees==fitted.rotation_degrees && corrected_record.scale==fitted.scale && corrected_record.translation_x==std::llround(fitted.x) && corrected_record.translation_y==std::llround(fitted.y));
-        check(corrected_record.automatic->similarity_residual.rms<corrected_record.automatic->translation_residual.rms && corrected_record.automatic->policy->sha256==loaded_policy->sha256);
+        check(corrected_record.automatic->similarity_residual.rms<corrected_record.automatic->translation_residual.rms && corrected_record.automatic->policy->sha256==scale_policy->sha256);
         check(Read(automatic.camera_a_original)==aa && Read(automatic.camera_b_original)==ab);
+        // No scale limit in the policy: rotation applied, scale 1, rigid fit.
+        auto rotation_only=automatic;rotation_only.output_directory=auto_root/"rotation-only";rotation_only.automatic_alignment->policy=loaded_policy;
+        const auto rotation_output=WriteUncalibratedStillReview(rotation_only);const auto rotation_record=LoadSavedStillReview(rotation_output.report);const auto& rm=*rotation_record.automatic;
+        std::cout<<px::StillAlignmentLog(rm,rotation_output.alignment_milliseconds)<<'\n';
+        check(rm.decision==StillAlignmentDecision::corrected && rm.scale_decision==S::no_scale_policy && rotation_record.scale==1 && rotation_record.rotation_degrees==rm.similarity->rotation_degrees &&
+            rotation_record.translation_x==std::llround(rm.rigid->x) && rotation_record.translation_y==std::llround(rm.rigid->y) && std::abs(rm.similarity->scale-1.004)<5e-4);
+        check(rm.similarity_residual.rms<=rm.rigid_residual.rms && rm.rigid_residual.rms<rm.translation_residual.rms);
+        const auto rotation_bytes=Read(rotation_record.report);const std::string rotation_text(rotation_bytes.begin(),rotation_bytes.end());
+        check(rotation_text.find("\"geometryBasis\":\"auto-still-rotation\"")!=std::string::npos && rotation_text.find("\"scaleDecision\":\"no-scale-policy\"")!=std::string::npos &&
+            rotation_text.find("\"scaleAutoCorrectionMaxPercent\":null")!=std::string::npos && rotation_text.find(",\"scale\":1},\"crop\"")!=std::string::npos && rotation_text.find("\"warnings\":[]")!=std::string::npos);
+        // Scale over the limit (0.2%): warned, scale 1, rotation still applied.
+        auto scale_over=automatic;scale_over.output_directory=auto_root/"scale-over";scale_over.automatic_alignment->policy=StillMergePolicy{scale_policy->sha256,2,{},0.2};
+        const auto scale_over_record=LoadSavedStillReview(WriteUncalibratedStillReview(scale_over).report);const auto& sm=*scale_over_record.automatic;
+        check(sm.decision==StillAlignmentDecision::corrected && sm.scale_decision==S::scale_exceeded && sm.scale_exceeded && scale_over_record.scale==1 &&
+            scale_over_record.rotation_degrees==sm.similarity->rotation_degrees && scale_over_record.translation_x==std::llround(sm.rigid->x));
+        const auto scale_over_bytes=Read(scale_over_record.report);const std::string scale_over_text(scale_over_bytes.begin(),scale_over_bytes.end());
+        check(scale_over_text.find("\"warnings\":[\"scale-exceeded\"]")!=std::string::npos && scale_over_text.find("\"scaleDecision\":\"scale-exceeded\"")!=std::string::npos &&
+            scale_over_text.find("\"geometryBasis\":\"auto-still-rotation\"")!=std::string::npos && scale_over_text.find("\"scaleAutoCorrectionMaxPercent\":0.20000000000000001")!=std::string::npos);
         // The overlap compares better after the similarity than after the
-        // translation alone: A against B (gain restored) on a grid of A pixels.
+        // rigid fit, and better after the rigid fit than after the translation
+        // alone: A against B (gain restored) on a grid of A pixels.
         const auto sources=LoadStillReviewSources(corrected_record);
         auto seam_error=[&](const a0::m2::render::PairRenderParameters& p){
             const auto inverse=a0::m2::render::Invert(p.camera_b_to_camera_a);double sum=0;
@@ -333,24 +399,30 @@ int main(){
             return sum;
         };
         const auto t=corrected_record.automatic;
-        check(seam_error(SimilarityReviewGeometry(corrected_record.translation_x,corrected_record.translation_y,fitted.rotation_degrees,fitted.scale,sw,sh))<
-            seam_error(SimilarityReviewGeometry(static_cast<int>(std::llround(t->translation_x)),static_cast<int>(std::llround(t->translation_y)),0,1,sw,sh)));
-        // Over the limit: translation only, warned, never clamped. A residual
-        // value of zero exercises the residual warning.
+        const auto similarity_error=seam_error(SimilarityReviewGeometry(corrected_record.translation_x,corrected_record.translation_y,fitted.rotation_degrees,fitted.scale,sw,sh));
+        const auto rigid_error=seam_error(SimilarityReviewGeometry(static_cast<int>(std::llround(fitted_rigid.x)),static_cast<int>(std::llround(fitted_rigid.y)),fitted_rigid.rotation_degrees,1,sw,sh));
+        const auto translation_error=seam_error(SimilarityReviewGeometry(static_cast<int>(std::llround(t->translation_x)),static_cast<int>(std::llround(t->translation_y)),0,1,sw,sh));
+        std::cout<<"seam_error similarity="<<similarity_error<<" rigid="<<rigid_error<<" translation="<<translation_error<<'\n';
+        check(similarity_error<rigid_error && rigid_error<translation_error);
+        // Over the rotation limit: translation only, warned, never clamped. The
+        // scale over its limit is warned too; a residual value of zero
+        // exercises the residual warning.
         auto exceeded=automatic;exceeded.output_directory=auto_root/"exceeded";
-        exceeded.automatic_alignment->policy=StillMergePolicy{loaded_policy->sha256,0.25,0.0};
+        exceeded.automatic_alignment->policy=StillMergePolicy{loaded_policy->sha256,0.25,0.0,0.2};
         const auto exceeded_record=LoadSavedStillReview(WriteUncalibratedStillReview(exceeded).report);const auto& em=*exceeded_record.automatic;
-        check(em.decision==StillAlignmentDecision::rotation_exceeded && em.rotation_exceeded && em.residual_exceeded && exceeded_record.rotation_degrees==0 && exceeded_record.scale==1);
+        check(em.decision==StillAlignmentDecision::rotation_exceeded && em.rotation_exceeded && em.scale_exceeded && em.scale_decision==S::scale_exceeded && em.residual_exceeded &&
+            exceeded_record.rotation_degrees==0 && exceeded_record.scale==1);
         check(exceeded_record.translation_x==std::llround(em.translation_x) && exceeded_record.translation_y==std::llround(em.translation_y));
         const auto exceeded_bytes=Read(exceeded_record.report);const std::string exceeded_text(exceeded_bytes.begin(),exceeded_bytes.end());
-        check(exceeded_text.find("\"geometryBasis\":\"auto-still-translation\"")!=std::string::npos && exceeded_text.find("\"warnings\":[\"rotation-exceeded\",\"fit-residual-exceeded\"]")!=std::string::npos &&
+        check(exceeded_text.find("\"geometryBasis\":\"auto-still-translation\"")!=std::string::npos && exceeded_text.find("\"warnings\":[\"rotation-exceeded\",\"scale-exceeded\",\"fit-residual-exceeded\"]")!=std::string::npos &&
             exceeded_text.find("\"adjustment\"")==std::string::npos && exceeded_text.find("\"similarityResidualMaxWarningPixels\":0")!=std::string::npos);
         // Without a policy file: values recorded, nothing corrected.
         auto unset=automatic;unset.output_directory=auto_root/"no-policy";unset.automatic_alignment->policy.reset();
         const auto unset_record=LoadSavedStillReview(WriteUncalibratedStillReview(unset).report);
-        check(unset_record.automatic->decision==StillAlignmentDecision::no_policy && !unset_record.automatic->policy && unset_record.rotation_degrees==0 && std::abs(unset_record.automatic->similarity->rotation_degrees-0.4)<0.02);
+        check(unset_record.automatic->decision==StillAlignmentDecision::no_policy && unset_record.automatic->scale_decision==S::no_policy && !unset_record.automatic->policy &&
+            unset_record.rotation_degrees==0 && unset_record.scale==1 && std::abs(unset_record.automatic->similarity->rotation_degrees-0.4)<0.02);
         const auto unset_bytes=Read(unset_record.report);const std::string unset_text(unset_bytes.begin(),unset_bytes.end());
-        check(unset_text.find("\"policy\":null")!=std::string::npos && unset_text.find("\"decision\":\"no-policy\"")!=std::string::npos);
+        check(unset_text.find("\"policy\":null")!=std::string::npos && unset_text.find("\"decision\":\"no-policy\"")!=std::string::npos && unset_text.find("\"scaleDecision\":\"no-policy\"")!=std::string::npos);
         // Not estimable (uniform originals): the live translation and render
         // are kept; the JPEG equals the earlier v1 result byte for byte.
         auto flat=r;flat.output_directory=root/"auto-flat";flat.automatic_alignment=StillReviewRequest::AutomaticAlignment{loaded_policy};flat.deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
@@ -381,9 +453,23 @@ int main(){
         reject_auto(corrected_text,"\"warnings\":[]","\"warnings\":[\"rotation-exceeded\"]",corrected.jpeg);
         reject_auto(corrected_text,"\"rotationAutoCorrectionMaxDegrees\":2","\"rotationAutoCorrectionMaxDegrees\":0.1",corrected.jpeg);
         reject_auto(corrected_text,"\"geometryBasis\":\"auto-still-similarity\"","\"geometryBasis\":\"manual-still-similarity\"",corrected.jpeg);
-        reject_auto(corrected_text,"\"estimator\":\"a0.overlap-similarity.v1\"","\"estimator\":\"other\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"estimator\":\"a0.overlap-similarity.v2\"","\"estimator\":\"other\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"estimator\":\"a0.overlap-similarity.v2\"","\"estimator\":\"a0.overlap-similarity.v1\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"schema\":\"a0.uncalibrated-still-review.v5\"","\"schema\":\"a0.uncalibrated-still-review.v4\"",corrected.jpeg);
         reject_auto(corrected_text,"\"productQualityAccepted\":false","\"productQualityAccepted\":true",corrected.jpeg);
-        reject_auto(exceeded_text,"\"warnings\":[\"rotation-exceeded\",\"fit-residual-exceeded\"]","\"warnings\":[\"fit-residual-exceeded\",\"rotation-exceeded\"]",exceeded_record.jpeg);
+        reject_auto(corrected_text,"\"scaleDecision\":\"corrected\"","\"scaleDecision\":\"no-scale-policy\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"scaleAutoCorrectionMaxPercent\":1,","\"scaleAutoCorrectionMaxPercent\":0.1,",corrected.jpeg);
+        reject_auto(corrected_text,"\"scaleAutoCorrectionMaxPercent\":1,","",corrected.jpeg);
+        reject_auto(corrected_text,"\"geometryBasis\":\"auto-still-similarity\"","\"geometryBasis\":\"auto-still-rotation\"",corrected.jpeg);
+        // Rigid result: the adjustment must be the applied scale 1, not the
+        // estimate; adding a scale limit afterwards changes the decision.
+        reject_auto(rotation_text,",\"scale\":1},\"crop\"",",\"scale\":"+std::to_string(rm.similarity->scale)+"},\"crop\"",rotation_record.jpeg);
+        reject_auto(rotation_text,"\"scaleAutoCorrectionMaxPercent\":null","\"scaleAutoCorrectionMaxPercent\":1",rotation_record.jpeg);
+        reject_auto(rotation_text,"\"geometryBasis\":\"auto-still-rotation\"","\"geometryBasis\":\"auto-still-similarity\"",rotation_record.jpeg);
+        reject_auto(rotation_text,"\"rigid\":{\"x\":","\"rigid\":{\"x\":1",rotation_record.jpeg);
+        reject_auto(scale_over_text,"\"warnings\":[\"scale-exceeded\"]","\"warnings\":[]",scale_over_record.jpeg);
+        reject_auto(exceeded_text,"\"warnings\":[\"rotation-exceeded\",\"scale-exceeded\",\"fit-residual-exceeded\"]","\"warnings\":[\"rotation-exceeded\",\"fit-residual-exceeded\"]",exceeded_record.jpeg);
+        reject_auto(exceeded_text,"\"warnings\":[\"rotation-exceeded\",\"scale-exceeded\",\"fit-residual-exceeded\"]","\"warnings\":[\"scale-exceeded\",\"rotation-exceeded\",\"fit-residual-exceeded\"]",exceeded_record.jpeg);
         reject_auto(exceeded_text,"\"geometryBasis\":\"auto-still-translation\"","\"geometryBasis\":\"live-preview\"",exceeded_record.jpeg);
         reject_auto(flat_text,"\"status\":\"undetermined\"","\"status\":\"estimated-not-judged\"",flat_output.jpeg);
         reject_auto(flat_text,"\"reason\":\"no-tiles\"","\"reason\":\"none\"",flat_output.jpeg);
@@ -391,6 +477,9 @@ int main(){
         fs::copy_file(corrected.jpeg,auto_damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
         {std::ofstream f(auto_damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<corrected_text;}
         check(LoadSavedStillReview(auto_damaged/"uncalibrated-review.json").automatic->decision==StillAlignmentDecision::corrected);
+        fs::copy_file(rotation_record.jpeg,auto_damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+        {std::ofstream f(auto_damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<rotation_text;}
+        check(LoadSavedStillReview(auto_damaged/"uncalibrated-review.json").automatic->scale_decision==S::no_scale_policy);
         // rotated-180 mounting: the estimate runs on the turned copies; the
         // originals stay as written.
         auto turn=[](a0::m2::render::BgrImage image){Rotate180(image);return image;};

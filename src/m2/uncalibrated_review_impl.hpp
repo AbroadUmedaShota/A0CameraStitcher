@@ -73,9 +73,11 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         automatic=DecideStillAlignment(EstimateOverlapSimilarity(a.image,b.image,translation_x,translation_y),r.automatic_alignment->policy);
         alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         if(automatic->similarity){
-            const auto t=StillAlignmentTranslation(*automatic);const bool corrected=automatic->decision==StillAlignmentDecision::corrected;
-            parameters=SimilarityReviewGeometry(t[0],t[1],corrected?automatic->similarity->rotation_degrees:0,corrected?automatic->similarity->scale:1,width,height);
-            translation_x=t[0];translation_y=t[1];
+            // The applied geometry, not the estimate: scale stays 1 unless the
+            // policy's scale limit admits it (the estimator checked all fits render).
+            const auto applied=AppliedStillAlignment(*automatic);
+            parameters=SimilarityReviewGeometry(applied.x,applied.y,applied.rotation_degrees,applied.scale,width,height);
+            translation_x=applied.x;translation_y=applied.y;
         }
         active();
     }
@@ -113,7 +115,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=automatic?"a0.uncalibrated-still-review.v4":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -126,20 +128,25 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(r.manual_revision)report<<",\"geometryBasis\":\""<<(similarity?"manual-still-similarity":"manual-still-pixels")<<"\",\"parentReview\":{\"path\":\""<<ReviewPathJson(NormalizedAbsolute(r.manual_revision->parent_report))<<"\",\"sha256\":\""<<r.manual_revision->parent_report_sha256<<"\"}";
     if(similarity)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<r.manual_revision->rotation_degrees<<",\"scale\":"<<r.manual_revision->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
     if(automatic){
-        const auto& m=*automatic;const bool corrected=m.decision==StillAlignmentDecision::corrected;
-        report<<",\"geometryBasis\":\""<<(corrected?"auto-still-similarity":m.similarity?"auto-still-translation":"live-preview")<<"\"";
-        if(corrected)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<m.similarity->rotation_degrees<<",\"scale\":"<<m.similarity->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
-        report<<",\"automaticAlignment\":{\"estimator\":\"a0.overlap-similarity.v1\",\"status\":\""<<OverlapEstimateStatusCode(m.status)<<"\",\"reason\":\""<<SimilarityUndeterminedReasonCode(m.reason)
+        const auto& m=*automatic;
+        report<<",\"geometryBasis\":\""<<StillAlignmentBasis(m)<<"\"";
+        // adjustment: the rotation and scale actually applied; the estimate
+        // stays in automaticAlignment.similarity.
+        if(m.decision==StillAlignmentDecision::corrected){const auto applied=AppliedStillAlignment(m);
+            report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<applied.rotation_degrees<<",\"scale\":"<<applied.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";}
+        report<<",\"automaticAlignment\":{\"estimator\":\"a0.overlap-similarity.v2\",\"status\":\""<<OverlapEstimateStatusCode(m.status)<<"\",\"reason\":\""<<SimilarityUndeterminedReasonCode(m.reason)
             <<"\",\"initialPosition\":\""<<(m.wide_search?"still-wide-search":"live-preview")<<"\",\"tiles\":{\"searched\":"<<m.tiles_searched<<",\"matched\":"<<m.tiles_matched<<",\"agreed\":"<<m.tiles_agreed<<"},\"similarity\":";
-        if(m.similarity)report<<"{\"x\":"<<m.similarity->x<<",\"y\":"<<m.similarity->y<<",\"rotationDegrees\":"<<m.similarity->rotation_degrees<<",\"scale\":"<<m.similarity->scale<<"},\"translationOnly\":{\"x\":"<<m.translation_x<<",\"y\":"<<m.translation_y
-            <<"},\"residualPixels\":{\"similarityRms\":"<<m.similarity_residual.rms<<",\"similarityMax\":"<<m.similarity_residual.maximum<<",\"translationOnlyRms\":"<<m.translation_residual.rms<<",\"translationOnlyMax\":"<<m.translation_residual.maximum<<"}";
-        else report<<"null,\"translationOnly\":null,\"residualPixels\":null";
-        report<<",\"decision\":\""<<StillAlignmentDecisionCode(m.decision)<<"\",\"warnings\":[";
-        if(m.rotation_exceeded)report<<"\"rotation-exceeded\"";
-        if(m.residual_exceeded)report<<(m.rotation_exceeded?",":"")<<"\"fit-residual-exceeded\"";
+        if(m.similarity)report<<"{\"x\":"<<m.similarity->x<<",\"y\":"<<m.similarity->y<<",\"rotationDegrees\":"<<m.similarity->rotation_degrees<<",\"scale\":"<<m.similarity->scale<<"},\"rigid\":{\"x\":"<<m.rigid->x<<",\"y\":"<<m.rigid->y
+            <<"},\"translationOnly\":{\"x\":"<<m.translation_x<<",\"y\":"<<m.translation_y
+            <<"},\"residualPixels\":{\"similarityRms\":"<<m.similarity_residual.rms<<",\"similarityMax\":"<<m.similarity_residual.maximum<<",\"rigidRms\":"<<m.rigid_residual.rms<<",\"rigidMax\":"<<m.rigid_residual.maximum
+            <<",\"translationOnlyRms\":"<<m.translation_residual.rms<<",\"translationOnlyMax\":"<<m.translation_residual.maximum<<"}";
+        else report<<"null,\"rigid\":null,\"translationOnly\":null,\"residualPixels\":null";
+        report<<",\"decision\":\""<<StillAlignmentDecisionCode(m.decision)<<"\",\"scaleDecision\":\""<<StillScaleDecisionCode(m.scale_decision)<<"\",\"warnings\":[";
+        bool first=true;for(const auto w:StillAlignmentWarnings(m)){report<<(first?"":",")<<'"'<<w<<'"';first=false;}
         report<<"],\"policy\":";
-        if(m.policy){report<<"{\"sha256\":\""<<m.policy->sha256<<"\",\"rotationAutoCorrectionMaxDegrees\":"<<m.policy->rotation_max_degrees<<",\"similarityResidualMaxWarningPixels\":";
-            if(m.policy->residual_max_pixels)report<<*m.policy->residual_max_pixels;else report<<"null";report<<"}";
+        const auto optional=[&](const std::optional<double>& v){if(v)report<<*v;else report<<"null";};
+        if(m.policy){report<<"{\"sha256\":\""<<m.policy->sha256<<"\",\"rotationAutoCorrectionMaxDegrees\":"<<m.policy->rotation_max_degrees<<",\"scaleAutoCorrectionMaxPercent\":";
+            optional(m.policy->scale_max_percent);report<<",\"similarityResidualMaxWarningPixels\":";optional(m.policy->residual_max_pixels);report<<"}";
         }else report<<"null";
         report<<"}";
     }

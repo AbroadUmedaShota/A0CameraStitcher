@@ -11,6 +11,7 @@
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include <array>
 #include <string_view>
+#include <vector>
 
 namespace a0::m2::experimental {
 // Every translation, crop and adjustment below is expressed in the frame of
@@ -39,21 +40,28 @@ inline render::PairRenderParameters ScalePreviewReviewGeometry(
 // Development merge policy (#365), read from an administrator-written local
 // file. No value has a code default: without a file nothing is corrected.
 // rotation_max_degrees: |rotation| up to and including it is corrected.
+// scale_max_percent: |scale*100-100| up to and including it is corrected,
+// only together with the rotation; absent means scale is never corrected.
 // residual_max_pixels: a similarity residual maximum above it is warned.
 struct StillMergePolicy {
     std::string sha256;
     double rotation_max_degrees{};
     std::optional<double> residual_max_pixels;
+    std::optional<double> scale_max_percent;
 };
 inline void ValidateStillMergePolicy(const StillMergePolicy& p){
+    const auto optional_valid=[](const std::optional<double>& v){return !v || (std::isfinite(*v) && *v>=0);};
     if(p.sha256.size()!=64 || p.sha256.find_first_not_of("0123456789abcdef")!=std::string::npos ||
         !std::isfinite(p.rotation_max_degrees) || p.rotation_max_degrees<0 || p.rotation_max_degrees>180 ||
-        (p.residual_max_pixels && (!std::isfinite(*p.residual_max_pixels) || *p.residual_max_pixels<0)))
+        !optional_valid(p.residual_max_pixels) || !optional_valid(p.scale_max_percent))
         throw std::invalid_argument("invalid still merge policy");
 }
-// corrected: similarity applied. rotation-exceeded: over the policy limit,
-// translation only plus a warning. no-policy: values recorded, translation
-// only. undetermined: the live-preview translation, as before #365.
+// The scale difference compared with scale_max_percent, in percent.
+inline double StillScaleDifferencePercent(double scale){return std::abs(scale*100-100);}
+// Rotation, which decides whether anything beyond translation is applied.
+// corrected: rotation applied (scale per StillScaleDecision). rotation-exceeded:
+// over the limit, translation only plus a warning. no-policy: values recorded,
+// translation only. undetermined: the live-preview translation, as before #365.
 enum class StillAlignmentDecision {corrected,rotation_exceeded,no_policy,undetermined};
 constexpr std::string_view StillAlignmentDecisionCode(StillAlignmentDecision v){
     switch(v){
@@ -64,39 +72,87 @@ constexpr std::string_view StillAlignmentDecisionCode(StillAlignmentDecision v){
     }
     return {};
 }
+// Scale, judged against its own limit. corrected: applied with the rotation.
+// scale-exceeded: over the limit, not applied, warned (also when the rotation
+// is over its limit). no-scale-policy: the policy has no scale limit, not
+// applied. not-applied: inside the limit but the rotation is over its limit,
+// so only translation is applied. no-policy / undetermined: as the decision.
+enum class StillScaleDecision {corrected,scale_exceeded,no_scale_policy,not_applied,no_policy,undetermined};
+constexpr std::string_view StillScaleDecisionCode(StillScaleDecision v){
+    switch(v){
+    case StillScaleDecision::corrected:return "corrected";
+    case StillScaleDecision::scale_exceeded:return "scale-exceeded";
+    case StillScaleDecision::no_scale_policy:return "no-scale-policy";
+    case StillScaleDecision::not_applied:return "not-applied";
+    case StillScaleDecision::no_policy:return "no-policy";
+    case StillScaleDecision::undetermined:return "undetermined";
+    }
+    return {};
+}
 struct AutomaticStillAlignment {
     OverlapEstimateStatus status{OverlapEstimateStatus::undetermined};
     SimilarityUndeterminedReason reason{SimilarityUndeterminedReason::no_tiles};
     bool wide_search{};
     unsigned tiles_searched{},tiles_matched{},tiles_agreed{};
     // Present only when estimated; residuals are over the agreed tiles.
-    std::optional<SimilarityFit> similarity;
+    // rigid: the similarity's rotation with scale 1, translation refitted.
+    std::optional<SimilarityFit> similarity,rigid;
     double translation_x{},translation_y{};
-    FitResidual similarity_residual,translation_residual;
+    FitResidual similarity_residual,rigid_residual,translation_residual;
     StillAlignmentDecision decision{StillAlignmentDecision::undetermined};
-    bool rotation_exceeded{},residual_exceeded{};
+    StillScaleDecision scale_decision{StillScaleDecision::undetermined};
+    bool rotation_exceeded{},scale_exceeded{},residual_exceeded{};
     std::optional<StillMergePolicy> policy;
 };
-// Equal to the limit is inside. An over-limit rotation is never clamped or
-// partly applied. A residual warning needs the policy value; it never blocks.
+// Rotation and scale are each compared with their own limit; equal to a limit
+// is inside. Within the rotation limit the rotation is applied, and the scale
+// only when the policy has a scale limit and the scale is inside it; otherwise
+// the scale stays 1 and the rigid fit is applied. Over the rotation limit only
+// the translation is applied. No over-limit value is clamped or partly applied.
+// A residual warning needs the policy value; it never blocks.
 inline AutomaticStillAlignment DecideStillAlignment(const OverlapSimilarityEstimate& e,const std::optional<StillMergePolicy>& policy){
     if(policy)ValidateStillMergePolicy(*policy);
     AutomaticStillAlignment r;r.status=e.status;r.reason=e.reason;r.wide_search=e.wide_search;
     r.tiles_searched=static_cast<unsigned>(e.tiles.size());r.tiles_matched=e.matched;r.tiles_agreed=e.agreed;r.policy=policy;
     if(e.status!=OverlapEstimateStatus::estimated_not_judged)return r;
-    r.similarity=e.similarity;r.translation_x=e.translation_x;r.translation_y=e.translation_y;
-    r.similarity_residual=e.similarity_residual;r.translation_residual=e.translation_residual;
-    if(!policy){r.decision=StillAlignmentDecision::no_policy;return r;}
+    r.similarity=e.similarity;r.rigid=e.rigid;r.translation_x=e.translation_x;r.translation_y=e.translation_y;
+    r.similarity_residual=e.similarity_residual;r.rigid_residual=e.rigid_residual;r.translation_residual=e.translation_residual;
+    if(!policy){r.decision=StillAlignmentDecision::no_policy;r.scale_decision=StillScaleDecision::no_policy;return r;}
     r.rotation_exceeded=std::abs(e.similarity.rotation_degrees)>policy->rotation_max_degrees;
     r.decision=r.rotation_exceeded?StillAlignmentDecision::rotation_exceeded:StillAlignmentDecision::corrected;
+    r.scale_exceeded=policy->scale_max_percent && StillScaleDifferencePercent(e.similarity.scale)>*policy->scale_max_percent;
+    r.scale_decision=!policy->scale_max_percent?StillScaleDecision::no_scale_policy:r.scale_exceeded?StillScaleDecision::scale_exceeded:
+        r.rotation_exceeded?StillScaleDecision::not_applied:StillScaleDecision::corrected;
     r.residual_exceeded=policy->residual_max_pixels && e.similarity_residual.maximum>*policy->residual_max_pixels;
     return r;
 }
-// Integer B-center position actually rendered, and the applied similarity.
-inline std::array<int,2> StillAlignmentTranslation(const AutomaticStillAlignment& a){
-    if(!a.similarity)throw std::invalid_argument("still alignment has no estimate");
-    const bool similarity=a.decision==StillAlignmentDecision::corrected;
-    return {static_cast<int>(std::llround(similarity?a.similarity->x:a.translation_x)),static_cast<int>(std::llround(similarity?a.similarity->y:a.translation_y))};
+// The geometry actually rendered: integer B-center position, rotation, scale.
+struct StillAlignmentGeometry {int x{},y{};double rotation_degrees{},scale{1};};
+inline StillAlignmentGeometry AppliedStillAlignment(const AutomaticStillAlignment& a){
+    if(!a.similarity || !a.rigid)throw std::invalid_argument("still alignment has no estimate");
+    const auto at=[](double x,double y,double degrees,double scale){return StillAlignmentGeometry{static_cast<int>(std::llround(x)),static_cast<int>(std::llround(y)),degrees,scale};};
+    if(a.decision!=StillAlignmentDecision::corrected)return at(a.translation_x,a.translation_y,0,1);
+    if(a.scale_decision==StillScaleDecision::corrected)return at(a.similarity->x,a.similarity->y,a.similarity->rotation_degrees,a.similarity->scale);
+    return at(a.rigid->x,a.rigid->y,a.rigid->rotation_degrees,1);
+}
+// Residual over the agreed tiles of the fit actually applied.
+inline FitResidual AppliedStillResidual(const AutomaticStillAlignment& a){
+    if(a.decision!=StillAlignmentDecision::corrected)return a.translation_residual;
+    return a.scale_decision==StillScaleDecision::corrected?a.similarity_residual:a.rigid_residual;
+}
+// Report warning codes, in this order.
+inline std::vector<std::string_view> StillAlignmentWarnings(const AutomaticStillAlignment& a){
+    std::vector<std::string_view> w;
+    if(a.rotation_exceeded)w.push_back("rotation-exceeded");
+    if(a.scale_exceeded)w.push_back("scale-exceeded");
+    if(a.residual_exceeded)w.push_back("fit-residual-exceeded");
+    return w;
+}
+// Report geometryBasis of an automatic result.
+inline std::string_view StillAlignmentBasis(const AutomaticStillAlignment& a){
+    if(!a.similarity)return "live-preview";
+    if(a.decision!=StillAlignmentDecision::corrected)return "auto-still-translation";
+    return a.scale_decision==StillScaleDecision::corrected?"auto-still-similarity":"auto-still-rotation";
 }
 struct StillReviewRequest {
     std::filesystem::path camera_a_original,camera_b_original,output_directory;
@@ -137,7 +193,7 @@ struct SavedStillReview {
     std::optional<StillReviewRequest::ManualRevision> manual_revision;
     double rotation_degrees{},scale{1};
     StitchCropPixels crop;
-    std::optional<AutomaticStillAlignment> automatic; // v4 reports only
+    std::optional<AutomaticStillAlignment> automatic; // v5 reports only
 };
 inline render::PairRenderParameters StillPixelReviewGeometry(int x,int y,std::uint32_t width,std::uint32_t height){
     (void)render::PixelCount(width,height);

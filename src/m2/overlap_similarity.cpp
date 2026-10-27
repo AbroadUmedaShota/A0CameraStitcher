@@ -187,6 +187,15 @@ Linear FitSimilarity(const std::vector<Correspondence>& fit, double cx, double c
     p /= norm; q /= norm;
     return {p,q,mean_ax-cx-(p*mbx-q*mby),mean_ay-cy-(q*mbx+p*mby)};
 }
+// Scale fixed to 1: the similarity's angle (atan2) is kept and only the
+// translation is solved again, t = mean(a) - c - R (mean(b) - c).
+Linear FitRigid(const std::vector<Correspondence>& fit, double cx, double cy, double radians) {
+    const double n = static_cast<double>(fit.size()), p = std::cos(radians), q = std::sin(radians);
+    double mbx = 0, mby = 0, mean_ax = 0, mean_ay = 0;
+    for (const auto& c : fit) { mbx += c.bx-cx; mby += c.by-cy; mean_ax += c.ax; mean_ay += c.ay; }
+    mbx /= n; mby /= n; mean_ax /= n; mean_ay /= n;
+    return {p,q,mean_ax-cx-(p*mbx-q*mby),mean_ay-cy-(q*mbx+p*mby)};
+}
 // One attempt from one start. Tiles are placed so both search regions stay
 // inside both frames; the grid is row-major and fixed by the start.
 OverlapSimilarityEstimate Attempt(const render::BgrImage& a, const render::BgrImage& b, int px, int py) {
@@ -292,13 +301,18 @@ OverlapSimilarityEstimate Attempt(const render::BgrImage& a, const render::BgrIm
     double tx = 0, ty = 0;
     for (const auto& c : fit) { tx += c.ax-c.bx; ty += c.ay-c.by; }
     tx /= n; ty /= n;
-    result.similarity = {x,y,std::atan2(s.q,s.p)*180/std::numbers::pi,std::hypot(s.p,s.q)};
+    const double radians = std::atan2(s.q,s.p);
+    const auto rigid = FitRigid(fit,cx,cy,radians);
+    result.similarity = {x,y,radians*180/std::numbers::pi,std::hypot(s.p,s.q)};
+    result.rigid = {rigid.x,rigid.y,result.similarity.rotation_degrees,1};
     result.translation_x = tx; result.translation_y = ty;
     result.similarity_residual = Residual(fit,s.Matrix(cx,cy));
+    result.rigid_residual = Residual(fit,rigid.Matrix(cx,cy));
     result.translation_residual = Residual(fit,{1,0,tx,0,1,ty,0,0,1});
-    // Both results must be renderable with integer B-center positions.
+    // Every fit the caller may apply must render with integer B-center positions.
     try {
-        for (const auto& [fx,fy,degrees,scale] : {std::tuple{x,y,result.similarity.rotation_degrees,result.similarity.scale},std::tuple{tx,ty,0.0,1.0}}) {
+        for (const auto& [fx,fy,degrees,scale] : {std::tuple{x,y,result.similarity.rotation_degrees,result.similarity.scale},
+                 std::tuple{rigid.x,rigid.y,result.rigid.rotation_degrees,1.0},std::tuple{tx,ty,0.0,1.0}}) {
             const auto ix = std::llround(fx), iy = std::llround(fy);
             if (ix <= 0 || ix >= width || iy <= -height || iy >= height) throw std::invalid_argument("outside");
             (void)SimilarityReviewGeometry(static_cast<int>(ix),static_cast<int>(iy),degrees,scale,a.width,a.height);

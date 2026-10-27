@@ -13,7 +13,8 @@ using a0::m2::experimental::StillMergePolicy;
 // Administrator-written local policy beside camera-map-wpd.json (#365). An
 // absent file means no policy: values are shown, nothing is corrected. Any
 // other unreadable or non-exact content refuses startup. No field has a code
-// default; similarityResidualMaxWarningPixels may be omitted.
+// default; similarityResidualMaxWarningPixels and scaleAutoCorrectionMaxPercent
+// may be omitted. Without the scale field the scale is never corrected.
 inline constexpr const wchar_t* kMergePolicySettingsName=L"wpd-merge-policy.json";
 struct MergePolicyFailure {[[noreturn]] static void Fail(std::string_view,std::string_view){throw std::invalid_argument("invalid merge policy settings");}};
 // sha256 is the caller's hash of the exact file bytes, recorded in reports.
@@ -21,8 +22,9 @@ inline StillMergePolicy ParseMergePolicySettings(std::string_view text,std::stri
     namespace json=a0::common::protocol_json;
     if(text.starts_with("\xEF\xBB\xBF"))text.remove_prefix(3); // encoding marker only
     const auto root=json::BasicJsonParser<MergePolicyFailure,4096>(text).Parse();
-    const bool residual=root.kind==json::JsonKind::object && root.object.contains("similarityResidualMaxWarningPixels");
-    if(root.kind!=json::JsonKind::object || root.object.size()!=2u+(residual?1u:0u) || !root.object.contains("schema") || !root.object.contains("rotationAutoCorrectionMaxDegrees"))MergePolicyFailure::Fail({},{});
+    const bool object=root.kind==json::JsonKind::object;
+    const bool residual=object && root.object.contains("similarityResidualMaxWarningPixels"),scale=object && root.object.contains("scaleAutoCorrectionMaxPercent");
+    if(!object || root.object.size()!=2u+(residual?1u:0u)+(scale?1u:0u) || !root.object.contains("schema") || !root.object.contains("rotationAutoCorrectionMaxDegrees"))MergePolicyFailure::Fail({},{});
     const auto& schema=root.object.at("schema");
     if(schema.kind!=json::JsonKind::string || schema.string!="a0.wpd-merge-policy.v1")MergePolicyFailure::Fail({},{});
     const auto number=[](const json::JsonValue& value){
@@ -30,8 +32,9 @@ inline StillMergePolicy ParseMergePolicySettings(std::string_view text,std::stri
         const auto parsed=std::from_chars(value.string.data(),value.string.data()+value.string.size(),n,std::chars_format::general);
         if(parsed.ec!=std::errc{} || parsed.ptr!=value.string.data()+value.string.size() || !std::isfinite(n))MergePolicyFailure::Fail({},{});return n;
     };
-    StillMergePolicy policy{std::move(sha256),number(root.object.at("rotationAutoCorrectionMaxDegrees")),{}};
+    StillMergePolicy policy{std::move(sha256),number(root.object.at("rotationAutoCorrectionMaxDegrees")),{},{}};
     if(residual)policy.residual_max_pixels=number(root.object.at("similarityResidualMaxWarningPixels"));
+    if(scale)policy.scale_max_percent=number(root.object.at("scaleAutoCorrectionMaxPercent"));
     try{a0::m2::experimental::ValidateStillMergePolicy(policy);}catch(const std::invalid_argument&){MergePolicyFailure::Fail({},{});}
     return policy;
 }

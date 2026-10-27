@@ -162,59 +162,66 @@ bindingはCREATE_NEWのpartialを保持handleでflushし、置換禁止rename・
 - 成立の条件: 一致が3個以上で、2行以上にまたがる。足りなければ `insufficient-tiles`
 - 開始位置: ライブの初期値に加え、長辺640 px以下に縮小した画像に#364の推定器を当てた上位2候補からも同じ手順を回す。一致の数が多い方、同数なら相似の残差RMSが小さい方を採る。完全に同点で結果が違えば `tied-starts`。初期値が探索範囲の外にずれると、偶然そろった少数のタイルでも相似が作れてしまうため、開始位置どうしを競わせる
 - 乱数は使わない。同じ入力からは同じ結果を出す
+- 当てはめは3通りを同じ一致タイルで出す。相似（4自由度）、倍率を1に固めた当てはめ（回転は相似のatan2の角度のまま、平行移動だけを最小二乗で求め直す。報告では `rigid`）、平行移動だけ。どれを当てるかは判定が決めるので、3通りとも整数のB中心で描けることを確かめ、どれかが描けなければ `outside-image` にする
 
 ### 判定
 
-方針ファイルの値だけを使い、コードには既定値を持たない。
+方針ファイルの値だけを使い、コードには既定値を持たない。回転と倍率をそれぞれの上限と比べる。
 
-| 推定の結果 | 合成の幾何 | `geometryBasis` | `decision` |
-|---|---|---|---|
-| 推定でき、\|回転\| ≤ 上限 | 推定した相似（回転・倍率を含む） | `auto-still-similarity` | `corrected` |
-| 推定でき、\|回転\| > 上限 | 推定した平行移動だけ。上限で切った部分的な補正はしない | `auto-still-translation` | `rotation-exceeded` |
-| 推定でき、方針ファイルなし | 推定した平行移動だけ。回転・倍率は記録と表示だけ | `auto-still-translation` | `no-policy` |
-| 推定できない | ライブから引き継いだ平行移動（#334と同じ合成） | `live-preview` | `undetermined` |
+| 推定の結果 | 合成の幾何 | `geometryBasis` | `decision` | `scaleDecision` |
+|---|---|---|---|---|
+| \|回転\| ≤ 回転の上限、倍率の差 ≤ 倍率の上限 | 推定した相似（回転・倍率を含む） | `auto-still-similarity` | `corrected` | `corrected` |
+| \|回転\| ≤ 回転の上限、倍率の差 > 倍率の上限 | 回転だけ当て、倍率は1。平行移動は倍率1で求め直した値（`rigid`） | `auto-still-rotation` | `corrected` | `scale-exceeded` |
+| \|回転\| ≤ 回転の上限、方針ファイルに倍率の上限なし | 同上（倍率は1） | `auto-still-rotation` | `corrected` | `no-scale-policy` |
+| \|回転\| > 回転の上限 | 推定した平行移動だけ。上限で切った部分的な補正はしない | `auto-still-translation` | `rotation-exceeded` | `scale-exceeded`・`no-scale-policy`・`not-applied`（倍率は上限の内側だが回転が超えたので当てない） |
+| 方針ファイルなし | 推定した平行移動だけ。回転・倍率は記録と表示だけ | `auto-still-translation` | `no-policy` | `no-policy` |
+| 推定できない | ライブから引き継いだ平行移動（#334と同じ合成） | `live-preview` | `undetermined` | `undetermined` |
 
-- 上限と等しい回転は補正する。比べるのは回転の絶対値
+- 上限と等しい値は補正する。回転は絶対値、倍率は「倍率を%にした値と100の差の絶対値」（1.01も0.99も差1%）を比べる
+- 倍率が上限を超えた時に回転だけ当てるのは、回転の上限は所有者が別に置いた値で、倍率の超過は回転の補正の可否と関係しないため（#365のレビューの差し戻しで決めた）。回転を当てて倍率を1に固めた時は、倍率1のまま重なり帯に合うよう平行移動を求め直す。相似のB中心をそのまま使うと、倍率の差の分だけ重なり帯がずれる
+- 倍率が上限を超えたら、回転の判定に関わらず `scale-exceeded` を記録して警告する。超えた項目は全部記録する
 - 相似の後の残差（一致したタイルの最大）が方針ファイルの警告値を超えたら `fit-residual-exceeded` を記録して警告する。台形（傾き）かレンズの歪みの疑いで、合成は止めない。警告値が無ければ値を表示するだけ
 - 推定した回転はBに当てる回転で、正が合成画面で見て時計回り。警告は「Bを合成画面で見て時計回り（反時計回り）にθ°戻す向き」と出す。カメラ本体をどちらへ回すかは取り付けで決まるので、設置手順で一度確かめる（※要確認）
-- 倍率は回転が上限の内側なら一緒に当てる。倍率だけの上限の欄は置いていない（※要確認、設計案のN6）
 - 回転の目標（設計案のN12）は置かない。上限の内側はすべて補正する（#362の※仮定）
-- 上限を超えた時も、撮影JPEGで推定した平行移動で合成する。設計案10節はライブの値で合成する案だが、上限の対象は回転だけなので平行移動は使う（※要確認）
+- 回転が上限を超えた時も、撮影JPEGで推定した平行移動で合成する。設計案10節はライブの値で合成する案だが、上限の対象は回転と倍率なので平行移動は使う（※要確認）
 
 ### 方針ファイル
 
 カメラ登録 `camera-map-wpd.json` と同じフォルダ（`%LOCALAPPDATA%\A0CameraStitcher\phase0`）の `wpd-merge-policy.json`。管理者が手で書く。
 
 ```json
-{"schema":"a0.wpd-merge-policy.v1","rotationAutoCorrectionMaxDegrees":2}
+{"schema":"a0.wpd-merge-policy.v1","rotationAutoCorrectionMaxDegrees":2,"scaleAutoCorrectionMaxPercent":1}
 ```
 
 - `rotationAutoCorrectionMaxDegrees`（必須、度、0〜180）: これ以下の回転を補正する。2°は#362の所有者の決定による暫定値で、コードには入れていない
+- `scaleAutoCorrectionMaxPercent`（任意、%、0以上）: 倍率の差がこれ以下なら、回転と一緒に倍率も補正する。欄が無ければ倍率は補正せず、値を表示するだけ。1%は#362の所有者の決定による当面の値で、コードには入れていない。0にすると倍率がちょうど1の時だけ補正する扱いになり、実際にはほぼ補正しない
 - `similarityResidualMaxWarningPixels`（任意、JPEGの画素、0以上）: 相似の後の残差の警告値。値は未決定なので、決まるまでは書かない
-- 未知の欄、重複、型の違い、schemaの違い、4096 byte超、通常ファイル以外は起動を拒否し、hardware leaseやカメラのopenに進まない。先頭のUTF-8 BOMだけは許す。値は起動時に一度だけ読む。書き換えたらプレビューを起動し直す。消せば補正しない状態に戻る
-- ログに `merge_policy=settings sha256=<hash> rotation_max_degrees=<値> residual_warning_pixels=<値|none>` か `merge_policy=none rotation_correction=0` を残す。報告にはファイルのhashと値を記録する
+- 未知の欄、重複、型の違い、nullの値、schemaの違い、4096 byte超、通常ファイル以外は起動を拒否し、hardware leaseやカメラのopenに進まない。先頭のUTF-8 BOMだけは許す。値は起動時に一度だけ読む。書き換えたらプレビューを起動し直す。消せば補正しない状態に戻る
+- 倍率の欄は任意の欄として足したのでschemaは `a0.wpd-merge-policy.v1` のまま。欄の無い既存のファイルはそのまま読め、倍率を補正しない
+- ログに `merge_policy=settings sha256=<hash> rotation_max_degrees=<値> scale_max_percent=<値|none> residual_warning_pixels=<値|none>` か `merge_policy=none rotation_correction=0 scale_correction=0` を残す。報告にはファイルのhashと値を記録する
 - 作成例（PowerShell 7。Windows PowerShell 5.1の `-Encoding UTF8` はBOMを付けるが、BOMは許す）:
 
 ```powershell
-Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\wpd-merge-policy.json') -Value '{"schema":"a0.wpd-merge-policy.v1","rotationAutoCorrectionMaxDegrees":2}' -Encoding utf8NoBOM
+Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\wpd-merge-policy.json') -Value '{"schema":"a0.wpd-merge-policy.v1","rotationAutoCorrectionMaxDegrees":2,"scaleAutoCorrectionMaxPercent":1}' -Encoding utf8NoBOM
 ```
 
-### 報告 `a0.uncalibrated-still-review.v4`
+### 報告 `a0.uncalibrated-still-review.v5`
 
-- v1の欄に `geometryBasis` と `automaticAlignment` を足す。`auto-still-similarity` の時だけ、v3と同じ `adjustment`（anchor=image-center・rotationDegrees・scale）と `crop` を持つ。`translation` は実際に合成したB中心の整数位置
-- `automaticAlignment`: `estimator`（`a0.overlap-similarity.v1`）、`status`（`estimated-not-judged`／`undetermined`）、`reason`（`none`・`no-tiles`・`insufficient-tiles`・`outside-image`・`tied-starts`）、`initialPosition`（`live-preview`／`still-wide-search`）、`tiles`（searched・matched・agreed）、`similarity`（x・y・rotationDegrees・scale）、`translationOnly`（x・y）、`residualPixels`（similarityRms・similarityMax・translationOnlyRms・translationOnlyMax）、`decision`、`warnings`、`policy`（sha256・rotationAutoCorrectionMaxDegrees・similarityResidualMaxWarningPixels）。推定できない時は `similarity`・`translationOnly`・`residualPixels` がnull、方針ファイルが無い時は `policy` がnull
-- 読込時は記録した値から判定をやり直し、`decision`・`warnings`・`geometryBasis`・`translation`・`adjustment` が合わなければ拒否する。品質の三つのfalseと向きの欄（#361）の扱いはv1〜v3と同じ。v1〜v3は従来どおり読める
-- 手動の再Merge（v2/v3）はv4を親にでき、子はv4の欄を持たない
+- 判定の規則か推定器の出力を変えたら、報告のschemaの版と推定器のidを上げる。v5（推定器 `a0.overlap-similarity.v2`）は倍率の上限を足した時に上げた。v4（推定器v1、倍率の上限なし）は公開前の作業用の版で、読まない
+- v1の欄に `geometryBasis` と `automaticAlignment` を足す。`decision` が `corrected`（`auto-still-similarity` か `auto-still-rotation`）の時だけ、v3と同じ形の `adjustment`（anchor=image-center・rotationDegrees・scale）と `crop` を持つ。`adjustment` は実際に当てた値で、倍率を1に固めた時の `scale` は1。推定値は `automaticAlignment.similarity` に残る。`translation` は実際に合成したB中心の整数位置
+- `automaticAlignment`: `estimator`（`a0.overlap-similarity.v2`）、`status`（`estimated-not-judged`／`undetermined`）、`reason`（`none`・`no-tiles`・`insufficient-tiles`・`outside-image`・`tied-starts`）、`initialPosition`（`live-preview`／`still-wide-search`）、`tiles`（searched・matched・agreed）、`similarity`（x・y・rotationDegrees・scale）、`rigid`（x・y。回転は `similarity` と同じで倍率は1）、`translationOnly`（x・y）、`residualPixels`（similarityRms・similarityMax・rigidRms・rigidMax・translationOnlyRms・translationOnlyMax）、`decision`、`scaleDecision`、`warnings`（`rotation-exceeded`・`scale-exceeded`・`fit-residual-exceeded` の順）、`policy`（sha256・rotationAutoCorrectionMaxDegrees・scaleAutoCorrectionMaxPercent・similarityResidualMaxWarningPixels。任意の欄が方針ファイルに無ければnull）。推定できない時は `similarity`・`rigid`・`translationOnly`・`residualPixels` がnull、方針ファイルが無い時は `policy` がnull
+- 読込時は記録した値から判定をやり直し、`decision`・`scaleDecision`・`warnings`・`geometryBasis`・`translation`・`adjustment` が合わなければ拒否する。品質の三つのfalseと向きの欄（#361）の扱いはv1〜v3と同じ。v1〜v3は従来どおり読める
+- 手動の再Merge（v2/v3）はv5を親にでき、子はv5の欄を持たない
 - 推定にも両台撮影の180秒の期限が掛かる。推定の後にも期限を確かめる
 
 ### 表示
 
-- 両台撮影の後、保存先に続けて結果を一行で出す（補正した値、上限超えの警告と戻す向き、方針ファイルなし、推定できず）。ログに `pair_review_alignment`（状態・判定・相似・タイル数・残差・方針のhash・時間ms・`quality_accepted=0`）を残す
-- StillReviewは右欄の先頭に推定の詳細（補正の有無、一致タイル、回転・倍率・B中心、残差、開始位置、方針、警告）を出す。補正していないv4（方針なし・上限超え）を開くと、手動調整の入力欄に推定値を入れる。保存JPEGの表示は変えない。「調整値を戻す」は表示中のJPEGの値に戻す
+- 両台撮影の後、保存先に続けて結果を一行で出す（補正した値、上限超えの警告と戻す向き、倍率を補正しなかった理由、方針ファイルなし、推定できず）。倍率が上限を超えたら「倍率が上限を超えたため倍率は補正していません」と倍率・100%との差・上限を出す。一行の末尾に一致タイルの数と、当てた幾何の残差RMSを付ける。ログに `pair_review_alignment`（状態・判定・倍率の判定・相似・`rigid`・当てた値・タイル数・残差・方針のhashと倍率の上限・時間ms・`quality_accepted=0`）を残す
+- StillReviewは右欄の先頭に推定の詳細（補正の有無と倍率を当てたか、一致タイル、推定値と当てた値、3通りの残差、開始位置、方針、警告）を出す。相似をそのまま当てていないv5（方針なし・上限超え・倍率を1に固めた）を開くと、手動調整の入力欄に推定値を入れる。保存JPEGの表示は変えない。「調整値を戻す」は表示中のJPEGの値に戻す
 
 ### 時間と確認
 
 - 7360×4912の推定は、操作PC-1のReleaseで開始位置3つを回して数秒。復号・合成・保存を足しても180秒の期限に収まる。Debugでは数十倍かかる
-- `m2_overlap_similarity_contracts`: 7360×4912の人工画像で、正負の小さい回転と倍率を戻し、相似の後の残差が平行移動だけの時より小さいこと。小さい画像で、初期値のずれを広い探索の開始位置で拾うこと、別の深さの帯が合議で外れること、同じ入力で同じ結果、模様の無い画像と一方向の縞では推定しないこと、不正な入力の拒否
-- `still_review_contracts`: 方針ファイルの厳格な読込、上限ちょうど・符号・上限超え・残差の警告の判定、人工JPEGでの `corrected`・`rotation-exceeded`・`no-policy`・`undetermined`（従来のv1と同じJPEGのbyte列になる）、手動の子の改訂、書き換えたv4の拒否、`rotated-180`、原画像の不変
-- 吊り下げリグで撮った保存ペア2組（`rotated-180`）に当てると、どちらも回転は約1°で、相似の後の残差は平行移動だけの時より小さかった。Bの端に近い列のタイルは合議から外れやすく、レンズの歪みが疑われる（※推定）。実画像と細かい値は公開しない
+- `m2_overlap_similarity_contracts`: 7360×4912の人工画像で、正負の小さい回転と倍率を戻し、相似の後の残差が平行移動だけの時より小さいこと。推定倍率1.0015で、倍率の上限が無い方針・0.1%の方針では当てる倍率が1、回転は相似と同じ角度で、`rigid` の残差が相似以上・平行移動だけ未満になること。1%の方針では推定倍率を当てること。小さい画像で、初期値のずれを広い探索の開始位置で拾うこと、別の深さの帯が合議で外れること、同じ入力で同じ結果、模様の無い画像と一方向の縞では推定しないこと、不正な入力の拒否
+- `still_review_contracts`: 方針ファイルの厳格な読込（倍率の欄の有無・null・負・型違い・重複・綴り違い）、上限ちょうど（倍率1.01と0.99は1%の内側、その次の倍精度の値は外側）・符号・上限超え・残差の警告の判定、回転が超えた時の倍率の判定と警告の並び、人工JPEG（倍率1.004）での倍率の上限あり（1%、`corrected`）・なし（`no-scale-policy`、倍率1）・超え（0.2%、`scale-exceeded`、倍率1）・回転超え・`no-policy`・`undetermined`（従来のv1と同じJPEGのbyte列になる）、継ぎ目の差が相似・`rigid`・平行移動だけの順に小さいこと、手動の子の改訂、書き換えたv5（倍率の判定・方針の倍率の値・当てた倍率・`rigid`・警告）とv4・推定器v1の拒否、`rotated-180`、原画像の不変
+- 吊り下げリグで撮った保存ペア2組（`rotated-180`）に当てると、どちらも回転は約1°で、相似の後の残差は平行移動だけの時より小さかった。Bの端に近い列のタイルは合議から外れやすく、レンズの歪みが疑われる（※推定）。推定した倍率は2組とも100%との差が1%より小さく、倍率の上限1%の方針では倍率も補正した（上限を置く前と同じ合成）。倍率の上限が無い方針では倍率を1に固め、残差RMSは相似より少し大きく、平行移動だけより小さかった。実画像と細かい値は公開しない

@@ -119,13 +119,15 @@ struct Inspector {
         preview_parameters=review::SimilarityReviewGeometry(draft_x,draft_y,draft_degrees,draft_scale,current.record.source_width,current.record.source_height);
         proposal.reset();
     }
-    // An automatic estimate that was not applied (no policy, over the limit)
-    // becomes the starting manual value; the saved JPEG stays displayed.
+    // An automatic estimate that was not fully applied (no policy, a limit
+    // exceeded or unset, scale kept at 1) becomes the starting manual value;
+    // the saved JPEG stays displayed and nothing is saved until the operator does.
     void InitialDraft(){
         SetDraft();
         const auto& automatic=current.record.automatic;if(!automatic)return;
         status=a0::phase0::experimental::StillAlignmentLine(*automatic);
-        if(!automatic->similarity || automatic->decision==review::StillAlignmentDecision::corrected)return;
+        if(!automatic->similarity || (automatic->decision==review::StillAlignmentDecision::corrected &&
+            automatic->scale_decision==review::StillScaleDecision::corrected))return;
         const auto& s=*automatic->similarity;const int x=static_cast<int>(std::llround(s.x)),y=static_cast<int>(std::llround(s.y));
         try{preview_parameters=review::SimilarityReviewGeometry(x,y,s.rotation_degrees,s.scale,current.record.source_width,current.record.source_height);}
         catch(const std::invalid_argument&){return;}

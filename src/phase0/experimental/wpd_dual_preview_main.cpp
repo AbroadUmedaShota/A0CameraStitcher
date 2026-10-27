@@ -743,9 +743,11 @@ int main(int argc,char** argv){
             auto policy_file=DefaultIdentityMapPath();policy_file.replace_filename(kMergePolicySettingsName);
             merge_policy=LoadMergePolicySettings(policy_file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
             std::ostringstream policy_log;policy_log.imbue(std::locale::classic());policy_log<<"merge_policy=";
-            if(merge_policy){policy_log<<"settings sha256="<<merge_policy->sha256<<" rotation_max_degrees="<<merge_policy->rotation_max_degrees<<" residual_warning_pixels=";
+            if(merge_policy){policy_log<<"settings sha256="<<merge_policy->sha256<<" rotation_max_degrees="<<merge_policy->rotation_max_degrees<<" scale_max_percent=";
+                if(merge_policy->scale_max_percent)policy_log<<*merge_policy->scale_max_percent;else policy_log<<"none";
+                policy_log<<" residual_warning_pixels=";
                 if(merge_policy->residual_max_pixels)policy_log<<*merge_policy->residual_max_pixels;else policy_log<<"none";
-            }else policy_log<<"none rotation_correction=0";
+            }else policy_log<<"none rotation_correction=0 scale_correction=0";
             Log(policy_log.str());
         }
         ComScope com;HardwareProcessLease lease;return RunPreviewWindow(Discover());
