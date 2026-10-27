@@ -2,11 +2,14 @@
 
 // Shared private sampling contract for matching and pre-match seed selection.
 #include "a0/m2/image_patch_correction.hpp"
+#include "zero_mean_correlation.hpp"
 #include <cmath>
 #include <stdexcept>
 
 namespace a0::m2::correction::patch_detail {
 using namespace render;
+using correlation_detail::Center;
+using correlation_detail::NormalizedDot;
 inline void Validate(const BgrImage& image) {
     if (image.bgr.size() != PixelCount(image.width,image.height)*3)
         throw std::invalid_argument("patch matching: BGR buffer differs from dimensions");
@@ -39,12 +42,5 @@ inline bool Patch(const BgrImage& image, const CameraProjection& camera, Point c
         values.push_back((bgr[0]+bgr[1]+bgr[2])/3);
     }
     return true;
-}
-inline double Center(std::vector<double>& values) {
-    double sum = 0; for (const double v : values) sum += v;
-    const double mean = sum/static_cast<double>(values.size());
-    double square_sum = 0;
-    for (auto& value : values) { value -= mean; square_sum += value*value; }
-    return std::sqrt(square_sum);
 }
 } // namespace a0::m2::correction::patch_detail

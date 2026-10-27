@@ -120,15 +120,25 @@ void MergeLoop(std::stop_token stop){
                     if(merged.auto_requested && merged.revision==revision){merged.auto_requested=false;align=true;}
                 }
                 if(align){
-                    const auto candidate=EstimatePreviewTranslation(small_a,small_b);
+                    using namespace a0::m2::experimental;
+                    const auto estimate=EstimateOverlapTranslation(small_a,small_b);
                     std::lock_guard lock(merged.mutex);merged.auto_busy=false;
                     if(merged.revision==revision && !stopping && PreviewPairFresh(Clock::now(),time_a,time_b)){
-                        if(candidate){
+                        // One diagnostic line per estimate; an undetermined result never moves C.
+                        std::ostringstream s;s<<"C auto_overlap_v2 status="<<OverlapEstimateStatusCode(estimate.status)<<" reason="<<OverlapUndeterminedReasonCode(estimate.reason)
+                            <<" orientation="<<a0::m2::experimental::MountOrientationName(mount_orientation)<<" levels="<<estimate.levels<<" candidates="<<estimate.candidates.size();
+                        if(!estimate.candidates.empty()){const auto& c=estimate.candidates[0];
+                            s<<" best_overlap_px="<<c.overlap_pixels<<" best_vertical_px="<<c.vertical_pixels<<" best_correlation="<<c.correlation<<" best_evidence="<<c.evidence<<" best_samples="<<c.samples;}
+                        if(estimate.candidates.size()>1){const auto& c=estimate.candidates[1];
+                            s<<" second_overlap_px="<<c.overlap_pixels<<" second_vertical_px="<<c.vertical_pixels<<" second_evidence="<<c.evidence<<" evidence_gap="<<estimate.candidates[0].evidence-c.evidence;}
+                        if(estimate.reverse)s<<" reverse_overlap_px="<<estimate.reverse->overlap_pixels<<" reverse_vertical_px="<<estimate.reverse->vertical_pixels;
+                        s<<" applied="<<(estimate.Applicable()?1:0)<<" quality_accepted=0";Log(s.str());
+                        if(const auto* candidate=estimate.Applicable()){
                             merged.overlap_pixels=candidate->overlap_pixels;merged.vertical_pixels=candidate->vertical_pixels;++merged.revision;
                             overlap=merged.overlap_pixels;vertical=merged.vertical_pixels;revision=merged.revision;
-                            merged.alignment_status=L"自動候補を適用（要目視確認） / 相関 "+std::to_wstring(candidate->correlation);
+                            merged.alignment_status=L"自動位置を適用（基準による判定なし・要目視確認） / 相関 "+std::to_wstring(candidate->correlation);
                             Log("C auto_translation_proposal=1 overlap_px="+std::to_string(overlap)+" vertical_px="+std::to_string(vertical)+" correlation="+std::to_string(candidate->correlation)+" quality_accepted=0");
-                        }else merged.alignment_status=L"自動位置を一意に決められません。模様・重なりを確認し手動調整してください";
+                        }else merged.alignment_status=std::wstring(L"自動位置を決められません（")+OverlapUndeterminedLabel(estimate.reason)+L"）。Cの位置は変えていません。模様・重なり・取付の向きを確認し手動調整してください";
                     }
                 }
                 auto result=RenderPreviewMerge(small_a,small_b,overlap,vertical);

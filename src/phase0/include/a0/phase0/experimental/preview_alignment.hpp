@@ -43,6 +43,8 @@ inline std::optional<double> Correlate(const Gray& a,const Gray& b,int dx,int dy
 // The score is a diagnostic, never an optical acceptance threshold. Rotation,
 // perspective, lens/color correction and approved-profile learning are absent.
 // A user must visually review the result and can refine its integer shifts.
+// Superseded in the live C by EstimateOverlapTranslation (#364); kept as the
+// baseline that the negative-control tests run on the same inputs.
 inline std::optional<PreviewTranslationCandidate> EstimatePreviewTranslation(
     const a0::m2::render::BgrImage& a,const a0::m2::render::BgrImage& b){
     using namespace preview_alignment_detail;
