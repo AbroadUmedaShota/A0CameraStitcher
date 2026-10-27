@@ -4,8 +4,9 @@ namespace ReviewJson=a0::common::protocol_json;
 using ReviewValue=ReviewJson::JsonValue;
 [[noreturn]] void ReviewReject(){throw std::invalid_argument("saved uncalibrated review failed validation");}
 struct ReviewJsonFailure {[[noreturn]] static void Fail(std::string_view,std::string_view){ReviewReject();}};
-void ReviewFields(const ReviewValue& value,std::initializer_list<const char*> fields,const char* optional=nullptr){
-    if(value.kind!=ReviewJson::JsonKind::object || value.object.size()!=fields.size()+(optional && value.object.contains(optional)?1u:0u))ReviewReject();
+void ReviewFields(const ReviewValue& value,std::initializer_list<const char*> fields,std::initializer_list<const char*> optional={}){
+    if(value.kind!=ReviewJson::JsonKind::object)ReviewReject();size_t present=0;for(const auto* field:optional)present+=value.object.contains(field)?1u:0u;
+    if(value.object.size()!=fields.size()+present)ReviewReject();
     for(const auto* field:fields)if(!value.object.contains(field))ReviewReject();
 }
 const ReviewValue& ReviewAt(const ReviewValue& value,const char* field){
@@ -92,6 +93,39 @@ AutomaticStillAlignment ReadAutomaticAlignment(const ReviewValue& value){
         ReviewString(ReviewAt(value,"scaleDecision"))!=StillScaleDecisionCode(decided.scale_decision))ReviewReject();
     return decided;
 }
+// #368 blend record. Only the seam cut is written; the linear feather is the
+// absent field, so one state has one report hash. The summary is recomputed
+// from the path on read; the settings are records, read within their limits.
+void WriteSeamBlendJson(std::ostream& out,const SeamBlendRecord& b){
+    const auto& s=b.settings;
+    out<<",\"blend\":{\"method\":\"seam-cut\",\"widthPixels\":"<<s.width_pixels<<",\"edgeMarginPixels\":"<<s.edge_margin_pixels
+        <<",\"seam\":{\"startX\":"<<b.seam_x.front()<<",\"steps\":\""<<EncodeSeamSteps(b.seam_x)<<"\",\"xMinimum\":"<<b.summary.x_minimum<<",\"xMaximum\":"<<b.summary.x_maximum
+        <<",\"xMean\":"<<b.summary.x_mean<<",\"differenceMean\":"<<b.difference_mean<<",\"differenceMaximum\":"<<b.difference_maximum
+        <<"},\"brightness\":{\"windowHalfWidthPixels\":"<<s.brightness_half_width_pixels<<",\"smoothingRows\":"<<s.brightness_smoothing_rows
+        <<",\"ratioMinimum\":"<<b.ratio_minimum<<",\"ratioMaximum\":"<<b.ratio_maximum<<",\"saturationLimitedPixels\":"<<b.saturation_limited_pixels<<"}}";
+}
+SeamBlendRecord ReadSeamBlend(const ReviewValue& value,std::uint32_t width,std::uint32_t height){
+    ReviewFields(value,{"method","widthPixels","edgeMarginPixels","seam","brightness"});
+    if(ReviewString(ReviewAt(value,"method"))!="seam-cut")ReviewReject();
+    const auto& seam=ReviewAt(value,"seam");const auto& light=ReviewAt(value,"brightness");
+    ReviewFields(seam,{"startX","steps","xMinimum","xMaximum","xMean","differenceMean","differenceMaximum"});
+    ReviewFields(light,{"windowHalfWidthPixels","smoothingRows","ratioMinimum","ratioMaximum","saturationLimitedPixels"});
+    SeamBlendRecord b;
+    b.settings={static_cast<unsigned>(ReviewUnsigned(ReviewAt(value,"widthPixels"),4096)),static_cast<unsigned>(ReviewUnsigned(ReviewAt(value,"edgeMarginPixels"),32768)),
+        static_cast<unsigned>(ReviewUnsigned(ReviewAt(light,"windowHalfWidthPixels"),4096)),static_cast<unsigned>(ReviewUnsigned(ReviewAt(light,"smoothingRows"),32768))};
+    // The path may be empty for a one-row output, so it is not a ReviewString.
+    const auto& steps=ReviewAt(seam,"steps");if(steps.kind!=ReviewJson::JsonKind::string || steps.string.size()+1!=height)ReviewReject();
+    try{ValidateSeamBlendSettings(b.settings);b.seam_x=ExpandSeamSteps(static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(seam,"startX"),width)),steps.string,width);}
+    catch(const std::invalid_argument&){ReviewReject();}
+    b.summary=SummarizeSeam(b.seam_x);
+    if(ReviewUnsigned(ReviewAt(seam,"xMinimum"),width)!=b.summary.x_minimum || ReviewUnsigned(ReviewAt(seam,"xMaximum"),width)!=b.summary.x_maximum ||
+        ReviewDouble(ReviewAt(seam,"xMean"))!=b.summary.x_mean)ReviewReject();
+    b.difference_mean=ReviewDouble(ReviewAt(seam,"differenceMean"));b.difference_maximum=ReviewDouble(ReviewAt(seam,"differenceMaximum"));
+    b.ratio_minimum=ReviewDouble(ReviewAt(light,"ratioMinimum"));b.ratio_maximum=ReviewDouble(ReviewAt(light,"ratioMaximum"));
+    b.saturation_limited_pixels=ReviewUnsigned(ReviewAt(light,"saturationLimitedPixels"),static_cast<std::uint64_t>(width)*height);
+    if(b.difference_mean<0 || b.difference_mean>b.difference_maximum || b.ratio_minimum<=0 || b.ratio_minimum>b.ratio_maximum)ReviewReject();
+    return b;
+}
 SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto full=NormalizedAbsolute(path);if(full.filename()!=L"uncalibrated-review.json")ReviewReject();
     V2PathPins pins;pins.Pin(full);LockedReadFile file(full,false,true);const auto bytes=file.ReadAll(256*1024);
@@ -103,12 +137,13 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto basis=automatic?ReviewString(ReviewAt(root,"geometryBasis")):std::string();
     const bool corrected=basis=="auto-still-similarity" || basis=="auto-still-rotation";
     if(automatic && !corrected && basis!="auto-still-translation" && basis!="live-preview")ReviewReject();
-    // mountOrientation is the only optional field in v1..v5: absent is normal.
-    if(automatic && corrected)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","automaticAlignment"},"mountOrientation");
-    else if(automatic)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","automaticAlignment"},"mountOrientation");
-    else if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},"mountOrientation");
-    else if(manual)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview"},"mountOrientation");
-    else{if(schema!="a0.uncalibrated-still-review.v1")ReviewReject();ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output"},"mountOrientation");}
+    // Optional in v1..v5: mountOrientation (absent is normal) and blend
+    // (#368, absent is the linear feather).
+    if(automatic && corrected)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","automaticAlignment"},{"mountOrientation","blend"});
+    else if(automatic)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","automaticAlignment"},{"mountOrientation","blend"});
+    else if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},{"mountOrientation","blend"});
+    else if(manual)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview"},{"mountOrientation","blend"});
+    else{if(schema!="a0.uncalibrated-still-review.v1")ReviewReject();ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output"},{"mountOrientation","blend"});}
     if(ReviewString(ReviewAt(root,"state"))!="UncalibratedReviewReady" || ReviewUnsigned(ReviewAt(root,"automaticRetryCount"),0)!=0)ReviewReject();
     for(const auto* flag:{"productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified"})ReviewFalse(ReviewAt(root,flag));
     SavedStillReview record;record.report=full;Sha256Provider sha;record.report_sha256=ToLowerHex(sha.Compute(bytes));
@@ -159,6 +194,7 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     if(ReviewString(ReviewAt(output,"path"))!="uncalibrated-review.jpg")ReviewReject();record.jpeg=full.parent_path()/L"uncalibrated-review.jpg";
     record.width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"width"),render::kMaximumImageDimension));record.height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"height"),render::kMaximumImageDimension));
     if(record.width!=plan.output_width || record.height!=plan.output_height)ReviewReject();record.jpeg_bytes=ReviewUnsigned(ReviewAt(output,"bytes"),kMaximumCompressedJpegBytes);if(!record.jpeg_bytes)ReviewReject();record.jpeg_sha256=ReviewHash(ReviewAt(output,"sha256"));
+    if(root.object.contains("blend"))record.blend=ReadSeamBlend(ReviewAt(root,"blend"),record.width,record.height);
     if(manual){
         if(ReviewString(ReviewAt(root,"geometryBasis"))!=(similarity?"manual-still-similarity":"manual-still-pixels"))ReviewReject();const auto& parent=ReviewAt(root,"parentReview");ReviewFields(parent,{"path","sha256"});
         auto parent_path=ReviewPath(ReviewAt(parent,"path"));if(parent_path==record.report || parent_path.filename()!=L"uncalibrated-review.json")ReviewReject();

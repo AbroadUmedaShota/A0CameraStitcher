@@ -29,6 +29,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         r.pair_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")!=std::string::npos)
         throw std::invalid_argument("review needs exact source hashes and pair identity");
     if(r.manual_revision && r.automatic_alignment)throw std::invalid_argument("manual revision and automatic alignment are exclusive");
+    if(r.blend!=BlendMethod::linear_feather && r.blend!=BlendMethod::seam_cut)throw std::invalid_argument("unknown review blend");
     if(r.automatic_alignment && r.automatic_alignment->policy)ValidateStillMergePolicy(*r.automatic_alignment->policy);
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
@@ -81,7 +82,14 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }
         active();
     }
-    auto rendered=render::RenderPair(a.image,b.image,parameters);a.image={};b.image={};active();
+    // #368: the seam cut replaces only the mixing; geometry and crop are the same.
+    std::optional<SeamBlendRecord> seam;double blend_milliseconds{};render::PairRenderResult rendered;
+    if(r.blend==BlendMethod::seam_cut){
+        const auto started=std::chrono::steady_clock::now();auto cut=RenderPairSeamCut(a.image,b.image,parameters,kSeamBlendDesign);
+        blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        rendered.image=std::move(cut.image);seam=std::move(cut.record);
+    }else rendered=render::RenderPair(a.image,b.image,parameters);
+    a.image={};b.image={};active();
     std::filesystem::create_directories(job.parent_path());pins.Pin(job.parent_path(),true);
     if(!std::filesystem::create_directory(job))throw std::runtime_error("cannot reserve new review directory");pins.Pin(job,true);
     const auto partial=job/L"uncalibrated-review.jpg.partial",final=job/L"uncalibrated-review.jpg";
@@ -150,12 +158,39 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
+    if(seam)WriteSeamBlendJson(report,*seam);
     report<<"}";
     const auto document=report.str();const std::vector<std::uint8_t> report_bytes(document.begin(),document.end());
     const auto report_partial=job/L"uncalibrated-review.json.partial";active();WriteBytesToNewFile(report_partial,report_bytes);
     {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
     result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
+    result.blend=std::move(seam);result.blend_milliseconds=blend_milliseconds;
     active();return result;
+}
+StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height){
+    if(!crop_width || !crop_height)throw std::invalid_argument("comparison crop is empty");
+    const auto sources=LoadStillReviewSources(review);
+    const auto parameters=SimilarityReviewGeometry(review.translation_x,review.translation_y,review.rotation_degrees,review.scale,review.source_width,review.source_height);
+    StillBlendComparison c;const auto since=[](auto started){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();};
+    auto started=std::chrono::steady_clock::now();auto feather=render::RenderPair(sources[0],sources[1],parameters).image;c.feather_milliseconds=since(started);
+    started=std::chrono::steady_clock::now();auto cut=RenderPairSeamCut(sources[0],sources[1],parameters,kSeamBlendDesign);c.seam_milliseconds=since(started);
+    if(feather.width!=review.width || feather.height!=review.height)throw std::runtime_error("comparison canvas differs from the saved review");
+    c.probes=ProbeSeamDisplacement(sources[0],sources[1],parameters,cut.record.seam_x,128,32,std::max(1u,feather.height/24));
+    const auto name=[&](const wchar_t* suffix){auto path=prefix;path+=suffix;return path;};
+    ComApartment apartment;auto factory=CreateFactory();
+    c.feather_matches_saved=ToLowerHex(EncodeReview(factory.get(),feather,name(L"-feather.jpg")).sha256)==review.jpeg_sha256;
+    (void)EncodeReview(factory.get(),cut.image,name(L"-seam.jpg"));
+    c.crop_width=std::min(crop_width,feather.width);c.crop_height=std::min(crop_height,feather.height);
+    const auto middle=feather.height/2,center=cut.record.seam_x[middle];
+    c.crop_left=std::min(center>c.crop_width/2?center-c.crop_width/2:0u,feather.width-c.crop_width);c.crop_top=std::min(middle>c.crop_height/2?middle-c.crop_height/2:0u,feather.height-c.crop_height);
+    const auto crop=[&](const Image& from){
+        Image out{c.crop_width,c.crop_height,std::vector<std::uint8_t>(static_cast<size_t>(c.crop_width)*c.crop_height*3)};
+        for(unsigned y=0;y<c.crop_height;++y)std::copy_n(from.bgr.data()+(static_cast<size_t>(c.crop_top+y)*from.width+c.crop_left)*3,static_cast<size_t>(c.crop_width)*3,out.bgr.data()+static_cast<size_t>(y)*c.crop_width*3);
+        return out;
+    };
+    auto feather_crop=crop(feather),seam_crop=crop(cut.image);
+    (void)EncodeReview(factory.get(),feather_crop,name(L"-feather-crop.jpg"));(void)EncodeReview(factory.get(),seam_crop,name(L"-seam-crop.jpg"));
+    c.seam=std::move(cut.record);return c;
 }
 }

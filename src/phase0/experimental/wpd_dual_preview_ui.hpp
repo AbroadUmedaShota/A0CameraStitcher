@@ -339,12 +339,16 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
         request.automatic_alignment=a0::m2::experimental::StillReviewRequest::AutomaticAlignment{merge_policy};
+        request.blend=a0::m2::experimental::BlendMethod::seam_cut; // #368
         result.review=a0::m2::experimental::WriteUncalibratedStillReview(request);
         if(Clock::now()>=deadline)throw std::runtime_error("pair deadline after review; all files retained");
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
         Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
         if(result.review->automatic)Log(StillAlignmentLog(*result.review->automatic,result.review->alignment_milliseconds));
+        if(const auto& seam=result.review->blend){std::ostringstream line;line.imbue(std::locale::classic());
+            line<<"pair_review_blend method=seam-cut seam_x="<<seam->summary.x_minimum<<".."<<seam->summary.x_maximum<<" ratio="<<seam->ratio_minimum<<".."<<seam->ratio_maximum
+                <<" saturation_limited="<<seam->saturation_limited_pixels<<" ms="<<result.review->blend_milliseconds<<" quality_accepted=0";Log(line.str());}
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
     }catch(const std::exception& error){result.capture.success=false;result.capture.error=error.what();evidence.RecordState("pair","FailedPartial",{},error.what());Log(std::string("pair_review_failure: ")+error.what());}
     return result;
