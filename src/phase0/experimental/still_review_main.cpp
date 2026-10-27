@@ -4,6 +4,7 @@
 #include "a0/m2/experimental/review_correspondence.hpp"
 #include "a0/m2/experimental/review_session.hpp"
 #include "a0/phase0/experimental/preview_back_buffer.hpp"
+#include "a0/phase0/experimental/still_alignment_text.hpp"
 #include <windowsx.h>
 #include <commdlg.h>
 #include <array>
@@ -118,6 +119,21 @@ struct Inspector {
         preview_parameters=review::SimilarityReviewGeometry(draft_x,draft_y,draft_degrees,draft_scale,current.record.source_width,current.record.source_height);
         proposal.reset();
     }
+    // An automatic estimate that was not applied (no policy, over the limit)
+    // becomes the starting manual value; the saved JPEG stays displayed.
+    void InitialDraft(){
+        SetDraft();
+        const auto& automatic=current.record.automatic;if(!automatic)return;
+        status=a0::phase0::experimental::StillAlignmentLine(*automatic);
+        if(!automatic->similarity || automatic->decision==review::StillAlignmentDecision::corrected)return;
+        const auto& s=*automatic->similarity;const int x=static_cast<int>(std::llround(s.x)),y=static_cast<int>(std::llround(s.y));
+        try{preview_parameters=review::SimilarityReviewGeometry(x,y,s.rotation_degrees,s.scale,current.record.source_width,current.record.source_height);}
+        catch(const std::invalid_argument&){return;}
+        draft_x=x;draft_y=y;draft_degrees=s.rotation_degrees;draft_scale=s.scale;
+        SetWindowTextW(edits[0],std::to_wstring(x).c_str());SetWindowTextW(edits[1],std::to_wstring(y).c_str());
+        SetWindowTextW(edits[2],Number(s.rotation_degrees).c_str());SetWindowTextW(edits[3],Number(s.scale).c_str());
+        status+=L" 手動調整の初期値に推定値を入れました（未保存）。";
+    }
     int Integer(HWND edit){
         wchar_t buffer[32]{};const int length=GetWindowTextLengthW(edit);
         if(length<=0 || length>=31)throw std::invalid_argument("invalid translation text");
@@ -154,7 +170,7 @@ struct Inspector {
             return GroupMetrics(review::ReviewPointRole::fitting,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting))+L"\r\n"+
                 GroupMetrics(review::ReviewPointRole::validation,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::validation));
         };
-        std::wstring text=L"調整値での残差（A原画像px）\r\n全点: "+std::to_wstring(points.size())+L" / 32\r\n\r\n"+groups(preview_parameters);
+        std::wstring text=(current.record.automatic?a0::phase0::experimental::StillAlignmentDetails(*current.record.automatic)+L"\r\n":std::wstring())+L"調整値での残差（A原画像px）\r\n全点: "+std::to_wstring(points.size())+L" / 32\r\n\r\n"+groups(preview_parameters);
         if(proposal)text+=L"\r\n候補での残差（未適用）\r\n"+groups(proposal->parameters);
         text+=L"\r\n各点（現在の調整値）\r\n";
         for(size_t i=0;i<measured.points.size();++i){const auto& p=measured.points[i];text+=std::to_wstring(i+1)+L" ["+RoleName(points[i].role)+L"] dx="+Number(p.dx)+L"\r\n   dy="+Number(p.dy)+L"\r\n   距離="+Number(p.distance)+L"\r\n";}
@@ -557,7 +573,7 @@ int wmain(int argc,wchar_t** argv){
         for(int i=0;i<4;++i){app->edits[i]=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(200+i)),instance,nullptr);if(!app->edits[i])throw std::runtime_error("create translation edit failed");}
         app->residual_text=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(300),instance,nullptr);
         if(!app->residual_text)throw std::runtime_error("create residual display failed");
-        app->SetDraft();app->UpdateMeasurements();app->Layout(window);SetTimer(window,1,100,nullptr);
+        app->InitialDraft();app->UpdateMeasurements();app->Layout(window);SetTimer(window,1,100,nullptr);
         if(resumed)app->RestoreWork(window,*resumed);
         if(app->smoke)app->VerifyControlLayout(window);
         ShowWindow(window,SW_SHOWNORMAL);if(!IsWindowVisible(window))ShowWindow(window,SW_SHOW);UpdateWindow(window);

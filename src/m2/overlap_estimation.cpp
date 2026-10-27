@@ -1,4 +1,5 @@
 #include "a0/m2/experimental/overlap_estimation.hpp"
+#include "overlap_estimation_detail.hpp"
 #include "zero_mean_correlation.hpp"
 
 #include <algorithm>
@@ -9,16 +10,14 @@ namespace a0::m2::experimental {
 namespace {
 using correlation_detail::Center;
 using correlation_detail::NormalizedDot;
+using overlap_detail::Gradient;
+using overlap_detail::Half;
+using overlap_detail::Plane;
 // Design constants of the search, not acceptance values.
 constexpr int kCoarsestSide = 96;      // the top level's larger side is at most this
 constexpr std::size_t kPeaks = 8;      // local maxima carried down from the top level
 constexpr int kRefineRadius = 2;       // per-level search around 2x the coarser position
 
-struct Plane {
-    int width{}, height{};
-    std::vector<double> v;
-    double At(int x, int y) const { return v[static_cast<std::size_t>(y)*width+x]; }
-};
 struct Range { int dx0, dx1, dy; }; // dx0 <= dx <= dx1, |dy| <= dy
 struct Peak {
     int dx{}, dy{};
@@ -36,25 +35,6 @@ Plane Luma(const render::BgrImage& image) {
 }
 // output(x,y)=input(w-1-x,h-1-y)
 Plane Turn(Plane p) { std::reverse(p.v.begin(),p.v.end()); return p; }
-// Forward-difference gradient magnitude, (w-1)x(h-1). Removes the smooth
-// brightness field (vignetting, shading, gain offset) before any averaging.
-Plane Gradient(const Plane& l) {
-    Plane g{l.width-1,l.height-1,{}};
-    g.v.resize(static_cast<std::size_t>(g.width)*g.height);
-    for (int y = 0; y < g.height; ++y) for (int x = 0; x < g.width; ++x) {
-        const double base = l.At(x,y), gx = l.At(x+1,y)-base, gy = l.At(x,y+1)-base;
-        g.v[static_cast<std::size_t>(y)*g.width+x] = std::sqrt(gx*gx+gy*gy);
-    }
-    return g;
-}
-// 2x2 mean of the magnitude: a thin line keeps its edge energy at every level.
-Plane Half(const Plane& p) {
-    Plane h{p.width/2,p.height/2,{}};
-    h.v.resize(static_cast<std::size_t>(h.width)*h.height);
-    for (int y = 0; y < h.height; ++y) for (int x = 0; x < h.width; ++x)
-        h.v[static_cast<std::size_t>(y)*h.width+x] = (p.At(2*x,2*y)+p.At(2*x+1,2*y)+p.At(2*x,2*y+1)+p.At(2*x+1,2*y+1))/4;
-    return h;
-}
 bool Score(const Plane& a, const Plane& b, int dx, int dy, std::vector<double>& va, std::vector<double>& vb, Peak& out) {
     const int x0 = dx, x1 = std::min(a.width,b.width+dx), y0 = std::max(0,dy), y1 = std::min(a.height,b.height+dy);
     if (dx <= 0 || x1-x0 < 2 || y1-y0 < 2) return false;

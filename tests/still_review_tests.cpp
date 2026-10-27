@@ -2,6 +2,9 @@
 #include "a0/m2/experimental/review_session.hpp"
 #include "a0/m2/offline_stitcher.hpp"
 #include "a0/phase0/phase0.hpp"
+#include "a0/phase0/experimental/preview_merge_policy.hpp"
+#include "a0/phase0/experimental/still_alignment_text.hpp"
+#include "similarity_scene.hpp"
 #include <Windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -34,6 +37,14 @@ void HalfFixture(const fs::path& path,std::array<BYTE,3> left_bgr,std::array<BYT
     Hr(frame->WritePixels(48,64*3,static_cast<UINT>(pixels.size()),pixels.data()));Hr(frame->Commit());Hr(encoder->Commit());
 }
 void Fixture(const fs::path& path,unsigned char red,unsigned char blue){HalfFixture(path,{blue,30,red},{blue,30,red});}
+void WriteJpeg(const fs::path& path,const a0::m2::render::BgrImage& image){
+    ComPtr<IWICImagingFactory> factory;Hr(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
+    ComPtr<IWICStream> stream;Hr(factory->CreateStream(&stream));Hr(stream->InitializeFromFilename(path.c_str(),GENERIC_WRITE));
+    ComPtr<IWICBitmapEncoder> encoder;Hr(factory->CreateEncoder(GUID_ContainerFormatJpeg,nullptr,&encoder));Hr(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));
+    ComPtr<IWICBitmapFrameEncode> frame;ComPtr<IPropertyBag2> props;Hr(encoder->CreateNewFrame(&frame,&props));Hr(frame->Initialize(props.Get()));Hr(frame->SetSize(image.width,image.height));
+    auto format=GUID_WICPixelFormat24bppBGR;Hr(frame->SetPixelFormat(&format));auto pixels=image.bgr;
+    Hr(frame->WritePixels(image.height,image.width*3,static_cast<UINT>(pixels.size()),pixels.data()));Hr(frame->Commit());Hr(encoder->Commit());
+}
 std::vector<unsigned char> Read(const fs::path& path){std::ifstream f(path,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
 int main(){
     int checks=0,failures=0;auto check=[&](bool value){++checks;if(!value)++failures;};
@@ -247,6 +258,153 @@ int main(){
         auto stripped=child_text;stripped.erase(stripped.find(field),field.size()+1); // the field and its comma
         check(stripped.find("mountOrientation")==std::string::npos);reject_in(child_damaged,turned_child_output.jpeg,stripped,false);
         check(Read(turned.camera_a_original)==ta && Read(turned.camera_b_original)==tb && Read(turned_output.report)==turned_bytes);
+        // #365 merge policy file: strict, no defaults, residual value optional.
+        namespace px=a0::phase0::experimental;
+        const auto sha=[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);};
+        const std::string policy_text="{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2}";
+        const auto parsed_policy=px::ParseMergePolicySettings(policy_text,std::string(64,'a'));
+        check(parsed_policy.rotation_max_degrees==2 && !parsed_policy.residual_max_pixels);
+        check(px::ParseMergePolicySettings("\xEF\xBB\xBF{ \"similarityResidualMaxWarningPixels\" : 12.5,\r\n \"rotationAutoCorrectionMaxDegrees\":0.75, \"schema\":\"a0.wpd-merge-policy.v1\" }\r\n",std::string(64,'b')).residual_max_pixels==12.5);
+        for(const auto* text:{"","{}","{\"schema\":\"a0.wpd-merge-policy.v1\"}","{\"rotationAutoCorrectionMaxDegrees\":2}",
+            "{\"schema\":\"a0.wpd-merge-policy.v2\",\"rotationAutoCorrectionMaxDegrees\":2}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":\"2\"}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":-1}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":181}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":null}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"similarityResidualMaxWarningPixels\":null}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"similarityResidualMaxWarningPixels\":-3}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"rotationTargetDegrees\":0.1}",
+            "{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"rotationAutoCorrectionMaxDegrees\":3}",
+            "[\"a0.wpd-merge-policy.v1\",2]"})reject([&]{(void)px::ParseMergePolicySettings(text,std::string(64,'a'));});
+        reject([&]{(void)px::ParseMergePolicySettings(policy_text,"not-a-hash");});
+        const auto policy_root=root/"policy";fs::create_directories(policy_root/"folder.json");
+        check(!px::LoadMergePolicySettings(policy_root/"absent.json",sha));reject([&]{(void)px::LoadMergePolicySettings(policy_root/"folder.json",sha);});
+        {std::ofstream f(policy_root/"large.json",std::ios::binary);f<<std::string(5000,' ');}reject([&]{(void)px::LoadMergePolicySettings(policy_root/"large.json",sha);});
+        {std::ofstream f(policy_root/"wpd-merge-policy.json",std::ios::binary);f<<policy_text;}
+        const auto loaded_policy=px::LoadMergePolicySettings(policy_root/"wpd-merge-policy.json",sha);
+        check(loaded_policy && loaded_policy->sha256==a0::phase0::Sha256Hex(Read(policy_root/"wpd-merge-policy.json")) && loaded_policy->rotation_max_degrees==2);
+        // The decision rule: equal to the limit is inside, either sign; above
+        // it nothing is clamped; the residual warning needs the policy value.
+        OverlapSimilarityEstimate synthetic;synthetic.status=OverlapEstimateStatus::estimated_not_judged;synthetic.reason=SimilarityUndeterminedReason::none;
+        synthetic.similarity={900.4,10.6,2,1.001};synthetic.translation_x=901.2;synthetic.translation_y=9.4;synthetic.similarity_residual={1,3};synthetic.agreed=5;
+        auto decided=DecideStillAlignment(synthetic,*loaded_policy);check(decided.decision==StillAlignmentDecision::corrected && !decided.rotation_exceeded && !decided.residual_exceeded);
+        check(StillAlignmentTranslation(decided)==std::array<int,2>{900,11});
+        synthetic.similarity.rotation_degrees=-2;check(DecideStillAlignment(synthetic,*loaded_policy).decision==StillAlignmentDecision::corrected);
+        synthetic.similarity.rotation_degrees=std::nextafter(2.0,3.0);decided=DecideStillAlignment(synthetic,*loaded_policy);
+        check(decided.decision==StillAlignmentDecision::rotation_exceeded && decided.rotation_exceeded && StillAlignmentTranslation(decided)==std::array<int,2>{901,9});
+        check(px::StillAlignmentLine(decided).find(L"時計回り")!=std::wstring::npos && px::StillAlignmentLine(decided).find(L"反時計回り")==std::wstring::npos);
+        synthetic.similarity.rotation_degrees=-2.5;check(px::StillAlignmentLine(DecideStillAlignment(synthetic,*loaded_policy)).find(L"反時計回り")!=std::wstring::npos);
+        check(DecideStillAlignment(synthetic,std::nullopt).decision==StillAlignmentDecision::no_policy && !DecideStillAlignment(synthetic,std::nullopt).rotation_exceeded);
+        auto warn_policy=*loaded_policy;warn_policy.residual_max_pixels=3;check(!DecideStillAlignment(synthetic,warn_policy).residual_exceeded);
+        warn_policy.residual_max_pixels=2.5;check(DecideStillAlignment(synthetic,warn_policy).residual_exceeded);
+        synthetic.status=OverlapEstimateStatus::undetermined;synthetic.reason=SimilarityUndeterminedReason::insufficient_tiles;
+        check(DecideStillAlignment(synthetic,*loaded_policy).decision==StillAlignmentDecision::undetermined && !DecideStillAlignment(synthetic,*loaded_policy).similarity);
+        // Automatic still alignment on generated JPEGs. Live geometry 460 x 307
+        // scales by 4 to a 924, 12 start; the truth is 930.3, 9.2, +0.4 deg.
+        const unsigned sw=1840,sh=1228;const auto world=similarity_scene::MakeScene(sw,sh,960,40,17);
+        const auto scene_a=similarity_scene::ViewA(world,sw,sh),scene_b=similarity_scene::ViewB(world,sw,sh,930.3,9.2,0.4,1.0,0.95);
+        const auto auto_root=root/"auto";fs::create_directories(auto_root/"CAM-A");fs::create_directories(auto_root/"CAM-B");
+        WriteJpeg(auto_root/"CAM-A/original.jpg",scene_a);WriteJpeg(auto_root/"CAM-B/original.jpg",scene_b);
+        const auto aa=Read(auto_root/"CAM-A/original.jpg"),ab=Read(auto_root/"CAM-B/original.jpg");
+        StillReviewRequest automatic{auto_root/"CAM-A/original.jpg",auto_root/"CAM-B/original.jpg",auto_root/"corrected",a0::phase0::Sha256Hex(aa),a0::phase0::Sha256Hex(ab),
+            "synthetic-pair-auto",{460,307,229,3,11},std::chrono::steady_clock::now()+std::chrono::seconds(240)};
+        automatic.automatic_alignment=StillReviewRequest::AutomaticAlignment{loaded_policy};
+        const auto corrected=WriteUncalibratedStillReview(automatic);const auto corrected_record=LoadSavedStillReview(corrected.report);
+        std::cout<<"auto_alignment_ms="<<corrected.alignment_milliseconds<<" "<<px::StillAlignmentLog(*corrected.automatic,corrected.alignment_milliseconds)<<'\n';
+        const auto corrected_bytes=Read(corrected.report);const std::string corrected_text(corrected_bytes.begin(),corrected_bytes.end());
+        check(corrected.automatic && corrected.automatic->decision==StillAlignmentDecision::corrected && corrected_record.automatic && corrected_record.automatic->decision==StillAlignmentDecision::corrected);
+        check(corrected_text.find("a0.uncalibrated-still-review.v4")!=std::string::npos && corrected_text.find("\"geometryBasis\":\"auto-still-similarity\"")!=std::string::npos &&
+            corrected_text.find("\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false")!=std::string::npos && corrected_text.find("\"warnings\":[]")!=std::string::npos);
+        const auto& fitted=*corrected_record.automatic->similarity;
+        check(std::abs(fitted.rotation_degrees-0.4)<0.02 && std::abs(fitted.x-930.3)<1.5 && std::abs(fitted.y-9.2)<1.5 && std::abs(fitted.scale-1)<5e-4);
+        check(corrected_record.rotation_degrees==fitted.rotation_degrees && corrected_record.scale==fitted.scale && corrected_record.translation_x==std::llround(fitted.x) && corrected_record.translation_y==std::llround(fitted.y));
+        check(corrected_record.automatic->similarity_residual.rms<corrected_record.automatic->translation_residual.rms && corrected_record.automatic->policy->sha256==loaded_policy->sha256);
+        check(Read(automatic.camera_a_original)==aa && Read(automatic.camera_b_original)==ab);
+        // The overlap compares better after the similarity than after the
+        // translation alone: A against B (gain restored) on a grid of A pixels.
+        const auto sources=LoadStillReviewSources(corrected_record);
+        auto seam_error=[&](const a0::m2::render::PairRenderParameters& p){
+            const auto inverse=a0::m2::render::Invert(p.camera_b_to_camera_a);double sum=0;
+            for(unsigned y=150;y<sh-150;y+=4)for(unsigned x=1000;x<sw-20;x+=4){
+                std::array<double,3> va{},vb{};a0::m2::render::Point s{};
+                if(a0::m2::render::SampleBilinear(sources[0],x,y,va) && a0::m2::render::TryTransform(inverse,{double(x),double(y)},s) && a0::m2::render::SampleBilinear(sources[1],s.x,s.y,vb))
+                    sum+=std::abs(va[0]-vb[0]/0.95);
+            }
+            return sum;
+        };
+        const auto t=corrected_record.automatic;
+        check(seam_error(SimilarityReviewGeometry(corrected_record.translation_x,corrected_record.translation_y,fitted.rotation_degrees,fitted.scale,sw,sh))<
+            seam_error(SimilarityReviewGeometry(static_cast<int>(std::llround(t->translation_x)),static_cast<int>(std::llround(t->translation_y)),0,1,sw,sh)));
+        // Over the limit: translation only, warned, never clamped. A residual
+        // value of zero exercises the residual warning.
+        auto exceeded=automatic;exceeded.output_directory=auto_root/"exceeded";
+        exceeded.automatic_alignment->policy=StillMergePolicy{loaded_policy->sha256,0.25,0.0};
+        const auto exceeded_record=LoadSavedStillReview(WriteUncalibratedStillReview(exceeded).report);const auto& em=*exceeded_record.automatic;
+        check(em.decision==StillAlignmentDecision::rotation_exceeded && em.rotation_exceeded && em.residual_exceeded && exceeded_record.rotation_degrees==0 && exceeded_record.scale==1);
+        check(exceeded_record.translation_x==std::llround(em.translation_x) && exceeded_record.translation_y==std::llround(em.translation_y));
+        const auto exceeded_bytes=Read(exceeded_record.report);const std::string exceeded_text(exceeded_bytes.begin(),exceeded_bytes.end());
+        check(exceeded_text.find("\"geometryBasis\":\"auto-still-translation\"")!=std::string::npos && exceeded_text.find("\"warnings\":[\"rotation-exceeded\",\"fit-residual-exceeded\"]")!=std::string::npos &&
+            exceeded_text.find("\"adjustment\"")==std::string::npos && exceeded_text.find("\"similarityResidualMaxWarningPixels\":0")!=std::string::npos);
+        // Without a policy file: values recorded, nothing corrected.
+        auto unset=automatic;unset.output_directory=auto_root/"no-policy";unset.automatic_alignment->policy.reset();
+        const auto unset_record=LoadSavedStillReview(WriteUncalibratedStillReview(unset).report);
+        check(unset_record.automatic->decision==StillAlignmentDecision::no_policy && !unset_record.automatic->policy && unset_record.rotation_degrees==0 && std::abs(unset_record.automatic->similarity->rotation_degrees-0.4)<0.02);
+        const auto unset_bytes=Read(unset_record.report);const std::string unset_text(unset_bytes.begin(),unset_bytes.end());
+        check(unset_text.find("\"policy\":null")!=std::string::npos && unset_text.find("\"decision\":\"no-policy\"")!=std::string::npos);
+        // Not estimable (uniform originals): the live translation and render
+        // are kept; the JPEG equals the earlier v1 result byte for byte.
+        auto flat=r;flat.output_directory=root/"auto-flat";flat.automatic_alignment=StillReviewRequest::AutomaticAlignment{loaded_policy};flat.deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        const auto flat_output=WriteUncalibratedStillReview(flat);const auto flat_record=LoadSavedStillReview(flat_output.report);
+        check(flat_record.automatic->decision==StillAlignmentDecision::undetermined && !flat_record.automatic->similarity && flat_record.translation_x==32 && flat_record.translation_y==4);
+        check(Read(flat_output.jpeg)==original_jpeg && flat_output.width==96 && flat_output.height==44);
+        const auto flat_bytes=Read(flat_output.report);const std::string flat_text(flat_bytes.begin(),flat_bytes.end());
+        check(flat_text.find("\"geometryBasis\":\"live-preview\"")!=std::string::npos && flat_text.find("\"similarity\":null")!=std::string::npos && flat_text.find("\"status\":\"undetermined\"")!=std::string::npos);
+        auto both=automatic;both.output_directory=auto_root/"both";both.manual_revision=StillReviewRequest::ManualRevision{930,9,corrected.report,corrected_record.report_sha256};
+        reject([&]{WriteUncalibratedStillReview(both);});check(!fs::exists(both.output_directory));
+        auto bad_policy=automatic;bad_policy.output_directory=auto_root/"bad-policy";bad_policy.automatic_alignment->policy->rotation_max_degrees=NAN;
+        reject([&]{WriteUncalibratedStillReview(bad_policy);});check(!fs::exists(bad_policy.output_directory));
+        // A manual revision of an automatic result keeps the v2/v3 format and
+        // its parent link; the estimate is the starting value.
+        auto manual_child=automatic;manual_child.automatic_alignment.reset();manual_child.output_directory=auto_root/"manual";
+        manual_child.manual_revision=StillReviewRequest::ManualRevision{corrected_record.translation_x,corrected_record.translation_y,corrected.report,corrected_record.report_sha256,fitted.rotation_degrees,fitted.scale};
+        const auto manual_record=LoadSavedStillReview(WriteUncalibratedStillReview(manual_child).report);
+        check(manual_record.manual_revision && manual_record.manual_revision->parent_report==corrected.report && !manual_record.automatic && manual_record.rotation_degrees==fitted.rotation_degrees);
+        // Recorded decisions are recomputed on read; altered reports fail closed.
+        const auto auto_damaged=auto_root/"damaged";
+        auto reject_auto=[&](const std::string& text,const std::string& from,const std::string& to,const fs::path& jpeg){
+            auto changed=text;const auto at=changed.find(from);if(at==std::string::npos)throw std::runtime_error("automatic token absent");changed.replace(at,from.size(),to);
+            fs::create_directories(auto_damaged);fs::copy_file(jpeg,auto_damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+            {std::ofstream f(auto_damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<changed;}
+            reject([&]{LoadSavedStillReview(auto_damaged/"uncalibrated-review.json");});
+        };
+        reject_auto(corrected_text,"\"decision\":\"corrected\"","\"decision\":\"no-policy\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"warnings\":[]","\"warnings\":[\"rotation-exceeded\"]",corrected.jpeg);
+        reject_auto(corrected_text,"\"rotationAutoCorrectionMaxDegrees\":2","\"rotationAutoCorrectionMaxDegrees\":0.1",corrected.jpeg);
+        reject_auto(corrected_text,"\"geometryBasis\":\"auto-still-similarity\"","\"geometryBasis\":\"manual-still-similarity\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"estimator\":\"a0.overlap-similarity.v1\"","\"estimator\":\"other\"",corrected.jpeg);
+        reject_auto(corrected_text,"\"productQualityAccepted\":false","\"productQualityAccepted\":true",corrected.jpeg);
+        reject_auto(exceeded_text,"\"warnings\":[\"rotation-exceeded\",\"fit-residual-exceeded\"]","\"warnings\":[\"fit-residual-exceeded\",\"rotation-exceeded\"]",exceeded_record.jpeg);
+        reject_auto(exceeded_text,"\"geometryBasis\":\"auto-still-translation\"","\"geometryBasis\":\"live-preview\"",exceeded_record.jpeg);
+        reject_auto(flat_text,"\"status\":\"undetermined\"","\"status\":\"estimated-not-judged\"",flat_output.jpeg);
+        reject_auto(flat_text,"\"reason\":\"no-tiles\"","\"reason\":\"none\"",flat_output.jpeg);
+        reject_auto(unset_text,"\"policy\":null","\"policy\":{}",unset_record.jpeg);
+        fs::copy_file(corrected.jpeg,auto_damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+        {std::ofstream f(auto_damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<corrected_text;}
+        check(LoadSavedStillReview(auto_damaged/"uncalibrated-review.json").automatic->decision==StillAlignmentDecision::corrected);
+        // rotated-180 mounting: the estimate runs on the turned copies; the
+        // originals stay as written.
+        auto turn=[](a0::m2::render::BgrImage image){Rotate180(image);return image;};
+        const auto auto_turned=root/"auto-turned";fs::create_directories(auto_turned/"CAM-A");fs::create_directories(auto_turned/"CAM-B");
+        WriteJpeg(auto_turned/"CAM-A/original.jpg",turn(scene_a));WriteJpeg(auto_turned/"CAM-B/original.jpg",turn(scene_b));
+        const auto ra=Read(auto_turned/"CAM-A/original.jpg"),rb=Read(auto_turned/"CAM-B/original.jpg");
+        auto turned_auto=automatic;turned_auto.camera_a_original=auto_turned/"CAM-A/original.jpg";turned_auto.camera_b_original=auto_turned/"CAM-B/original.jpg";
+        turned_auto.camera_a_sha256=a0::phase0::Sha256Hex(ra);turned_auto.camera_b_sha256=a0::phase0::Sha256Hex(rb);turned_auto.output_directory=auto_turned/"review";
+        turned_auto.geometry.orientation=MountOrientation::rotated_180;
+        const auto turned_auto_record=LoadSavedStillReview(WriteUncalibratedStillReview(turned_auto).report);
+        check(turned_auto_record.geometry.orientation==MountOrientation::rotated_180 && turned_auto_record.automatic->decision==StillAlignmentDecision::corrected &&
+            std::abs(turned_auto_record.automatic->similarity->rotation_degrees-0.4)<0.02 && Read(turned_auto.camera_a_original)==ra && Read(turned_auto.camera_b_original)==rb);
+        check(DescribeSavedReviewEvaluationInputs(turned_auto_record.report).find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
+        check(Read(output.report)==report_bytes && Read(output.jpeg)==original_jpeg && Read(r.camera_a_original)==a && Read(r.camera_b_original)==b);
         CoUninitialize();
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;

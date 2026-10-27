@@ -39,13 +39,63 @@ std::filesystem::path ReviewPath(const ReviewValue& value){
 bool SameReviewGeometry(const PreviewReviewGeometry& a,const PreviewReviewGeometry& b){
     return a.width==b.width && a.height==b.height && a.overlap==b.overlap && a.vertical==b.vertical && a.revision==b.revision && a.orientation==b.orientation;
 }
+// Every recorded decision is recomputed from the recorded values with the
+// writer's rule; a report whose decision or warnings disagree is rejected.
+AutomaticStillAlignment ReadAutomaticAlignment(const ReviewValue& value){
+    ReviewFields(value,{"estimator","status","reason","initialPosition","tiles","similarity","translationOnly","residualPixels","decision","warnings","policy"});
+    if(ReviewString(ReviewAt(value,"estimator"))!="a0.overlap-similarity.v1")ReviewReject();
+    OverlapSimilarityEstimate e;const auto status=ReviewString(ReviewAt(value,"status"));
+    if(status==OverlapEstimateStatusCode(OverlapEstimateStatus::estimated_not_judged))e.status=OverlapEstimateStatus::estimated_not_judged;else if(status!=OverlapEstimateStatusCode(OverlapEstimateStatus::undetermined))ReviewReject();
+    const auto reason=ReviewString(ReviewAt(value,"reason"));bool known=false;
+    for(const auto v:{SimilarityUndeterminedReason::none,SimilarityUndeterminedReason::no_tiles,SimilarityUndeterminedReason::insufficient_tiles,SimilarityUndeterminedReason::outside_image,SimilarityUndeterminedReason::tied_starts})
+        if(reason==SimilarityUndeterminedReasonCode(v)){e.reason=v;known=true;}
+    const auto start=ReviewString(ReviewAt(value,"initialPosition"));
+    if(!known || (start!="live-preview" && start!="still-wide-search") || (e.status==OverlapEstimateStatus::estimated_not_judged)!=(e.reason==SimilarityUndeterminedReason::none))ReviewReject();
+    e.wide_search=start=="still-wide-search";
+    const auto& tiles=ReviewAt(value,"tiles");ReviewFields(tiles,{"searched","matched","agreed"});
+    const auto searched=ReviewUnsigned(ReviewAt(tiles,"searched"),4096);e.matched=static_cast<unsigned>(ReviewUnsigned(ReviewAt(tiles,"matched"),searched));e.agreed=static_cast<unsigned>(ReviewUnsigned(ReviewAt(tiles,"agreed"),e.matched));
+    e.tiles.resize(static_cast<size_t>(searched));
+    const auto& fit=ReviewAt(value,"similarity");const auto& shift=ReviewAt(value,"translationOnly");const auto& residual=ReviewAt(value,"residualPixels");
+    const bool estimated=e.status==OverlapEstimateStatus::estimated_not_judged;
+    if(!estimated){if(fit.kind!=ReviewJson::JsonKind::null_value || shift.kind!=ReviewJson::JsonKind::null_value || residual.kind!=ReviewJson::JsonKind::null_value)ReviewReject();}
+    else{
+        ReviewFields(fit,{"x","y","rotationDegrees","scale"});ReviewFields(shift,{"x","y"});ReviewFields(residual,{"similarityRms","similarityMax","translationOnlyRms","translationOnlyMax"});
+        e.similarity={ReviewDouble(ReviewAt(fit,"x")),ReviewDouble(ReviewAt(fit,"y")),ReviewDouble(ReviewAt(fit,"rotationDegrees")),ReviewDouble(ReviewAt(fit,"scale"))};
+        e.translation_x=ReviewDouble(ReviewAt(shift,"x"));e.translation_y=ReviewDouble(ReviewAt(shift,"y"));
+        e.similarity_residual={ReviewDouble(ReviewAt(residual,"similarityRms")),ReviewDouble(ReviewAt(residual,"similarityMax"))};
+        e.translation_residual={ReviewDouble(ReviewAt(residual,"translationOnlyRms")),ReviewDouble(ReviewAt(residual,"translationOnlyMax"))};
+        if(e.agreed<3 || e.similarity.scale<=0 || std::abs(e.similarity.rotation_degrees)>180)ReviewReject();
+        for(const double d:{e.similarity_residual.rms,e.similarity_residual.maximum,e.translation_residual.rms,e.translation_residual.maximum})if(d<0)ReviewReject();
+    }
+    const auto& policy_value=ReviewAt(value,"policy");std::optional<StillMergePolicy> policy;
+    if(policy_value.kind!=ReviewJson::JsonKind::null_value){
+        ReviewFields(policy_value,{"sha256","rotationAutoCorrectionMaxDegrees","similarityResidualMaxWarningPixels"});
+        StillMergePolicy p{ReviewHash(ReviewAt(policy_value,"sha256")),ReviewDouble(ReviewAt(policy_value,"rotationAutoCorrectionMaxDegrees")),{}};
+        const auto& warning=ReviewAt(policy_value,"similarityResidualMaxWarningPixels");
+        if(warning.kind!=ReviewJson::JsonKind::null_value)p.residual_max_pixels=ReviewDouble(warning);
+        try{ValidateStillMergePolicy(p);}catch(const std::invalid_argument&){ReviewReject();}
+        policy=std::move(p);
+    }
+    auto decided=DecideStillAlignment(e,policy);
+    const auto& warnings=ReviewAt(value,"warnings");if(warnings.kind!=ReviewJson::JsonKind::array)ReviewReject();
+    std::vector<std::string> expected;if(decided.rotation_exceeded)expected.push_back("rotation-exceeded");if(decided.residual_exceeded)expected.push_back("fit-residual-exceeded");
+    if(warnings.array.size()!=expected.size())ReviewReject();
+    for(size_t i=0;i<expected.size();++i)if(ReviewString(warnings.array[i])!=expected[i])ReviewReject();
+    if(ReviewString(ReviewAt(value,"decision"))!=StillAlignmentDecisionCode(decided.decision))ReviewReject();
+    return decided;
+}
 SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto full=NormalizedAbsolute(path);if(full.filename()!=L"uncalibrated-review.json")ReviewReject();
     V2PathPins pins;pins.Pin(full);LockedReadFile file(full,false,true);const auto bytes=file.ReadAll(256*1024);
     const auto root=ReviewJson::BasicJsonParser<ReviewJsonFailure>(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size())).Parse();
     const auto schema=ReviewString(ReviewAt(root,"schema"));const bool similarity=schema=="a0.uncalibrated-still-review.v3",manual=similarity || schema=="a0.uncalibrated-still-review.v2";
-    // mountOrientation is the only optional field in v1/v2/v3: absent is normal.
-    if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},"mountOrientation");
+    const bool automatic=schema=="a0.uncalibrated-still-review.v4";
+    const auto basis=automatic?ReviewString(ReviewAt(root,"geometryBasis")):std::string();const bool corrected=basis=="auto-still-similarity";
+    if(automatic && !corrected && basis!="auto-still-translation" && basis!="live-preview")ReviewReject();
+    // mountOrientation is the only optional field in v1..v4: absent is normal.
+    if(automatic && corrected)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","automaticAlignment"},"mountOrientation");
+    else if(automatic)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","automaticAlignment"},"mountOrientation");
+    else if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},"mountOrientation");
     else if(manual)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview"},"mountOrientation");
     else{if(schema!="a0.uncalibrated-still-review.v1")ReviewReject();ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output"},"mountOrientation");}
     if(ReviewString(ReviewAt(root,"state"))!="UncalibratedReviewReady" || ReviewUnsigned(ReviewAt(root,"automaticRetryCount"),0)!=0)ReviewReject();
@@ -72,15 +122,23 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto base=ScalePreviewReviewGeometry(record.geometry,record.source_width,record.source_height);
     const auto& translation=ReviewAt(root,"translation");ReviewFields(translation,{"x","y"});
     record.translation_x=ReviewSigned(ReviewAt(translation,"x"),1,32767);record.translation_y=ReviewSigned(ReviewAt(translation,"y"),-32767,32767);
-    if(!manual && (base.camera_b_to_camera_a[2]!=record.translation_x || base.camera_b_to_camera_a[5]!=record.translation_y))ReviewReject();
-    if(similarity){
+    if(!manual && !automatic && (base.camera_b_to_camera_a[2]!=record.translation_x || base.camera_b_to_camera_a[5]!=record.translation_y))ReviewReject();
+    if(automatic){
+        record.automatic=ReadAutomaticAlignment(ReviewAt(root,"automaticAlignment"));const auto& m=*record.automatic;
+        const auto expected=m.decision==StillAlignmentDecision::corrected?"auto-still-similarity":m.similarity?"auto-still-translation":"live-preview";
+        if(basis!=expected)ReviewReject();
+        if(m.similarity){const auto t=StillAlignmentTranslation(m);if(t[0]!=record.translation_x || t[1]!=record.translation_y)ReviewReject();}
+        else if(base.camera_b_to_camera_a[2]!=record.translation_x || base.camera_b_to_camera_a[5]!=record.translation_y)ReviewReject();
+    }
+    if(similarity || corrected){
         const auto& adjustment=ReviewAt(root,"adjustment");ReviewFields(adjustment,{"anchor","rotationDegrees","scale"});
         if(ReviewString(ReviewAt(adjustment,"anchor"))!="image-center")ReviewReject();
         record.rotation_degrees=ReviewDouble(ReviewAt(adjustment,"rotationDegrees"));record.scale=ReviewDouble(ReviewAt(adjustment,"scale"));
+        if(corrected && (record.rotation_degrees!=record.automatic->similarity->rotation_degrees || record.scale!=record.automatic->similarity->scale))ReviewReject();
     }
     const auto parameters=SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
     record.crop=parameters.crop;
-    if(similarity){
+    if(similarity || corrected){
         const auto& crop=ReviewAt(root,"crop");ReviewFields(crop,{"left","top","right","bottom"});
         if(ReviewUnsigned(ReviewAt(crop,"left"),32768)!=parameters.crop.left || ReviewUnsigned(ReviewAt(crop,"top"),32768)!=parameters.crop.top ||
             ReviewUnsigned(ReviewAt(crop,"right"),32768)!=parameters.crop.right || ReviewUnsigned(ReviewAt(crop,"bottom"),32768)!=parameters.crop.bottom)ReviewReject();

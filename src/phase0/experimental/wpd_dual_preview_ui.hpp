@@ -30,6 +30,8 @@ using ReviewGeometry=a0::m2::experimental::PreviewReviewGeometry;
 ReviewGeometry pending_geometry;
 // Fixed before any worker starts; C and the saved Merge use the same frame.
 a0::m2::experimental::MountOrientation mount_orientation{};
+// Read once at startup (#365). Absent: values are recorded, nothing is corrected.
+std::optional<a0::m2::experimental::StillMergePolicy> merge_policy;
 Clock::time_point capture_deadline;
 Pixels review_pixels;bool review_visible=false;
 std::filesystem::path review_path;
@@ -335,11 +337,14 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
             [&](int i,auto end){if(i==0)Log("pair_preflight_both_ready=1 both_closed=1");return SaveStillOnce(ids[i],i==0?"CAM-A":"CAM-B",true,end);},[]{return !capture_stop_requested.load();},deadline);
         if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.preflight_complete;throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
-        result.review=a0::m2::experimental::WriteUncalibratedStillReview({a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline});
+        a0::m2::experimental::StillReviewRequest request{a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
+        request.automatic_alignment=a0::m2::experimental::StillReviewRequest::AutomaticAlignment{merge_policy};
+        result.review=a0::m2::experimental::WriteUncalibratedStillReview(request);
         if(Clock::now()>=deadline)throw std::runtime_error("pair deadline after review; all files retained");
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
         Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
+        if(result.review->automatic)Log(StillAlignmentLog(*result.review->automatic,result.review->alignment_milliseconds));
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
     }catch(const std::exception& error){result.capture.success=false;result.capture.error=error.what();evidence.RecordState("pair","FailedPartial",{},error.what());Log(std::string("pair_review_failure: ")+error.what());}
     return result;
@@ -371,6 +376,7 @@ void AdvanceCapture(HWND hwnd){
         auto result=capture_future.get();
         if(result.capture.success && result.capture.closed){
             captures_saved+=result.review?2:1;capture_status=L"保存済み: "+result.capture.path.wstring();
+            if(result.review && result.review->automatic)capture_status+=L" / "+StillAlignmentLine(*result.review->automatic);
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
