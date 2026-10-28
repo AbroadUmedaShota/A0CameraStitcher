@@ -119,4 +119,13 @@ inline void HorizontalLines(std::vector<Stroke>& out, Rect r, std::uint64_t seed
 inline void Hatching(std::vector<Stroke>& out, Rect r, double period) {
     for (double x = r.x0; x < r.x1; x += period) out.push_back(Segment(x,r.y0,x,r.y1,period/3,150));
 }
+// Lines of a fixed period in both directions with a small square mark at every
+// crossing, the table grid of a desk. x_phase and y_phase place a crossing.
+inline void Lattice(std::vector<Stroke>& out, Rect r, double period, double x_phase, double y_phase) {
+    const double fx = std::fmod(x_phase, period), fy = std::fmod(y_phase, period);
+    for (double x = r.x0+fx; x < r.x1; x += period) out.push_back(Segment(x, r.y0, x, r.y1, 3, 110));
+    for (double y = r.y0+fy; y < r.y1; y += period) out.push_back(Segment(r.x0, y, r.x1, y, 3, 110));
+    for (double x = r.x0+fx; x < r.x1; x += period) for (double y = r.y0+fy; y < r.y1; y += period)
+        out.push_back(Segment(x-4, y, x+4, y, 9, 140));
+}
 } // namespace seam_gate_scene

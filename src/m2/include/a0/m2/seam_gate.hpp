@@ -45,12 +45,19 @@ struct BandRow {
 // coordinates in the convention of render::RenderMappedPair. They are called
 // concurrently and must be immutable. A true return with nonfinite
 // coordinates throws.
+//
+// band: where the gate measures. transition: where the composite may mix A and
+// B (the range a viewer can see a seam in). The gate pass requires
+// transition inside band (docs/M2_SEAM_QUALITY_GATE.md, 16.11): a seam outside
+// the measured band is not measured. An empty transition means the path did
+// not say, and the decision is undetermined.
 struct SeamGateGeometry {
     std::uint32_t width{};
     std::uint32_t height{};
     OutputToCamera camera_a;
     OutputToCamera camera_b;
-    std::vector<BandRow> band; // one entry per output row
+    std::vector<BandRow> band;       // one entry per output row
+    std::vector<BandRow> transition; // one entry per output row, or empty (not supplied)
 };
 
 // Mappings of render::RenderPair (uncalibrated similarity, #365). Band empty.
@@ -62,12 +69,35 @@ SeamGateGeometry DocumentSeamGeometry(const render::DocumentRenderParameters& pa
 // (rows within inset_px of a row without overlap become empty).
 std::vector<BandRow> OverlapBand(const SeamGateGeometry& geometry, std::uint32_t camera_a_width,
     std::uint32_t camera_a_height, std::uint32_t camera_b_width, std::uint32_t camera_b_height, std::uint32_t inset_px);
+// Transition band of the seam-cut blend (experimental::RenderPairSeamCut): per
+// output row, the columns where the weights are neither 0 nor 1, widened to
+// whole pixels. seam_x: the seam column of every row; blend_width_px: the
+// blend's width_pixels. The linear feather mixes across the whole overlap of a
+// row (OverlapBand with inset 0), which the gate band never contains because
+// the outer RequiredBandInsetPx pixels cannot be measured; a path that
+// composes with the feather states its transition explicitly.
+std::vector<BandRow> SeamCutTransitionBand(const std::vector<std::uint32_t>& seam_x, std::uint32_t blend_width_px,
+    std::uint32_t output_width);
+
+// Result of checking transition inside band (docs 16.11).
+struct TransitionContainment {
+    bool supplied{};
+    std::uint32_t rows_outside{};      // rows with a transition pixel outside the band
+    std::uint64_t pixels_outside{};
+    std::uint32_t first_x{}, first_y{}; // first pixel outside, valid when pixels_outside > 0
+    bool Contained() const { return supplied && pixels_outside == 0; }
+};
+// Throws std::invalid_argument when the vectors differ in size or a row lies
+// outside [0, output_width].
+TransitionContainment CheckTransitionBandContained(const std::vector<BandRow>& band, const std::vector<BandRow>& transition,
+    std::uint32_t output_width);
 
 // Optional calibration prediction of the B-minus-A displacement at an output
 // position, in output pixels. false: no prediction there.
-// Product paths must not pass a prediction until the global placement is
-// verified outside the band: a predicted blank block can pass a placement that
-// is one lattice period off (docs/M2_SEAM_QUALITY_GATE.md, 16.10).
+// A predicted blank block alone cannot show that the placement is right: a
+// placement one lattice period off looks aligned there. The gate therefore
+// also requires the global placement check (docs/M2_SEAM_QUALITY_GATE.md,
+// 16.11), whether or not a prediction is passed.
 using DisplacementPrediction = std::function<bool(Point, Point&)>;
 
 // Design constants of the measurer (docs/M2_SEAM_QUALITY_GATE.md, 3.3/3.4).
@@ -92,11 +122,18 @@ struct SeamGateDesign {
     double agreement_floor_px;
     double block_neighbor_px;            // block value differing from every measured neighbour by more
     std::uint32_t strip_rows;            // rows sampled together (memory bound)
+    // Global placement check (docs 16.11). The local search cannot tell a
+    // placement that is one period of a repeating pattern off. Anchors are
+    // measured blocks whose patch is searched again over this wide radius.
+    std::uint32_t global_search_radius_px;   // covers the largest placement error expected (period of a table lattice)
+    std::uint32_t global_minimum_anchors;    // verified anchor blocks the pass requires
+    std::uint32_t global_maximum_evaluations; // anchors evaluated at most (cost bound)
+    double global_tolerance_px;              // wide peak vs local displacement
 };
 inline constexpr SeamGateDesign kSeamGateDesignCalibrated{
-    32, 64, 128, 16, 256, 7, 8.0, 32, 0.1, 0.8, 0.05, 0.01, 0.05, 16, 96, 3.0, 0.1, 0.5, 256};
+    32, 64, 128, 16, 256, 7, 8.0, 32, 0.1, 0.8, 0.05, 0.01, 0.05, 16, 96, 3.0, 0.1, 0.5, 256, 768, 4, 64, 2.0};
 inline constexpr SeamGateDesign kSeamGateDesignUncalibrated{
-    32, 64, 128, 48, 256, 7, 8.0, 32, 0.1, 0.8, 0.05, 0.01, 0.05, 16, 96, 3.0, 0.1, 0.5, 256};
+    32, 64, 128, 48, 256, 7, 8.0, 32, 0.1, 0.8, 0.05, 0.01, 0.05, 16, 96, 3.0, 0.1, 0.5, 256, 768, 4, 64, 2.0};
 // Throws std::invalid_argument for an inconsistent set (see the docs).
 void ValidateSeamGateDesign(const SeamGateDesign& design);
 // Band inset that keeps every search window of the first radius inside both
@@ -174,6 +211,32 @@ struct SeamBlock {
     std::optional<double> predicted_px;    // empty block: |prediction| + mismatch
 };
 
+// Outcome of the wide search of one anchor (docs 16.11).
+enum class GlobalAnchorStatus {
+    verified,           // one strict peak over the wide radius, at the local displacement
+    contradicted,       // one strict peak over the wide radius, somewhere else
+    repeating,          // a second peak close to the best: the pattern repeats inside the radius
+    search_boundary,    // the best peak is on the edge of the wide window
+    flat_correlation,
+    window_unavailable, // the wide window leaves a coverage
+};
+std::string_view GlobalAnchorStatusCode(GlobalAnchorStatus status);
+
+struct GlobalAnchor {
+    std::uint32_t x{}, y{}, block_column{}, block_row{};
+    GlobalAnchorStatus status{GlobalAnchorStatus::window_unavailable};
+    Point local{};  // displacement of the local measurement
+    Point wide{};   // position of the wide peak (verified and contradicted only)
+};
+struct GlobalPlacement {
+    bool performed{};                  // false when the band had no point
+    std::uint32_t radius_px{};
+    std::uint32_t candidates{};        // measured blocks with a two-directional counted point
+    std::uint32_t evaluated{};
+    std::uint32_t verified{}, contradicted{}, indeterminate{};
+    std::vector<GlobalAnchor> anchors; // evaluated, in evaluation order
+};
+
 struct SeamMeasurement {
     SeamGateDesign design{};
     SeamGateLimits limits;
@@ -184,6 +247,8 @@ struct SeamMeasurement {
     std::vector<SeamBlock> blocks; // row-major
     bool prediction_supplied{};
     std::optional<double> prediction_mismatch_px; // largest |measured - predicted| over counted points
+    GlobalPlacement global;
+    TransitionContainment containment;
 };
 
 // Measures every lattice point of the band. Points whose visible value plus
@@ -197,7 +262,8 @@ enum class SeamGateState { pass, fail, undetermined };
 std::string_view SeamGateStateCode(SeamGateState state);
 
 struct SeamGateFinding {
-    std::string reason; // seam-misalignment, predicted-misalignment, unmeasurable-content, no-measurable-block, unpredicted-empty-block, ...
+    std::string reason; // seam-misalignment, predicted-misalignment, unmeasurable-content, no-measurable-block, unpredicted-empty-block,
+                        // global-placement-mismatch, global-placement-unverified, transition-outside-band, ...
     std::string remedy; // instruction code
 };
 struct SeamGateLocation {
@@ -213,6 +279,10 @@ struct SeamGateResult {
     std::optional<double> measured_maximum_px, second_px, p95_px, mean_px, predicted_maximum_px;
     std::uint32_t counted_points{}, confirmed_points{}, unconfirmed_points{};
     std::uint32_t measured_blocks{}, empty_blocks{}, unmeasurable_blocks{}, unpredicted_empty_blocks{};
+    std::uint32_t unconfirmed_blocks{};   // blocks made unmeasurable by an unconfirmed point (#385 Q1 owner decision)
+    std::uint32_t global_candidates{}, global_evaluated{}, global_verified{}, global_contradicted{};
+    std::uint32_t transition_rows_outside{};
+    std::uint64_t transition_pixels_outside{};
 };
 
 // pass when max + guard <= limit and nothing else fails (equal passes).

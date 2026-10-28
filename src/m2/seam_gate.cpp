@@ -442,6 +442,62 @@ bool Agree(const Comparable& a, const Comparable& b, const SeamGateDesign& dz) {
     return std::hypot(diff.x,diff.y) <= tolerance;
 }
 
+// Workers of the global placement check. Each holds a wide window of the
+// order of (2*(patch/2+radius))^2 doubles several times over (tens of MB), so
+// the check uses at most this many workers whatever thread count the caller
+// passes. The result does not depend on it.
+constexpr unsigned kGlobalWorkers = 4;
+
+// Wide search of one anchor (docs 16.11): the patch of A at the anchor, searched
+// in B over +-design.global_search_radius_px by the same coarse-to-fine search
+// as the local measurement. Two-directional patches only, so the search is
+// two-dimensional. Verified when the single strict peak lies at the local
+// displacement; the wide window is the part of the search the local radius
+// (and its periodicity check) cannot see.
+GlobalAnchor CheckGlobal(const Context& c, const SeamPoint& p) {
+    const auto& dz = *c.design;
+    const int px = static_cast<int>(p.x), py = static_cast<int>(p.y), h = static_cast<int>(dz.patch_px/2);
+    const int radius = static_cast<int>(dz.global_search_radius_px);
+    GlobalAnchor anchor;
+    anchor.x = p.x; anchor.y = p.y; anchor.block_column = p.block_column; anchor.block_row = p.block_row;
+    anchor.local = p.displacement;
+    const Plane a_region = FeatureRegion(c.a, px, py, h);
+    if (HasNaN(a_region)) { anchor.status = GlobalAnchorStatus::window_unavailable; return anchor; }
+    const Template ta = MakeTemplate(FeatureOf(a_region, Feature::gradient));
+    if (!(ta.norm[0] > 0) || !(ta.norm[2] > 0)) { anchor.status = GlobalAnchorStatus::flat_correlation; return anchor; }
+    Plane region = FeatureRegion(c.b, px, py, h+radius);
+    if (HasNaN(region)) { anchor.status = GlobalAnchorStatus::window_unavailable; return anchor; }
+    Plane feature = FeatureOf(region, Feature::gradient);
+    region = Plane{};
+    const auto peak = IntegerSearch(ta, Pyramid(std::move(feature)), radius, Direction{}, dz.secondary_peak_ratio);
+    switch (peak.status) {
+    case PointStatus::valid: {
+        anchor.wide = {static_cast<double>(peak.x), static_cast<double>(peak.y)};
+        const bool same = std::hypot(anchor.wide.x-p.displacement.x, anchor.wide.y-p.displacement.y) <= dz.global_tolerance_px;
+        anchor.status = same ? GlobalAnchorStatus::verified : GlobalAnchorStatus::contradicted;
+        break;
+    }
+    case PointStatus::ambiguous: anchor.status = GlobalAnchorStatus::repeating; break;
+    case PointStatus::search_boundary: anchor.status = GlobalAnchorStatus::search_boundary; break;
+    default: anchor.status = GlobalAnchorStatus::flat_correlation; break;
+    }
+    return anchor;
+}
+// 0..n-1 in an order whose every prefix is spread over the range (bit reversal),
+// so a bounded number of evaluations covers the whole band.
+std::vector<std::size_t> SpreadOrder(std::size_t n) {
+    unsigned bits = 0;
+    while ((std::size_t{1} << bits) < n) ++bits;
+    std::vector<std::size_t> order;
+    order.reserve(n);
+    for (std::size_t k = 0; k < (std::size_t{1} << bits); ++k) {
+        std::size_t r = 0;
+        for (unsigned b = 0; b < bits; ++b) if (k & (std::size_t{1} << b)) r |= std::size_t{1} << (bits-1-b);
+        if (r < n) order.push_back(r);
+    }
+    return order;
+}
+
 template <class F> void ParallelFor(std::size_t count, unsigned threads, F&& body) {
     std::atomic<std::size_t> next{0};
     std::exception_ptr failure;
@@ -470,6 +526,8 @@ void ValidateGeometry(const BgrImage& a, const BgrImage& b, const SeamGateGeomet
     (void)render::PixelCount(g.width,g.height);
     Require(g.band.size() == g.height, "seam gate: one band row per output row is required");
     for (const auto& row : g.band) Require(row.begin <= row.end && row.end <= g.width, "seam gate: band row outside the output");
+    Require(g.transition.empty() || g.transition.size() == g.height, "seam gate: one transition row per output row is required");
+    for (const auto& row : g.transition) Require(row.begin <= row.end && row.end <= g.width, "seam gate: transition row outside the output");
 }
 } // namespace
 
@@ -495,6 +553,17 @@ std::string_view VariantCode(Variant v) {
     case Variant::luminance: return "luminance";
     }
     throw std::invalid_argument("unknown variant");
+}
+std::string_view GlobalAnchorStatusCode(GlobalAnchorStatus s) {
+    switch (s) {
+    case GlobalAnchorStatus::verified: return "verified";
+    case GlobalAnchorStatus::contradicted: return "contradicted";
+    case GlobalAnchorStatus::repeating: return "repeating";
+    case GlobalAnchorStatus::search_boundary: return "search-boundary";
+    case GlobalAnchorStatus::flat_correlation: return "flat-correlation";
+    case GlobalAnchorStatus::window_unavailable: return "window-unavailable";
+    }
+    throw std::invalid_argument("unknown global anchor status");
 }
 std::string_view BlockClassCode(BlockClass v) {
     switch (v) {
@@ -523,6 +592,13 @@ void ValidateSeamGateDesign(const SeamGateDesign& d) {
         finite_positive(d.agreement_factor) && finite_positive(d.agreement_floor_px) && finite_positive(d.block_neighbor_px) &&
         d.strip_rows >= d.block_px && d.strip_rows%d.block_px == 0 && d.strip_rows <= 32768,
         "seam gate: invalid design constants");
+    // The wide search has to reach past the periodicity check of the local one
+    // (2 radii), and its window is bounded for memory.
+    Require(d.global_search_radius_px%4 == 0 && d.global_search_radius_px > 2*d.search_radius_px && d.global_search_radius_px <= 1024 &&
+        d.global_minimum_anchors >= 1 && d.global_minimum_anchors <= d.global_maximum_evaluations &&
+        d.global_maximum_evaluations <= 4096 && std::isfinite(d.global_tolerance_px) && d.global_tolerance_px > 0 &&
+        d.global_tolerance_px <= 16,
+        "seam gate: invalid global placement constants");
 }
 std::uint32_t RequiredBandInsetPx(const SeamGateDesign& d) {
     ValidateSeamGateDesign(d);
@@ -594,6 +670,51 @@ std::vector<BandRow> OverlapBand(const SeamGateGeometry& g, std::uint32_t aw, st
     return band;
 }
 
+std::vector<BandRow> SeamCutTransitionBand(const std::vector<std::uint32_t>& seam_x, std::uint32_t blend_width_px,
+    std::uint32_t output_width) {
+    Require(blend_width_px >= 1 && blend_width_px <= 4096, "seam gate: blend width must be 1..4096");
+    // RenderPairSeamCut mixes where 0 < (x - seam)/width + 0.5 < 1, that is
+    // |x - seam| < width/2; whole pixels on both sides, rounded up.
+    const std::int64_t half = (static_cast<std::int64_t>(blend_width_px)+1)/2;
+    std::vector<BandRow> rows(seam_x.size());
+    for (std::size_t y = 0; y < seam_x.size(); ++y) {
+        Require(seam_x[y] < output_width, "seam gate: seam column outside the output");
+        const std::int64_t begin = std::max<std::int64_t>(0, static_cast<std::int64_t>(seam_x[y])-half);
+        const std::int64_t end = std::min<std::int64_t>(output_width, static_cast<std::int64_t>(seam_x[y])+half+1);
+        rows[y] = {static_cast<std::uint32_t>(begin), static_cast<std::uint32_t>(end)};
+    }
+    return rows;
+}
+
+TransitionContainment CheckTransitionBandContained(const std::vector<BandRow>& band, const std::vector<BandRow>& transition,
+    std::uint32_t output_width) {
+    Require(band.size() == transition.size(), "seam gate: band and transition differ in rows");
+    TransitionContainment c;
+    c.supplied = true;
+    for (std::size_t y = 0; y < transition.size(); ++y) {
+        const BandRow t = transition[y], b = band[y];
+        Require(t.begin <= t.end && t.end <= output_width && b.begin <= b.end && b.end <= output_width,
+            "seam gate: band row outside the output");
+        if (t.begin == t.end) continue;
+        std::uint64_t outside = 0;
+        std::uint32_t first = t.begin;
+        if (b.begin == b.end) outside = t.end-t.begin;
+        else {
+            if (t.begin < b.begin) outside += std::min(t.end, b.begin)-t.begin;
+            if (t.end > b.end) {
+                const std::uint32_t from = std::max(t.begin, b.end);
+                if (!outside) first = from;
+                outside += t.end-from;
+            }
+        }
+        if (!outside) continue;
+        if (!c.pixels_outside) { c.first_x = first; c.first_y = static_cast<std::uint32_t>(y); }
+        ++c.rows_outside;
+        c.pixels_outside += outside;
+    }
+    return c;
+}
+
 SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, const SeamGateGeometry& g,
     const SeamGateDesign& dz, const SeamGateLimits& limits, const DisplacementPrediction& prediction, unsigned threads) {
     ValidateSeamGateDesign(dz);
@@ -604,6 +725,8 @@ SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, co
     SeamMeasurement m;
     m.design = dz; m.limits = limits; m.width = g.width; m.height = g.height;
     m.prediction_supplied = static_cast<bool>(prediction);
+    m.global.radius_px = dz.global_search_radius_px;
+    if (!g.transition.empty()) m.containment = CheckTransitionBandContained(g.band,g.transition,g.width);
     std::uint32_t y0 = g.height, y1 = 0, x0 = g.width, x1 = 0;
     for (std::uint32_t y = 0; y < g.height; ++y) if (g.band[y].begin < g.band[y].end) {
         y0 = std::min(y0,y); y1 = y+1; x0 = std::min(x0,g.band[y].begin); x1 = std::max(x1,g.band[y].end);
@@ -620,7 +743,8 @@ SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, co
         }
     }
     // Raw crops: everything any search (up to the widest radius) can reach.
-    const int reach = static_cast<int>(std::max(dz.patch_px,dz.remeasure_patch_px)/2+2*dz.maximum_search_radius_px+dz.remeasure_shift_px+8);
+    const int reach = static_cast<int>(std::max(std::max(dz.patch_px,dz.remeasure_patch_px)/2+2*dz.maximum_search_radius_px+dz.remeasure_shift_px,
+        dz.patch_px/2+dz.global_search_radius_px)+8);
     Context c; c.design = &dz;
     c.a.map = &g.camera_a; c.b.map = &g.camera_b;
     for (auto* camera : {&c.a,&c.b}) {
@@ -691,7 +815,7 @@ SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, co
         });
         begin = end;
     }
-    for (auto* camera : {&c.a,&c.b}) { camera->strip = {}; camera->luma = {}; }
+    for (auto* camera : {&c.a,&c.b}) camera->strip = {};
 
     // Blocks.
     m.blocks.resize(static_cast<std::size_t>(m.block_columns)*m.block_rows);
@@ -730,6 +854,10 @@ SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, co
             pair = Agree({p.kind,p.normal,p.displacement,p.uncertainty_px},{q.kind,q.normal,q.displacement,q.uncertainty_px},dz);
         }
         if (!b.points) b.block_class = BlockClass::outside;
+        // #385 Q1 (owner decision, #385): a point over the line that
+        // remeasurement left unconfirmed makes the block unmeasurable, whatever
+        // else the block holds.
+        else if (b.unconfirmed_points) b.block_class = BlockClass::unmeasurable_content;
         else if (pair || confirmed) b.block_class = BlockClass::measured;
         else if (b.content_points) b.block_class = BlockClass::unmeasurable_content;
         else b.block_class = BlockClass::empty;
@@ -777,6 +905,39 @@ SeamMeasurement MeasureSeam(const BgrImage& image_a, const BgrImage& image_b, co
             b.predicted_px = std::hypot(predicted.x,predicted.y)+m.prediction_mismatch_px.value_or(0);
         }
     }
+    // Global placement (#392): the local search cannot tell a placement that
+    // is one period of a repeating pattern off. Measured blocks that hold a
+    // two-directional counted point are anchors; each is searched again over
+    // the wide radius. Anchors are taken in an order whose prefixes are spread
+    // over the band, at most global_maximum_evaluations of them.
+    m.global.performed = true;
+    {
+        std::vector<std::size_t> candidates;
+        for (std::size_t bi = 0; bi < m.blocks.size(); ++bi) {
+            if (m.blocks[bi].block_class != BlockClass::measured) continue;
+            std::optional<std::size_t> best;
+            for (const auto i : members[bi]) {
+                const auto& p = m.points[i];
+                if (!p.Counted() || p.status != PointStatus::valid || p.kind != PointKind::two_directional) continue;
+                if (!best || p.uncertainty_px < m.points[*best].uncertainty_px) best = i;
+            }
+            if (best) candidates.push_back(*best);
+        }
+        m.global.candidates = static_cast<std::uint32_t>(candidates.size());
+        auto order = SpreadOrder(candidates.size());
+        order.resize(std::min<std::size_t>(order.size(),dz.global_maximum_evaluations));
+        m.global.anchors.resize(order.size());
+        ParallelFor(order.size(),std::min(threads,kGlobalWorkers),[&](std::size_t k) {
+            m.global.anchors[k] = CheckGlobal(c,m.points[candidates[order[k]]]);
+        });
+        m.global.evaluated = static_cast<std::uint32_t>(order.size());
+        for (const auto& a : m.global.anchors) {
+            if (a.status == GlobalAnchorStatus::verified) ++m.global.verified;
+            else if (a.status == GlobalAnchorStatus::contradicted) ++m.global.contradicted;
+            else ++m.global.indeterminate;
+        }
+    }
+    for (auto* camera : {&c.a,&c.b}) camera->luma = {};
     return m;
 }
 
