@@ -92,6 +92,12 @@ void ValidateOutputRaster(const OutputRaster& raster);
 std::array<Point, 4> DocumentRasterCorners(const OutputRaster& raster);
 void ValidateCameraProjection(const CameraProjection& camera, const OutputRaster& raster);
 
+// The mapping RenderDocumentPair renders with: output sample (i,j) is the
+// document point (left+(i+0.5)*pitch, top+(j+0.5)*pitch) mm, projected by
+// TryProjectDocument. The returned function throws std::invalid_argument when
+// the projection is not representable. Shared with the seam gate (#386).
+OutputToCamera DocumentOutputToCamera(const OutputRaster& raster, const CameraProjection& camera);
+
 // Coverage is computed on the actual output sample grid. Every contiguous
 // overlap run [begin,end) along each row (horizontal layout) or column
 // (vertical layout) has CAM-B weight (sampleIndex-begin)/(end-begin).

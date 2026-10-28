@@ -277,6 +277,18 @@ else()
     target_compile_options(a0_m2_seam_blend PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Seam quality gate measurer and decision (#386, docs/M2_SEAM_QUALITY_GATE.md).
+# Pure buffers and output-to-camera mappings; never reads a composite.
+add_library(a0_m2_seam_gate src/m2/seam_gate.cpp src/m2/seam_gate_decision.cpp)
+target_include_directories(a0_m2_seam_gate PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_seam_gate PUBLIC a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_seam_gate)
+if(MSVC)
+    target_compile_options(a0_m2_seam_gate PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_seam_gate PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Pure bounded photometric estimation, no product/profile acceptance gate.
 add_library(a0_m2_color_correction src/m2/color_correction.cpp)
 target_include_directories(a0_m2_color_correction PUBLIC src/m2/include)
@@ -1380,6 +1392,19 @@ if(BUILD_TESTING)
         target_compile_options(m2_image_patch_refinement_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
     endif()
     add_test(NAME m2_image_patch_refinement_contracts COMMAND m2_image_patch_refinement_contracts)
+    # The scene generator (tests/seam_gate_scene.hpp) uses no gate header; the
+    # composites for the blend-independence check come from the renderers.
+    add_executable(m2_seam_gate_contracts tests/seam_gate_tests.cpp)
+    target_link_libraries(m2_seam_gate_contracts PRIVATE a0_m2_seam_gate a0_m2_seam_blend)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_seam_gate_contracts)
+    if(MSVC)
+        target_compile_options(m2_seam_gate_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_seam_gate_contracts COMMAND m2_seam_gate_contracts)
+    set_tests_properties(m2_seam_gate_contracts PROPERTIES TIMEOUT 1800)
+    # Full-size timing (7360x4912 pair); Release only, it is not a contract.
+    add_test(NAME m2_seam_gate_timing CONFIGURATIONS Release COMMAND m2_seam_gate_contracts --timing)
+    set_tests_properties(m2_seam_gate_timing PROPERTIES TIMEOUT 1800)
     add_executable(m2_stitch_correction_job_contracts tests/stitch_correction_job_tests.cpp)
     target_link_libraries(m2_stitch_correction_job_contracts PRIVATE a0_m2_stitch_correction_job)
     if(MSVC)
