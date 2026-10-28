@@ -100,6 +100,7 @@ int main(){
             const auto index=(static_cast<size_t>(y)*width+x)*3+c;left.bgr[index]=world(x,y);right.bgr[index]=static_cast<unsigned char>(world(x+dx,y+dy)*2+20);
         }
         const auto keep_left=left,keep_right=right;
+        // 80x60 is one level: the round trip repeats the same comparison here.
         const auto e=EstimateOverlapTranslation(left,right);
         check(at_v2(e,width,dx,dy) && e.reason==OverlapUndeterminedReason::none && e.reverse && e.reverse->overlap_pixels==e.candidates[0].overlap_pixels);
         check(e.candidates[0].correlation>0 && e.candidates[0].samples>3 && (e.candidates.size()<2 || e.candidates[0].evidence>e.candidates[1].evidence));
@@ -138,8 +139,9 @@ int main(){
     reject([&]{(void)OverlapUndeterminedLabel(OverlapUndeterminedReason::none);});
     // Negative controls at live size: the scene generator below is independent
     // of both estimators. Truth: overlap 310 px, B 12 px lower (dx=330, dy=12).
-    // Each records the baseline's result and requires v2 to return the true
-    // position or undetermined, never another applied position.
+    // Each records the baseline's result. v2 must never apply another
+    // position; today it applies the true one on all four, pinned per control
+    // so that a drift to undetermined is seen too.
     {
         constexpr int W=640,H=427,DX=330,DY=12;
         auto hash=[](int x,int y,unsigned seed){unsigned v=static_cast<unsigned>(x+4096)*2654435761u^static_cast<unsigned>(y+4096)*2246822519u^seed*3266489917u;
@@ -183,7 +185,7 @@ int main(){
             const auto e=EstimateOverlapTranslation(control.a,control.b),again=EstimateOverlapTranslation(control.a,control.b);
             const bool baseline_true=baseline && baseline->overlap_pixels==W-DX && baseline->vertical_pixels==DY;
             check(!baseline_true); // each control is a real failure of the baseline
-            check(!e.Applicable() || at_v2(e,W,DX,DY));
+            check(at_v2(e,W,DX,DY) && e.reason==OverlapUndeterminedReason::none && e.reverse && e.reverse->overlap_pixels==W-DX && e.reverse->vertical_pixels==DY);
             check(again.status==e.status && again.reason==e.reason && again.candidates.size()==e.candidates.size() &&
                 std::equal(e.candidates.begin(),e.candidates.end(),again.candidates.begin(),[](const auto& p,const auto& q){
                     return p.overlap_pixels==q.overlap_pixels && p.vertical_pixels==q.vertical_pixels && p.correlation==q.correlation && p.evidence==q.evidence && p.samples==q.samples;}));
@@ -191,10 +193,85 @@ int main(){
             if(baseline)std::cout<<baseline->overlap_pixels<<","<<baseline->vertical_pixels<<(baseline_true?" (true)":" (wrong)");else std::cout<<"none";
             std::cout<<" v2="<<OverlapEstimateStatusCode(e.status)<<"/"<<OverlapUndeterminedReasonCode(e.reason);
             if(!e.candidates.empty())std::cout<<" best="<<e.candidates[0].overlap_pixels<<","<<e.candidates[0].vertical_pixels<<" r="<<e.candidates[0].correlation<<" evidence="<<e.candidates[0].evidence;
-            if(e.candidates.size()>1)std::cout<<" second="<<e.candidates[1].overlap_pixels<<","<<e.candidates[1].vertical_pixels<<" evidence="<<e.candidates[1].evidence;
+            if(const auto* r=e.RunnerUp())std::cout<<" second="<<r->overlap_pixels<<","<<r->vertical_pixels<<" evidence="<<r->evidence;
             if(e.reverse)std::cout<<" reverse="<<e.reverse->overlap_pixels<<","<<e.reverse->vertical_pixels;
             std::cout<<" levels="<<e.levels<<"\n";
         }
+        // Further live-size inputs (#304 follow-up of #364). Same generators;
+        // each check records today's result, so a drift is visible.
+        auto shot_f=[&](auto scene,unsigned seed,int noise){
+            BgrImage image{W,H,std::vector<std::uint8_t>(static_cast<size_t>(W)*H*3)};
+            for(int y=0;y<H;++y)for(int x=0;x<W;++x){
+                double v=scene(x,y)+static_cast<int>(hash(x,y,seed)%(2*noise+1))-noise;
+                v=std::clamp(v,0.0,255.0);for(int c=0;c<3;++c)image.bgr[(static_cast<size_t>(y)*W+x)*3+c]=static_cast<std::uint8_t>(std::lround(v));
+            }
+            return image;};
+        // Bilinear value noise on a `cell` px lattice, defined between pixels.
+        auto field=[&](double x,double y,double cell){
+            const int cx=static_cast<int>(std::floor(x/cell)),cy=static_cast<int>(std::floor(y/cell));const double fx=x/cell-cx,fy=y/cell-cy;
+            auto v=[&](int i,int j){return static_cast<double>(hash(i,j,5)%201);};
+            return (v(cx,cy)*(1-fx)+v(cx+1,cy)*fx)*(1-fy)+(v(cx,cy+1)*(1-fx)+v(cx+1,cy+1)*fx)*fy;};
+        auto print=[&](const std::string& name,const OverlapEstimate& e){
+            std::cout<<"control="<<name<<" v2="<<OverlapEstimateStatusCode(e.status)<<"/"<<OverlapUndeterminedReasonCode(e.reason);
+            if(!e.candidates.empty())std::cout<<" best="<<e.candidates[0].overlap_pixels<<","<<e.candidates[0].vertical_pixels;
+            if(const auto* r=e.RunnerUp())std::cout<<" runner_up="<<r->overlap_pixels<<","<<r->vertical_pixels;
+            if(e.reverse)std::cout<<" reverse="<<e.reverse->overlap_pixels<<","<<e.reverse->vertical_pixels;
+            std::cout<<"\n";};
+        // B shifted by half a pixel vertically (true dy 12.5). Before the round
+        // trip shared full-resolution samples, forward found 12 and reverse
+        // 13 (reverse-mismatch), as once on the hung rig.
+        for(const double cell:{3.0,6.0}){
+            const auto e=EstimateOverlapTranslation(shot_f([&](int x,int y){return 30+field(x,y,cell);},51,2),
+                shot_f([&](int x,int y){return 30+field(x+DX,y+DY+0.5,cell);},52,2));
+            const auto* p=e.Applicable();
+            check(p && p->overlap_pixels==W-DX && p->vertical_pixels==DY &&
+                e.reverse && e.reverse->overlap_pixels==p->overlap_pixels && e.reverse->vertical_pixels==p->vertical_pixels);
+            print("half-pixel-cell"+std::to_string(static_cast<int>(cell)),e);
+        }
+        // True overlap 96 px (15%, dx=544, dy=5) under a wide lattice of dark
+        // 3 px lines: every lattice period aligns the lattice at a wider
+        // overlap with more samples, and the ranking prefers the larger window
+        // when correlations are close. Results are pinned per input, not
+        // judged here. Two apply the truth. The two undetermined ones are
+        // saved by chance: with periods 24 and 40 one lattice position falls
+        // exactly on the range edge dx=64 (overlap 576), so the best or the
+        // reverse best stops there. Period 64, lines 80, ink 30 applies the
+        // lattice at overlap 544 in both directions (recorded wrong, #304);
+        // fixing that needs a new threshold-free check.
+        struct Lattice {int period;double depth,ink;OverlapUndeterminedReason reason;unsigned best;};
+        for(const auto& l:{Lattice{40,40,30,OverlapUndeterminedReason::reverse_mismatch,96},Lattice{40,80,30,OverlapUndeterminedReason::search_boundary,576},
+            Lattice{64,80,60,OverlapUndeterminedReason::none,96},Lattice{24,40,60,OverlapUndeterminedReason::none,96},Lattice{64,80,30,OverlapUndeterminedReason::none,544}}){
+            constexpr int SX=544,SY=5;
+            auto scene=[&](int x,int y){return drawing(x,y,l.ink)-((x%l.period)<3 || (y%l.period)<3?l.depth:0.0);};
+            const auto e=EstimateOverlapTranslation(shot([&](int x,int y){return scene(x,y);},0,61,2),shot([&](int x,int y){return scene(x+SX,y+SY);},0,62,2));
+            const bool applied=l.reason==OverlapUndeterminedReason::none;
+            check(e.reason==l.reason && (e.Applicable()!=nullptr)==applied && !e.candidates.empty() &&
+                e.candidates[0].overlap_pixels==l.best && e.candidates[0].vertical_pixels==SY);
+            print("lattice-p"+std::to_string(l.period)+"-g"+std::to_string(static_cast<int>(l.depth))+"-i"+std::to_string(static_cast<int>(l.ink))+
+                (applied && l.best!=W-SX?" (recorded wrong, #304)":""),e);
+        }
+        // Smooth field shifted by (DX,DY) plus pixel noise texture shifted
+        // `delta` px further: the coarse levels follow the field, full
+        // resolution the texture. Records the two path-dependent reasons.
+        auto mixed=[&](int delta){
+            auto tex=[&](int x,int y){return static_cast<double>(static_cast<int>(hash(x,y,71)%13)-6);};
+            return EstimateOverlapTranslation(shot_f([&](int x,int y){return 30+field(x,y,24)+tex(x,y);},0,0),
+                shot_f([&](int x,int y){return 30+field(x+DX,y+DY,24)+tex(x+DX+delta,y+DY);},0,0));};
+        {
+            const auto e=mixed(10);check(!e.Applicable() && e.reason==OverlapUndeterminedReason::reverse_mismatch && e.reverse &&
+                (e.reverse->overlap_pixels!=e.candidates[0].overlap_pixels || e.reverse->vertical_pixels!=e.candidates[0].vertical_pixels));print("mixed-10",e);
+        }
+        {const auto e=mixed(20);check(!e.Applicable() && e.reason==OverlapUndeterminedReason::refinement_boundary && !e.reverse);print("mixed-20",e);}
+    }
+    // Runner-up skips the best's refined neighbour; Applicable never reads an
+    // empty list.
+    {
+        OverlapEstimate e;e.status=OverlapEstimateStatus::estimated_not_judged;e.reason=OverlapUndeterminedReason::none;
+        check(!e.Applicable() && !e.RunnerUp());
+        e.candidates={{310,12,0.9,500,1000},{311,13,0.8,400,1000},{309,12,0.8,390,1000},{300,5,0.1,20,1000}};
+        check(e.Applicable()==&e.candidates[0] && e.RunnerUp()==&e.candidates[3]);
+        e.candidates.resize(3);check(!e.RunnerUp());
+        e.candidates.push_back({310,14,0.1,10,1000});check(e.RunnerUp()==&e.candidates[3]);
     }
     check(PreviewMergeTitle(MountOrientation::normal,12,-3)==L"C 仮Merge（未校正） 取付の向き: 通常 / A:左 + B:右 / 重なり 12px / B上下 -3px");
     check(PreviewMergeTitle(turn,12,0).find(L"取付の向き: 180°回転")!=std::wstring::npos);
