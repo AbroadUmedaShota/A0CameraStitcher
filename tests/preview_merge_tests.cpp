@@ -100,6 +100,7 @@ int main(){
             const auto index=(static_cast<size_t>(y)*width+x)*3+c;left.bgr[index]=world(x,y);right.bgr[index]=static_cast<unsigned char>(world(x+dx,y+dy)*2+20);
         }
         const auto keep_left=left,keep_right=right;
+        // 80x60 is one level: the round trip repeats the same comparison here.
         const auto e=EstimateOverlapTranslation(left,right);
         check(at_v2(e,width,dx,dy) && e.reason==OverlapUndeterminedReason::none && e.reverse && e.reverse->overlap_pixels==e.candidates[0].overlap_pixels);
         check(e.candidates[0].correlation>0 && e.candidates[0].samples>3 && (e.candidates.size()<2 || e.candidates[0].evidence>e.candidates[1].evidence));
@@ -223,27 +224,31 @@ int main(){
             const auto e=EstimateOverlapTranslation(shot_f([&](int x,int y){return 30+field(x,y,cell);},51,2),
                 shot_f([&](int x,int y){return 30+field(x+DX,y+DY+0.5,cell);},52,2));
             const auto* p=e.Applicable();
-            check(p && p->overlap_pixels==W-DX && (p->vertical_pixels==DY || p->vertical_pixels==DY+1) &&
+            check(p && p->overlap_pixels==W-DX && p->vertical_pixels==DY &&
                 e.reverse && e.reverse->overlap_pixels==p->overlap_pixels && e.reverse->vertical_pixels==p->vertical_pixels);
             print("half-pixel-cell"+std::to_string(static_cast<int>(cell)),e);
         }
         // True overlap 96 px (15%, dx=544, dy=5) under a wide lattice of dark
         // 3 px lines: every lattice period aligns the lattice at a wider
-        // overlap with more samples. The required result is the true position
-        // or undetermined. Recorded exception: with a 64 px period, lines 80
-        // deep and drawing ink 30, v2 applies overlap 544 (the lattice at
-        // dx=96) in both directions. Its ranking prefers the larger window
-        // when correlations are close; fixing it needs a new threshold-free
-        // check (#304), so the wrong result is pinned here until then.
-        struct Lattice {int period;double depth,ink;bool recorded_wrong;};
-        for(const auto& l:{Lattice{40,40,30,false},Lattice{40,80,30,false},Lattice{64,80,60,false},Lattice{24,40,60,false},Lattice{64,80,30,true}}){
+        // overlap with more samples, and the ranking prefers the larger window
+        // when correlations are close. Results are pinned per input, not
+        // judged here. Two apply the truth. The two undetermined ones are
+        // saved by chance: with periods 24 and 40 one lattice position falls
+        // exactly on the range edge dx=64 (overlap 576), so the best or the
+        // reverse best stops there. Period 64, lines 80, ink 30 applies the
+        // lattice at overlap 544 in both directions (recorded wrong, #304);
+        // fixing that needs a new threshold-free check.
+        struct Lattice {int period;double depth,ink;OverlapUndeterminedReason reason;unsigned best;};
+        for(const auto& l:{Lattice{40,40,30,OverlapUndeterminedReason::reverse_mismatch,96},Lattice{40,80,30,OverlapUndeterminedReason::search_boundary,576},
+            Lattice{64,80,60,OverlapUndeterminedReason::none,96},Lattice{24,40,60,OverlapUndeterminedReason::none,96},Lattice{64,80,30,OverlapUndeterminedReason::none,544}}){
             constexpr int SX=544,SY=5;
             auto scene=[&](int x,int y){return drawing(x,y,l.ink)-((x%l.period)<3 || (y%l.period)<3?l.depth:0.0);};
             const auto e=EstimateOverlapTranslation(shot([&](int x,int y){return scene(x,y);},0,61,2),shot([&](int x,int y){return scene(x+SX,y+SY);},0,62,2));
-            const auto* p=e.Applicable();
-            if(l.recorded_wrong)check(p && p->overlap_pixels==544 && p->vertical_pixels==SY);
-            else check(!p || (p->overlap_pixels==W-SX && p->vertical_pixels==SY));
-            print("lattice-p"+std::to_string(l.period)+"-g"+std::to_string(static_cast<int>(l.depth))+"-i"+std::to_string(static_cast<int>(l.ink)),e);
+            const bool applied=l.reason==OverlapUndeterminedReason::none;
+            check(e.reason==l.reason && (e.Applicable()!=nullptr)==applied && !e.candidates.empty() &&
+                e.candidates[0].overlap_pixels==l.best && e.candidates[0].vertical_pixels==SY);
+            print("lattice-p"+std::to_string(l.period)+"-g"+std::to_string(static_cast<int>(l.depth))+"-i"+std::to_string(static_cast<int>(l.ink))+
+                (applied && l.best!=W-SX?" (recorded wrong, #304)":""),e);
         }
         // Smooth field shifted by (DX,DY) plus pixel noise texture shifted
         // `delta` px further: the coarse levels follow the field, full

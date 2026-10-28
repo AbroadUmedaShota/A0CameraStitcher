@@ -145,7 +145,7 @@ void MergeLoop(std::stop_token stop){
                         // A manual change already replaced the status; a stale or
                         // stopping pair must not leave "computing" on screen.
                         Log(std::string("C auto_overlap_v2 discarded=")+(stopping?"stopping":"stale"));
-                        merged.alignment_status=L"映像が古くなったため適用していません。もう一度押してください";
+                        merged.alignment_status=stopping?L"停止したため適用していません":L"映像が古くなったため適用していません。もう一度押してください";
                     }
                 }
                 auto result=RenderPreviewMerge(small_a,small_b,overlap,vertical);

@@ -172,7 +172,10 @@ OverlapEstimate EstimateOverlapTranslation(const render::BgrImage& a, const rend
     // compares the forward gradient samples, turned: the integer position is
     // rounded once, the same way in both directions, so a shift near half a
     // pixel does not flip the round trip. With a single level the search is
-    // exhaustive at full resolution and the round trip repeats it.
+    // exhaustive at full resolution and the round trip repeats it. A
+    // position reached in both directions scores from the same samples
+    // (summed in the opposite order), so the final ranking agrees unless two
+    // scores tie to rounding; what the round trip checks is the coarse path.
     auto turned = Build(Turn(lb),Turn(la));
     turned.front() = {Turn(pyramid.front().second),Turn(pyramid.front().first)};
     const auto reverse = Search(turned,full);
