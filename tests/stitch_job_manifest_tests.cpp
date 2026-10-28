@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -41,9 +42,30 @@ void CheckRejected(std::string_view expected_code, Callable&& callable, std::str
     }
 }
 
+// Parent of the per-test folders: A0_TEST_TMPDIR when set (Issue #395), else
+// the system temporary folder.
+fs::path TempParent() {
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&value, &length, "A0_TEST_TMPDIR") == 0 && value != nullptr) {
+        const std::string text(value);
+        std::free(value);
+        if (!text.empty()) {
+            return fs::path(text);
+        }
+    }
+#else
+    if (const char* value = std::getenv("A0_TEST_TMPDIR"); value != nullptr && *value != '\0') {
+        return fs::path(value);
+    }
+#endif
+    return fs::temp_directory_path();
+}
+
 fs::path MakeTempRoot() {
     static std::atomic<unsigned long long> sequence{};
-    const auto root = fs::temp_directory_path() /
+    const auto root = TempParent() /
         ("a0-stitch-job-manifest-" + std::to_string(++sequence) + "-" +
          std::to_string(reinterpret_cast<std::uintptr_t>(&sequence)));
     fs::remove_all(root);
