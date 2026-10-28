@@ -157,6 +157,7 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 
    ```powershell
    Get-FileHash -Algorithm SHA256 "$env:LOCALAPPDATA\A0CameraStitcher\phase0\camera-map-wpd.json"
+   Get-FileHash -Algorithm SHA256 "$env:LOCALAPPDATA\A0CameraStitcher\phase0\wpd-mount-orientation.json"  # あれば
    ```
 
 4. 下の「撮影の設定」のとおり、両台のピントを AF で 1 回だけ合わせる
@@ -166,6 +167,7 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 ### 撮影の設定
 
 - ピントは AF（AF-S）で合わせる。レンズのフォーカスモードは AF のままにし、MF に切り替えない。校正の撮影の最初に 1 回だけ、開発画面の各カメラの「AF」ボタンで両台のピントを合わせる。その時は、机に平らに置いた紙のチャートが各カメラの画面の中央にかかるようにする（図面と同じ机の面に合わせるため）
+- 開発画面（`Start-WpdDualLivePreview.ps1`）の両台撮影は AF をかけずに撮る（no-AF の撮影）。AF がかかるのは「AF」ボタンを押したときだけ。通常画面（OperatorShell）の撮影経路にある AF 付きの撮影は使わない（通常画面の経路を使う場合は別に確かめる、※要確認）
 - 一連の撮影（13 回と撮り足し）の間は AF をかけ直さない。AF をかけ直すと、倍率と歪みがわずかに変わりうる（※推定）。かけ直してしまったときは、その回の番号と時刻を記録に書く。図面を撮るときにかける AF と、校正のときの AF の差が写像にどれだけ入るかは確かめていない（※要確認）
 - AF-S は合焦を確かめてから撮るので、画面の中央に線や模様が無いと撮影が拒まれうる。チャートと図面は、各カメラの画面の中央に線や模様がかかるように置く。チャートを画面の縁に寄せる回（板を範囲の端に寄せる回、下の撮り足し）は、チャートの反対側の端か中央が画面の中央に来るように置く。A3 で届かないときは、もう 1 枚のチャートを画面の中央にかかるように置く
 - 絞り F8。図面を撮る時と同じ絞りにする（本番の絞りは ADR-0033 6 節で未決。※要確認）
@@ -247,10 +249,10 @@ cmake --build build/reference --config Release --target A0CameraStitcher.Fiducia
      -CalibrationJob <calibration-job.json> `
      -DetectorExecutable build/reference/Release/A0CameraStitcher.FiducialDetector.exe `
      -CalibratorExecutable build/reference/Release/A0CameraStitcher.DraftCalibrator.exe `
-     -OutputDirectory <親が存在する新規出力フォルダ>
+     -OutputDirectory <リポジトリの外かbuild/の下の新規フォルダ（親は存在すること）>
    ```
 
-   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。draft であり、承認された校正ではない。どちらかの job がリポジトリの中（別の worktree やメインのチェックアウトを含む、`.git` を持つフォルダの下）にあると、何も作らずに exit 2 で止まり、`error=draft-calibration-pipeline-job-inside-repository` と出る。出力先が深すぎると `error=draft-calibration-pipeline-output-path-too-long` で止まる（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
+   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。draft であり、承認された校正ではない。どちらかの job がリポジトリの中（別の worktree やメインのチェックアウトを含む、`.git` を持つフォルダの下）にあると、何も作らずに exit 2 で止まり、`error=draft-calibration-pipeline-job-inside-repository` と出る。出力先がリポジトリの中で `build/` の下でもないと `error=draft-calibration-pipeline-output-inside-repository` で止まる（出力には job の写しと session が入る）。出力先が深すぎると `error=draft-calibration-pipeline-output-path-too-long` で止まる（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
 
 ## 9. A4 と A0 を使う場合（代替）
 

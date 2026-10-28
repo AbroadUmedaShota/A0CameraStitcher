@@ -17,14 +17,14 @@ pwsh -NoProfile -File scripts/Invoke-DraftCalibrationPipeline.ps1 `
   -CalibrationJob <calibration-job.json> `
   -DetectorExecutable build/reference/Release/A0CameraStitcher.FiducialDetector.exe `
   -CalibratorExecutable build/reference/Release/A0CameraStitcher.DraftCalibrator.exe `
-  -OutputDirectory <親が存在する新規出力フォルダ>
+  -OutputDirectory <リポジトリの外かbuild/の下の新規フォルダ（親は存在すること）>
 ```
 
 パスに空白がある場合は引用符で囲む。画像名の基準は**元のDetectionJobのフォルダ**。実行時のカレントフォルダや、保存したjob snapshotのフォルダには変えない。検出jobには3つ以上のoperator anchorを明示し、検出器がその対応をチャート模様で確認する。自動的なanchor決定やreference選択は追加しない。
 
 両jobを読み取りロックし、元のバイト列をsnapshotに保存した状態でnativeツールを順次実行する。jobのサイズ上限は検出1 MiB、校正64 KiB。検出jobの入力契約、writerのvalidation必須条件、D810寸法・draft限定の条件は既存ツールが検査する。
 
-記入済みの検出jobと校正jobは**リポジトリの外のフォルダ**に置く。記入すると撮影時刻・provenanceId・rigMeasurementsが入り、`*.json`は.gitignoreの対象外なので、リポジトリの中に置くとcommitに乗りうる。どちらかのjobがこのリポジトリの中、または祖先のフォルダに`.git`（フォルダかファイル）を持つ場所（別のworktree・メインのチェックアウト・submoduleを含む）にあれば、何も作らずにexit 2で止まり、stderrに`error=draft-calibration-pipeline-job-inside-repository phase=preflight`と出す。シンボリックリンクやjunctionでリポジトリの外に見せかけた場所は見分けない。
+記入済みの検出jobと校正jobは**リポジトリの外のフォルダ**に置く。記入すると撮影時刻・provenanceId・rigMeasurementsが入り、`*.json`は.gitignoreの対象外なので、リポジトリの中に置くとcommitに乗りうる。どちらかのjobがこのリポジトリの中、または祖先のフォルダに`.git`（フォルダかファイル）を持つ場所（別のworktree・メインのチェックアウト・submoduleを含む）にあれば、何も作らずにexit 2で止まり、stderrに`error=draft-calibration-pipeline-job-inside-repository phase=preflight`と出す。出力にはjobの写しとsessionが入るので、出力先も同じ判定で拒否する（`error=draft-calibration-pipeline-output-inside-repository phase=preflight`）。ただし、その作業ツリーの一番上の`build/`の下（.gitignoreの対象。合成試験の`-EvidenceParent build/reference`）は許す。シンボリックリンクやjunctionでリポジトリの外に見せかけた場所は見分けない。
 
 nativeツールは長いパス（260文字以上）を扱わない。作業フォルダ`<出力名>.partial-<32桁>`の下で最も深い成果物（校正の`draft.partial-<プロセスID>/calibration-report.json`）が260文字以上になる出力先は、作業を始める前にexit 2で止まり、`error=draft-calibration-pipeline-output-path-too-long phase=preflight`と出す。出力先を浅いフォルダにする。
 
@@ -79,10 +79,10 @@ pwsh -NoProfile -File scripts/Test-DraftCalibrationPipeline.ps1 `
 
 試験は実際のnativeツールを呼ぶ。JPEG18枚の成功出力を#314のlibrary実行とbyte照合し、全画像不変・両jobの書込みロック・各artifactの独立hash・空白/日本語/角括弧を含むパス・失敗時の後段非起動・非上書き・入力/IO失敗・並行実行を確認する。生成物は新規の合成試験フォルダ（`<EvidenceParent>/cpt-<12桁>`）に保持する。
 
-フィクスチャはチェックアウトの`build/`の下にあり、そのままではjobがリポジトリの中と判定されて拒否される。そこで試験は、画像のパスを絶対パスに書き換えた検出jobと、校正jobのコピーを、ユーザーの一時フォルダの新しいフォルダ（`a0-cpt-jobs-<12桁>`、最後に`jobs=`で表示）に置いて流す。出力のバイト列は画像の場所に依存しない（検出レポートには画像のファイル名とSHA-256だけが入る）。加えて、リポジトリの中のjob（追跡済みの例と、存在しないパス）・`.git`ファイルを持つ別の作業ツリーのjob・深すぎる出力先が、作業フォルダを作らずにexit 2と決まったstderrで止まることを確かめる。`EvidenceParent`が深すぎると、試験は流す前に止まる。
+フィクスチャはチェックアウトの`build/`の下にあり、そのままではjobがリポジトリの中と判定されて拒否される。そこで試験は、画像のパスを絶対パスに書き換えた検出jobと、校正jobのコピーを、ユーザーの一時フォルダの新しいフォルダ（`a0-cpt-jobs-<12桁>`）に置いて流す。全体が成功したらこのフォルダだけを消し（`jobs=removed`）、失敗したら診断のために残してパスを`jobs=`で表示する。出力のバイト列は画像の場所に依存しない（検出レポートには画像のファイル名とSHA-256だけが入る）。加えて、リポジトリの中のjob（追跡済みの例と、存在しないパス）・`.git`ファイルを持つ別の作業ツリーのjob・作業ツリーの中で`build/`の外の出力先・深すぎる出力先が、作業フォルダを作らずにexit 2と決まったstderrで止まることを確かめる。`EvidenceParent`が深すぎると、試験は流す前に止まる。
 
 以前の版は、子のpwshを`$PSHOME`から起動していた。ストア版のPowerShellが起動できないのではなく、試験のフォルダ名（32桁のGUID）と出力名と`.partial-<32桁>`を足すと260文字近くになり、作業フォルダの作成（`CreateDirectoryW`、Win32エラー206）で止まっていた。深いフォルダを`EvidenceParent`に渡したときに起きる。今の版は試験のフォルダ名を短くし、子のpwshを実行中のpwsh（`[Environment]::ProcessPath`）から起動する。
 
-2026-10-15: Windows / PowerShell 7.6.7 / native Releaseで46チェック・失敗0。生成したprofile/sessionは既存JSON schemaを通り、同じバイト列を既存.NET readerの生成artifact確認へ渡して7チェック成功（fingerprint・session SHA-256一致、製品のapproved使用gateでdraft拒否を含む）。native/CMake/.NETの実装変更は無い。jobの置き場所と出力先の深さの検査を足した版では、同じフィクスチャ・Windows / PowerShell 7.6.9 / native Releaseで51チェック・失敗0（増えた5つは上の拒否の確認）。
+2026-10-15: Windows / PowerShell 7.6.7 / native Releaseで46チェック・失敗0。生成したprofile/sessionは既存JSON schemaを通り、同じバイト列を既存.NET readerの生成artifact確認へ渡して7チェック成功（fingerprint・session SHA-256一致、製品のapproved使用gateでdraft拒否を含む）。native/CMake/.NETの実装変更は無い。jobの置き場所と出力先の深さの検査を足した版では、同じフィクスチャ・Windows / PowerShell 7.6.9 / native Releaseで55チェック・失敗0（増えた9つは上の拒否と`build/`の除外の確認）。
 
 実写の検出・色/継ぎ目/解像品質、承認済みprofileの発行、撮影ごとの補正、製品アプリへの接続はこのツールの完了条件に含めない。

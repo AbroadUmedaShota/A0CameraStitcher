@@ -192,6 +192,21 @@ try {
     }
     Check (-not [IO.File]::Exists($absentDetection)) 'the refusal writes nothing into the repository'
 
+    Write-Host 'preflight: an output inside a git working tree is refused, except below build/'
+    $refusedOutput = 'error=draft-calibration-pipeline-output-inside-repository phase=preflight'
+    foreach ($output in @((Join-Path $repositoryRoot ('samples/public/pipeline-' + $suffix)), (Join-Path $otherTree ('out-' + $suffix)))) {
+        $result = Invoke-Pipeline $goodDetection $goodCalibration $output
+        Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq $refusedOutput -and
+            -not [IO.Path]::Exists($output) -and (Partials $output).Count -eq 0) 'output inside a git working tree is refused before staging'
+    }
+    # Below build/ the location check passes; a missing parent or the absent
+    # tool then stops the run before staging, so nothing is written there.
+    foreach ($output in @((Join-Path $repositoryRoot ('build/pipeline-' + $suffix)), (Join-Path $otherTree ('build/out-' + $suffix)))) {
+        $result = Invoke-Pipeline $goodDetection $goodCalibration $output (Join-Path $tools 'absent.exe')
+        Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq 'error=draft-calibration-pipeline-input-tool-or-io-failed phase=preflight' -and
+            -not [IO.Path]::Exists($output)) 'output below build/ of a working tree passes the location check'
+    }
+
     Write-Host 'preflight: an output too deep for the native tools is refused'
     $deepOutput = Join-Path $root ('d' * [Math]::Max(1, 220 - $root.Length))
     $result = Invoke-Pipeline $goodDetection $goodCalibration $deepOutput
@@ -265,5 +280,18 @@ try {
 }
 Write-Host "draft_calibration_pipeline checks=$script:checks failures=$script:failures"
 Write-Host "evidence=$root"
-Write-Host "jobs=$jobRoot"
+if ($script:failures -eq 0) {
+    # Only the exact folder this run created under the temp directory; kept on
+    # failure for diagnosis. Copied JPEGs may carry the read-only attribute.
+    try {
+        Get-ChildItem -LiteralPath $jobRoot -Recurse -File -Force | ForEach-Object { $_.Attributes = [IO.FileAttributes]::Normal }
+        [IO.Directory]::Delete($jobRoot, $true)
+        Write-Host 'jobs=removed'
+    } catch {
+        Write-Host "warning: could not remove the temporary job folder: $($_.Exception.Message)"
+        Write-Host "jobs=$jobRoot"
+    }
+} else {
+    Write-Host "jobs=$jobRoot"
+}
 exit $(if ($script:failures -eq 0) { 0 } else { 1 })

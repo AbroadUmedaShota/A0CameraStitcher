@@ -11,14 +11,17 @@ optical quality and does not control a camera.
 
 Exit 0: draft produced. Exit 3: recorded detection/calibration failure, no
 profile. Exit 2: input, tool-protocol or IO error; any partial folder is retained.
-The stderr line names the refusal (job-inside-repository, output-path-too-long)
-or the generic input-tool-or-io-failed, never a path.
+The stderr line names the refusal (job-inside-repository,
+output-inside-repository, output-path-too-long) or the generic
+input-tool-or-io-failed, never a path.
 PowerShell parameter-binding errors use PowerShell's own exit code.
 
 Filled-in jobs carry capture times, provenance and rig measurements, and *.json
 is not ignored by git. Both jobs must therefore live outside this repository
 and outside any git working tree (a folder with a .git entry, including other
-worktrees); such a job is refused before anything is staged.
+worktrees); such a job is refused before anything is staged. The output holds
+copies of both jobs and the session, so it is refused the same way, except
+below the build folder at the top of a working tree (build/ is ignored).
 
 The native tools do not use long paths. An output whose staging folder would
 put a native artifact at 260 characters or more is refused before staging.
@@ -40,17 +43,29 @@ function Full-Path([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { throw 'Empty path.' }
     return [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Value))
 }
-function Test-InsideRepository([string]$Path, [string]$RepositoryRoot) {
+function Get-WorkingTreeRoot([string]$Path, [string]$RepositoryRoot) {
+    # The working tree that contains Path, or $null: this repository, or any
+    # other git working tree (a main checkout, another worktree or a submodule
+    # has a .git directory or file in one of its ancestors).
     $separator = [IO.Path]::DirectorySeparatorChar
-    if ($Path.StartsWith($RepositoryRoot + $separator, [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    # Also any other git working tree: a main checkout, another worktree or a
-    # submodule has a .git directory or file in one of its ancestors.
+    if ($Path -ieq $RepositoryRoot -or $Path.StartsWith($RepositoryRoot + $separator, [StringComparison]::OrdinalIgnoreCase)) { return $RepositoryRoot }
     $directory = [IO.Path]::GetDirectoryName($Path)
     while (-not [string]::IsNullOrEmpty($directory)) {
-        if ([IO.Path]::Exists((Join-Path $directory '.git'))) { return $true }
+        if ([IO.Path]::Exists((Join-Path $directory '.git'))) { return [IO.Path]::TrimEndingDirectorySeparator($directory) }
         $directory = [IO.Path]::GetDirectoryName($directory)
     }
-    return $false
+    return $null
+}
+function Test-InsideRepository([string]$Path, [string]$RepositoryRoot) {
+    return $null -ne (Get-WorkingTreeRoot $Path $RepositoryRoot)
+}
+function Test-OutputInsideRepository([string]$Path, [string]$RepositoryRoot) {
+    $tree = Get-WorkingTreeRoot $Path $RepositoryRoot
+    if ($null -eq $tree) { return $false }
+    # build/ at the top of a working tree is ignored (the documented evidence
+    # parent of the synthetic test is build/reference).
+    $build = Join-Path $tree 'build'
+    return -not $Path.StartsWith($build + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
 }
 function New-Bytes([string]$Path, [byte[]]$Bytes) {
     $file = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -156,6 +171,10 @@ try {
     $detector = Full-Path $DetectorExecutable
     $calibrator = Full-Path $CalibratorExecutable
     $output = [IO.Path]::TrimEndingDirectorySeparator((Full-Path $OutputDirectory))
+    if (Test-OutputInsideRepository $output $repositoryRoot) {
+        $errorCode = 'draft-calibration-pipeline-output-inside-repository'
+        throw 'The output must be outside the repository, or below build/ of a working tree.'
+    }
     $parent = [IO.Path]::GetDirectoryName($output)
     if (-not [IO.Directory]::Exists($parent) -or [IO.Path]::Exists($output)) { throw 'Output must be new with an existing parent.' }
     if (-not [IO.File]::Exists($detector) -or -not [IO.File]::Exists($calibrator)) { throw 'Both native tools are required.' }
