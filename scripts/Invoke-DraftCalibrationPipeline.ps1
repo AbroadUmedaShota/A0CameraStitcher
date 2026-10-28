@@ -9,6 +9,12 @@ modified. A new directory holds observations, draft artifacts, job snapshots,
 private child logs and a hash inventory. This does not approve calibration or
 optical quality and does not control a camera.
 
+Exit 0: draft produced. Exit 3: recorded detection/calibration failure, no
+profile. Exit 2: input, tool-protocol or IO error; any partial folder is retained.
+The stderr line names the refusal (job-inside-repository, output-path-too-long)
+or the generic input-tool-or-io-failed, never a path.
+PowerShell parameter-binding errors use PowerShell's own exit code.
+
 Filled-in jobs carry capture times, provenance and rig measurements, and *.json
 is not ignored by git. Both jobs must therefore live outside this repository
 and outside any git working tree (a folder with a .git entry, including other
@@ -16,12 +22,6 @@ worktrees); such a job is refused before anything is staged.
 
 The native tools do not use long paths. An output whose staging folder would
 put a native artifact at 260 characters or more is refused before staging.
-
-Exit 0: draft produced. Exit 3: recorded detection/calibration failure, no
-profile. Exit 2: input, tool-protocol or IO error; any partial folder is retained.
-The stderr line names the refusal (job-inside-repository, output-path-too-long)
-or the generic input-tool-or-io-failed, never a path.
-PowerShell parameter-binding errors use PowerShell's own exit code.
 #>
 [CmdletBinding()]
 param(
