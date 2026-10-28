@@ -30,14 +30,39 @@ if ((Tree (Join-Path $fixture 'truth-comparison.json'))['schema'] -cne 'a0.synth
 $detector = Join-Path $tools 'A0CameraStitcher.FiducialDetector.exe'
 $calibrator = Join-Path $tools 'A0CameraStitcher.DraftCalibrator.exe'
 foreach ($tool in @($detector, $calibrator)) { if (-not [IO.File]::Exists($tool)) { throw 'Build the real native tools first.' } }
-$root = Join-Path $parent ('calibration-pipeline-tests-' + [Guid]::NewGuid().ToString('N'))
+function Test-InGitTree([string]$Path) {
+    for ($directory = $Path; -not [string]::IsNullOrEmpty($directory); $directory = [IO.Path]::GetDirectoryName($directory)) {
+        if ([IO.Path]::Exists((Join-Path $directory '.git'))) { return $true }
+    }
+    return $false
+}
+# Short names: the native tools do not use long paths, and the pipeline refuses
+# an output whose deepest native artifact would reach 260 characters.
+$suffix = [Guid]::NewGuid().ToString('N').Substring(0, 12)
+$root = Join-Path $parent ('cpt-' + $suffix)
+# Longest output name below (22) + '.partial-' and 32 hex digits (41) + the
+# calibrator's deepest artifact (49, see the pipeline) must stay below 260.
+if ($root.Length + 1 + 22 + 41 + 49 -ge 260) { throw 'EvidenceParent is too deep for the native tools; use a shorter folder.' }
 [void][IO.Directory]::CreateDirectory($root)
-$goodDetection = Join-Path $fixture 'detection-job.json'
-$goodCalibration = Join-Path $fixture 'job.json'
+# The pipeline refuses jobs inside any git working tree, and the documented
+# fixture and evidence folders are under build/ of a checkout. Filled-in copies
+# of the jobs therefore go to a new folder under the user's temp directory.
+$jobRoot = Join-Path ([IO.Path]::GetTempPath()) ('a0-cpt-jobs-' + $suffix)
+if (Test-InGitTree $jobRoot) { throw 'The temp directory is inside a git working tree.' }
+[void][IO.Directory]::CreateDirectory($jobRoot)
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$fixtureDetection = Join-Path $fixture 'detection-job.json'
+$fixtureDetectionTree = Tree $fixtureDetection
+foreach ($view in $fixtureDetectionTree['views']) { $view['image'] = Join-Path $fixture $view['image'] }
+$goodDetection = Join-Path $jobRoot 'detection-job.json'
+Write-Json $goodDetection $fixtureDetectionTree
+$goodCalibration = Join-Path $jobRoot 'job.json'
+[IO.File]::Copy((Join-Path $fixture 'job.json'), $goodCalibration, $false)
 
 function Start-Pipeline([string]$Detection, [string]$Calibration, [string]$Output, [string]$Detector = $detector) {
     $info = [Diagnostics.ProcessStartInfo]::new()
-    $info.FileName = Join-Path $PSHOME 'pwsh.exe'
+    # The running pwsh, whichever package or folder it came from.
+    $info.FileName = [Environment]::ProcessPath
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
@@ -83,7 +108,7 @@ function Partials([string]$Output) {
 try {
     Write-Host 'integration: actual 18 JPEGs -> native detector -> native draft writer'
     $originals = @{}
-    foreach ($view in (Tree $goodDetection)['views']) { $originals[$view['image']] = Hash (Join-Path $fixture $view['image']) }
+    foreach ($view in (Tree $fixtureDetection)['views']) { $originals[$view['image']] = Hash (Join-Path $fixture $view['image']) }
     $success = Join-Path $root '成功 空白 [draft]'
     $run = Start-Pipeline $goodDetection $goodCalibration $success
     # Wait for snapshots, which are written after both original jobs are locked.
@@ -136,7 +161,7 @@ try {
         [IO.File]::ReadAllText($existingFile) -ceq 'sentinel') 'existing file at output is unchanged'
     foreach ($case in @(@('empty-detection', 0, $true), @('large-detection', (1MB + 1), $true),
         @('empty-calibration', 0, $false), @('large-calibration', (64KB + 1), $false))) {
-        $jobFile = Join-Path $root ($case[0] + '.json')
+        $jobFile = Join-Path $jobRoot ($case[0] + '.json')
         [IO.File]::WriteAllBytes($jobFile, [byte[]]::new($case[1]))
         $output = Join-Path $root $case[0]
         $detection = if ($case[2]) { $jobFile } else { $goodDetection }
@@ -144,10 +169,54 @@ try {
         Check ((Invoke-Pipeline $detection $calibration $output).ExitCode -eq 2 -and (Partials $output).Count -eq 0) 'empty and oversized jobs fail before staging'
     }
 
+    Write-Host 'preflight: filled-in jobs inside a git working tree are refused'
+    $refusedInside = 'error=draft-calibration-pipeline-job-inside-repository phase=preflight'
+    # A tracked example inside this repository (read-only), and a path inside it
+    # that does not exist: the refusal comes before the job is opened.
+    $trackedCalibration = Join-Path $repositoryRoot 'samples/public/draft-calibration-job.v1.example.json'
+    if (-not [IO.File]::Exists($trackedCalibration)) { throw 'The tracked calibration job example is missing.' }
+    $absentDetection = Join-Path $repositoryRoot ('samples/public/detection-job-' + $suffix + '.json')
+    # Another working tree (worktree or main checkout) is marked by a .git file.
+    $otherTree = Join-Path $jobRoot 'other-tree'
+    [void][IO.Directory]::CreateDirectory((Join-Path $otherTree 'jobs'))
+    [IO.File]::WriteAllText((Join-Path $otherTree '.git'), 'gitdir: elsewhere')
+    $otherTreeCalibration = Join-Path $otherTree 'jobs/job.json'
+    [IO.File]::Copy($goodCalibration, $otherTreeCalibration, $false)
+    foreach ($case in @(@('inside-calibration', $goodDetection, $trackedCalibration),
+        @('inside-detection', $absentDetection, $goodCalibration),
+        @('other-tree-calibration', $goodDetection, $otherTreeCalibration))) {
+        $output = Join-Path $root $case[0]
+        $result = Invoke-Pipeline $case[1] $case[2] $output
+        Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq $refusedInside -and
+            -not [IO.Path]::Exists($output) -and (Partials $output).Count -eq 0) ('job inside a git working tree is refused before staging: ' + $case[0])
+    }
+    Check (-not [IO.File]::Exists($absentDetection)) 'the refusal writes nothing into the repository'
+
+    Write-Host 'preflight: an output inside a git working tree is refused, except below build/'
+    $refusedOutput = 'error=draft-calibration-pipeline-output-inside-repository phase=preflight'
+    foreach ($output in @((Join-Path $repositoryRoot ('samples/public/pipeline-' + $suffix)), (Join-Path $otherTree ('out-' + $suffix)))) {
+        $result = Invoke-Pipeline $goodDetection $goodCalibration $output
+        Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq $refusedOutput -and
+            -not [IO.Path]::Exists($output) -and (Partials $output).Count -eq 0) 'output inside a git working tree is refused before staging'
+    }
+    # Below build/ the location check passes; a missing parent or the absent
+    # tool then stops the run before staging, so nothing is written there.
+    foreach ($output in @((Join-Path $repositoryRoot ('build/pipeline-' + $suffix)), (Join-Path $otherTree ('build/out-' + $suffix)))) {
+        $result = Invoke-Pipeline $goodDetection $goodCalibration $output (Join-Path $tools 'absent.exe')
+        Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq 'error=draft-calibration-pipeline-input-tool-or-io-failed phase=preflight' -and
+            -not [IO.Path]::Exists($output)) 'output below build/ of a working tree passes the location check'
+    }
+
+    Write-Host 'preflight: an output too deep for the native tools is refused'
+    $deepOutput = Join-Path $root ('d' * [Math]::Max(1, 220 - $root.Length))
+    $result = Invoke-Pipeline $goodDetection $goodCalibration $deepOutput
+    Check ($result.ExitCode -eq 2 -and $result.Stderr.Trim() -ceq 'error=draft-calibration-pipeline-output-path-too-long phase=preflight' -and
+        -not [IO.Path]::Exists($deepOutput) -and (Partials $deepOutput).Count -eq 0) 'long output path is refused before staging'
+
     # Reuse only two synthetic references for negative jobs; actual Unicode paths.
-    $negativeInputs = Join-Path $root '入力 設定'
+    $negativeInputs = Join-Path $jobRoot '入力 設定'
     [void][IO.Directory]::CreateDirectory($negativeInputs)
-    $references = Tree $goodDetection
+    $references = Tree $fixtureDetection
     $references['views'] = @($references['views'] | Where-Object { $_['role'] -ceq 'reference' })
     foreach ($view in $references['views']) {
         $name = $view['camera'] + '.jpg'
@@ -211,4 +280,18 @@ try {
 }
 Write-Host "draft_calibration_pipeline checks=$script:checks failures=$script:failures"
 Write-Host "evidence=$root"
+if ($script:failures -eq 0) {
+    # Only the exact folder this run created under the temp directory; kept on
+    # failure for diagnosis. Copied JPEGs may carry the read-only attribute.
+    try {
+        Get-ChildItem -LiteralPath $jobRoot -Recurse -File -Force | ForEach-Object { $_.Attributes = [IO.FileAttributes]::Normal }
+        [IO.Directory]::Delete($jobRoot, $true)
+        Write-Host 'jobs=removed'
+    } catch {
+        Write-Host "warning: could not remove the temporary job folder: $($_.Exception.Message)"
+        Write-Host "jobs=$jobRoot"
+    }
+} else {
+    Write-Host "jobs=$jobRoot"
+}
 exit $(if ($script:failures -eq 0) { 0 } else { 1 })
