@@ -3,6 +3,7 @@
 #include "a0/m2/draft_calibration_artifacts.hpp"
 #include "a0/m2/planar_calibration.hpp"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -12,11 +13,17 @@ inline constexpr std::string_view kPlanarCalibrationReportSchema = "a0.planar-ca
 
 // Where the overlap chart lies on the sheet, in the convention of
 // referencePlacement: chart = R(angle) * document + translation. All zero
-// makes the overlap chart frame the document frame (F-000-000 at the origin).
+// makes the document frame the overlap chart frame: the origin is the chart's
+// (0, 0), the corner of the chart sheet, and F-000-000 lies at its chart
+// position ((28.5, 20) mm on the A3 portrait chart), not at the origin.
+// coplanar_confirmed is the declaration that the overlap chart lay flat on the
+// document plane itself (paper, not a board); false gives no profile
+// (overlap-placement-invalid), like referencePlacement's coplanarConfirmed.
 struct OverlapChartPlacement {
     double angle_radians;
     double translation_x_mm;
     double translation_y_mm;
+    bool coplanar_confirmed;
 };
 
 struct PlanarCalibrationMetadata {
@@ -26,6 +33,10 @@ struct PlanarCalibrationMetadata {
     DraftPaperOrientation orientation;
     DraftCameraOrder camera_order;
     OverlapChartPlacement overlap_placement;
+    // Resolution (1..65535, like outputRaster.dpi) that converts the report's
+    // seam disagreement from mm to output pixels. Report only: the profile's
+    // outputRaster stays null.
+    std::uint32_t seam_output_dpi;
 };
 
 // Development-only draft writer for the planar calibration (#374). The

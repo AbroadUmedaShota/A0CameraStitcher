@@ -13,7 +13,7 @@ Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レ�
 | 段 | すること | 所要の目安 |
 | --- | --- | --- |
 | 1 | チャートを作り（2 節）、A3 で紙を 2 枚印刷して倍率を確かめる（3 節の 1〜4）。板には貼らない | 印刷と確認で 15 分ほど（※推定） |
-| 2 | 両台撮影を 7 回（下の表） | 30 分ほど（※推定） |
+| 2 | 両台撮影を 7 回（下の表）。続けて 5 節の「撮り足し」の ①〜⑤ を撮る（そこの「13 回の後」は、平置きでは 7 回の後） | 30 分ほど（※推定）と撮り足し |
 | 3 | 画像を並べ、検出 job に anchor を書く（7 節）。使わない枠を job から消す | 14 枚で 25 分ほど（※推定） |
 | 4 | 検出と平置きの推定を流す（下の「実行」） | 数分 |
 
@@ -27,22 +27,28 @@ Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レ�
 - 重なる範囲（2 台の両方に写る帯）の中に置いた 1 枚は、両台の view になる。内側の隅（重なる範囲に近い隅）は帯の上端と下端に当たるので、1 枚で両台の内側の隅が撮れる
 - 回ごとにチャートを少し回す（0〜10° ほど、回ごとに変える）。chart id が C 表示でおおむね正立して読める向きにすると、anchor の節点を数えやすい
 - 隅の回は、チャートの角が範囲の隅に来るまで寄せる。画面から少しはみ出してよい（縁で切れたリングは検出しないだけ）。anchor にする 3 つのリングと、その周りの 3 × 3 セルほどは画面に入れる
+- AF-S は合焦を確かめてから撮るので、画面の中央に線や模様が無いカメラは撮影を拒まれうる（5 節の「撮影の設定」）。隅や端に置く回は、チャートの反対側の端か中央が画面の中央に来るように置く。A3 で届かない回は、もう 1 枚のチャートを、そのカメラの画面の中央にかかり、1 枚目から 1 セル（20 mm）以上離れる所に置く（置き方は ※要確認）
+- 2 枚目が写った view でも、anchor は 1 枚目のリングに書く（4 節の 2 枚を並べる場合と同じ）
+- A0 のチャートを平らに置ける場合は、隅と端の回の多くを 1 回で撮れる（5 節の「撮り足し」）
 - 2 枚を接して並べない。間を 1 セル（20 mm）以上空ける
 - 上下左右は 1 節の「上下左右と文書の左上」のとおり C 表示で見た向き。CAM-A が左、CAM-B が右の並びで、外側は CAM-A の左・CAM-B の右、内側は重なる範囲の側
+
+撮影の前に、5 節の「撮影の前に」（起動のコマンド、C の見出しの向き、A/B の登録ファイルの SHA-256、AF を 1 回）を行う。
 
 | 回 | 1 枚目 | 2 枚目 | CAM-A の画像 | CAM-B の画像 |
 | --- | --- | --- | --- | --- |
 | 1 | CAM-A の範囲の中央 | CAM-B の範囲の中央 | training `training-01` | training `training-01` |
 | 2 | CAM-A の外側の上の隅 | CAM-B の外側の上の隅 | training `training-02` | training `training-02` |
 | 3 | CAM-A の外側の下の隅 | CAM-B の外側の下の隅 | training `training-03` | training `training-03` |
-| 4 | 重なる範囲の上端（両台の内側の上の隅） | 写らない所へどける | training `training-04` | training `training-04` |
-| 5 | 重なる範囲の下端（両台の内側の下の隅） | 写らない所へどける | training `training-05` | training `training-05` |
+| 4 | 重なる範囲の上端（両台の内側の上の隅） | 写らない所へどける。画面の中央が空くカメラがあれば、その中央にかかる所（上の AF-S の項） | training `training-04` | training `training-04` |
+| 5 | 重なる範囲の下端（両台の内側の下の隅） | 4 回目と同じ | training `training-05` | training `training-05` |
 | 6 | CAM-A の範囲で、中央と隅の間のどこか 1 か所（10° ほど回す） | CAM-B の範囲で同じように | validation `validation-01` | validation `validation-01` |
-| 7 | 重なる範囲の上下の中ほど、chart id が C 表示で正立して読める向き（angle 0） | 写らない所へどける | reference `reference` | reference `reference` |
+| 7 | 重なる範囲の上下の中ほど、chart id が C 表示で正立して読める向き（angle 0） | 4 回目と同じ | reference `reference` | reference `reference` |
 
-- 7 回目が「重なりの置き方」で、文書の座標はこの置き方で決まる（チャートの F-000-000 が原点、チャートの軸が文書の軸）。5 節の reference の「収まるかを確かめる」「位置を測る」をそのまま行い、F-000-000 と F-012-000 のリングの中心の位置を記録する
+- 7 回目が「重なりの置き方」で、文書の座標はこの置き方で決まる（チャートの軸が文書の軸。`overlapPlacement` が全部 0 なら文書の原点はチャートの用紙の左上の角で、F-000-000 は A3 縦で文書の (28.5, 20) mm）。5 節の reference の「収まるかを確かめる」「位置を測る」をそのまま行い、F-000-000 と F-012-000 のリングの中心の位置を記録する
+- 7 回目のチャートは紙のまま机に直に置く（板に貼らない）。job の `coplanarConfirmed` は、このときだけ true にする（下の「実行」の 2）
 - 4・5 回目の 1 枚は 7 回目と違う位置にする（帯の上端と下端）
-- 7 回の間、リグとカメラを動かさない。ピントと絞りは図面を撮るときと同じにして、ピントリングをテープで留める（5 節の「撮影の設定」）
+- 7 回の間、リグとカメラを動かさない。ピントは AF（AF-S）のまま、撮影の最初に開発画面の「AF」ボタンで 1 回だけ合わせ、7 回と撮り足しの間はかけ直さない。絞りは図面を撮るときと同じにする（5 節の「撮影の設定」）
 
 検出 job の雛形（2 節）は各カメラ 9 枠ある。平置きでは `training-06` と `validation-02` を使わないので、両台の 4 つの枠（`CAM-A-training-06`、`CAM-A-validation-02`、`CAM-B-training-06`、`CAM-B-validation-02`）を `views` から消す。消さずに撮り足してもよい（`training-06` は外側の辺の中ほど、`validation-02` は 6 回目と違う位置）。
 
@@ -50,10 +56,11 @@ Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レ�
 
 ビルドは 8 節と同じ（`A0_BUILD_FIDUCIAL_DETECTOR=ON`、`A0_BUILD_DRAFT_CALIBRATOR=ON`）。まず検出だけを流して anchor を直す（8 節の 1）。
 
-1. 校正 job を作る。`samples/public/planar-calibration-job.v1.example.json` をコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` をリグに合わせ（`landscape`・`CAM-A-left-CAM-B-right`）、`overlapViews` を `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする
-2. `overlapPlacement` は 8 節 3 の `referencePlacement` と同じ式。angle 0 で置き、F-000-000 のリングの中心を文書の (x, y) mm で測ったなら、`angleRadians` 0、`translationXMm` = 28.5 − x、`translationYMm` = 20 − y（A3 縦。ほかの用紙は 2 節の表）
+1. 校正 job を作る。`samples/public/planar-calibration-job.v1.example.json` を**リポジトリの外のフォルダ**（検出 job と同じ場所など）へコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` をリグに合わせ（`landscape`・`CAM-A-left-CAM-B-right`）、`overlapViews` を `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする。`scripts/Invoke-DraftCalibrationPipeline.ps1` は `-Planar` でもリポジトリの中の job を拒否する
+2. `overlapPlacement` は 8 節 3 の `referencePlacement` と同じ式。angle 0 で置き、F-000-000 のリングの中心を文書の (x, y) mm で測ったなら、`angleRadians` 0、`translationXMm` = 28.5 − x、`translationYMm` = 20 − y（A3 縦。ほかの用紙は 2 節の表）。`coplanarConfirmed` は、7 回目のチャートを紙のまま図面と同じ机の面に直に置いたときだけ true にする。false だと profile は出ない（`overlap-placement-invalid`）。板に貼ったチャートで true にすると、板の厚みが 2 台の間の視差として黙って入る（3 節の終わり）
 3. `nominalCameras` に、各カメラのレンズに書かれた焦点距離（mm）と、センサーの公称寸法（D810 は 35.9 × 24.0 mm、保存された向きの幅と高さ）を書く。リグのレンズの焦点距離は ※要確認。焦点距離の真値は求めない（[平置きの推定](M2_PLANAR_CALIBRATION.md) の 1 節）
-4. まとめて流す
+4. `seamOutputDpi` に、継ぎ目の食い違いを出力の画素に直すときの DPI を書く（合成の出力と同じ値。報告にだけ使い、profile には入らない）
+5. まとめて流す
 
    ```powershell
    pwsh -NoProfile -File scripts/Invoke-DraftCalibrationPipeline.ps1 -Planar `
@@ -64,7 +71,7 @@ Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レ�
      -OutputDirectory <親が存在する新規出力フォルダ>
    ```
 
-   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。報告の `cameras[].heldOutResidual`（validation の残差）と `straightness`（歪みを除いた後の行と列の曲がり）を見る。どちらにも合格線は当てていない（※所有者が決める）
+   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。報告の `seam`（重なりの view での A と B の食い違い、mm と出力の画素）、`cameras[].heldOutResidual`（validation の残差）、`straightness`（歪みを除いた後の行と列の曲がり）、`cameras[].coverage`（fit に使った点が画像のどこにあるか、画像の隅の r²）を見る。どれにも合格線は当てていない（合否は #386 のゲート）。`coverage.fitPointCells` で点の無いセルは、その範囲の歪みが外挿になる。撮り足すかは ※所有者が決める
 
 ## 1. 全体の流れ（傾ける手順、代替）
 

@@ -18,7 +18,7 @@
 - 合成に要るのは文書の面から画像への写像で、奥行き方向の内部パラメータ（焦点距離そのもの）は要らない。K は推定しない
 - K_nom は公称値から作る: fx = f × 幅 px / センサー幅 mm、fy = f × 高さ px / センサー高さ mm、主点は標本格子の中心 ((幅 − 1) / 2, (高さ − 1) / 2)、skew 0。歪みの式と物理性の検査は `calibration_lens_model.hpp` のものをそのまま使う
 - 真の焦点距離と主点が公称値とずれると、係数はその分だけ別の値になるが、写像（文書 → 画素）は合う。係数を他のレンズや他の K と比べない
-- 文書の座標は、重なる範囲に置いた置き方（両台に写る view）で決める。その置き方を T = I とし、チャートの F-000-000 を原点、チャートの軸を文書の軸にする。2 台はこの置き方だけを共有する
+- 文書の座標は、重なる範囲に置いた置き方（両台に写る view）で決める。その置き方を T = I とし、チャートの座標（原点はチャートの用紙の左上の角、`chartPoints` の (0, 0)）とチャートの軸をそのまま文書の座標と軸にする。F-000-000 は原点ではなく、その節点の座標（A3 縦で (28.5, 20) mm）にある。2 台はこの置き方だけを共有する
 - profile に書くときは、job の `overlapPlacement`（重なりのチャートが用紙のどこにあるか）で用紙の座標に移す
 
 ## 2. 未知数と最適化
@@ -48,7 +48,8 @@
 | `profileId`・`provenanceId`・`measuredAt` | 既存の draft job と同じ。`measuredAt` は session の観測確定時刻以降 |
 | `documentPlane` | `orientation`（`landscape`/`portrait`）と `cameraOrder`（`CAM-A-left-CAM-B-right`/`CAM-A-top-CAM-B-bottom`） |
 | `overlapViews` | `CAM-A`・`CAM-B` それぞれの重なりの view の ID。session で role が `reference` の view であること |
-| `overlapPlacement` | 重なりのチャートの用紙上の位置。既存の `referencePlacement` と同じ向き: `chart = R(angleRadians) × document + (translationXMm, translationYMm)`。全部 0 なら用紙の原点 = F-000-000 |
+| `overlapPlacement` | 重なりのチャートの用紙上の位置。既存の `referencePlacement` と同じ向き: `chart = R(angleRadians) × document + (translationXMm, translationYMm)`。全部 0 なら用紙の座標 = 重なりのチャートの座標で、用紙の原点はチャートの用紙の左上の角（F-000-000 は A3 縦で (28.5, 20) mm）。`coplanarConfirmed`（真偽値）は、重なりのチャートを紙のまま文書の面（机）に直に置いたという申告で、`referencePlacement` の同名の欄と同じ。false なら profile を出さない（`overlap-placement-invalid`）。true にしても同じ平面にあることを証明したとは扱わない |
+| `seamOutputDpi` | 報告の継ぎ目の食い違いを出力の画素に直す DPI（整数、1〜65535、`outputRaster.dpi` と同じ範囲）。報告にだけ使い、profile の `outputRaster` は null のまま |
 | `nominalCameras` | カメラごとの `focalLengthMm`（レンズの公称値）、`sensorWidthMm`・`sensorHeightMm`（保存された向きの幅と高さ）。0 より大きく 10000 以下 |
 | `numericalPolicy` | `minimumTrainingViews`（1〜128、重なりの view は数えない）、`maxIterations`（1〜1000）、`relativeCostTolerance`・`relativeStepTolerance`（0〜1 の開区間）、`initialDamping`（> 0）、`maxUndistortionIterations`（1〜1000）、`undistortionTolerancePixels`（> 0）。後の 2 つは直線性の検査で歪みを除くときにだけ使う |
 
@@ -85,6 +86,14 @@ K が公称値であることを書く欄は profile v2 に無い。v2 の形（
 - `fitResidual`（training と重なり）、`overlapResidual`、`heldOutCoverage`、`heldOutResidual`（validation の `measurementPointIds`）
 - `straightness.fit`・`straightness.heldOut` のそれぞれ `raw` と `undistorted`（rms、max、行と列の数、点の数）
 - `views[]`: view ごとの role、重なりかどうか、`outcome`、置き方（重なりは 0, 0, 0）、残差、validation の LM の記録、直線性
+- `coverage`: `imageCornerRadiusSquared`（画像の隅の画素の中心 (0, 0) を K_nom で正規化した r²。主点が画像の中心なので 4 隅で同じ）と `fitPointCells`（training と重なりの view の `usedPointIds` を、raw 画像を 4 × 4 に分けたセルごとに数えた 4 行 4 列。上の行から、各行は左から。列は floor(4 (u + 0.5) / 幅)、行は floor(4 (v + 0.5) / 高さ)）。`distortionCheck.maxRadiusSquared`（fit した点の r² の最大）が隅の r² より小さいほど、隅は外挿になる
+
+`seam`（`overlapPlacement` は `coplanarConfirmed` も載せる）:
+
+- 重なりの 2 つの view の両方で検出された節点ごとに、各カメラの画素から歪みを除き（K_nom、5 係数、policy の `maxUndistortionIterations`・`undistortionTolerancePixels`）、`overlapChartToImage` の逆で重なりのチャートの mm に戻し、A と B の位置の差の長さを取る
+- `overlap`: 推定した写像そのもので測る。重なりの view は fit に入っているので、標本内の値
+- `checkerboardHeldOut`: 重なりの view の節点を市松に分け（チャートの x_mm と y_mm の異なる値の順位の和が偶数か奇数か）、偶数の側だけを重なりの view の fit に使って 2 台を推定し直し（training と validation は同じ）、奇数の側で測る。この推定し直しは報告のためだけで、profile には使わない
+- それぞれ `outcome`（`measured`、`camera-not-estimated`、`no-common-points`、`numerical-failure`）、`pointCount`、`meanMm`・`p95Mm`・`maxMm`（p95 は小さい方から ceil(0.95 n) 番目）、`meanOutputPixels`・`p95OutputPixels`・`maxOutputPixels`（mm × `outputDpi` / 25.4）。合否は付けない（#386 のゲート）
 
 profile が出るのは、両台が `planar-calibration-estimated` で、両台の validation がすべて評価できたときだけ。残差・直線性にはどの合格線も当てない。合格線は所有者が決める（#367 段 4）。
 
@@ -116,9 +125,10 @@ ctest --test-dir build/planar -C Release -j 1 -R '^m2_planar_calibration_contrac
 - 構成: D810 の寸法、公称 50 mm・35.9 × 24.0 mm。2 台とも 90° 回した向きで約 7 px/mm、面内で少し回し（0.4°、−0.7°）、机に対して少し傾けた H。歪みは CAM-A (k1, k2, k3, p1, p2) = (−0.045, 0.09, −0.06, 1.5e−4, −2e−4)、CAM-B (−0.052, 0.11, −0.08, −1e−4, 1.2e−4)。チャートは 11 × 15 節点、ピッチ 20 mm。各カメラに training 5（範囲の中央と四隅、少しずつ回す）、validation 1、重なり 1（2 台で同じ置き方）。画像の縁から 20 px 以内の点は使わない
 - 真の K = 公称の K、揺らぎなし: 5 係数が既知の値から 1e−6 以内、H と写像全体（文書 → raw 画素）が範囲内の約 2400 点で 1e−4 px 以内、validation の残差が 1 px 未満、歪みを除いた後の行と列が直線（1e−4 px）、profile v2 の読み込みと評価用の描画が通る、同じ入力で同じバイト列、`--planar-job` の exe が同じバイト列を書く
 - 公称の K がずれた場合: 真の焦点距離を 1 % 長く、主点を (±12, −8) px ずらし、画素に ±0.1 px の決まった揺らぎを足す。係数は比べず、validation の残差と写像の差が 1 px 未満であることを確かめる
-- 拒否: 未知のキー、欠けたキー、別の schema、不正な policy、文字列の数値、焦点距離 0、重なりの view が reference でない・別のカメラ・無い、training が足りない、validation が無い、`measuredAt` が観測より前
+- 拒否: 未知のキー、欠けたキー、別の schema、不正な policy、文字列の数値、焦点距離 0、重なりの view が reference でない・別のカメラ・無い、training が足りない、validation が無い、`measuredAt` が観測より前、`coplanarConfirmed` が false・欠けている・文字列、`seamOutputDpi` が欠けている・0・65536・小数・文字列
+- 継ぎ目と覆う範囲: 真の写像では `seam.overlap` と `seam.checkerboardHeldOut` がほぼ 0（1e−6 mm）で、点の数が両台で検出された節点（市松は奇数の側）の数と一致する。CAM-B の写像に既知のずれを入れて `MeasureOverlapSeam` で測ると、0.5 mm の平行移動はすべての点で 0.5 mm、原点まわりの 0.1 % の拡大は試験の中で節点の座標から求めた平均・p95・最大と一致する（1e−6 mm）。`fitPointCells` は試験の中で session から数えた値と一致し、合計が `fitResidual` の点の数と同じ。隅の r² は公称の K の式と一致する
 
-試験の閾値（1e−6、1e−4 px、1 px）は試験の入力で、実写の合格線ではない。実行した結果（Debug・Release とも 48 チェック・失敗 0）:
+試験の閾値（1e−6、1e−4 px、1 px、0.1 mm）は試験の入力で、実写の合格線ではない。実行した結果（Debug・Release とも 71 チェック・失敗 0）:
 
 | 項目 | CAM-A | CAM-B |
 | --- | --- | --- |
@@ -128,6 +138,14 @@ ctest --test-dir build/planar -C Release -j 1 -R '^m2_planar_calibration_contrac
 | validation の残差 rms | 2.0e−12 px | 5.2e−12 px |
 | 直線性 rms（検出した画素 → 歪みを除いた画素） | 0.081 → 4.0e−11 px | 0.091 → 3.9e−11 px |
 | 公称の K がずれた場合: validation の残差 rms / 写像の差の最大 | 0.071 px / 0.049 px | 0.072 px / 0.065 px |
+| fit に使った点の 4 × 4 セル（上の行から） | 105 8 9 114 / 26 44 43 25 / 25 70 75 23 / 115 62 65 116 | 114 64 62 113 / 26 75 68 22 / 20 46 43 21 / 113 8 11 110 |
+| 隅の r² / fit した点の r² の最大 | 0.186 / 0.182 | 0.186 / 0.182 |
+
+| 継ぎ目の食い違い（2 台で共通） | 点の数 | 最大 |
+| --- | --- | --- |
+| `seam.overlap`（真の K） | 165 | 6.0e−13 mm |
+| `seam.checkerboardHeldOut`（真の K） | 82 | 8.6e−13 mm |
+| 公称の K がずれた場合: `overlap` / `checkerboardHeldOut` | 165 / 82 | 0.027 mm / 0.027 mm |
 
 ### 画像から StitchEval まで（手で流す確認）
 
@@ -148,6 +166,7 @@ build/planar/Release/A0CameraStitcher.StitchEval.exe --profile-file <d>/profile.
 
 - 人工の観測だけの結果。実写の検出誤差、紙の浮きとたわみ、印刷の倍率、ピントの位置による歪みの変化は入っていない。実写は #374 の検証方法（所有者の GO の後）で確かめる
 - 机が平らでないと、置き方ごとに面がずれ、H と歪みに混ざる。紙は机に直に置く（板に貼ったチャートは厚みの分だけ面が変わるので使わない）
-- 範囲の縁と隅に点が無いと、そこでの歪みは外挿になる。四隅の置き方が要る
+- 範囲の縁と隅に点が無いと、そこでの歪みは外挿になる。四隅の置き方が要る。どこに点が無いかは報告の `coverage` で見る
+- 継ぎ目の食い違いは、重なりの view に写った範囲でしか測れない。`overlap` は fit に入った点での値で、`checkerboardHeldOut` も同じ view の隣の節点なので、継ぎ目の帯の上端と下端や、重なりの view が覆わない所の食い違いは表さない。帯の端にまたがせた置き方で測るのは #385 の撮り足し
 - 物理性で落ちる（`invalid-distortion`）経路は、人工の正常な観測からは起きないので、この試験では通っていない。判定の式は既存のレンズ推定と同じものを使っている
 - 公称の K を使うので、係数そのものは真のレンズの係数ではない。profile の K と係数は組で使う
