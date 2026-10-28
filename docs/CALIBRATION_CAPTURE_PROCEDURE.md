@@ -127,7 +127,7 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 | 12 | 紙（同じ位置） | 板 T6 | 予備 | training `training-06` |
 | 13 | 紙を重なる範囲へ（板は写らない所へどける） | ← 同じ紙 | reference `reference` | reference `reference` |
 
-- 紙は、反対側のカメラの範囲のうち重なる範囲から外れた外寄りに、少し回して（10° ほど）留める。板を重なる範囲の近くに置く回（T3・T4 など）でも、2 枚の間を 1 セル以上空けるため
+- 紙は、反対側のカメラの範囲のうち重なる範囲から外れた外寄りに、少し回して（10° ほど）留める。板を重なる範囲の近くに置く回（T3・T4 など）でも、2 枚の間を 1 セル以上空けるため。ただし紙はそのカメラの画面の中央にかかるようにする（AF-S の合焦の確認、下の「撮影の設定」）
 - validation-02 は validation-01 と同じ置き方の別の 1 枚で、置き方の違う検証にはならない。違う置き方で確かめたいときは、3 回目と 4 回目の間（9 回目と 10 回目の間）に紙を貼り直して位置を変える
 - 予備の画像も消さずに残し、記録に「job に入れない」と書く。validation の画像が映り込みなどで使えなかったときは、同じ置き方の予備に差し替える（差し替えたことを記録する）
 - 傾きは 20〜35° ほど（台の高さ 100〜150 mm で A3 の辺を持ち上げる）。照合の制約（セルの辺 80 px 以上、リングの短径/長径 0.4 以上）からは 60° 前後まで許すが、ピントの深さと紙のたわみを考えて控えめにした
@@ -144,9 +144,30 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 - **位置を測る**: 用紙の角ではなく、F-000-000 のリングの中心（中央の点）の位置を、文書の左上からの x（C 表示の右へ）・y（C 表示の下へ）として巻尺で mm で測り、記録する。用紙の裁ち方と印刷の位置のずれが入らない。8 節 3 の `referencePlacement` に使う
 - 向きの確かめとして、F-012-000 のリングの中心の y も測る。F-000-000 の y と同じなら回っていない。違いが大きければ置き直す（許す差は ※所有者が決める。240 mm 離れた 2 点で 1 mm の差は約 0.24°）
 
+### 撮影の前に
+
+1. 開発画面を吊り下げリグの向きで起動する
+
+   ```powershell
+   pwsh -NoProfile -File scripts/Start-WpdDualLivePreview.ps1 -MountOrientation rotated-180
+   ```
+
+2. C の見出しが「取付の向き: 180°回転（A/Bを回して合成）」であることを確かめる。「取付の向き: 通常」と出たら撮らずに画面を閉じ、上のコマンドで起動し直す。この文書の上下左右と文書の左上（1 節）は、180°回転の C 表示で決めている
+3. A/B の登録ファイルの SHA-256 を、撮影の記録（6 節、リポジトリの外）に書く。対象は `%LOCALAPPDATA%\A0CameraStitcher\phase0` の `camera-map-wpd.json`（A/B の登録）と、あれば同じフォルダの `wpd-mount-orientation.json`（取付の向き）。校正はこの A/B の割り当てに結び付くので、後で登録を作り直したときや 8 節で校正を流すときに、同じハッシュかを照合する。ハッシュの値もリポジトリや Issue には書かない
+
+   ```powershell
+   Get-FileHash -Algorithm SHA256 "$env:LOCALAPPDATA\A0CameraStitcher\phase0\camera-map-wpd.json"
+   ```
+
+4. 下の「撮影の設定」のとおり、両台のピントを AF で 1 回だけ合わせる
+
+各回の原画像は、両台撮影のたびに画面に出る保存先（`%LOCALAPPDATA%\A0CameraStitcher\wpd-captures` の下の、撮影ごとのフォルダ）に、CAM-A と CAM-B の `original.jpg` として残る。撮るたびに、回の番号と保存先のフォルダ名を記録に書く。7 節で検出 job の隣へコピーするときの元になる。保存先の原画像は動かさず、消さない。
+
 ### 撮影の設定
 
-- 2 台とも MF。ピントは作動距離でチャートの面に合わせ、合わせたらピントリングをテープで留める（[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) 6 節と同じ）。歪みはピントの位置で変わるので、校正の後に図面を撮る時も同じピントにする
+- ピントは AF（AF-S）で合わせる。レンズのフォーカスモードは AF のままにし、MF に切り替えない。校正の撮影の最初に 1 回だけ、開発画面の各カメラの「AF」ボタンで両台のピントを合わせる。その時は、机に平らに置いた紙のチャートが各カメラの画面の中央にかかるようにする（図面と同じ机の面に合わせるため）
+- 一連の撮影（13 回と撮り足し）の間は AF をかけ直さない。AF をかけ直すと、倍率と歪みがわずかに変わりうる（※推定）。かけ直してしまったときは、その回の番号と時刻を記録に書く。図面を撮るときにかける AF と、校正のときの AF の差が写像にどれだけ入るかは確かめていない（※要確認）
+- AF-S は合焦を確かめてから撮るので、画面の中央に線や模様が無いと撮影が拒まれうる。チャートと図面は、各カメラの画面の中央に線や模様がかかるように置く。チャートを画面の縁に寄せる回（板を範囲の端に寄せる回、下の撮り足し）は、チャートの反対側の端か中央が画面の中央に来るように置く。A3 で届かないときは、もう 1 枚のチャートを画面の中央にかかるように置く
 - 絞り F8。図面を撮る時と同じ絞りにする（本番の絞りは ADR-0033 6 節で未決。※要確認）
 - 露出モード M、2 台とも同じシャッター速度・ISO・WB。ISO・WB は固定、Auto ISO・VR は切る。画質は JPEG Fine・L（7360 × 4912）
 - 白い紙が飛ばない露出にする（ヒストグラムの右端に張りつかない）。検出器は明るさを白紙に対する比で読むので、白が飛ぶと照合が崩れる
@@ -154,13 +175,31 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 - 13 回の間、リグとカメラを動かさない。reference は後で図面を撮るのと同じリグの状態で撮る
 - ピクチャーコントロールなどの階調の設定は、2 台で同じにする（どの設定が検出に向くかは ※要確認）
 
+### 撮り足し（継ぎ目の確かめ、#385）
+
+継ぎ目のズレは出力で 1 px（約 0.12 mm）以下を合格線にする（#385 の所有者の決定）。そのため、継ぎ目の帯の全域と各カメラの縁で、A と B の写像の食い違いを測れる画像を足して撮る。13 回の後、リグと AF をそのままにして、次の置き方で両台撮影をする。上下左右は 1 節のとおり C 表示で見た向き。
+
+| 置き方 | チャートの位置 |
+| --- | --- |
+| ① | CAM-B の画面の右の縁にかかる位置 |
+| ② | CAM-A の画面の左の縁にかかる位置 |
+| ③ | 継ぎ目の帯（重なる範囲）の上端にまたがる位置 |
+| ④ | 継ぎ目の帯の下端にまたがる位置 |
+| ⑤ | 図面と同じ高さ（机に直に置き、板に貼らない）に置いた位置。1 回 |
+
+- A0 のチャート（`-Paper A0`、9 節）を机に平らに置けば、①〜④ の大半を 1 回で撮れる。A0 チャートの印刷代は ADR-0033 で許可されている。A0 で縁まで届かない所だけ、A3 で撮り足す
+- どの置き方でも、チャートは机に直に平らに置き、四辺をテープで留める（3 節の 6）。①〜④ でも、チャートの反対側の端か中央が画面の中央に来るように置く（「撮影の設定」の AF-S の項）
+- 撮り足しの画像は、今の検出 job の 9 枠には入れない。原画像と記録（回の番号、置き方の番号、保存先のフォルダ名、SHA-256）だけを残す。A と B の食い違いを測る使い方は #385 の段 1・2 で決める（※要確認）
+
+一枚ものの図面を撮るときも、四辺と継ぎ目の帯の近くをテープで机に密着させる。二台は別の位置から撮るので、机から浮いた分は A と B の逆向きのずれ（視差）として残り、画像の補正では消えない。約 0.3 mm 浮くと出力で 1 px を超える見込み（※推定）。
+
 ## 6. 撮影の記録
 
-[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) の 8 節に合わせ、記録はリポジトリの外に置く。1 回ごとに、回の番号、時刻、置き方、撮影設定、2 台の結果、画像のファイル名と SHA-256 を書く。加えて、chart id、SVG と PDF の SHA-256、100 mm の目盛りの実測値、reference に使ったチャート（紙のチャートであること）、F-000-000 と F-012-000 のリングの中心の位置、各回のどの画像を job に入れ、どれを予備にしたかを書く。本体の識別子は外部の記録にだけ書く。
+[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) の 8 節に合わせ、記録はリポジトリの外に置く。1 回ごとに、回の番号、時刻、置き方、撮影設定、2 台の結果、画像のファイル名と SHA-256 を書く。加えて、chart id、SVG と PDF の SHA-256、100 mm の目盛りの実測値、reference に使ったチャート（紙のチャートであること）、F-000-000 と F-012-000 のリングの中心の位置、各回のどの画像を job に入れ、どれを予備にしたかを書く。さらに、起動したコマンドと C の見出しの取付の向き、A/B の登録ファイルの SHA-256（5 節の「撮影の前に」）、AF をかけた時刻（1 回）と途中でかけ直した回、各回の原画像の保存先のフォルダ名、撮り足しの置き方の番号を書く。本体の識別子は外部の記録にだけ書く。
 
 ## 7. 画像の整理と anchor
 
-1. 検出 job の雛形（`.detector-job.template.json`）を、画像を置くフォルダにコピーする。画像のパスは job のフォルダからの相対で、雛形は `CAM-A/training-01.jpg` のように並ぶ。画像をこの名前で置くか、`image` を書き換える
+1. 検出 job の雛形（`.detector-job.template.json`）を、**リポジトリの外のフォルダ**（撮影の記録と同じ場所など）にコピーし、画像もそこに置く。記入した job には撮影時刻などが入り、`*.json` は .gitignore の対象外なので、リポジトリの中に置くと commit に乗りうる（リポジトリの中の job は 8 節 5 のスクリプトが拒否する）。画像のパスは job のフォルダからの相対で、雛形は `CAM-A/training-01.jpg` のように並ぶ。各回の原画像（5 節の「撮影の前に」の保存先）をこの名前でコピーするか、`image` を書き換える。コピーした画像の SHA-256 が保存先の原画像と同じことを確かめる
 2. `sessionId`（英数字・`-`・`_`）、`measuredAtUtc`（撮影の時刻、UTC、`YYYY-MM-DDThh:mm:ssZ`）、各カメラの `lensLabel`・`focalLengthLabel`・`focusLabel` を書く。`measuredAtUtc` が雛形のままだと、session の検査で止まる
 3. 各 view の `anchors` に、**3 つ以上**のリングを書く。同じ行や同じ列に並べない（例: ある節点と、その 2 つ右、2 つ下）
 
@@ -196,11 +235,11 @@ cmake --build build/reference --config Release --target A0CameraStitcher.Fiducia
    ```
 
    exit 0 で `session.json` が出る。exit 3 なら `detection-report.json` の各 view の `status` を見る。`anchor-not-found`（半径の中にリングがない）・`anchor-ambiguous`（2 つ以上）は位置か半径、`anchor-collinear` は 3 点が一直線、`identity-mismatch` は節点の名前の数え違い、`identity-unverifiable` は照合できるセルが足りない（チャートが小さく写っているか、画面から大きくはみ出している）。出力先は毎回新しいフォルダにする（既存のファイルを上書きせずに止まる）
-2. 校正 job を作る。`samples/public/draft-calibration-job.v1.example.json` をコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` は `landscape`・`CAM-A-left-CAM-B-right`（リグに合わせる）、`referencePair` は `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする
+2. 校正 job を作る。`samples/public/draft-calibration-job.v1.example.json` を**リポジトリの外のフォルダ**（検出 job と同じ場所など）へコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` は `landscape`・`CAM-A-left-CAM-B-right`（リグに合わせる）、`referencePair` は `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする
 3. `referencePlacement` は、文書 mm からチャート mm への写像 `chart = R(angle) × document + translation`（[文書写像](M2_REFERENCE_DOCUMENT_MAPPING.md)）。chart id が C 表示で正立して読める向きに置き（angle 0、1 節の「上下左右と文書の左上」）、F-000-000 のリングの中心を文書の (x, y) mm で測ったなら、`angleRadians` 0、`translationXMm` = 28.5 − x、`translationYMm` = 20 − y。28.5 と 20 は A3 縦の F-000-000 のチャート上の位置で、ほかの用紙は 2 節の表の値を使う
    - `coplanarConfirmed` は、reference を紙のチャート（板に貼っていない）で、図面と同じ机の面に直に置いて撮ったときだけ true にする。板に貼ったチャートで撮った reference では true にしない。false だと校正は `reference-placement-invalid` で止まり、true にすると板の厚み（約 5 mm）が 2 台の間の約 1.5 mm（※推定）の視差として黙って入る（3 節の終わり）。止まったら、紙のチャートで reference を撮り直す
 4. `rigMeasurements` は実測した値だけを書き、測っていない値は null のままにする
-5. まとめて流す（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
+5. A/B の登録ファイルの SHA-256 が撮影の記録の値と同じことを確かめてから（5 節の「撮影の前に」の 3）、まとめて流す（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
 
    ```powershell
    pwsh -NoProfile -File scripts/Invoke-DraftCalibrationPipeline.ps1 `
@@ -211,7 +250,7 @@ cmake --build build/reference --config Release --target A0CameraStitcher.Fiducia
      -OutputDirectory <親が存在する新規出力フォルダ>
    ```
 
-   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。draft であり、承認された校正ではない
+   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。draft であり、承認された校正ではない。どちらかの job がリポジトリの中（別の worktree やメインのチェックアウトを含む、`.git` を持つフォルダの下）にあると、何も作らずに exit 2 で止まり、`error=draft-calibration-pipeline-job-inside-repository` と出る。出力先が深すぎると `error=draft-calibration-pipeline-output-path-too-long` で止まる（[校正コマンド](M2_CALIBRATION_COMMAND.md)）
 
 ## 9. A4 と A0 を使う場合（代替）
 

@@ -9,8 +9,18 @@ modified. A new directory holds observations, draft artifacts, job snapshots,
 private child logs and a hash inventory. This does not approve calibration or
 optical quality and does not control a camera.
 
+Filled-in jobs carry capture times, provenance and rig measurements, and *.json
+is not ignored by git. Both jobs must therefore live outside this repository
+and outside any git working tree (a folder with a .git entry, including other
+worktrees); such a job is refused before anything is staged.
+
+The native tools do not use long paths. An output whose staging folder would
+put a native artifact at 260 characters or more is refused before staging.
+
 Exit 0: draft produced. Exit 3: recorded detection/calibration failure, no
 profile. Exit 2: input, tool-protocol or IO error; any partial folder is retained.
+The stderr line names the refusal (job-inside-repository, output-path-too-long)
+or the generic input-tool-or-io-failed, never a path.
 PowerShell parameter-binding errors use PowerShell's own exit code.
 #>
 [CmdletBinding()]
@@ -28,7 +38,19 @@ $utf8 = [Text.UTF8Encoding]::new($false, $true)
 
 function Full-Path([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { throw 'Empty path.' }
-    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Value)
+    return [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Value))
+}
+function Test-InsideRepository([string]$Path, [string]$RepositoryRoot) {
+    $separator = [IO.Path]::DirectorySeparatorChar
+    if ($Path.StartsWith($RepositoryRoot + $separator, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    # Also any other git working tree: a main checkout, another worktree or a
+    # submodule has a .git directory or file in one of its ancestors.
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    while (-not [string]::IsNullOrEmpty($directory)) {
+        if ([IO.Path]::Exists((Join-Path $directory '.git'))) { return $true }
+        $directory = [IO.Path]::GetDirectoryName($directory)
+    }
+    return $false
 }
 function New-Bytes([string]$Path, [byte[]]$Bytes) {
     $file = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -116,20 +138,35 @@ $steps = [ordered]@{ detection = $null; calibration = $null }
 $fingerprint = $null
 $exitCode = 2
 $phase = 'preflight'
+$errorCode = 'draft-calibration-pipeline-input-tool-or-io-failed'
+# Longest native path below the staging folder: the calibrator stages its own
+# output as draft.partial-<process id> (decimal, at most 10 digits).
+$longestNativeArtifact = 'draft.partial-4294967295' + [IO.Path]::DirectorySeparatorChar + 'calibration-report.json'
 try {
     if (-not $IsWindows) { throw 'Windows is required.' }
+    $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
     $detectionPath = Full-Path $DetectionJob
     $calibrationPath = Full-Path $CalibrationJob
+    foreach ($jobPath in @($detectionPath, $calibrationPath)) {
+        if (Test-InsideRepository $jobPath $repositoryRoot) {
+            $errorCode = 'draft-calibration-pipeline-job-inside-repository'
+            throw 'Filled-in jobs must be kept outside the repository and any git working tree.'
+        }
+    }
     $detector = Full-Path $DetectorExecutable
     $calibrator = Full-Path $CalibratorExecutable
     $output = [IO.Path]::TrimEndingDirectorySeparator((Full-Path $OutputDirectory))
     $parent = [IO.Path]::GetDirectoryName($output)
     if (-not [IO.Directory]::Exists($parent) -or [IO.Path]::Exists($output)) { throw 'Output must be new with an existing parent.' }
     if (-not [IO.File]::Exists($detector) -or -not [IO.File]::Exists($calibrator)) { throw 'Both native tools are required.' }
-    $detectionInput = Read-LockedJob $detectionPath (1MB)
-    $calibrationInput = Read-LockedJob $calibrationPath (64KB)
 
     $candidate = $output + '.partial-' + [Guid]::NewGuid().ToString('N')
+    if ((Join-Path $candidate $longestNativeArtifact).Length -ge 260) {
+        $errorCode = 'draft-calibration-pipeline-output-path-too-long'
+        throw 'The output path is too long for the native tools; choose a shorter output folder.'
+    }
+    $detectionInput = Read-LockedJob $detectionPath (1MB)
+    $calibrationInput = Read-LockedJob $calibrationPath (64KB)
     # Both resolved move targets are siblings inside the explicitly requested
     # output parent. No recursive move/delete or arbitrary directory cleanup.
     if ([IO.Path]::GetDirectoryName($candidate) -cne $parent) { throw 'Invalid staging parent.' }
@@ -210,7 +247,7 @@ public static class A0DraftCalibrationDirectory {
             try { Save-Report 'pipeline-error' 2 } catch { }
         }
     }
-    [Console]::Error.WriteLine("error=draft-calibration-pipeline-input-tool-or-io-failed phase=$phase")
+    [Console]::Error.WriteLine("error=$errorCode phase=$phase")
 } finally {
     if ($null -ne $calibrationInput) { $calibrationInput.Stream.Dispose() }
     if ($null -ne $detectionInput) { $detectionInput.Stream.Dispose() }
