@@ -8,6 +8,8 @@
 #include <chrono>
 #include <thread>
 #include <exception>
+#include <cstdio>
+#include <string>
 
 namespace a0::phase0::experimental {
 enum class WpdStillOperation { Ready, LiveStatus, ImageQuality, ImageSize, Events, CaptureNoAf, ObjectInfo, Object };
@@ -74,32 +76,53 @@ inline std::vector<WpdStillEvent> ParseWpdStillEvents(std::span<const unsigned c
     for(size_t i=0;i<count;++i)result.push_back({static_cast<std::uint16_t>(StillLittleEndian(data,2+6*i,2)),StillLittleEndian(data,4+6*i,4)});
     return result;
 }
+// A rejected event names its code and whether the shutter had been sent, so a
+// completion left over from an earlier capture (read by the next preflight) is
+// distinguishable from a second completion inside one capture (#381).
+inline std::string WpdStillEventCodeText(std::uint16_t code){char text[8]{};std::snprintf(text,sizeof text,"0x%04x",static_cast<unsigned>(code));return text;}
+class WpdStillEventRejected final:public std::runtime_error {
+public:
+    WpdStillEventRejected(const std::string& reason,std::uint16_t code,bool after_shutter):
+        std::runtime_error(reason+" code="+WpdStillEventCodeText(code)+" phase="+(after_shutter?"after_shutter":"before_shutter")),
+        code_(code),after_shutter_(after_shutter){}
+    std::uint16_t Code()const{return code_;}
+    bool AfterShutter()const{return after_shutter_;}
+private:
+    std::uint16_t code_{};bool after_shutter_{};
+};
 class WpdStillEventLedger final {
 public:
     void Observe(std::span<const WpdStillEvent> events,bool after_shutter){
         for(const auto& event:events){
+            auto reject=[&](const char* reason){throw WpdStillEventRejected(reason,event.code,after_shutter);};
             if(event.code==0x4006 || event.code==0xc104)continue; // property/obsolete event, no image ownership.
             if(event.code==0x4004 || event.code==0x4008 || event.code==0xc10c){
                 // StoreAdded invalidates preflight; its parameter is not an
                 // image handle. After shutter, any such change is terminal.
-                if(after_shutter)throw std::runtime_error("camera storage/metadata/live state changed during capture");
+                if(after_shutter)reject("camera storage/metadata/live state changed during capture");
                 refresh_required_=true;continue; // Never grants image ownership.
             }
             if(event.code==0xc101){
-                if(!after_shutter || handle_ || !ValidStillHandle(event.parameter))throw std::runtime_error("pending or ambiguous SDRAM object");
+                if(!after_shutter)reject("pending SDRAM object");
+                if(handle_)reject("ambiguous SDRAM object");
+                if(!ValidStillHandle(event.parameter))reject("invalid SDRAM object handle");
                 handle_=event.parameter;
             }else if(event.code==0xc102 || event.code==0x400d){
-                if(!after_shutter || completed_)throw std::runtime_error("pending or duplicate capture completion");
-                completed_=true;
-            }else if(event.code==0x4002)throw std::runtime_error("unexpected card image event");
-            else throw std::runtime_error("unclassified capture event code="+std::to_string(event.code)+" before_shutter="+std::to_string(!after_shutter));
+                // Before shutter it belongs to an earlier capture; after shutter
+                // a second one is a duplicate. Both stay terminal.
+                if(!after_shutter)reject("pending capture completion");
+                if(completed_)reject("duplicate capture completion");
+                completed_=true;completion_code_=event.code;
+            }else if(event.code==0x4002)reject("unexpected card image event");
+            else reject("unclassified capture event");
         }
     }
     std::optional<DWORD> Handle()const{return handle_;}
     bool Completed()const{return completed_;}
+    std::uint16_t CompletionCode()const{return completion_code_;}
     bool ProfileRefreshRequired()const{return refresh_required_;}
 private:
-    std::optional<DWORD> handle_;bool completed_{},refresh_required_{};
+    std::optional<DWORD> handle_;bool completed_{},refresh_required_{};std::uint16_t completion_code_{};
 };
 struct WpdStillObjectInfo {std::uint32_t bytes{},width{},height{};};
 inline WpdStillObjectInfo ParseWpdStillObjectInfo(std::span<const unsigned char> data){
@@ -165,6 +188,15 @@ private:
     std::optional<DWORD> attributable_handle_;
 };
 struct WpdStillPayload {std::vector<unsigned char> jpeg;WpdStillObjectInfo info;bool complete_event{};};
+// Filled on every exit of AcquireWpdStillPayload, failures included, so each
+// capture can log whether its completion event was read before the session
+// closed. Completion is still not required for success (#381 observation).
+struct WpdStillCaptureObservation {bool shutter_attempted{},complete_event{};std::uint16_t complete_event_code{};};
+inline std::string DescribeWpdStillCaptureObservation(const WpdStillCaptureObservation& observation){
+    return std::string("shutter_attempted=")+(observation.shutter_attempted?"1":"0")+
+        " complete_event="+(observation.complete_event?"1":"0")+
+        " complete_event_code="+(observation.complete_event?WpdStillEventCodeText(observation.complete_event_code):std::string("none"));
+}
 class WpdStillOutOfFocus final:public std::runtime_error {
 public:WpdStillOutOfFocus():std::runtime_error("camera reports OutOfFocus; no automatic AF or shutter retry"){}
 };
@@ -205,11 +237,17 @@ inline WpdStillEventLedger ReadWpdStillPreflight(WpdStillCaptureChannel& channel
 }
 inline WpdStillPayload AcquireWpdStillPayload(WpdStillCaptureChannel& channel,
     const std::function<bool()>& may_continue,
-    const std::function<void(std::span<const unsigned char>)>& partial_sink){
+    const std::function<void(std::span<const unsigned char>)>& partial_sink,
+    WpdStillCaptureObservation* observation=nullptr){
     if(!may_continue || !partial_sink)throw std::invalid_argument("missing capture admission/partial sink");
     auto active=[&]{if(!may_continue())throw std::runtime_error("still transaction deadline/stop");};
     auto ready=[&]{WaitWpdStillReady(channel,may_continue);};
+    if(observation)*observation={};
     auto ledger=ReadWpdStillPreflight(channel,may_continue);
+    struct Publish {
+        const WpdStillCaptureChannel& channel;const WpdStillEventLedger& ledger;WpdStillCaptureObservation* target;
+        ~Publish(){if(target)*target={channel.CaptureAttempted(),ledger.Completed(),ledger.CompletionCode()};}
+    } publish{channel,ledger,observation};
     try{channel.ShutterOnce();}
     catch(...){
         const auto shutter_error=std::current_exception();

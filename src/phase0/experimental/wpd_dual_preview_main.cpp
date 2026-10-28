@@ -120,6 +120,7 @@ StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias
     EvidenceWriter evidence(root,NewRunId(),"wpd-public-ptp-sdram-development");
     const auto partial_path=evidence.RunRoot()/(alias+"-transport.jpg.partial");
     HANDLE partial=INVALID_HANDLE_VALUE;
+    WpdStillCaptureObservation observed;bool acquisition_entered=false;
     std::jthread watchdog;
     try{
         device=Open(id,GENERIC_READ|GENERIC_WRITE);opened=true;
@@ -164,9 +165,10 @@ StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias
             Log(alias+" preflight_only=1 shutter_commands=0 setting_writes=0");
             ReadWpdStillPreflight(channel,admitted);outcome.success=true;
         }else{
+        acquisition_entered=true;
         auto payload=AcquireWpdStillPayload(channel,admitted,[&](std::span<const unsigned char> bytes){
             DWORD written{};if(!WriteFile(partial,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr) || written!=bytes.size())throw std::runtime_error("capture partial write failed");
-        });
+        },&observed);
         if(!FlushFileBuffers(partial))throw std::runtime_error("capture partial flush failed");
         CloseHandle(partial);partial=INVALID_HANDLE_VALUE;
         if(!IsValidJpeg(payload.jpeg))throw std::runtime_error("captured bytes are not a valid JPEG");
@@ -179,6 +181,9 @@ StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias
         }
     }catch(const std::exception& error){outcome.error=error.what();outcome.success=false;
         outcome.out_of_focus=dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr;Log(alias+(preflight_only?" preflight_failure: ":" capture_failure: ")+outcome.error);}
+    // One line per capture, success or failure: was this capture's completion
+    // event read before the session closed (#381). Not a success condition.
+    if(acquisition_entered)Log(alias+" capture_completion "+DescribeWpdStillCaptureObservation(observed));
     if(partial!=INVALID_HANDLE_VALUE)CloseHandle(partial);
     if(opened){
         busy_tick=GetTickCount64();busy=true;const auto hr=device->Close();busy=false;
