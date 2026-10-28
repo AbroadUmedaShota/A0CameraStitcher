@@ -263,14 +263,18 @@ function Project([double[]]$H, [double]$X, [double]$Y) {
 # ---- run ---------------------------------------------------------------------------------------
 $exitCode = 1
 $work = $null
+$created = $false
 try {
     $browser = Find-Browser
     if (-not $browser) { Write-Host 'No Google Chrome or Microsoft Edge was found. Pass -BrowserPath.'; exit 2 }
     if ($DetectorExecutable -and -not (Test-Path -LiteralPath $DetectorExecutable -PathType Leaf)) { Write-Host 'DetectorExecutable was not found.'; exit 2 }
-    $work = if ($WorkDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($WorkDirectory) } else { Join-Path ([IO.Path]::GetTempPath()) ('a0-detector-chart-test-' + [Guid]::NewGuid().ToString('N')) }
-    if ($work.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'WorkDirectory must be outside the repository.'; exit 2 }
-    if (Test-Path -LiteralPath $work) { Write-Host 'WorkDirectory must not exist yet.'; exit 2 }
-    New-Item -ItemType Directory -Path $work | Out-Null
+    $candidate = if ($WorkDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($WorkDirectory) } else { Join-Path ([IO.Path]::GetTempPath()) ('a0-detector-chart-test-' + [Guid]::NewGuid().ToString('N')) }
+    if ($candidate.TrimEnd([IO.Path]::DirectorySeparatorChar) -ieq $root -or $candidate.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'WorkDirectory must be outside the repository.'; exit 2 }
+    if (Test-Path -LiteralPath $candidate) { Write-Host 'WorkDirectory must not exist yet.'; exit 2 }
+    # Only a folder this run created is ever removed in finally.
+    New-Item -ItemType Directory -Path $candidate | Out-Null
+    $work = $candidate
+    $created = $true
 
     Write-Host 'Export'
     $a3 = Test-ExportCase 'A3' 'portrait' (Join-Path $work 'a3')
@@ -417,7 +421,7 @@ catch {
     $KeepWork = $true
 }
 finally {
-    if ($work -and (Test-Path -LiteralPath $work)) {
+    if ($created -and (Test-Path -LiteralPath $work)) {
         if ($KeepWork) { Write-Host "Work folder: $work" } else { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
