@@ -17,6 +17,7 @@ using overlap_detail::Plane;
 constexpr int kCoarsestSide = 96;      // the top level's larger side is at most this
 constexpr std::size_t kPeaks = 8;      // local maxima carried down from the top level
 constexpr int kRefineRadius = 2;       // per-level search around 2x the coarser position
+constexpr int kSmallestHalved = 16;    // a level is halved only while its smaller side is at least this
 
 struct Range { int dx0, dx1, dy; }; // dx0 <= dx <= dx1, |dy| <= dy
 struct Peak {
@@ -62,13 +63,17 @@ Range Scaled(const Range& r, int level) {
     const int s = 1 << level;
     return {(r.dx0+s-1)/s,r.dx1/s,r.dy/s};
 }
-// Best first, distinct positions. Equal z at the head is reported, not broken.
-std::vector<Peak> Search(const Plane& la, const Plane& lb, const Range& full, unsigned& levels) {
-    std::vector<std::pair<Plane,Plane>> pyramid{{Gradient(la),Gradient(lb)}};
+using Pyramid = std::vector<std::pair<Plane,Plane>>;
+// Gradient planes, full resolution first.
+Pyramid Build(const Plane& la, const Plane& lb) {
+    Pyramid pyramid{{Gradient(la),Gradient(lb)}};
     while (std::max(pyramid.back().first.width,pyramid.back().first.height) > kCoarsestSide &&
-        std::min(pyramid.back().first.width,pyramid.back().first.height) >= 16)
+        std::min(pyramid.back().first.width,pyramid.back().first.height) >= kSmallestHalved)
         pyramid.emplace_back(Half(pyramid.back().first),Half(pyramid.back().second));
-    levels = static_cast<unsigned>(pyramid.size());
+    return pyramid;
+}
+// Best first, distinct positions. Equal z at the head is reported, not broken.
+std::vector<Peak> Search(const Pyramid& pyramid, const Range& full) {
     std::vector<double> va, vb;
     const int top = static_cast<int>(pyramid.size())-1;
     const auto range = Scaled(full,top);
@@ -151,7 +156,9 @@ OverlapEstimate EstimateOverlapTranslation(const render::BgrImage& a, const rend
     const Range full{(width+9)/10,width*9/10,std::min(100,height/4)};
     const auto la = Luma(a), lb = Luma(b);
     OverlapEstimate result;
-    const auto forward = Search(la,lb,full,result.levels);
+    const auto pyramid = Build(la,lb);
+    result.levels = static_cast<unsigned>(pyramid.size());
+    const auto forward = Search(pyramid,full);
     for (const auto& p : forward) result.candidates.push_back(Candidate(p,a.width));
     if (forward.empty()) { result.reason = OverlapUndeterminedReason::no_candidate; return result; }
     const auto& best = forward[0];
@@ -159,10 +166,16 @@ OverlapEstimate EstimateOverlapTranslation(const render::BgrImage& a, const rend
     if (best.boundary) { result.reason = OverlapUndeterminedReason::search_boundary; return result; }
     if (best.edge) { result.reason = OverlapUndeterminedReason::refinement_boundary; return result; }
     // Round trip: B becomes the reference. Turning both by 180 degrees keeps
-    // B left of A and the same (dx,dy), while every pyramid cell and gradient
-    // difference is sampled from the other side.
-    unsigned reverse_levels{};
-    const auto reverse = Search(Turn(lb),Turn(la),full,reverse_levels);
+    // B left of A and the same (dx,dy). Above full resolution every pyramid
+    // cell and gradient difference is sampled from the other side, so a peak
+    // that only the forward cells lead to is not reached. Full resolution
+    // compares the forward gradient samples, turned: the integer position is
+    // rounded once, the same way in both directions, so a shift near half a
+    // pixel does not flip the round trip. With a single level the search is
+    // exhaustive at full resolution and the round trip repeats it.
+    auto turned = Build(Turn(lb),Turn(la));
+    turned.front() = {Turn(pyramid.front().second),Turn(pyramid.front().first)};
+    const auto reverse = Search(turned,full);
     if (!reverse.empty()) result.reverse = Candidate(reverse[0],a.width);
     if (!Clean(reverse) || reverse[0].dx != best.dx || reverse[0].dy != best.dy) {
         result.reason = OverlapUndeterminedReason::reverse_mismatch; return result;

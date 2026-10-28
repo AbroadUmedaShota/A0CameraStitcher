@@ -1,6 +1,8 @@
 #pragma once
 #include "a0/m2/render.hpp"
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -39,7 +41,18 @@ struct OverlapEstimate {
     std::optional<OverlapCandidate> reverse;  // best of the swapped, 180-degree turned search
     unsigned levels{};                        // pyramid levels searched, 1 = full resolution only
     // Applicable position only when status is estimated_not_judged.
-    const OverlapCandidate* Applicable() const {return status==OverlapEstimateStatus::estimated_not_judged?&candidates.front():nullptr;}
+    const OverlapCandidate* Applicable() const {return status==OverlapEstimateStatus::estimated_not_judged && !candidates.empty()?&candidates.front():nullptr;}
+    // First candidate more than 1 px from the best on either axis. Two coarse
+    // peaks can refine to neighbouring pixels; that neighbour is the best
+    // peak's shoulder, not a second position, so diagnostics compare against
+    // this one. Null when there is none. Does not affect the decision.
+    const OverlapCandidate* RunnerUp() const {
+        for (std::size_t i = 1; i < candidates.size(); ++i) {
+            const auto& c = candidates[i]; const auto& best = candidates.front();
+            if (std::abs(static_cast<long long>(c.overlap_pixels)-best.overlap_pixels) > 1 || std::abs(c.vertical_pixels-best.vertical_pixels) > 1) return &c;
+        }
+        return nullptr;
+    }
 };
 // Search range equals the manual C range: overlap 10..90% of the width and
 // |vertical| <= min(100, height/4). Accepts 8..640 pixels per side; throws

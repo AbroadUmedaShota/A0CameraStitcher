@@ -131,7 +131,7 @@ void MergeLoop(std::stop_token stop){
                             <<" orientation="<<a0::m2::experimental::MountOrientationName(mount_orientation)<<" levels="<<estimate.levels<<" candidates="<<estimate.candidates.size();
                         if(!estimate.candidates.empty()){const auto& c=estimate.candidates[0];
                             s<<" best_overlap_px="<<c.overlap_pixels<<" best_vertical_px="<<c.vertical_pixels<<" best_correlation="<<c.correlation<<" best_evidence="<<c.evidence<<" best_samples="<<c.samples;}
-                        if(estimate.candidates.size()>1){const auto& c=estimate.candidates[1];
+                        if(const auto* runner_up=estimate.RunnerUp()){const auto& c=*runner_up;
                             s<<" second_overlap_px="<<c.overlap_pixels<<" second_vertical_px="<<c.vertical_pixels<<" second_evidence="<<c.evidence<<" evidence_gap="<<estimate.candidates[0].evidence-c.evidence;}
                         if(estimate.reverse)s<<" reverse_overlap_px="<<estimate.reverse->overlap_pixels<<" reverse_vertical_px="<<estimate.reverse->vertical_pixels;
                         s<<" applied="<<(estimate.Applicable()?1:0)<<" quality_accepted=0";Log(s.str());
@@ -141,6 +141,11 @@ void MergeLoop(std::stop_token stop){
                             merged.alignment_status=L"自動位置を適用（基準による判定なし・要目視確認） / 相関 "+std::to_wstring(candidate->correlation);
                             Log("C auto_translation_proposal=1 overlap_px="+std::to_string(overlap)+" vertical_px="+std::to_string(vertical)+" correlation="+std::to_string(candidate->correlation)+" quality_accepted=0");
                         }else merged.alignment_status=std::wstring(L"自動位置を決められません（")+OverlapUndeterminedLabel(estimate.reason)+L"）。Cの位置は変えていません。模様・重なり・取付の向きを確認し手動調整してください";
+                    }else if(merged.revision==revision){
+                        // A manual change already replaced the status; a stale or
+                        // stopping pair must not leave "computing" on screen.
+                        Log(std::string("C auto_overlap_v2 discarded=")+(stopping?"stopping":"stale"));
+                        merged.alignment_status=L"映像が古くなったため適用していません。もう一度押してください";
                     }
                 }
                 auto result=RenderPreviewMerge(small_a,small_b,overlap,vertical);
