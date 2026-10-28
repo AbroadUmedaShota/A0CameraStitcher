@@ -259,20 +259,22 @@ PairRenderResult RenderDocumentPairImpl(const BgrImage& a, const BgrImage& b, co
     const BgrAffineTransform* color) {
     ValidateCameraProjection(parameters.camera_a, parameters.raster);
     ValidateCameraProjection(parameters.camera_b, parameters.raster);
-    const double pitch = 25.4 / parameters.raster.dpi;
-    const double left = static_cast<double>(parameters.raster.region_um.left) / 1000.0;
-    const double top = static_cast<double>(parameters.raster.region_um.top) / 1000.0;
-    const auto mapping = [&](const CameraProjection& camera) -> OutputToCamera {
-        return [camera, pitch, left, top](Point output, Point& raw) {
-            const Point document{left + (output.x + .5) * pitch, top + (output.y + .5) * pitch};
-            Require(TryProjectDocument(camera, document, raw), "document projection is not numerically representable");
-            return true;
-        };
-    };
     return RenderMappedPairImpl(a, b, {parameters.raster.width_pixels, parameters.raster.height_pixels,
-        mapping(parameters.camera_a), mapping(parameters.camera_b), parameters.layout, parameters.resampling},color);
+        DocumentOutputToCamera(parameters.raster, parameters.camera_a),
+        DocumentOutputToCamera(parameters.raster, parameters.camera_b), parameters.layout, parameters.resampling},color);
 }
 } // namespace
+OutputToCamera DocumentOutputToCamera(const OutputRaster& raster, const CameraProjection& camera) {
+    ValidateOutputRaster(raster);
+    const double pitch = 25.4 / raster.dpi;
+    const double left = static_cast<double>(raster.region_um.left) / 1000.0;
+    const double top = static_cast<double>(raster.region_um.top) / 1000.0;
+    return [camera, pitch, left, top](Point output, Point& raw) {
+        const Point document{left + (output.x + .5) * pitch, top + (output.y + .5) * pitch};
+        Require(TryProjectDocument(camera, document, raw), "document projection is not numerically representable");
+        return true;
+    };
+}
 PairRenderResult RenderMappedPair(const BgrImage& a,const BgrImage& b,const MappedRenderParameters& p) {return RenderMappedPairImpl(a,b,p,nullptr);}
 PairRenderResult RenderMappedPair(const BgrImage& a,const BgrImage& b,const MappedRenderParameters& p,const BgrAffineTransform& color) {return RenderMappedPairImpl(a,b,p,&color);}
 PairRenderResult RenderDocumentPair(const BgrImage& a,const BgrImage& b,const DocumentRenderParameters& p) {return RenderDocumentPairImpl(a,b,p,nullptr);}
