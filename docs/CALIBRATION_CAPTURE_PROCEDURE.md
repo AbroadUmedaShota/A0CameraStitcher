@@ -2,9 +2,71 @@
 
 Issue #371（#367 の段 2、#351 R4）。吊り下げリグの 2 台で、レンズの歪みと机に対する傾きを測るための撮影を、印刷から draft 校正の実行まで 1 回で準備できるように書く。撮影は所有者の GO の後に行う。
 
+主の手順は、チャートを机に平らに置いたまま位置だけ変えて撮る平置きの手順（次の節、#374）。チャートを板に貼って傾ける手順（1 節の段 3、4・5・8 節）は代替として残す。
+
 この文書とチャートは撮影の準備物で、校正精度・合成品質の合格を意味しない。校正データの承認は #45・#43、Live 側への反映は #308・#309 で、ここでは扱わない。
 
-## 1. 全体の流れ
+## 平置きの手順（主の手順、#374）
+
+図面は常に机に平らに置く。カメラは動かせず、チャートを傾ける道具も無い。そこで、チャートも机に平らに置いたまま位置だけ変えて撮り、[平置きの推定](M2_PLANAR_CALIBRATION.md)で歪みと文書の面の写像を求める。これを主の手順とする。板を傾ける手順（1 節の表の段 3、4・5 節、8 節）は、平置きで足りないと分かったときの代替として残す。チャートの作り方（2 節）、倍率の確かめ方（3 節の 1〜4）、撮影の設定（5 節の「撮影の設定」）、記録（6 節）、anchor（7 節）は共通。
+
+| 段 | すること | 所要の目安 |
+| --- | --- | --- |
+| 1 | チャートを作り（2 節）、A3 で紙を 2 枚印刷して倍率を確かめる（3 節の 1〜4）。板には貼らない | 印刷と確認で 15 分ほど（※推定） |
+| 2 | 両台撮影を 7 回（下の表） | 30 分ほど（※推定） |
+| 3 | 画像を並べ、検出 job に anchor を書く（7 節）。使わない枠を job から消す | 14 枚で 25 分ほど（※推定） |
+| 4 | 検出と平置きの推定を流す（下の「実行」） | 数分 |
+
+必要なもの: A3 を印刷できるプリンタ、厚手のマット紙 2 枚、1 mm 目盛りの定規（300 mm 以上）、巻尺、弱粘着のマスキングテープ。テープが無ければ重し 4 つ（文鎮や小さな本など）。板と傾けるための台は要らない。
+
+### 置き方
+
+- 紙は机に直に平らに置き、四辺をテープで留める。テープが無ければ、余白の四隅に重しを置く。重しはリングと模様にかけず、外側の帯（chart id や目盛りのある余白）に載せる。斜めから光を当てて、浮きと波打ちが無いことを見る
+- 板に貼ったチャートは使わない。板の厚み（約 5 mm）だけ面が机から浮き、その分が写像に入る（3 節の終わり）。すでに 1 枚を板に貼ったなら、もう 1 枚印刷する
+- 2 枚を同時に使う。1 枚を CAM-A の範囲、もう 1 枚を CAM-B の範囲に置くと、1 回の両台撮影で両台の view が 1 枚ずつ撮れる
+- 重なる範囲（2 台の両方に写る帯）の中に置いた 1 枚は、両台の view になる。内側の隅（重なる範囲に近い隅）は帯の上端と下端に当たるので、1 枚で両台の内側の隅が撮れる
+- 回ごとにチャートを少し回す（0〜10° ほど、回ごとに変える）。chart id が C 表示でおおむね正立して読める向きにすると、anchor の節点を数えやすい
+- 隅の回は、チャートの角が範囲の隅に来るまで寄せる。画面から少しはみ出してよい（縁で切れたリングは検出しないだけ）。anchor にする 3 つのリングと、その周りの 3 × 3 セルほどは画面に入れる
+- 2 枚を接して並べない。間を 1 セル（20 mm）以上空ける
+- 上下左右は 1 節の「上下左右と文書の左上」のとおり C 表示で見た向き。CAM-A が左、CAM-B が右の並びで、外側は CAM-A の左・CAM-B の右、内側は重なる範囲の側
+
+| 回 | 1 枚目 | 2 枚目 | CAM-A の画像 | CAM-B の画像 |
+| --- | --- | --- | --- | --- |
+| 1 | CAM-A の範囲の中央 | CAM-B の範囲の中央 | training `training-01` | training `training-01` |
+| 2 | CAM-A の外側の上の隅 | CAM-B の外側の上の隅 | training `training-02` | training `training-02` |
+| 3 | CAM-A の外側の下の隅 | CAM-B の外側の下の隅 | training `training-03` | training `training-03` |
+| 4 | 重なる範囲の上端（両台の内側の上の隅） | 写らない所へどける | training `training-04` | training `training-04` |
+| 5 | 重なる範囲の下端（両台の内側の下の隅） | 写らない所へどける | training `training-05` | training `training-05` |
+| 6 | CAM-A の範囲で、中央と隅の間のどこか 1 か所（10° ほど回す） | CAM-B の範囲で同じように | validation `validation-01` | validation `validation-01` |
+| 7 | 重なる範囲の上下の中ほど、chart id が C 表示で正立して読める向き（angle 0） | 写らない所へどける | reference `reference` | reference `reference` |
+
+- 7 回目が「重なりの置き方」で、文書の座標はこの置き方で決まる（チャートの F-000-000 が原点、チャートの軸が文書の軸）。5 節の reference の「収まるかを確かめる」「位置を測る」をそのまま行い、F-000-000 と F-012-000 のリングの中心の位置を記録する
+- 4・5 回目の 1 枚は 7 回目と違う位置にする（帯の上端と下端）
+- 7 回の間、リグとカメラを動かさない。ピントと絞りは図面を撮るときと同じにして、ピントリングをテープで留める（5 節の「撮影の設定」）
+
+検出 job の雛形（2 節）は各カメラ 9 枠ある。平置きでは `training-06` と `validation-02` を使わないので、両台の 4 つの枠（`CAM-A-training-06`、`CAM-A-validation-02`、`CAM-B-training-06`、`CAM-B-validation-02`）を `views` から消す。消さずに撮り足してもよい（`training-06` は外側の辺の中ほど、`validation-02` は 6 回目と違う位置）。
+
+### 実行
+
+ビルドは 8 節と同じ（`A0_BUILD_FIDUCIAL_DETECTOR=ON`、`A0_BUILD_DRAFT_CALIBRATOR=ON`）。まず検出だけを流して anchor を直す（8 節の 1）。
+
+1. 校正 job を作る。`samples/public/planar-calibration-job.v1.example.json` をコピーし、`profileId`・`provenanceId`・`measuredAt` を書き、`documentPlane` をリグに合わせ（`landscape`・`CAM-A-left-CAM-B-right`）、`overlapViews` を `{ "CAM-A": "CAM-A-reference", "CAM-B": "CAM-B-reference" }`（雛形の viewId）にする
+2. `overlapPlacement` は 8 節 3 の `referencePlacement` と同じ式。angle 0 で置き、F-000-000 のリングの中心を文書の (x, y) mm で測ったなら、`angleRadians` 0、`translationXMm` = 28.5 − x、`translationYMm` = 20 − y（A3 縦。ほかの用紙は 2 節の表）
+3. `nominalCameras` に、各カメラのレンズに書かれた焦点距離（mm）と、センサーの公称寸法（D810 は 35.9 × 24.0 mm、保存された向きの幅と高さ）を書く。リグのレンズの焦点距離は ※要確認。焦点距離の真値は求めない（[平置きの推定](M2_PLANAR_CALIBRATION.md) の 1 節）
+4. まとめて流す
+
+   ```powershell
+   pwsh -NoProfile -File scripts/Invoke-DraftCalibrationPipeline.ps1 -Planar `
+     -DetectionJob <画像の隣にあるdetection-job.json> `
+     -CalibrationJob <planar-calibration-job.json> `
+     -DetectorExecutable build/reference/Release/A0CameraStitcher.FiducialDetector.exe `
+     -CalibratorExecutable build/reference/Release/A0CameraStitcher.DraftCalibrator.exe `
+     -OutputDirectory <親が存在する新規出力フォルダ>
+   ```
+
+   exit 0 で `draft/profile.json` と `draft/calibration-report.json` が出る。報告の `cameras[].heldOutResidual`（validation の残差）と `straightness`（歪みを除いた後の行と列の曲がり）を見る。どちらにも合格線は当てていない（※所有者が決める）
+
+## 1. 全体の流れ（傾ける手順、代替）
 
 | 段 | すること | 所要の目安 |
 | --- | --- | --- |
@@ -86,7 +148,7 @@ pwsh -NoProfile -File scripts/Export-DetectorChartPdf.ps1 -OutputDirectory <リ�
 
 reference に板のチャートを使わない理由: 板の厚み（約 5 mm）の分だけチャートが机から浮く。校正には板の厚みを入れる欄が無い（`referencePlacement` は角度・並進・`coplanarConfirmed` だけ）。浮きは 2 台から見た位置の逆向きのずれ（視差）として残り、[PILOT_CAPTURE_PROCEDURE.md](PILOT_CAPTURE_PROCEDURE.md) 4 節の式で h = 5 mm なら 2 台の間で約 1.5 mm になる（※推定）。8 節 3 も参照。
 
-## 4. チャートを 2 枚使う理由
+## 4. チャートを 2 枚使う理由（傾ける手順）
 
 - 板のチャート（1 枚目）は、傾けて training に使う。傾けると紙のままではたわむので、板に貼る
 - 紙のチャート（2 枚目）は、机に直に平らに留めて validation と reference に使う。reference は図面と同じ面に置く必要があり（3 節の終わり、8 節 3）、板に貼ったチャートは使えない
@@ -94,7 +156,7 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 - 2 枚は同じ版（chart id が同じ）なので、1 つの検出 job で扱える。検出 job では、view ごとにそのとき写したチャートの節点を anchor で与える
 - 2 枚を接して並べない。間を 1 セル（20 mm）以上空ける（隣のチャートのリングを取り違えないため。※推定）
 
-## 5. 置き方と撮影の回数（両台撮影 13 回）
+## 5. 置き方と撮影の回数（傾ける手順、両台撮影 13 回）
 
 板を CAM-A の範囲で 6 通りに傾けて撮り（1〜6 回）、次に CAM-B の範囲で同じ 6 通りを撮る（7〜12 回）。その間、紙のチャートは反対側のカメラの範囲に平らに留めておく。最後に紙を重なる範囲に移して reference を撮る（13 回）。26 枚のうち、各カメラに training 6、validation 2、reference 1 の 9 枚を検出 job に入れる（人工画像で実績のある構成、[全工程の試験](M2_FULL_CALIBRATION_PIPELINE.md)）。上下左右は 1 節の「上下左右と文書の左上」のとおり C 表示で見た向き。
 
@@ -178,7 +240,7 @@ reference に板のチャートを使わない理由: 板の厚み（約 5 mm）
 - `radiusPx` は探索半径。その円の中にリングがちょうど 1 つ入る大きさにする。9 px/mm なら隣のリングまで約 180 px なので、50 px ほど
 - 間違った節点の名前は、セルの模様とグレーの照合（`identity`）でたいてい見つかる。ただし 3 列 3 行ずれた名前のように、模様が周期的に同じになるずれは見つからない（[検出器](M2_FIDUCIAL_DETECTOR.md)の限界）。数え直してから書く
 
-## 8. 検出と draft 校正の実行
+## 8. 検出と draft 校正の実行（傾ける手順）
 
 ビルド（OpenCV の入手と置き場所は[検出器](M2_FIDUCIAL_DETECTOR.md)のとおり。どちらの開発ツールも既定 OFF で、製品には入らない）:
 

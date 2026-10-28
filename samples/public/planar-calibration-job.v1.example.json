@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "a0.planar-calibration-job.v1",
+  "profileId": "synthetic-planar-draft-example",
+  "provenanceId": "synthetic-planar-provenance-example",
+  "measuredAt": "2000-01-02T00:00:00Z",
+  "documentPlane": {
+    "orientation": "landscape",
+    "cameraOrder": "CAM-A-left-CAM-B-right"
+  },
+  "overlapViews": { "CAM-A": "CAM-A-overlap", "CAM-B": "CAM-B-overlap" },
+  "overlapPlacement": {
+    "angleRadians": 0,
+    "translationXMm": -566,
+    "translationYMm": -400.5
+  },
+  "nominalCameras": {
+    "CAM-A": { "focalLengthMm": 50, "sensorWidthMm": 35.9, "sensorHeightMm": 24 },
+    "CAM-B": { "focalLengthMm": 50, "sensorWidthMm": 35.9, "sensorHeightMm": 24 }
+  },
+  "numericalPolicy": {
+    "minimumTrainingViews": 5,
+    "maxIterations": 200,
+    "relativeCostTolerance": 1e-12,
+    "relativeStepTolerance": 1e-12,
+    "initialDamping": 0.001,
+    "maxUndistortionIterations": 40,
+    "undistortionTolerancePixels": 1e-9
+  }
+}

@@ -446,6 +446,18 @@ std::optional<ChartPose> pose_detail::EstimatePlanarPose(
     return pose;
 }
 
+std::optional<std::array<double, 9>> pose_detail::FitPlanarHomography(std::span<const PlanarObservation> observations) {
+    if (observations.size() < kMinimumMappingPoints) return std::nullopt;
+    std::vector<Correspondence> points;
+    points.reserve(observations.size());
+    for (const auto& point : observations) {
+        if (!std::isfinite(point.x_mm) || !std::isfinite(point.y_mm)
+            || !std::isfinite(point.u) || !std::isfinite(point.v)) return std::nullopt;
+        points.push_back({point.x_mm, point.y_mm, point.u, point.v});
+    }
+    return FitHomography(points);
+}
+
 UndistortedIntrinsicsResult EstimateUndistortedIntrinsics(const CalibrationObservationSession& session,
     const UndistortedIntrinsicsPolicy& policy) {
     ValidatePolicy(policy);

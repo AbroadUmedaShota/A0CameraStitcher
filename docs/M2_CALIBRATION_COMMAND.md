@@ -2,6 +2,8 @@
 
 [JPEG検出器](M2_FIDUCIAL_DETECTOR.md)と[draft writer](M2_DRAFT_CALIBRATION_ARTIFACTS.md)を一度に実行する。入力は撮影済みのJPEGを指す検出jobと、reference pair・既知配置・数値policyを指定した校正job。出力は**既存形式のprofile v2のdraft＋詳細レポート**で、製品の撮影やLive Viewには接続しない。
 
+平置きのチャートだけで校正する場合（#374）は `-Planar` を付け、校正jobに `a0.planar-calibration-job.v1` を渡す。jobと報告の中身は[平置きの推定](M2_PLANAR_CALIBRATION.md)。それ以外の手順と出力の形はこの文書と同じ。
+
 ## 準備と実行
 
 Windows、PowerShell 7.4以降、既存の開発用nativeツール2つが必要。OpenCV DLLは検出器のexeの隣に置く。既存のCMake option `A0_BUILD_FIDUCIAL_DETECTOR=ON`、`A0_BUILD_DRAFT_CALIBRATOR=ON`でビルドし、製品へのOpenCVのリンク範囲は広げない。

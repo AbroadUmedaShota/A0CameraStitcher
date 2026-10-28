@@ -481,14 +481,24 @@ if(MSVC)
 endif()
 a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_calibration_lens)
 
+# Planar calibration (#374): STL and the lens stage only; no Win32, OpenCV,
+# generator or profile reader. Flat chart placements, nominal K.
+add_library(a0_m2_planar_calibration src/m2/planar_calibration.cpp)
+target_include_directories(a0_m2_planar_calibration PUBLIC src/m2/include)
+target_link_libraries(a0_m2_planar_calibration PUBLIC a0_m2_calibration_lens)
+if(MSVC)
+    target_compile_options(a0_m2_planar_calibration PRIVATE /W4 /permissive- /EHsc /fp:precise)
+endif()
+a0_defer_to_end_of_configure(a0_assert_no_calibration_view_dependency a0_m2_planar_calibration)
+
 # Draft profile/report writer is a development tool, never a product dependency.
 # Kept separate from the STL-only calibration libraries: only this layer uses
 # the strict profile reader and Windows SHA-256 / durable artifact publication.
 option(A0_BUILD_DRAFT_CALIBRATOR "Build the development-only draft calibration artifact writer (#313)" OFF)
 if(A0_BUILD_DRAFT_CALIBRATOR)
-    add_library(a0_m2_draft_calibration src/m2/draft_calibration_artifacts.cpp)
+    add_library(a0_m2_draft_calibration src/m2/draft_calibration_artifacts.cpp src/m2/planar_calibration_artifacts.cpp)
     target_include_directories(a0_m2_draft_calibration PUBLIC src/m2/include PRIVATE src/common/include)
-    target_link_libraries(a0_m2_draft_calibration PUBLIC a0_m2_calibration_lens PRIVATE a0_m2_rig_profile_v2 bcrypt)
+    target_link_libraries(a0_m2_draft_calibration PUBLIC a0_m2_calibration_lens a0_m2_planar_calibration PRIVATE a0_m2_rig_profile_v2 bcrypt)
     target_compile_definitions(a0_m2_draft_calibration PRIVATE UNICODE _UNICODE NOMINMAX)
     add_executable(A0CameraStitcher.DraftCalibrator src/m2/draft_calibrator_main.cpp)
     target_link_libraries(A0CameraStitcher.DraftCalibrator PRIVATE a0_m2_draft_calibration)
@@ -512,6 +522,18 @@ if(BUILD_TESTING AND A0_BUILD_DRAFT_CALIBRATOR)
     add_test(NAME m2_draft_calibration_artifacts_contracts
         COMMAND m2_draft_calibration_artifacts_contracts $<TARGET_FILE:A0CameraStitcher.DraftCalibrator>)
     set_tests_properties(m2_draft_calibration_artifacts_contracts PROPERTIES TIMEOUT 1200)
+
+    add_executable(m2_planar_calibration_contracts tests/planar_calibration_tests.cpp)
+    target_link_libraries(m2_planar_calibration_contracts PRIVATE a0_m2_draft_calibration a0_m2_rig_profile_v2 a0_m2_synthetic_pair)
+    target_include_directories(m2_planar_calibration_contracts PRIVATE src/m2 src/common/include)
+    target_compile_definitions(m2_planar_calibration_contracts PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(m2_planar_calibration_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_dependencies(m2_planar_calibration_contracts A0CameraStitcher.DraftCalibrator)
+    add_test(NAME m2_planar_calibration_contracts
+        COMMAND m2_planar_calibration_contracts $<TARGET_FILE:A0CameraStitcher.DraftCalibrator>)
+    set_tests_properties(m2_planar_calibration_contracts PROPERTIES TIMEOUT 1200)
 endif()
 if(BUILD_TESTING)
     add_executable(m2_calibration_view_geometry_contracts tests/calibration_view_geometry_tests.cpp)
