@@ -1006,7 +1006,14 @@ if(BUILD_TESTING)
     add_executable(a0_wpd_still_capture_tests tests/wpd_still_capture_tests.cpp)
     target_link_libraries(a0_wpd_still_capture_tests PRIVATE a0_wpd_live_view_transfer ole32 PortableDeviceGuids)
     add_test(NAME wpd_still_capture_contracts COMMAND a0_wpd_still_capture_tests)
-    set_tests_properties(wpd_still_capture_contracts PROPERTIES TIMEOUT 15)
+    set_tests_properties(wpd_still_capture_contracts PROPERTIES TIMEOUT 60)
+    # Pair transaction (#389): both shutters before either import, original
+    # handling on every stop point, completion events per body (#381). Synthetic
+    # channels only.
+    add_executable(a0_wpd_still_pair_tests tests/wpd_still_pair_tests.cpp)
+    target_link_libraries(a0_wpd_still_pair_tests PRIVATE a0_wpd_live_view_transfer ole32 PortableDeviceGuids)
+    add_test(NAME wpd_still_pair_contracts COMMAND a0_wpd_still_pair_tests)
+    set_tests_properties(wpd_still_pair_contracts PROPERTIES TIMEOUT 120)
     add_executable(a0_preview_merge_tests tests/preview_merge_tests.cpp)
     target_include_directories(a0_preview_merge_tests PRIVATE src/phase0/include src/common/include)
     target_link_libraries(a0_preview_merge_tests PRIVATE a0_m2_render a0_m2_overlap_estimation)

@@ -2,7 +2,7 @@
 
 所有者の「いい感じ」「開発を続けて」と「図面撮る前提だから今はある程度」という指示に基づく開発用の接続。仮配置のC表示に対する良好な感触を、最終図面の文字・直線・継ぎ目・色の受入へ読み替えない。承認済みrig profileを作ったり既存の製品用StitchJobの信頼ゲートを回避したりしない。
 
-「両台撮影 → 仮Merge保存」は、現在のCの幅・高さ・重なり・B上下移動・revisionを保存してから両Liveをdrain/Stop/Closeする。Aを一回撮影して原画像のPC検証とCloseを確認し、続けてBを一回撮影する。A失敗時にBへ進まず、B失敗でもA原画像を失わず、自動再撮影・旧画像の補充は行わない。停止要求時から原画像二枚・合成JPEG・確認レポートの検証まで、共通180秒deadlineを使う。別カメラごとの180秒へ延長しない。従来の単独撮影ボタンも残す。
+「両台撮影 → 仮Merge保存」は、現在のCの幅・高さ・重なり・B上下移動・revisionを保存してから両Liveをdrain/Stop/Closeする。撮影の手順は「両台の事前確認（非撮影のpreflightとClose）→ A/B両方のWPDセッションを開いて撮影直前の状態を再確認 → Aのシャッター → Bのシャッター → Aの取り込みとPC検証 → Bの取り込みとPC検証 → 両方Close」で、これを一つの180秒transactionとして扱う（#389。ABの間に原稿が動く時間を減らすため、画像の取り込みを両方のシャッターの後に回す。セッションの持ち方と理由は [WPD_STILL_CAPTURE.md](WPD_STILL_CAPTURE.md) の「両台撮影の順番とセッション」）。Bのシャッターは、Aのシャッターの受付を確認した後にだけ送る。二つのシャッターを送った時刻の差を `shutter_gap_ms` としてログに残す。同時露光は保証しない。Aのシャッターが通らなければBは撮らない。Bのシャッターが通らない、またはどちらかの取り込みが失敗しても、取得済みの原画像は失わない（Bが露光済みなら、Aの取り込みが失敗してもBは一回だけ取り込む。再試行ではない）。自動再撮影・旧画像の補充は行わない。停止要求は未送信のシャッターだけを止め、送信済みの取り込みと保存は続ける。停止要求時から原画像二枚・合成JPEG・確認レポートの検証まで、共通180秒deadlineを使う。別カメラごとの180秒へ延長しない。従来の単独撮影ボタンも残す。
 
 JPEGの幾何は `dx = round((previewWidth-overlap)*jpegWidth/previewWidth)`、`dy = round(vertical*jpegHeight/previewHeight)` とする仮の正規化座標変換。二台のJPEG寸法一致が必要で、上下は両画像が存在する高さにcropする。既存の純粋M2 rendererでfull-size BGRを合成する。ライブビューとJPEGの厳密な画角対応、回転・倍率・台形・レンズ・色・物理DPIは未検証であり、この式は校正結果ではない。誤差を閾値へclampして合格と扱わない。
 
@@ -12,7 +12,7 @@ JPEGはCREATE_NEWの所有handleへencodeし、flush、候補identity/size/hash/
 
 保存したJPEGから復号した縮小画像を、画面下段へ「撮影JPEGの合成結果（静止画／未校正・確認用）」として表示する。A/Bは再開し、「ライブCに戻す」「撮影結果を見る」で切り替える。静止結果を現在のライブ映像と表示しない。手動位置合わせを操作した場合もライブCへ戻る。通常起動に自動撮影はない。`--seconds 60 --pair-smoke` は一回の自動位置候補→実際の両台撮影UI command→原画像/合成JPEG保存→静止表示→両Live再開/終了を行う明示実機テスト。
 
-本entryは開発previewを明示有効にしたbuildだけでcompileする。既存の承認済みprofile用 `StitchCanonicalPair` / `StitchCanonicalPairV2` は変更していない。人工JPEGのgeometry/feather/保存/再読込/原画像不変/誤hash・alias・same-file拒否/期限・途中partial保持を `still_review_contracts`、A→B・共通deadline・失敗時の原画像保持を `still_pair_contracts` で検証する。実機結果は開発状況記録を参照。最終図面の校正受入は別工程。
+本entryは開発previewを明示有効にしたbuildだけでcompileする。既存の承認済みprofile用 `StitchCanonicalPair` / `StitchCanonicalPairV2` は変更していない。人工JPEGのgeometry/feather/保存/再読込/原画像不変/誤hash・alias・same-file拒否/期限・途中partial保持を `still_review_contracts`、二つのシャッターが取り込みより前に続けて送られる順序・共通deadline・停止要求・失敗時の原画像保持を `still_pair_contracts`（手順）と `wpd_still_pair_contracts`（偽channelで実際に送るコマンド列とallowlist）で検証する。実機結果は開発状況記録を参照。最終図面の校正受入は別工程。
 
 ## 保存結果の拡大・微調整・再Merge (#336)
 
@@ -94,7 +94,7 @@ native `--report ... --smoke` は作業の明示保存、点/用途/調整値の
 
 `PairCycleProbe` は試験だけの純粋な進行判定。session/pair/saved数、busy/失敗状態、現在のLive/merge鮮度と、前組の静止/C描画数を使う。以前の描画数で再開を成功にせず、一つの段階からcapture commandを重複送信しない。撮影コマンドや保存処理、校正/承認APIには触れない。実機結果が揃うまでは二組の成功と扱わない。
 
-初回のA shutter受付成功後に画像通知が得られず、別の読み取り診断とAF-only操作でAのOutOfFocus（0xA002）を確認した。撮影前と受付後のDeviceReadyでこの拒否を検出し、typedな理由をUIまで渡す。受付成功だけを画像到着・合焦の成功とせず、自動AFやシャッター再送は行わない。合焦拒否時も既存原画像や診断partialを保持し、撮影失敗後のライブ自動再開は無効のままとする。
+初回のA shutter受付成功後に画像通知が得られず、別の読み取り診断とAF-only操作でAのOutOfFocus（0xA002）を確認した。撮影前と受付後のDeviceReadyでこの拒否を検出し、typedな理由をUIまで渡す。受付成功だけを画像到着・合焦の成功とせず、自動AFやシャッター再送は行わない。両台撮影ではAの受付後のDeviceReadyを、Bのシャッターの後（Aの取り込みの先頭）に確認する。そのためAがOutOfFocusでもBのシャッターは既に送られているが、撮影前に両台のDeviceReadyを確認するので、起きるのは撮影前から受付後の間に状態が変わった場合に限る。合焦拒否時も既存原画像や診断partialを保持し、撮影失敗後のライブ自動再開は無効のままとする。
 
 `--capture-diagnostics` は登録A/BのreadinessとLive状態・禁止理由、露出時間（0x500D）・フォーカスモード（0x500A）・電池（0x5001）を読むだけの診断。既存のLive AFモードも読む。aliasを再確認し、hardware leaseと12秒の停滞watchdogを使って各sessionをCloseする。Start/AF/シャッター/設定writeは行わず、raw値をprivateログへ記録する。追加識別子は[公開PTP header](https://github.com/gphoto/libgphoto2/blob/v2.5.31/camlibs/ptp2/ptp.h)の数値事実を参照し、SDK資料は利用しない。
 

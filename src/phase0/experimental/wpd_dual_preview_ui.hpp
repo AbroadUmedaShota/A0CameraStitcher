@@ -338,9 +338,9 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
     EvidenceWriter evidence(root,NewRunId(),"wpd-uncalibrated-pair-review");
     try{
         evidence.RecordState("pair","BothLiveViewsClosed");
-        auto pair=CapturePreflightedStillPairOnce([&](int i,auto end){return CheckStillOnce(ids[i],i==0?"CAM-A":"CAM-B",end);},
-            [&](int i,auto end){if(i==0)Log("pair_preflight_both_ready=1 both_closed=1");return SaveStillOnce(ids[i],i==0?"CAM-A":"CAM-B",true,end);},[]{return !capture_stop_requested.load();},deadline);
-        if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.preflight_complete;throw std::runtime_error(pair.error);}
+        // #389: both shutters precede either import, all under this one deadline.
+        auto pair=CaptureStillPairShutterFirst(ids,deadline);
+        if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
         request.automatic_alignment=a0::m2::experimental::StillReviewRequest::AutomaticAlignment{merge_policy};
@@ -364,7 +364,7 @@ void AdvanceCapture(HWND hwnd){
         if(capture_pending && !closing){
             const int index=*capture_pending;capture_pending.reset();
             if(safe){
-                capture_status=index==2?L"A→Bを各1回撮影し、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
+                capture_status=index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
                 capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline]{
                     try{ComScope com;if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
                     catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=error.what();return result;}

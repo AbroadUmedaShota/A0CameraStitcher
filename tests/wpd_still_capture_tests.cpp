@@ -1,4 +1,4 @@
-#include "a0/phase0/experimental/wpd_still_capture.hpp"
+#include "wpd_still_fake.hpp"
 #include <algorithm>
 #include <iostream>
 using namespace a0::phase0::experimental;
@@ -12,71 +12,9 @@ template<class F>std::string RejectedEvent(F f,std::uint16_t code,bool after_shu
     try{f();}catch(const WpdStillEventRejected& e){typed=e.Code()==code && e.AfterShutter()==after_shutter;what=e.what();}catch(...){}
     Check(typed);return what;
 }
+// Test-sized completion wait. Production uses kWpdStillCompletionWaitMax.
+const WpdStillCompletionWait kShortWait{std::chrono::milliseconds(60),std::chrono::milliseconds(2)};
 bool Contains(const std::string& text,std::string_view part){return text.find(part)!=std::string::npos;}
-void Require(bool value){if(!value)throw std::runtime_error("synthetic still channel contract");}
-void Put(std::vector<unsigned char>& data,size_t offset,std::uint32_t value,size_t size){for(size_t i=0;i<size;++i)data[offset+i]=static_cast<unsigned char>(value>>(8*i));}
-WpdValues Reply(bool final=false){WpdValues result;Require(CoCreateInstance(CLSID_PortableDeviceValues,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&result))==S_OK);result->SetErrorValue(WPD_PROPERTY_COMMON_HRESULT,S_OK);if(final)result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE,0x2001);return result;}
-std::vector<unsigned char> EventsOf(const std::vector<WpdStillEvent>& events){std::vector<unsigned char> data(2+6*events.size());Put(data,0,static_cast<unsigned>(events.size()),2);size_t i=0;for(auto e:events){Put(data,2+6*i,e.code,2);Put(data,4+6*i,e.parameter,4);++i;}return data;}
-std::vector<unsigned char> Events(std::initializer_list<WpdStillEvent> events){return EventsOf(std::vector<WpdStillEvent>(events));}
-std::vector<unsigned char> Info(size_t bytes){std::vector<unsigned char> data(52);Put(data,4,0x3801,2);Put(data,8,static_cast<unsigned>(bytes),4);Put(data,26,7360,4);Put(data,30,4912,4);return data;}
-std::vector<unsigned char> Text(std::wstring_view text){std::vector<unsigned char> data(1+2*(text.size()+1));data[0]=static_cast<unsigned char>(text.size()+1);for(size_t i=0;i<text.size();++i)Put(data,1+2*i,text[i],2);return data;}
-class Fake final:public WpdStillCaptureChannel {
-public:
-    Fake():WpdStillCaptureChannel([&]{return admitted;},[&]{return owned;}){}
-    bool admitted=true,owned=true,pending=false,ambiguous=false,bad_quality=false,reject_object_end=false,reject_shutter=false,metadata_before=false,metadata_after=false;
-    bool out_of_focus_after_shutter=false,out_of_focus_before_shutter=false;
-    DWORD preflight_event{},postflight_event{},preflight_companion{};
-    int preflight_event_on_read{};bool repeat_preflight_event{},bad_quality_after_refresh{},late_pending{};
-    // #381: the camera's event queue outlives one session. A late completion
-    // is queued there and only a later session's preflight 0x90C7 reads it.
-    std::vector<WpdStillEvent>* camera_queue{};bool completion_late{},duplicate_completion{},duplicate_sent{};
-    int preflight_reads{};
-    int shutters{},object_reads{},ends{},profile_reads{};bool event_sent{},metadata_sent{};DWORD current_operation{};size_t offset{};
-    std::vector<unsigned char> jpeg{0xff,0xd8,7,8,9,10,0xff,0xd9},data;
-protected:
-    WpdLiveViewExchange Exchange(IPortableDeviceValues* request) override {
-        DWORD id{},code{};request->GetUnsignedIntegerValue(WPD_PROPERTY_COMMON_COMMAND_ID,&id);
-        request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,&code);
-        if(id==WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE.pid){
-            if(code==0x90c0)++shutters;else Require(code==0x90c8);auto result=Reply(true);if(code==0x90c0 && reject_shutter)result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE,0xa004);
-            if(code==0x90c8 && ((shutters && out_of_focus_after_shutter) || (!shutters && out_of_focus_before_shutter)))result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE,0xa002);return {S_OK,result};
-        }
-        if(id==WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_READ.pid){
-            current_operation=code;offset=0;
-            Microsoft::WRL::ComPtr<IPortableDevicePropVariantCollection> args;request->GetIPortableDevicePropVariantCollectionValue(WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS,&args);
-            PROPVARIANT v{};DWORD count{};args->GetCount(&count);if(count)args->GetAt(0,&v);DWORD parameter=v.ulVal;PropVariantClear(&v);
-            if(code==0x1015){if(parameter==0xd1a2){++profile_reads;data={0};}else if(parameter==0x5004)data={static_cast<unsigned char>((bad_quality || (bad_quality_after_refresh && profile_reads>1))?4:2)};else{Require(parameter==0x5003);data=Text(L"7360x4912");}}
-            else if(code==0x90c7){
-                const int preflight_read=preflight_reads;
-                if(!shutters)++preflight_reads;
-                if(camera_queue && !camera_queue->empty() && !shutters){data=EventsOf(*camera_queue);camera_queue->clear();}
-                else if((pending || (late_pending && profile_reads>1)) && !shutters)data=Events({{0xc101,123}});
-                else if(preflight_event && !shutters && (repeat_preflight_event || preflight_read==preflight_event_on_read)){
-                    const auto event=static_cast<std::uint16_t>(preflight_event);
-                    data=preflight_companion?Events({{event,0},{static_cast<std::uint16_t>(preflight_companion),123}}):Events({{event,0}});
-                }
-                else if(metadata_before && !shutters && !metadata_sent){metadata_sent=true;data=Events({{0x4008,0},{0xc10c,0}});}
-                else if(shutters && !event_sent && completion_late){event_sent=true;data=Events({{0xc101,123}});if(camera_queue)camera_queue->push_back({0xc102,0});}
-                else if(shutters && event_sent && duplicate_completion && !duplicate_sent){duplicate_sent=true;data=Events({{0x400d,0}});}
-                else if(shutters && !event_sent && postflight_event){event_sent=true;data=Events({{static_cast<std::uint16_t>(postflight_event),0},{0xc101,123}});}
-                else if(shutters && !event_sent){event_sent=true;data=metadata_after?Events({{0x4008,0},{0xc101,123}}):(ambiguous?Events({{0xc101,123},{0xc101,124}}):Events({{0xc101,123},{0xc102,0}}));}
-                else data=Events({});
-            }else if(code==0x1008){Require(parameter==123);data=Info(jpeg.size());}
-            else {Require(code==0x1009 && parameter==123);++object_reads;data=jpeg;}
-            auto result=Reply();result->SetStringValue(WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT,L"synthetic-still-context");
-            result->SetUnsignedLargeIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_TOTAL_DATA_SIZE,data.size());result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPTIMAL_TRANSFER_BUFFER_SIZE,3);
-            return {S_OK,result};
-        }
-        if(id==WPD_COMMAND_MTP_EXT_READ_DATA.pid){
-            DWORD requested{};request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_TO_READ,&requested);
-            auto count=std::min<size_t>(requested,data.size()-offset);auto result=Reply();result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ,static_cast<DWORD>(count));
-            result->SetBufferValue(WPD_PROPERTY_MTP_EXT_TRANSFER_DATA,data.data()+offset,static_cast<DWORD>(count));offset+=count;return {S_OK,result};
-        }
-        Require(id==WPD_COMMAND_MTP_EXT_END_DATA_TRANSFER.pid);++ends;auto result=Reply(true);
-        if(reject_object_end && current_operation==0x1009)result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE,0x2019);
-        return {S_OK,result};
-    }
-};
 }
 int main(){
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
@@ -136,14 +74,16 @@ int main(){
             const auto what=RejectedEvent([&]{AcquireWpdStillPayload(f,[]{return true;},[](auto){},&observed);},static_cast<std::uint16_t>(event),true);
             Check(Contains(what,"code="+WpdStillEventCodeText(static_cast<std::uint16_t>(event))+" phase=after_shutter"));
             Check(f.shutters==1 && f.object_reads==0 && observed.shutter_attempted && !observed.complete_event);}
-        // #381: a completion that arrives after this session's last event poll
+        // #381: a completion that arrives only after the session's wait ends
         // stays queued in the camera. The next capture's preflight reads it and
         // stops before its shutter, naming the event as pending (not duplicate).
         // Reading it consumed the queue, so the capture after that passes: the
-        // field pattern "first press fails, second press passes".
+        // field pattern "first press fails, second press passes". The wait is
+        // shortened here; production waits kWpdStillCompletionWaitMax.
         {std::vector<WpdStillEvent> camera_queue;
             Fake first;first.completion_late=true;first.camera_queue=&camera_queue;WpdStillCaptureObservation observed{true,true,0x400d};
-            auto r=AcquireWpdStillPayload(first,[]{return true;},[](auto){},&observed);
+            auto r=AcquireWpdStillPayload(first,[]{return true;},[](auto){},&observed,kShortWait);
+            Check(observed.completion_wait==WpdStillCompletionWaitResult::TimedOut && observed.completion_wait_ms>=kShortWait.max.count());
             Check(r.jpeg==first.jpeg && !r.complete_event && first.shutters==1 && first.object_reads==1 && camera_queue.size()==1);
             Check(observed.shutter_attempted && !observed.complete_event && observed.complete_event_code==0);
             Check(DescribeWpdStillCaptureObservation(observed)=="shutter_attempted=1 complete_event=0 complete_event_code=none");
@@ -156,6 +96,50 @@ int main(){
             auto again=AcquireWpdStillPayload(third,[]{return true;},[](auto){},&passed);
             Check(again.jpeg==third.jpeg && again.complete_event && third.shutters==1 && passed.complete_event && passed.complete_event_code==0xc102);
             Check(DescribeWpdStillCaptureObservation(passed)=="shutter_attempted=1 complete_event=1 complete_event_code=0xc102");}
+        // #381 wait: the completion is observed inside the same session, before it
+        // closes, whenever it arrives within the bound.
+        {Fake f;WpdStillCaptureObservation observed;
+            auto r=AcquireWpdStillPayload(f,[]{return true;},[](auto){},&observed,kShortWait);
+            Check(r.complete_event && observed.completion_wait==WpdStillCompletionWaitResult::AlreadySeen && observed.completion_wait_ms==0);
+            Check(DescribeWpdStillCompletionWait(observed,kShortWait)=="result=already_seen waited_ms=0 max_ms=60");}
+        // Completion after the image, on a later poll (0x400d is also accepted).
+        for(std::uint16_t code:{0xc102,0x400d}){
+            Fake f;f.use_script=true;f.post_script={{{0xc101,123}},{},{},{},{{code,0}}};WpdStillCaptureObservation observed;
+            auto r=AcquireWpdStillPayload(f,[]{return true;},[](auto){},&observed,kShortWait);
+            Check(r.jpeg==f.jpeg && r.complete_event && observed.complete_event && observed.complete_event_code==code);
+            Check(observed.completion_wait==WpdStillCompletionWaitResult::Seen && observed.completion_wait_ms>0 && observed.completion_wait_ms<kShortWait.max.count()+40);
+            Check(f.shutters==1 && f.object_reads==1);
+            Check(DescribeWpdStillCaptureObservation(observed)=="shutter_attempted=1 complete_event=1 complete_event_code="+WpdStillEventCodeText(code));
+            Check(Contains(DescribeWpdStillCompletionWait(observed,kShortWait),"result=seen waited_ms="));}
+        // Never delivered: the capture still succeeds, the wait is bounded, and
+        // the log says so. No shutter or read of the object is repeated.
+        {Fake f;f.use_script=true;f.post_script={{{0xc101,123}}};WpdStillCaptureObservation observed;
+            const auto started=std::chrono::steady_clock::now();
+            auto r=AcquireWpdStillPayload(f,[]{return true;},[](auto){},&observed,kShortWait);
+            const auto took=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started);
+            Check(r.jpeg==f.jpeg && !r.complete_event && !observed.complete_event && observed.shutter_attempted);
+            Check(observed.completion_wait==WpdStillCompletionWaitResult::TimedOut && observed.completion_wait_ms>=kShortWait.max.count());
+            Check(took<std::chrono::milliseconds(3000)); // Bounded: never the 5 s production bound times anything.
+            Check(Contains(DescribeWpdStillCompletionWait(observed,kShortWait),"result=timeout waited_ms="));
+            Check(f.shutters==1 && f.object_reads==1);}
+        // Production bound stays inside the 180 s transaction with room for a pair.
+        Check(kWpdStillCompletionWaitMax==std::chrono::milliseconds(5000) && 2*kWpdStillCompletionWaitMax<std::chrono::seconds(180)/10);
+        // Admission ending during the wait aborts it without failing the capture;
+        // the caller's deadline check decides the transaction.
+        {Fake f;f.use_script=true;f.post_script={{{0xc101,123}}};WpdStillCaptureObservation observed;
+            auto r=AcquireWpdStillPayload(f,[&]{return f.post_reads<=3;},[](auto){},&observed,kShortWait);
+            Check(r.jpeg==f.jpeg && !r.complete_event && observed.completion_wait==WpdStillCompletionWaitResult::Aborted);
+            Check(Contains(DescribeWpdStillCompletionWait(observed,kShortWait),"result=aborted"));}
+        // A second completion while waiting is not accepted silently. The first
+        // one ends the wait, so this arrives as a duplicate on the trailing poll.
+        {Fake f;f.use_script=true;f.post_script={{{0xc101,123},{0xc102,0}},{{0x400d,0}}};WpdStillCaptureObservation observed;size_t partial=0;
+            const auto what=RejectedEvent([&]{AcquireWpdStillPayload(f,[]{return true;},[&](auto c){partial+=c.size();},&observed,kShortWait);},0x400d,true);
+            Check(what=="duplicate capture completion code=0x400d phase=after_shutter" && partial==f.jpeg.size() && observed.complete_event);}
+        // A rejected event during the wait itself (storage changed) stays terminal
+        // and keeps the partial; the shutter is not resent.
+        {Fake f;f.use_script=true;f.post_script={{{0xc101,123}},{},{},{{0x4005,0}}};WpdStillCaptureObservation observed;size_t partial=0;
+            const auto what=RejectedEvent([&]{AcquireWpdStillPayload(f,[]{return true;},[&](auto c){partial+=c.size();},&observed,kShortWait);},0x4005,true);
+            Check(Contains(what,"phase=after_shutter") && partial==f.jpeg.size() && f.shutters==1 && !observed.complete_event && observed.completion_wait==WpdStillCompletionWaitResult::Aborted);}
         // A second completion inside one capture is a duplicate, after shutter.
         {Fake f;f.duplicate_completion=true;WpdStillCaptureObservation observed;size_t partial=0;
             const auto what=RejectedEvent([&]{AcquireWpdStillPayload(f,[]{return true;},[&](auto c){partial+=c.size();},&observed);},0x400d,true);

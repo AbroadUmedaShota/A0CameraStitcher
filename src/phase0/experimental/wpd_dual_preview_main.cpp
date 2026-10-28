@@ -29,6 +29,7 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
+#include "a0/phase0/experimental/wpd_still_pair.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
 #include "a0/phase0/experimental/preview_end_restart_probe.hpp"
 #include "a0/m2/experimental/still_review.hpp"
@@ -107,96 +108,182 @@ std::array<std::wstring,2> Discover(){
     Log("inventory bound_A=1 bound_B=1 SDK=0");return result;
 }
 using StillCaptureOutcome=VerifiedStillOriginal;
+// One body's WPD still session: open, the exposure steps, close. A single
+// capture runs them back to back; a pair transaction (#389) interleaves the two
+// bodies' steps so both shutters precede either import. Steps do not throw: a
+// failure is recorded in the outcome and logged once, and Finish() always closes
+// the session and the private partial. Not movable: the channel and watchdog
+// refer to this object.
+class StillLane final {
+public:
+    StillLane(std::wstring id,std::string alias,Clock::time_point outer_deadline,bool preflight_only):
+        id_(std::move(id)),alias_(std::move(alias)),preflight_only_(preflight_only),
+        deadline_(std::min(outer_deadline,Clock::now()+std::chrono::seconds(180))),
+        evidence_(std::in_place,DefaultIdentityMapPath().parent_path().parent_path()/(preflight_only?"wpd-preflights":"wpd-captures"),NewRunId(),"wpd-public-ptp-sdram-development"){
+        partial_path_=evidence_->RunRoot()/(alias_+"-transport.jpg.partial");
+    }
+    StillLane(const StillLane&)=delete;
+    StillLane& operator=(const StillLane&)=delete;
+    ~StillLane(){try{Finish();}catch(...){}}
+    bool OpenSession(){
+        try{
+            device_=Open(id_,GENERIC_READ|GENERIC_WRITE);opened_=true;
+            auto map_path=DefaultIdentityMapPath();map_path.replace_filename("camera-map-wpd.json");IdentityMap map(map_path);
+            if(map.FindAlias(Identity(device_.Get()))!=std::optional<std::string>(alias_))throw std::runtime_error("still camera alias mismatch");
+            if(!preflight_only_){
+                partial_=CreateFileW(partial_path_.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,nullptr);
+                if(partial_==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot create private capture partial");
+            }
+            watchdog_=std::jthread([this](std::stop_token stop){
+                const HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+                if(FAILED(hr)){cancelled_=true;Log(alias_+" capture watchdog COM initialization failed");return;}
+                while(!stop.stop_requested()){
+                    if(busy_ && GetTickCount64()-busy_tick_.load()>12000 && !cancelled_.exchange(true)){
+                        Log(alias_+" capture watchdog cancelling stalled I/O; lease retained");device_->Cancel();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CoUninitialize();
+            });
+            channel_=std::make_unique<Channel>(*this);
+            evidence_->RecordState(preflight_only_?"preflight":"capture","BothLiveViewsClosed",alias_);
+            return true;
+        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);return false;}
+    }
+    // Non-exposing check: Ready, capture profile and a clean event baseline.
+    void RunPreflightOnly(){
+        try{
+            Log(alias_+" preflight_only=1 shutter_commands=0 setting_writes=0");
+            ReadWpdStillPreflight(*channel_,[this]{return Admitted();});outcome_.success=true;
+        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);}
+    }
+    // Recheck the capture state of this open body. No exposure.
+    StillPairPrepared PrepareForExposure(){
+        StillPairPrepared prepared;
+        try{
+            acquisition_entered_=true;
+            run_.emplace(*channel_,[this]{return Admitted();},[this](std::span<const unsigned char> bytes){
+                DWORD written{};if(!WriteFile(partial_,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr) || written!=bytes.size())throw std::runtime_error("capture partial write failed");
+            },&observed_);
+            prepared=PrepareWpdStillRun(*run_);
+        }catch(const std::exception& error){prepared.error=error.what();}
+        if(!prepared.ready)Fail(prepared.error,prepared.out_of_focus);
+        return prepared;
+    }
+    StillShutterOutcome SendShutter(){
+        auto outcome=SendWpdStillShutter(*run_);
+        // The exchange refuses a stop that raced the admission check before it
+        // reaches the transport; the dispatched flag is the truth for NotSent.
+        if(!shutter_dispatched_)outcome.state=StillShutterState::NotSent;
+        return outcome;
+    }
+    // After an uncertain shutter: private partial only, never an original.
+    void Rescue(){if(run_)run_->RetainUncertainShutterCandidate();}
+    StillCaptureOutcome Collect(){
+        try{
+            auto payload=run_->Collect();
+            if(!FlushFileBuffers(partial_))throw std::runtime_error("capture partial flush failed");
+            CloseHandle(partial_);partial_=INVALID_HANDLE_VALUE;
+            if(!IsValidJpeg(payload.jpeg))throw std::runtime_error("captured bytes are not a valid JPEG");
+            (void)FullyDecodeJpeg(payload.jpeg,payload.info.width,payload.info.height);
+            const auto frame=evidence_->PersistExactlyOne("capture",alias_,{{"camera-original.jpg",std::move(payload.jpeg),true,{}}},deadline_);
+            if(!frame.success)throw std::runtime_error("PC original persistence failed: "+frame.error_category);
+            outcome_.success=true;outcome_.path=frame.path;outcome_.bytes=frame.bytes;outcome_.sha256=frame.sha256;
+            Log(alias_+" original_saved=1 bytes="+std::to_string(frame.bytes)+" sha256="+frame.sha256);
+            std::wcout<<L"saved_original="<<frame.path.wstring()<<std::endl;
+        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);}
+        return outcome_;
+    }
+    // One body, one shutter, then its import: the single-capture path.
+    void CaptureSingle(){
+        if(!PrepareForExposure().ready)return;
+        const auto shutter=SendShutter();
+        if(shutter.state!=StillShutterState::Sent){
+            if(shutter.state==StillShutterState::Uncertain)Rescue();
+            Fail(shutter.error,false);return;
+        }
+        Collect();
+    }
+    const std::string& Error()const{return outcome_.error;}
+    // Always closes the session and the partial. `external_error` names a failure
+    // decided outside this lane (e.g. its shutter was never sent) so the log and
+    // the journal state agree with the pair result.
+    StillCaptureOutcome Finish(const std::string& external_error={}){
+        if(finished_)return outcome_;
+        finished_=true;
+        if(!outcome_.success && outcome_.error.empty() && !external_error.empty())Fail(external_error,false);
+        // One line per capture, success or failure: was this capture's completion
+        // event read before the session closed (#381). Not a success condition.
+        if(acquisition_entered_){
+            Log(alias_+" capture_completion "+DescribeWpdStillCaptureObservation(observed_));
+            if(observed_.shutter_attempted)Log(alias_+" completion_wait "+DescribeWpdStillCompletionWait(observed_));
+        }
+        if(partial_!=INVALID_HANDLE_VALUE){CloseHandle(partial_);partial_=INVALID_HANDLE_VALUE;}
+        if(opened_){
+            busy_tick_=GetTickCount64();busy_=true;const auto hr=device_->Close();busy_=false;
+            outcome_.closed=hr==S_OK;opened_=false;
+            if(!outcome_.closed){outcome_.success=false;outcome_.error+="; still session close failed";}
+        }
+        if(watchdog_.joinable()){watchdog_.request_stop();watchdog_.join();}
+        if(Clock::now()>=deadline_){outcome_.success=false;outcome_.error+="; transaction deadline exceeded; PC bytes retained";}
+        if(outcome_.success)evidence_->RecordState(preflight_only_?"preflight":"capture","Complete",alias_);
+        else evidence_->RecordState(preflight_only_?"preflight":"capture","FailedPartial",alias_,outcome_.error);
+        Log(alias_+(preflight_only_?" preflight_session_closed=":" capture_session_closed=")+std::to_string(outcome_.closed)+
+            (preflight_only_?" preflight_ready=":" capture_complete=")+std::to_string(outcome_.success));
+        return outcome_;
+    }
+private:
+    class Channel final:public WpdStillCaptureChannel {
+    public:
+        explicit Channel(StillLane& lane):
+            WpdStillCaptureChannel([&lane]{return lane.Admitted();},[&lane]{return lane.opened_;}),lane_(lane){}
+    private:
+        WpdLiveViewExchange Exchange(IPortableDeviceValues* request)override{return lane_.Send(request);}
+        StillLane& lane_;
+    };
+    // A dispatched shutter keeps its import admitted after a stop request; an
+    // undispatched one does not. Nothing is admitted after cancel or deadline.
+    bool Admitted()const{return !cancelled_ && Clock::now()<deadline_ && (shutter_dispatched_ || !capture_stop_requested);}
+    void Fail(const std::string& error,bool out_of_focus){
+        outcome_.error=error;outcome_.success=false;outcome_.out_of_focus=out_of_focus;
+        Log(alias_+(preflight_only_?" preflight_failure: ":" capture_failure: ")+error);
+    }
+    WpdLiveViewExchange Send(IPortableDeviceValues* request){
+        if(preflight_only_ && !AllowedWpdStillRequest(request,false,{}))throw std::runtime_error("preflight forbids shutter/object request");
+        DWORD code{};request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,&code);
+        if(code==0x90c0){
+            if(capture_stop_requested)throw std::runtime_error("capture stopped before shutter dispatch");
+            shutter_dispatched_=true;Log(alias_+" shutter_no_af_once=1 card_write_command=0");
+        }
+        busy_tick_=GetTickCount64();busy_=true;WpdLiveViewExchange reply;reply.status=device_->SendCommand(0,request,&reply.results);busy_=false;
+        if(code==0x90c0){auto status=InspectWpdLiveViewCommand(reply.status,reply.results.Get(),true);std::ostringstream line;
+            line<<alias_<<" shutter_result_error="<<static_cast<int>(status.error)<<" dispatch=0x"<<std::hex<<static_cast<unsigned long>(status.dispatch_status)<<" command=0x"<<static_cast<unsigned long>(status.command_status)<<" mtp=0x"<<status.mtp_response;Log(line.str());}
+        return reply;
+    }
+    std::wstring id_;std::string alias_;bool preflight_only_{};Clock::time_point deadline_;
+    std::optional<EvidenceWriter> evidence_;
+    std::filesystem::path partial_path_;
+    ComPtr<IPortableDevice> device_;
+    HANDLE partial_{INVALID_HANDLE_VALUE};
+    bool opened_{},shutter_dispatched_{},acquisition_entered_{},finished_{};
+    std::atomic<bool> cancelled_{},busy_{};std::atomic<ULONGLONG> busy_tick_{};
+    WpdStillCaptureObservation observed_;
+    StillCaptureOutcome outcome_;
+    std::unique_ptr<Channel> channel_;
+    std::optional<WpdStillCaptureRun> run_;
+    std::jthread watchdog_; // Last: joined first, before the state it reads goes away.
+};
 StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
     Clock::time_point outer_deadline,bool preflight_only){
     StillCaptureOutcome outcome;
     if(!both_live_sessions_closed){outcome.error="both Live View sessions must be closed before capture";return outcome;}
     const auto deadline=std::min(outer_deadline,Clock::now()+std::chrono::seconds(180));
     if(Clock::now()>=deadline || capture_stop_requested){outcome.error="capture deadline/stop before open";return outcome;}
-    ComPtr<IPortableDevice> device;bool opened=false;
-    std::atomic<bool> cancelled=false,busy=false;std::atomic<ULONGLONG> busy_tick{};bool shutter_dispatched=false;
-    auto admitted=[&]{return !cancelled && Clock::now()<deadline && (shutter_dispatched || !capture_stop_requested);};
-    const auto root=DefaultIdentityMapPath().parent_path().parent_path()/(preflight_only?"wpd-preflights":"wpd-captures");
-    EvidenceWriter evidence(root,NewRunId(),"wpd-public-ptp-sdram-development");
-    const auto partial_path=evidence.RunRoot()/(alias+"-transport.jpg.partial");
-    HANDLE partial=INVALID_HANDLE_VALUE;
-    WpdStillCaptureObservation observed;bool acquisition_entered=false;
-    std::jthread watchdog;
-    try{
-        device=Open(id,GENERIC_READ|GENERIC_WRITE);opened=true;
-        auto map_path=DefaultIdentityMapPath();map_path.replace_filename("camera-map-wpd.json");IdentityMap map(map_path);
-        if(map.FindAlias(Identity(device.Get()))!=std::optional<std::string>(alias))throw std::runtime_error("still camera alias mismatch");
-        if(!preflight_only){
-            partial=CreateFileW(partial_path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,nullptr);
-            if(partial==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot create private capture partial");
-        }
-        watchdog=std::jthread([&](std::stop_token stop){
-            const HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-            if(FAILED(hr)){cancelled=true;Log(alias+" capture watchdog COM initialization failed");return;}
-            while(!stop.stop_requested()){
-                if(busy && GetTickCount64()-busy_tick.load()>12000 && !cancelled.exchange(true)){
-                    Log(alias+" capture watchdog cancelling stalled I/O; lease retained");device->Cancel();
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-            CoUninitialize();
-        });
-        class Channel final:public WpdStillCaptureChannel {
-        public:
-            Channel(std::function<bool()> admission,std::function<bool()> cleanup,std::function<WpdLiveViewExchange(IPortableDeviceValues*)> exchange):
-                WpdStillCaptureChannel(std::move(admission),std::move(cleanup)),exchange_(std::move(exchange)){}
-        private:
-            WpdLiveViewExchange Exchange(IPortableDeviceValues* request)override{return exchange_(request);}
-            std::function<WpdLiveViewExchange(IPortableDeviceValues*)> exchange_;
-        } channel(admitted,[&]{return opened;},[&](IPortableDeviceValues* request){
-            if(preflight_only && !AllowedWpdStillRequest(request,false,{}))throw std::runtime_error("preflight forbids shutter/object request");
-            DWORD code{};request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,&code);
-            if(code==0x90c0){
-                if(capture_stop_requested)throw std::runtime_error("capture stopped before shutter dispatch");
-                shutter_dispatched=true;Log(alias+" shutter_no_af_once=1 card_write_command=0");
-            }
-            busy_tick=GetTickCount64();busy=true;WpdLiveViewExchange reply;reply.status=device->SendCommand(0,request,&reply.results);busy=false;
-            if(code==0x90c0){auto status=InspectWpdLiveViewCommand(reply.status,reply.results.Get(),true);std::ostringstream line;
-                line<<alias<<" shutter_result_error="<<static_cast<int>(status.error)<<" dispatch=0x"<<std::hex<<static_cast<unsigned long>(status.dispatch_status)<<" command=0x"<<static_cast<unsigned long>(status.command_status)<<" mtp=0x"<<status.mtp_response;Log(line.str());}
-            return reply;
-        });
-        evidence.RecordState(preflight_only?"preflight":"capture","BothLiveViewsClosed",alias);
-        if(preflight_only){
-            Log(alias+" preflight_only=1 shutter_commands=0 setting_writes=0");
-            ReadWpdStillPreflight(channel,admitted);outcome.success=true;
-        }else{
-        acquisition_entered=true;
-        auto payload=AcquireWpdStillPayload(channel,admitted,[&](std::span<const unsigned char> bytes){
-            DWORD written{};if(!WriteFile(partial,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr) || written!=bytes.size())throw std::runtime_error("capture partial write failed");
-        },&observed);
-        if(!FlushFileBuffers(partial))throw std::runtime_error("capture partial flush failed");
-        CloseHandle(partial);partial=INVALID_HANDLE_VALUE;
-        if(!IsValidJpeg(payload.jpeg))throw std::runtime_error("captured bytes are not a valid JPEG");
-        (void)FullyDecodeJpeg(payload.jpeg,payload.info.width,payload.info.height);
-        const auto frame=evidence.PersistExactlyOne("capture",alias,{{"camera-original.jpg",std::move(payload.jpeg),true,{}}},deadline);
-        if(!frame.success)throw std::runtime_error("PC original persistence failed: "+frame.error_category);
-        outcome.success=true;outcome.path=frame.path;outcome.bytes=frame.bytes;outcome.sha256=frame.sha256;
-        Log(alias+" original_saved=1 bytes="+std::to_string(frame.bytes)+" sha256="+frame.sha256);
-        std::wcout<<L"saved_original="<<frame.path.wstring()<<std::endl;
-        }
-    }catch(const std::exception& error){outcome.error=error.what();outcome.success=false;
-        outcome.out_of_focus=dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr;Log(alias+(preflight_only?" preflight_failure: ":" capture_failure: ")+outcome.error);}
-    // One line per capture, success or failure: was this capture's completion
-    // event read before the session closed (#381). Not a success condition.
-    if(acquisition_entered)Log(alias+" capture_completion "+DescribeWpdStillCaptureObservation(observed));
-    if(partial!=INVALID_HANDLE_VALUE)CloseHandle(partial);
-    if(opened){
-        busy_tick=GetTickCount64();busy=true;const auto hr=device->Close();busy=false;
-        outcome.closed=hr==S_OK;opened=false;
-        if(!outcome.closed){outcome.success=false;outcome.error+="; still session close failed";}
+    StillLane lane(id,alias,outer_deadline,preflight_only);
+    if(lane.OpenSession()){
+        if(preflight_only)lane.RunPreflightOnly();else lane.CaptureSingle();
     }
-    if(watchdog.joinable()){watchdog.request_stop();watchdog.join();}
-    if(Clock::now()>=deadline){outcome.success=false;outcome.error+="; transaction deadline exceeded; PC bytes retained";}
-    if(outcome.success)evidence.RecordState(preflight_only?"preflight":"capture","Complete",alias);
-    else evidence.RecordState(preflight_only?"preflight":"capture","FailedPartial",alias,outcome.error);
-    Log(alias+(preflight_only?" preflight_session_closed=":" capture_session_closed=")+std::to_string(outcome.closed)+
-        (preflight_only?" preflight_ready=":" capture_complete=")+std::to_string(outcome.success));
-    return outcome;
+    return lane.Finish();
 }
 StillCaptureOutcome SaveStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
     Clock::time_point deadline=Clock::time_point::max()){
@@ -205,6 +292,27 @@ StillCaptureOutcome SaveStillOnce(const std::wstring& id,const std::string& alia
 VerifiedStillPreflight CheckStillOnce(const std::wstring& id,const std::string& alias,Clock::time_point deadline){
     const auto result=RunStillOnce(id,alias,true,deadline,true);
     return {result.success,result.closed,result.error,result.out_of_focus};
+}
+// A and B as one 180 s transaction (#389): both bodies stay open from the
+// exposure recheck until both imports are saved. Closing A or opening B between
+// the shutters would put the slow open/preflight/import back into the gap.
+VerifiedStillPair CaptureStillPairShutterFirst(const std::array<std::wstring,2>& ids,Clock::time_point deadline){
+    std::array<std::unique_ptr<StillLane>,2> lanes;
+    const auto alias=[](int i){return i==0?"CAM-A":"CAM-B";};
+    StillPairSteps steps;
+    steps.preflight=[&](int i,Clock::time_point end){return CheckStillOnce(ids[i],alias(i),end);};
+    steps.prepare=[&](int i,Clock::time_point end){
+        if(i==0)Log("pair_preflight_both_ready=1 both_closed=1");
+        lanes[i]=std::make_unique<StillLane>(ids[i],alias(i),end,false);
+        if(!lanes[i]->OpenSession())return StillPairPrepared{false,lanes[i]->Error(),false};
+        return lanes[i]->PrepareForExposure();
+    };
+    steps.shutter=[&](int i){return lanes[i]->SendShutter();};
+    steps.collect=[&](int i){return lanes[i]->Collect();};
+    steps.rescue=[&](int i){lanes[i]->Rescue();};
+    steps.close=[&](int i,VerifiedStillOriginal& original){if(lanes[i])original=lanes[i]->Finish(original.error);};
+    steps.log=[](const std::string& line){Log(line);};
+    return CaptureStillPairShutterFirstOnce(steps,[]{return !capture_stop_requested.load();},deadline);
 }
 struct Pixels {UINT width{},height{};std::vector<BYTE> bytes;};
 Pixels Decode(IWICImagingFactory* factory,std::span<const unsigned char> jpeg){
