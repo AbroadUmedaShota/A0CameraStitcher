@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -35,7 +36,8 @@ using Matrix3 = std::array<double, 9>;
 int checks = 0, failures = 0;
 void Check(bool value, const std::string& label) { ++checks; if (!value) { ++failures; std::cerr << "FAIL: " << label << '\n'; } }
 struct Failure { [[noreturn]] static void Fail(std::string_view, std::string_view) { throw std::invalid_argument("test JSON"); } };
-JsonValue Tree(std::string_view json) { return BasicJsonParser<Failure>(json).Parse(); }
+// The report embeds the session, so it can exceed the protocol default (256 KiB).
+JsonValue Tree(std::string_view json) { return BasicJsonParser<Failure, 8U * 1024U * 1024U>(json).Parse(); }
 const JsonValue& At(const JsonValue& value, const char* key) { return value.object.at(key); }
 double Value(const JsonValue& value) { double out{}; std::from_chars(value.string.data(), value.string.data() + value.string.size(), out); return out; }
 std::string Q(const std::string& value) { return '"' + value + '"'; }
@@ -169,7 +171,7 @@ std::string Job(const Scenario& scenario, const std::string& overrides = {}) {
     const auto p = OverlapJobPlacement(scenario.overlap);
     std::string job = R"({"schemaVersion":"a0.planar-calibration-job.v1","profileId":"synthetic-planar-draft","provenanceId":"synthetic-planar-provenance","measuredAt":"2000-01-02T00:00:00Z","documentPlane":{"orientation":"landscape","cameraOrder":"CAM-A-left-CAM-B-right"},"overlapViews":{"CAM-A":"A-overlap","CAM-B":"B-overlap"},"overlapPlacement":{"angleRadians":)"
         + N(p[0]) + ",\"translationXMm\":" + N(p[1]) + ",\"translationYMm\":" + N(p[2])
-        + R"(},"nominalCameras":{"CAM-A":{"focalLengthMm":50,"sensorWidthMm":35.9,"sensorHeightMm":24},"CAM-B":{"focalLengthMm":50,"sensorWidthMm":35.9,"sensorHeightMm":24}},"numericalPolicy":{"minimumTrainingViews":5,"maxIterations":200,"relativeCostTolerance":1e-12,"relativeStepTolerance":1e-12,"initialDamping":0.001,"maxUndistortionIterations":40,"undistortionTolerancePixels":1e-9}})";
+        + R"(,"coplanarConfirmed":true},"nominalCameras":{"CAM-A":{"focalLengthMm":50,"sensorWidthMm":35.9,"sensorHeightMm":24},"CAM-B":{"focalLengthMm":50,"sensorWidthMm":35.9,"sensorHeightMm":24}},"numericalPolicy":{"minimumTrainingViews":5,"maxIterations":200,"relativeCostTolerance":1e-12,"relativeStepTolerance":1e-12,"initialDamping":0.001,"maxUndistortionIterations":40,"undistortionTolerancePixels":1e-9},"seamOutputDpi":180})";
     if (!overrides.empty()) {
         const auto at = overrides.find('=');
         const auto from = overrides.substr(0, at), to = overrides.substr(at + 1);
@@ -349,6 +351,11 @@ void TestNominalMismatch() {
         std::cout << alias << " mismatch: fit rms=" << fit << " held-out rms=" << held_out << " raw mapping max px=" << compared.raw_max << '\n';
         Check(held_out < 1.0 && compared.raw_max < 1.0, std::string(alias) + " nominal-K mismatch stays below 1 px (synthetic, test input)");
     }
+    const auto& seam = At(report, "seam");
+    const double overlap = Value(At(At(seam, "overlap"), "maxMm")), held_out = Value(At(At(seam, "checkerboardHeldOut"), "maxMm"));
+    std::cout << "mismatch seam max mm: overlap=" << overlap << " checkerboard=" << held_out << '\n';
+    Check(At(At(seam, "checkerboardHeldOut"), "outcome").string == "measured" && overlap > 0 && overlap < 0.1 && held_out > 0 && held_out < 0.1,
+        "nominal-K mismatch: seam disagreement is measured and below 0.1 mm (synthetic, test input)");
 }
 
 void TestRejections() {
@@ -366,6 +373,20 @@ void TestRejections() {
     const auto no_focal = RunPlanarCalibrationJob(session, Job(scenario, "\"focalLengthMm\":50=\"focalLengthMm\":0"));
     Check(!no_focal.ok && no_focal.profile_json.empty() && rejection(no_focal) == "planar-calibration-unavailable"
         && status(no_focal, 0) == "nominal-camera-invalid", "zero nominal focal length gives no profile");
+    const auto no_focal_report = Tree(no_focal.report_json);
+    const auto& no_focal_seam = At(no_focal_report, "seam");
+    Check(At(At(no_focal_seam, "overlap"), "outcome").string == "camera-not-estimated"
+        && At(At(no_focal_seam, "checkerboardHeldOut"), "outcome").string == "camera-not-estimated"
+        && At(At(no_focal_seam, "overlap"), "meanMm").kind == JsonKind::null_value, "no seam measure without both estimates");
+    const auto not_coplanar = RunPlanarCalibrationJob(session, Job(scenario, "\"coplanarConfirmed\":true=\"coplanarConfirmed\":false"));
+    Check(!not_coplanar.ok && not_coplanar.profile_json.empty() && rejection(not_coplanar) == "overlap-placement-invalid",
+        "an overlap placement not declared coplanar gives no profile");
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, ",\"coplanarConfirmed\":true=")); }, "missing coplanarConfirmed is refused");
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, "\"coplanarConfirmed\":true=\"coplanarConfirmed\":\"true\"")); }, "string coplanarConfirmed is refused");
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, ",\"seamOutputDpi\":180=")); }, "missing seamOutputDpi is refused");
+    for (const auto* bad : {"0", "65536", "180.5", "\"180\""})
+        Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, std::string("\"seamOutputDpi\":180=\"seamOutputDpi\":") + bad)); },
+            (std::string("seamOutputDpi ") + bad + " is refused").c_str());
     const auto role = RunPlanarCalibrationJob(session, Job(scenario, "\"CAM-A\":\"A-overlap\"=\"CAM-A\":\"A-T1\""));
     Check(!role.ok && status(role, 0) == "overlap-role-mismatch", "overlap view must be the reference view");
     const auto camera = RunPlanarCalibrationJob(session, Job(scenario, "\"CAM-A\":\"A-overlap\"=\"CAM-A\":\"B-overlap\""));
@@ -386,6 +407,128 @@ void TestRejections() {
              NominalCamera{std::nan(""), 35.9, 24}}) invalid = invalid && !NominalIntrinsics(bad, kWidth, kHeight);
     Check(invalid && !NominalIntrinsics(good, 0, kHeight), "invalid nominal declarations give no K");
 }
+// Seam disagreement and coverage (#385 WP-05). Expected values are computed
+// here from the session JSON, independently of the estimator's code paths.
+const JsonValue& ViewOf(const JsonValue& session, const std::string& id) {
+    for (const auto& view : At(session, "views").array) if (At(view, "viewId").string == id) return view;
+    throw std::runtime_error("test view");
+}
+std::vector<std::pair<std::string, std::array<double, 2>>> Detected(const JsonValue& view) {
+    std::vector<std::pair<std::string, std::array<double, 2>>> out;
+    for (const auto& o : At(view, "observations").array)
+        if (At(o, "state").string == "detected") out.push_back({At(o, "pointId").string, {Value(At(At(o, "pixel"), "x")), Value(At(At(o, "pixel"), "y"))}});
+    return out;
+}
+struct Stats { double mean, p95, max; std::size_t n; };
+Stats StatsOf(std::vector<double> values) {
+    double sum = 0;
+    for (const auto value : values) sum += value;
+    std::sort(values.begin(), values.end());
+    const auto rank = static_cast<std::size_t>(std::ceil(0.95 * static_cast<double>(values.size())));
+    return {sum / static_cast<double>(values.size()), values[rank - 1], values.back(), values.size()};
+}
+bool Near(double a, double b, double tolerance) { return std::abs(a - b) <= tolerance; }
+
+void TestSeam() {
+    const auto scenario = MakeScenario(0, 1, 0, 0);
+    const auto session_json = Session(scenario);
+    const auto output = RunPlanarCalibrationJob(session_json, Job(scenario));
+    Check(output.ok, "seam scenario produces a draft");
+    if (!output.ok) return;
+    const auto report = Tree(output.report_json);
+    const auto tree = Tree(session_json);
+    const auto& seam = At(report, "seam");
+    Check(Value(At(seam, "outputDpi")) == 180 && At(At(report, "overlapPlacement"), "coplanarConfirmed").boolean, "report carries the seam DPI and the coplanar declaration");
+
+    // Chart points detected in both overlap views, and their checkerboard colour.
+    std::map<std::string, std::array<double, 2>> chart;
+    for (const auto& p : At(tree, "chartPoints").array) chart[At(p, "pointId").string] = {Value(At(p, "xMm")), Value(At(p, "yMm"))};
+    const auto a = Detected(ViewOf(tree, "A-overlap")), b = Detected(ViewOf(tree, "B-overlap"));
+    std::vector<std::string> common, odd;
+    for (const auto& [id, pixel] : a) {
+        if (std::none_of(b.begin(), b.end(), [&](const auto& other) { return other.first == id; })) continue;
+        common.push_back(id);
+        const auto c = std::lround(chart[id][0] / kPitch), r = std::lround(chart[id][1] / kPitch);
+        if ((c + r) % 2 == 1) odd.push_back(id);
+    }
+    const auto& overlap = At(seam, "overlap");
+    const auto& held_out = At(seam, "checkerboardHeldOut");
+    std::cout << "seam overlap n=" << Value(At(overlap, "pointCount")) << " mean mm=" << Value(At(overlap, "meanMm")) << " max mm=" << Value(At(overlap, "maxMm"))
+              << " | checkerboard n=" << Value(At(held_out, "pointCount")) << " mean mm=" << Value(At(held_out, "meanMm")) << " max mm=" << Value(At(held_out, "maxMm")) << '\n';
+    Check(At(overlap, "outcome").string == "measured" && Value(At(overlap, "pointCount")) == static_cast<double>(common.size()) && common.size() > 50,
+        "overlap seam counts every point detected in both overlap views");
+    Check(Value(At(overlap, "maxMm")) < 1e-6 && Value(At(overlap, "meanMm")) <= Value(At(overlap, "p95Mm")) + 1e-15
+        && Value(At(overlap, "p95Mm")) <= Value(At(overlap, "maxMm")), "known mapping: overlap seam is about zero (1e-6 mm, test input)");
+    Check(At(held_out, "outcome").string == "measured" && Value(At(held_out, "pointCount")) == static_cast<double>(odd.size())
+        && Value(At(held_out, "maxMm")) < 1e-6, "known mapping: checkerboard held-out seam on the odd half is about zero (1e-6 mm, test input)");
+    Check(Value(At(overlap, "maxOutputPixels")) == Value(At(overlap, "maxMm")) * 180 / 25.4, "output pixels are mm * dpi / 25.4");
+
+    // Known disagreement: replace CAM-B's mapping by H_B * M, so that CAM-B
+    // maps each point to M^-1(p). A shift gives |delta| at every point; a
+    // scale about the chart origin gives |p| (1 - 1 / s).
+    const auto session = CalibrationObservationSession::Parse(session_json);
+    const PlanarCalibrationRequest request{{"A-overlap", "B-overlap"}, {NominalCamera{50, 35.9, 24}, NominalCamera{50, 35.9, 24}}};
+    const PlanarCalibrationPolicy policy{5, 200, 1e-12, 1e-12, 0.001, 40, 1e-9};
+    const auto result = EstimatePlanarCalibration(session, request, policy);
+    const auto shifted = [&](const Matrix3& m) {
+        auto changed = result;
+        changed.cameras[1].document_to_image = Normalize(Multiply(*result.cameras[1].document_to_image, m));
+        return MeasureOverlapSeam(session, request, policy, changed);
+    };
+    const auto shift = shifted({1, 0, 0.3, 0, 1, -0.4, 0, 0, 1});
+    Check(shift.outcome == PlanarSeamOutcome::Measured && shift.disagreement && Near(shift.disagreement->mean_mm, 0.5, 1e-6)
+        && Near(shift.disagreement->p95_mm, 0.5, 1e-6) && Near(shift.disagreement->max_mm, 0.5, 1e-6), "a known 0.5 mm shift of CAM-B reads 0.5 mm");
+    constexpr double scale = 1.001;
+    std::vector<double> expected;
+    for (const auto& id : common) expected.push_back(std::hypot(chart[id][0], chart[id][1]) * (1 - 1 / scale));
+    const auto want = StatsOf(expected);
+    const auto scaled = shifted({scale, 0, 0, 0, scale, 0, 0, 0, 1});
+    Check(scaled.disagreement && scaled.disagreement->point_count == want.n && Near(scaled.disagreement->mean_mm, want.mean, 1e-6)
+        && Near(scaled.disagreement->p95_mm, want.p95, 1e-6) && Near(scaled.disagreement->max_mm, want.max, 1e-6),
+        "a known 0.1 % scale of CAM-B reads the expected mean, p95 and max");
+    if (scaled.disagreement)
+        std::cout << "known scale: mean=" << scaled.disagreement->mean_mm << " p95=" << scaled.disagreement->p95_mm << " max=" << scaled.disagreement->max_mm
+                  << " expected " << want.mean << ' ' << want.p95 << ' ' << want.max << '\n';
+    else std::cout << "known scale: " << PlanarSeamOutcomeCode(scaled.outcome) << '\n';
+    auto unestimated = result;
+    unestimated.cameras[0].status = PlanarCameraStatus::SolverNonconvergence;
+    Check(MeasureOverlapSeam(session, request, policy, unestimated).outcome == PlanarSeamOutcome::CameraNotEstimated, "no seam without both estimates");
+
+    // Coverage: 4 x 4 cells of the fitted points and the image corner r^2.
+    for (std::size_t i = 0; i < 2; ++i) {
+        const std::string prefix = i == 0 ? "A-" : "B-";
+        std::array<double, 16> cells{};
+        for (const auto& view : At(tree, "views").array) {
+            const auto& id = At(view, "viewId").string;
+            if (id.rfind(prefix, 0) != 0 || (At(view, "role").string != "training" && id != prefix + "overlap")) continue;
+            const auto detected = Detected(view);
+            for (const auto& used : At(view, "usedPointIds").array)
+                for (const auto& [point, pixel] : detected) if (point == used.string) {
+                    const auto cell = [](double value, double size) { return std::clamp(static_cast<int>(std::floor(4 * (value + 0.5) / size)), 0, 3); };
+                    ++cells[static_cast<std::size_t>(cell(pixel[1], kHeight) * 4 + cell(pixel[0], kWidth))];
+                }
+        }
+        const auto& coverage = At(At(report, "cameras").array[i], "coverage");
+        bool same = true;
+        double total = 0;
+        std::string row_text;
+        for (std::size_t row = 0; row < 4; ++row) for (std::size_t column = 0; column < 4; ++column) {
+            const double value = Value(At(coverage, "fitPointCells").array[row].array[column]);
+            same = same && value == cells[row * 4 + column];
+            total += value;
+            row_text += (column ? " " : row ? " | " : "") + std::to_string(static_cast<int>(value));
+        }
+        const double fx = kFocal * kWidth / kSensorWidth, fy = kFocal * kHeight / kSensorHeight;
+        const double corner = std::pow((kWidth - 1) / 2.0 / fx, 2) + std::pow((kHeight - 1) / 2.0 / fy, 2);
+        const double reported = Value(At(coverage, "imageCornerRadiusSquared"));
+        std::cout << (i == 0 ? "CAM-A" : "CAM-B") << " fit cells " << row_text << " corner r2=" << reported
+                  << " fit max r2=" << Value(At(At(At(report, "cameras").array[i], "distortionCheck"), "maxRadiusSquared")) << '\n';
+        Check(same && total == Value(At(At(At(report, "cameras").array[i], "fitResidual"), "pointCount")),
+            std::string(i == 0 ? "CAM-A" : "CAM-B") + " fit point cells match the session and sum to the fitted points");
+        Check(Near(reported, corner, 1e-15), std::string(i == 0 ? "CAM-A" : "CAM-B") + " image corner r^2 from the nominal K");
+    }
+}
+
 // --write-fixture <new directory>: the inputs of the recovery scenario for a
 // manual end-to-end run (DraftCalibrator, SyntheticPairGenerator, StitchEval):
 // session.json, job.json, pair-spec.json (the true cameras on an A0 chart) and
@@ -421,6 +564,7 @@ int main(int argc, char** argv) {
         if (argc != 2) throw std::invalid_argument("usage: <DraftCalibrator.exe> | --write-fixture <new directory>");
         TestRecovery(argv[1]);
         TestNominalMismatch();
+        TestSeam();
         TestRejections();
     } catch (const std::exception& error) {
         std::cerr << "exception: " << error.what() << '\n';

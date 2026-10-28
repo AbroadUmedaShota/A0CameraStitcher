@@ -11,7 +11,8 @@
   "overlapPlacement": {
     "angleRadians": 0,
     "translationXMm": -566,
-    "translationYMm": -400.5
+    "translationYMm": -400.5,
+    "coplanarConfirmed": true
   },
   "nominalCameras": {
     "CAM-A": { "focalLengthMm": 50, "sensorWidthMm": 35.9, "sensorHeightMm": 24 },
@@ -25,5 +26,6 @@
     "initialDamping": 0.001,
     "maxUndistortionIterations": 40,
     "undistortionTolerancePixels": 1e-9
-  }
+  },
+  "seamOutputDpi": 180
 }

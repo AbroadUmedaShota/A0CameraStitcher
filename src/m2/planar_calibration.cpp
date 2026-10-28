@@ -422,8 +422,11 @@ void EvaluateValidation(const CalibrationObservationSession& session, const Sess
     pooled.Merge(sum);
 }
 
+// overlap_point_ids replaces the overlap view's usedPointIds (checkerboard
+// measure only); null keeps the session's.
 CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, std::size_t index,
-    const PlanarCalibrationRequest& request, const PlanarCalibrationPolicy& policy) {
+    const PlanarCalibrationRequest& request, const PlanarCalibrationPolicy& policy,
+    const std::vector<std::string>* overlap_point_ids = nullptr) {
     const auto camera = index == 0 ? CameraAlias::CamA : CameraAlias::CamB;
     CameraPlanarResult out{camera, PlanarCameraStatus::NominalInvalid, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         std::nullopt, {}, std::nullopt, std::nullopt, HeldOutCoverage::NotReached, std::nullopt, {}, {}};
@@ -462,7 +465,8 @@ CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, 
     fitted.insert(fitted.end(), training.begin(), training.end());
     std::vector<View> views;
     for (std::size_t f = 0; f < fitted.size(); ++f) {
-        auto points = Gather(session, *members[fitted[f]], members[fitted[f]]->used_point_ids);
+        const auto& ids = f == 0 && overlap_point_ids ? *overlap_point_ids : members[fitted[f]]->used_point_ids;
+        auto points = Gather(session, *members[fitted[f]], ids);
         if (!points) { out.views[fitted[f]].outcome = PlanarViewOutcome::NumericalFailure; return out; }
         views.push_back({std::move(*points), f == 0 ? std::nullopt : std::optional<std::size_t>{f - 1}});
     }
@@ -548,6 +552,122 @@ CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, 
     out.held_out_straightness = validation_lines.Summary();
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Report-only measures: seam disagreement and coverage.
+
+// The named overlap view of a camera, only when it is that camera's reference view.
+const SessionView* OverlapView(const CalibrationObservationSession& session, const PlanarCalibrationRequest& request, std::size_t index) {
+    const auto camera = index == 0 ? CameraAlias::CamA : CameraAlias::CamB;
+    for (const auto& view : session.Views())
+        if (view.id == request.overlap_view_ids[index]) return view.camera == camera && view.role == ViewRole::Reference ? &view : nullptr;
+    return nullptr;
+}
+
+// Checkerboard colour of every chart point: true when the rank of its x_mm
+// among the distinct x_mm plus the rank of its y_mm among the distinct y_mm is even.
+std::unordered_map<std::string_view, bool> CheckerboardEven(const CalibrationObservationSession& session) {
+    std::map<double, std::size_t> columns, rows; // ordered: ranks
+    for (const auto& point : session.ChartPoints()) { columns.emplace(point.x_mm, 0); rows.emplace(point.y_mm, 0); }
+    std::size_t rank = 0;
+    for (auto& entry : columns) entry.second = rank++;
+    rank = 0;
+    for (auto& entry : rows) entry.second = rank++;
+    std::unordered_map<std::string_view, bool> even; // looked up only, never iterated
+    even.reserve(session.ChartPoints().size());
+    for (const auto& point : session.ChartPoints()) even.emplace(point.id, (columns.at(point.x_mm) + rows.at(point.y_mm)) % 2 == 0);
+    return even;
+}
+
+// Raw pixel -> overlap chart mm through the undistortion and H^-1.
+std::optional<std::array<double, 2>> DocumentOf(const PinholeIntrinsics& k, const BrownConradyDistortion& d, const Matrix3& h_inverse,
+    const PixelPosition& pixel, const PlanarCalibrationPolicy& policy) {
+    const auto undistorted = lens_detail::UndistortPixel(k, d, pixel.x, pixel.y, policy.max_undistortion_iterations,
+        policy.undistortion_tolerance_pixels);
+    if (!undistorted) return std::nullopt;
+    const auto& m = h_inverse;
+    const double w = m[6] * undistorted->x + m[7] * undistorted->y + m[8];
+    if (!std::isfinite(w) || w == 0) return std::nullopt;
+    const std::array<double, 2> out{(m[0] * undistorted->x + m[1] * undistorted->y + m[2]) / w,
+        (m[3] * undistorted->x + m[4] * undistorted->y + m[5]) / w};
+    if (!std::isfinite(out[0]) || !std::isfinite(out[1])) return std::nullopt;
+    return out;
+}
+
+// Points detected in both overlap views, in CAM-A observation order. With a
+// checkerboard, only the points of the colour `even`.
+PlanarSeamMeasure Seam(const CalibrationObservationSession& session, const PlanarCalibrationRequest& request,
+    const PlanarCalibrationPolicy& policy, const PlanarCalibrationResult& result,
+    const std::unordered_map<std::string_view, bool>* checkerboard, bool even) {
+    std::array<const SessionView*, 2> views{};
+    std::array<Matrix3, 2> inverses{};
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& camera = result.cameras[i];
+        views[i] = OverlapView(session, request, i);
+        if (camera.status != PlanarCameraStatus::Estimated || !camera.nominal_intrinsics || !camera.distortion
+            || !camera.document_to_image || views[i] == nullptr) return {PlanarSeamOutcome::CameraNotEstimated, std::nullopt};
+        const auto inverse = Inverse(*camera.document_to_image);
+        if (!inverse) return {PlanarSeamOutcome::NumericalFailure, std::nullopt};
+        inverses[i] = *inverse;
+    }
+    std::unordered_map<std::string_view, PixelPosition> b_pixels; // looked up only, never iterated
+    b_pixels.reserve(views[1]->observations.size());
+    for (const auto& observation : views[1]->observations) if (observation.pixel) b_pixels.emplace(observation.point_id, *observation.pixel);
+    std::vector<double> distances;
+    double sum = 0;
+    for (const auto& observation : views[0]->observations) {
+        if (!observation.pixel) continue;
+        const auto b = b_pixels.find(observation.point_id);
+        if (b == b_pixels.end()) continue;
+        if (checkerboard) {
+            const auto colour = checkerboard->find(observation.point_id);
+            if (colour == checkerboard->end() || colour->second != even) continue;
+        }
+        const auto& a_camera = result.cameras[0];
+        const auto& b_camera = result.cameras[1];
+        const auto a_document = DocumentOf(*a_camera.nominal_intrinsics, *a_camera.distortion, inverses[0], *observation.pixel, policy);
+        const auto b_document = DocumentOf(*b_camera.nominal_intrinsics, *b_camera.distortion, inverses[1], b->second, policy);
+        if (!a_document || !b_document) return {PlanarSeamOutcome::NumericalFailure, std::nullopt};
+        const double distance = std::hypot((*a_document)[0] - (*b_document)[0], (*a_document)[1] - (*b_document)[1]);
+        if (!std::isfinite(distance)) return {PlanarSeamOutcome::NumericalFailure, std::nullopt};
+        distances.push_back(distance);
+        sum += distance;
+    }
+    if (distances.empty()) return {PlanarSeamOutcome::NoCommonPoints, std::nullopt};
+    const std::size_t n = distances.size();
+    const double mean = sum / static_cast<double>(n);
+    std::sort(distances.begin(), distances.end());
+    const std::size_t rank = (95 * n + 99) / 100; // ceil(0.95 n), 1-based
+    if (!std::isfinite(mean)) return {PlanarSeamOutcome::NumericalFailure, std::nullopt};
+    return {PlanarSeamOutcome::Measured, SeamDisagreement{mean, distances[rank - 1], distances.back(), static_cast<std::uint32_t>(n)}};
+}
+
+PlanarCameraCoverage Coverage(const CalibrationObservationSession& session, const PlanarCalibrationRequest& request, std::size_t index) {
+    const auto camera = index == 0 ? CameraAlias::CamA : CameraAlias::CamB;
+    PlanarCameraCoverage out{std::nullopt, {}};
+    const auto& group = session.Camera(camera);
+    if (const auto k = NominalIntrinsics(request.nominal[index], group.width_pixels, group.height_pixels)) {
+        const double x = -k->cx / k->fx, y = -k->cy / k->fy;
+        out.image_corner_radius_squared = x * x + y * y;
+    }
+    const auto* overlap = OverlapView(session, request, index);
+    for (const auto& view : session.Views()) {
+        if (view.camera != camera || (view.role != ViewRole::Training && &view != overlap)) continue;
+        std::unordered_map<std::string_view, PixelPosition> pixels; // looked up only, never iterated
+        pixels.reserve(view.observations.size());
+        for (const auto& observation : view.observations) if (observation.pixel) pixels.emplace(observation.point_id, *observation.pixel);
+        const auto cell = [](double coordinate, std::uint32_t size) {
+            const double value = std::floor(4.0 * (coordinate + 0.5) / size);
+            return value < 1 ? std::size_t{0} : value >= 3 ? std::size_t{3} : static_cast<std::size_t>(value);
+        };
+        for (const auto& id : view.used_point_ids) {
+            const auto pixel = pixels.find(id);
+            if (pixel == pixels.end()) continue; // Parse guarantees a detected pixel
+            ++out.fit_point_cells[cell(pixel->second.y, view.height_pixels) * 4 + cell(pixel->second.x, view.width_pixels)];
+        }
+    }
+    return out;
+}
 } // namespace
 
 std::optional<PinholeIntrinsics> NominalIntrinsics(const NominalCamera& camera, std::uint32_t width, std::uint32_t height) {
@@ -565,6 +685,34 @@ PlanarCalibrationResult EstimatePlanarCalibration(const CalibrationObservationSe
     const PlanarCalibrationRequest& request, const PlanarCalibrationPolicy& policy) {
     ValidatePolicy(policy);
     return PlanarCalibrationResult{{EvaluateCamera(session, 0, request, policy), EvaluateCamera(session, 1, request, policy)}};
+}
+
+PlanarSeamMeasure MeasureOverlapSeam(const CalibrationObservationSession& session, const PlanarCalibrationRequest& request,
+    const PlanarCalibrationPolicy& policy, const PlanarCalibrationResult& result) {
+    ValidatePolicy(policy);
+    return Seam(session, request, policy, result, nullptr, true);
+}
+
+PlanarCalibrationMeasures MeasurePlanarCalibration(const CalibrationObservationSession& session, const PlanarCalibrationRequest& request,
+    const PlanarCalibrationPolicy& policy, const PlanarCalibrationResult& result) {
+    ValidatePolicy(policy);
+    PlanarCalibrationMeasures out{Seam(session, request, policy, result, nullptr, true), {PlanarSeamOutcome::CameraNotEstimated, std::nullopt},
+        {Coverage(session, request, 0), Coverage(session, request, 1)}};
+    const std::array<const SessionView*, 2> overlaps{OverlapView(session, request, 0), OverlapView(session, request, 1)};
+    for (std::size_t i = 0; i < 2; ++i)
+        if (overlaps[i] == nullptr || result.cameras[i].status != PlanarCameraStatus::Estimated) return out;
+    // Estimate again with the even half of each overlap view, measure on the odd half.
+    const auto checkerboard = CheckerboardEven(session);
+    std::array<std::vector<std::string>, 2> even_ids;
+    for (std::size_t i = 0; i < 2; ++i)
+        for (const auto& id : overlaps[i]->used_point_ids) {
+            const auto colour = checkerboard.find(id);
+            if (colour != checkerboard.end() && colour->second) even_ids[i].push_back(id);
+        }
+    const PlanarCalibrationResult half{{EvaluateCamera(session, 0, request, policy, &even_ids[0]),
+        EvaluateCamera(session, 1, request, policy, &even_ids[1])}};
+    out.checkerboard_seam = Seam(session, request, policy, half, &checkerboard, false);
+    return out;
 }
 
 } // namespace a0::m2::calibration

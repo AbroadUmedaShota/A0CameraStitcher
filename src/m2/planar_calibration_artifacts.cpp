@@ -66,7 +66,27 @@ std::string NominalJson(const NominalCamera& camera, const std::optional<Pinhole
     return "{\"focalLengthMm\":" + Finite(camera.focal_length_mm) + ",\"sensorWidthMm\":" + Finite(camera.sensor_width_mm)
         + ",\"sensorHeightMm\":" + Finite(camera.sensor_height_mm) + ",\"intrinsics\":" + (k ? K(*k) : "null") + '}';
 }
-std::string CameraJson(const CameraPlanarResult& camera, const std::optional<Matrix3>& sheet_to_image) {
+// Seam disagreement in overlap chart mm and in output pixels (mm * dpi / 25.4).
+std::string SeamJson(const PlanarSeamMeasure& measure, std::uint32_t dpi) {
+    std::string out = "{\"outcome\":" + Q(PlanarSeamOutcomeCode(measure.outcome));
+    if (!measure.disagreement) return out + ",\"pointCount\":0,\"meanMm\":null,\"p95Mm\":null,\"maxMm\":null,\"meanOutputPixels\":null,\"p95OutputPixels\":null,\"maxOutputPixels\":null}";
+    const auto& d = *measure.disagreement;
+    const auto pixels = [dpi](double mm) { return N(mm * dpi / 25.4); };
+    return out + ",\"pointCount\":" + std::to_string(d.point_count) + ",\"meanMm\":" + N(d.mean_mm) + ",\"p95Mm\":" + N(d.p95_mm)
+        + ",\"maxMm\":" + N(d.max_mm) + ",\"meanOutputPixels\":" + pixels(d.mean_mm) + ",\"p95OutputPixels\":" + pixels(d.p95_mm)
+        + ",\"maxOutputPixels\":" + pixels(d.max_mm) + '}';
+}
+std::string CoverageJson(const PlanarCameraCoverage& coverage) {
+    std::string out = "{\"imageCornerRadiusSquared\":" + (coverage.image_corner_radius_squared ? N(*coverage.image_corner_radius_squared) : "null")
+        + ",\"fitPointCells\":[";
+    for (std::size_t row = 0; row < 4; ++row) {
+        out += row ? ",[" : "[";
+        for (std::size_t column = 0; column < 4; ++column) out += (column ? "," : "") + std::to_string(coverage.fit_point_cells[row * 4 + column]);
+        out += ']';
+    }
+    return out + "]}";
+}
+std::string CameraJson(const CameraPlanarResult& camera, const std::optional<Matrix3>& sheet_to_image, const PlanarCameraCoverage& coverage) {
     std::string out = "{\"camera\":" + Q(CameraAliasCode(camera.camera)) + ",\"status\":" + Q(PlanarCameraStatusCode(camera.status))
         + ",\"nominalIntrinsics\":" + (camera.nominal_intrinsics ? K(*camera.nominal_intrinsics) : "null")
         + ",\"solver\":" + Solver(camera.solver) + ",\"distortion\":" + (camera.distortion ? D(*camera.distortion) : "null")
@@ -90,7 +110,7 @@ std::string CameraJson(const CameraPlanarResult& camera, const std::optional<Mat
             + ",\"residual\":" + Residual(view.residual) + ",\"solver\":" + Solver(view.solver)
             + ",\"straightness\":" + StraightnessJson(view.straightness) + '}';
     }
-    return out + "]}";
+    return out + "],\"coverage\":" + CoverageJson(coverage) + '}';
 }
 const SessionView* FindView(const CalibrationObservationSession& session, const std::string& id) {
     for (const auto& view : session.Views()) if (view.id == id) return &view;
@@ -152,12 +172,14 @@ DraftCalibrationArtifacts BuildPlanarCalibrationArtifacts(std::string_view json,
     DraftCalibrationArtifacts out;
     std::string rejection, profile_validation_failure;
     std::optional<PlanarCalibrationResult> result;
+    std::optional<PlanarCalibrationMeasures> measures;
     std::array<std::optional<Matrix3>, 2> sheet_to_image{};
     if (session.Camera(CameraAlias::CamA).width_pixels != 7360 || session.Camera(CameraAlias::CamA).height_pixels != 4912
         || session.Camera(CameraAlias::CamB).width_pixels != 7360 || session.Camera(CameraAlias::CamB).height_pixels != 4912) {
         rejection = "unsupported-image-dimensions";
     } else {
         result = EstimatePlanarCalibration(session, request, policy);
+        measures = MeasurePlanarCalibration(session, request, policy, *result);
         bool estimated = true, validation_evaluated = true;
         for (std::size_t i = 0; i < 2; ++i) {
             const auto& camera = result->cameras[i];
@@ -166,7 +188,9 @@ DraftCalibrationArtifacts BuildPlanarCalibrationArtifacts(std::string_view json,
                 && camera.held_out_residual && camera.held_out_residual->point_count > 0;
             if (camera.document_to_image) sheet_to_image[i] = SheetToImage(*camera.document_to_image, metadata.overlap_placement);
         }
-        if (!estimated) rejection = "planar-calibration-unavailable";
+        // A placement not declared flat on the document plane is refused first.
+        if (!metadata.overlap_placement.coplanar_confirmed) rejection = "overlap-placement-invalid";
+        else if (!estimated) rejection = "planar-calibration-unavailable";
         else if (!validation_evaluated) rejection = "validation-not-evaluated";
         else if (!sheet_to_image[0] || !sheet_to_image[1]) rejection = "overlap-placement-invalid";
         else {
@@ -201,12 +225,20 @@ DraftCalibrationArtifacts BuildPlanarCalibrationArtifacts(std::string_view json,
     }
     report += "},\"overlapViews\":{\"CAM-A\":" + Q(request.overlap_view_ids[0]) + ",\"CAM-B\":" + Q(request.overlap_view_ids[1])
         + "},\"overlapPlacement\":{\"angleRadians\":" + Finite(placement.angle_radians) + ",\"translationXMm\":" + Finite(placement.translation_x_mm)
-        + ",\"translationYMm\":" + Finite(placement.translation_y_mm) + "},\"documentPlane\":" + plane
+        + ",\"translationYMm\":" + Finite(placement.translation_y_mm) + ",\"coplanarConfirmed\":" + (placement.coplanar_confirmed ? "true" : "false")
+        + "},\"documentPlane\":" + plane
         + ",\"fitResidualScope\":\"training and overlap usedPointIds, raw camera pixels\""
         + ",\"heldOutResidualScope\":\"validation measurementPointIds after a placement-only fit to posePointIds, raw camera pixels\""
         + ",\"quality\":\"not-assessed\",\"cameras\":";
     if (!result) report += "null";
-    else report += '[' + CameraJson(result->cameras[0], sheet_to_image[0]) + ',' + CameraJson(result->cameras[1], sheet_to_image[1]) + ']';
+    else report += '[' + CameraJson(result->cameras[0], sheet_to_image[0], measures->coverage[0]) + ','
+        + CameraJson(result->cameras[1], sheet_to_image[1], measures->coverage[1]) + ']';
+    report += ",\"seam\":";
+    if (!measures) report += "null";
+    else report += "{\"outputDpi\":" + std::to_string(metadata.seam_output_dpi)
+        + ",\"scope\":\"chart points detected in both overlap views, each mapped to overlap chart mm by its camera's undistortion and documentToImage inverse\""
+        + ",\"overlap\":" + SeamJson(measures->overlap_seam, metadata.seam_output_dpi)
+        + ",\"checkerboardHeldOut\":" + SeamJson(measures->checkerboard_seam, metadata.seam_output_dpi) + '}';
     out.report_json = report + '}';
     return out;
 }
@@ -224,7 +256,8 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
         else if (c == '}' || c == ']') { if (--depth < 0) InvalidJob(); }
     }
     const auto job = BasicJsonParser<Failure>(job_json).Parse();
-    Keys(job, {"schemaVersion", "profileId", "provenanceId", "measuredAt", "documentPlane", "overlapViews", "overlapPlacement", "nominalCameras", "numericalPolicy"});
+    Keys(job, {"schemaVersion", "profileId", "provenanceId", "measuredAt", "documentPlane", "overlapViews", "overlapPlacement", "nominalCameras",
+        "numericalPolicy", "seamOutputDpi"});
     if (Text(At(job, "schemaVersion")) != kPlanarCalibrationJobSchema) InvalidJob();
     const auto& plane = At(job, "documentPlane"); Keys(plane, {"orientation", "cameraOrder"});
     PlanarCalibrationMetadata metadata;
@@ -234,8 +267,13 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
     if (order != "CAM-A-left-CAM-B-right" && order != "CAM-A-top-CAM-B-bottom") InvalidJob();
     metadata.orientation = orientation == "landscape" ? DraftPaperOrientation::Landscape : DraftPaperOrientation::Portrait;
     metadata.camera_order = order == "CAM-A-left-CAM-B-right" ? DraftCameraOrder::LeftRight : DraftCameraOrder::TopBottom;
-    const auto& placement = At(job, "overlapPlacement"); Keys(placement, {"angleRadians", "translationXMm", "translationYMm"});
-    metadata.overlap_placement = {Number(At(placement, "angleRadians")), Number(At(placement, "translationXMm")), Number(At(placement, "translationYMm"))};
+    const auto& placement = At(job, "overlapPlacement"); Keys(placement, {"angleRadians", "translationXMm", "translationYMm", "coplanarConfirmed"});
+    if (At(placement, "coplanarConfirmed").kind != JsonKind::boolean) InvalidJob();
+    metadata.overlap_placement = {Number(At(placement, "angleRadians")), Number(At(placement, "translationXMm")), Number(At(placement, "translationYMm")),
+        At(placement, "coplanarConfirmed").boolean};
+    const double dpi = Number(At(job, "seamOutputDpi"));
+    if (dpi < 1 || dpi > 65535 || std::floor(dpi) != dpi) InvalidJob();
+    metadata.seam_output_dpi = static_cast<std::uint32_t>(dpi);
     const auto& views = At(job, "overlapViews"); Keys(views, {"CAM-A", "CAM-B"});
     const auto& nominal = At(job, "nominalCameras"); Keys(nominal, {"CAM-A", "CAM-B"});
     const PlanarCalibrationRequest request{{Text(At(views, "CAM-A")), Text(At(views, "CAM-B"))},
