@@ -56,6 +56,9 @@ SeamGateResult DecideSeamGate(const SeamMeasurement& m, const SeamGateLimits& li
     // with other limits would read points that were never confirmed.
     if (m.limits.limit_px != limits.limit_px || m.limits.guard_band_px != limits.guard_band_px)
         return UndeterminedSeamGate("limits-differ-from-measurement",limits);
+    // The decision speaks for the composite's transition band; a path that did
+    // not say where the composite mixes cannot get a pass (docs 16.11).
+    if (!m.containment.supplied) return UndeterminedSeamGate("transition-band-not-supplied",limits);
     SeamGateResult r;
     r.limits = limits;
     std::vector<double> values;
@@ -84,7 +87,10 @@ SeamGateResult DecideSeamGate(const SeamMeasurement& m, const SeamGateLimits& li
     for (const auto& b : m.blocks) {
         switch (b.block_class) {
         case BlockClass::measured: ++r.measured_blocks; break;
-        case BlockClass::unmeasurable_content: ++r.unmeasurable_blocks; break;
+        case BlockClass::unmeasurable_content:
+            ++r.unmeasurable_blocks;
+            if (b.unconfirmed_points) ++r.unconfirmed_blocks;
+            break;
         case BlockClass::empty:
             ++r.empty_blocks;
             if (!b.predicted_px) ++r.unpredicted_empty_blocks;
@@ -93,6 +99,9 @@ SeamGateResult DecideSeamGate(const SeamMeasurement& m, const SeamGateLimits& li
         case BlockClass::outside: break;
         }
     }
+    r.global_candidates = m.global.candidates; r.global_evaluated = m.global.evaluated;
+    r.global_verified = m.global.verified; r.global_contradicted = m.global.contradicted;
+    r.transition_rows_outside = m.containment.rows_outside; r.transition_pixels_outside = m.containment.pixels_outside;
     if (predicted_top) {
         r.predicted_maximum_px = predicted_top->predicted_px;
         if (!r.maximum_px || *predicted_top->predicted_px > *r.maximum_px) {
@@ -109,6 +118,15 @@ SeamGateResult DecideSeamGate(const SeamMeasurement& m, const SeamGateLimits& li
     // Draft 3.5: a block without content and without a calibration
     // prediction has no value, and is not counted as within the limit.
     if (r.unpredicted_empty_blocks) r.findings.push_back({"unpredicted-empty-block","use-calibrated-prediction"});
+    // #392: the placement is checked outside the local search radius, and the
+    // composite's transition has to lie inside the measured band. A
+    // contradicting anchor is evidence of a wrong placement; too few verified
+    // anchors means the placement is not known (a pattern that repeats inside
+    // the wide radius, or no content, verifies nothing).
+    if (r.global_contradicted) r.findings.push_back({"global-placement-mismatch","retake-then-recalibrate"});
+    else if (r.global_verified < m.design.global_minimum_anchors)
+        r.findings.push_back({"global-placement-unverified","place-distinctive-content-and-retake"});
+    if (r.transition_pixels_outside) r.findings.push_back({"transition-outside-band","check-gate-band"});
     r.state = r.findings.empty() ? SeamGateState::pass : SeamGateState::fail;
     return r;
 }
@@ -128,8 +146,12 @@ std::string SeamGateReportJson(const SeamGateResult& r, const SeamMeasurement* m
         ",\"predictedMaximumPx\":"+N(r.predicted_maximum_px)+",\"countedPoints\":"+U(r.counted_points)+
         ",\"confirmedPoints\":"+U(r.confirmed_points)+",\"unconfirmedPoints\":"+U(r.unconfirmed_points)+"}";
     s += ",\"blocks\":{\"measured\":"+U(r.measured_blocks)+",\"empty\":"+U(r.empty_blocks)+",\"unmeasurableContent\":"+
-        U(r.unmeasurable_blocks)+",\"emptyWithoutPrediction\":"+U(r.unpredicted_empty_blocks)+
+        U(r.unmeasurable_blocks)+",\"unmeasurableByUnconfirmedPoint\":"+U(r.unconfirmed_blocks)+",\"emptyWithoutPrediction\":"+U(r.unpredicted_empty_blocks)+
         ",\"emptyWithoutPredictionPasses\":false}";
+    s += ",\"placement\":{\"globalRadiusPx\":"+U(m ? m->design.global_search_radius_px : 0)+",\"minimumAnchors\":"+U(m ? m->design.global_minimum_anchors : 0)+
+        ",\"candidates\":"+U(r.global_candidates)+",\"evaluated\":"+U(r.global_evaluated)+",\"verified\":"+U(r.global_verified)+
+        ",\"contradicted\":"+U(r.global_contradicted)+",\"transitionRowsOutside\":"+U(r.transition_rows_outside)+
+        ",\"transitionPixelsOutside\":"+U(r.transition_pixels_outside)+"}";
     if (!m) return s+",\"measurement\":null}";
     const auto& d = m->design;
     s += ",\"measurement\":{\"design\":{\"pointSpacingPx\":"+U(d.point_spacing_px)+",\"patchPx\":"+U(d.patch_px)+
@@ -140,10 +162,23 @@ std::string SeamGateReportJson(const SeamGateResult& r, const SeamMeasurement* m
         ",\"uncertaintyFloorPx\":"+N(d.uncertainty_floor_px)+",\"maximumUncertaintyPx\":"+N(d.maximum_uncertainty_px)+
         ",\"remeasureShiftPx\":"+U(d.remeasure_shift_px)+",\"remeasurePatchPx\":"+U(d.remeasure_patch_px)+
         ",\"agreementFactor\":"+N(d.agreement_factor)+",\"agreementFloorPx\":"+N(d.agreement_floor_px)+
-        ",\"blockNeighborPx\":"+N(d.block_neighbor_px)+",\"stripRows\":"+U(d.strip_rows)+"}";
+        ",\"blockNeighborPx\":"+N(d.block_neighbor_px)+",\"stripRows\":"+U(d.strip_rows)+",\"globalSearchRadiusPx\":"+U(d.global_search_radius_px)+
+        ",\"globalMinimumAnchors\":"+U(d.global_minimum_anchors)+",\"globalMaximumEvaluations\":"+U(d.global_maximum_evaluations)+
+        ",\"globalTolerancePx\":"+N(d.global_tolerance_px)+"}";
     s += ",\"grid\":{\"width\":"+U(m->width)+",\"height\":"+U(m->height)+",\"originX\":"+U(m->origin_x)+",\"originY\":"+
         U(m->origin_y)+",\"blockColumns\":"+U(m->block_columns)+",\"blockRows\":"+U(m->block_rows)+"}";
     s += ",\"prediction\":{\"supplied\":"+B(m->prediction_supplied)+",\"mismatchPx\":"+N(m->prediction_mismatch_px)+"}";
+    s += ",\"transition\":{\"supplied\":"+B(m->containment.supplied)+",\"rowsOutside\":"+U(m->containment.rows_outside)+
+        ",\"pixelsOutside\":"+U(m->containment.pixels_outside)+",\"firstOutside\":";
+    if (m->containment.pixels_outside) s += "{\"x\":"+U(m->containment.first_x)+",\"y\":"+U(m->containment.first_y)+"}";
+    else s += "null";
+    s += "},\"globalAnchors\":[";
+    for (std::size_t i = 0; i < m->global.anchors.size(); ++i) {
+        const auto& a = m->global.anchors[i];
+        s += (i ? "," : "")+std::string("{\"x\":")+U(a.x)+",\"y\":"+U(a.y)+",\"blockColumn\":"+U(a.block_column)+",\"blockRow\":"+
+            U(a.block_row)+",\"status\":"+Q(GlobalAnchorStatusCode(a.status))+",\"localPx\":"+P(a.local)+",\"widePx\":"+P(a.wide)+"}";
+    }
+    s += "]";
     std::map<std::string_view,std::uint64_t> counts;
     for (const auto& p : m->points) ++counts[PointStatusCode(p.status)];
     s += ",\"pointStatusCounts\":{";
