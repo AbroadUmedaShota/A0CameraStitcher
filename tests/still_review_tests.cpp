@@ -423,6 +423,39 @@ int main(){
             unset_record.rotation_degrees==0 && unset_record.scale==1 && std::abs(unset_record.automatic->similarity->rotation_degrees-0.4)<0.02);
         const auto unset_bytes=Read(unset_record.report);const std::string unset_text(unset_bytes.begin(),unset_bytes.end());
         check(unset_text.find("\"policy\":null")!=std::string::npos && unset_text.find("\"decision\":\"no-policy\"")!=std::string::npos && unset_text.find("\"scaleDecision\":\"no-policy\"")!=std::string::npos);
+        // StillReview fields (#382): the saved geometry first; the estimate only
+        // on request. A blend-only revision of an estimate the policy did not
+        // apply keeps the parent geometry; the requested estimate is recorded.
+        {
+            const auto same=[](const StillAlignmentGeometry& g,int x,int y,double degrees,double scale){return g.x==x && g.y==y && g.rotation_degrees==degrees && g.scale==scale;};
+            const auto estimate_of=[&](const SavedStillReview& v,const StillAlignmentGeometry& g){const auto& s=*v.automatic->similarity;
+                return same(g,static_cast<int>(std::llround(s.x)),static_cast<int>(std::llround(s.y)),s.rotation_degrees,s.scale);};
+            const auto exceeded_saved=SavedStillReviewGeometry(exceeded_record);const auto exceeded_estimate=EstimatedStillReviewGeometry(exceeded_record);
+            check(same(exceeded_saved,exceeded_record.translation_x,exceeded_record.translation_y,0,1) && exceeded_estimate && estimate_of(exceeded_record,*exceeded_estimate) &&
+                exceeded_estimate->rotation_degrees!=0 && exceeded_estimate->scale!=1);
+            const auto unset_estimate=EstimatedStillReviewGeometry(unset_record);
+            check(same(SavedStillReviewGeometry(unset_record),unset_record.translation_x,unset_record.translation_y,0,1) && unset_estimate && estimate_of(unset_record,*unset_estimate));
+            const auto scale_over_estimate=EstimatedStillReviewGeometry(scale_over_record);const auto scale_over_saved=SavedStillReviewGeometry(scale_over_record);
+            check(scale_over_saved.scale==1 && scale_over_saved.rotation_degrees==sm.similarity->rotation_degrees && scale_over_estimate && scale_over_estimate->scale==sm.similarity->scale);
+            const auto corrected_estimate=EstimatedStillReviewGeometry(corrected_record);
+            check(corrected_estimate && same(*corrected_estimate,corrected_record.translation_x,corrected_record.translation_y,corrected_record.rotation_degrees,corrected_record.scale));
+            check(!EstimatedStillReviewGeometry(LoadSavedStillReview(output.report)));
+            auto unusable=exceeded_record;unusable.automatic->similarity->x=-1;check(!EstimatedStillReviewGeometry(unusable));
+            unusable=exceeded_record;unusable.automatic->similarity->scale=NAN;check(!EstimatedStillReviewGeometry(unusable));
+            auto child_of=[&](const char* name,const StillAlignmentGeometry& g){
+                auto request=automatic;request.automatic_alignment.reset();request.output_directory=auto_root/name;request.blend=BlendMethod::seam_cut;
+                request.deadline=std::chrono::steady_clock::now()+std::chrono::seconds(240);
+                request.manual_revision=StillReviewRequest::ManualRevision{g.x,g.y,exceeded_record.report,exceeded_record.report_sha256,g.rotation_degrees,g.scale};
+                return LoadSavedStillReview(WriteUncalibratedStillReview(request).report);
+            };
+            const auto kept=child_of("blend-only",exceeded_saved);
+            check(kept.manual_revision && kept.manual_revision->parent_report==exceeded_record.report && kept.blend && !kept.automatic && !EstimatedStillReviewGeometry(kept) &&
+                same(SavedStillReviewGeometry(kept),exceeded_saved.x,exceeded_saved.y,0,1));
+            const auto requested=child_of("estimate-requested",*exceeded_estimate);
+            check(requested.manual_revision && requested.manual_revision->parent_report==exceeded_record.report &&
+                same(SavedStillReviewGeometry(requested),exceeded_estimate->x,exceeded_estimate->y,exceeded_estimate->rotation_degrees,exceeded_estimate->scale));
+            check(LoadSavedStillReview(exceeded_record.report).report_sha256==exceeded_record.report_sha256);
+        }
         // Not estimable (uniform originals): the live translation and render
         // are kept; the JPEG equals the earlier v1 result byte for byte.
         auto flat=r;flat.output_directory=root/"auto-flat";flat.automatic_alignment=StillReviewRequest::AutomaticAlignment{loaded_policy};flat.deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
