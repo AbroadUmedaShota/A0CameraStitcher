@@ -163,7 +163,7 @@ inline std::string_view StillAlignmentBasis(const AutomaticStillAlignment& a){
 // the two cameras. The names below are the report's codes.
 //
 // applied: the scale difference is inside the limit (equal to it is inside) and
-// the scale was multiplied into B's placement about a point on the seam column.
+// the scale was multiplied into B's placement about B's image center.
 // exceeded: over the limit, nothing applied (the gate fails it later).
 // not_estimated: no usable estimate, nothing applied. seam_outside_overlap: the
 // correction would leave the seam outside the overlap, nothing applied.
@@ -204,8 +204,7 @@ struct FixedScaleCorrection {
     std::optional<double> estimated_scale,difference_percent;
     // The factor multiplied into B's placement: the estimate when applied, else 1.
     double applied_scale{1};
-    // Fixed point of the correction: on the seam column, at the vertical middle
-    // of the output window, in A's pixels.
+    // Fixed point of the correction: B's image center moved by the fixed mapping, in A's pixels.
     render::Point center{};
     unsigned used_tiles{};
     FitResidual residual; // of the fitted model (scale and free shift) over the used tiles

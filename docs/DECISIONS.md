@@ -572,7 +572,7 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 7. fingerprintはstitcherが自分で読んで適用した値から計算する（ADR-0026）。
 8. profileに物理的な識別子と自由記述の欄を置かない。
 
-追記（2026-11-04、ADR-0037・Issue #396・#397）: 不変条件2はADR-0037で改定（Accepted、2026-11-04）。撮影ごとの平行移動・回転の補正を合成に使わず、撮影ごとの補正は継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る。倍率の推定では回転を固定の値に縛り、補正の中心は継ぎ目の列上に置き、推定できない時は補正しない（所有者の決定（2026-11-04、#396））。本文の書き換えは後の変更で行い、それまでは本追記とADR-0037が優先する。
+追記（2026-11-04、ADR-0037・Issue #396・#397）: 不変条件2はADR-0037で改定（Accepted、2026-11-04）。撮影ごとの平行移動・回転の補正を合成に使わず、撮影ごとの補正は継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る。倍率の推定では回転を固定の値に縛り、補正の中心はBの画像の中心を固定の写像で出力へ移した点に置き、推定できない時は補正しない（所有者の決定（2026-11-04、#396））。本文の書き換えは後の変更で行い、それまでは本追記とADR-0037が優先する。
 
 ### 所有者の確認が要る点
 
@@ -617,7 +617,7 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 
 ## ADR-0036: ライブビューを承認済みrig profileで描く表示専用の合成Cにし、WPD経由のライブビュー3命令をvendor operationの例外にする
 
-- 状態: 決定1 Accepted（2026-11-04、#396）／決定2 Proposed（保留。所有者によるNikon SDK使用許諾の読み直しが前提）。決定1の実装は、#398・#399が関数と記録まで。経路への接続（#400〜#403）は未実装で、承認済みのrig profileも無いので、操作者の画面にCはまだ出ない（※未実装）。決定2に関わる改定の対象は、今の文面がそのまま効く。AGENTS.mdは人が書き換えるので、本ADRでは本文を変えない。
+- 状態: 決定1 Accepted（2026-11-04、#396）／決定2 Proposed（保留。所有者によるNikon SDK使用許諾の読み直しが前提）。決定1の実装は、#398・#399が関数と記録、#400（JPEG）と#401（開発用ビルドのC）は経路に接続済み、#402・#403は未実装。承認済みのrig profileも無いので、操作者の画面にCはまだ出ない（開発用ビルドのCだけが条件で描く）。決定2に関わる改定の対象は、今の文面がそのまま効く。AGENTS.mdは人が書き換えるので、本ADRでは本文を変えない。
 - 起票日: 2026-10-14
 - 決定日: 決定1 2026-11-04（#396）。決定2は未決定
 - 関連: #307（本ADR）、#306（所有者の決定と技術の道筋）、#396（2026-11-04の所有者の決定）、#397〜#403（決定1の文書と実装。#403はCの画面で継ぎ目の列を決めて保存する操作）、ADR-0037（撮影ごとの位置・回転の補正をやめる。Accepted）、#292（B案）、#293（今のスコープ）、#291・#295（ADR-0035）、#280・#281・#282（合成のレンダラー・reader・製品の入口）、#274・#277（profileの選択と校正）、#46（撮影ごとの補正）、#43・#42・#45（リグ・品質基準・承認済みprofile）、#233（pilot）、`HG-0010`・`HG-0011`
@@ -780,7 +780,7 @@ AGENTS.mdの差し替えの案（承認までは今の文言が効く）:
 - 確認点A・B・Cの回答（2026-11-04）: B7以外は案のとおり承認。B2は二状態にする（`ready-auto-correction`を廃止）。B5は明るさの比に上限を置く（値は実機で測ってから）。C1は「人の操作で決めた列の保存はADR-0036決定1の5に当たらない」と読む。
 - B7の決定: ピントは撮影のたびに合わせ直してよく、設置の時に固定する運用にはしない。ピントの合わせ直しや高さの違いで左右のカメラの写る大きさ（倍率）に差が出た時は、差が上限以内なら撮影ごとに補正する。上限を超えたら補正せず、ゲートで不合格にして「ピントか高さを確かめてください」と案内する。回転と平行移動は撮影ごとに直さない。継ぎ目の列は変えない。
 - B7の上限（2026-11-04、#396）: 倍率の補正の上限は1%で始める。左右の倍率の差が1%以内なら撮影ごとに補正し、超えたら補正せずゲートで不合格にして案内する。値は実機で測った後に見直す。
-- B7の細部（2026-11-04、#396、所有者の言葉「推奨どおりで」）: (1) 回転は固定の値に縛り、撮影ごとに変えるのは倍率だけ。(2) 倍率の補正の中心は継ぎ目の列の上に置き、継ぎ目の線を動かさない。(3) 倍率を推定できない時は補正しない。固定の写像のまま合成し、ゲートの判定に任せる。
+- B7の細部（2026-11-04、#396、所有者の言葉「推奨どおりで」）: (1) 回転は固定の値に縛り、撮影ごとに変えるのは倍率だけ。(2) 倍率の補正の中心は継ぎ目の列の上に置き、継ぎ目の線を動かさない（同日の後の決定で置き換わった。決定6 の中心の項）。(3) 倍率を推定できない時は補正しない。固定の写像のまま合成し、ゲートの判定に任せる。
 
 ### 決定
 
@@ -791,7 +791,7 @@ AGENTS.mdの差し替えの案（承認までは今の文言が効く）:
 5. **設置が変われば校正をやり直す**: 固定の合成条件とprofileの写像を更新するのは、設置が変わった時の再校正だけ（#362の読み替え）。設置の時の推定（#364・#365）から作った条件は、人が見て確かめた上で使ってよい（B3）。継ぎ目の列は、人がCの画面で動かして保存した時に更新する（決定4）。どちらの更新も人が明示して行い、撮影の結果から自動では更新しない。台の揺れやシャッターの振動で組ごとにAとBが動いた撮影は、固定の写像からずれた分がゲートで測られ、合格線を超えれば書き出さない（原画像は残す、#385）。揺れない取り付けを前提にする（B1）。
 6. **倍率だけは上限以内で撮影ごとに補正する（B7）**: ピントは撮影のたびに合わせ直してよい。左右の倍率の差が上限以内なら、撮影ごとにBに倍率だけを当てる。上限を超えたら補正せず（倍率1）、ゲートで不合格にして「ピントか高さを確かめてください」と案内する。上限で切った部分的な補正はしない。上限は所有者の決定で1%（初期値。実機で測った後に見直す前提）。倍率の差は「倍率を%にした値と100の差の絶対値」で比べ、1%ちょうどは補正する（#365の倍率の判定と同じ比べ方、※案）。値はコードに既定値として埋め込まず、方針ファイル（`wpd-merge-policy.json`の`scaleAutoCorrectionMaxPercent`）か固定の合成条件の記録（開発経路。値は方針ファイルから条件を作る時に写す、未承認）から読む。どちらにも値が無ければ倍率を補正しない（倍率1）。
    - 倍率の推定では、回転を固定の写像の値に縛る。撮影ごとに変えるのは倍率だけ（所有者の決定（2026-11-04、#396））。推定の方法は#365の推定器の倍率の部分を使う案で、#400の実装に合わせて書く（※案）。
-   - 倍率の補正の中心は継ぎ目の列の上に置き、継ぎ目の線を動かさない（所有者の決定（2026-11-04、#396））。列上のどの点にするか（帯の縦の中央など）は#400で決める。
+   - 倍率の補正の中心は、Bの画像の中心（原寸の (幅/2, 高さ/2)、写像の `anchor:"image-center"` と同じ取り方）を固定の写像で出力へ移した点にする（所有者の決定（2026-11-04、#396、所有者の言葉「Bの中心に改める」）。同日の最初の決定の「継ぎ目の列の上」を置き換える）。ピントや高さの変化はBの光学中心のまわりにかかるので、この中心なら倍率でないずれが残らない。継ぎ目の線は動かない: 継ぎ目は出力の列で決まり、合成の窓の左端を保つので、Bをどこを中心に拡大しても列は変わらない。
    - 倍率を推定できない時（繰り返し模様、候補が定まらないなど）は補正しない。固定の写像のまま合成し、ゲートの判定に任せる（所有者の決定（2026-11-04、#396））。報告に「倍率を推定できなかった」と残す（記録の書き方は#400）。
    - 推定した倍率と当てた倍率、上限の値と出どころは報告に記録する。
    - ライブのCは撮影の前に倍率を知らないので、固定の写像のまま描く。CとJPEGの幾何の違いは、上限以内の倍率の差だけになる。
@@ -808,7 +808,7 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 ### ADR-0034の不変条件2との関係
 
 - 今: 「撮影ごとにhomographyを推定しない（ADR-0021）。推定は開発時の校正ツール（#277）だけで行う。撮影ごとの補正は承認された上限の内側の相似変換に限る。」
-- 改定（B9で承認した案をB7と2026-11-04の決定に合わせて直した。本文の書き換えは承認後の作業）: 「撮影ごとにhomographyも相似も推定して合成に当てない。合成に使う写像の推定は、開発時の校正ツール（#277）と、設置時に固定の合成条件を作る時だけで行う。撮影ごとの推定は、ずれの診断とゲートの入力に使う。撮影ごとの補正は、継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る。倍率の推定では回転を固定の値に縛り、補正の中心は継ぎ目の列上に置く。上限を超えた倍率と、推定できない倍率は当てない。」（細部の3点は所有者の決定（2026-11-04、#396））
+- 改定（B9で承認した案をB7と2026-11-04の決定に合わせて直した。本文の書き換えは承認後の作業）: 「撮影ごとにhomographyも相似も推定して合成に当てない。合成に使う写像の推定は、開発時の校正ツール（#277）と、設置時に固定の合成条件を作る時だけで行う。撮影ごとの推定は、ずれの診断とゲートの入力に使う。撮影ごとの補正は、継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る。倍率の推定では回転を固定の値に縛り、補正の中心はBの画像の中心を固定の写像で出力へ移した点に置く。上限を超えた倍率と、推定できない倍率は当てない。」（細部の3点は所有者の決定（2026-11-04、#396））
 - profile 2.0.0の`correctionEnvelope`（[rig profile 2.0.0の設計](design/rig-profile-v2.md)の2.4節）: B8の案のとおり、回転の欄は補正の上限から再校正の案内の境目に読み替える。倍率の欄はB7で撮影ごとの補正の上限として残ると読む（※読み方。B8の案は回転・倍率の両方を読み替える案だったが、B7で倍率の補正が戻ったため）。本ADRではschemaを変えない。
 
 ### #385の決定との関係
@@ -844,7 +844,7 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 | `FR-STI-005` | 自動補正量が範囲を超えたら成功扱いにしない | 倍率は上限を超えたら補正せず不合格。位置・回転は固定の条件からのずれ（診断の値）に読み替える | 置いた |
 | `FR-STI-006` | `補正不要`・`自動補正して続行`・`物理調整が必要` | 二状態（`自動補正して続行`を廃止） | 置いた |
 | `docs/WPD_STILL_REVIEW.md` の#365・#368の節 | 撮影ごとの相似を合成に当てる。内容で道筋を選ぶ | #400で書き換える。相似と道筋は診断として報告に残し、倍率だけを上限以内で当てる | 節の頭に注記を置いた |
-| `docs/WPD_PREVIEW_MERGE.md` の冒頭・#364の節 | 自動位置合わせv2と手動の調整がCの位置を変える。線形feather | #401・#402で書き換える | 節の頭に注記を置いた |
+| `docs/WPD_PREVIEW_MERGE.md` の冒頭・#364の節 | 自動位置合わせv2と手動の調整がCの位置を変える。線形feather | #401（Cの節。書き換え済み）・#402（v2の節）で書き換える | 節の頭に注記を置いた |
 | `docs/M2_SEAM_QUALITY_GATE.md` の5.6節 | 撮影ごとの局所合わせのADR草案（D2） | D2を取り下げる（B6） | 置いた |
 | AGENTS.md | 下の3文 | 下の差し替えの案（人が反映する） | 置かない |
 
@@ -853,7 +853,7 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 AGENTS.mdの差し替えの案（B9で承認した案をB7と2026-11-04の決定に合わせて直した。人が反映するまでは今の文言が効く）:
 
 - 今: `Treat setup as an automatic-correction envelope, not pixel-perfect manual placement: use an approved fixed rig profile plus transient bounded per-capture correction. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile.`
-- 案: `Treat setup as a calibrated fixed installation, not pixel-perfect manual placement: compose every capture with one fixed geometry per installation (an approved rig profile, or on development paths an unapproved fixed composite condition) and one straight vertical seam column stored with it (ADR-0037). Only a person may move the seam column, by dragging it in the C view within the overlap margins and pressing the fix button; save it as a new revision of the fixed condition and use it for every later JPEG and C. Record the column used in every report. Per-capture position and rotation estimates are diagnostics and seam-gate inputs only; they never move the composite geometry or the seam. Per capture, only brightness (the A/B ratio along the seam applied to B) and a left/right scale difference within the owner-approved limit may be corrected; read the limit from the policy file or the fixed composite record, never from a code default. Estimate scale with rotation held at the fixed value, centre the scale correction on the seam column so the seam does not move, and do not apply a scale that is over the limit or cannot be estimated (compose with the fixed mapping and leave the decision to the seam gate). Never bend the seam row by row. Recalibrate and replace the fixed condition when the installation changes. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile or the fixed composite condition.`
+- 案: `Treat setup as a calibrated fixed installation, not pixel-perfect manual placement: compose every capture with one fixed geometry per installation (an approved rig profile, or on development paths an unapproved fixed composite condition) and one straight vertical seam column stored with it (ADR-0037). Only a person may move the seam column, by dragging it in the C view within the overlap margins and pressing the fix button; save it as a new revision of the fixed condition and use it for every later JPEG and C. Record the column used in every report. Per-capture position and rotation estimates are diagnostics and seam-gate inputs only; they never move the composite geometry or the seam. Per capture, only brightness (the A/B ratio along the seam applied to B) and a left/right scale difference within the owner-approved limit may be corrected; read the limit from the policy file or the fixed composite record, never from a code default. Estimate scale with rotation held at the fixed value, centre the scale correction on the centre of B's image moved into the output by the fixed mapping (the seam is a column of the output window and does not move), and do not apply a scale that is over the limit or cannot be estimated (compose with the fixed mapping and leave the decision to the seam gate). Never bend the seam row by row. Recalibrate and replace the fixed condition when the installation changes. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile or the fixed composite condition.`
 - 今: `A provisional fixed-parameter C review view may consume live frames in memory and must be labelled uncalibrated.`
 - 案: `A development C view may consume live frames in memory only through the same fixed composite condition and straight-seam function as the saved JPEG, scaled to Live View pixels (ADR-0036 decision 1, ADR-0037); it does not apply the per-capture scale correction. It must be labelled uncalibrated and unapproved, and the Live View-to-still mapping must be labelled unverified until measured (#309).`
 - 今: `The later request for rough automatic merge plus manual refinement also authorizes a button-triggered translation proposal in the uncalibrated development C view. Keep the search bounded to the visible manual translation range, identify the result as a proposal requiring visual review, and permit manual pixel refinement. No per-frame homography estimation, rig-profile learning, optical acceptance threshold or final calibration approval is implied.`
@@ -865,7 +865,7 @@ AGENTS.mdの差し替えの案（B9で承認した案をB7と2026-11-04の決定
 
 - 実装（#398〜#403）。
 - 値: 明るさの比の上限（実機で測ってから）、再校正の案内の境目（#402）。
-- 倍率の推定の方法（#365の推定器の倍率の部分をどう使うか）と、補正の中心を列上のどの点にするかは#400で決める。回転を縛ること、中心を列上に置くこと、推定できない時は補正しないことは所有者の決定（2026-11-04、#396）。
+- 倍率の推定の方法は#400で決めた（#365の推定器が返した合意タイルから、回転を固定の値に縛り、推定の中だけ平行移動を自由にして倍率を求め直す。当てるのは倍率だけ）。回転を縛ること、補正の中心をBの画像の中心を固定の写像で出力へ移した点に置くこと、推定できない時は補正しないことは所有者の決定（2026-11-04、#396）。
 - 製品経路で継ぎ目の列と倍率の上限を承認済みのprofileに持たせるか（#45の時）。
 - 色の補正（#46）。承認済みのprofile（#45）と最終のリグ（#43）。Cのframeの出どころ（ADR-0036決定2、保留）。#394・WP-04の見直しの詳細。
 
@@ -881,7 +881,7 @@ AGENTS.mdの差し替えの案（B9で承認した案をB7と2026-11-04の決定
 | B4 再校正の案内の境目。決まるまでは値を表示するだけ | 案のとおり承認（※読み方）。値は未決 |
 | B5 明るさの比に上限を置くか | 置く。値は実機で測ってから |
 | B6 #385のD2（局所合わせ）を取り下げるか | 取り下げる（案のとおり、※読み方） |
-| B7 #385のD3（AF-S）の倍率 | 所有者の修正: ピントは都度合わせてよい。倍率の差は上限以内なら撮影ごとに補正、超えたら不合格で案内。上限は1%で始める（同日の決定。実機で測った後に見直す）。細部の3点（回転を固定の値に縛る、中心を継ぎ目の列上に置く、推定できない時は補正しない）も同日に案のとおり決定（所有者の言葉「推奨どおりで」） |
+| B7 #385のD3（AF-S）の倍率 | 所有者の修正: ピントは都度合わせてよい。倍率の差は上限以内なら撮影ごとに補正、超えたら不合格で案内。上限は1%で始める（同日の決定。実機で測った後に見直す）。細部の3点（回転を固定の値に縛る、推定できない時は補正しない、中心）も同日に決定。中心は最初「継ぎ目の列上」（所有者の言葉「推奨どおりで」）としたが、同日の後の決定で「Bの画像の中心を固定の写像で出力へ移した点」に改めた（所有者の言葉「Bの中心に改める」） |
 | B8 `correctionEnvelope`の回転・倍率の欄の読み替え | 案のとおり承認（※読み方）。倍率はB7で補正の上限として残ると読む |
 | B9 ADR-0034の不変条件2の改定とAGENTS.mdの差し替えの案、StillReviewの手動の再Merge | 案のとおり承認（※読み方）。改定と案はB7と同日の細部の決定に合わせて直した |
 

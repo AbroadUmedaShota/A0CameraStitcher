@@ -86,8 +86,10 @@ int main(){
                 base.crop.right==same.crop.right && base.crop.bottom==same.crop.bottom);
             const auto p=FixedScaleCenter(*c);
             const auto plan=render::PlanPairCanvas(w,h,w,h,base);
-            // The center is on the seam column, at the vertical middle of the window.
-            CHECK(p.x==plan.origin_x+base.crop.left+c->seam.column && p.y==plan.origin_y+base.crop.top+plan.output_height/2.0);
+            // The center is B's image center moved by the fixed mapping (owner decision 2026-11-04, #396).
+            CHECK(Near(p.x,c->mapping.translation_x+w/2.0,1e-9) && Near(p.y,c->mapping.translation_y+h/2.0,1e-9));
+            const auto moved_center=render::Transform(base.camera_b_to_camera_a,{w/2.0,h/2.0});
+            CHECK(Near(p.x,moved_center.x,1e-12) && Near(p.y,moved_center.y,1e-12));
             for(const double k:{0.99,0.996,1.004,1.01}){
                 const auto q=FixedCompositeScaledGeometry(*c,k);
                 const auto qplan=render::PlanPairCanvas(w,h,w,h,q);
@@ -96,16 +98,18 @@ int main(){
                 CHECK(Near(std::hypot(q.camera_b_to_camera_a[0],q.camera_b_to_camera_a[3]),k*std::hypot(base.camera_b_to_camera_a[0],base.camera_b_to_camera_a[3]),1e-12));
                 // The window keeps its left edge, so the seam column keeps its meaning.
                 CHECK(qplan.origin_x+q.crop.left==plan.origin_x+base.crop.left);
-                // The point P is fixed, and every point of the seam line stays on it.
-                const auto inverse=render::Invert(base.camera_b_to_camera_a);
-                for(const double y:{p.y-500,p.y-100,p.y,p.y+300,p.y+500}){
-                    const auto b=render::Transform(inverse,{p.x,y});
-                    const auto moved=render::Transform(q.camera_b_to_camera_a,b);
-                    CHECK(Near(moved.x,p.x,1e-9));
-                    if(y==p.y)CHECK(Near(moved.y,p.y,1e-9));
-                    else CHECK(Near(moved.y-p.y,k*(y-p.y),1e-9)); // vertical stretch about P
+                // B's image center stays where the fixed mapping puts it, and every other
+                // point of B moves to P + k (H(b) - P): B grows about its own center.
+                const auto center_moved=render::Transform(q.camera_b_to_camera_a,{w/2.0,h/2.0});
+                CHECK(Near(center_moved.x,p.x,1e-9) && Near(center_moved.y,p.y,1e-9));
+                for(const auto& b:{render::Point{0,0},render::Point{double(w),0},render::Point{double(w),double(h)},render::Point{300,900}}){
+                    const auto before=render::Transform(base.camera_b_to_camera_a,b),after=render::Transform(q.camera_b_to_camera_a,b);
+                    CHECK(Near(after.x-p.x,k*(before.x-p.x),1e-9) && Near(after.y-p.y,k*(before.y-p.y),1e-9));
                 }
-                // The seam column can be rendered where the window is covered.
+                // The seam column is a column of the output window, whose left edge is kept,
+                // so it names the same global column however B was scaled.
+                CHECK(plan.origin_x+base.crop.left+c->seam.column==qplan.origin_x+q.crop.left+c->seam.column);
+                // And it can still be drawn where the window is covered.
                 CHECK(c->seam.column<qplan.output_width);
             }
         }
@@ -261,19 +265,42 @@ int main(){
             CHECK(after.second>0 && after.first<=before.first+1e-9);
             if(std::abs(test.truth-1)>2e-3)CHECK(after.first<before.first);
         }
-        // B enlarged about its OWN image center (what a focus or height change does),
-        // not about P: a = k (H(b) - Hc) + Hc. About P that is the same scale plus a
-        // shift d = (1 - k)(Hc - P). The scale must still come out as k, and the
-        // shift is reported instead of being mistaken for a scale (#400 review H1).
+        // Owner decision of 2026-11-04 (#396): the correction is about B's image center.
+        // A focus or height change enlarges B about its own center, a = k (H(b) - Hc) + Hc,
+        // so with Hc as the center the scale is found and no shift is left over.
+        // About a point on the seam column the same scale would leave a shift
+        // d = (1 - k)(Hc - P_seam) at the seam; this test fails if the center is replaced.
         {
             const double truth=1.005;
             const auto b=scene::ViewB(world,w,h,930,9,0,truth,1.0);
             const auto result=DecideFixedScale(flat,EstimateOverlapSimilarity(a,b,930,9));
-            const double expected_x=(1-truth)*(cx+930-p.x),expected_y=(1-truth)*(cy+9-p.y);
             std::cout<<"own-center truth="<<truth<<" status="<<FixedScaleStatusCode(result.status)<<" estimated="<<(result.estimated_scale?*result.estimated_scale:0.0)
-                <<" shift="<<result.unexplained_shift.x<<","<<result.unexplained_shift.y<<" expected="<<expected_x<<","<<expected_y<<'\n';
+                <<" shift="<<result.unexplained_shift.x<<","<<result.unexplained_shift.y<<'\n';
+            // (a) the scale is found
             CHECK(result.status==FixedScaleStatus::applied && result.estimated_scale && Near(*result.estimated_scale,truth,1.5e-3));
-            CHECK(Near(result.unexplained_shift.x,expected_x,1.0) && Near(result.unexplained_shift.y,expected_y,1.0));
+            // A pure scale about the center leaves no shift behind (tolerance 0.5 px, the tile measurement noise).
+            CHECK(Near(result.unexplained_shift.x,0,0.5) && Near(result.unexplained_shift.y,0,0.5));
+            // (b) at the seam, A and the corrected B agree within 1.5 px (the probes are whole pixels).
+            // (c) the same factor about the seam column leaves a clearly larger offset.
+            const auto base=FixedCompositeRenderParameters(flat);
+            const auto centered=FixedCompositeScaledGeometry(flat,result.applied_scale);
+            const auto base_plan=render::PlanPairCanvas(w,h,w,h,base);
+            const render::Point seam_point{base_plan.origin_x+base.crop.left+flat.seam.column,base_plan.origin_y+base.crop.top+base_plan.output_height/2.0};
+            const double k=result.applied_scale;const auto& m=base.camera_b_to_camera_a;
+            render::PairRenderParameters about_seam{{k*m[0],k*m[1],k*(m[2]-seam_point.x)+seam_point.x,k*m[3],k*m[4],k*(m[5]-seam_point.y)+seam_point.y,0,0,1},base.layout,base.crop};
+            const auto offset_at_seam=[&](const render::PairRenderParameters& q){
+                const auto plan=render::PlanPairCanvas(w,h,w,h,q);
+                const std::vector<std::uint32_t> seam(plan.output_height,flat.seam.column);
+                double worst=0;int valid=0;
+                for(const auto& probe:ProbeSeamDisplacement(a,b,q,seam,128,32,std::max(1u,plan.output_height/24)))
+                    if(probe.valid){++valid;worst=std::max(worst,std::hypot(probe.dx,probe.dy));}
+                return std::pair{worst,valid};
+            };
+            const auto none=offset_at_seam(base),centred=offset_at_seam(centered),seamed=offset_at_seam(about_seam);
+            std::cout<<"  offset at the seam: uncorrected="<<none.first<<" about B's center="<<centred.first<<" about the seam="<<seamed.first<<" probes="<<centred.second<<"/"<<seamed.second<<'\n';
+            CHECK(centred.second>0 && seamed.second>0);
+            CHECK(centred.first<=1.5);
+            CHECK(seamed.first>=2.0 && seamed.first>centred.first+0.5);
         }
         // Another scene with the same fixed fields: the mapping and the seam do not depend on the content.
         {
