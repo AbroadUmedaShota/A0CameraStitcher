@@ -572,7 +572,7 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 7. fingerprintはstitcherが自分で読んで適用した値から計算する（ADR-0026）。
 8. profileに物理的な識別子と自由記述の欄を置かない。
 
-追記（2026-11-04、ADR-0037・Issue #396・#397）: 不変条件2はADR-0037で改定（Accepted、2026-11-04）。撮影ごとの平行移動・回転の補正を合成に使わず、撮影ごとの補正は継ぎ目に沿った明るさの比と、承認された上限以内の倍率（回転は固定の値に縛る）に限る。本文の書き換えは後の変更で行い、それまでは本追記とADR-0037が優先する。
+追記（2026-11-04、ADR-0037・Issue #396・#397）: 不変条件2はADR-0037で改定（Accepted、2026-11-04）。撮影ごとの平行移動・回転の補正を合成に使わず、撮影ごとの補正は継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る（倍率の推定で回転を固定の値に縛る方法などの細部は※案で、#400で確定する）。本文の書き換えは後の変更で行い、それまでは本追記とADR-0037が優先する。
 
 ### 所有者の確認が要る点
 
@@ -617,7 +617,7 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 
 ## ADR-0036: ライブビューを承認済みrig profileで描く表示専用の合成Cにし、WPD経由のライブビュー3命令をvendor operationの例外にする
 
-- 状態: 決定1 Accepted（2026-11-04、#396）／決定2 Proposed（保留。所有者によるNikon SDK使用許諾の読み直しが前提）。決定1の実装（#398〜#402）は未着手で、承認済みのrig profileも無いので、操作者の画面にCはまだ出ない（※未実装）。決定2に関わる改定の対象は、今の文面がそのまま効く。AGENTS.mdは人が書き換えるので、本ADRでは本文を変えない。
+- 状態: 決定1 Accepted（2026-11-04、#396）／決定2 Proposed（保留。所有者によるNikon SDK使用許諾の読み直しが前提）。決定1の実装は、#398・#399が関数と記録まで。経路への接続（#400〜#403）は未実装で、承認済みのrig profileも無いので、操作者の画面にCはまだ出ない（※未実装）。決定2に関わる改定の対象は、今の文面がそのまま効く。AGENTS.mdは人が書き換えるので、本ADRでは本文を変えない。
 - 起票日: 2026-10-14
 - 決定日: 決定1 2026-11-04（#396）。決定2は未決定
 - 関連: #307（本ADR）、#306（所有者の決定と技術の道筋）、#396（2026-11-04の所有者の決定）、#397〜#403（決定1の文書と実装。#403はCの画面で継ぎ目の列を決めて保存する操作）、ADR-0037（撮影ごとの位置・回転の補正をやめる。Accepted）、#292（B案）、#293（今のスコープ）、#291・#295（ADR-0035）、#280・#281・#282（合成のレンダラー・reader・製品の入口）、#274・#277（profileの選択と校正）、#46（撮影ごとの補正）、#43・#42・#45（リグ・品質基準・承認済みprofile）、#233（pilot）、`HG-0010`・`HG-0011`
@@ -656,7 +656,7 @@ Proposed（#278の「守ること」を本ADRで確かめ直したもの）:
 
 ### 決定1: 表示専用の合成C（Accepted、2026-11-04、#396）
 
-1. Cは承認済み（approved）のrig profileだけで描く。draft、期限切れ、fingerprintが一致しないprofileでは描かない。
+1. 製品の経路では、Cは承認済み（approved）のrig profileだけで描く。draft、期限切れ、fingerprintが一致しないprofileでは描かない。開発経路は2の副項のとおり。
 2. Cの写像は、approved profileの写像をライブビューの画素へ縮めたものとする（`K_lv = S·K`、`H_lv = S·H`、歪み係数はそのまま）。描画は保存の合成と同じレンダラー（#280）を通す。`S`はライブビューの画素と撮影画像の画素の対応（拡縮と平行移動）で、測定で決めた固定の値とし、frameごとに推定しない。`S`の値と置き場所（機種の定数か、profileの欄か）は測定の後に別に承認する。
    - 承認済みのprofileが出るまでの開発経路では、設置ごとに一度作る「固定の合成条件（未承認）」（#399）を、同じように`S`でライブビューの画素へ縮めて使う。この条件は承認済みのprofileではなく、approvedを名乗らない。描くCは表示専用で、保存しない（5のとおり）。画面には未校正・未承認であることと、`S`が※未検証の仮定であること（#309）を出す。
    - この開発経路は、ADR-0033の4節の評価専用の入口と同じ扱いにする。既定OFFのCMake option（今は`A0_BUILD_WPD_DUAL_PREVIEW`）を付けたビルドだけに入れ、製品の配布物に入れない。製品の合成がapprovedのprofileだけを受け付ける規則（ADR-0033の4節、ADR-0034の不変条件1）は変えない。7の「承認済みのprofileが無い間は操作者の画面にCを出さない」もそのまま効く。
@@ -762,7 +762,7 @@ AGENTS.mdの差し替えの案（承認までは今の文言が効く）:
 
 ## ADR-0037: 撮影ごとの位置・回転の補正をやめ、設置ごとに固定した写像と縦一直線の継ぎ目で合成する（倍率だけは上限以内で撮影ごとに補正する）
 
-- 状態: Accepted（2026-11-04、#396。B7は所有者の修正のとおり。倍率の上限は所有者の決定で1%から始める（実機で測った後に見直す前提）。明るさの比の上限値は未決）。所有者は確認点B7だけを取り上げて直したので、ほかの確認点は案のとおり承認と読んだ（※読み方）。実装は#398〜#403で行う（※未実装）。ADR-0021の決定と安全境界、ADR-0034の不変条件2、ADR-0036の不変条件4の本文の書き換えは残っており（承認後の作業）、それまでは各対象の追記が本ADRへの改定を示す。AGENTS.mdは人が書き換えるので本文を変えず、下の差し替えの案を人が反映する。
+- 状態: Accepted（2026-11-04、#396。B7は所有者の修正のとおり。倍率の上限は所有者の決定で1%から始める（実機で測った後に見直す前提）。明るさの比の上限値は未決）。所有者は確認点B7だけを取り上げて直したので、ほかの確認点は案のとおり承認と読んだ（※読み方）。実装は#398・#399が関数と記録まで。経路への接続（#400〜#403）は未実装。ADR-0021の決定と安全境界、ADR-0034の不変条件2、ADR-0036の不変条件4の本文の書き換えは残っており（承認後の作業）、それまでは各対象の追記が本ADRへの改定を示す。AGENTS.mdは人が書き換えるので本文を変えず、下の差し替えの案を人が反映する。
 - 起票日: 2026-11-04
 - 決定日: 2026-11-04（#396の所有者の回答）
 - 関連: #396（所有者の決定Q1〜Q4と確認点A・B・Cの回答）、#397（本ADR）、#398（縦一直線の継ぎ目の合成関数。列を入力に取る）、#399（固定の合成条件）、#400（JPEGの経路）、#401（Cの経路）、#402（自動推定を診断と再校正の案内に）、#403（Cの画面で継ぎ目の線をドラッグして列を決め、固定の合成条件に保存する）、#385（継ぎ目のズレのゲート）、#394・WP-04（ゲートを開発経路へつなぐ前の修正と接続）、#362・#364・#365・#368、#374（平置きの校正）、#45（承認済みprofile）、#46（撮影ごとの補正）、ADR-0021・0033・0034・0036
@@ -784,7 +784,7 @@ AGENTS.mdの差し替えの案（承認までは今の文言が効く）:
 ### 決定
 
 1. **固定の写像で合成する**: 書き出す合成の幾何は、設置ごとに固定した写像で決める。製品経路では承認済みrig profileの写像（ADR-0034）。承認済みのprofileが出るまでの開発経路では、設置ごとに一度作る「固定の合成条件（未承認）」（#399）。どちらも撮影ごとに作り直さない。撮影ごとの位置（平行移動）と回転の補正は合成の幾何に当てない。例外は決定6の倍率だけ。
-2. **撮影ごとの推定は診断に限る**: 撮影JPEGでの相似の推定（#365）、ライブの自動位置合わせv2（#364）、ゲート（#385）の測定は、固定の写像からのずれを測って報告に残し、ゲートの入力と再校正の案内（#402）にだけ使う。例外は決定6で、#365の推定器の倍率の部分だけを補正に使う。合成の写像、継ぎ目の列、固定の合成条件、profileには書き戻さない。
+2. **撮影ごとの推定は診断に限る**: 撮影JPEGでの相似の推定（#365）、ライブの自動位置合わせv2（#364）、ゲート（#385）の測定は、固定の写像からのずれを測って報告に残し、ゲートの入力と再校正の案内（#402）にだけ使う。例外は決定6の倍率の補正で、#365の推定器の倍率の部分を使う案（※案、#400で確定）。合成の写像、継ぎ目の列、固定の合成条件、profileには書き戻さない。
 3. **明るさは撮影ごとに合わせる**: 継ぎ目に沿った窓でAとBの輝度の比を行ごとに求め、行方向にならしてBに掛ける（#368と同じ計算）。JPEGは撮影ごと、Cはframeごとに求める。比を求めても合成の位置は動かさない。比には上限を置く（B5）。上限の値は実機で測ってから決める（※未決）。上限を超えた時の扱いも値と一緒に決める（※未決）。色の補正（#46）は本ADRの範囲外（※未決）。
 4. **継ぎ目は縦一直線の1本**: 継ぎ目は出力の画素の1列で、すべての行で同じ列に置く。行ごとに曲がる道筋（#368の`RenderPairSeamCut`の形）は書き出す合成にもCにも使わない。列は固定の合成条件（#399）に持たせ、すべての撮影で同じ列を使う。製品経路で承認済みのprofileに持たせるかは#45の時に決める（C2）。撮影ごとに自動で列を選ばない。列を動かすのは人だけで、Cの画面で継ぎ目の線をドラッグし、帯の余裕の内側で左右に動かす。「この列で固定」を押した時だけ、固定の合成条件の新しい改訂として保存し、以後の撮影のJPEGとCの両方に使う。開発経路の列の初期値は帯の中央で、記録と画面に※仮と出す。操作と保存の細部は[設計](design/fixed-composite.md)の5節（#403、2026-11-04に承認）。使った列とその出どころは報告に記録し、検品の時に一目で分かるように示す。CとJPEGは、列を入力に取る同じ合成の関数（#398）を通る。列がどこかの行でAとBの重なり（と混ぜ幅）から外れる時は合成せずに失敗にする。
 5. **設置が変われば校正をやり直す**: 固定の合成条件とprofileの写像を更新するのは、設置が変わった時の再校正だけ（#362の読み替え）。設置の時の推定（#364・#365）から作った条件は、人が見て確かめた上で使ってよい（B3）。継ぎ目の列は、人がCの画面で動かして保存した時に更新する（決定4）。どちらの更新も人が明示して行い、撮影の結果から自動では更新しない。台の揺れやシャッターの振動で組ごとにAとBが動いた撮影は、固定の写像からずれた分がゲートで測られ、合格線を超えれば書き出さない（原画像は残す、#385）。揺れない取り付けを前提にする（B1）。
@@ -807,7 +807,7 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 ### ADR-0034の不変条件2との関係
 
 - 今: 「撮影ごとにhomographyを推定しない（ADR-0021）。推定は開発時の校正ツール（#277）だけで行う。撮影ごとの補正は承認された上限の内側の相似変換に限る。」
-- 改定（B9で承認、本文の書き換えは承認後の作業）: 「撮影ごとにhomographyも相似も推定して合成に当てない。合成に使う写像の推定は、開発時の校正ツール（#277）と、設置時に固定の合成条件を作る時だけで行う。撮影ごとの推定は、ずれの診断とゲートの入力に使う。撮影ごとの補正は、継ぎ目に沿った明るさの比と、承認された上限以内の倍率（回転は固定の値に縛り、中心は継ぎ目の列上）に限る。」
+- 改定（B9で承認した案をB7に合わせて直した。倍率補正の細部は未承認の※案。本文の書き換えは承認後の作業）: 「撮影ごとにhomographyも相似も推定して合成に当てない。合成に使う写像の推定は、開発時の校正ツール（#277）と、設置時に固定の合成条件を作る時だけで行う。撮影ごとの推定は、ずれの診断とゲートの入力に使う。撮影ごとの補正は、継ぎ目に沿った明るさの比と、承認された上限以内の倍率に限る。上限を超えた倍率は当てない。」（倍率の推定で回転を固定の値に縛ること、補正の中心を継ぎ目の列上に置くこと、推定できない時は当てないことは※案で、#400で確定する）
 - profile 2.0.0の`correctionEnvelope`（[rig profile 2.0.0の設計](design/rig-profile-v2.md)の2.4節）: B8の案のとおり、回転の欄は補正の上限から再校正の案内の境目に読み替える。倍率の欄はB7で撮影ごとの補正の上限として残ると読む（※読み方。B8の案は回転・倍率の両方を読み替える案だったが、B7で倍率の補正が戻ったため）。本ADRではschemaを変えない。
 
 ### #385の決定との関係
@@ -823,7 +823,7 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 2. 撮影ごとの推定の結果を、合成の写像、継ぎ目の列、固定の合成条件、profileに書き戻さない。自動で学習・更新しない。撮影ごとに当てた倍率も次の撮影に持ち越さない。
 3. 固定の合成条件の更新は、人が明示した再校正（写像）と、人がCの画面で列を動かして「この列で固定」を押す操作（継ぎ目の列）だけで行う。更新は新しい改訂として保存し、前の記録を消さずに残し、新しい記録は前の記録のSHA-256を持つ（A3）。
 4. 撮影ごと（Cではframeごと）に変えてよいのは、継ぎ目に沿った明るさの比と、上限以内の倍率（JPEGだけ）だけ。どちらも平行移動・回転・継ぎ目の列を動かさない。継ぎ目は行ごとに曲げない。
-5. CとJPEGは同じ固定の条件と、列を入力に取る同じ合成の関数（#398）を通り、同じ列を使う。違いは、Cをライブビューの画素へ縮める`S`（ADR-0036決定1の2）と、JPEGだけに当てる上限以内の倍率。
+5. CとJPEGは同じ固定の条件と、列を入力に取る同じ合成の関数（#398）を通り、同じ列を使う。幾何の違いは、Cをライブビューの画素へ縮める`S`（ADR-0036決定1の2）と、JPEGだけに当てる上限以内の倍率。このほか、Cでの混ぜ幅と明るさの窓の扱い（設計の3.4節、※未決）によって、画素の見え方も違いうる。
 6. 使った継ぎ目の列とその出どころ、当てた倍率は報告に記録し、検品の時に一目で分かるように示す。
 7. ADR-0021の安全境界は残す。自由なhomographyを推定しない。上限を超えた値をclampして合格にしない。未承認の閾値をコードに置かない。
 8. 固定の合成条件（未承認）を承認済みのprofileとして扱わない。製品の合成はapprovedのprofileだけを受け付ける（ADR-0033の4節、ADR-0034の不変条件1）。
@@ -849,10 +849,10 @@ ADR-0021は、設置の判定を`ready`、`ready-auto-correction`、`physical-ad
 
 書き換えの時に確かめる対象（本ADRでは追記を置かない）: `FR-UI-001`（設置と自動補正可否の表示）、PRODUCT_REQUIREMENTSの受入の9（範囲内の差だけを自動補正する）、`docs/ARCHITECTURE.md`・`docs/M2_PRE_GATE.md`・`docs/ROADMAP.md`・`docs/FEATURE_VERIFICATION_PLAN.md`・`docs/STITCHING_VALIDATION_AND_EXPERT_REVIEW.md`の三状態の記述、`docs/M2_AUTO_OVERLAP.md`（相似の保持`T_hold`の節と、撮影ごとの補正を前提にした節）、`docs/M2_SEAM_QUALITY_GATE.md`の0節・6節・7節、`docs/design/rig-profile-v2.md`の`correctionEnvelope`、`src/m2/include/a0/m2/setup_assessment.hpp`、`.autodev/requirements/normalized.json`。
 
-AGENTS.mdの差し替えの案（B9で承認。人が反映するまでは今の文言が効く）:
+AGENTS.mdの差し替えの案（B9で承認した案をB7に合わせて直した。倍率補正の細部は未承認の※案なので英文に入れていない。人が反映するまでは今の文言が効く）:
 
 - 今: `Treat setup as an automatic-correction envelope, not pixel-perfect manual placement: use an approved fixed rig profile plus transient bounded per-capture correction. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile.`
-- 案: `Treat setup as a calibrated fixed installation, not pixel-perfect manual placement: compose every capture with one fixed geometry per installation (an approved rig profile, or on development paths an unapproved fixed composite condition) and one straight vertical seam column stored with it (ADR-0037). Only a person may move the seam column, by dragging it in the C view within the overlap margins and pressing the fix button; save it as a new revision of the fixed condition and use it for every later JPEG and C. Record the column used in every report. Per-capture position and rotation estimates are diagnostics and seam-gate inputs only; they never move the composite geometry or the seam. Per capture, only brightness (the A/B ratio along the seam applied to B) and a scale difference within the approved limit may be corrected; scale is estimated with rotation held at the fixed value, centred on the seam column, and an over-limit or unestimable scale is not applied. Never bend the seam row by row. Recalibrate and replace the fixed condition when the installation changes. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile or the fixed composite condition.`
+- 案: `Treat setup as a calibrated fixed installation, not pixel-perfect manual placement: compose every capture with one fixed geometry per installation (an approved rig profile, or on development paths an unapproved fixed composite condition) and one straight vertical seam column stored with it (ADR-0037). Only a person may move the seam column, by dragging it in the C view within the overlap margins and pressing the fix button; save it as a new revision of the fixed condition and use it for every later JPEG and C. Record the column used in every report. Per-capture position and rotation estimates are diagnostics and seam-gate inputs only; they never move the composite geometry or the seam. Per capture, only brightness (the A/B ratio along the seam applied to B) and a left/right scale difference within the owner-approved limit may be corrected; read the limit from the policy file or the fixed composite record, never from a code default, and do not apply a scale difference over the limit. Never bend the seam row by row. Recalibrate and replace the fixed condition when the installation changes. Do not freely re-estimate a homography, hard-code unapproved optical thresholds, clamp an over-limit result into success, or automatically learn/update the rig profile or the fixed composite condition.`
 - 今: `A provisional fixed-parameter C review view may consume live frames in memory and must be labelled uncalibrated.`
 - 案: `A development C view may consume live frames in memory only through the same fixed composite condition and straight-seam function as the saved JPEG, scaled to Live View pixels (ADR-0036 decision 1, ADR-0037); it does not apply the per-capture scale correction. It must be labelled uncalibrated and unapproved, and the Live View-to-still mapping must be labelled unverified until measured (#309).`
 - 今: `The later request for rough automatic merge plus manual refinement also authorizes a button-triggered translation proposal in the uncalibrated development C view. Keep the search bounded to the visible manual translation range, identify the result as a proposal requiring visual review, and permit manual pixel refinement. No per-frame homography estimation, rig-profile learning, optical acceptance threshold or final calibration approval is implied.`
