@@ -33,13 +33,18 @@
   the same list as PinnedSha256 in the C# fixture check) that sits in tests/fixtures/hardware-replay/images/.
   A .b64 file is accepted only as such a pinned dummy at that path; any other .b64 file is a hit.
   Binary files in the range are reported as hits.
+  A merge commit is compared by what was changed while merging: the difference between the
+  automatic merge and the merge as committed (git show --remerge-diff), read like the diff of any
+  other commit (its added lines, paths, binary files and .b64 files). A merge that equals its
+  automatic merge adds nothing. A merge of more than two parents, or one that git cannot remerge
+  (git older than 2.36), cannot be verified.
   -IncludeChangedFiles also compares the whole working tree content of every file the range
   touches.
 
   Exit codes: 0 = no hits, 1 = hits (judge each: a hit may be a false positive such as a real date
   that also appears in prose, but a real value must not be pushed), 2 = could not verify
   (no local source data, no body serial number to compare, a photograph folder that was too large
-  to read completely, or an error). Treat 2 as "do not push".
+  to read completely, a merge commit that cannot be inspected, or an error). Treat 2 as "do not push".
 
   The check refuses to call a push clean when it has no body serial number to look for (neither
   from the EXIF of a photograph nor from the Nikon USB / WPD registry entries of this PC): a PC
@@ -750,10 +755,15 @@ function Get-PublishTargets {
     $targets = [System.Collections.Generic.List[object]]::new()
     $structural = [System.Collections.Generic.List[object]]::new()
     $script:AllowedImageSha256 = Get-HeadPinnedImageHashes $Root $Head
-    $commits = @(Invoke-Git $Root @('rev-list', '--reverse', "$Base..$Head"))
+    # Each line: the commit, then its parents.
+    $parentCount = @{}
+    $commits = @(foreach ($line in @(Invoke-Git $Root @('rev-list', '--reverse', '--parents', "$Base..$Head"))) {
+            $ids = @(([string]$line).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+            if ($ids.Count -eq 0) { continue }
+            $parentCount[$ids[0]] = $ids.Count - 1
+            $ids[0]
+        })
     Write-Host "commits in range $Base..$Head : $($commits.Count)"
-    $merges = @(Invoke-Git $Root @('rev-list', '--merges', "$Base..$Head"))
-    foreach ($c in $merges) { $structural.Add([pscustomobject]@{ Scope = 'merge-commit'; Target = $c.Substring(0, 7); Line = 0; Label = 'merge' }) }
 
     foreach ($c in $commits) {
         $short = $c.Substring(0, 7)
@@ -764,12 +774,38 @@ function Get-PublishTargets {
         $identity = @(Invoke-Git $Root @('log', '-1', '--format=%an%n%ae%n%cn%n%ce', $c))
         Add-Target $targets "identity $short" ($identity -join "`n") $null 'author-committer'
 
-        foreach ($line in (Invoke-Git $Root @('diff-tree', '--root', '--no-commit-id', '--numstat', '-r', $c))) {
+        # A merge commit: git shows it as a combined diff, which holds no added line the parser below
+        # reads, and diff-tree lists nothing for it. What a person changed while merging (a conflict
+        # resolved by hand, or a change added to the merge) is the difference between the automatic
+        # merge and the merge as committed. --remerge-diff (git 2.36 or later) shows that difference as
+        # an ordinary two-way diff; when it is empty, the merge is the tree of the automatic merge and
+        # adds nothing to compare. A merge of more than two parents gets no remerge diff from git (only
+        # a warning), so it cannot be inspected; neither can a merge when the remerge diff fails.
+        $parents = [int]$parentCount[$c]
+        if ($parents -gt 2) { throw (New-SafeError "merge commit cannot be inspected (commit $short has more than two parents)") }
+        if ($parents -eq 2) {
+            $lineScope = 'merge-resolution'
+            $remerge = {
+                param([string[]]$DiffArgs)
+                try { return @(Invoke-Git $Root (@('show', '--remerge-diff', '--no-color', '--no-textconv', '--no-ext-diff', '--format=') + $DiffArgs + @($c))) }
+                catch { throw (New-SafeError "merge commit cannot be inspected (commit $short, git show --remerge-diff failed)") }
+            }
+            $numstat = @(& $remerge @('--numstat'))
+            $nameStatus = @(& $remerge @('-M', '--name-status'))
+            $diffLines = @(& $remerge @('--unified=0'))
+        }
+        else {
+            $lineScope = 'added-line'
+            $numstat = @(Invoke-Git $Root @('diff-tree', '--root', '--no-commit-id', '--numstat', '-r', $c))
+            # Every path the commit touches; for a rename both the old and the new path.
+            $nameStatus = @(Invoke-Git $Root @('diff-tree', '--root', '-r', '-M', '--no-commit-id', '--name-status', $c))
+            $diffLines = @(Invoke-Git $Root @('show', '--no-color', '--no-textconv', '--no-ext-diff', '--format=', '--unified=0', $c))
+        }
+
+        foreach ($line in $numstat) {
             if ($line -match "^-`t-`t(.+)$") { $structural.Add([pscustomobject]@{ Scope = 'binary-file'; Target = "$short $($Matches[1])"; Line = 0; Label = 'binary' }) }
         }
 
-        # Every path the commit touches; for a rename both the old and the new path.
-        $nameStatus = @(Invoke-Git $Root @('diff-tree', '--root', '-r', '-M', '--no-commit-id', '--name-status', $c))
         $paths = [System.Collections.Generic.List[string]]::new()
         $b64Paths = [System.Collections.Generic.List[string]]::new()
         foreach ($entry in $nameStatus) {
@@ -782,17 +818,18 @@ function Get-PublishTargets {
 
         # A commit that widens the pinned image hash list of this script is judged by a person (#266 L-4):
         # the list decides which images the check lets through, and the C# copy is not required before a push.
+        # (A merge whose resolution touches the script is compared with its first parent.)
         if ($paths -contains $script:PinnedListScript) {
             $listChange = Get-PinnedListChange $Root $c
             if ($listChange) { $structural.Add([pscustomobject]@{ Scope = $listChange; Target = "$short $($script:PinnedListScript)"; Line = 0; Label = 'pinned' }) }
         }
 
-        $diff = (Invoke-Git $Root @('show', '--no-color', '--no-textconv', '--no-ext-diff', '--format=', '--unified=0', $c)) -join "`n"
+        $diff = $diffLines -join "`n"
         $file = $null; $newLine = 0; $inHunk = $false
         $buf = [System.Collections.Generic.List[string]]::new(); $nums = [System.Collections.Generic.List[int]]::new()
         $flush = {
             if ($file -and $buf.Count -gt 0) {
-                Add-TextTargets $targets $structural "$short $file" $buf.ToArray() $nums.ToArray() 'added-line' "$short $file" ($file -like '*.b64')
+                Add-TextTargets $targets $structural "$short $file" $buf.ToArray() $nums.ToArray() $lineScope "$short $file" ($file -like '*.b64')
             }
         }
         foreach ($line in $diff -split "`n") {
@@ -1080,6 +1117,30 @@ function Add-SelfTestCommit {
     $null = Invoke-SelfTestGit $Dir @('add', '-A')
     $null = Invoke-SelfTestGit $Dir @('commit', '-q', '-m', $Message)
     return (Invoke-SelfTestGit $Dir @('rev-parse', 'HEAD'))
+}
+
+# A side branch with one commit ($Theirs), one commit on the current branch ($Ours), and a merge of the
+# side branch. git merge never commits here: the files of $Resolution are written over its result (over
+# the conflict markers too), and the merge is committed by hand. Returns the commit before the merge on
+# the current branch (Base) and the merge (Head); Base..Head holds the side commit and the merge.
+function Add-SelfTestMerge {
+    param([string]$Dir, [string]$Branch, [hashtable]$Ours, [hashtable]$Theirs, [hashtable]$Resolution, [bool]$ExpectConflict)
+    $writeFiles = { param([hashtable]$Files) foreach ($k in $Files.Keys) { [IO.File]::WriteAllText((Join-Path $Dir $k), $Files[$k], $script:Utf8) } }
+    $current = [string](Invoke-SelfTestGit $Dir @('symbolic-ref', '--short', 'HEAD'))
+    $null = Invoke-SelfTestGit $Dir @('checkout', '-q', '-b', $Branch)
+    & $writeFiles $Theirs
+    $null = Add-SelfTestCommit $Dir "side $Branch"
+    $null = Invoke-SelfTestGit $Dir @('checkout', '-q', $current)
+    & $writeFiles $Ours
+    $before = [string](Add-SelfTestCommit $Dir "main $Branch")
+    # Exit 1 on a conflict; whether the merge stopped as expected is checked below.
+    $null = & git -C $Dir merge -q --no-ff --no-commit $Branch 2>&1
+    $null = Invoke-SelfTestGit $Dir @('rev-parse', '-q', '--verify', 'MERGE_HEAD')
+    $conflicted = @(Invoke-SelfTestGit $Dir @('diff', '--name-only', '--diff-filter=U') | Where-Object { $_ }).Count -gt 0
+    if ($conflicted -ne $ExpectConflict) { throw "self test setup: merge of $Branch conflicted=$conflicted, expected $ExpectConflict" }
+    & $writeFiles $Resolution
+    $head = [string](Add-SelfTestCommit $Dir "merge $Branch")
+    return [pscustomobject]@{ Base = $before; Head = $head }
 }
 
 function Invoke-SelfTest {
@@ -1542,11 +1603,54 @@ function Invoke-SelfTest {
         if ($cap.Result.Exit -ne 1) { $failures.Add("a needle written as hex in a file name must give exit 1 (got $($cap.Result.Exit))") }
         if ($cap.Text.IndexOf($hexName, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $cap.Text.IndexOf($hex16Name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $failures.Add('a path printed for a hit must not show the hex form of the needle') }
         if ($cap.Text -notmatch 'h8-\*\*\*\.md' -or $cap.Text -notmatch 'h16-\*\*\*\.md') { $failures.Add('the hex form of a needle in a printed path must be replaced by asterisks') }
+
+        # #409: a merge commit is compared by what was changed while merging (git show --remerge-diff). Each
+        # range holds the clean side commit and the merge, so every hit belongs to the merge.
+        $tmpMg = "$tmp-mg"
+        New-SelfTestRepo $tmpMg
+        [IO.File]::WriteAllText((Join-Path $tmpMg 'm.txt'), "line one`nshared line`nline three`n", $script:Utf8)
+        $null = Add-SelfTestCommit $tmpMg 'seed'
+        $mergeA = Add-SelfTestMerge $tmpMg 'zz-merge-a' @{ 'm.txt' = "line one`nmain side`nline three`n" } @{ 'm.txt' = "line one`nbranch side`nline three`n" } `
+            @{ 'm.txt' = "line one`nresolved $needle`nline three`n" } $true
+        $mergeB = Add-SelfTestMerge $tmpMg 'zz-merge-b' @{ 'm.txt' = "line one`nmain again`nline three`n" } @{ 'm.txt' = "line one`nbranch again`nline three`n" } `
+            @{ 'm.txt' = "line one`nresolved by hand`nline three`n" } $true
+        $mergeC = Add-SelfTestMerge $tmpMg 'zz-merge-c' @{ 'c-main.txt' = "main file`n" } @{ 'c-side.txt' = "side file`n" } @{} $false
+        foreach ($case in @(
+                @{ Name = 'a conflict resolved by hand with a needle in the resolution'; Merge = $mergeA; Exit = 1 },
+                @{ Name = 'a conflict resolved by hand without a needle'; Merge = $mergeB; Exit = 0 },
+                @{ Name = 'a merge without a conflict (--no-ff)'; Merge = $mergeC; Exit = 0 })) {
+            $r = Invoke-LeakCheck -Root $tmpMg -Base $case.Merge.Base -Head $case.Merge.Head -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                -IncludeChangedFiles $false -NoLocalSources $true 6>$null
+            if ($r.Exit -ne $case.Exit) { $failures.Add("merge, $($case.Name): expected exit $($case.Exit), got $($r.Exit)") }
+            $mergeShort = $case.Merge.Head.Substring(0, 7)
+            $resolutionHits = @($r.Hits | Where-Object { $_.Scope -eq 'merge-resolution' -and $_.Target.Contains($mergeShort) })
+            $otherHits = @($r.Hits | Where-Object { -not $_.Target.Contains($mergeShort) })
+            if ($case.Exit -eq 1 -and $resolutionHits.Count -eq 0) { $failures.Add("merge, $($case.Name): the needle must be a merge-resolution hit of the merge") }
+            if ($otherHits.Count -gt 0) { $failures.Add("merge, $($case.Name): a hit outside the merge (the side commit is clean)") }
+            if (@($r.Hits | Where-Object { $_.Scope -eq 'merge-commit' }).Count -gt 0) { $failures.Add("merge, $($case.Name): a merge is not a structural hit by itself") }
+        }
+        # More than two parents: git gives no remerge diff, so the check cannot verify (exit 2, a fixed sentence, no path).
+        $octoBase = [string](Invoke-SelfTestGit $tmpMg @('rev-parse', 'HEAD'))
+        $octoMain = [string](Invoke-SelfTestGit $tmpMg @('symbolic-ref', '--short', 'HEAD'))
+        foreach ($b in 'zz-octo-1', 'zz-octo-2') {
+            $null = Invoke-SelfTestGit $tmpMg @('checkout', '-q', '-b', $b, $octoBase)
+            [IO.File]::WriteAllText((Join-Path $tmpMg "$b.txt"), "$b`n", $script:Utf8)
+            $null = Add-SelfTestCommit $tmpMg "add $b"
+        }
+        $null = Invoke-SelfTestGit $tmpMg @('checkout', '-q', $octoMain)
+        $null = Invoke-SelfTestGit $tmpMg @('merge', '-q', '--no-ff', '-m', 'octopus', 'zz-octo-1', 'zz-octo-2')
+        $octoHead = [string](Invoke-SelfTestGit $tmpMg @('rev-parse', 'HEAD'))
+        if (@((Invoke-SelfTestGit $tmpMg @('log', '-1', '--format=%P', $octoHead)) -split ' ' | Where-Object { $_ }).Count -ne 3) { $failures.Add('self test setup: the octopus merge must have three parents') }
+        $out = @(& { Invoke-Entry -Base $octoBase -Head $octoHead -RepositoryRoot $tmpMg -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                    -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $true } 6>&1)
+        $text = ($out | Out-String)
+        if ($out[-1] -ne 2) { $failures.Add("a merge of more than two parents must give exit 2 (got $($out[-1]))") }
+        if ($text -notmatch 'CANNOT VERIFY: merge commit cannot be inspected' -or $text.Contains($tmpMg)) { $failures.Add('a merge of more than two parents must stop with the fixed sentence and no path') }
     }
     finally {
         $script:PinnedImageSha256 = $savedPinned
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-        foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3") {
+        foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3", "$tmp-mg") {
             if (Test-Path -LiteralPath $extra) { Remove-Item -LiteralPath $extra -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
