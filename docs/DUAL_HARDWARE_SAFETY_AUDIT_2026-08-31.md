@@ -2,14 +2,14 @@
 
 ## 判定
 
-`HardwarePending`。実機撮影は開始していない。SDK-only／WPD-onlyの読み取り専用ゲートは合格し、2026-08-31にADR-0028のSDK Module保持限定例外が承認された。pair-level preflightとproduction adapter coexistence probeは実装済みで、ソフトウェア回帰で検証済みである。ただし、このexact SHAでのAOPC-22-NOTE実機coexistence probeと、one-shot以降の実機証跡は未完了であり、実シャッター操作は開始しない。
+`HardwarePending`。実機撮影は開始していない。SDK-only／WPD-onlyの読み取り専用ゲートは合格し、2026-08-31にADR-0028のSDK Module保持限定例外が承認された。pair-level preflightとproduction adapter coexistence probeは実装済みで、ソフトウェア回帰で検証済みである。ただし、このexact SHAでの操作 PC-3実機coexistence probeと、one-shot以降の実機証跡は未完了であり、実シャッター操作は開始しない。
 
 ## 確認済みの範囲
 
 - 対象branch: `feat/dual-real-capture-backend`
 - 読み取り専用実機ゲートの基準commit: `d4bc288092e0ab7c40d3d280baad8050e6db150a`
 - 安全修正と回帰証拠の基準commit: `29b86715121f8606e2ea7f244a9079038fae0ddb`
-- AOPC-22-NOTEの専用clean worktreeでSDK-only probeを一回実行し、D810 2台、SDK session／source／Module完全終了、process 0を確認した。
+- 操作 PC-3の専用clean worktreeでSDK-only probeを一回実行し、D810 2台、SDK session／source／Module完全終了、process 0を確認した。
 - SDK完全終了後、WPD-only probeを一回実行し、D810 2台、CAM-A/B map各1台、両カードpayload 0件、全WPD session close、process 0を確認した。
 - `29b8671`はNative Debug full build、CTest 20/20、Foundation 37/37、OperatorShell 63/63、独立read-only reviewに合格し、branchへpush済みである。review判定はpatch `PASS`、Dual hardware readiness `BLOCK`である。
 - 撮影、Live View、設定変更、WPD object削除、format、vendor operation、自動retry、USB操作は行っていない。
@@ -24,7 +24,7 @@ CAM-A/Bの目視割当tokenは一つのSDK Module session内だけで有効で�
 
 現backendはSDK sourceを閉じてもModuleを保持したままWPDへ進む。ADR-0028はcontrolled Dual `CaptureRecoveryOnly`に限りこのModule保持を承認した。ただしWPDを開く前に全Live View、SDK source、SDK capture sessionを完全終了し、WPD open中のSDK API operationを0にする。Agent/binding-session terminal teardownまたはbinding invalidationではModuleをunloadしてbindingをinvalidにする。
 
-AOPC-22-NOTE上のライセンス済みSDK資料を静的・読み取り専用で追加確認した。header 22件、sample source 6件、PDF資料10件の範囲では、同型D810二台で必ず異なり、USB再接続またはSDK Module unload／reload後も不変で、WPD側CAM-A/Bと安全に相関できる正式なper-body property/APIは見つからなかった。`Name`、`Interface`、Module内source ID、candidate ordinal、USB port、firmware／versionは恒久identityへ使用しない。SDK、WPD、Camera Agent、Live View、撮影等の実行系操作は0件である。
+操作 PC-3上のライセンス済みSDK資料を静的・読み取り専用で追加確認した。header 22件、sample source 6件、PDF資料10件の範囲では、同型D810二台で必ず異なり、USB再接続またはSDK Module unload／reload後も不変で、WPD側CAM-A/Bと安全に相関できる正式なper-body property/APIは見つからなかった。`Name`、`Interface`、Module内source ID、candidate ordinal、USB port、firmware／versionは恒久identityへ使用しない。SDK、WPD、Camera Agent、Live View、撮影等の実行系操作は0件である。
 
 ### 2. pair開始前の一括preflight
 
@@ -58,8 +58,8 @@ production backendは、CAM-A撮影前にWPD上のD810 exact 2、CAM-A/B map exa
 
 - ADR-0028と要件・Agent contract・Phase 0計画・generated requirements/planの同期
 - pair-level両カードpreflight、production adapter read-only coexistence probe、focused／全回帰、独立reviewのソフトウェア証跡をexact SHAで固定する
-- AOPC-22-NOTEで同じexact SHAのread-only coexistence probeを実行し、source/capture session close、Module retained、WPD open中SDK operation 0、WPD closeを実機で確認する。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化し、再binding要求を記録する
-- AOPC-22-NOTEでexact SHA、clean、関連process 0
+- 操作 PC-3で同じexact SHAのread-only coexistence probeを実行し、source/capture session close、Module retained、WPD open中SDK operation 0、WPD closeを実機で確認する。WPD cleanup未確認時はSDK APIを呼ばずAgentを隔離・terminal化し、再binding要求を記録する
+- 操作 PC-3でexact SHA、clean、関連process 0
 - SDK source/capture sessionとWPD sessionの分離、Module保持境界、両カード空、WPD cleanup確認の再確認
 - CAM-A/B物理目視対応のoperator coordination
 

@@ -890,7 +890,7 @@ static Task DualHardwareCaptureRecoveryOnlyBindingInvalidationReasonWireFormatAs
     // The envelope below (schemaVersion/marker/requestId/success/resultCode) is
     // synthesized by this test via DualHardwareResponseJson; only the inlined
     // "result" JSON text is the Agent's actual raw bytes -- captured verbatim
-    // from a real terminal result (transaction 020a434c..., #224, AOPC-31-NOTE
+    // from a real terminal result (transaction 020a434c..., #224, 操作 PC-1
     // 2026-10-06). The Agent's native wire format writes
     // DualBindingInvalidationReason::None as an empty string, not the name "None"
     // (dual_identity_session_binding.cpp / dual_hardware_camera_agent.cpp). Before

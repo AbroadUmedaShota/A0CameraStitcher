@@ -15,6 +15,10 @@
       (owner, serials, dates, unique ID, maker note), read only
     - the registry (Nikon USB / WPD device keys, registered owner)
     - the environment (PC name, user profile paths)
+    - the local list leak-check-needles.txt in the same folder (not tracked by git; UTF-8, one value
+      per line, lines that start with '#' and empty lines are skipped, surrounding spaces removed):
+      values that no record holds, such as the names of the other PCs. Optional: without the file
+      nothing is added and the result does not change.
   Nothing is written to disk and no value or hash of one is stored in the repository. Output has
   only labels (category#number) and locations (commit, file, line). Values are never printed;
   neither are absolute paths or the messages of exceptions.
@@ -96,6 +100,8 @@ $script:Latin1 = [Text.Encoding]::Latin1
 $script:Utf16 = [Text.Encoding]::Unicode
 # More photographs than this under one folder cannot be read completely: report it (exit 2).
 $script:MaxPhotosPerRoot = 2000
+# The local list of extra values in the source folder (not tracked by git; see .DESCRIPTION).
+$script:LocalNeedleListName = 'leak-check-needles.txt'
 # The notice the fixture dummy images carry (the self test builds its invented dummies with it; the
 # check itself does not accept an image because of the notice).
 $script:SyntheticImageNotice = 'A0 replay fixture: synthetic image, not a photograph'
@@ -329,8 +335,21 @@ function Get-LocalNeedles {
     param([string]$SourceRoot, [string[]]$ExtraPhotoRoot, [bool]$NoRegistry = $false, [bool]$NoEnvironment = $false)
     $set = New-NeedleSet
     $sourceFiles = @()
+    $listPath = [IO.Path]::GetFullPath((Join-Path $SourceRoot $script:LocalNeedleListName))
     if (Test-Path -LiteralPath $SourceRoot -PathType Container) {
-        $sourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)
+        # The local list is not a record: its comment lines must not become needles through the record patterns.
+        $sourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File | Where-Object { $_.FullName -ne $listPath })
+    }
+
+    # The local list (optional): one value per line; '#' lines and empty lines are skipped.
+    $listValues = 0
+    if (Test-Path -LiteralPath $listPath -PathType Leaf) {
+        foreach ($line in [IO.File]::ReadAllLines($listPath, $script:Utf8)) {
+            $v = $line.Trim()
+            if ($v.Length -eq 0 -or $v.StartsWith('#')) { continue }
+            $listValues++
+            Add-Needle $set $v 'local-list'
+        }
     }
 
     # Records: relative paths and text content (read only).
@@ -419,7 +438,7 @@ function Get-LocalNeedles {
     }
     [pscustomobject]@{
         Set = $set; SourceFiles = $sourceFiles.Count; Photos = $photoFiles.Count; UsbInstances = $usbCount; WpdKeys = $wpdCount
-        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped; RecordBodies = $aliases.Count
+        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped; RecordBodies = $aliases.Count; ListValues = $listValues
     }
 }
 
@@ -978,7 +997,7 @@ function Invoke-LeakCheck {
             $local = Get-LocalNeedles $SourceRoot $ExtraPhotoRoot $SelfTestIsolation $SelfTestIsolation
             $set = $local.Set
             $recordBodies = $local.RecordBodies
-            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys), camera bodies named in the records=$recordBodies"
+            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys), camera bodies named in the records=$recordBodies, local list values=$($local.ListValues)"
             if ($local.SourceFiles -eq 0) { $cannotVerify = 'The local source data folder holds no files.' }
             elseif ($local.Capped) { $cannotVerify = "A photograph folder holds more than $($script:MaxPhotosPerRoot) photographs and was not read completely." }
             elseif ((Get-RecordIdCount $set) -eq 0) {
@@ -1419,6 +1438,35 @@ function Invoke-SelfTest {
         $cap = Invoke-CheckCaptured $localArgs
         if ($cap.Result.Exit -ne 0) { $failures.Add("a source folder with a photographed serial and a clean range must give exit 0 (got $($cap.Result.Exit))") }
         if ((Get-FileHash -LiteralPath $photo -Algorithm SHA256).Hash -ne $photoHash) { $failures.Add('the export folder must be read only') }
+
+        # #410: the local list in the source folder adds its values; '#' lines and empty lines are skipped, and
+        # without the file the result does not change. The list holds the invented needle of the 'plain added line'
+        # commit (with spaces around it and a BOM, as an editor may save it) and an invented hex value that sits in
+        # a comment line only.
+        $localListFile = Join-Path $source $script:LocalNeedleListName
+        $listComment = '0a1b2c3d4e5f60718293a4b5c6d7e8f9'   # invented
+        $plainRange = ($scenarios | Where-Object { $_.Name -eq 'plain added line' })
+        $listArgs = $localArgs.Clone(); $listArgs.Base = $plainRange.Base; $listArgs.Head = $plainRange.Head
+        $withoutList = @((Invoke-CheckCaptured $localArgs).Result.Exit, (Invoke-CheckCaptured $listArgs).Result.Exit)
+        if ($withoutList[1] -ne 0) { $failures.Add("without the local list the invented value must not be known (got exit $($withoutList[1]))") }
+        [IO.File]::WriteAllText($localListFile, "# other PC = $listComment`r`n`r`n  $needle  `r`n#$needle-commented`r`n", [Text.UTF8Encoding]::new($true))
+        $local = Get-LocalNeedles $source @() $true $true
+        $listed = @($local.Set.List | Where-Object { $_.Category -eq 'local-list' } | ForEach-Object { $_.Value })
+        if ($listed.Count -ne 1 -or $listed[0] -cne $needle -or $local.ListValues -ne 1) { $failures.Add("the local list must give exactly its one value line, trimmed (got $($listed.Count))") }
+        if (@($local.Set.List | Where-Object { $_.Value -like "*$listComment*" -or $_.Value -like '#*' }).Count -ne 0) { $failures.Add('a comment line of the local list must not become a needle (also not through the record patterns)') }
+        $commentHits = [System.Collections.Generic.List[object]]::new()
+        $commentTargets = [System.Collections.Generic.List[object]]::new()
+        Add-Target $commentTargets 'comment words' "other PC = $listComment" $null 'added-line'
+        Find-NeedleHits (New-Variants $local.Set) $commentTargets $commentHits
+        if ($commentHits.Count -ne 0) { $failures.Add('the words of a comment line of the local list must not be found') }
+        $cap = Invoke-CheckCaptured $listArgs
+        if ($cap.Result.Exit -ne 1 -or @($cap.Result.Hits | Where-Object { $_.Label -like 'local-list#*' }).Count -eq 0) { $failures.Add("a value of the local list in an added line must be a hit (got exit $($cap.Result.Exit))") }
+        if ($cap.Text.Contains($needle) -or $cap.Text -notmatch 'local list values=1') { $failures.Add('the local list must be counted in the output without its value') }
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne $withoutList[0]) { $failures.Add("the local list must not change the result of a clean range (got exit $($cap.Result.Exit))") }
+        Remove-Item -LiteralPath $localListFile
+        $cap = Invoke-CheckCaptured $listArgs
+        if ($cap.Result.Exit -ne $withoutList[1] -or $cap.Text -notmatch 'local list values=0') { $failures.Add("without the local list the exit must be as before (got $($cap.Result.Exit))") }
 
         # L1 (c): records that name two camera bodies need two distinct body serials.
         [IO.File]::WriteAllText($record, ('{' + $exportJson + ', "transactionId": "' + $recordId + '", "legs": ["CAM-A", "CAM-B"]}'), $script:Utf8)

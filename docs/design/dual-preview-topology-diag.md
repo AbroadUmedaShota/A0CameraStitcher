@@ -776,7 +776,7 @@ SDK なしビルド。test root に合成の v2 marker を置き、試験用 lea
 6. dry-run から実行までの有効時間 30 分（仮の値）
 7. 監査ファイルの読取り上限 1 MiB（仮の値）
 8. 別 session の正規名 marker を回復対象に含めること（`sessionMatch = 0`）への security の同意
-9. 各 PC の marker の現状（前任 PC AOPC-11-NOTE の run-04 marker、現 PC AOPC-20-NOTE の run-05 marker）。C はそれぞれ別の承認で 1 回ずつ
+9. 各 PC の marker の現状（前任 PC 操作 PC-4 の run-04 marker、現 PC 操作 PC-2 の run-05 marker）。C はそれぞれ別の承認で 1 回ずつ
 10. `CreateToolhelp32Snapshot` が他 session のプロセスの実行ファイル名も返すこと（P7）
 11. B の最終形（実装中。9 節は作業ツリーの現状を前提にしている）
 12. `postFirstEventMs` と journal の tick 差の照合幅「数百 ms」（経験則）

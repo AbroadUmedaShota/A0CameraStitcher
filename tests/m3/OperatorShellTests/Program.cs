@@ -12664,7 +12664,7 @@ static async Task CaptureRecoveryOnlyRecoverAsyncDecodesRealAgentFixtureAsync()
     // Envelope (schemaVersion/marker/requestId/success/resultCode) is synthesized
     // by this test's fake transport; only the "result" object below is the
     // Agent's actual terminal result bytes, decoded from the real journal for
-    // transaction 020a434c... (#224, AOPC-31-NOTE 2026-10-06).
+    // transaction 020a434c... (#224, 操作 PC-1 2026-10-06).
     const string agentTerminalJson =
         """{"transactionId":"020a434cd48749339e0ff2faa832b820","capturePurpose":"CaptureRecoveryOnly","stitchOutcome":"Pending","a0QualityApproval":"Unapproved","originals":[],"terminalState":"Failed","failureCode":"CaptureCameraA","evidence":{"terminalState":"Failed","identitySnapshot":{"expiresAtUtc":"2026-10-06T05:48:35.1395659+00:00","observedAtUtc":"2026-10-06T05:43:35.1395659+00:00","reasonCode":"same_agent_operator_binding","status":"Ready"},"captureProfileSchemaVersion":"a0.dual-capture-profile.operator-approved.v1","captureProfileApprovalBasis":"operator-approved-capture-recovery-only-v1","cameraModel":"Nikon D810","imageFormat":"JPEG Fine","imageSize":"L","pixelDimensions":"7360x4912","bindingInvalidationReason":"","watchdogStartedAtUtc":"2026-10-06T05:43:35.1413652+00:00","watchdogDeadlineUtc":"2026-10-06T05:46:35.1413652+00:00","completedAtUtc":"2026-10-06T05:43:39.3127834Z","watchdogCompletedInTime":true,"liveViewStopAndCloseConfirmed":true,"exactDeleteConfirmedForEveryRetainedOriginal":false,"bothSpoolsEmptyAfter":false,"automaticRetryCount":0}}""";
 
