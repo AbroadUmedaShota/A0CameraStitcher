@@ -234,7 +234,7 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 
 - 人が設置の時に明示して一度だけ作る。撮影ごとには作らない。保存済みの review の報告（`LoadSavedStillReview` が通るもの）を渡し、`MakeFixedCompositeCondition(review, 時刻, 倍率補正の上限)` が、その報告が実際に使った幾何を取り出して記録にする。自動の相似（#365）の報告は、推定値ではなく適用された相似（回転が上限超えなら平行移動だけ）。手動の報告（v2・v3）はその値。v1 の報告と、推定できなかった v5 の報告はライブの平行移動
 - ファイルは `wpd-fixed-composite-condition.json`。`wpd-merge-policy.json` と同じフォルダ（`%LOCALAPPDATA%\A0CameraStitcher\phase0`）に置く想定。`LoadFixedCompositeCondition(ファイル, ハッシュ関数)` は、ファイルが無ければ「固定の合成条件が無い」（`std::nullopt`）を返し、あるのに読めない・厳密に読めない時は例外にする（壊れたファイルを「無い」と取り違えない）。戻り値にはファイルのバイト列の SHA-256 も付く（#400・#401 が報告に残す用）
-- 書き込みの `WriteFixedCompositeCondition` は新しいファイルとしてだけ書く。検証、`.partial` への排他的な作成、書き戻して読み直し、置き換えなしの rename の順で、既にあるファイルは上書きしない（同じ内容でも拒否）。親のフォルダは作らない。既存の `.partial` があれば拒否し、消さない。失敗した時はこの呼び出しが作った `.partial` だけを消す。記録を変えて保存し直す時（継ぎ目の列の変更など）に新しいファイルにするか改訂として前のものを残すかは #403 の設計で決める
+- 書き込みの `WriteFixedCompositeCondition` は新しいファイルとしてだけ書く。検証、`.partial` への排他的な作成、書き戻して読み直し、置き換えなしの rename の順で、既にあるファイルは上書きしない（同じ内容でも拒否）。親のフォルダは作らない。既存の `.partial` があれば拒否し、消さない。失敗した時はこの呼び出しが作った `.partial` だけを消す。v1 は最初の記録の書式。記録を変えて保存し直す時（継ぎ目の列の変更など）は、#396 の決定（A3）のとおり、前の記録を消さずに残し、新しい記録が前の記録の SHA-256 を持つ。その親の欄を持つ書式と、どの記録を有効にするかは #403 で足す（v1 は親の欄を持たない）
 
 ### 書式 `a0.fixed-composite-condition.v1`
 
