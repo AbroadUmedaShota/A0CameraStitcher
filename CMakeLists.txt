@@ -1061,6 +1061,12 @@ if(BUILD_TESTING)
     target_link_libraries(a0_seam_blend_tests PRIVATE a0_m2_render a0_m2_seam_blend)
     add_test(NAME m2_seam_blend_contracts COMMAND a0_seam_blend_tests)
     set_tests_properties(m2_seam_blend_contracts PROPERTIES TIMEOUT 300)
+    # Fixed vertical seam on a pair of output-to-camera mappings (#405 W2): the pair
+    # mapping of RenderPair, a lens-distorted document mapping, a reduced output.
+    add_executable(a0_seam_blend_mapped_tests tests/seam_blend_mapped_tests.cpp)
+    target_link_libraries(a0_seam_blend_mapped_tests PRIVATE a0_m2_render a0_m2_seam_blend)
+    add_test(NAME m2_seam_blend_mapped_contracts COMMAND a0_seam_blend_mapped_tests)
+    set_tests_properties(m2_seam_blend_mapped_contracts PROPERTIES TIMEOUT 900)
     add_executable(a0_fixed_composite_condition_tests tests/fixed_composite_condition_tests.cpp)
     target_link_libraries(a0_fixed_composite_condition_tests PRIVATE a0_m2_fixed_composite)
     if(MSVC)

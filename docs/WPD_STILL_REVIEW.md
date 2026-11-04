@@ -527,3 +527,14 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition <保存済みの�
 - 報告の欄: `SeamBlendRecord::fixed_seam`（この関数だけが真）。`seam_x` は全行が同じ列。報告の書式は #400 で決めた（v6、`method` は `fixed-seam`）
 - 縮尺: `ScaleFixedSeamCondition` は、撮影画像の画素で表した条件（写像・crop・継ぎ目の列）を、ライブビューの大きさへ縮める。写像は S·H·S⁻¹（S は幅・高さの比）で、Bの置き場所は縮尺の比のまま厳密に対応する。cropの端と継ぎ目は全体の座標で縮尺の比を掛けて整数画素に丸める。継ぎ目は縮めた画素の0.5以内、cropの端は内側へ丸め、キャンバスの端で止めるので、動く量は縮めた画素の2未満で、縮めた撮影窓の外へは出ない。ライブビューが撮影と同じ視野を縮めたものという対応は正規化座標の仮定で、光学的には未検証（#334）。C側の使い方は #401 で決める
 - 試験（`m2_seam_blend_contracts`）: 平らな合成画像で左はAだけ・右はBだけ・混ぜ幅の中だけ混ざる、模様をずらしても同じ列のまま・Bの置き場所が変わらない、B全体を0.8倍にした登録済みの図で比が窓の和の比（行方向に2回ならす）に一致し継ぎ目の段が消える、同じ入力で同じバイト列、重なりの端が行ごとに動く回転ペアで重なりから外れる列と混ぜ幅の半分がはみ出す列が失敗、`CanRenderFixedSeam` が合成の成否と一致、探索の結果が真っすぐな時にその列を渡すと `RenderPairSeamCut` と同じ出力、縮めた条件の写像・継ぎ目・窓が縮尺の比で対応
+
+## 写像の対で動く固定の継ぎ目の合成 (#405 W2)
+
+縦一直線の継ぎ目の合成（#398）を、B を A に重ねる相似（3×3）だけでなく、出力の画素から A・B それぞれの生画素への写像の対 `render::OutputToCamera` で動くように一般化した（設計は [レンズの歪みを含む固定の合成条件 v2](design/fixed-composite-lens.md) の 4 節）。**JPEG と C の経路はまだ v2 に切り替えていない。** 両方とも今までどおり `RenderPairFixedSeam`（相似）で描く。切り替えは同設計の W4（JPEG）と W5（C）で、条件の v2 の記録は W1、倍率の補正と中心 P は W3。
+
+- 入口（`a0_m2_seam_blend`、`experimental/seam_blend.hpp`）: `RenderMappedFixedSeam` / `CanRenderMappedFixedSeam` / `MappedFixedSeamBand` は `MappedFixedSeamInput`（出力の大きさと A・B の写像）を受ける。`PairMappedFixedSeamInput` は v1 の `PairRenderParameters` を、`DocumentMappedFixedSeamInput` は #374 の文書の面→各カメラの生画素（内部パラメータ・歪みの係数・文書→画像の射影、`render::DocumentOutputToCamera`）を、それぞれ写像の対にする。後者を直接描く `RenderDocumentFixedSeam` / `CanRenderDocumentFixedSeam` もある。継ぎ目の列は出力ラスタの列
+- 混ぜ方は #398 と同じ内部処理を共有する（帯の標本化、#368 と同じ明るさの比、継ぎ目に沿った合成）。標本化は生画素に 1 回だけ（bilinear）で、中間の画像は作らない。ゲートの `SeamGateGeometry` も同じ形の写像の対を持つので、合成に使った対をそのままゲートに渡せる
+- v1 の出力は変えない。`RenderPairSeamCut` と `RenderPairFixedSeam` は写像を型で持ち、呼び出しの重さと計算の順は一般化の前と同じ。一般化の前に、画像・報告の全欄・行ごとの比を SHA-256 で固定した 18 通りの入力（平らな図・図面風・ノイズ・回転と倍率つき・飽和・重なりの縁・縮めた条件）が、一般化の後も同じ値になる（`m2_seam_blend_contracts`、Debug と Release で同じ値）
+- 失敗（`std::invalid_argument`）: 継ぎ目の列と混ぜ幅の半分が、どこかの行で A と B の両方に写らない。重なりが 1 続きでない行。写像が無い・非有限の位置を返す・A も B も写らない出力画素。文書の入口は、上下配置、bilinear 以外の補間、射影の分母が出力ラスタの全域で正でないカメラも拒否する
+- 重なりの求め方: 行ごとに、粗い走査（8 列おき、見つからない行は全列）で最初の両方が写る列を探し、その列から両端へ歩く。ゲートの `OverlapBand` と同じ考え方だが、コードは共有していない（共有するかは W3 以降）
+- 試験（`m2_seam_blend_mapped_contracts`、人工の画像と人工の歪みだけ）: v1 の写像を写像の対にしたものが `RenderPairFixedSeam` とバイト列・報告・行ごとの比まで一致、歪み 0 の文書の写像が相似と同じ配置になる、歪みの違う 2 台のカメラが見た紙で、真のレンズの写像は継ぎ目に沿った A/B の位置の差がほぼ 0、相似は上下の端で 1 px を超えて残る、係数に誤差のある推定でも相似より端で小さい、縮めた出力（ライブビューの形）が原寸の出力を縮めたものと継ぎ目の近くで一致し 1 画素のずれは見分けられる、決定的、上の失敗。ライブビューと撮影画像の対応 `S` は試験の中の仮置きで、C の経路での確かめは W5

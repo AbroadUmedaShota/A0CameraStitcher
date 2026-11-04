@@ -1,4 +1,5 @@
 #pragma once
+#include "a0/m2/document_render.hpp"
 #include "a0/m2/render.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -116,6 +117,68 @@ struct SeamBlendResult {
 // false means only that the column and its half blend width do not fit.
 [[nodiscard]] bool CanRenderFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
     const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+
+// ---- Vertical seam between two cameras given as output-to-camera mappings (#405) ----
+// RenderPairFixedSeam places B with a 3x3 similarity, which cannot follow a lens
+// distortion. The functions below run the same blend (the band, the brightness
+// ratio of window sums, the mixing along the seam, one bilinear sampling of the raw
+// pixels) on a pair of render::OutputToCamera mappings: output pixel (x,y), passed as
+// its integer index, to the raw position of A and of B. The mappings of the document
+// render (a lens model, a document plane and a raster in micrometres and DPI) and the
+// pair mapping of render::RenderPair are both such pairs, and the seam gate measures
+// with the same form (seam_gate.hpp), so a gate can be given the pair a render used.
+// A mapping returns false where its camera has no sample; a non-finite position is
+// an error (std::invalid_argument), never a reason to use the other camera.
+// Mappings must be immutable and deterministic.
+struct MappedFixedSeamInput {
+    std::uint32_t width{},height{};                 // output raster, in pixels
+    render::OutputToCamera camera_a,camera_b;       // A is the left camera, B the right one
+};
+// Per output row, the run [first,end) of columns where both cameras have a sample.
+struct MappedOverlapRow {std::uint32_t first{},end{};};
+
+// render::RenderPair's mapping as a pair: output pixel (x,y) is global (ox+x,oy+y), where
+// (ox,oy) is the canvas origin plus the crop; A is sampled there and B through the inverse of
+// camera_b_to_camera_a. RenderMappedFixedSeam on this pair equals RenderPairFixedSeam byte for
+// byte (the same double arithmetic; RenderPairFixedSeam itself avoids the indirect call).
+// Throws std::invalid_argument for the conditions of RenderPair (layout, transform, canvas).
+[[nodiscard]] MappedFixedSeamInput PairMappedFixedSeamInput(std::uint32_t camera_a_width,std::uint32_t camera_a_height,
+    std::uint32_t camera_b_width,std::uint32_t camera_b_height,const render::PairRenderParameters& parameters);
+// render::RenderDocumentPair's mapping as a pair (render::DocumentOutputToCamera of each camera):
+// the raw position follows the lens coefficients and the document plane, so a lens distortion
+// is followed, not approximated. Only A left and B right and bilinear resampling are supported.
+// Throws std::invalid_argument for another layout or kernel, or when a camera projection does not
+// validate over the raster (render::ValidateCameraProjection).
+[[nodiscard]] MappedFixedSeamInput DocumentMappedFixedSeamInput(const render::DocumentRenderParameters& parameters);
+
+// Per output row, the run of columns covered by both cameras that contains the first covered
+// column of a coarse scan (every 8th column, every column for a row the scan misses). Throws
+// std::invalid_argument for the input conditions of RenderMappedFixedSeam or a row with no
+// column covered by both.
+[[nodiscard]] std::vector<MappedOverlapRow> MappedFixedSeamBand(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input);
+
+// The same blend as RenderPairFixedSeam with the seam at output column seam_column in every
+// row, for a mapped pair. seam_column +/- (ceil(width_pixels/2)-1) must be covered by both
+// cameras on every output row; otherwise this throws std::invalid_argument and renders nothing.
+// So does a row whose covered columns are not one run, an output pixel covered by neither camera,
+// a missing mapping, an empty or too large output, a buffer that does not match its size, and
+// invalid settings. edge_margin_pixels is not used (it is copied into the record), as in
+// RenderPairFixedSeam. The record has fixed_seam set and seam_x equal to seam_column in every row.
+// Camera, file and clock free; deterministic for deterministic mappings.
+[[nodiscard]] SeamBlendResult RenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings);
+// Whether RenderMappedFixedSeam accepts seam_column, decided on the same coverage test without
+// rendering. Throws for the other input conditions, so false means only that the column and its
+// half blend width do not fit.
+[[nodiscard]] bool CanRenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings);
+// RenderMappedFixedSeam / CanRenderMappedFixedSeam on DocumentMappedFixedSeamInput(parameters).
+// seam_column is a column of the document raster (parameters.raster).
+[[nodiscard]] SeamBlendResult RenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+[[nodiscard]] bool CanRenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
 
 // A composition condition for a vertical seam: the pair mapping with its crop
 // and the seam column, all in the pixels of the image size it was made for.
