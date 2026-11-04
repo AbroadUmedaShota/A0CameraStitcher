@@ -37,7 +37,8 @@
   automatic merge and the merge as committed (git show --remerge-diff), read like the diff of any
   other commit (its added lines, paths, binary files and .b64 files). A merge that equals its
   automatic merge adds nothing. A merge of more than two parents, or one that git cannot remerge
-  (git older than 2.36), cannot be verified.
+  (git older than 2.36, or anything git writes to stderr during the remerge, even with exit 0),
+  cannot be verified.
   -IncludeChangedFiles also compares the whole working tree content of every file the range
   touches.
 
@@ -785,10 +786,16 @@ function Get-PublishTargets {
         if ($parents -gt 2) { throw (New-SafeError "merge commit cannot be inspected (commit $short has more than two parents)") }
         if ($parents -eq 2) {
             $lineScope = 'merge-resolution'
+            # git can fail inside the remerge and still exit 0 with no output (it cannot create its
+            # temporary object directory, say): that would look like an empty resolution. So any line
+            # git writes to stderr (merged in by Invoke-Git) counts as a failure as well.
             $remerge = {
                 param([string[]]$DiffArgs)
-                try { return @(Invoke-Git $Root (@('show', '--remerge-diff', '--no-color', '--no-textconv', '--no-ext-diff', '--format=') + $DiffArgs + @($c))) }
-                catch { throw (New-SafeError "merge commit cannot be inspected (commit $short, git show --remerge-diff failed)") }
+                $failed = "merge commit cannot be inspected (commit $short, git show --remerge-diff failed)"
+                try { $out = @(Invoke-Git $Root (@('show', '--remerge-diff', '--no-color', '--no-textconv', '--no-ext-diff', '--format=') + $DiffArgs + @($c))) }
+                catch { throw (New-SafeError $failed) }
+                if (@($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count -gt 0) { throw (New-SafeError $failed) }
+                return $out
             }
             $numstat = @(& $remerge @('--numstat'))
             $nameStatus = @(& $remerge @('-M', '--name-status'))
@@ -1125,7 +1132,13 @@ function Add-SelfTestCommit {
 # the current branch (Base) and the merge (Head); Base..Head holds the side commit and the merge.
 function Add-SelfTestMerge {
     param([string]$Dir, [string]$Branch, [hashtable]$Ours, [hashtable]$Theirs, [hashtable]$Resolution, [bool]$ExpectConflict)
-    $writeFiles = { param([hashtable]$Files) foreach ($k in $Files.Keys) { [IO.File]::WriteAllText((Join-Path $Dir $k), $Files[$k], $script:Utf8) } }
+    $writeFiles = {
+        param([hashtable]$Files)
+        foreach ($k in $Files.Keys) {
+            $p = Join-Path $Dir $k
+            if ($Files[$k] -is [byte[]]) { [IO.File]::WriteAllBytes($p, $Files[$k]) } else { [IO.File]::WriteAllText($p, $Files[$k], $script:Utf8) }
+        }
+    }
     $current = [string](Invoke-SelfTestGit $Dir @('symbolic-ref', '--short', 'HEAD'))
     $null = Invoke-SelfTestGit $Dir @('checkout', '-q', '-b', $Branch)
     & $writeFiles $Theirs
@@ -1615,19 +1628,54 @@ function Invoke-SelfTest {
         $mergeB = Add-SelfTestMerge $tmpMg 'zz-merge-b' @{ 'm.txt' = "line one`nmain again`nline three`n" } @{ 'm.txt' = "line one`nbranch again`nline three`n" } `
             @{ 'm.txt' = "line one`nresolved by hand`nline three`n" } $true
         $mergeC = Add-SelfTestMerge $tmpMg 'zz-merge-c' @{ 'c-main.txt' = "main file`n" } @{ 'c-side.txt' = "side file`n" } @{} $false
+        # Files that only the merge adds: the paths, binary files and .b64 files of the resolution are read too
+        # (from the remerge diff, not from diff-tree, which lists nothing for a merge).
+        $mergeP = Add-SelfTestMerge $tmpMg 'zz-merge-p' @{ 'p-main.txt' = "main file`n" } @{ 'p-side.txt' = "side file`n" } `
+            @{ "p-$needle.txt" = "clean`n" } $false
+        $mergeBin = Add-SelfTestMerge $tmpMg 'zz-merge-bin' @{ 'bin-main.txt' = "main file`n" } @{ 'bin-side.txt' = "side file`n" } `
+            @{ 'bin.dat' = [byte[]](1, 0, 2, 0, 255, 254, 0, 0) } $false
+        $mergeB64 = Add-SelfTestMerge $tmpMg 'zz-merge-b64' @{ 'b64-main.txt' = "main file`n" } @{ 'b64-side.txt' = "side file`n" } `
+            @{ 'x.b64' = ([Convert]::ToBase64String($script:Utf8.GetBytes('only some harmless text')) + "`n") } $false
         foreach ($case in @(
-                @{ Name = 'a conflict resolved by hand with a needle in the resolution'; Merge = $mergeA; Exit = 1 },
-                @{ Name = 'a conflict resolved by hand without a needle'; Merge = $mergeB; Exit = 0 },
-                @{ Name = 'a merge without a conflict (--no-ff)'; Merge = $mergeC; Exit = 0 })) {
+                @{ Name = 'a conflict resolved by hand with a needle in the resolution'; Merge = $mergeA; Exit = 1; Scope = 'merge-resolution' },
+                @{ Name = 'a conflict resolved by hand without a needle'; Merge = $mergeB; Exit = 0; Scope = $null },
+                @{ Name = 'a merge without a conflict (--no-ff)'; Merge = $mergeC; Exit = 0; Scope = $null },
+                @{ Name = 'a file with a needle in its name added by the merge'; Merge = $mergeP; Exit = 1; Scope = 'file-path' },
+                @{ Name = 'a binary file added by the merge'; Merge = $mergeBin; Exit = 1; Scope = 'binary-file' },
+                @{ Name = 'a .b64 file added by the merge'; Merge = $mergeB64; Exit = 1; Scope = 'b64-not-pinned' })) {
             $r = Invoke-LeakCheck -Root $tmpMg -Base $case.Merge.Base -Head $case.Merge.Head -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
                 -IncludeChangedFiles $false -NoLocalSources $true 6>$null
             if ($r.Exit -ne $case.Exit) { $failures.Add("merge, $($case.Name): expected exit $($case.Exit), got $($r.Exit)") }
             $mergeShort = $case.Merge.Head.Substring(0, 7)
-            $resolutionHits = @($r.Hits | Where-Object { $_.Scope -eq 'merge-resolution' -and $_.Target.Contains($mergeShort) })
             $otherHits = @($r.Hits | Where-Object { -not $_.Target.Contains($mergeShort) })
-            if ($case.Exit -eq 1 -and $resolutionHits.Count -eq 0) { $failures.Add("merge, $($case.Name): the needle must be a merge-resolution hit of the merge") }
+            if ($case.Scope -and @($r.Hits | Where-Object { $_.Scope -eq $case.Scope -and $_.Target.Contains($mergeShort) }).Count -eq 0) {
+                $failures.Add("merge, $($case.Name): expected a $($case.Scope) hit of the merge")
+            }
             if ($otherHits.Count -gt 0) { $failures.Add("merge, $($case.Name): a hit outside the merge (the side commit is clean)") }
             if (@($r.Hits | Where-Object { $_.Scope -eq 'merge-commit' }).Count -gt 0) { $failures.Add("merge, $($case.Name): a merge is not a structural hit by itself") }
+        }
+        # git can fail inside the remerge and still exit 0 without output: here it cannot create its temporary
+        # object directory (the object directory is a plain file; objects are read through the alternates).
+        # That is no empty resolution: the check cannot verify (exit 2, the fixed sentence, no path).
+        $objFile = "$tmp-mgobj"
+        [IO.File]::WriteAllText($objFile, "not a directory`n", $script:Utf8)
+        $savedEnv = @{}
+        foreach ($k in 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES') { $savedEnv[$k] = [Environment]::GetEnvironmentVariable($k) }
+        try {
+            $env:GIT_OBJECT_DIRECTORY = $objFile
+            $env:GIT_ALTERNATE_OBJECT_DIRECTORIES = (Join-Path $tmpMg '.git/objects')
+            $out = @(& { Invoke-Entry -Base $mergeA.Base -Head $mergeA.Head -RepositoryRoot $tmpMg -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                        -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $true } 6>&1)
+        }
+        finally {
+            foreach ($k in $savedEnv.Keys) {
+                if ($null -eq $savedEnv[$k]) { Remove-Item -LiteralPath "Env:$k" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:$k" -Value $savedEnv[$k] }
+            }
+        }
+        $text = ($out | Out-String)
+        if ($out[-1] -ne 2) { $failures.Add("a remerge that fails inside git with exit 0 must give exit 2 (got $($out[-1]))") }
+        if ($text -notmatch 'CANNOT VERIFY: merge commit cannot be inspected \(commit [0-9a-f]{7}, git show --remerge-diff failed\)' -or $text.Contains($tmp)) {
+            $failures.Add('a remerge that fails inside git must stop with the fixed sentence and no path')
         }
         # More than two parents: git gives no remerge diff, so the check cannot verify (exit 2, a fixed sentence, no path).
         $octoBase = [string](Invoke-SelfTestGit $tmpMg @('rev-parse', 'HEAD'))
@@ -1650,7 +1698,7 @@ function Invoke-SelfTest {
     finally {
         $script:PinnedImageSha256 = $savedPinned
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-        foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3", "$tmp-mg") {
+        foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3", "$tmp-mg", "$tmp-mgobj") {
             if (Test-Path -LiteralPath $extra) { Remove-Item -LiteralPath $extra -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
