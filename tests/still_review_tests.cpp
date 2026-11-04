@@ -1,15 +1,19 @@
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/experimental/fixed_composite_condition.hpp"
+#include "a0/m2/experimental/fixed_scale_correction.hpp"
 #include "a0/m2/experimental/review_session.hpp"
 #include "a0/m2/offline_stitcher.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/experimental/preview_merge_policy.hpp"
 #include "a0/phase0/experimental/still_alignment_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_tool.hpp"
 #include "similarity_scene.hpp"
 #include <Windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <array>
+#include <source_location>
 #include <fstream>
 #include <iostream>
 using namespace a0::m2::experimental;
@@ -48,7 +52,7 @@ void WriteJpeg(const fs::path& path,const a0::m2::render::BgrImage& image){
 }
 std::vector<unsigned char> Read(const fs::path& path){std::ifstream f(path,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
 int main(){
-    int checks=0,failures=0;auto check=[&](bool value){++checks;if(!value)++failures;};
+    int checks=0,failures=0;auto check=[&](bool value,std::source_location where=std::source_location::current()){++checks;if(!value){++failures;std::cerr<<"check failed at line "<<where.line()<<'\n';}};
     auto reject=[&](auto call){bool threw=false;try{call();}catch(const std::exception&){threw=true;}check(threw);};
     try{
         auto p=ScalePreviewReviewGeometry({16,12,8,1,9},64,48);check(p.camera_b_to_camera_a[2]==32 && p.camera_b_to_camera_a[5]==4 && p.crop.top==4 && p.crop.bottom==4);
@@ -618,6 +622,216 @@ int main(){
             check(loaded && loaded->condition.source.review_report_sha256==corrected_record.report_sha256 && loaded->file_sha256==a0::phase0::Sha256Hex(Read(condition_file)));
             reject([&]{WriteFixedCompositeCondition(condition_file,v1);});
             check(loaded && FormatFixedCompositeCondition(loaded->condition)==FormatFixedCompositeCondition(v5));
+        }
+        // #400: the fixed composite. Geometry and seam come from the condition;
+        // the capture measures brightness and, inside the condition's limit, one scale.
+        {
+            namespace px=a0::phase0::experimental;
+            const auto hash_bytes=[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);};
+            const auto make_condition=[&](double limit){
+                FixedCompositeCondition c;c.created_utc="2026-11-04T12:00:00Z";c.source.review_report_sha256=std::string(64,'a');c.source.pair_id="pair-1";
+                c.source.method=FixedCompositeMethod::manual_still_pixels;c.source_width=sw;c.source_height=sh;
+                c.mapping.translation_x=930;c.mapping.translation_y=9;c.mapping.rotation_degrees=0;c.mapping.scale=1;
+                const auto p=SimilarityReviewGeometry(930,9,0,1,sw,sh);c.mapping.crop=p.crop;
+                const auto plan=a0::m2::render::PlanPairCanvas(sw,sh,sw,sh,p);c.output_width=plan.output_width;c.output_height=plan.output_height;
+                c.scale_auto_correction_max_percent=limit;c.seam={ProvisionalSeamColumn(p,sw,sh),FixedSeamOrigin::band_center_provisional};
+                ValidateFixedCompositeCondition(c);return c;
+            };
+            const auto fixed_root=root/"fixed";fs::create_directories(fixed_root/"settings");
+            const auto condition_path=fixed_root/"settings"/kFixedCompositeConditionName;
+            WriteFixedCompositeCondition(condition_path,make_condition(1));
+            const auto loaded_condition=LoadFixedCompositeCondition(condition_path,hash_bytes);check(loaded_condition.has_value());
+            const auto& condition=loaded_condition->condition;
+            const auto centre=FixedScaleCenter(condition);
+            const double cx=sw/2.0,cy=sh/2.0;
+            // B differs from the condition by a scale k about the centre of the seam: a = P + k (H(b) - P).
+            const auto view_b=[&](const similarity_scene::Scene& s,double k){
+                return similarity_scene::ViewB(s,sw,sh,(k-1)*cx+k*930+(1-k)*centre.x,(k-1)*cy+k*9+(1-k)*centre.y,0,k,1.0);
+            };
+            const auto other_world=similarity_scene::MakeScene(sw,sh,960,40,99);
+            const auto make_pair=[&](const char* name,const similarity_scene::Scene& s,double k){
+                const auto dir=fixed_root/name;fs::create_directories(dir/"CAM-A");fs::create_directories(dir/"CAM-B");
+                WriteJpeg(dir/"CAM-A/original.jpg",similarity_scene::ViewA(s,sw,sh));WriteJpeg(dir/"CAM-B/original.jpg",view_b(s,k));return dir;
+            };
+            const auto request_for=[&](const fs::path& dir,const char* output,const FixedPolicyLimit& policy){
+                StillReviewRequest q{dir/"CAM-A/original.jpg",dir/"CAM-B/original.jpg",dir/output,a0::phase0::Sha256Hex(Read(dir/"CAM-A/original.jpg")),
+                    a0::phase0::Sha256Hex(Read(dir/"CAM-B/original.jpg")),"synthetic-pair-fixed",{460,307,229,3,11},std::chrono::steady_clock::now()+std::chrono::seconds(600)};
+                q.fixed_composite=StillReviewRequest::FixedComposite{&condition,loaded_condition->file_sha256,policy};return q;
+            };
+            const auto same_policy=ComparePolicyLimit(1,1.0,FixedPolicyCheck::policy_absent);
+            const auto near_pair=make_pair("near",world,1.004);
+            const auto near_request=request_for(near_pair,"review",same_policy);
+            const auto before_a=Read(near_request.camera_a_original),before_b=Read(near_request.camera_b_original);
+            const auto made=WriteUncalibratedStillReview(near_request);
+            check(made.fixed_composite && made.fixed_composite->scale.status==FixedScaleStatus::applied && made.blend && made.blend->fixed_seam);
+            const auto text_bytes=Read(made.report);const std::string text(text_bytes.begin(),text_bytes.end());
+            for(const auto* token:{"\"schema\":\"a0.uncalibrated-still-review.v6\"","\"geometryBasis\":\"fixed-composite\"","\"method\":\"fixed-seam\"","\"origin\":\"band-center-provisional\"",
+                "\"status\":\"applied\"","\"policyLimit\":{\"check\":\"same\"","\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false",
+                "\"translation\":{\"x\":930,\"y\":9}","\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":0,\"scale\":1}","\"deltaFromFixed\":{"})
+                check(text.find(token)!=std::string::npos);
+            check(text.find(loaded_condition->file_sha256)!=std::string::npos && text.find("\"notice\":\"\"")!=std::string::npos);
+            check(Read(near_request.camera_a_original)==before_a && Read(near_request.camera_b_original)==before_b); // originals untouched
+            // Written, then read: every recorded value comes back, and the effective render equals what was written.
+            const auto saved_fixed=LoadSavedStillReview(made.report);
+            check(saved_fixed.fixed_composite.has_value() && saved_fixed.translation_x==930 && saved_fixed.translation_y==9 && saved_fixed.rotation_degrees==0 && saved_fixed.scale==1);
+            const auto& wrote=*made.fixed_composite;const auto& read=*saved_fixed.fixed_composite;
+            check(read.condition_sha256==loaded_condition->file_sha256 && read.seam_column==condition.seam.column && read.seam_origin=="band-center-provisional");
+            check(read.scale.status==wrote.scale.status && read.scale.reason==wrote.scale.reason && read.scale.limit_percent==1 && read.scale.estimated_scale==wrote.scale.estimated_scale &&
+                read.scale.difference_percent==wrote.scale.difference_percent && read.scale.applied_scale==wrote.scale.applied_scale && read.scale.center.x==wrote.scale.center.x &&
+                read.scale.center.y==wrote.scale.center.y && read.scale.used_tiles==wrote.scale.used_tiles && read.scale.residual.rms==wrote.scale.residual.rms && read.scale.residual.maximum==wrote.scale.residual.maximum);
+            check(read.diagnostic.status==wrote.diagnostic.status && read.diagnostic.tiles_agreed==wrote.diagnostic.tiles_agreed && read.diagnostic.similarity && wrote.diagnostic.similarity &&
+                read.diagnostic.similarity->scale==wrote.diagnostic.similarity->scale && read.diagnostic.similarity_residual.rms==wrote.diagnostic.similarity_residual.rms);
+            check(read.policy_limit.check==FixedPolicyCheck::same && read.policy_limit.policy_percent==1.0);
+            check(saved_fixed.blend && saved_fixed.blend->fixed_seam && saved_fixed.blend->seam_x.size()==saved_fixed.height &&
+                saved_fixed.blend->seam_x.front()==condition.seam.column && saved_fixed.blend->summary.x_minimum==saved_fixed.blend->summary.x_maximum);
+            check(read.scale.applied_scale!=1 && std::abs(read.scale.applied_scale-1.004)<1.5e-3 && read.scale.applied_scale<=1.01);
+            const auto effective=SavedStillReviewRenderParameters(saved_fixed);
+            check(effective.crop.left==saved_fixed.crop.left && effective.crop.top==saved_fixed.crop.top && effective.crop.right==saved_fixed.crop.right && effective.crop.bottom==saved_fixed.crop.bottom);
+            check(a0::m2::render::PlanPairCanvas(sw,sh,sw,sh,effective).output_width==saved_fixed.width && made.width==saved_fixed.width && made.height==saved_fixed.height);
+            (void)LoadStillReviewImage(saved_fixed);
+            check(DescribeSavedReviewEvaluationInputs(made.report).find("a0.saved-review-evaluation-inputs.v1")!=std::string::npos);
+            // The inspector's texts come from the read record.
+            check(px::FixedCompositeDetails(saved_fixed).find(L"固定の合成条件（未承認）")!=std::wstring::npos && px::FixedCompositeDetails(saved_fixed).find(L"継ぎ目の列: "+std::to_wstring(condition.seam.column))!=std::wstring::npos &&
+                px::FixedCompositeLine(read).find(L"桃色の縦線")!=std::wstring::npos && px::FixedCompositeLine(read).find(L"補正しました")!=std::wstring::npos);
+            // A child manual re-Merge of a fixed composite keeps working as a way to inspect a saved pair.
+            StillReviewRequest child{near_request.camera_a_original,near_request.camera_b_original,near_pair/"revision",near_request.camera_a_sha256,near_request.camera_b_sha256,
+                near_request.pair_id,near_request.geometry,std::chrono::steady_clock::now()+std::chrono::seconds(600),StillReviewRequest::ManualRevision{930,9,made.report,saved_fixed.report_sha256}};
+            const auto child_record=LoadSavedStillReview(WriteUncalibratedStillReview(child).report);
+            check(child_record.manual_revision && !child_record.fixed_composite && child_record.translation_x==930);
+            // Strict reader: each recorded decision is recomputed; a changed value is rejected.
+            const auto damaged=fixed_root/"damaged";
+            const auto reject_text=[&](const std::string& from,const std::string& to){
+                auto changed=text;const auto at=changed.find(from);
+                if(at==std::string::npos){check(false);return;}
+                changed.replace(at,from.size(),to);
+                fs::create_directories(damaged);fs::copy_file(made.jpeg,damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+                {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<changed;}
+                reject([&]{LoadSavedStillReview(damaged/"uncalibrated-review.json");});
+            };
+            reject_text("\"status\":\"applied\"","\"status\":\"exceeded\"");
+            reject_text("\"status\":\"applied\"","\"status\":\"not-estimated\"");
+            reject_text("\"origin\":\"band-center-provisional\"","\"origin\":\"operator-x\"");
+            reject_text("\"geometryBasis\":\"fixed-composite\"","\"geometryBasis\":\"auto-still-translation\"");
+            reject_text("\"method\":\"fixed-seam\"","\"method\":\"seam-cut\"");
+            reject_text("\"policyLimit\":{\"check\":\"same\"","\"policyLimit\":{\"check\":\"differs\"");
+            reject_text("\"estimator\":\"a0.overlap-similarity.v2\"","\"estimator\":\"a0.overlap-similarity.v3\"");
+            reject_text("\"notice\":\"\"","\"notice\":\"x\"");
+            reject_text("\"column\":"+std::to_string(condition.seam.column),"\"column\":"+std::to_string(condition.seam.column+1));
+            reject_text("\"fixedComposite\":{","\"fixedComposite\":{\"extra\":0,");
+            reject_text("a0.uncalibrated-still-review.v6","a0.uncalibrated-still-review.v7");
+            // v6 is a distinct report: an earlier schema never carries the fixed fields.
+            reject_text("a0.uncalibrated-still-review.v6","a0.uncalibrated-still-review.v5");
+            // The blend comparison tool follows the geometry actually rendered.
+            const auto compared=CompareStillReviewBlends(saved_fixed,near_pair/"compare",400,300);
+            check(compared.crop_width>0 && !compared.probes.empty());
+
+            // Policy file: the condition's value decides; a differing or missing file is only recorded.
+            const auto differs=WriteUncalibratedStillReview(request_for(near_pair,"policy-differs",ComparePolicyLimit(1,0.2,FixedPolicyCheck::policy_absent)));
+            check(differs.fixed_composite->scale.status==FixedScaleStatus::applied && differs.fixed_composite->scale.limit_percent==1 && differs.fixed_composite->policy_limit.check==FixedPolicyCheck::differs);
+            const auto differs_record=LoadSavedStillReview(differs.report);
+            check(differs_record.fixed_composite->policy_limit.check==FixedPolicyCheck::differs && differs_record.fixed_composite->policy_limit.policy_percent==0.2 && differs_record.fixed_composite->scale.applied_scale==read.scale.applied_scale);
+            const auto differs_bytes=Read(differs.report);const std::string differs_text(differs_bytes.begin(),differs_bytes.end());
+            check(differs_text.find("\"policyLimit\":{\"check\":\"differs\",\"policyPercent\":0.2")!=std::string::npos && differs_text.find("\"conditionPercent\":1,")!=std::string::npos &&
+                differs_text.find("方針ファイルの倍率の上限が固定の合成条件と違います。固定の合成条件を作り直してください")!=std::string::npos);
+            check(px::FixedCompositeLine(*differs_record.fixed_composite).find(L"方針ファイルの倍率の上限が固定の合成条件と違います")!=std::wstring::npos &&
+                px::FixedCompositeLine(*differs_record.fixed_composite).find(L"方針ファイル 0.20% / 固定の合成条件 1.00%")!=std::wstring::npos);
+            for(const auto missing:{FixedPolicyCheck::policy_absent,FixedPolicyCheck::policy_unreadable,FixedPolicyCheck::policy_without_scale_limit}){
+                const auto name=std::string("policy-")+std::string(FixedPolicyCheckCode(missing));
+                const auto absent=WriteUncalibratedStillReview(request_for(near_pair,name.c_str(),ComparePolicyLimit(1,std::nullopt,missing)));
+                const auto absent_record=LoadSavedStillReview(absent.report);
+                check(absent_record.fixed_composite->policy_limit.check==missing && !absent_record.fixed_composite->policy_limit.policy_percent &&
+                    absent_record.fixed_composite->scale.status==FixedScaleStatus::applied && absent_record.fixed_composite->scale.applied_scale==read.scale.applied_scale);
+                const auto absent_bytes=Read(absent.report);const std::string absent_text(absent_bytes.begin(),absent_bytes.end());
+                check(absent_text.find("方針ファイルの倍率の上限を確かめられないため、固定の合成条件の記録の値で判定しました")!=std::string::npos);
+            }
+
+            // Over the limit: nothing is applied, the geometry is the fixed mapping, the notice is recorded.
+            const auto far_pair=make_pair("far",world,1.02);
+            const auto exceeded=WriteUncalibratedStillReview(request_for(far_pair,"review",same_policy));
+            check(exceeded.fixed_composite->scale.status==FixedScaleStatus::exceeded && exceeded.fixed_composite->scale.applied_scale==1 && exceeded.fixed_composite->scale.estimated_scale);
+            const auto exceeded_record=LoadSavedStillReview(exceeded.report);
+            const auto exceeded_effective=SavedStillReviewRenderParameters(exceeded_record),fixed_base=FixedCompositeRenderParameters(condition);
+            check(exceeded_effective.camera_b_to_camera_a==fixed_base.camera_b_to_camera_a && exceeded_effective.crop.left==fixed_base.crop.left && exceeded_effective.crop.right==fixed_base.crop.right);
+            const auto exceeded_bytes=Read(exceeded.report);const std::string exceeded_text(exceeded_bytes.begin(),exceeded_bytes.end());
+            check(exceeded_text.find("倍率の差が上限を超えた。ピントか高さを確かめてください")!=std::string::npos && exceeded_text.find("\"status\":\"exceeded\"")!=std::string::npos &&
+                px::FixedCompositeLine(*exceeded_record.fixed_composite).find(L"ピントか高さを確かめてください")!=std::wstring::npos);
+
+            // Different content, same fixed fields: mapping and seam do not follow the pictures.
+            const auto other_pair=make_pair("other",other_world,1.0);
+            const auto other=WriteUncalibratedStillReview(request_for(other_pair,"review",same_policy));
+            const auto other_bytes=Read(other.report);const std::string other_text(other_bytes.begin(),other_bytes.end());
+            const auto fixed_part=[](const std::string& t){
+                const auto from=t.find("\"translation\":"),to=t.find("\"output\":");const auto adjustment=t.find("\"adjustment\":"),end=t.find("\"crop\":");
+                const auto seam=t.find("\"seam\":{\"column\""),seam_end=t.find("\"scaleCorrection\"");
+                return t.substr(from,to-from)+t.substr(adjustment,end-adjustment)+t.substr(seam,seam_end-seam);
+            };
+            check(fixed_part(other_text)==fixed_part(text) && !fixed_part(text).empty());
+            const auto other_record=LoadSavedStillReview(other.report);
+            check(other_record.fixed_composite->seam_column==read.seam_column && other_record.translation_x==saved_fixed.translation_x && other_record.rotation_degrees==saved_fixed.rotation_degrees &&
+                other_record.scale==saved_fixed.scale && other_record.fixed_composite->scale.status==FixedScaleStatus::applied &&
+                std::abs(other_record.fixed_composite->scale.applied_scale-1)<=other_record.fixed_composite->scale.limit_percent/100);
+            check(other_record.blend->seam_x.front()==saved_fixed.blend->seam_x.front());
+
+            // A capture that does not fit the condition makes no composite and no directory; the originals stay.
+            const auto unavailable=[&](StillReviewRequest q,FixedCompositeSkip expected){
+                const auto a_before=Read(q.camera_a_original),b_before=Read(q.camera_b_original);bool seen=false;
+                try{(void)WriteUncalibratedStillReview(q);}catch(const FixedCompositeUnavailable& error){seen=error.Skip()==expected;}
+                check(seen && !fs::exists(q.output_directory) && Read(q.camera_a_original)==a_before && Read(q.camera_b_original)==b_before);
+            };
+            auto turned_request=request_for(near_pair,"unavailable-orientation",same_policy);turned_request.geometry.orientation=MountOrientation::rotated_180;
+            unavailable(turned_request,FixedCompositeSkip::orientation_differs);
+            {   // 64 x 48 originals of the earlier fixtures against a condition made for 1840 x 1228.
+                StillReviewRequest tiny_request{root/"CAM-A/original.jpg",root/"CAM-B/original.jpg",fixed_root/"unavailable-size",a0::phase0::Sha256Hex(a),a0::phase0::Sha256Hex(b),
+                    "synthetic-pair-fixed",{16,12,8,1,9},std::chrono::steady_clock::now()+std::chrono::seconds(60)};
+                tiny_request.fixed_composite=StillReviewRequest::FixedComposite{&condition,loaded_condition->file_sha256,same_policy};
+                unavailable(tiny_request,FixedCompositeSkip::size_differs);
+            }
+            auto outside=make_condition(1);outside.seam.origin=FixedSeamOrigin::operator_set;outside.seam.column=0;
+            {
+                auto q=request_for(near_pair,"unavailable-seam",same_policy);q.fixed_composite->condition=&outside;
+                unavailable(q,FixedCompositeSkip::seam_outside_overlap);
+            }
+            auto broken=make_condition(1);broken.seam.column=broken.output_width;
+            {
+                auto q=request_for(near_pair,"unavailable-invalid",same_policy);q.fixed_composite->condition=&broken;
+                unavailable(q,FixedCompositeSkip::condition_invalid);
+            }
+            // The fixed composite owns geometry and seam, so nothing else may be set with it.
+            auto both=request_for(near_pair,"exclusive",same_policy);both.blend=BlendMethod::seam_cut;reject([&]{WriteUncalibratedStillReview(both);});check(!fs::exists(both.output_directory));
+            both=request_for(near_pair,"exclusive-auto",same_policy);both.automatic_alignment=StillReviewRequest::AutomaticAlignment{};reject([&]{WriteUncalibratedStillReview(both);});
+            both=request_for(near_pair,"exclusive-hash",same_policy);both.fixed_composite->condition_sha256="not-a-hash";reject([&]{WriteUncalibratedStillReview(both);});
+            both=request_for(near_pair,"exclusive-null",same_policy);both.fixed_composite->condition=nullptr;reject([&]{WriteUncalibratedStillReview(both);});
+            // The capture-side text for each reason is defined.
+            for(const auto skip:{FixedCompositeSkip::condition_absent,FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap})
+                check(!px::WidenUtf8(FixedCompositeSkipText(skip)).empty());
+            check(px::WidenUtf8(FixedCompositeSkipText(FixedCompositeSkip::condition_absent)).find(L"固定の合成条件がありません。設置の時に作ってください")!=std::wstring::npos);
+
+            // Making the condition (explicit, once, never over an existing one).
+            const auto settings=fixed_root/"make";fs::create_directories(settings);
+            const auto at=std::chrono::system_clock::time_point{std::chrono::sys_days{std::chrono::year{2026}/11/4}+std::chrono::hours(12)};
+            const auto make=[&](const fs::path& report,const fs::path& folder){return px::MakeFixedCompositeConditionFile(report,folder,hash_bytes,at);};
+            auto result=make(corrected.report,settings);
+            check(!result.made && !fs::exists(settings/kFixedCompositeConditionName)); // no policy file
+            {std::ofstream f(settings/px::kMergePolicySettingsName,std::ios::binary);f<<"{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2}";}
+            result=make(corrected.report,settings);
+            check(!result.made && !fs::exists(settings/kFixedCompositeConditionName)); // policy without a scale limit
+            fs::remove(settings/px::kMergePolicySettingsName);
+            {std::ofstream f(settings/px::kMergePolicySettingsName,std::ios::binary);f<<"{\"schema\":\"a0.wpd-merge-policy.v1\",\"rotationAutoCorrectionMaxDegrees\":2,\"scaleAutoCorrectionMaxPercent\":0.5}";}
+            result=make(corrected.report,settings);
+            check(result.made && result.file==settings/kFixedCompositeConditionName && fs::exists(result.file));
+            const auto made_condition=LoadFixedCompositeCondition(result.file,hash_bytes);
+            check(made_condition && made_condition->condition.scale_auto_correction_max_percent==0.5 && made_condition->condition.seam.origin==FixedSeamOrigin::band_center_provisional &&
+                made_condition->condition.source.review_report_sha256==corrected_record.report_sha256);
+            const auto made_bytes=Read(result.file);
+            result=make(corrected.report,settings);
+            check(!result.made && Read(settings/kFixedCompositeConditionName)==made_bytes); // never overwritten
+            // A report made with a fixed composite is not a source; a missing folder or report makes nothing.
+            const auto settings_two=fixed_root/"make-two";fs::create_directories(settings_two);
+            fs::copy_file(settings/px::kMergePolicySettingsName,settings_two/px::kMergePolicySettingsName);
+            check(!make(made.report,settings_two).made && !fs::exists(settings_two/kFixedCompositeConditionName));
+            check(!make(corrected.report,fixed_root/"missing-folder").made);
+            check(!make(fixed_root/"no-such-report"/"uncalibrated-review.json",settings_two).made && !fs::exists(settings_two/kFixedCompositeConditionName));
+            check(make(corrected.report,settings_two).made);
         }
         CoUninitialize();
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}

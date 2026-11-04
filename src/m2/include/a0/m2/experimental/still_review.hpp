@@ -6,6 +6,8 @@
 #include <cmath>
 #include <stdexcept>
 #include <optional>
+#include <stdexcept>
+#include <string_view>
 #include "a0/m2/experimental/review_alignment.hpp"
 #include "a0/m2/experimental/mount_orientation.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
@@ -155,6 +157,109 @@ inline std::string_view StillAlignmentBasis(const AutomaticStillAlignment& a){
     if(a.decision!=StillAlignmentDecision::corrected)return "auto-still-translation";
     return a.scale_decision==StillScaleDecision::corrected?"auto-still-similarity":"auto-still-rotation";
 }
+// Fixed composite review (#400, parent #396). The mapping and the seam column
+// come from the fixed composite condition of the setup (#399); a capture only
+// measures the brightness ratio and, inside a limit, a scale difference between
+// the two cameras. The names below are the report's codes.
+//
+// applied: the scale difference is inside the limit (equal to it is inside) and
+// the scale was multiplied into B's placement about a point on the seam column.
+// exceeded: over the limit, nothing applied (the gate fails it later).
+// not_estimated: no usable estimate, nothing applied. seam_outside_overlap: the
+// correction would leave the seam outside the overlap, nothing applied.
+enum class FixedScaleStatus {applied,exceeded,not_estimated,seam_outside_overlap};
+constexpr std::string_view FixedScaleStatusCode(FixedScaleStatus v){
+    switch(v){
+    case FixedScaleStatus::applied:return "applied";
+    case FixedScaleStatus::exceeded:return "exceeded";
+    case FixedScaleStatus::not_estimated:return "not-estimated";
+    case FixedScaleStatus::seam_outside_overlap:return "seam-outside-overlap";
+    }
+    return {};
+}
+// Why no estimate was usable. The middle four are the similarity estimator's own
+// undetermined reasons. too_few_tiles: fewer than three tiles over two rows lie
+// within the estimator's search window around the fixed mapping.
+// degenerate_fit: the scale-only fit has no lever arm or a non-positive result.
+enum class FixedScaleReason {none,no_tiles,insufficient_tiles,outside_image,tied_starts,too_few_tiles,degenerate_fit};
+constexpr std::string_view FixedScaleReasonCode(FixedScaleReason v){
+    switch(v){
+    case FixedScaleReason::none:return "none";
+    case FixedScaleReason::no_tiles:return "no-tiles";
+    case FixedScaleReason::insufficient_tiles:return "insufficient-tiles";
+    case FixedScaleReason::outside_image:return "outside-image";
+    case FixedScaleReason::tied_starts:return "tied-starts";
+    case FixedScaleReason::too_few_tiles:return "too-few-tiles-near-fixed-mapping";
+    case FixedScaleReason::degenerate_fit:return "degenerate-fit";
+    }
+    return {};
+}
+struct FixedScaleCorrection {
+    FixedScaleStatus status{FixedScaleStatus::not_estimated};
+    FixedScaleReason reason{FixedScaleReason::no_tiles};
+    // From the condition record; no code default.
+    double limit_percent{};
+    // Present when a scale-only fit exists. difference_percent is
+    // |estimated*100-100|, the value compared with the limit.
+    std::optional<double> estimated_scale,difference_percent;
+    // The factor multiplied into B's placement: the estimate when applied, else 1.
+    double applied_scale{1};
+    // Fixed point of the correction: on the seam column, at the vertical middle
+    // of the output window, in A's pixels.
+    render::Point center{};
+    unsigned used_tiles{};
+    FitResidual residual; // of the scale-only fit over the used tiles
+};
+// The #365 similarity estimate of this capture, kept for diagnosis only. It is
+// never used for the geometry (only its scale-only reduction above may be).
+struct FixedSimilarityDiagnostic {
+    OverlapEstimateStatus status{OverlapEstimateStatus::undetermined};
+    SimilarityUndeterminedReason reason{SimilarityUndeterminedReason::no_tiles};
+    bool wide_search{};
+    unsigned tiles_searched{},tiles_matched{},tiles_agreed{};
+    std::optional<SimilarityFit> similarity; // B centre relative to A, as the estimator reports it
+    FitResidual similarity_residual;
+};
+// The scale limit of the condition record is the one used (the value copied at
+// setup). The merge policy file may disagree; that never changes the composite,
+// it is only recorded and shown so the condition can be made again.
+// same / differs: the policy has a scale limit, equal or not. The others: the
+// policy file is absent, unreadable, or has no scaleAutoCorrectionMaxPercent.
+enum class FixedPolicyCheck {same,differs,policy_absent,policy_unreadable,policy_without_scale_limit};
+constexpr std::string_view FixedPolicyCheckCode(FixedPolicyCheck v){
+    switch(v){
+    case FixedPolicyCheck::same:return "same";
+    case FixedPolicyCheck::differs:return "differs";
+    case FixedPolicyCheck::policy_absent:return "policy-absent";
+    case FixedPolicyCheck::policy_unreadable:return "policy-unreadable";
+    case FixedPolicyCheck::policy_without_scale_limit:return "policy-without-scale-limit";
+    }
+    return {};
+}
+struct FixedPolicyLimit {
+    FixedPolicyCheck check{FixedPolicyCheck::policy_absent};
+    std::optional<double> policy_percent; // present for same and differs only
+};
+// What a v6 report records about the fixed composite it was made with.
+struct SavedFixedComposite {
+    std::string condition_sha256;           // SHA-256 of the condition file used
+    std::uint32_t seam_column{};            // output pixel column, after the crop
+    std::string seam_origin;                // "band-center-provisional" or "operator"
+    FixedPolicyLimit policy_limit;
+    FixedScaleCorrection scale;
+    FixedSimilarityDiagnostic diagnostic;
+};
+// How far this capture's B sat from where the condition puts it: the estimate
+// minus the fixed translation, the rotation difference in degrees, the scale
+// as a ratio. Recomputed from recorded values; absent without an estimate.
+struct FixedMappingDelta {double x{},y{},rotation_degrees{},scale_ratio{1};};
+inline std::optional<FixedMappingDelta> FixedDiagnosticDelta(const FixedSimilarityDiagnostic& d,int fixed_x,int fixed_y,double fixed_rotation,double fixed_scale){
+    if(!d.similarity)return std::nullopt;
+    return FixedMappingDelta{d.similarity->x-fixed_x,d.similarity->y-fixed_y,d.similarity->rotation_degrees-fixed_rotation,d.similarity->scale/fixed_scale};
+}
+
+struct FixedCompositeCondition; // fixed_composite_condition.hpp
+
 struct StillReviewRequest {
     std::filesystem::path camera_a_original,camera_b_original,output_directory;
     std::string camera_a_sha256,camera_b_sha256,pair_id;
@@ -175,6 +280,34 @@ struct StillReviewRequest {
     // #368: seam_cut adds the report blend record; linear_feather keeps the
     // earlier render and report bytes.
     BlendMethod blend{BlendMethod::linear_feather};
+    // #400: compose with the fixed composite condition instead of an estimated
+    // or manual geometry. The condition is owned by the caller and must outlive
+    // the call. Exclusive with manual_revision, automatic_alignment and blend
+    // (the seam is the condition's vertical column). condition_sha256 is the
+    // SHA-256 of the exact file bytes the condition was read from.
+    struct FixedComposite {const FixedCompositeCondition* condition{};std::string condition_sha256;FixedPolicyLimit policy_limit;};
+    std::optional<FixedComposite> fixed_composite;
+};
+// Why a fixed composite could not be made for a capture. The writer throws it
+// before any output exists, so the caller knows that only the originals remain.
+enum class FixedCompositeSkip {condition_absent,condition_invalid,orientation_differs,size_differs,seam_outside_overlap};
+constexpr std::string_view FixedCompositeSkipCode(FixedCompositeSkip v){
+    switch(v){
+    case FixedCompositeSkip::condition_absent:return "condition-absent";
+    case FixedCompositeSkip::condition_invalid:return "condition-invalid";
+    case FixedCompositeSkip::orientation_differs:return "orientation-differs";
+    case FixedCompositeSkip::size_differs:return "size-differs";
+    case FixedCompositeSkip::seam_outside_overlap:return "seam-outside-overlap";
+    }
+    return {};
+}
+class FixedCompositeUnavailable : public std::runtime_error {
+public:
+    FixedCompositeUnavailable(FixedCompositeSkip skip,const std::string& detail):
+        std::runtime_error("fixed composite unavailable ("+std::string(FixedCompositeSkipCode(skip))+"): "+detail),skip_(skip){}
+    FixedCompositeSkip Skip() const noexcept {return skip_;}
+private:
+    FixedCompositeSkip skip_;
 };
 struct StillReviewResult {
     std::filesystem::path jpeg,report;
@@ -185,6 +318,7 @@ struct StillReviewResult {
     double alignment_milliseconds{};
     std::optional<SeamBlendRecord> blend;
     double blend_milliseconds{};
+    std::optional<SavedFixedComposite> fixed_composite; // v6 reports only
 };
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
@@ -200,7 +334,11 @@ struct SavedStillReview {
     double rotation_degrees{},scale{1};
     StitchCropPixels crop;
     std::optional<AutomaticStillAlignment> automatic; // v5 reports only
-    std::optional<SeamBlendRecord> blend; // seam-cut only; absent is the linear feather
+    std::optional<SeamBlendRecord> blend; // seam-cut only; absent is the linear feather (v6: the fixed seam, fixed_seam set)
+    // v6 reports only. translation_x/y, rotation_degrees and scale are then the
+    // fixed mapping; fixed_composite->scale.applied_scale is multiplied about
+    // scale.center on top of it. crop and width/height are what was rendered.
+    std::optional<SavedFixedComposite> fixed_composite;
 };
 // StillReview manual fields (#382). They start at the geometry the report
 // actually rendered, so a re-Merge without edits keeps the parent geometry.

@@ -24,7 +24,9 @@ size_t smoke_next{},capture_smoke_next{},merge_smoke_next{};
 unsigned pair_smoke_next{},pair_reviews{},review_painted{};
 unsigned captures_saved{},preview_sessions{};
 std::optional<int> capture_once_alias,capture_pending;
-struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::experimental::StillReviewResult> review;bool preflight_refused{};};
+// composite_skip: the originals were saved but no composite was made (#400); the text is shown on screen and in the evidence record.
+struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::experimental::StillReviewResult> review;bool preflight_refused{};
+    std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;};
 std::future<CaptureUiOutcome> capture_future;
 using ReviewGeometry=a0::m2::experimental::PreviewReviewGeometry;
 ReviewGeometry pending_geometry;
@@ -338,21 +340,48 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
     EvidenceWriter evidence(root,NewRunId(),"wpd-uncalibrated-pair-review");
     try{
         evidence.RecordState("pair","BothLiveViewsClosed");
+        // Read first and on every capture, so a condition made between captures is used.
+        std::optional<a0::m2::experimental::LoadedFixedCompositeCondition> condition;
+        a0::m2::experimental::FixedCompositeSkip condition_skip=a0::m2::experimental::FixedCompositeSkip::condition_absent;
+        try{
+            auto condition_file=DefaultIdentityMapPath();condition_file.replace_filename(a0::m2::experimental::kFixedCompositeConditionName);
+            condition=a0::m2::experimental::LoadFixedCompositeCondition(condition_file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
+        }catch(const std::exception&){condition_skip=a0::m2::experimental::FixedCompositeSkip::condition_invalid;}
         // #389: both shutters precede either import, all under this one deadline.
         auto pair=CaptureStillPairShutterFirst(ids,deadline);
         if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
-        request.automatic_alignment=a0::m2::experimental::StillReviewRequest::AutomaticAlignment{merge_policy};
-        request.blend=a0::m2::experimental::BlendMethod::seam_cut; // #368
-        result.review=a0::m2::experimental::WriteUncalibratedStillReview(request);
+        // #400: geometry and seam come from the fixed composite condition beside the
+        // merge policy. Its absence or damage never stops the capture: the originals
+        // are kept and only the composite is skipped, with the reason on screen.
+        namespace m2e=a0::m2::experimental;
+        std::optional<m2e::FixedCompositeSkip> skip;
+        if(condition){
+            const auto policy_scale=merge_policy?merge_policy->scale_max_percent:std::nullopt;
+            request.fixed_composite=m2e::StillReviewRequest::FixedComposite{&condition->condition,condition->file_sha256,
+                m2e::ComparePolicyLimit(condition->condition.scale_auto_correction_max_percent,policy_scale,merge_policy?m2e::FixedPolicyCheck::policy_without_scale_limit:m2e::FixedPolicyCheck::policy_absent)};
+            try{result.review=m2e::WriteUncalibratedStillReview(request);}
+            catch(const m2e::FixedCompositeUnavailable& unavailable){skip=unavailable.Skip();result.composite_detail=unavailable.what();}
+        }else skip=condition_skip;
+        if(!result.review){
+            result.composite_skip=skip;
+            result.capture={true,true,a.path,a.bytes,a.sha256,{}};
+            result.originals={a.path,b.path};
+            evidence.RecordState("pair","OriginalsSavedCompositeSkipped",{},m2e::FixedCompositeSkipCode(*skip));
+            Log("pair_composite_skipped=1 reason="+std::string(m2e::FixedCompositeSkipCode(*skip))+" originals_saved=2 calibrated=0");
+            return result;
+        }
         if(Clock::now()>=deadline)throw std::runtime_error("pair deadline after review; all files retained");
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
         Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
-        if(result.review->automatic)Log(StillAlignmentLog(*result.review->automatic,result.review->alignment_milliseconds));
+        if(const auto& fixed=result.review->fixed_composite){std::ostringstream line;line.imbue(std::locale::classic());
+            line<<"pair_review_fixed_composite seam_column="<<fixed->seam_column<<" seam_origin="<<fixed->seam_origin<<" scale_status="<<a0::m2::experimental::FixedScaleStatusCode(fixed->scale.status)
+                <<" scale_reason="<<a0::m2::experimental::FixedScaleReasonCode(fixed->scale.reason)<<" applied_scale="<<fixed->scale.applied_scale<<" limit_percent="<<fixed->scale.limit_percent
+                <<" policy_check="<<a0::m2::experimental::FixedPolicyCheckCode(fixed->policy_limit.check)<<" estimate_ms="<<result.review->alignment_milliseconds<<" quality_accepted=0";Log(line.str());}
         if(const auto& seam=result.review->blend){std::ostringstream line;line.imbue(std::locale::classic());
-            line<<"pair_review_blend method=seam-cut seam_x="<<seam->summary.x_minimum<<".."<<seam->summary.x_maximum<<" ratio="<<seam->ratio_minimum<<".."<<seam->ratio_maximum
+            line<<"pair_review_blend method="<<(result.review->fixed_composite?"fixed-seam":"seam-cut")<<" seam_x="<<seam->summary.x_minimum<<".."<<seam->summary.x_maximum<<" ratio="<<seam->ratio_minimum<<".."<<seam->ratio_maximum
                 <<" saturation_limited="<<seam->saturation_limited_pixels<<" ms="<<result.review->blend_milliseconds<<" quality_accepted=0";Log(line.str());}
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
     }catch(const std::exception& error){result.capture.success=false;result.capture.error=error.what();evidence.RecordState("pair","FailedPartial",{},error.what());Log(std::string("pair_review_failure: ")+error.what());}
@@ -384,13 +413,20 @@ void AdvanceCapture(HWND hwnd){
     if(capture_future.valid() && capture_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto result=capture_future.get();
         if(result.capture.success && result.capture.closed){
-            captures_saved+=result.review?2:1;capture_status=L"保存済み: "+result.capture.path.wstring();
+            captures_saved+=(result.review || result.composite_skip)?2:1;capture_status=L"保存済み: "+result.capture.path.wstring();
+            if(result.composite_skip)capture_status=L"原画像2枚を保存しました（A: "+result.originals[0].wstring()+L"）。合成はしていません: "+WidenUtf8(a0::m2::experimental::FixedCompositeSkipText(*result.composite_skip));
+            if(result.review && result.review->fixed_composite)capture_status+=L" / "+FixedCompositeLine(*result.review->fixed_composite);
             if(result.review && result.review->automatic)capture_status+=L" / "+StillAlignmentLine(*result.review->automatic);
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
                 review_pixels={thumbnail.width,thumbnail.height,{}};review_pixels.bytes.resize(static_cast<size_t>(thumbnail.width)*thumbnail.height*4);
                 for(size_t i=0,j=0;i<thumbnail.bgr.size();i+=3,j+=4)std::copy_n(thumbnail.bgr.data()+i,3,review_pixels.bytes.data()+j);
+                // The seam is one vertical column (#400): drawn on this display copy only, never in the saved JPEG.
+                if(const auto& fixed=result.review->fixed_composite){
+                    const auto divisor=std::max(1u,(std::max(result.review->width,result.review->height)+1199)/1200);const auto column=fixed->seam_column/divisor;
+                    if(column<thumbnail.width)for(unsigned y=0;y<thumbnail.height;++y){auto* pixel=review_pixels.bytes.data()+(static_cast<size_t>(y)*thumbnail.width+column)*4;pixel[0]=255;pixel[1]=0;pixel[2]=255;}
+                }
                 review_visible=true;
             }
             if(!closing)StartPreview();

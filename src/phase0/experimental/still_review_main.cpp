@@ -5,6 +5,9 @@
 #include "a0/m2/experimental/review_session.hpp"
 #include "a0/phase0/experimental/preview_back_buffer.hpp"
 #include "a0/phase0/experimental/still_alignment_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_tool.hpp"
+#include "a0/m2/stitch_job_manifest.hpp"
 #include <windowsx.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -78,6 +81,7 @@ struct Inspector {
     }
     std::wstring BlendText() const {
         const auto& b=current.record.blend;const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
+        if(current.record.fixed_composite)return a0::phase0::experimental::FixedCompositeDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
         if(!b)return L"合成（保存JPEG）: 線形 feather\r\n"+next;
         return L"合成（保存JPEG）: 継ぎ目で切替\r\n継ぎ目 x: "+std::to_wstring(b->summary.x_minimum)+L"〜"+std::to_wstring(b->summary.x_maximum)+L" px\r\n混ぜる幅: "+std::to_wstring(b->settings.width_pixels)+
             L" px\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
@@ -150,6 +154,7 @@ struct Inspector {
     // so a re-Merge that changes only the blend keeps the parent geometry.
     void InitialDraft(){
         SetDraft();const auto estimate=review::EstimatedStillReviewGeometry(current.record);EnableWindow(buttons[32],estimate.has_value());
+        if(current.record.fixed_composite){status=a0::phase0::experimental::FixedCompositeLine(*current.record.fixed_composite);return;}
         const auto& automatic=current.record.automatic;if(!automatic)return;
         status=a0::phase0::experimental::StillAlignmentLine(*automatic);
         if(estimate && !SameGeometry(*estimate,review::SavedStillReviewGeometry(current.record)))status+=L" 入力欄は保存JPEGの値です。推定値は「推定値を入力欄へ」で入れます。";
@@ -646,6 +651,17 @@ int wmain(int argc,wchar_t** argv){
                 throw std::invalid_argument("explicit report required");
             std::cout<<review::DescribeSavedReviewEvaluationInputs(fs::path(argv[2]))<<std::endl;return 0;
         }
+        if(argc==5 && std::wstring_view(argv[1])==L"--make-fixed-composite-condition" && std::wstring_view(argv[3])==L"--settings-folder"){
+            // Development entry (#400): a person names the saved review and the settings
+            // folder. File-only, no window, never overwrites, never automatic.
+            const fs::path settings(argv[4]);
+            const auto policy=settings/a0::phase0::experimental::kMergePolicySettingsName;
+            const auto made=a0::phase0::experimental::MakeFixedCompositeConditionFile(fs::path(argv[2]),settings,
+                [&](const std::vector<unsigned char>&){return a0::m2::ComputeFileSha256Hex(policy);},std::chrono::system_clock::now());
+            SetConsoleOutputCP(CP_UTF8);
+            std::cout<<"fixed_composite_condition_made="<<made.made<<" camera_operations=0\n"<<made.message<<'\n'<<std::flush;
+            return made.made?0:1;
+        }
         if(argc==5 && std::wstring_view(argv[1])==L"--report" && std::wstring_view(argv[3])==L"--blend-compare"){
             // Development comparison (#368): file-only, new files, no window.
             const auto record=review::LoadSavedStillReview(fs::path(argv[2]));
@@ -665,7 +681,7 @@ int wmain(int argc,wchar_t** argv){
         const bool from_session=argc>=3 && std::wstring(argv[1])==L"--session";
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:std::wstring(argv[3])!=L"--smoke")))
-            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke]");
+            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder>");
         // Opt out of Windows bitmap scaling so 100% is one physical display
         // pixel per saved image pixel, including on a scaled desktop.
         if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))throw std::runtime_error("per-monitor pixel display awareness unavailable");
