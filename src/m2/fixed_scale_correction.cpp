@@ -14,20 +14,19 @@ Window WindowOf(const render::PairRenderParameters& base,unsigned width,unsigned
 }
 }
 
-render::Point FixedScaleCenter(int x,int y,double rotation_degrees,double scale,unsigned width,unsigned height,std::uint32_t seam_column){
+render::Point FixedScaleCenter(int x,int y,double rotation_degrees,double scale,unsigned width,unsigned height){
     const auto base=SimilarityReviewGeometry(x,y,rotation_degrees,scale,width,height);
-    const auto w=WindowOf(base,width,height);
-    return {w.left+seam_column,w.top+w.height/2.0};
+    return render::Transform(base.camera_b_to_camera_a,{width/2.0,height/2.0});
 }
 
 render::PairRenderParameters FixedCompositeScaledGeometry(int x,int y,double rotation_degrees,double scale,
-    unsigned width,unsigned height,std::uint32_t seam_column,double k){
+    unsigned width,unsigned height,double k){
     auto base=SimilarityReviewGeometry(x,y,rotation_degrees,scale,width,height);
     if(k==1)return base;
     if(!std::isfinite(k) || k<=0 || width<4 || height<4)throw std::invalid_argument("invalid fixed composite scale correction");
     const auto window=WindowOf(base,width,height);
     // The one place that decides the center (FixedScaleCenter); the fit uses it too.
-    const auto p=FixedScaleCenter(x,y,rotation_degrees,scale,width,height,seam_column);
+    const auto p=FixedScaleCenter(x,y,rotation_degrees,scale,width,height);
     const auto& m=base.camera_b_to_camera_a;
     render::PairRenderParameters q{{k*m[0],k*m[1],k*(m[2]-p.x)+p.x,k*m[3],k*m[4],k*(m[5]-p.y)+p.y,0,0,1},base.layout,{}};
     // The axis-aligned rectangle inscribed in the scaled B with one input pixel

@@ -343,8 +343,7 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
         if(ReviewString(ReviewAt(root,"geometryBasis"))!="fixed-composite")ReviewReject();
         record.fixed_composite=ReadFixedComposite(ReviewAt(root,"fixedComposite"),record.translation_x,record.translation_y,record.rotation_degrees,record.scale);
     }
-    const auto parameters=fixed?FixedCompositeScaledGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height,
-        record.fixed_composite->seam_column,record.fixed_composite->scale.applied_scale):SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
+    const auto parameters=fixed?FixedCompositeScaledGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height,record.fixed_composite->scale.applied_scale):SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
     record.crop=parameters.crop;
     if(similarity || corrected || fixed){
         const auto& crop=ReviewAt(root,"crop");ReviewFields(crop,{"left","top","right","bottom"});
@@ -358,7 +357,7 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     if(record.width!=plan.output_width || record.height!=plan.output_height)ReviewReject();record.jpeg_bytes=ReviewUnsigned(ReviewAt(output,"bytes"),kMaximumCompressedJpegBytes);if(!record.jpeg_bytes)ReviewReject();record.jpeg_sha256=ReviewHash(ReviewAt(output,"sha256"));
     if(fixed){
         const auto fixed_base=SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
-        const auto& f=*record.fixed_composite;const auto centre=FixedScaleCenter(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height,f.seam_column);
+        const auto& f=*record.fixed_composite;const auto centre=FixedScaleCenter(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
         if(f.seam_column>=record.width || f.scale.center.x!=centre.x || f.scale.center.y!=centre.y ||
             (f.seam_origin=="band-center-provisional" && f.seam_column!=ProvisionalSeamColumn(fixed_base,record.source_width,record.source_height)))ReviewReject();
         record.blend=ReadFixedSeamBlend(ReviewAt(root,"blend"),f.seam_column,record.width,record.height);
