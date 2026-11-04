@@ -289,7 +289,7 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 
 ## レンズの歪みを含む固定の合成条件 v2 (#405 W1・W6、親 #396)
 
-設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）と、作る入口（W6: 作る時の検査、倍率の写像、CLI）まで。合成の関数は W2（次の節）。倍率の撮影ごとの推定（W3）、JPEG の経路（W4）、C の経路（W5）はまだ入っていない。v2 の記録を読んで使う経路は今のところ無い（作れるだけ）。
+設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）と、作る入口（W6: 作る時の検査、倍率の写像、CLI）まで。合成の関数は W2（次の節）。倍率の撮影ごとの推定と補正は W3（その後の節）。JPEG の経路（W4）と C の経路（W5）は v2 にまだ切り替えていない。v2 の記録を読んで使う経路は今のところ無い（作れるだけ）。
 
 v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読めない。profile も承認しないし、書き換えない。
 
@@ -337,7 +337,7 @@ fingerprint は空白やメンバーの順序に影響されないので、空�
 
 ### 範囲外
 
-- 倍率の撮影ごとの推定と当てはめ（W3）、報告の新しい版と JPEG の経路（W4）、C の写像と格子（W5）は後続の子 Issue（設計の 11 節）
+- 倍率の撮影ごとの推定と当てはめは W3（「倍率の撮影ごとの推定と補正」の節）。報告の新しい版と JPEG の経路（W4）、C の写像と格子（W5）は後続の子 Issue（設計の 11 節）
 - 継ぎ目の列を人が動かす操作と保存し直しの手順（#403）
 
 ### 確認
@@ -388,6 +388,19 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition-v2 <draft rig prof
 
 - `m2_fixed_composite_creation_contracts`（`tests/fixed_composite_creation_tests.cpp`、fixture の draft だけ）: 検査する倍率、生画素から文書の点への逆（歪み・主点のずれ・傾きのある人工のカメラで往復）、中心 P（閉じた式、歪みと主点のずれがある場合は順の射影が格子の中心に戻る）、倍率 1 が文書の写像とビット単位で同じなこと、P が倍率によらず動かないこと、帯と中央の計算、検査 3（上限を大きくしすぎて覆えない、A が左でない）・4（帯の端の列、倍率の端でだけ外れる列）・5（中央でない仮の列）、上限 0 だと倍率 1 だけ見ること、歪みのある draft
 - `m2_fixed_composite_tool_v2_contracts`（`tests/fixed_composite_tool_v2_tests.cpp`、一時フォルダ）: 方針ファイル・向きの設定・profile・領域・DPI の各拒否（何も書かない）、dry-run、作った記録と profile の写しを `LoadFixedCompositeConditionAny` で読み直して全欄と作る検査を再実行、再実行・v1 のファイル・部分ファイル・同名の別の profile で上書きしない、同じ内容の写しの再利用、`rotated-180` の記録、SHA-256 の既知の値
+
+## 倍率の撮影ごとの推定と補正 (#405 W3)
+
+v2 の写像の上で、撮影ごとに変える倍率 k だけを推定して決める。設計は [レンズの歪みを含む固定の合成条件](design/fixed-composite-lens.md) の 5.2・5.3 節。実装は `DecideFixedScaleV2`（`experimental/fixed_scale_correction_v2.hpp`、カメラ・ファイル・時計を使わない決定的な関数）。v1 の `DecideFixedScale` と報告は変えていない。**JPEG の経路（W4）と C の経路（W5）はまだ v2 に切り替えていない。** この関数を呼ぶ経路は今のところ無く、試験だけが呼ぶ。
+
+- 式: 中心 P（`FixedCompositeScaleCenterMm(B)`、B の画素の格子の中心を B の固定の写像の逆で文書へ移した点）のまわりに、A の文書の点 X_a と B の文書の点 X_b が `X_a = P + k (X_b − P) + d` で結ばれるとして、k と d を最小二乗で当てはめる。q = X_b − P、t = X_a − P として `k = Σ(q−q̄)·(t−t̄) / Σ|q−q̄|²`、`d = t̄ − k q̄`。回転は固定（文書の面では A と B が同じ座標なので 0）、平行移動 d は推定の中だけ自由にして、倍率でないずれ（手ぶれ、模様の 1 周期）が k に混ざらないようにする。当てるのは k だけで、d は「倍率で説明できなかったずれ」として mm と出力の画素（`d / (25.4/DPI)`）の両方で返す。残差（rms と最大）も同じ 2 つの単位で返す
+- 入力: #365 の推定器（`EstimateOverlapSimilarity`）が返す合意したタイル。推定器は向きを当てた（`rotated-180` なら画素の並びを逆にした）A 左・B 右の 7360×4912 の画像で走らせる。`DecideFixedScaleV2` は画像の大きさ（profile が固定する 7360×4912 でなければ例外）と、条件・profile の対応（fingerprint が合わなければ例外）を確かめる
+- 座標の合わせ方: 推定器のタイルの座標は画素の角が原点（画素 i の中心が i+0.5。`overlap_similarity.cpp` の `tile.a_x += 0.5` と、相似の中心が `width/2`）。v2 の写像は保存した順の画素で、画素 i の中心が整数 i（ADR-0034、設計 3.7 節）。そこでタイルの座標 c を `c − 0.5` に直し、`rotated-180` では x を `7359 − (c − 0.5)`、y を `4911 − (c − 0.5)` に戻す（`FixedScaleRawPixelOfTile`）。こうして得た A と B それぞれの生画素を `TryDocumentPointOfRawPixel` で文書の mm へ移す（歪みの逆と文書→画像の逆）。歪みを除いた座標で当てはめるので、端のタイルの歪みが k に混ざらない（試験で、同じタイルを歪みの無い profile で読むと k が 1.00438 になり、真値 1.005 から外れる）
+- 使うタイル: 合意に入っていて、2 つの文書の点が解け、2 点の距離が推定器の探索半径（画素）をその点の撮影画素/mm（`FixedCompositeCapturePixelsPerMm`）で割った値以下のもの。1 周期ずれた一致はここで落ちる。3 点以上で 2 行以上が要り、足りなければ推定できない（`too-few-tiles-near-fixed-mapping`）。広がりが 0 か k が正でない時は `degenerate-fit`。使った行の数と最初・最後の行（`used_rows`・`first_used_row`・`last_used_row`）を返すので、縦の広がりを後から確かめられる
+- 判定は v1 と同じ: `|100k − 100|` が条件の上限以下なら当てる（ちょうど上限は当てる）、超えたら当てずに `exceeded`、推定できなければ当てずに `not-estimated`（理由は v1 と同じ符号）。上限は条件の記録の値で、コードに既定値は無い
+- 当て方: 当てる倍率の写像は W6 の `ScaledDocumentOutputToCamera` だけを通す（`ScaledDocumentMappedFixedSeamInput(profile.parameters, applied_scale)`）。この関数は自前で倍率を掛けない。出力の大きさ（条件のラスタ）は撮影ごとに計算し直さない。上限の範囲のどの倍率でも覆えて継ぎ目が重なりに入ることは、条件を作る時に確かめてある（W6）。当てた後の継ぎ目の確かめ（`RequireFixedCompositeSeam`）は全行を評価するので、この関数では行わず、呼ぶ側（W4・W5）が必要なら行う。`seam_outside_overlap` はこの関数では付かない
+- 中心の報告: `center_mm`（文書の mm）と `center_output_pixels`（出力ラスタの画素。`(X − 左上)/ピッチ − 0.5`、`ScaledDocumentOutputToCamera` が標本を取る座標）
+- 試験（`m2_fixed_scale_correction_v2_contracts`、`tests/fixed_scale_correction_v2_tests.cpp`、人工のタイルだけ。歪みの無い写像と、2 台に歪みの係数を入れた写像の両方で、`normal` と `rotated-180`）: B を P のまわりに 0.5%・−0.5% 拡大した組で k が真値に戻り d が 0、平行移動だけのずれで k が 1 のまま d に出る、倍率とずれの両方、上限超え・ちょうど上限（測った差をそのまま上限にして、等しいと当てる・直前の値だと当てない）・上限 0、推定できない場合（推定器の理由 5 通り、タイル 2 点、1 行だけ、合意の外、1 周期ずれ、解けない点、広がり 0、符号の反転）、補正後に継ぎ目の列に沿った A と B の位置の差が補正前より小さい（0.5% 拡大で 22.3 px から 1e-10 px 未満。ずれが残る組では残りがずれの分だけ）、座標の合わせ方を閉じた式で独立に読んだ結果との一致、中心 P、決定性、不正な入力の拒否
 
 ## 仮Merge保存を固定の合成条件で行う (#400、親 #396)
 
@@ -574,7 +587,7 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition <保存済みの�
 
 ## 写像の対で動く固定の継ぎ目の合成 (#405 W2)
 
-縦一直線の継ぎ目の合成（#398）を、B を A に重ねる相似（3×3）だけでなく、出力の画素から A・B それぞれの生画素への写像の対 `render::OutputToCamera` で動くように一般化した（設計は [レンズの歪みを含む固定の合成条件 v2](design/fixed-composite-lens.md) の 4 節）。**JPEG と C の経路はまだ v2 に切り替えていない。** 両方とも今までどおり `RenderPairFixedSeam`（相似）で描く。切り替えは同設計の W4（JPEG）と W5（C）で、条件の v2 の記録は W1、倍率の補正と中心 P は W3。
+縦一直線の継ぎ目の合成（#398）を、B を A に重ねる相似（3×3）だけでなく、出力の画素から A・B それぞれの生画素への写像の対 `render::OutputToCamera` で動くように一般化した（設計は [レンズの歪みを含む固定の合成条件 v2](design/fixed-composite-lens.md) の 4 節）。**JPEG と C の経路はまだ v2 に切り替えていない。** 両方とも今までどおり `RenderPairFixedSeam`（相似）で描く。切り替えは同設計の W4（JPEG）と W5（C）で、条件の v2 の記録は W1、倍率の推定と補正は W3（「倍率の撮影ごとの推定と補正」の節）。
 
 - 入口（`a0_m2_seam_blend`、`experimental/seam_blend.hpp`）: `RenderMappedFixedSeam` / `CanRenderMappedFixedSeam` / `MappedFixedSeamBand` は `MappedFixedSeamInput`（出力の大きさと A・B の写像）を受ける。`PairMappedFixedSeamInput` は v1 の `PairRenderParameters` を、`DocumentMappedFixedSeamInput` は #374 の文書の面→各カメラの生画素（内部パラメータ・歪みの係数・文書→画像の射影、`render::DocumentOutputToCamera`）を、それぞれ写像の対にする。後者を直接描く `RenderDocumentFixedSeam` / `CanRenderDocumentFixedSeam` もある。継ぎ目の列は出力ラスタの列
 - 混ぜ方は #398 と同じ内部処理を共有する（帯の標本化、#368 と同じ明るさの比、継ぎ目に沿った合成）。標本化は生画素に 1 回だけ（bilinear）で、中間の画像は作らない。ゲートの `SeamGateGeometry` も同じ形の写像の対を持つので、合成に使った対をそのままゲートに渡せる

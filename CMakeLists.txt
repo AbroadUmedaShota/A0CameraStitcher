@@ -353,7 +353,7 @@ endif()
 # W6 adds the shared output-to-camera mappings (a lens scale of camera B about a
 # fixed centre) and the creation checks that run the mapped fixed seam over every
 # output row.
-add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_maps.cpp src/m2/fixed_composite_creation.cpp)
+add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_maps.cpp src/m2/fixed_composite_creation.cpp src/m2/fixed_scale_correction_v2.cpp)
 target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include PRIVATE src/m2)
 target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_seam_blend a0_m2_render PRIVATE bcrypt)
 target_compile_definitions(a0_m2_fixed_composite_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
@@ -1443,6 +1443,17 @@ if(BUILD_TESTING)
     add_test(NAME m2_fixed_composite_creation_contracts COMMAND a0_fixed_composite_creation_tests
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
     set_tests_properties(m2_fixed_composite_creation_contracts PROPERTIES TIMEOUT 600)
+
+    # The per-capture scale of the v2 composite (#405 W3): the fit in document mm, the
+    # tile frame, the decision against the limit, and the drawn correction. Camera and file free.
+    add_executable(a0_fixed_scale_correction_v2_tests tests/fixed_scale_correction_v2_tests.cpp)
+    target_link_libraries(a0_fixed_scale_correction_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_scale_correction_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_scale_correction_v2_contracts COMMAND a0_fixed_scale_correction_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_scale_correction_v2_contracts PROPERTIES TIMEOUT 600)
 
     # The development entry that makes the v2 condition (#405 W6): refusals, no overwrite,
     # the profile copy, the policy limit and the recorded mount orientation.
