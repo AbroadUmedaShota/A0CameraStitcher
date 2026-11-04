@@ -347,6 +347,19 @@ else()
     target_compile_options(a0_m2_rig_profile_v2 PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Fixed composite condition v2 (#405 W1): the lens-aware record that names a
+# calibrated draft rig profile by hash. Development only and unapproved; the
+# v1 library above is unchanged and this one builds on it.
+add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp)
+target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include)
+target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_render)
+target_compile_definitions(a0_m2_fixed_composite_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(a0_m2_fixed_composite_v2 PRIVATE /W4 /permissive- /EHsc /utf-8)
+else()
+    target_compile_options(a0_m2_fixed_composite_v2 PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
     src/m2/stitch_job_manifest.cpp
@@ -1402,6 +1415,15 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_rig_profile_v2_contracts COMMAND m2_rig_profile_v2_contracts
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+
+    add_executable(a0_fixed_composite_condition_v2_tests tests/fixed_composite_condition_v2_tests.cpp)
+    target_link_libraries(a0_fixed_composite_condition_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_condition_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_condition_v2_contracts COMMAND a0_fixed_composite_condition_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_condition_v2_contracts PROPERTIES TIMEOUT 60)
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
     add_executable(m2_evaluation_render_conditions_contracts tests/evaluation_render_conditions_tests.cpp)
