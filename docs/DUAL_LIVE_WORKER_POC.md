@@ -307,13 +307,13 @@ Case 4（worker0が応答前にexit）のexit codeは、相方worker1のclose往
 
 実SDK・実機での動作は※未検証（このPCにSDKは到着したが、SDK有効ビルドと実機実行は未実施）。相方workerのclose応答（status/receipt）はjournalに残らない（T2へ。※T2で対応済み: 各exitブロックの後に `worker_close_*` の要約を記録）。gated build専用分類 `licensed_adapter_unavailable` は表にない（T2へ。※T2で対応済み: 分類表に追加し60語）。journal書込み失敗の注入試験はない。T2（WU1: 予算表と操作別期限、WU2: close送信とexit観測の分離・「停止処理中」分類、WU3: 操作期限と受付寿命の分離）は未着手。※T2で対応済み（上のT2節、commit `d256dba`）。前任PCのrun-04隔離marker、実機preview枠4/5、本人判断パケットA/Bの扱いは本作業で変更していない。
 
-全体検証の証跡（2026-10-01、AOPC-20-NOTE、VS2019 BuildTools・cmake 3.31.12・SDK-stub構成 `build/handoff-verify`）: `ctest --test-dir build/handoff-verify -C Debug -j 1 --output-on-failure` は45/45 PASS（405秒、20:19〜20:26）。同 `-C Release` は43/45（371秒、20:13〜20:19）で、失敗2件は本変更と無関係な試作IPC試験 `dual_live_worker_poc_contracts`（`FAIL: helper reports actual worker identities`）と `dual_live_session_integration`（Timeout 15秒）。この2件は負荷なしの単独再実行3回で1回失敗・2回PASSであり、このPCでは断続的に失敗する（※要調査。常駐ウイルス対策によるプロセス起動遅延を疑うが未確認）。※2026-10-05のmain着地前レビューH2で試験側の起動待ちを分けて解消（制約・残件の5を参照）。T1で登録した6系列は負荷なしの単独実行（`-R` で10件、19:43〜19:44）でDebug/Releaseとも全件PASS。全体実行の初回（18:54〜19:29）はDebug 44/45・Release 42/45で、差分は (a) `hardware_process_lease_delegation_contracts` の既存試験バグ（marker v2化以降、読取り専用化の後に `RegisterDualWorkers` を呼ぶため access denied で abort する。別コミットで順序を直し、Debug/Release・`--diagnostic` とも PASS）、(b) 緩和前のCase 4、(c) 同時ビルド負荷によるIPC期限切れ、で説明できる。M3 simulated（`scripts/Test-M3Simulated.ps1` Debug/Release）と `scripts/Test-DualCameraWpfFlow.ps1` は不合格。operator shell tests は95/96 PASSで、残る1件 `HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync` はfixtureのシンボリックリンク作成に `SeCreateSymbolicLinkPrivilege` を要し、このPC（開発者モード無効・非管理者）では `IOException: クライアントは要求された特権を保有していません` で止まる。製品コードの不具合ではなく環境差で、開発者モードの有効化か、試験をジャンクションへ代替する対応が要る（※要対応）。
+全体検証の証跡（2026-10-01、操作 PC-2、VS2019 BuildTools・cmake 3.31.12・SDK-stub構成 `build/handoff-verify`）: `ctest --test-dir build/handoff-verify -C Debug -j 1 --output-on-failure` は45/45 PASS（405秒、20:19〜20:26）。同 `-C Release` は43/45（371秒、20:13〜20:19）で、失敗2件は本変更と無関係な試作IPC試験 `dual_live_worker_poc_contracts`（`FAIL: helper reports actual worker identities`）と `dual_live_session_integration`（Timeout 15秒）。この2件は負荷なしの単独再実行3回で1回失敗・2回PASSであり、このPCでは断続的に失敗する（※要調査。常駐ウイルス対策によるプロセス起動遅延を疑うが未確認）。※2026-10-05のmain着地前レビューH2で試験側の起動待ちを分けて解消（制約・残件の5を参照）。T1で登録した6系列は負荷なしの単独実行（`-R` で10件、19:43〜19:44）でDebug/Releaseとも全件PASS。全体実行の初回（18:54〜19:29）はDebug 44/45・Release 42/45で、差分は (a) `hardware_process_lease_delegation_contracts` の既存試験バグ（marker v2化以降、読取り専用化の後に `RegisterDualWorkers` を呼ぶため access denied で abort する。別コミットで順序を直し、Debug/Release・`--diagnostic` とも PASS）、(b) 緩和前のCase 4、(c) 同時ビルド負荷によるIPC期限切れ、で説明できる。M3 simulated（`scripts/Test-M3Simulated.ps1` Debug/Release）と `scripts/Test-DualCameraWpfFlow.ps1` は不合格。operator shell tests は95/96 PASSで、残る1件 `HardwareSingleInvalidAgentStorageStopsBeforeLaunchAsync` はfixtureのシンボリックリンク作成に `SeCreateSymbolicLinkPrivilege` を要し、このPC（開発者モード無効・非管理者）では `IOException: クライアントは要求された特権を保有していません` で止まる。製品コードの不具合ではなく環境差で、開発者モードの有効化か、試験をジャンクションへ代替する対応が要る（※要対応）。
 
-SDK有効構成のビルド記録（2026-10-01 20:32〜20:42、AOPC-20-NOTE、`build/sdk-verify`、`-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk`、clean HEAD `620d2dc`）: CMakeは「Nikon D810 licensed adapter enabled」を報告し、Phase0・SingleWorkerPreview・PreviewWorker・PreviewCommissioning・MarkerDiagnostic・CameraAgent・DualCameraAgent・M2AdapterのRelease buildはすべてexit 0（既存C4819警告のみ）。exe SHA-256は画面 `CAFA7A0F92DF325A78C2F1772005293E269A1DED337DDD3770B82E3FC120D7FD`、worker `5347174C35FA43DFAE3F389FEE0C9956EAFA1AA6E2222251996E98B9DA19F045`、単体preview `3BB9DB4A41D84BD812E8A947705C358291A4D87B554655648F5D4228E7EF4598`、MarkerDiagnostic `8D0DEFE918F654235860DD47D22D2AEFC05C4CED160F9BE1F2E422BD12341FB9`、Phase0 `E3B5D8DD897F335DD73D3EE9916214DE50EED88F8A747D1A79BA0BE96646008B`。SDKはNikonの申請経路で本人が取得した `S-SDKD810-011BF-ALLIN` をignored領域へ展開したもので、SDK同梱のReadMeは1モジュールで2台以上のカメラを制御できないことを明記しており（原文の転載はしない）、ADR-0031の根拠と一致する。実行processだけに `NIKON_D810_SDK_MODULE_PATH` を設定した `SingleWorkerPreview describe` は `sdkAvailable=true`、`PreviewCommissioning --describe` は `machineOperation=partial` を返し、いずれもSDK・カメラを開かない発見操作で、終了後のA0関連processは0（20:45）。これはビルド成果であり、実機試験・配布候補・run-05の許可ではない。
+SDK有効構成のビルド記録（2026-10-01 20:32〜20:42、操作 PC-2、`build/sdk-verify`、`-DNIKON_D810_SDK_ROOT=.tools/nikon/d810-remote-sdk`、clean HEAD `620d2dc`）: CMakeは「Nikon D810 licensed adapter enabled」を報告し、Phase0・SingleWorkerPreview・PreviewWorker・PreviewCommissioning・MarkerDiagnostic・CameraAgent・DualCameraAgent・M2AdapterのRelease buildはすべてexit 0（既存C4819警告のみ）。exe SHA-256は画面 `CAFA7A0F92DF325A78C2F1772005293E269A1DED337DDD3770B82E3FC120D7FD`、worker `5347174C35FA43DFAE3F389FEE0C9956EAFA1AA6E2222251996E98B9DA19F045`、単体preview `3BB9DB4A41D84BD812E8A947705C358291A4D87B554655648F5D4228E7EF4598`、MarkerDiagnostic `8D0DEFE918F654235860DD47D22D2AEFC05C4CED160F9BE1F2E422BD12341FB9`、Phase0 `E3B5D8DD897F335DD73D3EE9916214DE50EED88F8A747D1A79BA0BE96646008B`。SDKはNikonの申請経路で本人が取得した `S-SDKD810-011BF-ALLIN` をignored領域へ展開したもので、SDK同梱のReadMeは1モジュールで2台以上のカメラを制御できないことを明記しており（原文の転載はしない）、ADR-0031の根拠と一致する。実行processだけに `NIKON_D810_SDK_MODULE_PATH` を設定した `SingleWorkerPreview describe` は `sdkAvailable=true`、`PreviewCommissioning --describe` は `machineOperation=partial` を返し、いずれもSDK・カメラを開かない発見操作で、終了後のA0関連processは0（20:45）。これはビルド成果であり、実機試験・配布候補・run-05の許可ではない。
 
-### 二台実機run-05: selectで選択無効化・隔離維持（2026-10-05、AOPC-20-NOTE）
+### 二台実機run-05: selectで選択無効化・隔離維持（2026-10-05、操作 PC-2）
 
-所有者のGOを受け、AOPC-20-NOTEでD810二台（USB直結、V1.11とV1.14）、A0関連process 0、委譲marker `marker_missing` を起動前に確認し、main `e1d1cb2` から `build/sdk-dual-poc`（SDK有効＋`A0_BUILD_DUAL_PREVIEW_POC=ON`）でビルドした試験画面 `11272FFC952DFE8870FCCEA9537B2ABD78323F253EA5108A79B93333F2570619` とworker `3C62D4A622FCFFDADCD4953486C8B8820048EFA935DEF85BF4179E07F071E83D` を、SDK module pathを実行processだけに渡して `--commission-preview-only` で起動した（12:14:35、起動時点でカメラ操作0回）。操作者の「開始」でworker二つが起動し（12:14:41）、worker 0のenumerateは候補2を返した。操作者が「候補を表示」を押した直後、worker 0のselectが `worker_selection_invalidated` で失敗し、画面は `終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。worker=0 operation=select category=worker_selection_invalidated response=validated ack_write=completed_not_processed close_receipt=complete_reported` を表示した。撮影・設定変更・WPD・カード操作・自動再試行は0回。
+所有者のGOを受け、操作 PC-2でD810二台（USB直結、V1.11とV1.14）、A0関連process 0、委譲marker `marker_missing` を起動前に確認し、main `e1d1cb2` から `build/sdk-dual-poc`（SDK有効＋`A0_BUILD_DUAL_PREVIEW_POC=ON`）でビルドした試験画面 `11272FFC952DFE8870FCCEA9537B2ABD78323F253EA5108A79B93333F2570619` とworker `3C62D4A622FCFFDADCD4953486C8B8820048EFA935DEF85BF4179E07F071E83D` を、SDK module pathを実行processだけに渡して `--commission-preview-only` で起動した（12:14:35、起動時点でカメラ操作0回）。操作者の「開始」でworker二つが起動し（12:14:41）、worker 0のenumerateは候補2を返した。操作者が「候補を表示」を押した直後、worker 0のselectが `worker_selection_invalidated` で失敗し、画面は `終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。worker=0 operation=select category=worker_selection_invalidated response=validated ack_write=completed_not_processed close_receipt=complete_reported` を表示した。撮影・設定変更・WPD・カード操作・自動再試行は0回。
 
 journal `logs/preview-run-21104-347900703.jsonl`（固定イベント29行、識別子なし。ignoredのビルド配下と作業用フォルダに保持）: `run_started` → `worker_a_enumerated(2)` → `operation_failed` → `close_unconfirmed` → 失敗ブロック（`failure_worker_index=0`、`failure_operation_select`、`worker_selection_invalidated`、`worker_response_validated`、`worker_status_failed`、`worker_ack_write_completed`、`close_receipt_*` 5項目すべて1）→ worker 0のexitブロック（`worker_exit_check_waited_after_failure_receipt`、`worker_exit_code=3`、`worker_close_not_sent`）→ worker 1のexitブロック（`worker_exit_check_waited_after_close_ack`、`worker_exit_code=0`、`worker_close_status_closed`、`worker_close_ack_write_completed`、`worker_close_receipt_*` 5項目すべて1）。run-04で欠けていた「失敗した命令・分類・worker終了code」はT1/T2の計装で残った。
 
@@ -329,7 +329,7 @@ marker の回復（2026-10-05 18:30、所有者の承認による手動経路 B�
 
 ### 二台実機run-04: 終了確認不能・隔離維持（2026-09-23）
 
-本人の二台接続復旧を受け、AOPC-11-NOTEでOS上の正常なD810二台、A0関連processなし、委譲markerなしを確認した。隔離SDK一組と付随DLL三つの存在を読取りで確認。SDK有効の `PreviewCommissioning` / `PreviewWorker` を既存Visual Studio生成projectからRelease buildし、exit 0。画面exeのSHA-256は `132FA1975F8E6EB5D074B6B5EA3403F1318D7F10A84B3DBCAC8E4E288D3F3260`、worker exeは `056E4F003362E0794FBE1080CBEA334B579B34506633CD874AB75E98906EAE0C`。実行processに限りSDK module pathを渡し、`--commission-preview-only` で画面を起動した。起動時点ではカメラ操作0回。
+本人の二台接続復旧を受け、操作 PC-4でOS上の正常なD810二台、A0関連processなし、委譲markerなしを確認した。隔離SDK一組と付随DLL三つの存在を読取りで確認。SDK有効の `PreviewCommissioning` / `PreviewWorker` を既存Visual Studio生成projectからRelease buildし、exit 0。画面exeのSHA-256は `132FA1975F8E6EB5D074B6B5EA3403F1318D7F10A84B3DBCAC8E4E288D3F3260`、worker exeは `056E4F003362E0794FBE1080CBEA334B579B34506633CD874AB75E98906EAE0C`。実行processに限りSDK module pathを渡し、`--commission-preview-only` で画面を起動した。起動時点ではカメラ操作0回。
 
 本人による「開始」後に二workerの起動を観測した。試験画面は候補選択欄を表示したが、その後 `終了確認が取れません。隔離を維持しています。アプリを閉じず、実機状態を確認してください。` を表示。worker二つはOS上で終了したが、委譲markerは残存し、画面processは存続した。本人は二台とも電源ON・背面ライブビュー映像なしを目視確認した。ただしこれをSDK停止・Source/Module closeの証明には使わない。明示的なCAM-A/B割当、左右同時フレーム、両workerの完全close receiptは未確認。
 
@@ -373,13 +373,13 @@ commit `a75f670c1f9f3e67141bf450bc2a50b2b020bc29` でSDK-stub専用owner試験ex
 
 ### 本人判断パケットB: 回復後の実機run-05
 
-注（2026-10-05）: run-05は前任PC（AOPC-11-NOTE）のrun-04 markerを回復しないまま、別PC（AOPC-20-NOTE、起動前 `marker_missing`）で所有者のGOにより実施した。結果は上の「二台実機run-05」節。以下は当時の判断材料として残す。
+注（2026-10-05）: run-05は前任PC（操作 PC-4）のrun-04 markerを回復しないまま、別PC（操作 PC-2、起動前 `marker_missing`）で所有者のGOにより実施した。結果は上の「二台実機run-05」節。以下は当時の判断材料として残す。
 
 marker回復が別途承認・完了してもrun-05は自動許可しない。残りの実機preview枠は1/5で、二台の新鮮な接続状態・物理alias、電源/固定設置、変更後exeのexact hash、SDK/WPD非重複、左右の新規frameと両側停止/closeの一回限り記録手順を再確認したうえで、本人が別にGO/保留を判断する。失敗・通信不明・片側停止・期限切れでは再試行せず隔離に戻す。preview成功を撮影・保存原画像・品質・製品受入へ拡張しない。
 
 非破壊の人手復旧手順は、①操作者がカメラの電源・背面Live View・USB状態を確認し、不明ならカメラを安全に電源OFF/切断する、②OS上のD810・試験画面・worker・同一sessionの委譲markerを読取りで照合する、③ignored journalとアプリ表示を保全する、④markerを**削除・編集せず**カメラ制御入口を停止したまま原因と終了証跡を評価する、である。2026-09-23の本調査時点ではmarkerは1件、v2構造は妥当、reparseでなく、試験画面/workerは0件。ただしOS上のD810は再び2台見えており、その後の物理状態や再接続の理由は未確認。接続済みであっても隔離を解除しない。秘密のnonce/epochや個体番号は記録・commitしない。
 
-OS台数確認の注意: AOPC-11-NOTEのPnP表示名は `D810`（WPD / OK）であり、`Nikon D810` という文字列だけで検索すると接続中の2台を**誤って0台**と数えた。2026-09-23の再照合では `Get-PnpDevice -PresentOnly` と `Win32_PnPEntity` の双方で `D810` が2台、A0関連processが0件、同一sessionの通常file markerが1件だった。回復前の0台判定には表示名 `D810` を含む新鮮なOS列挙と操作者の電源OFF/USB切断確認の両方を要求し、片方だけ、狭い名前filter、または古い観測を根拠に隔離を解除しない。この観測はマーカー内容やSDK終了状態を確認したものではない。
+OS台数確認の注意: 操作 PC-4のPnP表示名は `D810`（WPD / OK）であり、`Nikon D810` という文字列だけで検索すると接続中の2台を**誤って0台**と数えた。2026-09-23の再照合では `Get-PnpDevice -PresentOnly` と `Win32_PnPEntity` の双方で `D810` が2台、A0関連processが0件、同一sessionの通常file markerが1件だった。回復前の0台判定には表示名 `D810` を含む新鮮なOS列挙と操作者の電源OFF/USB切断確認の両方を要求し、片方だけ、狭い名前filter、または古い観測を根拠に隔離を解除しない。この観測はマーカー内容やSDK終了状態を確認したものではない。
 
 既存の `DisarmDualDelegation` は両workerの型付き完全終了証拠、保持process handleとの一致、両exit code 0、marker内容一致を要求する。run-04ではこれらが揃わず、親画面も既に終了しているため、**既存APIだけで安全にmarkerを解除する経路はない**。手動のファイル削除、再起動、旧binaryからの操作を復旧手順にしない。解除が必要なら、カメラの物理隔離、証拠保全、正確な対象確認、監査可能な一回限りの操作を含む別の人間判断・実装・software-only検証が先に必要。
 
@@ -403,7 +403,7 @@ SDK有効構成 `build/worker-selection-sdk` の `A0CameraStitcher.MarkerDiagnos
 
 ### 単体実機run-03: SDK読込み段階で失敗（2026-09-23）
 
-本人の一台で進める指示を受け、既存preview枠の3回目を実施した。AOPC-11-NOTEで正常なD810一台、A0関連processなし、委譲隔離markerなしを確認。current source `319335fa96f76819b36fee7d33fd8d0e40fc8de9` の `SingleWorkerPreview` をSDK有効構成でbuild（exit 0）し、SHA-256 `E02813FD0757672271D2D206A9B07EE0EE170FDF6C5E8E85C39980CFB0279B68` のexeで `preview-single --confirm-one-physical-camera` を一回だけ実行した。目的は更新後の終了receiptを含む単体経路の確認であり、凍結済み旧workerの再合格ではない。
+本人の一台で進める指示を受け、既存preview枠の3回目を実施した。操作 PC-4で正常なD810一台、A0関連processなし、委譲隔離markerなしを確認。current source `319335fa96f76819b36fee7d33fd8d0e40fc8de9` の `SingleWorkerPreview` をSDK有効構成でbuild（exit 0）し、SHA-256 `E02813FD0757672271D2D206A9B07EE0EE170FDF6C5E8E85C39980CFB0279B68` のexeで `preview-single --confirm-one-physical-camera` を一回だけ実行した。目的は更新後の終了receiptを含む単体経路の確認であり、凍結済み旧workerの再合格ではない。
 
 結果はexit 5、`status=failed`、`error=sdk_load_failed`、`frames=0`、`bytes=0`。openingからclosingへ移り、starting段階には達しなかった。`closeReceipt` はSource/Module/process claimの解放をすべてtrueと報告し、終了後のA0関連processは0。`closeConfirmed=true` だが、開始していないLive Viewのoff確認はfalseであり、Live Viewの取得・停止成功とは扱わない。エラー分類だけではDLL読み込み、Module Open、初期化callback等のどこが失敗したか確定できない。
 
@@ -423,7 +423,7 @@ run-03の分類だけでは失敗点を特定できなかったため、次の�
 
 最終stub/SDK PreviewCommissioning buildはいずれもexit 0。新規2試験 `ctest --test-dir build/worker-selection-stub -C Release -R '^preview_(run_journal|display_failure)_contracts$' --output-on-failure` は一回実行、2/2 PASS（0.41秒、exit 0）。前者は記録構文・連番・既存file拒否・不正event拒否、後者は非表示の実WindowProc/WICへ破損JPEGを渡しClose後の未合格保持を確認した。Start命令なし、SDK/worker/lease開始なし。disk write/flush障害の注入と実カメラ映像表示は未検証。既存owner/lease試験は再実行していない。
 
-同ターンのOS確認はAOPC-11-NOTEでD810 2台/正常2台、A0関連processなし。実機preview予算は **2/5消費・残り3回** のまま。本人にA/Bそれぞれだけへ映る目印の準備と割当操作が可能かを確認中で、SDK版実行はまだ行っていない。
+同ターンのOS確認は操作 PC-4でD810 2台/正常2台、A0関連processなし。実機preview予算は **2/5消費・残り3回** のまま。本人にA/Bそれぞれだけへ映る目印の準備と割当操作が可能かを確認中で、SDK版実行はまだ行っていない。
 
 ### 委譲検証・起動失敗分類の修正（software検証済み、実機未実行）
 
@@ -441,7 +441,7 @@ run-03の分類だけでは失敗点を特定できなかったため、次の�
 
 もう一点、owner constructorのすべての例外を部分起動として扱うため、worker exe欠落など起動前の確定失敗でも画面が閉じられない。owner側で子process生成の有無を区別して伝え、確定的な起動前失敗だけは正常な画面終了を許し、部分起動不明は隔離を維持する修正が必要。これらは未解決で、UI-only合格・build成功は実機投入許可ではない。
 
-レビュー後の確認: AOPC-11-NOTEのOS列挙ではD810 2台/正常2台（個体IDは出力・保存なし）。SDK操作0回、preview予算2/5のまま。GUIのSDK版buildはexit 0（その後の停止要求チェック1行追加はSDK版再build待ち）。最終stub buildとdescribe再検証はexit 0、describe 1/1 PASS（0.68秒、累計2回）。混在 `--describe --commission-preview-only` と重複 `--ui-only --ui-only` はそれぞれexit 2、UI/SDK開始なし。現在の画面は未受入で、実機モードを起動しない。
+レビュー後の確認: 操作 PC-4のOS列挙ではD810 2台/正常2台（個体IDは出力・保存なし）。SDK操作0回、preview予算2/5のまま。GUIのSDK版buildはexit 0（その後の停止要求チェック1行追加はSDK版再build待ち）。最終stub buildとdescribe再検証はexit 0、describe 1/1 PASS（0.68秒、累計2回）。混在 `--describe --commission-preview-only` と重複 `--ui-only --ui-only` はそれぞれexit 2、UI/SDK開始なし。現在の画面は未受入で、実機モードを起動しない。
 
 ### 2026-09-22 実験用の操作者画面（統合検証中、実機未実行）
 
@@ -541,7 +541,7 @@ UI接続前にowner threadをコードでも強制した。別threadのCloseは�
 
 ## 後続Goal: 個体割当と限定委譲（2026-09-22）
 
-本人の「後続の作業についてもgoal化して進めてください」によりGoalを作成。基点 `33bed76`、branch `codex/dual-live-worker-poc-20260922`。実機なしの設計・契約実装・レビュー・限定検証を進める。SDK/WPD起動、撮影、設定変更、AOPC-22-NOTE、本番有効化、merge/公開は含まない。
+本人の「後続の作業についてもgoal化して進めてください」によりGoalを作成。基点 `33bed76`、branch `codex/dual-live-worker-poc-20260922`。実機なしの設計・契約実装・レビュー・限定検証を進める。SDK/WPD起動、撮影、設定変更、操作 PC-3、本番有効化、merge/公開は含まない。
 
 ### 今回の契約モデル
 
@@ -598,7 +598,7 @@ worker-local映像の操作者確認は候補だが、二workerが別物理body�
 
 ## 実機接続の第一段階: 一台限定worker（2026-09-22、検証中）
 
-本人の「実機検証を始めて」「進めてください」に基づく実装。PCはAOPC-11-NOTE、BのUSBを抜いて一台だけとする準備を本人が確認済み。初回は接続中の一台だけを対象とし、3フレームの取得を1回の試験として数える。最大5回、自動再試行なし。これは物理CAM-A/Bの対応証明ではない。
+本人の「実機検証を始めて」「進めてください」に基づく実装。PCは操作 PC-4、BのUSBを抜いて一台だけとする準備を本人が確認済み。初回は接続中の一台だけを対象とし、3フレームの取得を1回の試験として数える。最大5回、自動再試行なし。これは物理CAM-A/Bの対応証明ではない。
 
 - 新CLI `A0CameraStitcher.SingleWorkerPreview describe` はSDKを開かない発見操作。`sdkAvailable` はSDK有効buildかつ実行時moduleパスの配置検査成功を示し、実ロード・カメラ通信成功の証拠ではない。
 - `preview-single --confirm-one-physical-camera` は実機操作。SDKのraw Sourceが厳密に一つでなければSource Open前に拒否し、唯一のSourceだけを一回開いてD810であることを確認する。既存の全候補Openによる識別経路は使わない。Source IDを保存・process間転送しない。

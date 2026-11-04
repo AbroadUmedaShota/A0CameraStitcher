@@ -44,13 +44,13 @@ SDK module、依存DLL、SDK/WPD mapは実識別子を記録せず、次のhash�
 
 事実:
 
-- 実機用PCは`AOPC-22-NOTE`である。
+- 実機用PCは`操作 PC-3`である。
 - 保存済み候補EXEは、作成PCのprivate evidence領域で固定済みである。
-- 2026-09-17時点で`AOPC-22-NOTE`へのSSHはtimeoutし、同PC上のEXE配置、起動引数、表示中processを確認できていない。
+- 2026-09-17時点で`操作 PC-3`へのSSHはtimeoutし、同PC上のEXE配置、起動引数、表示中processを確認できていない。
 
 推奨:
 
-- `AOPC-22-NOTE`の同一interactive Windows logon sessionで実行する。
+- `操作 PC-3`の同一interactive Windows logon sessionで実行する。
 - repositoryの作業treeから直接起動せず、専用の固定ローカル実行フォルダへ候補EXEと必要なlocal-only設定を配置する。
 - コピー後にEXE、SDK module、依存DLL、SDK/WPD mapのhashを再確認する。一つでも違えば`Blocked`とし、新しい候補として再承認する。
 - WPF画面を使う場合でも、上部が`SIMULATED`なら中止する。この最小パッケージはPhase 0 CLIのPC直接保存確認であり、WPF受入とは別である。
@@ -62,7 +62,7 @@ SDK module、依存DLL、SDK/WPD mapは実識別子を記録せず、次のhash�
 - JPEG Fine / L / 7360x4912が読み取り確認できる状態。
 - 専用カード。今回のPC直接保存確認では事前・事後payload 0を必須にする。
 - 安定したUSB接続、AC電源または十分なbattery、固定ローカル保存先と十分な空き容量。
-- 他のNikon/cameraアプリが停止した`AOPC-22-NOTE`のinteractive session。
+- 他のNikon/cameraアプリが停止した`操作 PC-3`のinteractive session。
 
 ### 2.4 実行順序
 

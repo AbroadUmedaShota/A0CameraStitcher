@@ -13,8 +13,8 @@
     "software_candidate": "Five-run focused contract and full M3 simulated Release PASS / HardwareNotRun",
     "sdkless_release_ctest": "24/24 PASS, 261.47 seconds; prior AF timeout did not reproduce in current full M3 run, root cause not established",
     "licensed_focused_ctest": "current candidate not run; previous evidence does not certify changed code",
-    "next_single_step": "fix candidate and verify current local host, alias, operation and at-most-five budget before hardware execution; AOPC-22-NOTE excluded by user",
-    "dual_state": "Five-pair production coordinator implemented; current AOPC-11-NOTE OS inventory finds only one D810; dual hardware acceptance remains incomplete",
+    "next_single_step": "fix candidate and verify current local host, alias, operation and at-most-five budget before hardware execution; 操作 PC-3 excluded by user",
+    "dual_state": "Five-pair production coordinator implemented; current 操作 PC-4 OS inventory finds only one D810; dual hardware acceptance remains incomplete",
     "stitch_state": "software fixed-warp prototype; HG-0001, HG-0002, and rights-cleared corpus block product quality completion",
     "hardware_operations_in_this_reconciliation": 0
   },
@@ -23,7 +23,7 @@
     "M2 real quality completion requires actual rig and rights-cleared input; pre-gate and corpus contracts pass but do not prove image quality"
   ],
   "blocking_gaps": [
-    "AOPC-22-NOTE is excluded; AOPC-11-NOTE has one OS-visible D810, no SDK/WPD readiness or current candidate hardware execution",
+    "操作 PC-3 is excluded; 操作 PC-4 has one OS-visible D810, no SDK/WPD readiness or current candidate hardware execution",
     "SingleCamera historical Camera Agent 1/10/100 evidence is preserved; current real WPF and continuous Live View acceptance remains incomplete, now maximum five initial attempts under ADR-0030",
     "Dual real capture and fault acceptance remain incomplete; one-shot is included in the maximum five pairs, with no replacement or automatic retry; new 100-run acceptance is not required",
     "HG-0001 and HG-0002 block final DualCamera M2 optical, calibration, setup-assistant thresholds, automatic correction, stitching, and quality work",
