@@ -56,7 +56,7 @@ struct MergeView {
 // The fixed composite condition beside the settings (#401). Written only by LoadFixedSource, on the UI
 // thread while no merge worker exists; the merge worker and the UI only read it.
 FixedPreviewSource fixed_source;
-bool FixedConditionPresent(){return fixed_source.loaded.has_value() || fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent;}
+bool FixedConditionPresent(){return fixed_source.Present();}
 // Read again at every preview session start, so a condition made between sessions is used.
 void LoadFixedSource(){
     try{
@@ -66,10 +66,15 @@ void LoadFixedSource(){
         fixed_source={};fixed_source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;fixed_source.detail=error.what();
     }
     std::ostringstream line;line.imbue(std::locale::classic());
-    line<<"C fixed_composite_condition="<<(fixed_source.loaded?"present":fixed_source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent?"absent":"invalid");
+    line<<"C fixed_composite_condition="<<(fixed_source.loaded || fixed_source.loaded_v2?"present":fixed_source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent?"absent":"invalid");
     if(fixed_source.loaded){const auto& c=fixed_source.loaded->condition;
-        line<<" sha256="<<fixed_source.loaded->file_sha256<<" seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
+        line<<" version=1 sha256="<<fixed_source.loaded->file_sha256<<" seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
+    if(fixed_source.loaded_v2){const auto& c=fixed_source.loaded_v2->condition;const auto& p=fixed_source.loaded_v2->profile;
+        line<<" version=2 sha256="<<fixed_source.loaded_v2->file_sha256<<" profile_sha256="<<p.profile_file_sha256<<" profile_fingerprint_sha256="<<p.profile_fingerprint_sha256
+            <<" raster="<<c.raster.width_pixels<<"x"<<c.raster.height_pixels<<"@"<<c.raster.dpi<<"dpi seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
+            <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
+    else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason=condition_invalid";
     Log(line.str());
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
@@ -77,10 +82,12 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
     const auto& plan=choice.plan;
     line<<"C composite mode="<<(choice.mode==PreviewCMode::fixed_composite?"fixed-composite":choice.mode==PreviewCMode::unavailable?"unavailable":"uncalibrated")
         <<" view="<<plan.view_width<<"x"<<plan.view_height;
-    if(choice.mode==PreviewCMode::fixed_composite)
-        line<<" capture_seam_column="<<plan.capture_seam_column<<" scaled_seam_column="<<plan.scaled_seam_column<<" seam_column="<<plan.view.seam_column<<" seam_shift="<<plan.seam_shift
+    if(choice.mode==PreviewCMode::fixed_composite){
+        line<<(plan.lens_aware?" version=2 grid="+std::to_string(plan.output_width)+"x"+std::to_string(plan.output_height)+" grid_pitch_mm="+std::to_string(plan.grid.pitch_mm)+" coordinate_table=1":" version=1")
+            <<" capture_seam_column="<<plan.capture_seam_column<<" scaled_seam_column="<<plan.scaled_seam_column<<" seam_column="<<plan.view.seam_column<<" seam_shift="<<plan.seam_shift
             <<" blend_width="<<plan.settings.width_pixels<<" window_half_width="<<plan.settings.brightness_half_width_pixels<<" smoothing_rows="<<plan.settings.brightness_smoothing_rows
-            <<" scale_correction=0 correspondence_verified=0 uncalibrated=1 quality_accepted=0";
+            <<" scale_correction=0 correspondence_verified=0 uncalibrated="<<(plan.lens_aware?0:1)<<" quality_accepted=0";
+    }
     else if(choice.mode==PreviewCMode::unavailable)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(*plan.skip);
     Log(line.str());
 }
@@ -424,7 +431,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         title=FixedPreviewTitle(mount_orientation,merged.fixed_plan);
         status=merged.position_refusal.empty()?FixedPreviewNote(merged.fixed_plan):merged.position_refusal;
     }else if(FixedConditionPresent()){
-        title=L"C 固定の合成条件（未校正・未承認・表示専用）";
+        title=FixedPreviewUnavailableTitle(fixed_source);
         status=merged.decided?merged.position_refusal:L"固定の合成条件を確認しています…";
     }else{
         title=PreviewMergeTitle(mount_orientation,merged.overlap_pixels,merged.vertical_pixels);
@@ -880,6 +887,55 @@ int RunFixedCUiSmoke(){
         check(!merged.position_refusal.empty() && !merged.pixels.bytes.empty());
     }
     paint();check(pink(picture_rect())>0);
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    // 1b. A lens-aware condition (v2, #405 W5): the same real worker, Paint, buttons and admission. The profile is two
+    // affine synthetic cameras built here (a sheet position per pixel, no file and no hash), the condition is in memory.
+    const auto lens_condition=[](m2::MountOrientation orientation){
+        namespace render=a0::m2::render;
+        const render::OutputRaster raster{render::DocumentRegionUm{540000,100000,620000,140000},254,800,400};
+        const render::CameraIntrinsics intrinsics{10000,10000,3679.5,2455.5};const render::LensDistortion no_lens{0,0,0,0,0};
+        const render::DocumentRenderParameters parameters{raster,render::CameraProjection{intrinsics,no_lens,{0,8,100,-8,0,4800,0,0,1}},
+            render::CameraProjection{intrinsics,no_lens,{0,8,100,-8,0,9400,0,0,1}},a0::m2::StitchLayout::camera_a_left_camera_b_right,render::Resampling::bilinear};
+        m2::FixedCompositeConditionV2 c;
+        c.created_utc="2026-11-04T12:00:00Z";c.orientation=orientation;c.raster=raster;c.scale_auto_correction_max_percent=1;
+        c.seam={400,m2::FixedSeamOrigin::operator_set}; // inside the overlap of 561 to 600 mm
+        return m2::LoadedFixedCompositeConditionV2{c,std::string(64,'c'),m2::FixedCompositeProfileBinding{parameters,std::string("smoke-profile"),std::string(64,'d'),std::string(64,'e')}};
+    };
+    fixed_source={};fixed_source.loaded_v2=lens_condition(mount_orientation);
+    check(FixedConditionPresent());
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
+    {
+        std::lock_guard lock(merged.mutex);
+        check(merged.mode==PreviewCMode::fixed_composite && merged.error.empty() && merged.fixed_plan.lens_aware);
+        check(merged.pixels.width==merged.fixed_plan.output_width && merged.pixels.height==merged.fixed_plan.output_height && merged.pixels.width>0);
+        check(merged.seam_column==merged.fixed_plan.view.seam_column && merged.fixed_plan.view_width==400 && merged.fixed_plan.view_height==267);
+        check(merged.ratio_minimum>0.4 && merged.ratio_maximum<0.6);
+    }
+    paint();
+    {
+        const auto rect=picture_rect();
+        check(rect.width>0 && rect.height>0);
+        const auto lit=pink(rect);
+        check(lit+2>=static_cast<unsigned>(rect.height) && lit<=static_cast<unsigned>(rect.height));
+        std::uint64_t revision{};unsigned overlap{};int vertical{};
+        {std::lock_guard lock(merged.mutex);revision=merged.revision;overlap=merged.overlap_pixels;vertical=merged.vertical_pixels;}
+        for(int id=300;id<=304;++id)press(id);
+        std::lock_guard lock(merged.mutex);
+        check(merged.revision==revision && merged.overlap_pixels==overlap && merged.vertical_pixels==vertical && !merged.auto_requested && !merged.auto_busy && !merged.position_refusal.empty());
+    }
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    // 1c. The same lens-aware condition made for the other mounting is not drawn, with its reason.
+    fixed_source={};fixed_source.loaded_v2=lens_condition(m2::MountOrientation::rotated_180);
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
+    {
+        std::lock_guard lock(merged.mutex);
+        check(merged.pixels.bytes.empty() && merged.error==FixedPreviewUnavailableText(m2::FixedCompositeSkip::orientation_differs));
+        check(FixedPreviewUnavailableTitle(fixed_source).find(L"v2")!=std::wstring::npos);
+    }
     check(capture_admitted());
     stop_worker();rearm();ClearMerge();
 
