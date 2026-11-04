@@ -1024,7 +1024,7 @@ if(BUILD_TESTING)
     # handling on every stop point, completion events per body (#381). Synthetic
     # channels only.
     add_executable(a0_wpd_still_pair_tests tests/wpd_still_pair_tests.cpp)
-    target_link_libraries(a0_wpd_still_pair_tests PRIVATE a0_wpd_live_view_transfer ole32 PortableDeviceGuids)
+    target_link_libraries(a0_wpd_still_pair_tests PRIVATE a0_wpd_live_view_transfer a0_phase0_core ole32 windowscodecs PortableDeviceGuids)
     add_test(NAME wpd_still_pair_contracts COMMAND a0_wpd_still_pair_tests)
     set_tests_properties(wpd_still_pair_contracts PROPERTIES TIMEOUT 120)
     add_executable(a0_preview_merge_tests tests/preview_merge_tests.cpp)

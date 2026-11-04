@@ -23,6 +23,10 @@ public:
     bool out_of_focus_after_shutter=false,out_of_focus_before_shutter=false;
     DWORD preflight_event{},postflight_event{},preflight_companion{};
     int preflight_event_on_read{};bool repeat_preflight_event{},bad_quality_after_refresh{},late_pending{};
+    // #407: Live View on (0xd1a2 != 0) and an image size other than FX JPEG L
+    // (0x5003 != 7360x4912), from the first profile read or only after the
+    // StoreAdded refresh (second profile read).
+    bool live_on{},wrong_size{},live_on_after_refresh{},wrong_size_after_refresh{};
     // #381: the camera's event queue outlives one session. A late completion
     // is queued there and only a later session's preflight 0x90C7 reads it.
     std::vector<WpdStillEvent>* camera_queue{};bool completion_late{},duplicate_completion{},duplicate_sent{};
@@ -57,7 +61,9 @@ protected:
         }
         if(id==WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_READ.pid){
             current_operation=code;offset=0;
-            if(code==0x1015){if(parameter==0xd1a2){++profile_reads;data={0};}else if(parameter==0x5004)data={static_cast<unsigned char>((bad_quality || (bad_quality_after_refresh && profile_reads>1))?4:2)};else{Require(parameter==0x5003);data=Text(L"7360x4912");}}
+            if(code==0x1015){if(parameter==0xd1a2){++profile_reads;data={static_cast<unsigned char>((live_on || (live_on_after_refresh && profile_reads>1))?1:0)};}
+                else if(parameter==0x5004)data={static_cast<unsigned char>((bad_quality || (bad_quality_after_refresh && profile_reads>1))?4:2)};
+                else{Require(parameter==0x5003);data=Text((wrong_size || (wrong_size_after_refresh && profile_reads>1))?L"5520x3680":L"7360x4912");}}
             else if(code==0x90c7){
                 const int preflight_read=preflight_reads;
                 const size_t post_index=shutters?post_reads++:0;

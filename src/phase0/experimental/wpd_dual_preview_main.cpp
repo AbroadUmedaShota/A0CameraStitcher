@@ -32,6 +32,7 @@
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/wpd_still_persist.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
 #include "a0/phase0/experimental/preview_end_restart_probe.hpp"
 #include "a0/m2/experimental/still_review.hpp"
@@ -186,13 +187,10 @@ public:
             auto payload=run_->Collect();
             if(!FlushFileBuffers(partial_))throw std::runtime_error("capture partial flush failed");
             CloseHandle(partial_);partial_=INVALID_HANDLE_VALUE;
-            if(!IsValidJpeg(payload.jpeg))throw std::runtime_error("captured bytes are not a valid JPEG");
-            (void)FullyDecodeJpeg(payload.jpeg,payload.info.width,payload.info.height);
-            const auto frame=evidence_->PersistExactlyOne("capture",alias_,{{"camera-original.jpg",std::move(payload.jpeg),true,{}}},deadline_);
-            if(!frame.success)throw std::runtime_error("PC original persistence failed: "+frame.error_category);
-            outcome_.success=true;outcome_.path=frame.path;outcome_.bytes=frame.bytes;outcome_.sha256=frame.sha256;
-            Log(alias_+" original_saved=1 bytes="+std::to_string(frame.bytes)+" sha256="+frame.sha256);
-            std::wcout<<L"saved_original="<<frame.path.wstring()<<std::endl;
+            const auto saved=PersistVerifiedWpdStill(*evidence_,alias_,std::move(payload),deadline_);
+            outcome_.success=saved.success;outcome_.path=saved.path;outcome_.bytes=saved.bytes;outcome_.sha256=saved.sha256;
+            Log(alias_+" original_saved=1 bytes="+std::to_string(saved.bytes)+" sha256="+saved.sha256);
+            std::wcout<<L"saved_original="<<saved.path.wstring()<<std::endl;
         }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);}
         return outcome_;
     }
@@ -227,7 +225,7 @@ public:
             if(!outcome_.closed){outcome_.success=false;outcome_.error+="; still session close failed";}
         }
         if(watchdog_.joinable()){watchdog_.request_stop();watchdog_.join();}
-        if(Clock::now()>=deadline_){outcome_.success=false;outcome_.error+="; transaction deadline exceeded; PC bytes retained";}
+        ApplyStillDeadline(outcome_,Clock::now(),deadline_);
         if(outcome_.success)evidence_->RecordState(preflight_only_?"preflight":"capture","Complete",alias_);
         else evidence_->RecordState(preflight_only_?"preflight":"capture","FailedPartial",alias_,outcome_.error);
         Log(alias_+(preflight_only_?" preflight_session_closed=":" capture_session_closed=")+std::to_string(outcome_.closed)+
