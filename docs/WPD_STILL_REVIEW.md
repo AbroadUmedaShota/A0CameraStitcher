@@ -287,6 +287,64 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 - `m2_fixed_composite_condition_contracts`（`tests/fixed_composite_condition_tests.cpp`、カメラ・実ファイル不要）: 書式の全文、往復、方式ごとの作成（v1・v2・v3・v5 の各判定を人工の値で）、各拒否、帯の計算（回転・倍率つきの写像で、帯の列が全行で覆われ、外側の列が覆われないことを画素ごとに）、仮の継ぎ目と `operator` の扱い、倍率の上限の範囲（方針ファイルの検証と同じ受理）、一時フォルダでの書き込み・読み込み・上書きの拒否
 - `still_review_contracts`: 実際に書いた v1・v2・v3・v5 の報告（回転のみ、倍率が上限超え、回転が上限超え、推定なし、`rotated-180`、seam-cut を含む）を `LoadSavedStillReview` で読み、記録の写像・crop・出力の大きさが報告と一致し、保存して読み直せること
 
+## レンズの歪みを含む固定の合成条件 v2 (#405 W1、親 #396)
+
+設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）まで。合成の関数（W2）、倍率の補正（W3）、JPEG の経路（W4）、C の経路（W5）、作る入口の CLI（W6）はまだ入っていない。v2 の記録を使う経路は今のところ無い。
+
+v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読めない。profile も承認しないし、書き換えない。
+
+### v1 との並存
+
+- ファイル名は v1 と同じ `wpd-fixed-composite-condition.json` の 1 つだけ。中の `schema` で版を分ける。`LoadFixedCompositeConditionAny(ファイル, ハッシュ関数)` が `schema` を見て、v1 なら `ParseFixedCompositeCondition`（v1 の reader そのもの。同じバイト列に同じ関数を当てる）、v2 なら v2 の reader に渡し、`std::variant` で返す。ファイルが無ければ `std::nullopt`、それ以外で読めなければ例外（v1 と同じ）
+- v1 の reader・writer・書式・試験は変えていない。v1 の `LoadFixedCompositeCondition` に v2 のファイルを渡すと、schema が違うので例外になる。つまり v1 しか知らない経路は v2 のファイルを黙って読まず、使えない側に倒れる
+- v1 から v2 への切り替えは人が行う。v1 のファイルを別の名前へ移してから v2 を書く（`WriteFixedCompositeConditionV2` は既存のファイルを上書きしない。v1 のファイルの上にも書けない）。どの記録を有効にするかの仕組みは #403
+
+### 書式 `a0.fixed-composite-condition.v2`
+
+```json
+{"schema":"a0.fixed-composite-condition.v2","approval":"unapproved","createdUtc":"2026-11-04T12:34:56Z","revision":{"parentSha256":null},"source":{"profileFile":"wpd-fixed-composite-profile-0123456789abcdef.json","profileFileSha256":"<64 桁の小文字 16 進>","profileFingerprintSha256":"<64 桁の小文字 16 進>"},"mountOrientation":"normal","outputRaster":{"regionUm":{"left":100000,"top":100000,"right":110000,"bottom":108000},"dpi":254,"widthPixels":100,"heightPixels":80},"scaleAutoCorrectionMaxPercent":1,"seam":{"column":50,"origin":"band-center-provisional"}}
+```
+
+数値は書式の説明用の人工の値で、実測値ではない。
+
+| 欄 | 意味 |
+|---|---|
+| `approval` | 常に `unapproved` |
+| `createdUtc` | 作った時刻（UTC、秒） |
+| `revision.parentSha256` | 前の記録のファイルの SHA-256（64 桁の小文字 16 進）。最初の記録は `null`（#396 の A3）。この欄は形だけを検証する。親をたどる・どの記録を有効にするかは #403 |
+| `source.profileFile` | 参照する profile のファイル名。条件と同じフォルダの中だけで探す。名前だけで、フォルダの区切り・親のフォルダ・ドライブ名・`..`・Windows のデバイス名・条件自身の名前は拒否（6〜96 文字の `A-Za-z0-9._-`、先頭は英数字、末尾は `.json`）。作る入口が写す時の名前は `wpd-fixed-composite-profile-<ファイル SHA-256 の先頭 16 桁>.json`（`FixedCompositeProfileFileName`）。この形は記録には要求しない（識別は次の hash が担う） |
+| `source.profileFileSha256` | profile のファイルのバイト列の SHA-256。読む時に照合する |
+| `source.profileFingerprintSha256` | ADR-0034 の fingerprint（`RigProfileV2::FingerprintSha256`）。読む時に計算し直して照合する |
+| `mountOrientation` | 校正した時の取り付けの向き（`normal` か `rotated-180`）。今の向きとの照合は経路の側（v1 と同じ） |
+| `outputRaster` | 開発用の出力ラスタ。文書の面の `regionUm`（マイクロメートル、整数）、整数の `dpi`、`widthPixels`・`heightPixels`。画素数は領域と DPI から切り上げで決まる値と一致しなければ読めない（ADR-0034）。所有者の決定（`HG-0001`）ではなく、人が作る時に指定した未承認の値。コードの既定値は無い |
+| `scaleAutoCorrectionMaxPercent` | 撮影ごとに倍率だけ補正してよい差の上限（%）。v1 と同じ意味と範囲（有限、0 以上）。必須で、コードの既定値は無い |
+| `seam` | 継ぎ目の列（v1 と同じ意味）。`column` は出力ラスタの画素の列（0 以上、`widthPixels` 未満）、`origin` は `band-center-provisional` か `operator` |
+
+写像の値（内部パラメータ、歪みの係数、文書→画像の射影）は記録に写さず、profile だけが持つ。撮影画像の大きさ（profile の `cameraModel` が固定）、補間の種類、有効期限も持たない。v1 の `source.reviewReportSha256`・`pairId`・`method` は v2 には無い（保存済みの review ではなく校正から作るため）。
+
+### 読む時と作る時の検査
+
+読む時（`LoadFixedCompositeConditionAny`、JPEG の経路では撮影のたびに期限の中で）:
+
+1. 書式（`ParseFixedCompositeConditionV2`）: 欄の過不足、重複キー、型、整数の表記（小数・指数・`-0` を拒否）、範囲、`approved`、BOM と空白以外の前後のデータ、4096 byte 超
+2. profile を同じフォルダから読む（無い・通常ファイルでない・256 KiB 超は例外）。バイト列の SHA-256 が `profileFileSha256` と一致すること。一致しなければ profile を解釈しない
+3. profile が rig profile 2.0.0 として読め、fingerprint が `profileFingerprintSha256` と一致すること
+4. profile が校正済みの draft であること（approved や、校正の欄が空の雛形は拒否）。`cameraOrder` が A 左・B 右であること。2 台の射影が記録の出力ラスタの上で有効なこと（`ValidateCalibrationForEvaluation`。領域が用紙の中にあること、歪みの単調性、射影の分母の符号を含む）
+
+fingerprint は空白やメンバーの順序に影響されないので、空白だけ違う profile は fingerprint が同じでもファイルの SHA-256 で拒否される。
+
+作る時（`MakeFixedCompositeConditionV2`、純粋な関数でファイルは読み書きしない）: 上の 1〜4 に加えて、設計の 3.9 節の 3〜5（倍率の上限の範囲のどの倍率でも出力が A か B で覆われること、継ぎ目の列と混ぜ幅の半分がすべての行で重なりに入ること、仮の列が帯の中央と一致すること）を確かめる。この 3 つは写像で合成する関数（W2）が要るので、検査そのものは `FixedCompositeCreationCheck` として外から受け取る。**検査が渡されない時は記録を作らない**（覆いと継ぎ目を確かめないまま記録を作らないため）。実装は W6（作る入口）で、W2 の後に入れる。
+
+### 範囲外
+
+- 合成の関数、倍率の補正と中心、報告の新しい版、C の写像と格子、`StillReview` の CLI（`--make-fixed-composite-condition-v2`）、profile を設定のフォルダへ写す処理は後続の子 Issue（設計の 11 節の W2〜W6）
+- 継ぎ目の列を人が動かす操作と保存し直しの手順（#403）
+
+### 確認
+
+- `m2_fixed_composite_condition_v2_contracts`（`tests/fixed_composite_condition_v2_tests.cpp`、カメラ・実ファイル不要。共有の rig profile v2 の fixture と一時フォルダだけを使う）: 書式の全文と往復（親の hash あり・なし）、profile の名前の検査、作る関数の拒否（approved・雛形・上下の配置・ラスタの不一致・領域が用紙の外・上限と継ぎ目の範囲・検査が無い・検査が拒否）、書式の拒否、profile の SHA-256 と fingerprint の不一致（空白だけ違う profile を含む）、一時フォルダでの書き込み・上書きの拒否・版を区別した読み込み（v1 の読み込みが v1 の関数と同じ結果、v1 のファイルの上に v2 を書けないこと、profile が無い・差し替え・巨大・フォルダ、名前が親のフォルダを指す記録）
+- `m2_fixed_composite_condition_contracts`: v1 の既存の試験。変更なしで通る
+
 ## 仮Merge保存を固定の合成条件で行う (#400、親 #396)
 
 「両台撮影 → 仮Merge保存」の合成は、Cの値でも撮影ごとの推定でもなく、固定の合成条件（#399）で決める。撮影の手順（シャッター、取り込み、180秒のdeadline、原画像の保存とhash）は変えていない。ライブのC（`RenderPreviewMerge`）はこの変更では触らず、#401 で切り替える。
