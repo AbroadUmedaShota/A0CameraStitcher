@@ -5,30 +5,68 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace a0::m2::experimental {
 namespace {
 using render::BgrImage;
 double Luminance(const std::array<double,3>& p){return p[0]*0.114+p[1]*0.587+p[2]*0.299;}
-// Output pixel (x,y) is global (ox+x,oy+y), exactly as render::RenderPair.
-struct Frame {
-    render::PairCanvasPlan plan;
-    render::Matrix3 inverse{};
+// The blend reads each camera through a mapping from the output pixel (x,y) to a
+// raw position of that camera, sampled bilinearly (coverage [0,w)x[0,h)). A
+// mapping is any callable bool(double x,double y,render::Point& raw); false means
+// the camera has no sample there. Frame is a template so that the pair mapping of
+// render::RenderPair (below) stays a pair of plain functors with no indirect call.
+template<class MapA,class MapB> struct Frame {
+    unsigned width{},height{};
+    MapA map_a;MapB map_b;
+    bool A(const BgrImage& a,double x,double y,std::array<double,3>& p) const {render::Point s{};return map_a(x,y,s) && render::SampleBilinear(a,s.x,s.y,p);}
+    bool B(const BgrImage& b,double x,double y,std::array<double,3>& p) const {render::Point s{};return map_b(x,y,s) && render::SampleBilinear(b,s.x,s.y,p);}
+};
+// render::RenderPair as a pair of mappings: output pixel (x,y) is global (ox+x,oy+y);
+// A is sampled there, B through the inverse of camera_b_to_camera_a.
+struct PairMapA {
     double ox{},oy{};
-    bool A(const BgrImage& a,double x,double y,std::array<double,3>& p) const {return render::SampleBilinear(a,ox+x,oy+y,p);}
-    bool B(const BgrImage& b,double x,double y,std::array<double,3>& p) const {
-        render::Point s{};return render::TryTransform(inverse,{ox+x,oy+y},s) && render::SampleBilinear(b,s.x,s.y,p);
+    bool operator()(double x,double y,render::Point& raw) const {raw={ox+x,oy+y};return true;}
+};
+struct PairMapB {
+    render::Matrix3 inverse{};double ox{},oy{};
+    bool operator()(double x,double y,render::Point& raw) const {return render::TryTransform(inverse,{ox+x,oy+y},raw);}
+};
+using PairFrame=Frame<PairMapA,PairMapB>;
+struct Prepared {render::PairCanvasPlan plan;PairFrame frame;};
+// The images are checked against their buffers when given (null: only the sizes are known).
+Prepared Prepare(unsigned aw,unsigned ah,unsigned bw,unsigned bh,const BgrImage* a,const BgrImage* b,const render::PairRenderParameters& p){
+    if(p.layout!=StitchLayout::camera_a_left_camera_b_right)throw std::invalid_argument("seam blend needs A left and B right");
+    const auto inverse=render::Invert(p.camera_b_to_camera_a);
+    render::ValidateProjectiveDomain(p.camera_b_to_camera_a,bw,bh);
+    if(a && b && (a->bgr.size()!=render::PixelCount(a->width,a->height)*3 || b->bgr.size()!=render::PixelCount(b->width,b->height)*3))
+        throw std::invalid_argument("seam blend buffer size does not match its dimensions");
+    Prepared r;r.plan=render::PlanPairCanvas(aw,ah,bw,bh,p);
+    const double ox=r.plan.origin_x+p.crop.left,oy=r.plan.origin_y+p.crop.top;
+    r.frame={r.plan.output_width,r.plan.output_height,PairMapA{ox,oy},PairMapB{inverse,ox,oy}};return r;
+}
+Prepared Prepare(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& p){return Prepare(a.width,a.height,b.width,b.height,&a,&b,p);}
+// An arbitrary output-to-camera mapping (render::OutputToCamera): the output pixel is
+// passed as its integer index (x,y), exactly as the mappings of the document render
+// and of the seam gate expect it. A non-finite result fails instead of being sampled.
+struct FunctionMap {
+    const render::OutputToCamera* map{};
+    bool operator()(double x,double y,render::Point& raw) const {
+        if(!(*map)({x,y},raw))return false;
+        if(!std::isfinite(raw.x) || !std::isfinite(raw.y))throw std::invalid_argument("output-to-camera mapping returned nonfinite camera coordinates");
+        return true;
     }
 };
-Frame Prepare(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& p){
-    if(p.layout!=StitchLayout::camera_a_left_camera_b_right)throw std::invalid_argument("seam blend needs A left and B right");
-    Frame f;f.inverse=render::Invert(p.camera_b_to_camera_a);
-    render::ValidateProjectiveDomain(p.camera_b_to_camera_a,b.width,b.height);
+using MappedFrame=Frame<FunctionMap,FunctionMap>;
+MappedFrame PrepareMapped(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& in){
+    (void)render::PixelCount(in.width,in.height);
+    if(!in.camera_a || !in.camera_b)throw std::invalid_argument("seam blend needs both output-to-camera mappings");
     if(a.bgr.size()!=render::PixelCount(a.width,a.height)*3 || b.bgr.size()!=render::PixelCount(b.width,b.height)*3)
         throw std::invalid_argument("seam blend buffer size does not match its dimensions");
-    f.plan=render::PlanPairCanvas(a.width,a.height,b.width,b.height,p);
-    f.ox=f.plan.origin_x+p.crop.left;f.oy=f.plan.origin_y+p.crop.top;return f;
+    return {in.width,in.height,FunctionMap{&in.camera_a},FunctionMap{&in.camera_b}};
 }
 constexpr float kAbsent=std::numeric_limits<float>::quiet_NaN();
 // Log luminance of A and B on the band columns [x0,x0+width) of every output
@@ -47,12 +85,12 @@ struct Band {
         return std::sqrt(gx*gx+gy*gy);
     }
 };
-Band SampleBand(const BgrImage& a,const BgrImage& b,const Frame& f){
-    const auto& plan=f.plan;
-    const double start=std::max(plan.a_bounds.minimum_x,plan.b_bounds.minimum_x),end=std::min(plan.a_bounds.maximum_x,plan.b_bounds.maximum_x);
-    const double first=std::max(0.0,std::floor(start-f.ox)-1),last=std::min(double(plan.output_width),std::ceil(end-f.ox)+1);
-    if(!(last>first))throw std::invalid_argument("seam blend has no overlap band");
-    Band band{static_cast<unsigned>(first),static_cast<unsigned>(last-first),plan.output_height,{},{},{},{}};
+// The band over the columns [x0,x0+width) of every output row. one_run: the
+// covered cells of a row must be one run (no uncovered cell between the first and
+// the last covered one); a mapped pair that breaks it fails instead of choosing a side.
+template<class MapA,class MapB>
+Band SampleBandColumns(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f,unsigned x0,unsigned width,bool one_run){
+    Band band{x0,width,f.height,{},{},{},{}};
     const auto cells=static_cast<size_t>(band.width)*band.height;
     band.a.assign(cells,kAbsent);band.b.assign(cells,kAbsent);band.c0.assign(band.height,0);band.c1.assign(band.height,0);
     for(unsigned y=0;y<band.height;++y){
@@ -64,8 +102,48 @@ Band SampleBand(const BgrImage& a,const BgrImage& b,const Frame& f){
             if(!any)band.c0[y]=i;any=true;band.c1[y]=i+1;
         }
         if(!any)throw std::invalid_argument("seam blend needs A and B on every output row");
+        if(one_run)for(unsigned i=band.c0[y];i<band.c1[y];++i)
+            if(std::isnan(ra[i]))throw std::invalid_argument("the overlap of A and B is not one run on an output row");
     }
     return band;
+}
+// The pair mapping of render::RenderPair: the columns come from the bounds of A and of the placed B.
+Band SampleBand(const BgrImage& a,const BgrImage& b,const Prepared& prepared){
+    const auto& plan=prepared.plan;const double ox=prepared.frame.map_a.ox;
+    const double start=std::max(plan.a_bounds.minimum_x,plan.b_bounds.minimum_x),end=std::min(plan.a_bounds.maximum_x,plan.b_bounds.maximum_x);
+    const double first=std::max(0.0,std::floor(start-ox)-1),last=std::min(double(plan.output_width),std::ceil(end-ox)+1);
+    if(!(last>first))throw std::invalid_argument("seam blend has no overlap band");
+    return SampleBandColumns(a,b,prepared.frame,static_cast<unsigned>(first),static_cast<unsigned>(last-first),false);
+}
+// Both cameras have a sample at the output pixel (the coverage test of render::SampleBilinear).
+bool InsideImage(const BgrImage& image,const render::Point& raw){return raw.x>=0.0 && raw.y>=0.0 && raw.x<double(image.width) && raw.y<double(image.height);}
+bool BothCover(const MappedFrame& f,const BgrImage& a,const BgrImage& b,unsigned x,unsigned y){
+    render::Point pa{},pb{};
+    return f.map_a(x,y,pa) && InsideImage(a,pa) && f.map_b(x,y,pb) && InsideImage(b,pb);
+}
+// Per output row, the run [first,end) of columns covered by both cameras that
+// contains the first covered column found on a coarse scan (every 8th column,
+// then every column for a row the coarse scan misses), walked to both ends.
+std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const BgrImage& a,const BgrImage& b){
+    std::vector<MappedOverlapRow> rows(f.height);
+    for(unsigned y=0;y<f.height;++y){
+        long long seed=-1;
+        for(unsigned x=0;x<f.width && seed<0;x+=8)if(BothCover(f,a,b,x,y))seed=x;
+        for(unsigned x=0;x<f.width && seed<0;++x)if(BothCover(f,a,b,x,y))seed=x;
+        if(seed<0)throw std::invalid_argument("seam blend needs A and B on every output row");
+        unsigned lo=static_cast<unsigned>(seed),hi=lo+1;
+        while(lo>0 && BothCover(f,a,b,lo-1,y))--lo;
+        while(hi<f.width && BothCover(f,a,b,hi,y))++hi;
+        rows[y]={lo,hi};
+    }
+    return rows;
+}
+// The band of a mapped pair: the columns of the overlap runs of all rows, one cell wider on each side.
+Band SampleMappedBand(const BgrImage& a,const BgrImage& b,const MappedFrame& f){
+    const auto rows=OverlapRows(f,a,b);unsigned first=f.width,end=0;
+    for(const auto& r:rows){first=std::min(first,r.first);end=std::max(end,r.end);}
+    first=first?first-1:0;end=std::min(f.width,end+1);
+    return SampleBandColumns(a,b,f,first,end-first,true);
 }
 // Local mean of log(A)-log(B) over blocks of side `block`, bilinear between
 // block centres. Blocks without a covered cell take the mean of all cells.
@@ -153,10 +231,11 @@ void MeasureAlongSeam(const Band& band,const SeamBlendSettings& settings,SeamBle
 // Mixes A and B along record.seam_x with row_ratio (both set), as described in
 // seam_blend.hpp. Takes the partly filled result and returns it with the image
 // and the seam summary.
-SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame& frame,const SeamBlendSettings& settings,SeamBlendResult result){
+template<class MapA,class MapB>
+SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const SeamBlendSettings& settings,SeamBlendResult result){
     auto& record=result.record;
     record.summary=SummarizeSeam(record.seam_x);
-    const unsigned width=frame.plan.output_width,height=frame.plan.output_height;
+    const unsigned width=frame.width,height=frame.height;
     auto& output=result.image;output={width,height,std::vector<std::uint8_t>(static_cast<size_t>(render::PixelCount(width,height))*3)};
     const double blend=settings.width_pixels;
     for(unsigned y=0;y<height;++y){
@@ -197,22 +276,63 @@ void RequireSeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_w
 
 SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,const SeamBlendSettings& settings){
     ValidateSeamBlendSettings(settings);
-    const auto frame=Prepare(a,b,parameters);
+    const auto prepared=Prepare(a,b,parameters);
     SeamBlendResult result;auto& record=result.record;record.settings=settings;
     {
-        const auto band=SampleBand(a,b,frame);
+        const auto band=SampleBand(a,b,prepared);
         record.seam_x=FindSeam(band,MeasureLocalRatio(band,2*settings.brightness_half_width_pixels),settings.edge_margin_pixels);
         MeasureAlongSeam(band,settings,result);
     }
-    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+    return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result));
 }
 
 SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
     ValidateSeamBlendSettings(settings);
-    const auto frame=Prepare(a,b,parameters);
+    const auto prepared=Prepare(a,b,parameters);
     SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
     {
-        const auto band=SampleBand(a,b,frame);
+        const auto band=SampleBand(a,b,prepared);
+        RequireSeamInOverlap(band,seam_column,settings.width_pixels);
+        record.seam_x.assign(band.height,seam_column);
+        MeasureAlongSeam(band,settings,result);
+    }
+    return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result));
+}
+
+bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    ValidateSeamBlendSettings(settings);
+    const auto prepared=Prepare(a,b,parameters);
+    return SeamInOverlap(SampleBand(a,b,prepared),seam_column,settings.width_pixels);
+}
+
+MappedFixedSeamInput PairMappedFixedSeamInput(std::uint32_t camera_a_width,std::uint32_t camera_a_height,std::uint32_t camera_b_width,
+    std::uint32_t camera_b_height,const render::PairRenderParameters& parameters){
+    const auto prepared=Prepare(camera_a_width,camera_a_height,camera_b_width,camera_b_height,nullptr,nullptr,parameters);
+    const PairMapA map_a=prepared.frame.map_a;const PairMapB map_b=prepared.frame.map_b;
+    return {prepared.frame.width,prepared.frame.height,
+        [map_a](render::Point output,render::Point& raw){return map_a(output.x,output.y,raw);},
+        [map_b](render::Point output,render::Point& raw){return map_b(output.x,output.y,raw);}};
+}
+
+MappedFixedSeamInput DocumentMappedFixedSeamInput(const render::DocumentRenderParameters& parameters){
+    if(parameters.layout!=StitchLayout::camera_a_left_camera_b_right)throw std::invalid_argument("seam blend needs A left and B right");
+    if(parameters.resampling!=render::Resampling::bilinear)throw std::invalid_argument("the fixed seam blend samples bilinearly");
+    render::ValidateCameraProjection(parameters.camera_a,parameters.raster);
+    render::ValidateCameraProjection(parameters.camera_b,parameters.raster);
+    return {parameters.raster.width_pixels,parameters.raster.height_pixels,
+        render::DocumentOutputToCamera(parameters.raster,parameters.camera_a),render::DocumentOutputToCamera(parameters.raster,parameters.camera_b)};
+}
+
+std::vector<MappedOverlapRow> MappedFixedSeamBand(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input){
+    return OverlapRows(PrepareMapped(a,b,input),a,b);
+}
+
+SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    ValidateSeamBlendSettings(settings);
+    const auto frame=PrepareMapped(a,b,input);
+    SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
+    {
+        const auto band=SampleMappedBand(a,b,frame);
         RequireSeamInOverlap(band,seam_column,settings.width_pixels);
         record.seam_x.assign(band.height,seam_column);
         MeasureAlongSeam(band,settings,result);
@@ -220,10 +340,17 @@ SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const re
     return ComposeAlongSeam(a,b,frame,settings,std::move(result));
 }
 
-bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){
     ValidateSeamBlendSettings(settings);
-    const auto frame=Prepare(a,b,parameters);
-    return SeamInOverlap(SampleBand(a,b,frame),seam_column,settings.width_pixels);
+    return SeamInOverlap(SampleMappedBand(a,b,PrepareMapped(a,b,input)),seam_column,settings.width_pixels);
+}
+
+SeamBlendResult RenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    return RenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings);
+}
+
+bool CanRenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    return CanRenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings);
 }
 
 FixedSeamCondition ScaleFixedSeamCondition(const FixedSeamCondition& capture,std::uint32_t capture_width,std::uint32_t capture_height,
@@ -256,8 +383,8 @@ FixedSeamCondition ScaleFixedSeamCondition(const FixedSeamCondition& capture,std
 
 std::vector<SeamDisplacementProbe> ProbeSeamDisplacement(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,
     const std::vector<std::uint32_t>& seam_x,unsigned patch,unsigned search,unsigned row_step){
-    const auto frame=Prepare(a,b,parameters);
-    const unsigned width=frame.plan.output_width,height=frame.plan.output_height;
+    const auto prepared=Prepare(a,b,parameters);const auto& frame=prepared.frame;
+    const unsigned width=frame.width,height=frame.height;
     if(seam_x.size()!=height || patch<4 || patch>512 || !search || search>256 || !row_step)throw std::invalid_argument("invalid seam probe");
     const unsigned half=patch/2,reach=half+search,side=patch+2*search;
     std::vector<SeamDisplacementProbe> probes;
