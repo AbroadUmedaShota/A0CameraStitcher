@@ -6,6 +6,8 @@
 #if defined(A0_ENABLE_UNCALIBRATED_REVIEW)
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/experimental/review_session.hpp"
+#include "a0/m2/experimental/fixed_scale_correction.hpp"
+#include "a0/m2/experimental/seam_blend.hpp"
 #include "a0/common/protocol_json.hpp"
 #include <charconv>
 #endif

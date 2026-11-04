@@ -27,6 +27,7 @@
 #include "a0/phase0/experimental/preview_mount_settings.hpp"
 #include "a0/phase0/experimental/preview_merge_policy.hpp"
 #include "a0/phase0/experimental/still_alignment_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"

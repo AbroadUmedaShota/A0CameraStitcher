@@ -31,6 +31,15 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(r.manual_revision && r.automatic_alignment)throw std::invalid_argument("manual revision and automatic alignment are exclusive");
     if(r.blend!=BlendMethod::linear_feather && r.blend!=BlendMethod::seam_cut)throw std::invalid_argument("unknown review blend");
     if(r.automatic_alignment && r.automatic_alignment->policy)ValidateStillMergePolicy(*r.automatic_alignment->policy);
+    // #400: the fixed composite owns geometry and seam, so nothing else may set them.
+    const FixedCompositeCondition* fixed_condition{};
+    if(r.fixed_composite){
+        if(r.manual_revision || r.automatic_alignment || r.blend!=BlendMethod::linear_feather || !r.fixed_composite->condition || !hash_valid(r.fixed_composite->condition_sha256))
+            throw std::invalid_argument("fixed composite review is exclusive and needs the condition and its hash");
+        fixed_condition=r.fixed_composite->condition;
+        try{ValidateFixedCompositeCondition(*fixed_condition);}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
+    }
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
     if(a_path.parent_path().filename()!=L"CAM-A" || b_path.parent_path().filename()!=L"CAM-B")throw std::invalid_argument("review A/B original paths are not alias-bound");
@@ -43,6 +52,13 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(ToLowerHex(a.sha256)!=r.camera_a_sha256 || ToLowerHex(b.sha256)!=r.camera_b_sha256)throw std::invalid_argument("review source hash differs from capture transaction");
     if(a.image.width!=b.image.width || a.image.height!=b.image.height)throw std::invalid_argument("review source dimensions differ");
     const auto width=a.image.width,height=a.image.height;
+    // Checked before anything is created: a mismatch keeps only the originals.
+    if(fixed_condition){
+        if(fixed_condition->orientation!=r.geometry.orientation)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::orientation_differs,std::string("condition ")+std::string(MountOrientationName(fixed_condition->orientation))+", capture "+std::string(MountOrientationName(r.geometry.orientation)));
+        if(fixed_condition->source_width!=width || fixed_condition->source_height!=height)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,"condition "+std::to_string(fixed_condition->source_width)+"x"+std::to_string(fixed_condition->source_height)+", capture "+std::to_string(width)+"x"+std::to_string(height));
+    }
     auto parameters=ScalePreviewReviewGeometry(r.geometry,width,height);
     std::unique_ptr<LockedReadFile> parent_file;
     if(r.manual_revision){
@@ -82,9 +98,42 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }
         active();
     }
+    // #400: geometry and seam from the fixed condition. The similarity estimate
+    // is kept as a diagnostic; only its scale-only reduction may change B, and
+    // only inside the condition's limit (the policy file never decides).
+    std::optional<SavedFixedComposite> fixed_record;
+    if(fixed_condition){
+        const auto& c=*fixed_condition;
+        // The cheap check first: a seam that cannot be drawn needs no estimate.
+        parameters=FixedCompositeRenderParameters(c);
+        if(!CanRenderFixedSeam(a.image,b.image,parameters,c.seam.column,kSeamBlendDesign))
+            throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,"seam column "+std::to_string(c.seam.column));
+        const auto started=std::chrono::steady_clock::now();
+        const auto estimate=EstimateOverlapSimilarity(a.image,b.image,c.mapping.translation_x,c.mapping.translation_y);
+        active();
+        SavedFixedComposite record;
+        record.condition_sha256=r.fixed_composite->condition_sha256;record.seam_column=c.seam.column;
+        record.seam_origin=std::string(FixedSeamOriginName(c.seam.origin));record.policy_limit=r.fixed_composite->policy_limit;
+        record.scale=DecideFixedScale(c,estimate);record.diagnostic=MakeFixedSimilarityDiagnostic(estimate);
+        alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        if(record.scale.status==FixedScaleStatus::applied){
+            bool fits=false;render::PairRenderParameters scaled{};
+            try{scaled=FixedCompositeScaledGeometry(c,record.scale.applied_scale);fits=CanRenderFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);}
+            catch(const std::invalid_argument&){fits=false;}
+            if(fits)parameters=scaled;
+            else{record.scale.status=FixedScaleStatus::seam_outside_overlap;record.scale.applied_scale=1;}
+        }
+        translation_x=c.mapping.translation_x;translation_y=c.mapping.translation_y;
+        fixed_record=std::move(record);
+    }
     // #368: the seam cut replaces only the mixing; geometry and crop are the same.
     std::optional<SeamBlendRecord> seam;double blend_milliseconds{};render::PairRenderResult rendered;
-    if(r.blend==BlendMethod::seam_cut){
+    if(fixed_record){
+        const auto started=std::chrono::steady_clock::now();
+        auto fixed=RenderPairFixedSeam(a.image,b.image,parameters,fixed_record->seam_column,kSeamBlendDesign);
+        blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        rendered.image=std::move(fixed.image);seam=std::move(fixed.record);
+    }else if(r.blend==BlendMethod::seam_cut){
         const auto started=std::chrono::steady_clock::now();auto cut=RenderPairSeamCut(a.image,b.image,parameters,kSeamBlendDesign);
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         rendered.image=std::move(cut.image);seam=std::move(cut.record);
@@ -123,7 +172,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -158,20 +207,22 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
-    if(seam)WriteSeamBlendJson(report,*seam);
+    if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
+        WriteFixedCompositeJson(report,*fixed_record,fixed_condition->mapping.translation_x,fixed_condition->mapping.translation_y,fixed_condition->mapping.rotation_degrees,fixed_condition->mapping.scale);WriteFixedSeamBlendJson(report,*seam);}
+    else if(seam)WriteSeamBlendJson(report,*seam);
     report<<"}";
     const auto document=report.str();const std::vector<std::uint8_t> report_bytes(document.begin(),document.end());
     const auto report_partial=job/L"uncalibrated-review.json.partial";active();WriteBytesToNewFile(report_partial,report_bytes);
     {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
     result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
-    result.blend=std::move(seam);result.blend_milliseconds=blend_milliseconds;
+    result.blend=std::move(seam);result.fixed_composite=std::move(fixed_record);result.blend_milliseconds=blend_milliseconds;
     active();return result;
 }
 StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height){
     if(!crop_width || !crop_height)throw std::invalid_argument("comparison crop is empty");
     const auto sources=LoadStillReviewSources(review);
-    const auto parameters=SimilarityReviewGeometry(review.translation_x,review.translation_y,review.rotation_degrees,review.scale,review.source_width,review.source_height);
+    const auto parameters=SavedStillReviewRenderParameters(review);
     StillBlendComparison c;const auto since=[](auto started){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();};
     auto started=std::chrono::steady_clock::now();auto feather=render::RenderPair(sources[0],sources[1],parameters).image;c.feather_milliseconds=since(started);
     started=std::chrono::steady_clock::now();auto cut=RenderPairSeamCut(sources[0],sources[1],parameters,kSeamBlendDesign);c.seam_milliseconds=since(started);
