@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -110,6 +111,21 @@ FixedCompositeConditionV2 ParseFixedCompositeConditionV2(std::string_view text);
 // same JSON checks. Throws std::invalid_argument if the text is not a JSON
 // object with a string "schema". Reads nothing else.
 std::string FixedCompositeConditionSchemaOf(std::string_view text);
+
+// A problem with the profile a v2 record names, as opposed to the record itself:
+// `missing` when the file is not in the condition's folder, `differs` when it is
+// there but is not the profile the record names (SHA-256, fingerprint) or cannot be
+// used (not a rig profile 2.0.0, not a calibrated draft, A not left of B, projections
+// invalid over the raster). It is a std::invalid_argument, so callers that only check
+// for that keep working; the review writer uses the kind to say why nothing was composed.
+class FixedCompositeProfileError : public std::invalid_argument {
+public:
+    enum class Kind {missing,differs};
+    FixedCompositeProfileError(Kind kind,const std::string& what):std::invalid_argument(what),kind_(kind){}
+    Kind GetKind() const noexcept {return kind_;}
+private:
+    Kind kind_;
+};
 
 // The referenced profile after verification, ready for the renderers.
 struct FixedCompositeProfileBinding {

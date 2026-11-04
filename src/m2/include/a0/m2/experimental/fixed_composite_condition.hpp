@@ -259,6 +259,8 @@ inline std::string FormatFixedCompositeTime(std::chrono::system_clock::time_poin
 // field).
 inline FixedCompositeCondition MakeFixedCompositeCondition(const SavedStillReview& review,std::chrono::system_clock::time_point created,double scale_auto_correction_max_percent){
     if(review.manual_revision && review.automatic)throw std::invalid_argument("a review is either manual or automatic");
+    // A lens-aware (v7) report has no similarity to fix; its mapping is a profile's (#405).
+    if(review.fixed_composite_lens)throw std::invalid_argument("a lens-aware review has no similarity mapping to make a v1 condition from");
     FixedCompositeCondition c;
     c.created_utc=FormatFixedCompositeTime(created);
     c.source.review_report_sha256=review.report_sha256;c.source.pair_id=review.pair_id;

@@ -19,6 +19,28 @@ EncodedJpegIdentity EncodeReview(IWICImagingFactory* factory,Image& image,const 
 std::string ReviewPathJson(const std::filesystem::path& path){
     const auto u8=path.generic_u8string();return a0::common::protocol_json::JsonEscape(std::string(reinterpret_cast<const char*>(u8.data()),u8.size()));
 }
+// #405 W4. The expected B-to-A translation of the profile's fixed mapping, in the pixels of the
+// oriented frames the tile estimator works in (A left, B right): B's grid centre goes to the document
+// by B's fixed mapping (the centre of the scale correction) and from there to A's raw pixel. A shift is
+// the same in both pixel conventions; a half turn only reverses its sign. False where either mapping
+// has no point or the position is not one the estimator accepts as a start.
+bool LensEstimatorPrior(const FixedCompositeProfileBinding& profile,MountOrientation orientation,unsigned width,unsigned height,int& x,int& y){
+    try{
+        const auto& p=profile.parameters;
+        const auto document=FixedCompositeScaleCenterMm(p.camera_b);
+        render::Point on_a{};
+        if(!render::TryProjectDocument(p.camera_a,document,on_a))return false;
+        double dx=on_a.x-(static_cast<double>(width)-1)/2,dy=on_a.y-(static_cast<double>(height)-1)/2;
+        if(orientation==MountOrientation::rotated_180){dx=-dx;dy=-dy;}
+        if(!std::isfinite(dx) || !std::isfinite(dy) || std::abs(dx)>=width || std::abs(dy)>=height)return false;
+        x=static_cast<int>(std::llround(dx));y=static_cast<int>(std::llround(dy));
+        return x>0 && x<static_cast<int>(width) && std::abs(y)<static_cast<int>(height);
+    }catch(const std::invalid_argument&){return false;}
+}
+bool SameLensRaster(const render::OutputRaster& a,const render::OutputRaster& b){
+    return a.region_um.left==b.region_um.left && a.region_um.top==b.region_um.top && a.region_um.right==b.region_um.right && a.region_um.bottom==b.region_um.bottom &&
+        a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
+}
 }
 #include "still_review_report_impl.hpp"
 StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
@@ -40,6 +62,20 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         try{ValidateFixedCompositeCondition(*fixed_condition);}
         catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
     }
+    // #405 W4: the lens-aware fixed composite owns geometry and seam too; its profile is the mapping.
+    const FixedCompositeConditionV2* lens_condition{};const FixedCompositeProfileBinding* lens_profile{};
+    if(r.fixed_composite_lens){
+        const auto& lens=*r.fixed_composite_lens;
+        if(r.fixed_composite || r.manual_revision || r.automatic_alignment || r.blend!=BlendMethod::linear_feather || !lens.condition || !lens.profile || !hash_valid(lens.condition_sha256))
+            throw std::invalid_argument("lens-aware fixed composite review is exclusive and needs the condition, its profile and the condition hash");
+        lens_condition=lens.condition;lens_profile=lens.profile;
+        try{ValidateFixedCompositeConditionV2(*lens_condition);}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
+        // The binding must be the profile this condition names, for this condition's raster.
+        if(lens_profile->profile_file_sha256!=lens_condition->source.profile_file_sha256 || lens_profile->profile_fingerprint_sha256!=lens_condition->source.profile_fingerprint_sha256 ||
+            !SameLensRaster(lens_profile->parameters.raster,lens_condition->raster))
+            throw FixedCompositeUnavailable(FixedCompositeSkip::profile_differs,"the profile binding is not the one the condition names");
+    }
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
     if(a_path.parent_path().filename()!=L"CAM-A" || b_path.parent_path().filename()!=L"CAM-B")throw std::invalid_argument("review A/B original paths are not alias-bound");
@@ -58,6 +94,13 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             throw FixedCompositeUnavailable(FixedCompositeSkip::orientation_differs,std::string("condition ")+std::string(MountOrientationName(fixed_condition->orientation))+", capture "+std::string(MountOrientationName(r.geometry.orientation)));
         if(fixed_condition->source_width!=width || fixed_condition->source_height!=height)
             throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,"condition "+std::to_string(fixed_condition->source_width)+"x"+std::to_string(fixed_condition->source_height)+", capture "+std::to_string(width)+"x"+std::to_string(height));
+    }
+    if(lens_condition){
+        if(lens_condition->orientation!=r.geometry.orientation)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::orientation_differs,std::string("condition ")+std::string(MountOrientationName(lens_condition->orientation))+", capture "+std::string(MountOrientationName(r.geometry.orientation)));
+        // The profile's camera model fixes the frame its mapping is defined on.
+        if(width!=kD810SensorWidthPixels || height!=kD810SensorHeightPixels)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,"profile frame "+std::to_string(kD810SensorWidthPixels)+"x"+std::to_string(kD810SensorHeightPixels)+", capture "+std::to_string(width)+"x"+std::to_string(height));
     }
     auto parameters=ScalePreviewReviewGeometry(r.geometry,width,height);
     std::unique_ptr<LockedReadFile> parent_file;
@@ -78,6 +121,16 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         parameters=SimilarityReviewGeometry(revision.x,revision.y,revision.rotation_degrees,revision.scale,width,height);
     }
     active();
+    // The mapped composite works on the stored pixel order (design 3.7). The cheap check that the seam can be drawn
+    // comes first: a seam that cannot be drawn needs no estimate. Nothing but sizes is read from the images here.
+    std::optional<MappedFixedSeamInput> lens_pair;
+    if(lens_condition){
+        try{
+            lens_pair=ScaledDocumentMappedFixedSeamInput(lens_profile->parameters,1.0);
+            if(!CanRenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign))
+                throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,"seam column "+std::to_string(lens_condition->seam.column));
+        }catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,error.what());}
+    }
     // Only the decoded copies turn; the locked originals stay byte-identical.
     OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);
     int translation_x=static_cast<int>(parameters.camera_b_to_camera_a[2]),translation_y=static_cast<int>(parameters.camera_b_to_camera_a[5]);
@@ -97,6 +150,38 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             translation_x=applied.x;translation_y=applied.y;
         }
         active();
+    }
+    // #405 W4: the scale of this capture on the lens-aware composite. The tiles of the similarity estimator
+    // (run on the oriented frames, from the profile's own mapping) are moved to the document and fitted there;
+    // the decision is DecideFixedScaleV2's. Then the images go back to the stored order the mapping is defined on.
+    std::optional<SavedFixedCompositeLens> lens_record;
+    if(lens_condition){
+        const auto& c=*lens_condition;const auto& profile=*lens_profile;
+        const auto started=std::chrono::steady_clock::now();
+        OverlapSimilarityEstimate estimate;int prior_x{},prior_y{};
+        if(LensEstimatorPrior(profile,c.orientation,width,height,prior_x,prior_y))estimate=EstimateOverlapSimilarity(a.image,b.image,prior_x,prior_y);
+        else{estimate.status=OverlapEstimateStatus::undetermined;estimate.reason=SimilarityUndeterminedReason::outside_image;}
+        active();
+        OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);
+        SavedFixedCompositeLens record;
+        record.condition_sha256=r.fixed_composite_lens->condition_sha256;record.profile_file=c.source.profile_file;
+        record.profile_file_sha256=profile.profile_file_sha256;record.profile_fingerprint_sha256=profile.profile_fingerprint_sha256;
+        if(profile.profile_id && !profile.profile_id->empty())record.profile_id=profile.profile_id;
+        record.raster=c.raster;record.seam_column=c.seam.column;record.seam_origin=std::string(FixedSeamOriginName(c.seam.origin));
+        record.policy_limit=r.fixed_composite_lens->policy_limit;
+        record.estimate_status=estimate.status;record.estimate_reason=estimate.reason;record.wide_search=estimate.wide_search;
+        record.tiles_searched=static_cast<unsigned>(estimate.tiles.size());record.tiles_matched=estimate.matched;record.tiles_agreed=estimate.agreed;
+        record.scale=DecideFixedScaleV2(c,profile,estimate,width,height);
+        if(record.scale.status==FixedScaleStatus::applied){
+            // The correction must leave the seam (and half the blend) inside the overlap; otherwise it is not applied.
+            bool fits=false;MappedFixedSeamInput scaled;
+            try{scaled=ScaledDocumentMappedFixedSeamInput(profile.parameters,record.scale.applied_scale);fits=CanRenderMappedFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);}
+            catch(const std::invalid_argument&){fits=false;}
+            if(fits)lens_pair=std::move(scaled);
+            else{record.scale.status=FixedScaleStatus::seam_outside_overlap;record.scale.applied_scale=1;}
+        }
+        alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        lens_record=std::move(record);
     }
     // #400: geometry and seam from the fixed condition. The similarity estimate
     // is kept as a diagnostic; only its scale-only reduction may change B, and
@@ -128,7 +213,14 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     }
     // #368: the seam cut replaces only the mixing; geometry and crop are the same.
     std::optional<SeamBlendRecord> seam;double blend_milliseconds{};render::PairRenderResult rendered;
-    if(fixed_record){
+    if(lens_record){
+        const auto started=std::chrono::steady_clock::now();
+        auto fixed=RenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign);
+        blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        // The raster is fixed by the condition: the output is never another size.
+        if(fixed.image.width!=lens_condition->raster.width_pixels || fixed.image.height!=lens_condition->raster.height_pixels)throw std::runtime_error("lens-aware composite is not the size of the condition's raster");
+        rendered.image=std::move(fixed.image);seam=std::move(fixed.record);
+    }else if(fixed_record){
         const auto started=std::chrono::steady_clock::now();
         auto fixed=RenderPairFixedSeam(a.image,b.image,parameters,fixed_record->seam_column,kSeamBlendDesign);
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
@@ -172,7 +264,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -180,8 +272,10 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         <<"\"previewGeometry\":{\"width\":"<<r.geometry.width<<",\"height\":"<<r.geometry.height<<",\"overlap\":"<<r.geometry.overlap<<",\"vertical\":"<<r.geometry.vertical<<",\"revision\":"<<r.geometry.revision<<"},";
     // Absent means normal, so normal reports keep their previous bytes.
     if(r.geometry.orientation!=MountOrientation::normal)report<<"\"mountOrientation\":\""<<MountOrientationName(r.geometry.orientation)<<"\",";
-    report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},\"translation\":{\"x\":"<<translation_x<<",\"y\":"<<translation_y<<"},"
-        <<"\"output\":{\"path\":\"uncalibrated-review.jpg\",\"width\":"<<output_width<<",\"height\":"<<output_height<<",\"bytes\":"<<encoded.size<<",\"sha256\":\""<<result.sha256<<"\"}";
+    report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},";
+    // The lens-aware mapping is the profile's: no translation (v7).
+    if(!lens_record)report<<"\"translation\":{\"x\":"<<translation_x<<",\"y\":"<<translation_y<<"},";
+    report<<"\"output\":{\"path\":\"uncalibrated-review.jpg\",\"width\":"<<output_width<<",\"height\":"<<output_height<<",\"bytes\":"<<encoded.size<<",\"sha256\":\""<<result.sha256<<"\"}";
     if(r.manual_revision)report<<",\"geometryBasis\":\""<<(similarity?"manual-still-similarity":"manual-still-pixels")<<"\",\"parentReview\":{\"path\":\""<<ReviewPathJson(NormalizedAbsolute(r.manual_revision->parent_report))<<"\",\"sha256\":\""<<r.manual_revision->parent_report_sha256<<"\"}";
     if(similarity)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<r.manual_revision->rotation_degrees<<",\"scale\":"<<r.manual_revision->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
     if(automatic){
@@ -207,7 +301,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
-    if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
+    if(lens_record){report<<",\"geometryBasis\":\"fixed-composite-lens\"";WriteFixedCompositeLensJson(report,*lens_record);WriteFixedSeamBlendJson(report,*seam);}
+    else if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
         WriteFixedCompositeJson(report,*fixed_record,fixed_condition->mapping.translation_x,fixed_condition->mapping.translation_y,fixed_condition->mapping.rotation_degrees,fixed_condition->mapping.scale);WriteFixedSeamBlendJson(report,*seam);}
     else if(seam)WriteSeamBlendJson(report,*seam);
     report<<"}";
@@ -216,11 +311,12 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
     result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
-    result.blend=std::move(seam);result.fixed_composite=std::move(fixed_record);result.blend_milliseconds=blend_milliseconds;
+    result.blend=std::move(seam);result.fixed_composite=std::move(fixed_record);result.fixed_composite_lens=std::move(lens_record);result.blend_milliseconds=blend_milliseconds;
     active();return result;
 }
 StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height){
     if(!crop_width || !crop_height)throw std::invalid_argument("comparison crop is empty");
+    if(review.fixed_composite_lens)throw std::invalid_argument("the blend comparison re-renders a similarity placement; a lens-aware review has none");
     const auto sources=LoadStillReviewSources(review);
     const auto parameters=SavedStillReviewRenderParameters(review);
     StillBlendComparison c;const auto since=[](auto started){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();};

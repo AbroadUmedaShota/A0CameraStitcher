@@ -75,6 +75,8 @@ namespace a0::m2::experimental {
 // What a saved report rendered: the fixed mapping of a v6 report with its
 // applied scale, the report's own placement otherwise.
 [[nodiscard]] inline render::PairRenderParameters SavedStillReviewRenderParameters(const SavedStillReview& r){
+    // A v7 report has no similarity to rebuild: its mapping is the profile's (#405 W4).
+    if(r.fixed_composite_lens)throw std::invalid_argument("a lens-aware (v7) report has no similarity placement");
     if(r.fixed_composite)
         return FixedCompositeScaledGeometry(r.translation_x,r.translation_y,r.rotation_degrees,r.scale,r.source_width,r.source_height,
             r.fixed_composite->scale.applied_scale);

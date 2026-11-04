@@ -48,30 +48,7 @@ namespace a0::m2::experimental {
 // parameters, applied_scale): the one place that puts k into B's mapping. The output
 // raster is fixed by the condition and is not planned again; that every k inside the limit
 // is covered and keeps the seam inside the overlap was checked when the condition was made.
-struct FixedScaleCorrectionV2 {
-    FixedScaleStatus status{FixedScaleStatus::not_estimated};
-    FixedScaleReason reason{FixedScaleReason::no_tiles};
-    // From the condition record; no code default.
-    double limit_percent{};
-    // Present when a fit exists. difference_percent is |estimated*100-100|, the value compared with the limit.
-    std::optional<double> estimated_scale,difference_percent;
-    // The factor put into B's mapping: the estimate when applied, else 1.
-    double applied_scale{1};
-    // Fixed point of the correction: document mm, and the same point in output raster pixels
-    // (document point minus the raster's top left, over the pitch, minus half a pixel: the
-    // coordinates ScaledDocumentOutputToCamera takes its samples in).
-    render::Point center_mm{},center_output_pixels{};
-    unsigned used_tiles{};
-    // Rows of the estimator's tile grid that used tiles came from: how many distinct, and the
-    // first and last. Meaningful when used_tiles > 0. A short span means a short lever arm.
-    unsigned used_rows{},first_used_row{},last_used_row{};
-    // Residual of the fitted model (scale and free shift) over the used tiles.
-    FitResidual residual_mm,residual_output_pixels;
-    // t = k q + d: what the scale could not explain. Present with estimated_scale. Diagnostic
-    // only, never applied. A large value means B moved (shake, a pattern period) or the
-    // scale acts about B's own optical centre rather than about P.
-    render::Point unexplained_shift_mm{},unexplained_shift_output_pixels{};
-};
+// FixedScaleCorrectionV2, the result of the decision, is declared in still_review.hpp: a v7 report holds it (#405 W4).
 
 // Fits k from an estimate of the oriented frames (frame_width x frame_height, which must be
 // the profile's 7360x4912) and decides against the condition's limit. Pure. status is applied
