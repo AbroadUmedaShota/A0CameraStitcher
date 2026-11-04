@@ -28,9 +28,14 @@ namespace a0::m2::experimental {
 // (EstimateOverlapSimilarity). Its own fit frees rotation and translation, so
 // its scale cannot be used as is: a rotation of a few hundredths of a degree
 // would leak into it. Instead the agreed tiles it returns are reused and k is
-// refitted with rotation and translation tied to H:
-//   k = sum(q . t) / sum(q . q),  q = H(b) - P,  t = a - P,
-// the least-squares solution of t = k q over the used tiles. The estimator's
+// refitted with the rotation tied to H. The translation is free inside the
+// estimate only, t = k q + d with q = H(b) - P and t = a - P:
+//   k = sum((q - qm) . (t - tm)) / sum(|q - qm|^2),  d = tm - k qm,
+// so a shift that is not a scale (shake, one pattern period) does not leak into
+// k when the tiles sit on one side of P. Only k is applied; d is recorded as
+// the shift the scale could not explain. The center P is decided in one place,
+// FixedScaleCenter (the owner is asked whether it should be B's own optical
+// center instead). The estimator's
 // own similarity fit stays a diagnostic. A tile is used when it is in the
 // estimator's consensus and its match lies within the estimator's search
 // window of where H puts it; a match a whole pattern period away (a repeated

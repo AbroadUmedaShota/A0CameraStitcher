@@ -678,7 +678,8 @@ int main(){
             check(read.condition_sha256==loaded_condition->file_sha256 && read.seam_column==condition.seam.column && read.seam_origin=="band-center-provisional");
             check(read.scale.status==wrote.scale.status && read.scale.reason==wrote.scale.reason && read.scale.limit_percent==1 && read.scale.estimated_scale==wrote.scale.estimated_scale &&
                 read.scale.difference_percent==wrote.scale.difference_percent && read.scale.applied_scale==wrote.scale.applied_scale && read.scale.center.x==wrote.scale.center.x &&
-                read.scale.center.y==wrote.scale.center.y && read.scale.used_tiles==wrote.scale.used_tiles && read.scale.residual.rms==wrote.scale.residual.rms && read.scale.residual.maximum==wrote.scale.residual.maximum);
+                read.scale.center.y==wrote.scale.center.y && read.scale.used_tiles==wrote.scale.used_tiles && read.scale.residual.rms==wrote.scale.residual.rms && read.scale.residual.maximum==wrote.scale.residual.maximum &&
+                read.scale.unexplained_shift.x==wrote.scale.unexplained_shift.x && read.scale.unexplained_shift.y==wrote.scale.unexplained_shift.y);
             check(read.diagnostic.status==wrote.diagnostic.status && read.diagnostic.tiles_agreed==wrote.diagnostic.tiles_agreed && read.diagnostic.similarity && wrote.diagnostic.similarity &&
                 read.diagnostic.similarity->scale==wrote.diagnostic.similarity->scale && read.diagnostic.similarity_residual.rms==wrote.diagnostic.similarity_residual.rms);
             check(read.policy_limit.check==FixedPolicyCheck::same && read.policy_limit.policy_percent==1.0);
@@ -693,6 +694,9 @@ int main(){
             // The inspector's texts come from the read record.
             check(px::FixedCompositeDetails(saved_fixed).find(L"固定の合成条件（未承認）")!=std::wstring::npos && px::FixedCompositeDetails(saved_fixed).find(L"継ぎ目の列: "+std::to_wstring(condition.seam.column))!=std::wstring::npos &&
                 px::FixedCompositeLine(read).find(L"桃色の縦線")!=std::wstring::npos && px::FixedCompositeLine(read).find(L"補正しました")!=std::wstring::npos);
+            // An applied scale is not in the inspector's fields or residuals; the panel and status say so.
+            check(read.scale.applied_scale!=1 && px::FixedCompositeDetails(saved_fixed).find(L"入力欄に含まれません")!=std::wstring::npos &&
+                px::FixedCompositeDetails(saved_fixed).find(L"倍率で説明できなかったずれ")!=std::wstring::npos && px::FixedScaleInputNote(read.scale).find(L"×")!=std::wstring::npos);
             // A child manual re-Merge of a fixed composite keeps working as a way to inspect a saved pair.
             StillReviewRequest child{near_request.camera_a_original,near_request.camera_b_original,near_pair/"revision",near_request.camera_a_sha256,near_request.camera_b_sha256,
                 near_request.pair_id,near_request.geometry,std::chrono::steady_clock::now()+std::chrono::seconds(600),StillReviewRequest::ManualRevision{930,9,made.report,saved_fixed.report_sha256}};
@@ -708,6 +712,15 @@ int main(){
                 {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<changed;}
                 reject([&]{LoadSavedStillReview(damaged/"uncalibrated-review.json");});
             };
+            // Control: the same copy, unaltered, is read. Without it a rejection could come from the copy itself.
+            {
+                fs::create_directories(damaged);fs::copy_file(made.jpeg,damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+                {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<text;}
+                const auto control=LoadSavedStillReview(damaged/"uncalibrated-review.json");
+                check(control.fixed_composite && control.fixed_composite->seam_column==condition.seam.column && control.width==saved_fixed.width);
+            }
+            reject_text("\"unexplainedShift\":{","\"unexplainedShift\":{\"extra\":0,");
+            reject_text("\"unexplainedShift\":{\"x\":","\"unexplainedShift\":{\"z\":");
             reject_text("\"status\":\"applied\"","\"status\":\"exceeded\"");
             reject_text("\"status\":\"applied\"","\"status\":\"not-estimated\"");
             reject_text("\"origin\":\"band-center-provisional\"","\"origin\":\"operator-x\"");

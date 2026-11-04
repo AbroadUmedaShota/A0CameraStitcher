@@ -154,7 +154,8 @@ struct Inspector {
     // so a re-Merge that changes only the blend keeps the parent geometry.
     void InitialDraft(){
         SetDraft();const auto estimate=review::EstimatedStillReviewGeometry(current.record);EnableWindow(buttons[32],estimate.has_value());
-        if(current.record.fixed_composite){status=a0::phase0::experimental::FixedCompositeLine(*current.record.fixed_composite);return;}
+        if(current.record.fixed_composite){status=a0::phase0::experimental::FixedCompositeLine(*current.record.fixed_composite);
+            if(current.record.fixed_composite->scale.applied_scale!=1)status+=L" / "+a0::phase0::experimental::FixedScaleInputNote(current.record.fixed_composite->scale);return;}
         const auto& automatic=current.record.automatic;if(!automatic)return;
         status=a0::phase0::experimental::StillAlignmentLine(*automatic);
         if(estimate && !SameGeometry(*estimate,review::SavedStillReviewGeometry(current.record)))status+=L" 入力欄は保存JPEGの値です。推定値は「推定値を入力欄へ」で入れます。";

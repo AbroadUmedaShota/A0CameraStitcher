@@ -208,7 +208,12 @@ struct FixedScaleCorrection {
     // of the output window, in A's pixels.
     render::Point center{};
     unsigned used_tiles{};
-    FitResidual residual; // of the scale-only fit over the used tiles
+    FitResidual residual; // of the fitted model (scale and free shift) over the used tiles
+    // What the scale could not explain: the mean shift left after the scale, in
+    // A pixels with P as the origin (t = k q + d). Present with estimated_scale.
+    // Diagnostic only; it is not applied. A large value means B moved (shake, a
+    // pattern period) or the scale acts about B's own center rather than about P.
+    render::Point unexplained_shift{};
 };
 // The #365 similarity estimate of this capture, kept for diagnosis only. It is
 // never used for the geometry (only its scale-only reduction above may be).

@@ -144,7 +144,7 @@ void WriteFixedCompositeJson(std::ostream& out,const SavedFixedComposite& f,int 
         <<"\"},\"scaleCorrection\":{\"status\":\""<<FixedScaleStatusCode(s.status)<<"\",\"reason\":\""<<FixedScaleReasonCode(s.reason)<<"\",\"limitPercent\":"<<s.limit_percent
         <<",\"estimatedScale\":";optional(s.estimated_scale);out<<",\"differencePercent\":";optional(s.difference_percent);
     out<<",\"appliedScale\":"<<s.applied_scale<<",\"center\":{\"x\":"<<s.center.x<<",\"y\":"<<s.center.y<<"},\"usedTiles\":"<<s.used_tiles<<",\"residualPixels\":";
-    if(s.estimated_scale)out<<"{\"rms\":"<<s.residual.rms<<",\"maximum\":"<<s.residual.maximum<<"}";else out<<"null";
+    if(s.estimated_scale)out<<"{\"rms\":"<<s.residual.rms<<",\"maximum\":"<<s.residual.maximum<<"},\"unexplainedShift\":{\"x\":"<<s.unexplained_shift.x<<",\"y\":"<<s.unexplained_shift.y<<"}";else out<<"null,\"unexplainedShift\":null";
     out<<",\"notice\":";text(FixedScaleNotice(s.status));
     out<<"},\"policyLimit\":{\"check\":\""<<FixedPolicyCheckCode(f.policy_limit.check)<<"\",\"policyPercent\":";optional(f.policy_limit.policy_percent);
     out<<",\"conditionPercent\":"<<s.limit_percent<<",\"notice\":";text(FixedPolicyNotice(f.policy_limit.check));
@@ -177,7 +177,7 @@ SavedFixedComposite ReadFixedComposite(const ReviewValue& value,int fixed_x,int 
     f.seam_column=static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(seam,"column"),render::kMaximumImageDimension));
     f.seam_origin=ReviewString(ReviewAt(seam,"origin"));if(!ParseFixedSeamOrigin(f.seam_origin))ReviewReject();
     const auto& s=ReviewAt(value,"scaleCorrection");
-    ReviewFields(s,{"status","reason","limitPercent","estimatedScale","differencePercent","appliedScale","center","usedTiles","residualPixels","notice"});
+    ReviewFields(s,{"status","reason","limitPercent","estimatedScale","differencePercent","appliedScale","center","usedTiles","residualPixels","unexplainedShift","notice"});
     bool known=false;const auto status=ReviewString(ReviewAt(s,"status"));
     for(const auto v:{FixedScaleStatus::applied,FixedScaleStatus::exceeded,FixedScaleStatus::not_estimated,FixedScaleStatus::seam_outside_overlap})
         if(status==FixedScaleStatusCode(v)){f.scale.status=v;known=true;}
@@ -195,6 +195,9 @@ SavedFixedComposite ReadFixedComposite(const ReviewValue& value,int fixed_x,int 
     if(c.estimated_scale){
         if(*c.estimated_scale<=0 || *c.difference_percent!=StillScaleDifferencePercent(*c.estimated_scale))ReviewReject();
         c.residual=ReviewResidual(residual);
+        const auto& shift=ReviewAt(s,"unexplainedShift");ReviewFields(shift,{"x","y"});c.unexplained_shift={ReviewDouble(ReviewAt(shift,"x")),ReviewDouble(ReviewAt(shift,"y"))};
+    }else if(ReviewAt(s,"unexplainedShift").kind!=ReviewJson::JsonKind::null_value){
+        ReviewReject();
     }
     const bool estimated=c.estimated_scale.has_value();
     switch(c.status){

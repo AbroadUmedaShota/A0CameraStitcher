@@ -50,7 +50,7 @@ double Angle(const render::Matrix3& m){return std::atan2(m[3],m[0])*180/3.141592
 // An estimate whose agreed tiles follow x_A = P + k (H(b) - P) exactly, with
 // H the fixed mapping of a translation-only condition. dxs/dys: where H puts
 // each tile, relative to P.
-OverlapSimilarityEstimate ModelEstimate(const FixedCompositeCondition& c,double k,const std::vector<std::pair<int,int>>& offsets,unsigned radius=50){
+OverlapSimilarityEstimate ModelEstimate(const FixedCompositeCondition& c,double k,const std::vector<std::pair<int,int>>& offsets,unsigned radius=50,double shift_x=0,double shift_y=0){
     OverlapSimilarityEstimate e;
     e.status=OverlapEstimateStatus::estimated_not_judged;e.reason=SimilarityUndeterminedReason::none;e.search_radius=radius;
     const auto p=FixedScaleCenter(c);
@@ -58,7 +58,7 @@ OverlapSimilarityEstimate ModelEstimate(const FixedCompositeCondition& c,double 
     for(const auto& [dx,dy]:offsets){
         const double predicted_x=p.x+dx,predicted_y=p.y+dy;
         SimilarityTile t{};
-        t.a_x=p.x+k*(predicted_x-p.x);t.a_y=p.y+k*(predicted_y-p.y);
+        t.a_x=p.x+k*(predicted_x-p.x)+shift_x;t.a_y=p.y+k*(predicted_y-p.y)+shift_y;
         t.b_x=predicted_x-c.mapping.translation_x;t.b_y=predicted_y-c.mapping.translation_y; // identity rotation and scale
         t.row=row++;t.column=0;t.matched=true;t.agreed=true;e.tiles.push_back(t);
     }
@@ -66,7 +66,10 @@ OverlapSimilarityEstimate ModelEstimate(const FixedCompositeCondition& c,double 
     e.similarity={double(c.mapping.translation_x),double(c.mapping.translation_y),0,k};
     return e;
 }
-const std::vector<std::pair<int,int>> kOffsets{{-60,-300},{40,-200},{-20,-100},{70,100},{-50,200},{30,300}};
+// Eight tiles keep every sum exact in binary (the mean divides by 8).
+const std::vector<std::pair<int,int>> kOffsets{{-60,-300},{40,-200},{-20,-100},{70,100},{-50,200},{30,300},{10,-250},{-30,150}};
+// All on one side of the center (y > 0), where a shift and a scale are hardest to tell apart.
+const std::vector<std::pair<int,int>> kOneSide{{-60,50},{40,100},{-20,150},{70,200},{-50,250},{30,300},{10,350},{-30,400}};
 }
 
 int main(){
@@ -119,7 +122,7 @@ int main(){
         CHECK(decided.status==FixedScaleStatus::applied && decided.reason==FixedScaleReason::none);
         CHECK(decided.estimated_scale && *decided.estimated_scale==k_exact && decided.applied_scale==k_exact);
         CHECK(decided.difference_percent && *decided.difference_percent==0.78125 && decided.limit_percent==0.78125);
-        CHECK(decided.used_tiles==kOffsets.size() && decided.residual.maximum==0);
+        CHECK(decided.used_tiles==kOffsets.size() && decided.residual.maximum<1e-9 && decided.unexplained_shift.x==0 && decided.unexplained_shift.y==0);
         CHECK(decided.center.x==FixedScaleCenter(limited).x && decided.center.y==FixedScaleCenter(limited).y);
         limited.scale_auto_correction_max_percent=std::nextafter(0.78125,0.0);
         decided=DecideFixedScale(limited,ModelEstimate(limited,k_exact,kOffsets));
@@ -136,6 +139,20 @@ int main(){
         CHECK(DecideFixedScale(limited,ModelEstimate(limited,k_exact,kOffsets)).status==FixedScaleStatus::exceeded);
         limited.scale_auto_correction_max_percent=1;
 
+        // A shift that is not a scale must not become one (#400 review H1). Every
+        // tile moved by (0,5), all of them on the y > 0 side of the center: with
+        // the translation tied to H this read as k = 1 + sum(q.d)/sum(|q|^2) > 1.
+        {
+            decided=DecideFixedScale(limited,ModelEstimate(limited,1.0,kOneSide,50,0,5));
+            CHECK(decided.status==FixedScaleStatus::applied && decided.estimated_scale && *decided.estimated_scale==1 && decided.applied_scale==1);
+            CHECK(decided.unexplained_shift.x==0 && decided.unexplained_shift.y==5 && decided.residual.maximum<1e-9);
+            // The same shift on a real scale: the scale is found, the shift is left over.
+            decided=DecideFixedScale(limited,ModelEstimate(limited,k_exact,kOneSide,50,-3,5));
+            CHECK(decided.status==FixedScaleStatus::applied && *decided.estimated_scale==k_exact && decided.unexplained_shift.x==-3 && decided.unexplained_shift.y==5);
+            // A shift alone never moves k, on either side.
+            decided=DecideFixedScale(limited,ModelEstimate(limited,1.0,kOffsets,50,7,-4));
+            CHECK(*decided.estimated_scale==1 && decided.unexplained_shift.x==7 && decided.unexplained_shift.y==-4);
+        }
         // Tiles that disagree with the model leave a residual; the fit still takes the least-squares k.
         {
             auto noisy=ModelEstimate(limited,k_exact,kOffsets);
@@ -243,6 +260,20 @@ int main(){
             std::cout<<"  displacement uncorrected max="<<before.first<<" corrected max="<<after.first<<" probes="<<before.second<<"/"<<after.second<<'\n';
             CHECK(after.second>0 && after.first<=before.first+1e-9);
             if(std::abs(test.truth-1)>2e-3)CHECK(after.first<before.first);
+        }
+        // B enlarged about its OWN image center (what a focus or height change does),
+        // not about P: a = k (H(b) - Hc) + Hc. About P that is the same scale plus a
+        // shift d = (1 - k)(Hc - P). The scale must still come out as k, and the
+        // shift is reported instead of being mistaken for a scale (#400 review H1).
+        {
+            const double truth=1.005;
+            const auto b=scene::ViewB(world,w,h,930,9,0,truth,1.0);
+            const auto result=DecideFixedScale(flat,EstimateOverlapSimilarity(a,b,930,9));
+            const double expected_x=(1-truth)*(cx+930-p.x),expected_y=(1-truth)*(cy+9-p.y);
+            std::cout<<"own-center truth="<<truth<<" status="<<FixedScaleStatusCode(result.status)<<" estimated="<<(result.estimated_scale?*result.estimated_scale:0.0)
+                <<" shift="<<result.unexplained_shift.x<<","<<result.unexplained_shift.y<<" expected="<<expected_x<<","<<expected_y<<'\n';
+            CHECK(result.status==FixedScaleStatus::applied && result.estimated_scale && Near(*result.estimated_scale,truth,1.5e-3));
+            CHECK(Near(result.unexplained_shift.x,expected_x,1.0) && Near(result.unexplained_shift.y,expected_y,1.0));
         }
         // Another scene with the same fixed fields: the mapping and the seam do not depend on the content.
         {

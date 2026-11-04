@@ -41,6 +41,10 @@ inline std::wstring FixedPolicyLine(const a0::m2::experimental::FixedPolicyLimit
     if(p.check==C::differs)return notice+L"（方針ファイル "+StillFixed(*p.policy_percent,2)+L"% / 固定の合成条件 "+StillFixed(condition_percent,2)+L"%。合成は固定の合成条件の値で行いました）";
     return notice+L"（固定の合成条件 "+StillFixed(condition_percent,2)+L"%）";
 }
+// The inspector's fields and residuals are computed for the fixed mapping, so an applied scale is not in them.
+inline std::wstring FixedScaleInputNote(const a0::m2::experimental::FixedScaleCorrection& s){
+    return L"倍率の補正 ×"+StillFixed(s.applied_scale,5)+L" は入力欄に含まれません（入力欄と「調整値での残差」は固定の写像で計算します）";
+}
 // One line for the capture status of the preview window.
 inline std::wstring FixedCompositeLine(const a0::m2::experimental::SavedFixedComposite& f){
     using C=a0::m2::experimental::FixedPolicyCheck;
@@ -54,7 +58,8 @@ inline std::wstring FixedCompositeDetails(const a0::m2::experimental::SavedStill
     std::wstring text=L"合成（保存JPEG）: 固定の合成条件（未承認）\r\n条件 SHA-256: "+std::wstring(f.condition_sha256.begin(),f.condition_sha256.begin()+12)+L"…\r\n";
     text+=L"継ぎ目の列: "+std::to_wstring(f.seam_column)+L"（"+FixedSeamOriginText(f.seam_origin)+L"）\r\n縦線は「継ぎ目を表示」で桃色になります\r\n\r\n";
     text+=L"倍率の補正\r\n"+FixedScaleLine(f.scale)+L"\r\n";
-    if(f.scale.estimated_scale)text+=L"推定 ×"+StillFixed(*f.scale.estimated_scale,5)+L"（使ったタイル "+std::to_wstring(f.scale.used_tiles)+L"、残差 RMS "+StillFixed(f.scale.residual.rms,2)+L" px）\r\n";
+    if(f.scale.estimated_scale)text+=L"推定 ×"+StillFixed(*f.scale.estimated_scale,5)+L"（使ったタイル "+std::to_wstring(f.scale.used_tiles)+L"、残差 RMS "+StillFixed(f.scale.residual.rms,2)+L" px）\r\n倍率で説明できなかったずれ（Pを原点・合成には使っていません） "+StillSigned(f.scale.unexplained_shift.x,2)+L", "+StillSigned(f.scale.unexplained_shift.y,2)+L" px\r\n";
+    if(f.scale.applied_scale!=1)text+=FixedScaleInputNote(f.scale)+L"\r\n";
     text+=FixedPolicyLine(f.policy_limit,f.scale.limit_percent)+L"\r\n\r\n";
     const auto& d=f.diagnostic;
     text+=L"診断（合成の位置には使っていません）\r\n";

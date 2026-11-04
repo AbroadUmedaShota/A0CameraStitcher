@@ -307,7 +307,7 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 所有者の決定（2026-11-04、#396）: (1) 回転は固定の値に縛り、撮影ごとに変えるのは倍率だけ。(2) 倍率の補正の中心は継ぎ目の列の上に置き、継ぎ目の線を動かさない。(3) 倍率を推定できない時は補正せず、固定の写像のまま合成する（ゲートの判定に任せる）。以下はこの決定の実装で、当てはめの方法（回転を縛る方法、使うタイルの条件）は #400 の設計。
 
 - **モデル**: 固定の写像 H に、1 つの係数 k を点 P を中心に掛ける。`x_A = P + k (H(b) − P)`。P は継ぎ目の列上で、出力の窓の縦の中央（`FixedScaleCenter`）。P を通る縦線は縦線のまま動かないので、継ぎ目の線は動かない。回転は H のまま、平行移動は H のまま（P を中心にした拡大が生む移動だけが加わる）
-- **推定**: #365 の推定器（`EstimateOverlapSimilarity`）を、固定の平行移動を初期位置にして走らせる。推定器の相似の当てはめは回転と平行移動も自由に動かすので、その倍率をそのまま使うと、回転や位置のずれが倍率に混ざる。そこで推定器が返した「合意したタイル」（A の点とそれに合う B の点）だけを使い、回転と平行移動を H に縛った 1 自由度の最小二乗で k を求め直す。`q = H(b) − P`、`t = a − P` として `k = Σ(q·t) / Σ(q·q)`（`DecideFixedScale`）。推定器自身の相似の値は診断として報告に残すだけで、合成には使わない
+- **推定**: #365 の推定器（`EstimateOverlapSimilarity`）を、固定の平行移動を初期位置にして走らせる。推定器の相似の当てはめは回転と平行移動も自由に動かすので、その倍率をそのまま使うと、回転や位置のずれが倍率に混ざる。そこで推定器が返した「合意したタイル」（A の点とそれに合う B の点）だけを使い、回転は H に縛ったまま、推定の中だけ平行移動を自由にして k を求め直す。`q = H(b) − P`、`t = a − P` として `t = k q + d`、`k = Σ(q−q̄)·(t−t̄) / Σ|q−q̄|²`、`d = t̄ − k q̄`（`DecideFixedScale`）。平行移動を縛ったまま `t = k q` を解くと、倍率でないずれ（揺れ、1 周期のずれ）がタイルの偏りに応じて k に混ざるため（#400 のレビュー H1）。**当てるのは k だけ**で、`d`（倍率で説明できなかったずれ、P を原点にした量）は `scaleCorrection.unexplainedShift` に診断として残し、合成には使わない。当てはめが退化する判定は `Σ|q−q̄|² > 0`（使えるタイルが 3 つ以上・2 行以上の条件は従来どおり）。補正の中心 P は `FixedScaleCenter` の 1 か所で決めている（ピントや高さによる拡大は B の光学中心のまわりにかかるので、P 中心だと継ぎ目で横のずれが `d` として残る。中心をどこにするかは所有者に確認中で、確認が取れるまで P のまま、※要確認）。推定器自身の相似の値は診断として報告に残すだけで、合成には使わない
 - **使うタイル**: 推定器の合意に入っていて、かつ一致の位置が「H が置く位置」から推定器の探索半径以内のもの。繰り返し模様で 1 周期ずれて一致したタイルは、数 % の倍率では説明できない距離にあるので使わない。使えるタイルが 3 つ未満、または 2 行未満なら「推定できない」（`too-few-tiles-near-fixed-mapping`）
 - **判定**: `|k×100 − 100|`（`StillScaleDifferencePercent`、#365 と同じ比べ方）が、固定の合成条件の `scaleAutoCorrectionMaxPercent` 以下なら補正する。**ちょうど上限は補正する**。上限を超えたら補正せず（k=1、上限で切った部分的な補正はしない）、報告と画面に「倍率の差が上限を超えた。ピントか高さを確かめてください」を残す。ゲートでの不合格は WP-04 でつなぐ（今回は報告と画面の案内まで）。推定できない時（推定器が決められない、タイルが足りない、当てはめが退化する）は補正せず、理由を報告に残す。補正すると継ぎ目が重なりの外に出る時も補正せず、`seam-outside-overlap` と残す
 - **補正した時の範囲**: 拡大した B から覆える窓を計算し直す（`FixedCompositeScaledGeometry`）。窓の左端は固定の条件と同じなので、継ぎ目の列の意味は変わらない。出力の大きさは、k に応じて右端と上下が少し変わる
@@ -350,7 +350,7 @@ v1〜v5 の reader と書き出しのバイト列は変えていない。`LoadSa
 - `crop`: 実際に描いた窓（倍率を当てた時は計算し直した値）
 - `fixedComposite.condition.sha256`: 使った条件ファイルのバイト列の SHA-256
 - `fixedComposite.seam`: `column`（crop 後の出力画素）、`origin`（`band-center-provisional`／`operator`）
-- `fixedComposite.scaleCorrection`: `status`（`applied`／`exceeded`／`not-estimated`／`seam-outside-overlap`）、`reason`、`limitPercent`、`estimatedScale`、`differencePercent`、`appliedScale`、`center`、`usedTiles`、`residualPixels`、`notice`（`exceeded` などの案内文。`applied` は空）
+- `fixedComposite.scaleCorrection`: `status`（`applied`／`exceeded`／`not-estimated`／`seam-outside-overlap`）、`reason`、`limitPercent`、`estimatedScale`、`differencePercent`、`appliedScale`、`center`、`usedTiles`、`residualPixels`、`unexplainedShift`、`notice`（`exceeded` などの案内文。`applied` は空）
 - `fixedComposite.policyLimit`: `check`、`policyPercent`、`conditionPercent`、`notice`
 - `fixedComposite.diagnostic`: #365 の推定（`status`、`reason`、`initialPosition`＝`fixed-mapping`／`still-wide-search`、`tiles`、`similarity`、`residualPixels`）と、固定の写像からの動き `deltaFromFixed`（平行移動 x・y、回転、倍率の比）。**合成の幾何には使っていない**
 - `blend`: `method` は `fixed-seam`。`widthPixels`、`edgeMarginPixels`、`differenceMean`、`differenceMaximum`、`brightness`（`ratioMinimum`・`ratioMaximum`・`saturationLimitedPixels` ほか）。継ぎ目の列は `fixedComposite.seam` に一度だけ書く
@@ -373,7 +373,7 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition <保存済みの�
 ### 表示
 
 - WpdDualPreview: 撮影の状態欄に、継ぎ目の列と出どころ、倍率の補正、方針ファイルとの照合、注記を 1 行で出す。撮影結果の画像（表示用の縮小コピー。保存したJPEGには描かない）には、継ぎ目の列に桃色の縦線を重ねる
-- StillReview: 横のパネルに、条件の SHA-256、継ぎ目の列と出どころ、倍率の補正、方針ファイルとの照合、診断（固定の位置からの動き）を出す。「継ぎ目を表示」で、保存JPEGに継ぎ目の縦線を桃色で重ねる（v6 は `blend` が固定の継ぎ目として読まれるので、既存の表示がそのまま使える）。表示の入切は既存のボタン
+- StillReview: 倍率の補正を当てた報告では、入力欄と「調整値での残差」は固定の写像で計算されるため、状態欄とパネルに「倍率の補正 ×k は入力欄に含まれません」と出す。横のパネルに、条件の SHA-256、継ぎ目の列と出どころ、倍率の補正、方針ファイルとの照合、診断（固定の位置からの動き）を出す。「継ぎ目を表示」で、保存JPEGに継ぎ目の縦線を桃色で重ねる（v6 は `blend` が固定の継ぎ目として読まれるので、既存の表示がそのまま使える）。表示の入切は既存のボタン
 - StillReview の手動の再Merge（#336・#338）は、保存済みの組を調べる道具として残す。v6 の報告を親にして再Mergeすると、固定の写像（倍率の補正なし）を初期値にした手動の改訂（v2／v3）が親を残した別保存になる
 
 ### 試験

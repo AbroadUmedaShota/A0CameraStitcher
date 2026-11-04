@@ -26,7 +26,8 @@ render::PairRenderParameters FixedCompositeScaledGeometry(int x,int y,double rot
     if(k==1)return base;
     if(!std::isfinite(k) || k<=0 || width<4 || height<4)throw std::invalid_argument("invalid fixed composite scale correction");
     const auto window=WindowOf(base,width,height);
-    const render::Point p{window.left+seam_column,window.top+window.height/2.0};
+    // The one place that decides the center (FixedScaleCenter); the fit uses it too.
+    const auto p=FixedScaleCenter(x,y,rotation_degrees,scale,width,height,seam_column);
     const auto& m=base.camera_b_to_camera_a;
     render::PairRenderParameters q{{k*m[0],k*m[1],k*(m[2]-p.x)+p.x,k*m[3],k*m[4],k*(m[5]-p.y)+p.y,0,0,1},base.layout,{}};
     // The axis-aligned rectangle inscribed in the scaled B with one input pixel
@@ -66,23 +67,37 @@ FixedScaleCorrection DecideFixedScale(const FixedCompositeCondition& condition,c
     }
     const auto& h=FixedCompositeRenderParameters(condition).camera_b_to_camera_a;
     const double radius=e.search_radius;
-    double qq=0,qt=0;std::set<unsigned> rows;std::vector<std::array<double,4>> used; // q.x,q.y,t.x,t.y
+    std::set<unsigned> rows;std::vector<std::array<double,4>> used; // q.x,q.y,t.x,t.y
     for(const auto& tile:e.tiles){
         if(!tile.agreed)continue;
         const auto predicted=render::Transform(h,{tile.b_x,tile.b_y});
         if(std::hypot(tile.a_x-predicted.x,tile.a_y-predicted.y)>radius)continue;
-        const double qx=predicted.x-out.center.x,qy=predicted.y-out.center.y,tx=tile.a_x-out.center.x,ty=tile.a_y-out.center.y;
-        qq+=qx*qx+qy*qy;qt+=qx*tx+qy*ty;rows.insert(tile.row);used.push_back({qx,qy,tx,ty});
+        used.push_back({predicted.x-out.center.x,predicted.y-out.center.y,tile.a_x-out.center.x,tile.a_y-out.center.y});
+        rows.insert(tile.row);
     }
     out.used_tiles=static_cast<unsigned>(used.size());
     if(used.size()<3 || rows.size()<2){out.reason=FixedScaleReason::too_few_tiles;return out;}
-    const double k=qt/qq;
-    if(!(qq>0) || !std::isfinite(k) || k<=0){out.reason=FixedScaleReason::degenerate_fit;return out;}
+    // Inside the estimate only, the translation is free: t = k q + d. Without it
+    // a shift that is not a scale (shake, one pattern period) leaks into k in
+    // proportion to how far the tiles sit to one side of P. Rotation stays H's.
+    // Only k is applied; d is what the scale could not explain, recorded as is.
+    const double n=static_cast<double>(used.size());
+    double mqx=0,mqy=0,mtx=0,mty=0;
+    for(const auto& u:used){mqx+=u[0];mqy+=u[1];mtx+=u[2];mty+=u[3];}
+    mqx/=n;mqy/=n;mtx/=n;mty/=n;
+    double spread=0,cross=0;
+    for(const auto& u:used){
+        const double qx=u[0]-mqx,qy=u[1]-mqy;
+        spread+=qx*qx+qy*qy;cross+=qx*(u[2]-mtx)+qy*(u[3]-mty);
+    }
+    const double k=cross/spread;
+    if(!(spread>0) || !std::isfinite(k) || k<=0){out.reason=FixedScaleReason::degenerate_fit;return out;}
+    out.unexplained_shift={mtx-k*mqx,mty-k*mqy};
     double sum=0,maximum=0;
     for(const auto& u:used){
-        const double d=std::hypot(u[2]-k*u[0],u[3]-k*u[1]);sum+=d*d;maximum=std::max(maximum,d);
+        const double d=std::hypot(u[2]-k*u[0]-out.unexplained_shift.x,u[3]-k*u[1]-out.unexplained_shift.y);sum+=d*d;maximum=std::max(maximum,d);
     }
-    out.residual={std::sqrt(sum/static_cast<double>(used.size())),maximum};
+    out.residual={std::sqrt(sum/n),maximum};
     out.estimated_scale=k;out.difference_percent=StillScaleDifferencePercent(k);
     out.reason=FixedScaleReason::none;
     if(*out.difference_percent<=out.limit_percent){out.status=FixedScaleStatus::applied;out.applied_scale=k;}
