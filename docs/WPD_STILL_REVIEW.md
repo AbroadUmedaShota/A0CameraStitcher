@@ -287,9 +287,9 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 - `m2_fixed_composite_condition_contracts`（`tests/fixed_composite_condition_tests.cpp`、カメラ・実ファイル不要）: 書式の全文、往復、方式ごとの作成（v1・v2・v3・v5 の各判定を人工の値で）、各拒否、帯の計算（回転・倍率つきの写像で、帯の列が全行で覆われ、外側の列が覆われないことを画素ごとに）、仮の継ぎ目と `operator` の扱い、倍率の上限の範囲（方針ファイルの検証と同じ受理）、一時フォルダでの書き込み・読み込み・上書きの拒否
 - `still_review_contracts`: 実際に書いた v1・v2・v3・v5 の報告（回転のみ、倍率が上限超え、回転が上限超え、推定なし、`rotated-180`、seam-cut を含む）を `LoadSavedStillReview` で読み、記録の写像・crop・出力の大きさが報告と一致し、保存して読み直せること
 
-## レンズの歪みを含む固定の合成条件 v2 (#405 W1、親 #396)
+## レンズの歪みを含む固定の合成条件 v2 (#405 W1・W6、親 #396)
 
-設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）まで。合成の関数（W2）、倍率の補正（W3）、JPEG の経路（W4）、C の経路（W5）、作る入口の CLI（W6）はまだ入っていない。v2 の記録を使う経路は今のところ無い。
+設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）と、作る入口（W6: 作る時の検査、倍率の写像、CLI）まで。合成の関数は W2（次の節）。倍率の撮影ごとの推定（W3）、JPEG の経路（W4）、C の経路（W5）はまだ入っていない。v2 の記録を読んで使う経路は今のところ無い（作れるだけ）。
 
 v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読めない。profile も承認しないし、書き換えない。
 
@@ -333,17 +333,61 @@ v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読め�
 
 fingerprint は空白やメンバーの順序に影響されないので、空白だけ違う profile は fingerprint が同じでもファイルの SHA-256 で拒否される。
 
-作る時（`MakeFixedCompositeConditionV2`、純粋な関数でファイルは読み書きしない）: 上の 1〜4 に加えて、設計の 3.9 節の 3〜5（倍率の上限の範囲のどの倍率でも出力が A か B で覆われること、継ぎ目の列と混ぜ幅の半分がすべての行で重なりに入ること、仮の列が帯の中央と一致すること）を確かめる。この 3 つは写像で合成する関数（W2）が要るので、検査そのものは `FixedCompositeCreationCheck` として外から受け取る。**検査が渡されない時は記録を作らない**（覆いと継ぎ目を確かめないまま記録を作らないため）。実装は W6（作る入口）で、W2 の後に入れる。
+作る時（`MakeFixedCompositeConditionV2`、純粋な関数でファイルは読み書きしない）: 上の 1〜4 に加えて、設計の 3.9 節の 3〜5（倍率の上限の範囲のどの倍率でも出力が A か B で覆われること、継ぎ目の列と混ぜ幅の半分がすべての行で重なりに入ること、仮の列が帯の中央と一致すること）を確かめる。この 3 つは写像で合成する関数（W2）が要るので、検査そのものは `FixedCompositeCreationCheck` として外から受け取る。**検査が渡されない時は記録を作らない**（覆いと継ぎ目を確かめないまま記録を作らないため）。検査の実装は次の「作る時の検査（W6）」、入口は「v2 の条件を作る入口（W6）」。
 
 ### 範囲外
 
-- 合成の関数、倍率の補正と中心、報告の新しい版、C の写像と格子、`StillReview` の CLI（`--make-fixed-composite-condition-v2`）、profile を設定のフォルダへ写す処理は後続の子 Issue（設計の 11 節の W2〜W6）
+- 倍率の撮影ごとの推定と当てはめ（W3）、報告の新しい版と JPEG の経路（W4）、C の写像と格子（W5）は後続の子 Issue（設計の 11 節）
 - 継ぎ目の列を人が動かす操作と保存し直しの手順（#403）
 
 ### 確認
 
 - `m2_fixed_composite_condition_v2_contracts`（`tests/fixed_composite_condition_v2_tests.cpp`、カメラ・実ファイル不要。共有の rig profile v2 の fixture と一時フォルダだけを使う）: 書式の全文と往復（親の hash あり・なし）、profile の名前の検査、作る関数の拒否（approved・雛形・上下の配置・ラスタの不一致・領域が用紙の外・上限と継ぎ目の範囲・検査が無い・検査が拒否）、書式の拒否、profile の SHA-256 と fingerprint の不一致（空白だけ違う profile を含む）、一時フォルダでの書き込み・上書きの拒否・版を区別した読み込み（v1 の読み込みが v1 の関数と同じ結果、v1 のファイルの上に v2 を書けないこと、profile が無い・差し替え・巨大・フォルダ、名前が親のフォルダを指す記録）
 - `m2_fixed_composite_condition_contracts`: v1 の既存の試験。変更なしで通る
+
+### 作る時の検査（W6）
+
+`MakeFixedCompositeCreationCheck()`（`experimental/fixed_composite_creation.hpp`）が、設計 3.9 節の 3〜5 を `MakeFixedCompositeConditionV2` に渡す `FixedCompositeCreationCheck` として実装する。カメラ・ファイル・画像は使わない。検査には 7360×4912 の空の枠（中身は見ない）を A・B の両方に渡し、W2 の `CanRenderMappedFixedSeam`・`MappedFixedSeamBand` をそのまま呼ぶ。つまり継ぎ目の列が検査を通るのは、合成の関数がその列を受けるとき、そのときに限る。
+
+倍率の範囲は、方針ファイルから写した上限 L（%）に対して `1−L/100`・`1`・`1+L/100` の 3 通り（L=0 なら 1 だけ。L が 100 以上なら倍率にならないので作らない）。各倍率で B の写像を次の形にして、同じ検査を回す。
+
+- 3. 覆い（`RequireFixedCompositeCoverage`）: どの行でも、A が先頭の列から続けて覆い、B が最後の列まで続けて覆い、2 つが接するか重なる。つまり出力のすべての標本が A か B に覆われ、A が左のカメラである。覆いは `render::SampleBilinear` と同じ（枠の [0,w)×[0,h)）。違反は行と列の範囲を例外の文に入れる
+- 4. 継ぎ目（`RequireFixedCompositeSeam`）: 継ぎ目の列と混ぜ幅の半分（`kSeamBlendDesign.width_pixels` が 8 なので 3 列）が、すべての行で A と B の両方に入る。重なりが無い行、1 続きでない行も失敗
+- 5. 仮の列（倍率 1 の帯の中央）: `origin` が `band-center-provisional` の記録だけ。帯は全行で A と B の両方が覆う列 `[最大の first, 最小の end)`（`FixedCompositeBandOfRows`）、中央は v1 と同じ `(first+end)/2` の切り捨て（`FixedCompositeBandCenter`）。`operator` の列は中央に縛られず、4 だけが掛かる
+
+どれかが外れると例外の文に倍率（例 `at scale 0.99 of camera B`）が入る。
+
+### 倍率の写像（W6 が置き、W3 が使う）
+
+`experimental/fixed_composite_maps.hpp`。設計 4.1 節の「B に倍率を入れる所は 1 か所」をここに置いた。W3 の推定・JPEG・C・ゲートは、倍率 k を入れた B の写像をここから作る（重複して作らない）。
+
+- `ScaledDocumentOutputToCamera(ラスタ, カメラ, 中心 P, k)`: 出力の標本の文書の点を P まわりに 1/k 倍（`P + (X−P)/k`）してから、内部パラメータ・歪み・射影をそのまま通す。k=1 は `render::DocumentOutputToCamera` とビット単位で同じ。profile の値は変えない
+- `ScaledDocumentMappedFixedSeamInput(パラメータ, k)`: `DocumentMappedFixedSeamInput` の B だけを上の写像にした対。A はそのまま
+- `FixedCompositeScaleCenterMm(B)`: 中心 P。B の画素の格子の中心 `((w−1)/2, (h−1)/2)`（7360×4912 なので (3679.5, 2455.5)）を、B の固定の写像の逆で文書へ移した点（設計 5.2 節）。主点が格子の中心にあれば閉じた式 H⁻¹(中心) と一致し、無ければ歪みの逆（`calibration::lens_detail::UndistortPixel`、数値の打ち切りだけの規則）を解く。画像の中心と主点のどちらを使うかが割れる校正は、まだ所有者に確認していない（設計 15 節の 2）
+- `TryDocumentPointOfRawPixel(カメラ, 生画素, 文書の点)`: `TryProjectDocument` の逆。W3 の推定が、合意したタイルの点を文書の mm へ移すのに使う
+- `FixedCompositeCapturePixelsPerMm(カメラ, 文書の点)`: 文書の 1 mm あたりの撮影画素（射影のヤコビアン、±0.5 mm の中心差分）。25.4 を掛けると、出力 1 画素が撮影 1 画素になる DPI の目安。記録には書かない
+
+### v2 の条件を作る入口（W6）
+
+```
+A0CameraStitcher.StillReview --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <フォルダ> --region-um <left,top,right,bottom> --dpi <整数> [--dry-run]
+```
+
+実装は `MakeFixedCompositeConditionV2File`（`fixed_composite_tool_v2.hpp`）。人が設置の時に一度、明示して実行する。自動では作らない。ウィンドウもカメラも使わない（`camera_operations=0`）。
+
+- 入力: 平置き校正（#374）が書く校正済みの draft rig profile（場所は問わない）、設定のフォルダ、出力ラスタの領域（文書の面のマイクロメートル、整数）と整数の DPI。**領域・DPI・倍率の上限に既定値は無く**、渡されない・読めない時は作らない。領域と DPI は所有者の決定（`HG-0001`）ではなく、人が選ぶ開発用の未承認の値。DPI は撮影画像と同じ程度の細かさ（継ぎ目のあたりで出力 1 画素が撮影 1 画素）にすると v1 と比べやすい。`--dry-run` の詳細に、領域の中央でその DPI が A・B それぞれ出る（`capture_equivalent_dpi_a`・`_b`）
+- 倍率の上限: フォルダの `wpd-merge-policy.json` の `scaleAutoCorrectionMaxPercent` を記録に写す。ファイルが無い、読めない、その欄が無い時は作らない（v1 と同じ）
+- 取り付けの向き: フォルダの `wpd-mount-orientation.json`（無ければ `normal`、ライブのプレビューと同じ約束）を記録する
+- 上書きしない: `wpd-fixed-composite-condition.json` が既にあれば作らない。**v1 の条件がある時は作らず、人が v1 のファイルを別の名前へ移してから作り直すよう案内する**（所有者の決定。どの記録を有効にするかは #403）
+- profile の写し: 条件と同じフォルダへ `wpd-fixed-composite-profile-<ファイル SHA-256 の先頭 16 桁>.json` として写す（`CopyFixedCompositeProfile`。新しいファイルとして書き、読み戻して照合してから移す）。同じ名前で同じバイト列のファイルがあれば写さずに使い、違うバイト列なら作らない。条件の書き込みに失敗した時は profile の写しだけが残る（内容が名前になっているので害は無い）
+- 仮の継ぎ目: 倍率 1 の帯の中央（`band-center-provisional`）。上の検査を通らなければ作らない
+- `--dry-run`: 条件を作る手前までの全部（profile の検証、検査 3〜5）を行い、何も書かない。通れば終了コード 0
+- 終了コード: 作った 0、dry-run で通った 0、作らなかった 1、引数が足りない・不正 2。標準出力の 1 行目は `fixed_composite_condition_v2_made=… checked=… dry_run=… camera_operations=0`、続けて理由か結果の文（日本語）と、`key=value` の事実（profile_id、出力の DPI と画素数、検査した倍率、帯の列と継ぎ目の列、上記の DPI の目安）。実測の値は出さない
+
+### 確認（W6）
+
+- `m2_fixed_composite_creation_contracts`（`tests/fixed_composite_creation_tests.cpp`、fixture の draft だけ）: 検査する倍率、生画素から文書の点への逆（歪み・主点のずれ・傾きのある人工のカメラで往復）、中心 P（閉じた式、歪みと主点のずれがある場合は順の射影が格子の中心に戻る）、倍率 1 が文書の写像とビット単位で同じなこと、P が倍率によらず動かないこと、帯と中央の計算、検査 3（上限を大きくしすぎて覆えない、A が左でない）・4（帯の端の列、倍率の端でだけ外れる列）・5（中央でない仮の列）、上限 0 だと倍率 1 だけ見ること、歪みのある draft
+- `m2_fixed_composite_tool_v2_contracts`（`tests/fixed_composite_tool_v2_tests.cpp`、一時フォルダ）: 方針ファイル・向きの設定・profile・領域・DPI の各拒否（何も書かない）、dry-run、作った記録と profile の写しを `LoadFixedCompositeConditionAny` で読み直して全欄と作る検査を再実行、再実行・v1 のファイル・部分ファイル・同名の別の profile で上書きしない、同じ内容の写しの再利用、`rotated-180` の記録、SHA-256 の既知の値
 
 ## 仮Merge保存を固定の合成条件で行う (#400、親 #396)
 

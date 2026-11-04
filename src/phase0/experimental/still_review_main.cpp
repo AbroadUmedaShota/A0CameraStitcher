@@ -7,6 +7,7 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
+#include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
 #include <windowsx.h>
 #include <commdlg.h>
@@ -652,6 +653,49 @@ int wmain(int argc,wchar_t** argv){
                 throw std::invalid_argument("explicit report required");
             std::cout<<review::DescribeSavedReviewEvaluationInputs(fs::path(argv[2]))<<std::endl;return 0;
         }
+        if(argc>=2 && std::wstring_view(argv[1])==L"--make-fixed-composite-condition-v2"){
+            // Development entry (#405 W6): a person names the draft rig profile, the settings folder,
+            // the output region (micrometres of the document plane) and the DPI. File-only, no window,
+            // never overwrites, never automatic. Without every one of them nothing is made.
+            SetConsoleOutputCP(CP_UTF8);
+            const auto usage=[]{
+                std::cout<<"fixed_composite_condition_v2_made=0 camera_operations=0\n"
+                    "usage: StillReview --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run]\n"<<std::flush;
+                return 2;
+            };
+            a0::phase0::experimental::FixedConditionV2Request request;
+            bool have_folder=false,have_region=false,have_dpi=false;
+            if(argc<3)return usage();
+            request.profile=fs::path(argv[2]);
+            for(int i=3;i<argc;++i){
+                const std::wstring_view flag(argv[i]);
+                if(flag==L"--dry-run" && !request.dry_run){request.dry_run=true;continue;}
+                if(i+1>=argc)return usage();
+                const std::wstring value(argv[++i]);
+                if(flag==L"--settings-folder" && !have_folder){request.settings_folder=fs::path(value);have_folder=true;}
+                else if(flag==L"--region-um" && !have_region){
+                    size_t at=0;
+                    for(int k=0;k<4;++k){
+                        const auto end=k<3?value.find(L',',at):value.size();
+                        if(end==std::wstring::npos || end==at || end-at>12)return usage();
+                        long long n{};
+                        for(auto j=at;j<end;++j){if(value[j]<L'0' || value[j]>L'9')return usage();n=n*10+(value[j]-L'0');}
+                        request.region_um[static_cast<size_t>(k)]=n;at=end+1;
+                    }
+                    have_region=true;
+                }else if(flag==L"--dpi" && !have_dpi){
+                    if(value.empty() || value.size()>5 || value.find_first_not_of(L"0123456789")!=std::wstring::npos)return usage();
+                    request.dpi=static_cast<std::uint32_t>(std::stoul(value));have_dpi=true;
+                }else return usage();
+            }
+            if(!have_folder || !have_region || !have_dpi)return usage();
+            const auto made=a0::phase0::experimental::MakeFixedCompositeConditionV2File(request,
+                [](const std::vector<unsigned char>& bytes){return a0::m2::experimental::FixedCompositeBytesSha256(bytes);},std::chrono::system_clock::now());
+            std::cout<<"fixed_composite_condition_v2_made="<<made.made<<" checked="<<made.checked<<" dry_run="<<request.dry_run<<" camera_operations=0\n"<<made.message<<'\n';
+            for(const auto& line:made.details)std::cout<<line<<'\n';
+            std::cout<<std::flush;
+            return (made.made || (made.checked && request.dry_run))?0:1;
+        }
         if(argc==5 && std::wstring_view(argv[1])==L"--make-fixed-composite-condition" && std::wstring_view(argv[3])==L"--settings-folder"){
             // Development entry (#400): a person names the saved review and the settings
             // folder. File-only, no window, never overwrites, never automatic.
@@ -682,7 +726,7 @@ int wmain(int argc,wchar_t** argv){
         const bool from_session=argc>=3 && std::wstring(argv[1])==L"--session";
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:std::wstring(argv[3])!=L"--smoke")))
-            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder>");
+            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder> | --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run]");
         // Opt out of Windows bitmap scaling so 100% is one physical display
         // pixel per saved image pixel, including on a scaled desktop.
         if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))throw std::runtime_error("per-monitor pixel display awareness unavailable");

@@ -244,22 +244,25 @@ std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAny(c
     return LoadedFixedCompositeConditionAny{LoadedFixedCompositeConditionV2{std::move(condition),hash(Bytes(text)),std::move(binding)}};
 }
 
-void WriteFixedCompositeConditionV2(const std::filesystem::path& file,const FixedCompositeConditionV2& condition){
-    // Format validates; the file ends with a newline.
-    const auto text=FormatFixedCompositeConditionV2(condition)+"\n";
+namespace {
+// Writes `text` as a NEW file: an exclusive partial beside it, flushed, read back
+// and compared (and checked by `verify`), then moved without replacing. An existing
+// file or partial is never overwritten.
+void WriteNewFile(const std::filesystem::path& file,const std::string& text,const char* what,
+    const std::function<bool(const std::string&)>& verify){
     std::error_code error;
     const auto parent=file.parent_path();
     if(file.filename().empty() || (!parent.empty() && !std::filesystem::is_directory(parent,error)))
-        throw std::invalid_argument("fixed composite condition folder does not exist");
+        throw std::invalid_argument(std::string(what)+" folder does not exist");
     const auto existing=std::filesystem::symlink_status(file,error);
     if(existing.type()!=std::filesystem::file_type::not_found) // MSVC also sets `error` for a missing file
-        throw std::invalid_argument("fixed composite condition already exists; never overwrite");
+        throw std::invalid_argument(std::string(what)+" already exists; never overwrite");
     auto partial=file;partial+=L".partial";
     // Exclusive: a partial that is already there is somebody else's, not ours to reuse.
     const HANDLE handle=CreateFileW(partial.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(handle==INVALID_HANDLE_VALUE){
         if(GetLastError()==ERROR_FILE_EXISTS || GetLastError()==ERROR_ALREADY_EXISTS)
-            throw std::invalid_argument("fixed composite condition partial already exists");
+            throw std::invalid_argument(std::string(what)+" partial already exists");
         throw IoError("partial cannot be created");
     }
     bool open=true;
@@ -277,13 +280,53 @@ void WriteFixedCompositeConditionV2(const std::filesystem::path& file,const Fixe
             std::ifstream in(partial,std::ios::binary);
             reread.assign(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
         }
-        if(reread!=text || FormatFixedCompositeConditionV2(ParseFixedCompositeConditionV2(reread))+"\n"!=text)
-            throw std::runtime_error("fixed composite condition partial changed");
+        if(reread!=text || !verify(reread))
+            throw std::runtime_error(std::string(what)+" partial changed");
         // No MOVEFILE_REPLACE_EXISTING: an existing target makes the move fail.
         if(!MoveFileExW(partial.c_str(),file.c_str(),MOVEFILE_WRITE_THROUGH))
             throw IoError("cannot be moved into place without replacing");
     }catch(...){
         RemoveOwnPartial(partial);throw;
     }
+}
+} // namespace
+
+void WriteFixedCompositeConditionV2(const std::filesystem::path& file,const FixedCompositeConditionV2& condition){
+    // Format validates; the file ends with a newline.
+    const auto text=FormatFixedCompositeConditionV2(condition)+"\n";
+    WriteNewFile(file,text,"fixed composite condition",[&](const std::string& reread){
+        return FormatFixedCompositeConditionV2(ParseFixedCompositeConditionV2(reread))+"\n"==text;
+    });
+}
+
+std::string CopyFixedCompositeProfile(const std::filesystem::path& folder,std::string_view profile_bytes,const FixedCompositeSha256& hash){
+    if(!hash)Reject("no SHA-256 provider");
+    if(profile_bytes.size()>kMaximumFixedCompositeProfileBytes)Reject("the profile is too large");
+    const auto name=FixedCompositeProfileFileName(hash(Bytes(profile_bytes)));
+    const auto target=folder/name;
+    bool found{};
+    const auto existing=ReadRegularFile(target,kMaximumFixedCompositeProfileBytes,"fixed composite profile",found);
+    if(found){
+        // The name carries the first 16 hex digits of the SHA-256: the same name with other bytes is not ours to replace.
+        if(existing!=profile_bytes)Reject("a different profile already has this name; never overwrite");
+        return name;
+    }
+    const std::string text(profile_bytes);
+    WriteNewFile(target,text,"fixed composite profile",[&](const std::string& reread){return reread==text;});
+    return name;
+}
+
+std::string FixedCompositeBytesSha256(const std::vector<unsigned char>& bytes){
+    if(bytes.size()>std::numeric_limits<ULONG>::max())Reject("SHA-256 input is too large");
+    std::array<unsigned char,32> digest{};
+    BCRYPT_ALG_HANDLE algorithm{};
+    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("SHA-256 provider unavailable");
+    const auto status=BCryptHash(algorithm,nullptr,0,const_cast<PUCHAR>(bytes.data()),static_cast<ULONG>(bytes.size()),digest.data(),static_cast<ULONG>(digest.size()));
+    BCryptCloseAlgorithmProvider(algorithm,0);
+    if(status<0)throw std::runtime_error("SHA-256 calculation failed");
+    static constexpr char kDigits[]="0123456789abcdef";
+    std::string hex;hex.reserve(64);
+    for(const auto b:digest){hex+=kDigits[b>>4];hex+=kDigits[b&15];}
+    return hex;
 }
 }

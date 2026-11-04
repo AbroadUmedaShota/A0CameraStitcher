@@ -350,9 +350,12 @@ endif()
 # Fixed composite condition v2 (#405 W1): the lens-aware record that names a
 # calibrated draft rig profile by hash. Development only and unapproved; the
 # v1 library above is unchanged and this one builds on it.
-add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp)
-target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include)
-target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_render)
+# W6 adds the shared output-to-camera mappings (a lens scale of camera B about a
+# fixed centre) and the creation checks that run the mapped fixed seam over every
+# output row.
+add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_maps.cpp src/m2/fixed_composite_creation.cpp)
+target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include PRIVATE src/m2)
+target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_seam_blend a0_m2_render PRIVATE bcrypt)
 target_compile_definitions(a0_m2_fixed_composite_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
 if(MSVC)
     target_compile_options(a0_m2_fixed_composite_v2 PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -1124,7 +1127,7 @@ if(BUILD_TESTING)
         add_test(NAME review_alignment_contracts COMMAND a0_review_alignment_tests)
         add_executable(A0CameraStitcher.StillReview src/phase0/experimental/still_review_main.cpp)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
-        target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite user32 gdi32 windowscodecs ole32 comdlg32)
+        target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 comdlg32)
         target_compile_definitions(A0CameraStitcher.StillReview PRIVATE UNICODE _UNICODE NOMINMAX)
         if(A0_BUILD_STITCH_EVAL)
             add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StillReview)
@@ -1430,6 +1433,28 @@ if(BUILD_TESTING)
     add_test(NAME m2_fixed_composite_condition_v2_contracts COMMAND a0_fixed_composite_condition_v2_tests
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
     set_tests_properties(m2_fixed_composite_condition_v2_contracts PROPERTIES TIMEOUT 60)
+
+    # Mappings, scale centre and the creation checks of the v2 condition (#405 W6).
+    add_executable(a0_fixed_composite_creation_tests tests/fixed_composite_creation_tests.cpp)
+    target_link_libraries(a0_fixed_composite_creation_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_creation_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_creation_contracts COMMAND a0_fixed_composite_creation_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_creation_contracts PROPERTIES TIMEOUT 600)
+
+    # The development entry that makes the v2 condition (#405 W6): refusals, no overwrite,
+    # the profile copy, the policy limit and the recorded mount orientation.
+    add_executable(a0_fixed_composite_tool_v2_tests tests/fixed_composite_tool_v2_tests.cpp)
+    target_include_directories(a0_fixed_composite_tool_v2_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_fixed_composite_tool_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_tool_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_tool_v2_contracts COMMAND a0_fixed_composite_tool_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_tool_v2_contracts PROPERTIES TIMEOUT 600)
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
     add_executable(m2_evaluation_render_conditions_contracts tests/evaluation_render_conditions_tests.cpp)

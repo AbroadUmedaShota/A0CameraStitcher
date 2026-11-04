@@ -146,8 +146,8 @@ struct FixedCompositeV2Request {
 // if, for the scales 1 and 1 +- limit/100, any output sample is covered by
 // neither camera or the seam column (with half the blend width) leaves the
 // overlap on any row, or a provisional column differs from the band middle.
-// Supplied by the entrance that creates conditions once the mapped composite
-// exists (#405 W2/W6).
+// MakeFixedCompositeCreationCheck (fixed_composite_creation.hpp, #405 W6) is the check
+// the creating entrance passes.
 using FixedCompositeCreationCheck=std::function<void(const FixedCompositeConditionV2&,const FixedCompositeProfileBinding&)>;
 // Pure: builds the record, verifies the profile bytes (BindFixedCompositeProfile),
 // runs the creation check and validates. Reads and writes no file. Throws
@@ -175,6 +175,20 @@ std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAny(c
 // Writes the record as a NEW file, with the steps and guarantees of
 // WriteFixedCompositeCondition (exclusive partial, read back, move without
 // replacing; an existing file or partial is never overwritten). Copying the
-// profile beside it is the creating entrance's job.
+// profile beside it is CopyFixedCompositeProfile's job.
 void WriteFixedCompositeConditionV2(const std::filesystem::path& file,const FixedCompositeConditionV2& condition);
+
+// Puts the profile bytes into `folder` under FixedCompositeProfileFileName(hash(bytes))
+// and returns that name (design 3.2). A new file, with the same steps as the
+// condition writer. A file of that name that already holds exactly these bytes is
+// left alone and counts as done; one that holds other bytes is never replaced
+// (std::invalid_argument). The profile is not parsed here: BindFixedCompositeProfile
+// (through MakeFixedCompositeConditionV2) is what decides whether it is usable.
+std::string CopyFixedCompositeProfile(const std::filesystem::path& folder,std::string_view profile_bytes,const FixedCompositeSha256& hash);
+
+// SHA-256, lower-case hex, through the system cryptography provider. For entrances
+// that have no provider of their own (the development StillReview does not link the
+// camera core, which holds the other one). The reading and creating functions above
+// still take the provider as a parameter.
+std::string FixedCompositeBytesSha256(const std::vector<unsigned char>& bytes);
 }
