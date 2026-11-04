@@ -28,7 +28,8 @@ inline std::wstring FixedScaleLine(const a0::m2::experimental::FixedScaleCorrect
     case S::applied:text=L"倍率を ×"+StillFixed(s.applied_scale,5)+L" 補正しました（100% との差 "+StillFixed(*s.difference_percent,3)+L"%、"+limit+L"）";break;
     case S::exceeded:text=L"倍率は補正していません（100% との差 "+StillFixed(*s.difference_percent,3)+L"%、"+limit+L"）";break;
     case S::not_estimated:
-    case S::seam_outside_overlap:text=L"倍率は補正していません（"+limit+L"）";break;
+    case S::seam_outside_overlap:
+    case S::output_uncovered:text=L"倍率は補正していません（"+limit+L"）";break;
     }
     const auto notice=a0::m2::experimental::FixedScaleNotice(s.status);
     if(!notice.empty())text+=L" / "+WidenUtf8(notice);

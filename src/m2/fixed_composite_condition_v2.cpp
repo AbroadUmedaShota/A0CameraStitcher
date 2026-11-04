@@ -183,6 +183,8 @@ FixedCompositeConditionV2 ParseFixedCompositeConditionV2(std::string_view text){
     if(!origin)Reject("seam origin is unknown");
     c.seam.origin=*origin;
     ValidateFixedCompositeConditionV2(c); // invalid_argument as well
+    // The same range the creating side accepts (FixedCompositeCheckedScales): at 100 % or more 1 - limit/100 is not a scale.
+    if(c.scale_auto_correction_max_percent>=100)Reject("scaleAutoCorrectionMaxPercent is not below 100");
     return c;
 }
 
@@ -240,7 +242,9 @@ std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAny(c
     bool profile_found{};
     std::string profile_bytes;
     try{profile_bytes=ReadRegularFile(profile_path,kMaximumFixedCompositeProfileBytes,"fixed composite profile",profile_found);}
-    catch(const std::invalid_argument& error){throw FixedCompositeProfileError(FixedCompositeProfileError::Kind::differs,error.what());}
+    catch(const std::exception& error){ // not a regular file, too large, or unreadable (sharing violation, access denied)
+        throw FixedCompositeProfileError(FixedCompositeProfileError::Kind::differs,error.what());
+    }
     if(!profile_found)throw FixedCompositeProfileError(FixedCompositeProfileError::Kind::missing,"fixed composite condition v2: the referenced profile is missing from the condition's folder");
     // Whatever is wrong with a profile that is there is the profile's, not the record's.
     std::optional<FixedCompositeProfileBinding> bound;

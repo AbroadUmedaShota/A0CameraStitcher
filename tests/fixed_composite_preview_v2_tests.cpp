@@ -396,7 +396,8 @@ void States(const fs::path& normal_folder,const fs::path& rotated_folder){
         gap.condition.raster=render::OutputRaster{render::DocumentRegionUm{590000,100000,660000,140000},254,700,400};
         gap.condition.seam={50,FixedSeamOrigin::operator_set};
         const auto gap_plan=PlanFixedPreviewV2(gap,MountOrientation::normal,640,427);
-        CHECK(gap_plan.skip && *gap_plan.skip==FixedCompositeSkip::seam_outside_overlap);
+        // Pixels in the gap are shown by neither camera: size-differs, the reason the JPEG path gives for the same condition.
+        CHECK(gap_plan.skip && *gap_plan.skip==FixedCompositeSkip::size_differs);
         // The cameras overlap, but the region runs on past the end of B: samples covered by neither camera.
         auto past=*source.loaded_v2;
         past.condition.raster=render::OutputRaster{render::DocumentRegionUm{570000,100000,1189000,140000},254,6190,400};

@@ -24,6 +24,7 @@
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/optical_planner.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_preview.hpp"
 #include "similarity_scene.hpp"
 #include <Windows.h>
 #include <wincodec.h>
@@ -298,6 +299,36 @@ void Selection(){
     fs::remove(profile_path);
     WriteText(profile_path,original_profile);
     {const auto sel=SelectFixedComposite(file,kHash);CHECK(sel.IsV2());} // the control: the same bytes again
+    // A profile that is there but cannot be read (another handle holds it exclusively) is the profile's problem, in the
+    // same words for the JPEG path and the live C. The kind is the typed error's.
+    {
+        const auto kind_of=[&]()->std::optional<FixedCompositeProfileError::Kind>{
+            try{(void)LoadFixedCompositeConditionAny(file,kHash);}
+            catch(const FixedCompositeProfileError& error){return error.GetKind();}
+            catch(const std::exception&){}
+            return std::nullopt;
+        };
+        CHECK(!kind_of());
+        const HANDLE held=CreateFileW(profile_path.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        CHECK(held!=INVALID_HANDLE_VALUE);
+        const auto locked=kind_of();
+        const auto sel=SelectFixedComposite(file,kHash);
+        CloseHandle(held);
+        CHECK(locked && *locked==FixedCompositeProfileError::Kind::differs && !sel.loaded && sel.reason==FixedCompositeSkip::profile_differs);
+        fs::rename(profile_path,folder/"moved-away-2.json");
+        const auto missing=kind_of();
+        CHECK(missing && *missing==FixedCompositeProfileError::Kind::missing);
+        fs::rename(folder/"moved-away-2.json",profile_path);
+        CHECK(!kind_of());
+    }
+    // The range of the limit is the creating side's: below 100 percent.
+    {
+        const auto limited=[&](const char* value){return ReplaceAll(text,"\"scaleAutoCorrectionMaxPercent\":1,",std::string("\"scaleAutoCorrectionMaxPercent\":")+value+",");};
+        CHECK(!Throws([&]{(void)ParseFixedCompositeConditionV2(limited("99.5"));}));
+        REJECT(ParseFixedCompositeConditionV2(limited("100")));
+        REJECT(ParseFixedCompositeConditionV2(limited("250")));
+        broken(limited("100"),FixedCompositeSkip::condition_invalid,"limit of 100 percent");
+    }
     // A v1 file in the same name still reads as v1 and is untouched by any of this.
     {
         const auto v1_folder=root/"selection-v1";fs::create_directories(v1_folder);
@@ -500,6 +531,62 @@ void SeamAfterCorrection(const Rig& lens_rig){
     CHECK(skipped && !fs::exists(q.output_directory));
 }
 
+// ---- an output the cameras do not fully show (a condition edited by hand) ----
+// Whether every output pixel of this raster is shown by A or B at scale k.
+bool Covered(const render::DocumentRenderParameters& profile,const render::OutputRaster& raster,double k){
+    auto parameters=profile;parameters.raster=raster;
+    try{RequireFixedCompositeCoverage(ScaledDocumentMappedFixedSeamInput(parameters,k));}
+    catch(const std::invalid_argument&){return false;}
+    return true;
+}
+void Coverage(const Rig& lens_rig){
+    std::cout<<"coverage\n";
+    const auto profile_text=ProfileText(base_profile,Variant::lens);
+    const auto& profile=lens_rig.settings.loaded.profile.parameters;
+    const auto flat=MakeFrames(root,"flat-coverage",Flat(kWidth,kHeight,128),Flat(kWidth,kHeight,128));
+    // (1) Not covered even at scale 1 (the region runs below what the cameras see). Made without the creation check.
+    {
+        const auto raster=Raster(560000,10000,740000,500000,254);
+        CHECK(!Covered(profile,raster,1.0));
+        const auto s=MakeSettings(root/"settings-uncovered",profile_text,MountOrientation::normal,raster,1,kSmallSeam,FixedSeamOrigin::operator_set,false);
+        auto q=RequestFor(flat,"review-uncovered",s,kSamePolicy);
+        const auto before_a=ReadBytes(flat.a),before_b=ReadBytes(flat.b);
+        bool refused=false;
+        try{(void)WriteUncalibratedStillReview(q);}
+        catch(const FixedCompositeUnavailable& error){refused=error.Skip()==FixedCompositeSkip::size_differs;}
+        // The way the capture takes it: composite skipped, originals kept, no output folder.
+        CHECK(refused && !fs::exists(q.output_directory) && ReadBytes(flat.a)==before_a && ReadBytes(flat.b)==before_b);
+        // The live C refuses the same condition for the same reason.
+        namespace px=a0::phase0::experimental;
+        const auto plan=px::PlanFixedPreviewV2(s.loaded,MountOrientation::normal,640,427);
+        std::cout<<"  C: "<<(plan.skip?std::string(FixedCompositeSkipCode(*plan.skip)):std::string("drawn"))<<" "<<plan.detail<<std::endl;
+        CHECK(plan.skip && *plan.skip==FixedCompositeSkip::size_differs);
+        // The creating entrance refuses it, so only a hand-edited record gets here.
+        REJECT(MakeSettings(root/"settings-uncovered-checked",profile_text,MountOrientation::normal,raster,1,kSmallSeam,FixedSeamOrigin::operator_set,true));
+    }
+    // (2) Covered at scale 1, not at the scale this pair measures: the scale is not applied and the status says why.
+    {
+        const double k=*lens_rig.outcome.saved.fixed_composite_lens->scale.estimated_scale;
+        long long bottom=0;
+        for(long long um=470000;um<=490000 && !bottom;um+=500){
+            const auto raster=Raster(560000,10000,740000,um,254);
+            if(Covered(profile,raster,1.0) && !Covered(profile,raster,k))bottom=um;
+        }
+        std::cout<<"  bottom of the region where scale 1 is covered and scale "<<k<<" is not: "<<bottom<<" um\n";
+        CHECK(bottom!=0);
+        const auto raster=Raster(560000,10000,740000,bottom,254);
+        const auto s=MakeSettings(root/"settings-uncovered-scaled",profile_text,MountOrientation::normal,raster,1,kSmallSeam,FixedSeamOrigin::operator_set,false);
+        const auto o=Run(RequestFor(lens_rig.frames,"review-uncovered-scaled",s,kSamePolicy));
+        const auto& c=o.saved.fixed_composite_lens->scale;
+        CHECK(c.status==FixedScaleStatus::output_uncovered && c.reason==FixedScaleReason::none && c.applied_scale==1 && c.estimated_scale && *c.estimated_scale==k);
+        CHECK(o.saved.width==raster.width_pixels && o.saved.height==raster.height_pixels && fs::exists(o.saved.jpeg));
+        CHECK(o.text.find("\"status\":\"output-uncovered\"")!=std::string::npos);
+        VerifySavedFixedCompositeLens(o.saved,s.loaded.profile);
+        namespace px=a0::phase0::experimental;
+        CHECK(px::FixedCompositeLensLine(*o.saved.fixed_composite_lens).find(L"倍率は補正していません")!=std::wstring::npos);
+    }
+}
+
 // The same condition on pictures with other content: the mapping and the seam do not follow the pictures.
 std::string FixedPart(const std::string& text){
     const auto from=text.find("\"fixedCompositeLens\":{"),to=text.find("\"scaleCorrection\"");
@@ -666,6 +753,7 @@ int main(int argc,char** argv){
         Limits(lens);
         NotEstimated();
         SeamAfterCorrection(lens);
+        Coverage(lens);
         SameMapping(lens,World(99));
         const auto other_profile=MakeSettings(root/"settings-other-profile",ProfileText(base_profile,Variant::plain),MountOrientation::normal,SmallRaster(),1,kSmallSeam,FixedSeamOrigin::operator_set);
         Tamper(lens,other_profile);

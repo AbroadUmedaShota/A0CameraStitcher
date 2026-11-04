@@ -123,10 +123,15 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     active();
     // The mapped composite works on the stored pixel order (design 3.7). The cheap check that the seam can be drawn
     // comes first: a seam that cannot be drawn needs no estimate. Nothing but sizes is read from the images here.
+    // Before the seam, every output pixel must be shown by A or B (a condition edited by hand can ask for more than the
+    // cameras see); the live C refuses the same condition as size-differs, so the JPEG says the same.
     std::optional<MappedFixedSeamInput> lens_pair;
     if(lens_condition){
+        try{lens_pair=ScaledDocumentMappedFixedSeamInput(lens_profile->parameters,1.0);}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,error.what());}
+        try{RequireFixedCompositeCoverage(*lens_pair);}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,std::string("output not covered by A or B: ")+error.what());}
         try{
-            lens_pair=ScaledDocumentMappedFixedSeamInput(lens_profile->parameters,1.0);
             if(!CanRenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign))
                 throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,"seam column "+std::to_string(lens_condition->seam.column));
         }catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,error.what());}
@@ -173,12 +178,17 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         record.tiles_searched=static_cast<unsigned>(estimate.tiles.size());record.tiles_matched=estimate.matched;record.tiles_agreed=estimate.agreed;
         record.scale=DecideFixedScaleV2(c,profile,estimate,width,height);
         if(record.scale.status==FixedScaleStatus::applied){
-            // The correction must leave the seam (and half the blend) inside the overlap; otherwise it is not applied.
-            bool fits=false;MappedFixedSeamInput scaled;
-            try{scaled=ScaledDocumentMappedFixedSeamInput(profile.parameters,record.scale.applied_scale);fits=CanRenderMappedFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);}
+            // The correction must leave every output pixel shown and the seam (and half the blend) inside the
+            // overlap; otherwise it is not applied, and the status says which of the two failed.
+            bool covered=true,fits=false;MappedFixedSeamInput scaled;
+            try{
+                scaled=ScaledDocumentMappedFixedSeamInput(profile.parameters,record.scale.applied_scale);
+                try{RequireFixedCompositeCoverage(scaled);}catch(const std::invalid_argument&){covered=false;}
+                if(covered)fits=CanRenderMappedFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);
+            }
             catch(const std::invalid_argument&){fits=false;}
             if(fits)lens_pair=std::move(scaled);
-            else{record.scale.status=FixedScaleStatus::seam_outside_overlap;record.scale.applied_scale=1;}
+            else{record.scale.status=covered?FixedScaleStatus::seam_outside_overlap:FixedScaleStatus::output_uncovered;record.scale.applied_scale=1;}
         }
         alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         lens_record=std::move(record);
@@ -215,7 +225,10 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::optional<SeamBlendRecord> seam;double blend_milliseconds{};render::PairRenderResult rendered;
     if(lens_record){
         const auto started=std::chrono::steady_clock::now();
-        auto fixed=RenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign);
+        SeamBlendResult fixed;
+        // Nothing is created before this point, so a refusal here leaves only the originals.
+        try{fixed=RenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign);}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,error.what());}
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         // The raster is fixed by the condition: the output is never another size.
         if(fixed.image.width!=lens_condition->raster.width_pixels || fixed.image.height!=lens_condition->raster.height_pixels)throw std::runtime_error("lens-aware composite is not the size of the condition's raster");

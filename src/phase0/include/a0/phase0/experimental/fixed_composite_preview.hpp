@@ -306,6 +306,18 @@ inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFix
     }catch(const std::exception& error){return refuse(FixedCompositeSkip::condition_invalid,error.what());}
     // Coverage depends on the geometry only, so flat frames decide the fit and the trial render.
     const a0::m2::render::BgrImage flat{view_width,view_height,std::vector<std::uint8_t>(static_cast<size_t>(view_width)*view_height*3,128)};
+    // An output pixel that neither camera shows (the condition, edited by hand, asks for more than the cameras see) is a size
+    // problem, as in the JPEG path; without this a row with nothing in it would read as a seam outside the overlap.
+    try{
+        for(std::uint32_t j=0;j<plan.output_height;++j)for(std::uint32_t i=0;i<plan.output_width;++i){
+            const a0::m2::render::Point output{static_cast<double>(i),static_cast<double>(j)};
+            a0::m2::render::Point raw_a{},raw_b{};
+            const auto inside=[&](const a0::m2::render::Point& p){return p.x>=0 && p.y>=0 && p.x<view_width && p.y<view_height;};
+            const bool a_shows=plan.mapped->camera_a(output,raw_a) && inside(raw_a);
+            const bool b_shows=plan.mapped->camera_b(output,raw_b) && inside(raw_b);
+            if(!a_shows && !b_shows)return refuse(FixedCompositeSkip::size_differs,"output pixel ("+std::to_string(i)+","+std::to_string(j)+") is shown by neither camera");
+        }
+    }catch(const std::invalid_argument& error){return refuse(FixedCompositeSkip::size_differs,error.what());}
     // The JPEG column c is centred on the document X of C's column (c+0.5)*s-0.5; rounded half up.
     const long long target=static_cast<long long>(std::floor((static_cast<double>(condition.seam.column)+0.5)*sx));
     plan.scaled_seam_column=static_cast<std::uint32_t>(std::clamp<long long>(target,0,static_cast<long long>(plan.output_width)-1));

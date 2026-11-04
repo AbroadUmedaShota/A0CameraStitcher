@@ -167,13 +167,16 @@ inline std::string_view StillAlignmentBasis(const AutomaticStillAlignment& a){
 // exceeded: over the limit, nothing applied (the gate fails it later).
 // not_estimated: no usable estimate, nothing applied. seam_outside_overlap: the
 // correction would leave the seam outside the overlap, nothing applied.
-enum class FixedScaleStatus {applied,exceeded,not_estimated,seam_outside_overlap};
+// output_uncovered (lens-aware v7 only, #405): the correction would leave an output pixel that
+// neither camera shows, nothing applied.
+enum class FixedScaleStatus {applied,exceeded,not_estimated,seam_outside_overlap,output_uncovered};
 constexpr std::string_view FixedScaleStatusCode(FixedScaleStatus v){
     switch(v){
     case FixedScaleStatus::applied:return "applied";
     case FixedScaleStatus::exceeded:return "exceeded";
     case FixedScaleStatus::not_estimated:return "not-estimated";
     case FixedScaleStatus::seam_outside_overlap:return "seam-outside-overlap";
+    case FixedScaleStatus::output_uncovered:return "output-uncovered";
     }
     return {};
 }

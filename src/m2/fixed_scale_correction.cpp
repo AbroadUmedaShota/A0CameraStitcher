@@ -118,6 +118,7 @@ std::string_view FixedScaleNotice(FixedScaleStatus status){
     case FixedScaleStatus::exceeded:return "倍率の差が上限を超えた。ピントか高さを確かめてください";
     case FixedScaleStatus::not_estimated:return "倍率の差を推定できなかったため、倍率は補正していません";
     case FixedScaleStatus::seam_outside_overlap:return "倍率を補正すると継ぎ目が重なりの外に出るため、倍率は補正していません";
+    case FixedScaleStatus::output_uncovered:return "倍率を補正すると、どちらのカメラにも写らない出力の画素ができるため、倍率は補正していません";
     }
     return {};
 }

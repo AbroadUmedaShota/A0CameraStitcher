@@ -360,7 +360,7 @@ SavedFixedCompositeLens ReadFixedCompositeLens(const ReviewValue& value){
     const auto& s=ReviewAt(value,"scaleCorrection");
     ReviewFields(s,{"status","reason","limitPercent","estimatedScale","differencePercent","appliedScale","center","usedTiles","usedRows","residual","unexplainedShift","notice"});
     auto& c=f.scale;bool known=false;const auto status=ReviewString(ReviewAt(s,"status"));
-    for(const auto v:{FixedScaleStatus::applied,FixedScaleStatus::exceeded,FixedScaleStatus::not_estimated,FixedScaleStatus::seam_outside_overlap})
+    for(const auto v:{FixedScaleStatus::applied,FixedScaleStatus::exceeded,FixedScaleStatus::not_estimated,FixedScaleStatus::seam_outside_overlap,FixedScaleStatus::output_uncovered})
         if(status==FixedScaleStatusCode(v)){c.status=v;known=true;}
     const auto reason=ReviewString(ReviewAt(s,"reason"));bool reason_known=false;
     for(const auto v:{FixedScaleReason::none,FixedScaleReason::no_tiles,FixedScaleReason::insufficient_tiles,FixedScaleReason::outside_image,FixedScaleReason::tied_starts,FixedScaleReason::too_few_tiles,FixedScaleReason::degenerate_fit})
@@ -399,6 +399,7 @@ SavedFixedCompositeLens ReadFixedCompositeLens(const ReviewValue& value){
     case FixedScaleStatus::exceeded:
         if(!estimated || c.reason!=FixedScaleReason::none || *c.difference_percent<=c.limit_percent || c.applied_scale!=1)ReviewReject();break;
     case FixedScaleStatus::seam_outside_overlap:
+    case FixedScaleStatus::output_uncovered:
         if(!estimated || c.reason!=FixedScaleReason::none || *c.difference_percent>c.limit_percent || c.applied_scale!=1)ReviewReject();break;
     case FixedScaleStatus::not_estimated:
         if(estimated || c.reason==FixedScaleReason::none || c.applied_scale!=1)ReviewReject();break;

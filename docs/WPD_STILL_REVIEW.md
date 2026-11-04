@@ -317,7 +317,7 @@ v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読め�
 | `source.profileFingerprintSha256` | ADR-0034 の fingerprint（`RigProfileV2::FingerprintSha256`）。読む時に計算し直して照合する |
 | `mountOrientation` | 校正した時の取り付けの向き（`normal` か `rotated-180`）。今の向きとの照合は経路の側（v1 と同じ） |
 | `outputRaster` | 開発用の出力ラスタ。文書の面の `regionUm`（マイクロメートル、整数）、整数の `dpi`、`widthPixels`・`heightPixels`。画素数は領域と DPI から切り上げで決まる値と一致しなければ読めない（ADR-0034）。所有者の決定（`HG-0001`）ではなく、人が作る時に指定した未承認の値。コードの既定値は無い |
-| `scaleAutoCorrectionMaxPercent` | 撮影ごとに倍率だけ補正してよい差の上限（%）。v1 と同じ意味と範囲（有限、0 以上）。必須で、コードの既定値は無い |
+| `scaleAutoCorrectionMaxPercent` | 撮影ごとに倍率だけ補正してよい差の上限（%）。v1 と同じ意味と範囲（有限、0 以上）。必須で、コードの既定値は無い。v2 の reader は作る側と同じく 100 未満だけ受け付ける |
 | `seam` | 継ぎ目の列（v1 と同じ意味）。`column` は出力ラスタの画素の列（0 以上、`widthPixels` 未満）、`origin` は `band-center-provisional` か `operator` |
 
 写像の値（内部パラメータ、歪みの係数、文書→画像の射影）は記録に写さず、profile だけが持つ。撮影画像の大きさ（profile の `cameraModel` が固定）、補間の種類、有効期限も持たない。v1 の `source.reviewReportSha256`・`pairId`・`method` は v2 には無い（保存済みの review ではなく校正から作るため）。
@@ -410,7 +410,7 @@ v2 の写像の上で、撮影ごとに変える倍率 k だけを推定して�
 
 - 条件ファイルは撮影のたびに `SelectFixedComposite`（`experimental/fixed_composite_selection.hpp`。C の経路も `LoadFixedPreviewSource` を通して同じ関数で読む）で読む。ファイル名は v1 と同じ1つで、`schema` が v1 なら今までの #400 の経路（報告は v6）、v2 ならこの節の経路（報告は v7）
 - v1 の経路の出力は変えていない。同じ人工の入力で6通り（線形 feather、seam-cut、自動の推定、固定の合成条件で倍率を当てた場合と上限を超えた場合、手動の再Merge）を、この変更の前の版（82e3448）と後の版のビルドでそれぞれ書き、出力 JPEG と報告の SHA-256 がすべて一致することを確かめた（2026-11-04、使い捨ての確認用プログラム。リポジトリには入れていない）
-- 合成しない時は、原画像2枚を残して理由を画面と記録に出す（#400 と同じ）。理由の符号は `condition-absent`・`condition-invalid`・`profile-absent`（条件が参照する校正ファイルが条件と同じフォルダに無い）・`profile-differs`（校正ファイルがあるが、条件の SHA-256・fingerprint と違う、校正済み draft として使えない、フォルダや巨大なファイル）・`orientation-differs`・`size-differs`（原画像が profile の 7360×4912 でない）・`seam-outside-overlap`。`profile-absent` と `profile-differs` は `FixedCompositeProfileError`（`std::invalid_argument` の派生）の種類から決める。C の経路は同じ判定を `SelectFixedComposite` から受け取り、同じ符号をログに出す
+- 合成しない時は、原画像2枚を残して理由を画面と記録に出す（#400 と同じ）。理由の符号は `condition-absent`・`condition-invalid`・`profile-absent`（条件が参照する校正ファイルが条件と同じフォルダに無い）・`profile-differs`（校正ファイルがあるが、条件の SHA-256・fingerprint と違う、校正済み draft として使えない、フォルダや巨大なファイル、共有違反やアクセス拒否で読めない）・`orientation-differs`・`size-differs`（原画像が profile の 7360×4912 でない、または条件の出力に A・B のどちらにも写らない画素がある。手で直した条件で起きる。C も同じ理由で描かない）・`seam-outside-overlap`。`profile-absent` と `profile-differs` は `FixedCompositeProfileError`（`std::invalid_argument` の派生）の種類から決める。C の経路は同じ判定を `SelectFixedComposite` から受け取り、同じ符号をログに出す
 - v1 から v2 への切り替えは人が行う（v1 のファイルを別の名前に移してから v2 を作る）。途中で版を混ぜて描かない
 
 ### 写像と出力
@@ -423,10 +423,10 @@ v2 の写像の上で、撮影ごとに変える倍率 k だけを推定して�
 
 1. 要求の検査: 条件・校正の束縛（`LoadFixedCompositeConditionAny` が返すもの）・条件の hash があり、v1 の固定の合成・手動・自動・seam-cut と同時に指定しない。校正の束縛が条件の hash・fingerprint・ラスタと合わない時は何も作らず `profile-differs`
 2. 取り付けの向きと原画像の大きさの検査（合わなければ何も作らない）
-3. 継ぎ目の確認（倍率 1）: `CanRenderMappedFixedSeam`。継ぎ目の列と混ぜ幅の半分が全行で重なりに入らなければ、推定せずに `seam-outside-overlap`
+3. 被覆の確認（倍率 1）: `RequireFixedCompositeCoverage`。出力のどの画素も A か B に写らなければ、推定せずに `size-differs`。続けて継ぎ目の確認（`CanRenderMappedFixedSeam`）。継ぎ目の列と混ぜ幅の半分が全行で重なりに入らなければ、推定せずに `seam-outside-overlap`
 4. 推定の初期位置: B の格子の中心（`FixedCompositeScaleCenterMm`）を A の生画素へ写した位置から、向きを当てた画像での平行移動を作る（半回転では符号を反転）。推定器が受け付けない位置なら、推定せずに `outside-image`
 5. #365 の推定器（`EstimateOverlapSimilarity`）を、向きを当てた画像で走らせる。合意したタイルを `DecideFixedScaleV2` に渡す（タイルの座標は W3 の約束どおり保存した順の画素へ直される）
-6. 上限以内で当てる場合は、当てた後の写像で `CanRenderMappedFixedSeam` を呼ぶ。外れたら倍率 1 のまま、状態を `seam-outside-overlap`（推定は残す）にする。条件を作る検査で上限の範囲の両端と 1 を確かめてあるので、ここで外れるのは検査を飛ばした条件か壊れた記録だけ
+6. 上限以内で当てる場合は、当てた後の写像で被覆と `CanRenderMappedFixedSeam` を確かめる。外れたら倍率 1 のまま、状態を、被覆が欠けるなら `output-uncovered`、継ぎ目が重なりの外なら `seam-outside-overlap` にする（推定は残す）。合成の呼び出しが `std::invalid_argument` で拒否した時も `size-differs` に包み、出力を作る前に止める。条件を作る検査で上限の範囲の両端と 1 を確かめてあるので、ここで外れるのは検査を飛ばした条件か壊れた記録だけ
 7. 合成（`RenderMappedFixedSeam`）、JPEG の書き出しと読み直し、原画像の hash の再確認、報告の書き出し
 
 ### 報告 `a0.uncalibrated-still-review.v7`
@@ -439,7 +439,7 @@ v6 に v2 の情報を足すのではなく、新しい版にした。v6 は相�
   - `profile`: `file`（条件が記す名前）、`fileSha256`、`fingerprintSha256`、`profileId`（無ければ null）
   - `raster`: `regionUm`（left・top・right・bottom）、`dpi`、`widthPixels`、`heightPixels`
   - `seam`: `column`、`origin`（`band-center-provisional`／`operator`）
-  - `scaleCorrection`: `status`（`applied`・`exceeded`・`not-estimated`・`seam-outside-overlap`）、`reason`、`limitPercent`（条件の記録の値）、`estimatedScale`、`differencePercent`、`appliedScale`、`center`（`mm` と `outputPixels`）、`usedTiles`、`usedRows`（`count`・`first`・`last`）、`residual`（`mm` と `outputPixels` に `rms`・`maximum`。推定がなければ null）、`unexplainedShift`（d。`mm` と `outputPixels`。推定がなければ null）、`notice`
+  - `scaleCorrection`: `status`（`applied`・`exceeded`・`not-estimated`・`seam-outside-overlap`・`output-uncovered`）、`reason`、`limitPercent`（条件の記録の値）、`estimatedScale`、`differencePercent`、`appliedScale`、`center`（`mm` と `outputPixels`）、`usedTiles`、`usedRows`（`count`・`first`・`last`）、`residual`（`mm` と `outputPixels` に `rms`・`maximum`。推定がなければ null）、`unexplainedShift`（d。`mm` と `outputPixels`。推定がなければ null）、`notice`
   - `policyLimit`: v6 と同じ（方針ファイルとの照合。合成は常に条件の値）
   - `estimate`: 推定器の概要（`estimator`・`status`・`reason`・`initialPosition`・`tiles` の searched・matched・agreed）。推定器自身の相似の当てはめは記録しない（使っていない）
 - `blend`: v6 と同じ `fixed-seam`（継ぎ目の列は `fixedCompositeLens.seam` に1回だけ）
