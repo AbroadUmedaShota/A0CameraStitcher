@@ -815,7 +815,7 @@ int main(){
             both=request_for(near_pair,"exclusive-hash",same_policy);both.fixed_composite->condition_sha256="not-a-hash";reject([&]{WriteUncalibratedStillReview(both);});
             both=request_for(near_pair,"exclusive-null",same_policy);both.fixed_composite->condition=nullptr;reject([&]{WriteUncalibratedStillReview(both);});
             // The capture-side text for each reason is defined.
-            for(const auto skip:{FixedCompositeSkip::condition_absent,FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap})
+            for(const auto skip:{FixedCompositeSkip::condition_absent,FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap,FixedCompositeSkip::profile_absent,FixedCompositeSkip::profile_differs})
                 check(!px::WidenUtf8(FixedCompositeSkipText(skip)).empty());
             check(px::WidenUtf8(FixedCompositeSkipText(FixedCompositeSkip::condition_absent)).find(L"固定の合成条件がありません。設置の時に作ってください")!=std::wstring::npos);
 

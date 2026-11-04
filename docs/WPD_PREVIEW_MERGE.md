@@ -49,7 +49,7 @@
 
 > 設計は [レンズの歪みを含む固定の合成条件](design/fixed-composite-lens.md) の 6 節（C）、3.7 節（取り付けの向き）。上の「固定の合成条件で描くC」は v1 の条件（相似の写像）の説明で、v1 の描き方、出力、文言は変えていない。
 
-条件ファイルは v1 と同じ名前（`wpd-fixed-composite-condition.json`）で、`schema` が `a0.fixed-composite-condition.v2` ならこの経路になる。v2 の条件は写像の値を持たず、同じフォルダの校正済み draft の rig profile を SHA-256 と fingerprint で参照する（W1）。条件を読む場所は `LoadFixedPreviewSource` の 1 か所で、版の振り分けもここで行う（`LoadFixedCompositeConditionAny`）。profile が無い、差し替わっている、書き換わっている場合は、条件が壊れているのと同じ扱いで、Cを描かず理由を出す。profile も条件も書き換えず、承認もしない。
+条件ファイルは v1 と同じ名前（`wpd-fixed-composite-condition.json`）で、`schema` が `a0.fixed-composite-condition.v2` ならこの経路になる。v2 の条件は写像の値を持たず、同じフォルダの校正済み draft の rig profile を SHA-256 と fingerprint で参照する（W1）。条件を読むのは両台撮影の JPEG の経路と同じ `SelectFixedComposite`（`a0/m2/experimental/fixed_composite_selection.hpp`）で、Cはそれを `LoadFixedPreviewSource` から呼ぶだけにしてある。版の振り分けも、条件が無い・壊れている・profile が無い（`profile-absent`）・profile が違う（`profile-differs`。差し替わった、書き換わった、使えない）の判定も JPEG と同じで、Cを描かない時の理由の符号も JPEG の「合成しない理由」（[WPD_STILL_REVIEW.md](WPD_STILL_REVIEW.md) の「v2 の JPEG の経路」）と同じ。画面の文言は、`profile-absent` と `profile-differs` では JPEG の文の後ろに「Cを描きません」を付けたもの。profile も条件も書き換えず、承認もしない。
 
 | 状態 | Cの描き方 | 画面 |
 |---|---|---|
@@ -79,7 +79,7 @@
 
 **位置合わせのボタン、継ぎ目の線、撮影**。v1 と同じ。条件ファイルがある間は、位置合わせのボタンはCの位置を変えず、推定も走らせない。継ぎ目の線は寄せた後の列の中心に引く。Cの画素は保存せず、撮影、保存の合成、補正の推定、条件・profile の入力にしない。両台撮影はCの絵に依らず受け付ける。
 
-**ログ**（画素は書かない）。条件の読み込みの行に `version=1|2` を足し、v2 は条件と profile の SHA-256、profile の fingerprint、出力ラスタの大きさと DPI、継ぎ目の列を出す。描き方の決定の行（`C composite mode=…`）に `version=2 grid=WxH grid_pitch_mm=… coordinate_table=1` を足す。
+**ログ**（画素は書かない）。条件の読み込みの行に `version=1|2` を足し、条件ファイルがあって使えない時は `reason=` に理由の符号（`condition-invalid`・`profile-absent`・`profile-differs`）を出し、v2 は条件と profile の SHA-256、profile の fingerprint、出力ラスタの大きさと DPI、継ぎ目の列を出す。描き方の決定の行（`C composite mode=…`）に `version=2 grid=WxH grid_pitch_mm=… coordinate_table=1` を足す。
 
 **確認**。`preview_fixed_composite_v2_contracts`（`tests/fixed_composite_preview_v2_tests.cpp`、カメラ不要、引数は rig profile v2 の共通試験ベクトルのフォルダ）:
 

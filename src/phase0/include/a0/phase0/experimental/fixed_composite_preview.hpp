@@ -2,6 +2,7 @@
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/experimental/fixed_composite_condition.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
+#include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/m2/experimental/mount_orientation.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
 #include "a0/m2/optical_planner.hpp"
@@ -343,10 +344,12 @@ inline a0::m2::experimental::SeamBlendResult RenderFixedPreview(const FixedPrevi
 }
 
 // The condition file beside the settings, read when a preview session starts.
-// An absent file is the uncalibrated C; any other failure is a damaged one.
-// The one place that reads the condition of the preview, of either version: loaded
-// holds a version 1 record, loaded_v2 a version 2 record with its verified profile
-// (a missing, replaced or damaged profile is a damaged condition). At most one is set.
+// The preview's view of the condition file, of either version: loaded holds a version 1
+// record, loaded_v2 a version 2 record with its verified profile. At most one is set.
+// When neither is, reason says why: condition_absent (no file) leaves the uncalibrated C;
+// anything else means a file exists and C is not drawn with it. The reading itself is
+// SelectFixedComposite, the function the pair capture uses, so C and the JPEG judge an
+// absent, damaged, profile-less or profile-differing condition the same way.
 struct FixedPreviewSource {
     std::optional<a0::m2::experimental::LoadedFixedCompositeCondition> loaded;
     std::optional<a0::m2::experimental::LoadedFixedCompositeConditionV2> loaded_v2;
@@ -358,14 +361,12 @@ struct FixedPreviewSource {
 template<class Hash>
 FixedPreviewSource LoadFixedPreviewSource(const std::filesystem::path& file,Hash hash){
     FixedPreviewSource source;
-    try{
-        auto any=a0::m2::experimental::LoadFixedCompositeConditionAny(file,a0::m2::experimental::FixedCompositeSha256(hash));
-        if(any){
-            if(auto* v1=std::get_if<a0::m2::experimental::LoadedFixedCompositeCondition>(&*any))source.loaded=std::move(*v1);
-            else source.loaded_v2=std::move(std::get<a0::m2::experimental::LoadedFixedCompositeConditionV2>(*any));
-        }
+    auto selection=a0::m2::experimental::SelectFixedComposite(file,a0::m2::experimental::FixedCompositeSha256(hash));
+    source.reason=selection.reason;source.detail=std::move(selection.detail);
+    if(selection.loaded){
+        if(auto* v1=std::get_if<a0::m2::experimental::LoadedFixedCompositeCondition>(&*selection.loaded))source.loaded=std::move(*v1);
+        else source.loaded_v2=std::move(std::get<a0::m2::experimental::LoadedFixedCompositeConditionV2>(*selection.loaded));
     }
-    catch(const std::exception& error){source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;source.detail=error.what();}
     return source;
 }
 
@@ -442,6 +443,9 @@ inline std::wstring FixedPreviewUnavailableText(a0::m2::experimental::FixedCompo
     case S::orientation_differs:return L"固定の合成条件の取り付けの向きが、この画面の向きと合いません。Cを描きません";
     case S::size_differs:return L"固定の合成条件を、ライブビューの大きさへ縮められません。Cを描きません";
     case S::seam_outside_overlap:return L"固定の合成条件の継ぎ目の列が、縮めたCの重なりの外にあります。Cを描きません";
+    // Worded as the pair capture's FixedCompositeSkipText, followed by what C does.
+    case S::profile_absent:return L"固定の合成条件が参照する校正ファイル（profile）が、条件と同じフォルダにありません。Cを描きません";
+    case S::profile_differs:return L"固定の合成条件が参照する校正ファイル（profile）が、条件の記録と違うか使えません。設置の時に作り直してください。Cを描きません";
     }
     throw std::invalid_argument("unknown fixed composite skip");
 }

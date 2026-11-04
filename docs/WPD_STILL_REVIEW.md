@@ -289,7 +289,7 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 
 ## レンズの歪みを含む固定の合成条件 v2 (#405 W1・W6、親 #396)
 
-設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）と、作る入口（W6: 作る時の検査、倍率の写像、CLI）まで。合成の関数は W2（次の節）。倍率の撮影ごとの推定と補正は W3（その後の節）。JPEG の経路は W4（「v2 の JPEG の経路」の節）で v2 に切り替えた。C の経路（W5）は v2 にまだ切り替えていない。
+設計は [固定の合成条件（レンズの歪みを含む）](design/fixed-composite-lens.md)。v1 は B を A に重ねる相似（平行移動・回転・倍率）だけで、レンズの歪みを表せない。v2 は、校正（#374）が書く rig profile 2.0.0 の校正済み draft を参照し、その写像で合成する。この節は記録そのもの（書式、検証、読み書き、作る関数）と、作る入口（W6: 作る時の検査、倍率の写像、CLI）まで。合成の関数は W2（次の節）。倍率の撮影ごとの推定と補正は W3（その後の節）。JPEG の経路は W4（「v2 の JPEG の経路」の節）で v2 に切り替えた。C の経路は W5 で v2 に切り替えた（[WPD_PREVIEW_MERGE.md](WPD_PREVIEW_MERGE.md) の「レンズの歪みを含む固定の合成条件（v2）で描くC」）。
 
 v1 と同じく、承認を表す欄を持たず、`unapproved` 以外は読めない。profile も承認しないし、書き換えない。
 
@@ -337,7 +337,7 @@ fingerprint は空白やメンバーの順序に影響されないので、空�
 
 ### 範囲外
 
-- 倍率の撮影ごとの推定と当てはめは W3（「倍率の撮影ごとの推定と補正」の節）。報告の新しい版（v7）と JPEG の経路は W4（「v2 の JPEG の経路」の節）。C の写像と格子（W5）は別の子 Issue（設計の 11 節）
+- 倍率の撮影ごとの推定と当てはめは W3（「倍率の撮影ごとの推定と補正」の節）。報告の新しい版（v7）と JPEG の経路は W4（「v2 の JPEG の経路」の節）。C の写像と格子は W5（[WPD_PREVIEW_MERGE.md](WPD_PREVIEW_MERGE.md) の「レンズの歪みを含む固定の合成条件（v2）で描くC」）
 - 継ぎ目の列を人が動かす操作と保存し直しの手順（#403）
 
 ### 確認
@@ -404,13 +404,13 @@ v2 の写像の上で、撮影ごとに変える倍率 k だけを推定して�
 
 ## v2 の JPEG の経路 (#405 W4)
 
-両台撮影の仮Merge保存（`SavePairReview`）が、条件ファイルの版を見て合成を分ける。設計は [レンズの歪みを含む固定の合成条件](design/fixed-composite-lens.md) の 3.7・5・9 節。撮影の手順（シャッター、取り込み、180秒のdeadline、原画像の保存とhash）は変えていない。C の経路（W5）は別。
+両台撮影の仮Merge保存（`SavePairReview`）が、条件ファイルの版を見て合成を分ける。設計は [レンズの歪みを含む固定の合成条件](design/fixed-composite-lens.md) の 3.7・5・9 節。撮影の手順（シャッター、取り込み、180秒のdeadline、原画像の保存とhash）は変えていない。C の経路（W5）は [WPD_PREVIEW_MERGE.md](WPD_PREVIEW_MERGE.md) に書き、条件の読み方と「合成しない理由」はこの節と同じものを使う。
 
 ### どの版で合成するか
 
-- 条件ファイルは撮影のたびに `SelectFixedComposite`（`experimental/fixed_composite_selection.hpp`。C の経路も同じ関数で読める）で読む。ファイル名は v1 と同じ1つで、`schema` が v1 なら今までの #400 の経路（報告は v6）、v2 ならこの節の経路（報告は v7）
+- 条件ファイルは撮影のたびに `SelectFixedComposite`（`experimental/fixed_composite_selection.hpp`。C の経路も `LoadFixedPreviewSource` を通して同じ関数で読む）で読む。ファイル名は v1 と同じ1つで、`schema` が v1 なら今までの #400 の経路（報告は v6）、v2 ならこの節の経路（報告は v7）
 - v1 の経路の出力は変えていない。同じ人工の入力で6通り（線形 feather、seam-cut、自動の推定、固定の合成条件で倍率を当てた場合と上限を超えた場合、手動の再Merge）を、この変更の前の版（82e3448）と後の版のビルドでそれぞれ書き、出力 JPEG と報告の SHA-256 がすべて一致することを確かめた（2026-11-04、使い捨ての確認用プログラム。リポジトリには入れていない）
-- 合成しない時は、原画像2枚を残して理由を画面と記録に出す（#400 と同じ）。理由の符号は `condition-absent`・`condition-invalid`・`profile-absent`（条件が参照する校正ファイルが条件と同じフォルダに無い）・`profile-differs`（校正ファイルがあるが、条件の SHA-256・fingerprint と違う、校正済み draft として使えない、フォルダや巨大なファイル）・`orientation-differs`・`size-differs`（原画像が profile の 7360×4912 でない）・`seam-outside-overlap`。`profile-absent` と `profile-differs` は `FixedCompositeProfileError`（`std::invalid_argument` の派生）の種類から決める
+- 合成しない時は、原画像2枚を残して理由を画面と記録に出す（#400 と同じ）。理由の符号は `condition-absent`・`condition-invalid`・`profile-absent`（条件が参照する校正ファイルが条件と同じフォルダに無い）・`profile-differs`（校正ファイルがあるが、条件の SHA-256・fingerprint と違う、校正済み draft として使えない、フォルダや巨大なファイル）・`orientation-differs`・`size-differs`（原画像が profile の 7360×4912 でない）・`seam-outside-overlap`。`profile-absent` と `profile-differs` は `FixedCompositeProfileError`（`std::invalid_argument` の派生）の種類から決める。C の経路は同じ判定を `SelectFixedComposite` から受け取り、同じ符号をログに出す
 - v1 から v2 への切り替えは人が行う（v1 のファイルを別の名前に移してから v2 を作る）。途中で版を混ぜて描かない
 
 ### 写像と出力
@@ -657,7 +657,7 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition <保存済みの�
 
 ## 写像の対で動く固定の継ぎ目の合成 (#405 W2)
 
-縦一直線の継ぎ目の合成（#398）を、B を A に重ねる相似（3×3）だけでなく、出力の画素から A・B それぞれの生画素への写像の対 `render::OutputToCamera` で動くように一般化した（設計は [レンズの歪みを含む固定の合成条件 v2](design/fixed-composite-lens.md) の 4 節）。**JPEG と C の経路はまだ v2 に切り替えていない。** 両方とも今までどおり `RenderPairFixedSeam`（相似）で描く。切り替えは同設計の W4（JPEG）と W5（C）で、条件の v2 の記録は W1、倍率の推定と補正は W3（「倍率の撮影ごとの推定と補正」の節）。
+縦一直線の継ぎ目の合成（#398）を、B を A に重ねる相似（3×3）だけでなく、出力の画素から A・B それぞれの生画素への写像の対 `render::OutputToCamera` で動くように一般化した（設計は [レンズの歪みを含む固定の合成条件 v2](design/fixed-composite-lens.md) の 4 節）。**この節の時点では JPEG と C の経路は v2 に切り替えていなかった**（その後 W4 と W5 で切り替えた）。v1 の条件では今までどおり `RenderPairFixedSeam`（相似）で描く。切り替えは同設計の W4（JPEG）と W5（C）で、条件の v2 の記録は W1、倍率の推定と補正は W3（「倍率の撮影ごとの推定と補正」の節）。
 
 - 入口（`a0_m2_seam_blend`、`experimental/seam_blend.hpp`）: `RenderMappedFixedSeam` / `CanRenderMappedFixedSeam` / `MappedFixedSeamBand` は `MappedFixedSeamInput`（出力の大きさと A・B の写像）を受ける。`PairMappedFixedSeamInput` は v1 の `PairRenderParameters` を、`DocumentMappedFixedSeamInput` は #374 の文書の面→各カメラの生画素（内部パラメータ・歪みの係数・文書→画像の射影、`render::DocumentOutputToCamera`）を、それぞれ写像の対にする。後者を直接描く `RenderDocumentFixedSeam` / `CanRenderDocumentFixedSeam` もある。継ぎ目の列は出力ラスタの列
 - 混ぜ方は #398 と同じ内部処理を共有する（帯の標本化、#368 と同じ明るさの比、継ぎ目に沿った合成）。標本化は生画素に 1 回だけ（bilinear）で、中間の画像は作らない。ゲートの `SeamGateGeometry` も同じ形の写像の対を持つので、合成に使った対をそのままゲートに渡せる

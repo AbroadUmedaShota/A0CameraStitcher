@@ -404,11 +404,16 @@ void States(const fs::path& normal_folder,const fs::path& rotated_folder){
         const auto past_plan=PlanFixedPreviewV2(past,MountOrientation::normal,640,427);
         CHECK(past_plan.skip && *past_plan.skip==FixedCompositeSkip::size_differs && !past_plan.detail.empty());
     }
-    // A damaged condition is not an absent one.
-    const auto damaged=[&](const char* what,const FixedPreviewSource& s){
-        Check(!s.loaded && !s.loaded_v2 && s.Present() && s.reason==FixedCompositeSkip::condition_invalid && !s.detail.empty(),what);
+    // A damaged condition is not an absent one, and C gives the reason the pair capture gives: the
+    // preview reads the file with SelectFixedComposite, so the two are compared on the same folder.
+    const auto damaged=[&](const char* what,const fs::path& folder,FixedCompositeSkip reason){
+        const auto s=Load(folder);
+        Check(!s.loaded && !s.loaded_v2 && s.Present() && s.reason==reason && !s.detail.empty(),what);
+        const auto selection=SelectFixedComposite(ConditionOf(folder),kHash);
+        Check(!selection.loaded && selection.reason==s.reason && selection.detail==s.detail,what);
         const auto choice=ChoosePreviewC(s,MountOrientation::normal,320,214);
-        Check(choice.mode==PreviewCMode::unavailable && choice.plan.skip && *choice.plan.skip==FixedCompositeSkip::condition_invalid,what);
+        Check(choice.mode==PreviewCMode::unavailable && choice.plan.skip && *choice.plan.skip==reason,what);
+        Check(!FixedPreviewUnavailableText(reason).empty() && FixedPreviewUnavailableText(reason).find(L"Cを描きません")!=std::wstring::npos,what);
     };
     {
         const auto folder=CopyOf(normal_folder,"damaged-profile");
@@ -417,15 +422,17 @@ void States(const fs::path& normal_folder,const fs::path& rotated_folder){
         CHECK(!profile.empty());
         const auto original=ReadAll(profile);
         WriteAll(profile,original+" ");                       // one byte more: the SHA-256 differs
-        damaged("profile bytes changed",Load(folder));
+        damaged("profile bytes changed",folder,FixedCompositeSkip::profile_differs);
         WriteAll(profile,ReplaceAll(original,"\"k1\": -0.05","\"k1\": 0.5")); // another calibration under the same name
-        damaged("profile replaced by another calibration",Load(folder));
+        damaged("profile replaced by another calibration",folder,FixedCompositeSkip::profile_differs);
         WriteAll(profile,original);
         CHECK(Load(folder).loaded_v2.has_value());              // restored: usable again
         fs::remove(profile);
-        damaged("profile missing",Load(folder));
+        damaged("profile missing",folder,FixedCompositeSkip::profile_absent);
         WriteAll(profile,"{");
-        damaged("profile not a profile",Load(folder));
+        damaged("profile not a profile",folder,FixedCompositeSkip::profile_differs);
+        fs::remove(profile);fs::create_directory(profile);
+        damaged("profile is a folder",folder,FixedCompositeSkip::profile_differs);
         fs::remove_all(folder);
     }
     {
@@ -433,13 +440,13 @@ void States(const fs::path& normal_folder,const fs::path& rotated_folder){
         const auto file=ConditionOf(folder);
         const auto original=ReadAll(file);
         WriteAll(file,ReplaceAll(original,"\"approval\":\"unapproved\"","\"approval\":\"approved\""));
-        damaged("approval claimed",Load(folder));
+        damaged("approval claimed",folder,FixedCompositeSkip::condition_invalid);
         WriteAll(file,original.substr(0,original.size()/2));
-        damaged("condition cut short",Load(folder));
+        damaged("condition cut short",folder,FixedCompositeSkip::condition_invalid);
         WriteAll(file,"");
-        damaged("condition empty",Load(folder));
+        damaged("condition empty",folder,FixedCompositeSkip::condition_invalid);
         fs::remove(file);fs::create_directory(file);
-        damaged("condition is a folder",Load(folder));
+        damaged("condition is a folder",folder,FixedCompositeSkip::condition_invalid);
         fs::remove_all(folder);
     }
     // A version 1 file is still read as version 1 and still drawn with the earlier C.

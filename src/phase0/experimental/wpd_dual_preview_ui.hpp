@@ -74,7 +74,7 @@ void LoadFixedSource(){
         line<<" version=2 sha256="<<fixed_source.loaded_v2->file_sha256<<" profile_sha256="<<p.profile_file_sha256<<" profile_fingerprint_sha256="<<p.profile_fingerprint_sha256
             <<" raster="<<c.raster.width_pixels<<"x"<<c.raster.height_pixels<<"@"<<c.raster.dpi<<"dpi seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
-    else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason=condition_invalid";
+    else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(fixed_source.reason);
     Log(line.str());
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
@@ -973,16 +973,24 @@ int RunFixedCUiSmoke(){
     check(capture_admitted());
     stop_worker();rearm();ClearMerge();
 
-    // 3. A damaged file: the same, with its own reason.
-    fixed_source={};fixed_source.reason=m2::FixedCompositeSkip::condition_invalid;
-    check(FixedConditionPresent());
-    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
-    {
-        std::lock_guard lock(merged.mutex);
-        check(merged.pixels.bytes.empty() && merged.error==FixedPreviewUnavailableText(m2::FixedCompositeSkip::condition_invalid));
+    // 3. A damaged file, a version 2 condition without its profile, and one whose profile differs: the same,
+    // each with its own reason, and the profile reasons worded as the pair capture words them.
+    for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs}){
+        fixed_source={};fixed_source.reason=reason;
+        check(FixedConditionPresent());
+        check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
+        {
+            std::lock_guard lock(merged.mutex);
+            check(merged.pixels.bytes.empty() && merged.error==FixedPreviewUnavailableText(reason));
+            check(merged.fixed_plan.skip && *merged.fixed_plan.skip==reason);
+        }
+        if(reason!=m2::FixedCompositeSkip::condition_invalid){
+            const auto capture_text=WidenUtf8(m2::FixedCompositeSkipText(reason));
+            check(!capture_text.empty() && FixedPreviewUnavailableText(reason).rfind(capture_text,0)==0);
+        }
+        check(capture_admitted());
+        stop_worker();rearm();ClearMerge();
     }
-    check(capture_admitted());
-    stop_worker();rearm();ClearMerge();
 
     // 4. No condition: the uncalibrated C stays, its position requests work, and no seam line is drawn.
     fixed_source={};
