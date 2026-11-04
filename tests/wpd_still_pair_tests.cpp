@@ -214,6 +214,12 @@ int main(){
         // ... and for B: A is open but not exposed; both close.
         {Harness h;h.lane[1].fake.preflight_event=0x4005;const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"CAM-B exposure preflight:") && h.lane[0].fake.shutters==0 && h.lane[1].fake.shutters==0 && !r.shutter_dispatched[0]);}
+        // #407: B's Live View is on at the exposure recheck: neither body is
+        // exposed or read, both close.
+        {Harness h;h.lane[1].fake.live_on=true;const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && Contains(r.error,"CAM-B exposure preflight") && Contains(r.error,"Live View off"));
+            Check(h.lane[0].fake.shutters==0 && h.lane[1].fake.shutters==0 && !r.shutter_dispatched[0] && !r.shutter_dispatched[1]);
+            Check(h.lane[0].fake.object_reads==0 && h.lane[1].fake.object_reads==0 && !h.lane[0].persisted && !h.lane[1].persisted);}
         // OutOfFocus before the shutter is typed through the pair result.
         {Harness h;h.lane[1].fake.out_of_focus_before_shutter=true;const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && r.out_of_focus && h.lane[0].fake.shutters==0 && h.lane[1].fake.shutters==0);}

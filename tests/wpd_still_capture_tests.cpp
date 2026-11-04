@@ -12,6 +12,12 @@ template<class F>std::string RejectedEvent(F f,std::uint16_t code,bool after_shu
     try{f();}catch(const WpdStillEventRejected& e){typed=e.Code()==code && e.AfterShutter()==after_shutter;what=e.what();}catch(...){}
     Check(typed);return what;
 }
+// Requires a std::exception; returns its text (empty when nothing was thrown).
+template<class F>std::string Rejected(F f){
+    std::string what;bool rejected=false;
+    try{f();}catch(const std::exception& e){rejected=true;what=e.what();}
+    Check(rejected);return what;
+}
 // Test-sized completion wait. Production uses kWpdStillCompletionWaitMax.
 const WpdStillCompletionWait kShortWait{std::chrono::milliseconds(60),std::chrono::milliseconds(2)};
 bool Contains(const std::string& text,std::string_view part){return text.find(part)!=std::string::npos;}
@@ -64,6 +70,25 @@ int main(){
             Check(ok && f.shutters==1 && f.profile_reads==2 && f.preflight_reads==4 && f.object_reads==1);}
         {Fake f;f.preflight_event=0x4004;f.bad_quality_after_refresh=true;
             Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[](auto){});});Check(f.profile_reads==2 && f.shutters==0 && f.object_reads==0);}
+        // #407: Live View on, or an image size other than FX JPEG L, refuses the
+        // capture before any shutter or object read. Both the preflight alone and
+        // the single capture, at the first profile read and only after the
+        // StoreAdded refresh.
+        for(bool capture:{false,true}){
+            const auto run=[capture](Fake& f){
+                if(capture)AcquireWpdStillPayload(f,[]{return true;},[](auto){});
+                else ReadWpdStillPreflight(f,[]{return true;});
+            };
+            for(bool live:{true,false}){
+                const std::string_view expected=live?"Live View off":"FX JPEG L";
+                {Fake f;(live?f.live_on:f.wrong_size)=true;
+                    const auto what=Rejected([&]{run(f);});
+                    Check(Contains(what,expected) && f.profile_reads==1 && f.shutters==0 && f.object_reads==0);}
+                {Fake f;f.preflight_event=0x4004;(live?f.live_on_after_refresh:f.wrong_size_after_refresh)=true;
+                    const auto what=Rejected([&]{run(f);});
+                    Check(Contains(what,expected) && f.profile_reads==2 && f.shutters==0 && f.object_reads==0);}
+            }
+        }
         {Fake f;f.preflight_event=0x4004;f.late_pending=true;
             Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[](auto){});});Check(f.profile_reads==2 && f.shutters==0 && f.object_reads==0);}
         {Fake f;f.preflight_event=0x4004;f.repeat_preflight_event=true;
