@@ -1,4 +1,5 @@
 #include "a0/m2/experimental/still_review.hpp"
+#include "a0/m2/experimental/fixed_composite_condition.hpp"
 #include "a0/m2/experimental/review_session.hpp"
 #include "a0/m2/offline_stitcher.hpp"
 #include "a0/phase0/phase0.hpp"
@@ -576,6 +577,48 @@ int main(){
         check(Read(auto_root/"compare-seam.jpg").size()>0 && Read(corrected.jpeg)==Read(corrected.jpeg));
         reject([&]{(void)CompareStillReviewBlends(corrected_record,auto_root/"compare",400,300);});
         check(Read(output.report)==report_bytes && Read(output.jpeg)==original_jpeg && Read(r.camera_a_original)==a && Read(r.camera_b_original)==b);
+        // Fixed composite condition (#399) made from the real saved reports of every
+        // version: the geometry is the one each report actually rendered.
+        {
+            const auto created=std::chrono::system_clock::now();
+            const auto condition_of=[&](const SavedStillReview& review,FixedCompositeMethod method){
+                const auto c=MakeFixedCompositeCondition(review,created,0.5);
+                check(c.source.method==method && c.source.review_report_sha256==review.report_sha256 && c.source.pair_id==review.pair_id);
+                check(c.orientation==review.geometry.orientation && c.source_width==review.source_width && c.source_height==review.source_height);
+                const auto expected=SimilarityReviewGeometry(review.translation_x,review.translation_y,review.rotation_degrees,review.scale,review.source_width,review.source_height);
+                const auto actual=FixedCompositeRenderParameters(c);
+                check(actual.camera_b_to_camera_a==expected.camera_b_to_camera_a && actual.crop.left==review.crop.left && actual.crop.top==review.crop.top &&
+                    actual.crop.right==review.crop.right && actual.crop.bottom==review.crop.bottom);
+                const auto plan=a0::m2::render::PlanPairCanvas(c.source_width,c.source_height,c.source_width,c.source_height,actual);
+                check(plan.output_width==review.width && plan.output_height==review.height && c.output_width==review.width && c.output_height==review.height);
+                check(c.seam.origin==FixedSeamOrigin::band_center_provisional && c.seam.column==ProvisionalSeamColumn(actual,c.source_width,c.source_height));
+                const auto text=FormatFixedCompositeCondition(c);
+                check(FormatFixedCompositeCondition(ParseFixedCompositeCondition(text))==text && text.find("\"approval\":\"unapproved\"")!=std::string::npos);
+                return c;
+            };
+            const auto v1=condition_of(saved,FixedCompositeMethod::live_preview);
+            check(v1.mapping.translation_x==32 && v1.mapping.translation_y==4 && v1.seam.column==48);
+            const auto v2=condition_of(child,FixedCompositeMethod::manual_still_pixels);
+            check(v2.mapping.translation_x==33 && v2.mapping.translation_y==3);
+            const auto v3=condition_of(similarity_record,FixedCompositeMethod::manual_still_similarity);
+            check(v3.mapping.rotation_degrees==1 && v3.mapping.scale==1.125);
+            const auto v5=condition_of(corrected_record,FixedCompositeMethod::auto_still_similarity);
+            check(v5.mapping.rotation_degrees==corrected_record.automatic->similarity->rotation_degrees && v5.mapping.scale==corrected_record.automatic->similarity->scale);
+            (void)condition_of(rotation_record,FixedCompositeMethod::auto_still_rotation);
+            (void)condition_of(scale_over_record,FixedCompositeMethod::auto_still_rotation);
+            (void)condition_of(exceeded_record,FixedCompositeMethod::auto_still_translation);
+            (void)condition_of(flat_record,FixedCompositeMethod::live_preview);
+            check(condition_of(turned_record,FixedCompositeMethod::live_preview).orientation==MountOrientation::rotated_180);
+            check(condition_of(cut_record,FixedCompositeMethod::auto_still_similarity).seam.origin==FixedSeamOrigin::band_center_provisional);
+            // Written once as a new file, read back, never overwritten.
+            const auto condition_file=root/"fixed-composite"/kFixedCompositeConditionName;
+            fs::create_directories(condition_file.parent_path());
+            WriteFixedCompositeCondition(condition_file,v5);
+            const auto loaded=LoadFixedCompositeCondition(condition_file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
+            check(loaded && loaded->condition.source.review_report_sha256==corrected_record.report_sha256 && loaded->file_sha256==a0::phase0::Sha256Hex(Read(condition_file)));
+            reject([&]{WriteFixedCompositeCondition(condition_file,v1);});
+            check(loaded && FormatFixedCompositeCondition(loaded->condition)==FormatFixedCompositeCondition(v5));
+        }
         CoUninitialize();
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;

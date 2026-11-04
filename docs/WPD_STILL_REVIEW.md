@@ -226,6 +226,63 @@ Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'A0CameraStitcher\phase0\w
 - `still_review_contracts`: 方針ファイルの厳格な読込（倍率の欄の有無・null・負・型違い・重複・綴り違い）、上限ちょうど（倍率1.01と0.99は1%の内側、その次の倍精度の値は外側）・符号・上限超え・残差の警告の判定、回転が超えた時の倍率の判定と警告の並び、人工JPEG（倍率1.004）での倍率の上限あり（1%、`corrected`）・なし（`no-scale-policy`、倍率1）・超え（0.2%、`scale-exceeded`、倍率1）・回転超え・`no-policy`・`undetermined`（従来のv1と同じJPEGのbyte列になる）、継ぎ目の差が相似・`rigid`・平行移動だけの順に小さいこと、手動の子の改訂、書き換えたv5（倍率の判定・方針の倍率の値・当てた倍率・`rigid`・警告）とv4・推定器v1の拒否、`rotated-180`、原画像の不変
 - 吊り下げリグで撮った保存ペア2組（`rotated-180`）に当てると、どちらも回転は約1°で、相似の後の残差は平行移動だけの時より小さかった。Bの端に近い列のタイルは合議から外れやすく、レンズの歪みが疑われる（※推定）。推定した倍率は2組とも100%との差が1%より小さく、倍率の上限1%の方針では倍率も補正した（上限を置く前と同じ合成）。倍率の上限が無い方針では倍率を1に固め、残差RMSは相似より少し大きく、平行移動だけより小さかった。実画像と細かい値は公開しない
 
+## 設置ごとの固定の合成条件 (#399)
+
+#396 の決定。合成の幾何（B を A に重ねる写像）は撮影ごとに変えず、設置ごとに一度決めた値をすべての撮影で使う。承認済みの rig profile がまだ無いので、開発経路では「固定の合成条件（未承認）」として扱う。この記録は rig profile ではなく、承認を表す欄も持たない。読む側は JPEG の経路（#400）と C の経路（#401）で、今回は書式、検証、作る関数、読み書きの関数と試験までを入れた。
+
+### 作り方と置き場所
+
+- 人が設置の時に明示して一度だけ作る。撮影ごとには作らない。保存済みの review の報告（`LoadSavedStillReview` が通るもの）を渡し、`MakeFixedCompositeCondition(review, 時刻, 倍率補正の上限)` が、その報告が実際に使った幾何を取り出して記録にする。自動の相似（#365）の報告は、推定値ではなく適用された相似（回転が上限超えなら平行移動だけ）。手動の報告（v2・v3）はその値。v1 の報告と、推定できなかった v5 の報告はライブの平行移動
+- ファイルは `wpd-fixed-composite-condition.json`。`wpd-merge-policy.json` と同じフォルダ（`%LOCALAPPDATA%\A0CameraStitcher\phase0`）に置く想定。`LoadFixedCompositeCondition(ファイル, ハッシュ関数)` は、ファイルが無ければ「固定の合成条件が無い」（`std::nullopt`）を返し、あるのに読めない・厳密に読めない時は例外にする（壊れたファイルを「無い」と取り違えない）。戻り値にはファイルのバイト列の SHA-256 も付く（#400・#401 が報告に残す用）
+- 書き込みの `WriteFixedCompositeCondition` は新しいファイルとしてだけ書く。検証、`.partial` への排他的な作成、書き戻して読み直し、置き換えなしの rename の順で、既にあるファイルは上書きしない（同じ内容でも拒否）。親のフォルダは作らない。既存の `.partial` があれば拒否し、消さない。失敗した時はこの呼び出しが作った `.partial` だけを消す。記録を変えて保存し直す時（継ぎ目の列の変更など）に新しいファイルにするか改訂として前のものを残すかは #403 の設計で決める
+
+### 書式 `a0.fixed-composite-condition.v1`
+
+```json
+{"schema":"a0.fixed-composite-condition.v1","approval":"unapproved","createdUtc":"2026-11-04T12:34:56Z","source":{"reviewReportSha256":"<64 桁の小文字 16 進>","pairId":"pair-1","method":"live-preview"},"mountOrientation":"normal","sourceDimensions":{"width":64,"height":48},"mapping":{"translation":{"x":32,"y":4},"rotationDegrees":0,"scale":1,"anchor":"image-center","crop":{"left":0,"top":4,"right":0,"bottom":4}},"output":{"width":96,"height":44},"scaleAutoCorrectionMaxPercent":1,"seam":{"column":48,"origin":"band-center-provisional"}}
+```
+
+数値は書式の説明用の人工の値で、実測値ではない。
+
+| 欄 | 意味 |
+|---|---|
+| `approval` | 常に `unapproved`。ほかの値は読めない。`approved` に当たる値は持てない |
+| `createdUtc` | 作った時刻（UTC、秒）。実在する日付と時刻だけ |
+| `source.reviewReportSha256` / `pairId` | 元にした review の報告のバイト列の SHA-256 と pairId。パスは持たない（報告が移動しても記録は読める） |
+| `source.method` | 写像の作り方。報告の `geometryBasis` と同じ名前: `live-preview`（v1、推定できなかった v5）、`manual-still-pixels`（v2）、`manual-still-similarity`（v3）、`auto-still-translation`・`auto-still-rotation`・`auto-still-similarity`（v5）。写像と食い違う名前（平行移動だけの方式で回転が 0 でない、など）は読めない |
+| `mountOrientation` | `normal` か `rotated-180`。報告と違い、`normal` も省かず書く |
+| `sourceDimensions` | 撮影画像の原寸の幅と高さ（A と B は同じ大きさ） |
+| `mapping` | B の画像中心を A に対して `translation`（原寸の画素、整数）へ置き、`rotationDegrees`（度）と `scale` で中心まわりに回して拡大する。座標は向き（`mountOrientation`）を当てた後の原寸の画素。`crop` は出力の切り取りで、写像から求まる「覆われた長方形」と一致しなければ読めない |
+| `output` | crop 後の合成の大きさ。写像から求まる値と一致しなければ読めない |
+| `scaleAutoCorrectionMaxPercent` | 撮影ごとに倍率だけ補正してよい差の上限（%）。回転と平行移動は固定のままで、超えたらゲートで不合格にする（#396 の決定）。必須。所有者の決定: 1%（初期値）。値は記録を作る時に方針ファイル `wpd-merge-policy.json` の `scaleAutoCorrectionMaxPercent` から写す。コードの既定値にはしていない（記録を作る関数は引数で受け取る）。実機で測った後に見直す前提で、承認された光学的な閾値ではない。範囲は方針ファイルと同じ（有限、0 以上）。倍率の推定と補正そのものは #400 |
+| `seam` | 継ぎ目の列。次節 |
+
+`mapping` から `PairRenderParameters` を作る `FixedCompositeRenderParameters` は原寸用で、報告が描いたものと同じ行列と crop を返す。ライブビューの大きさへ縮める関数はここには無い（#398 の `ScaleFixedSeamCondition` を #401 が使う）。
+
+### 継ぎ目の列
+
+継ぎ目は縦にまっすぐな 1 本で、列は記録が持つ（#396 の再改定）。すべての撮影で同じ列を使い、人が C の画面でドラッグして変える（#403、設計待ち）。
+
+- `seam.column`: crop 後の出力の画素の列（0 以上、`output.width` 未満）
+- `seam.origin`: `band-center-provisional`（仮。帯の中央）か `operator`（人が動かした）。仮のときは `column` が帯の中央と一致していなければ読めない。人が動かしたら `operator` にする
+- 帯は A と B が全出力行で覆っている列の範囲（列の全体が覆われた列だけ数える）。`FixedCompositeOverlapBand(写像, 幅, 高さ)` が写像と crop だけから計算し（画像は読まない）、`ProvisionalSeamColumn` が `(最初の列 + 最後の列の次) / 2`（切り捨て）を返す。例: 帯が 32〜63 列なら 48
+- 検証は出力の幅の中にあることまで。混ぜ幅の半分を含めて帯に収まるかは、合成する側（#398 の `RenderPairFixedSeam`、`CanRenderFixedSeam`）が確かめる
+
+### 読めない記録
+
+壊れた JSON、重複キー、違う schema、足りない欄・余計な欄（どの階層でも）、型の違い、有限でない数・範囲外の数（`1e999` を含む）、整数の欄の小数や指数表記、大きさ 0、撮影画像を覆えない写像、未知の向き・方式・出どころ、`approved` などの承認の値、4096 byte 超、通常ファイル以外は、すべて同じ例外で拒否する。先頭の UTF-8 BOM だけは許す。
+
+### 範囲外と将来
+
+- 校正（#374）から作る場合の欄は、この版では持たない。校正由来の出どころが決まったら、その欄を足した新しい schema 名で出す（この版の reader は知らない欄を拒否するので、混ざらない）
+- JPEG の経路の切り替え（#400）、C の経路の切り替え（#401）、継ぎ目の列を人が動かす操作と保存し直し方（#403）は含まない
+- 記録を作る・保存する UI や CLI の入口は #400・#401 で作る
+
+### 確認
+
+- `m2_fixed_composite_condition_contracts`（`tests/fixed_composite_condition_tests.cpp`、カメラ・実ファイル不要）: 書式の全文、往復、方式ごとの作成（v1・v2・v3・v5 の各判定を人工の値で）、各拒否、帯の計算（回転・倍率つきの写像で、帯の列が全行で覆われ、外側の列が覆われないことを画素ごとに）、仮の継ぎ目と `operator` の扱い、倍率の上限の範囲（方針ファイルの検証と同じ受理）、一時フォルダでの書き込み・読み込み・上書きの拒否
+- `still_review_contracts`: 実際に書いた v1・v2・v3・v5 の報告（回転のみ、倍率が上限超え、回転が上限超え、推定なし、`rotated-180`、seam-cut を含む）を `LoadSavedStillReview` で読み、記録の写像・crop・出力の大きさが報告と一致し、保存して読み直せること
+
 ## 継ぎ目を1本の道筋にした合成と、継ぎ目に沿った明るさ合わせ (#368)
 
 #367 の段1。未校正Mergeの混ぜ方を、重なった帯の全域を半々に混ぜる線形featherから、継ぎ目で切り替える方式（`seam-cut`）に変える。幾何（平行移動、#365の相似）とcropは変えず、画素の混ぜ方と明るさだけが違う。線形featherは残し、報告の欄で区別する。レンズの歪み・傾きの校正（段2）、継ぎ目のそばの局所的な変形（段3）、品質の合否（段4）、ライブのC、製品経路の合成は対象外。
