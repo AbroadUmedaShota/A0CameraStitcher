@@ -28,6 +28,7 @@
 #include "a0/phase0/experimental/preview_merge_policy.hpp"
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_preview.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
@@ -803,6 +804,7 @@ int main(int argc,char** argv){
     try{
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--isolated-a-start-diagnostics"){
             ComScope com;HardwareProcessLease lease;return RunIsolatedAStartDiagnostics(Discover());
         }

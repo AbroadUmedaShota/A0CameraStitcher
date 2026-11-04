@@ -9,7 +9,7 @@ bool closing=false,preview_joined=false,all_sessions_passed=true;
 std::array<std::array<HWND,3>,2> focus_buttons{};
 std::array<HWND,2> capture_buttons{};
 std::array<HWND,5> merge_buttons{};
-HWND pair_button{},review_button{},inspect_button{},session_button{};
+HWND pair_button{},review_button{},inspect_button{},session_button{},seam_button{};
 bool focus_smoke=false,capture_smoke=false,merge_smoke=false,pair_smoke=false,level_smoke=false;
 bool restart_smoke=false,capture_restart_blocked=false;
 bool manual_restart_waiting=false;
@@ -45,8 +45,45 @@ struct MergeView {
     std::uint64_t frames{},painted{},paint_sequence{},revision{},rendered_revision{};
     unsigned overlap_pixels{},source_width{},source_height{};int vertical_pixels{};
     bool auto_requested{},auto_busy{};
+    // How C is drawn (#401). decided: the merge worker has chosen for the current frame size.
+    // fixed_plan is the plan in use (fixed_composite) or the reason C is not drawn (unavailable).
+    bool decided{};PreviewCMode mode{PreviewCMode::uncalibrated};FixedPreviewPlan fixed_plan;
+    bool show_seam=true;std::uint32_t seam_column{}; // seam_column: in the pixels of `pixels`, set with them
+    double ratio_minimum{1},ratio_maximum{1};
+    std::wstring position_refusal;
     std::wstring error,alignment_status=L"自動位置合わせで候補を作成 → 手動で微調整（要目視確認）";
 } merged;
+// The fixed composite condition beside the settings (#401). Written only by LoadFixedSource, on the UI
+// thread while no merge worker exists; the merge worker and the UI only read it.
+FixedPreviewSource fixed_source;
+bool FixedConditionPresent(){return fixed_source.loaded.has_value() || fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent;}
+// Read again at every preview session start, so a condition made between sessions is used.
+void LoadFixedSource(){
+    try{
+        auto file=DefaultIdentityMapPath();file.replace_filename(a0::m2::experimental::kFixedCompositeConditionName);
+        fixed_source=LoadFixedPreviewSource(file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
+    }catch(const std::exception& error){
+        fixed_source={};fixed_source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;fixed_source.detail=error.what();
+    }
+    std::ostringstream line;line.imbue(std::locale::classic());
+    line<<"C fixed_composite_condition="<<(fixed_source.loaded?"present":fixed_source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent?"absent":"invalid");
+    if(fixed_source.loaded){const auto& c=fixed_source.loaded->condition;
+        line<<" sha256="<<fixed_source.loaded->file_sha256<<" seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
+            <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
+    Log(line.str());
+}
+void LogPreviewChoice(const FixedPreviewChoice& choice){
+    std::ostringstream line;line.imbue(std::locale::classic());
+    const auto& plan=choice.plan;
+    line<<"C composite mode="<<(choice.mode==PreviewCMode::fixed_composite?"fixed-composite":choice.mode==PreviewCMode::unavailable?"unavailable":"uncalibrated")
+        <<" view="<<plan.view_width<<"x"<<plan.view_height;
+    if(choice.mode==PreviewCMode::fixed_composite)
+        line<<" capture_seam_column="<<plan.capture_seam_column<<" scaled_seam_column="<<plan.scaled_seam_column<<" seam_column="<<plan.view.seam_column<<" seam_shift="<<plan.seam_shift
+            <<" blend_width="<<plan.settings.width_pixels<<" window_half_width="<<plan.settings.brightness_half_width_pixels<<" smoothing_rows="<<plan.settings.brightness_smoothing_rows
+            <<" scale_correction=0 correspondence_verified=0 uncalibrated=1 quality_accepted=0";
+    else if(choice.mode==PreviewCMode::unavailable)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(*plan.skip);
+    Log(line.str());
+}
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
     return !stopping && !closing && !capture_pending && !capture_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
@@ -88,7 +125,12 @@ PreviewEndRestartObservation ObserveCameraEndRestart(){
     view.merge_fresh=!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b);
     return view;
 }
-void ClearMerge(){std::lock_guard lock(merged.mutex);merged.pixels={};merged.source_a={};merged.source_b={};merged.auto_requested=false;merged.auto_busy=false;}
+void ClearMerge(){std::lock_guard lock(merged.mutex);merged.pixels={};merged.source_a={};merged.source_b={};merged.auto_requested=false;merged.auto_busy=false;merged.decided=false;merged.position_refusal.clear();}
+Pixels ToPixels(const a0::m2::render::BgrImage& image){
+    Pixels next{image.width,image.height,{}};next.bytes.resize(static_cast<size_t>(next.width)*next.height*4);
+    for(size_t i=0,j=0;i<image.bgr.size();i+=3,j+=4)std::copy_n(image.bgr.data()+i,3,next.bytes.data()+j);
+    return next;
+}
 a0::m2::render::BgrImage SmallBgr(const Pixels& p){
     // Bound C's CPU work independently of A/B acquisition and display.
     const auto divisor=std::max(1u,(std::max(p.width,p.height)+639)/640);
@@ -101,8 +143,34 @@ a0::m2::render::BgrImage SmallBgr(const Pixels& p){
     }
     return result;
 }
+// One frame pair of C when a fixed composite condition exists (#401). Display only. fixed_composite draws
+// the pair with the scaled condition and measures the brightness ratio from these two frames; unavailable
+// draws nothing and leaves the reason in merged.error. The pair still counts as seen (sources and revision
+// are published), so the pair capture, which does not depend on C's picture, stays available.
+void PublishFixedC(const FixedPreviewChoice& choice,const a0::m2::render::BgrImage& a,const a0::m2::render::BgrImage& b,
+    Clock::time_point time_a,Clock::time_point time_b,std::uint64_t revision,const std::stop_token& stop){
+    const auto current=[&]{return !stopping && !stop.stop_requested() && merged.revision==revision && PreviewPairFresh(Clock::now(),time_a,time_b);};
+    if(choice.mode==PreviewCMode::unavailable){
+        std::lock_guard lock(merged.mutex);
+        if(current()){merged.pixels={};merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;merged.error=FixedPreviewUnavailableText(*choice.plan.skip);}
+        return;
+    }
+    try{
+        auto drawn=RenderFixedPreview(choice.plan,a,b);
+        auto next=ToPixels(drawn.image);
+        std::lock_guard lock(merged.mutex);
+        if(current()){
+            merged.pixels=std::move(next);merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;++merged.frames;merged.error.clear();
+            merged.ratio_minimum=drawn.record.ratio_minimum;merged.ratio_maximum=drawn.record.ratio_maximum;merged.seam_column=choice.plan.view.seam_column;
+        }
+    }catch(const std::exception&){
+        std::lock_guard lock(merged.mutex);merged.pixels={};
+        merged.error=L"固定の合成条件でCを描けませんでした。A/Bのフレームの大きさを確認してください";
+    }
+}
 void MergeLoop(std::stop_token stop){
     std::uint64_t last_a{},last_b{},last_revision=~std::uint64_t{};
+    std::optional<FixedPreviewChoice> choice;unsigned choice_width{},choice_height{};
     while(!stop.stop_requested() && !stopping){
         Pixels a,b;Clock::time_point time_a{},time_b{};std::uint64_t sequence_a{},sequence_b{},revision{};unsigned overlap{};int vertical{};
         {std::lock_guard lock(merged.mutex);overlap=merged.overlap_pixels;vertical=merged.vertical_pixels;revision=merged.revision;}
@@ -116,12 +184,26 @@ void MergeLoop(std::stop_token stop){
                 auto small_a=SmallBgr(a),small_b=SmallBgr(b);
                 // Proposal, manual shifts and render all share the oriented frame.
                 a0::m2::experimental::OrientRenderInput(small_a,mount_orientation);a0::m2::experimental::OrientRenderInput(small_b,mount_orientation);
+                // #401: how C is drawn depends on the condition file and the frame size, not on the frame content.
+                if(!choice || choice_width!=small_a.width || choice_height!=small_a.height){
+                    choice=ChoosePreviewC(fixed_source,mount_orientation,small_a.width,small_a.height);choice_width=small_a.width;choice_height=small_a.height;
+                    LogPreviewChoice(*choice);
+                }
                 bool align=false;
                 {std::lock_guard lock(merged.mutex);
                     merged.source_width=small_a.width;merged.source_height=small_a.height;
                     if(!merged.overlap_pixels)merged.overlap_pixels=small_a.width*30/100;
                     overlap=merged.overlap_pixels;
-                    if(merged.auto_requested && merged.revision==revision){merged.auto_requested=false;align=true;}
+                    merged.decided=true;merged.mode=choice->mode;merged.fixed_plan=choice->plan;
+                    // With a fixed condition no alignment request moves C (#401): nothing is estimated or applied.
+                    if(choice->mode!=PreviewCMode::uncalibrated){merged.auto_requested=false;merged.auto_busy=false;}
+                    else if(merged.auto_requested && merged.revision==revision){merged.auto_requested=false;align=true;}
+                }
+                if(choice->mode!=PreviewCMode::uncalibrated){
+                    PublishFixedC(*choice,small_a,small_b,time_a,time_b,revision,stop);
+                    last_a=sequence_a;last_b=sequence_b;last_revision=revision;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                    continue;
                 }
                 if(align){
                     using namespace a0::m2::experimental;
@@ -151,8 +233,7 @@ void MergeLoop(std::stop_token stop){
                     }
                 }
                 auto result=RenderPreviewMerge(small_a,small_b,overlap,vertical);
-                Pixels next{result.image.width,result.image.height,{}};next.bytes.resize(static_cast<size_t>(next.width)*next.height*4);
-                for(size_t i=0,j=0;i<result.image.bgr.size();i+=3,j+=4)std::copy_n(result.image.bgr.data()+i,3,next.bytes.data()+j);
+                auto next=ToPixels(result.image);
                 std::lock_guard lock(merged.mutex);
                 if(!stopping && !stop.stop_requested() && merged.revision==revision && PreviewPairFresh(Clock::now(),time_a,time_b)){
                     merged.pixels=std::move(next);merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;++merged.frames;merged.error.clear();
@@ -166,6 +247,7 @@ void MergeLoop(std::stop_token stop){
 void StartPreview(){
     if(capture_future.valid() || camera_workers[0].joinable() || camera_workers[1].joinable() || merge_worker.joinable())throw std::runtime_error("preview workers must be closed before restart");
     stopping=false;camera_end_observed=false;ready_count=0;preview_joined=false;ClearMerge();
+    if(!cleanup_only)LoadFixedSource(); // before the merge worker exists (#401)
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->id=registered_ids[i];cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     camera_workers[0]=std::jthread([]{cameras[0]->Run();});
     try{camera_workers[1]=std::jthread([]{cameras[1]->Run();});}
@@ -206,6 +288,7 @@ void LayoutButtons(HWND hwnd){
     if(review_button)MoveWindow(review_button,1005,rect.bottom/2+52,225,28,TRUE);
     if(inspect_button)MoveWindow(inspect_button,std::max(12L,rect.right-215),rect.bottom/2+88,200,28,TRUE);
     if(session_button)MoveWindow(session_button,std::max(12L,rect.right-430),rect.bottom/2+88,200,28,TRUE);
+    if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
 }
 void OpenSavedInspector(){
     if(review_path.empty())return;
@@ -221,12 +304,32 @@ void OpenSavedInspector(){
     if(!CreateProcessW(executable.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process))throw std::runtime_error("saved inspector launch failed");
     CloseHandle(process.hThread);CloseHandle(process.hProcess);Log("saved_review_inspector_launched=1 camera_operations=0");
 }
-bool DrawPixels(HDC dc,const Pixels& p,int left,int top,int available_width,int available_height){
-    if(!p.width || !p.height || available_width<=0 || available_height<=0)return false;
+// Where DrawPixels puts a picture of p inside the given area: centred across, top aligned, keeping its proportions.
+struct PixelRect {int left{},top{},width{},height{};};
+PixelRect FitPixels(const Pixels& p,int left,int top,int available_width,int available_height){
+    if(!p.width || !p.height || available_width<=0 || available_height<=0)return {};
     const double scale=std::min(double(available_width)/p.width,double(available_height)/p.height);
     const int width=static_cast<int>(p.width*scale),height=static_cast<int>(p.height*scale);
+    return {left+(available_width-width)/2,top,width,height};
+}
+bool DrawPixels(HDC dc,const Pixels& p,int left,int top,int available_width,int available_height){
+    if(!p.width || !p.height || available_width<=0 || available_height<=0)return false;
+    const auto rect=FitPixels(p,left,top,available_width,available_height);
+    const int width=rect.width,height=rect.height;
     BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=p.width;info.bmiHeader.biHeight=-static_cast<LONG>(p.height);info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
     return StretchDIBits(dc,left+(available_width-width)/2,top,width,height,0,0,p.width,p.height,p.bytes.data(),&info,DIB_RGB_COLORS,SRCCOPY)>0;
+}
+// The seam of C: one vertical line over the picture drawn into `rect`, at the middle of output column
+// `column` of p, in the pink of the saved result's seam line (#400). Over the display only; the pixels of
+// C stay as rendered. Returns whether a line was drawn.
+inline constexpr COLORREF kSeamLineColor=RGB(255,0,255);
+bool DrawSeamLine(HDC dc,const PixelRect& rect,const Pixels& p,unsigned column){
+    if(!p.width || column>=p.width || rect.width<=0 || rect.height<=0)return false;
+    const int x=rect.left+static_cast<int>(std::lround((column+0.5)*rect.width/p.width));
+    const auto saved=SaveDC(dc);if(!saved)return false;
+    SelectObject(dc,GetStockObject(DC_PEN));SetDCPenColor(dc,kSeamLineColor);
+    const bool drawn=MoveToEx(dc,x,rect.top,nullptr)!=FALSE && LineTo(dc,x,rect.top+rect.height)!=FALSE;
+    RestoreDC(dc,saved);return drawn;
 }
 bool DrawLevel(HDC dc,int left,int width,const Camera& c){
     const bool active=!stopping && !c.done && !c.failed;
@@ -314,11 +417,28 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         return drawn;
     }
     std::lock_guard lock(merged.mutex);
-    const auto title=PreviewMergeTitle(mount_orientation,merged.overlap_pixels,merged.vertical_pixels);
+    // The title and the standing note name the kind of C (#401): drawn with the fixed composite condition,
+    // not drawn although a condition exists, or the uncalibrated C when there is none.
+    std::wstring title,status;
+    if(merged.decided && merged.mode==PreviewCMode::fixed_composite){
+        title=FixedPreviewTitle(mount_orientation,merged.fixed_plan);
+        status=merged.position_refusal.empty()?FixedPreviewNote(merged.fixed_plan):merged.position_refusal;
+    }else if(FixedConditionPresent()){
+        title=L"C 固定の合成条件（未校正・未承認・表示専用）";
+        status=merged.decided?merged.position_refusal:L"固定の合成条件を確認しています…";
+    }else{
+        title=PreviewMergeTitle(mount_orientation,merged.overlap_pixels,merged.vertical_pixels);
+        status=std::wstring(kUncalibratedPreviewNotice)+L" / "+merged.alignment_status;
+    }
     TextOutW(dc,12,client.bottom/2+88,title.c_str(),static_cast<int>(title.size()));
-    TextOutW(dc,12,client.bottom/2+110,merged.alignment_status.c_str(),static_cast<int>(merged.alignment_status.size()));
+    RECT status_line{12,client.bottom/2+110,client.right-12,client.bottom/2+138};
+    DrawTextW(dc,status.c_str(),-1,&status_line,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     if(!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b)){
-        if(DrawPixels(dc,merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155))drawn[2]=merged.frames;
+        if(DrawPixels(dc,merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155)){
+            drawn[2]=merged.frames;
+            if(merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.show_seam)
+                DrawSeamLine(dc,FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155),merged.pixels,merged.seam_column);
+        }
     }else{const auto text=stopping?L"C: ライブビュー停止中です":merged.error.empty()?L"C: 両方の新しいフレームを待っています":merged.error.c_str();TextOutW(dc,12,client.bottom/2+145,text,lstrlenW(text));}
     return drawn;
 }
@@ -326,7 +446,10 @@ void RequestCapture(int index){
     if(camera_end_restart_smoke)return; // This explicit lifecycle test never exposes.
     if(index<0 || index>2 || !CanFocus(*cameras[0]) || !CanFocus(*cameras[1]))return;
     if(index==2){std::lock_guard lock(merged.mutex);
-        if(merged.pixels.bytes.empty() || merged.rendered_revision!=merged.revision || !PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b))return;
+        // C without a picture because the fixed condition cannot be applied (#401) does not stop the pair capture:
+        // the saved pair needs no picture of C, and its own composite step reports the same reasons (#400).
+        const bool no_picture_by_condition=merged.decided && merged.mode==PreviewCMode::unavailable;
+        if((merged.pixels.bytes.empty() && !no_picture_by_condition) || merged.rendered_revision!=merged.revision || !PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b))return;
         pending_geometry={merged.source_width,merged.source_height,merged.overlap_pixels,merged.vertical_pixels,merged.revision,mount_orientation};
     }
     capture_stop_requested=false;review_visible=false;capture_deadline=Clock::now()+std::chrono::seconds(180);
@@ -455,6 +578,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if((id==200 || id==201) && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==capture_buttons[id-200]){RequestCapture(id-200);return 0;}
         if(id==400 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==pair_button){RequestCapture(2);return 0;}
         if(id==401 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==review_button && !review_pixels.bytes.empty()){review_visible=!review_visible;return 0;}
+        if(id==404 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==seam_button){
+            // Display only: the seam line over C. Nothing about the composite changes.
+            const bool shown=SendMessageW(seam_button,BM_GETCHECK,0,0)==BST_CHECKED;
+            {std::lock_guard lock(merged.mutex);merged.show_seam=shown;}
+            Log(std::string("C ui_seam_line=")+(shown?"1":"0"));return 0;
+        }
         if(id==402 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==inspect_button){
             try{OpenSavedInspector();}catch(const std::exception&){capture_status=L"拡大確認画面を開けませんでした。撮影結果は保存されています。";}return 0;
         }
@@ -486,6 +615,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             std::lock_guard lock(merged.mutex);
             if(stopping || !merged.source_width)return 0;
             review_visible=false;
+            // A fixed composite condition decides C's position (#401): no request moves it, and nothing is estimated.
+            if(FixedConditionPresent()){
+                merged.position_refusal=FixedPreviewPositionRefusal();
+                Log("C ui_position_request_ignored=1 id="+std::to_string(id)+" fixed_composite_condition=1");return 0;
+            }
             if(id==304){
                 if(!merged.auto_busy){merged.auto_requested=true;merged.auto_busy=true;merged.alignment_status=L"自動位置の候補を計算中…";++merged.revision;}
                 Log("C ui_auto_alignment=1");return 0;
@@ -526,7 +660,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             EnableWindow(session_button,CanRestartPreview() || (!preview_joined && CanFocus(*cameras[0]) && CanFocus(*cameras[1])));
             SetWindowTextW(session_button,preview_joined?L"ライブ再開":stopping?L"停止・切断中…":L"ライブ停止");
         }
-        {std::lock_guard lock(merged.mutex);for(int i=0;i<5;++i)if(merge_buttons[i])EnableWindow(merge_buttons[i],!stopping && merged.source_width>0 && (i!=4 || !merged.auto_busy));}
+        {std::lock_guard lock(merged.mutex);for(int i=0;i<5;++i)if(merge_buttons[i])EnableWindow(merge_buttons[i],!stopping && merged.source_width>0 && (i!=4 || !merged.auto_busy));
+            if(seam_button)EnableWindow(seam_button,!stopping && merged.decided && merged.mode==PreviewCMode::fixed_composite);}
         if(focus_smoke && smoke_next<6 && !stopping && Clock::now()-run_start>std::chrono::seconds(5+static_cast<int>(smoke_next)*3)){
             constexpr std::array<std::array<int,2>,6> plan{{{0,0},{1,0},{0,1},{0,2},{1,1},{1,2}}};const auto item=plan[smoke_next];
             if(CanFocus(*cameras[item[0]])){SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(100+item[0]*10+item[1],BN_CLICKED),reinterpret_cast<LPARAM>(focus_buttons[item[0]][item[1]]));++smoke_next;}
@@ -581,7 +716,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
                 std::string state=c.alias+" live_frames="+std::to_string(c.frames)+" painted="+std::to_string(c.painted)+" level_frames="+std::to_string(c.level_frames)+" level_painted="+std::to_string(c.level_painted);
                 if(D810LevelVisible(c.level,!stopping && !c.done && !c.failed,c.last,Clock::now()))state+=" roll_degrees="+std::to_string(c.level->roll_degrees)+" pitch_degrees="+std::to_string(c.level->pitch_degrees)+" level_reference_only=1";
                 Log(state);}
-            {std::lock_guard lock(merged.mutex);Log("C merged_frames="+std::to_string(merged.frames)+" painted="+std::to_string(merged.painted));}next_report=Clock::now()+std::chrono::seconds(2);
+            {std::lock_guard lock(merged.mutex);std::ostringstream line;line.imbue(std::locale::classic());
+                line<<"C merged_frames="<<merged.frames<<" painted="<<merged.painted;
+                if(merged.decided && merged.mode==PreviewCMode::fixed_composite)line<<" fixed_composite=1 seam_column="<<merged.seam_column<<" brightness_ratio="<<merged.ratio_minimum<<".."<<merged.ratio_maximum<<" scale_correction=0";
+                else if(merged.decided && merged.mode==PreviewCMode::unavailable)line<<" fixed_composite=unavailable";
+                Log(line.str());}next_report=Clock::now()+std::chrono::seconds(2);
         }}
         if(run_seconds>0 && Clock::now()-run_start>=std::chrono::seconds(run_seconds)){closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();}
         for(const auto& c:cameras)c->CancelStalled();
@@ -644,6 +783,158 @@ int RunLifecycleUiSmoke(){
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
+// Camera-free contract of C with a fixed composite condition (#401), on synthetic frames. The real merge
+// worker, Paint, the position buttons, the seam checkbox and the pair-capture admission run; the condition
+// comes from memory, so no settings file is read or written, and no Discover/Open/Run or hardware lease exists.
+int RunFixedCUiSmoke(){
+    Log("fixed_c_ui_synthetic=1 camera_operations=0");
+    namespace m2=a0::m2::experimental;
+    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("fixed_c_ui_failed_check="+std::to_string(checks));}};
+    const auto condition=[](m2::MountOrientation orientation){
+        m2::FixedCompositeCondition c;
+        c.created_utc="2026-11-04T12:00:00Z";c.source.review_report_sha256=std::string(64,'a');c.source.pair_id="pair-1";
+        c.source.method=m2::FixedCompositeMethod::manual_still_pixels;c.orientation=orientation;
+        c.source_width=1840;c.source_height=1228;c.mapping.translation_x=930;c.mapping.translation_y=9;c.mapping.rotation_degrees=0;c.mapping.scale=1;
+        const auto p=m2::SimilarityReviewGeometry(930,9,0,1,1840,1228);
+        c.mapping.crop=p.crop;
+        const auto plan=a0::m2::render::PlanPairCanvas(1840,1228,1840,1228,p);
+        c.output_width=plan.output_width;c.output_height=plan.output_height;c.scale_auto_correction_max_percent=1;
+        c.seam={m2::ProvisionalSeamColumn(p,1840,1228),m2::FixedSeamOrigin::band_center_provisional};
+        m2::ValidateFixedCompositeCondition(c);
+        return c;
+    };
+    const auto frame=[](BYTE b,BYTE g,BYTE r){Pixels p{400,267,{}};p.bytes.assign(static_cast<size_t>(p.width)*p.height*4,0);
+        for(size_t i=0;i<p.bytes.size();i+=4){p.bytes[i]=b;p.bytes[i+1]=g;p.bytes[i+2]=r;}return p;};
+    for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];
+        c.alias=i==0?"CAM-A":"CAM-B";c.pixels=i==0?frame(100,100,100):frame(200,200,200);
+        c.frames=25;c.first=Clock::now()-std::chrono::seconds(3);c.last=Clock::now();}
+    stopping=false;run_seconds=0;run_start=Clock::now();
+    const auto refresh=[&]{for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->last=Clock::now();++camera->frames;}};
+    auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0FixedCUiSmoke";
+    if(!RegisterClassW(&wc))return 2;
+    HWND window=CreateWindowExW(0,wc.lpszClassName,L"synthetic fixed C test",WS_OVERLAPPEDWINDOW,0,0,1400,960,nullptr,nullptr,instance,nullptr);
+    if(!window)return 2;
+    for(int j=0;j<5;++j)merge_buttons[j]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);
+    seam_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|BS_AUTOCHECKBOX,0,0,10,10,window,reinterpret_cast<HMENU>(404),instance,nullptr);
+    bool controls=seam_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
+    if(!controls){DestroyWindow(window);return 2;}
+    SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);
+    HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+    if(!dc || !bitmap){DestroyWindow(window);return 2;}
+    auto old=SelectObject(dc,bitmap);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
+    const RECT client{0,0,1400,960};
+    // Pink pixels over the picture of C in the lower half; a picture has none of its own here.
+    const auto pink=[&](const PixelRect& rect){unsigned count{};
+        for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
+    const auto paint=[&]{refresh();Paint(dc,client);GdiFlush();};
+    const auto start_worker_wait=[&](auto ready){
+        for(int i=0;i<100;++i){refresh();std::this_thread::sleep_for(std::chrono::milliseconds(50));{std::lock_guard lock(merged.mutex);if(ready())return true;}}
+        return false;
+    };
+    const auto start_worker=[&](auto ready){merge_worker=std::jthread(MergeLoop);return start_worker_wait(ready);};
+    const auto stop_worker=[&]{merge_worker.request_stop();merge_worker.join();};
+    const auto press=[&](int id){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(id==404?seam_button:merge_buttons[id-300]));};
+    // The pair capture must stay admitted whenever C was decided: the saved pair needs no picture of C.
+    const auto capture_admitted=[&]{
+        capture_pending.reset();RequestCapture(2);const bool admitted=capture_pending.has_value() && *capture_pending==2;
+        capture_pending.reset();return admitted;
+    };
+    const auto rearm=[&]{stopping=false;capture_stop_requested=false;capture_pending.reset();};
+    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155);};
+
+    // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
+    fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
+    check(FixedConditionPresent());
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
+    {
+        std::lock_guard lock(merged.mutex);
+        check(merged.mode==PreviewCMode::fixed_composite && merged.error.empty());
+        check(merged.pixels.width==merged.fixed_plan.output_width && merged.pixels.height==merged.fixed_plan.output_height && !merged.pixels.bytes.empty());
+        check(merged.seam_column==merged.fixed_plan.view.seam_column && merged.fixed_plan.view_width==400 && merged.fixed_plan.view_height==267);
+        check(merged.ratio_minimum>0.4 && merged.ratio_maximum<0.6); // A 100 against B 200: B is brought down to A beside the seam
+    }
+    paint();
+    {
+        const auto rect=picture_rect();
+        check(rect.width>0 && rect.height>0);
+        const auto lit=pink(rect);
+        check(lit+2>=static_cast<unsigned>(rect.height) && lit<=static_cast<unsigned>(rect.height));
+        unsigned expected_column{},picture_width{};{std::lock_guard lock(merged.mutex);expected_column=merged.seam_column;picture_width=merged.pixels.width;}
+        const int x=rect.left+static_cast<int>(std::lround((expected_column+0.5)*rect.width/picture_width));
+        check(GetPixel(dc,x,rect.top+rect.height/2)==kSeamLineColor);
+        // Off: the same picture without the line. On again: the line comes back.
+        SendMessageW(seam_button,BM_SETCHECK,BST_UNCHECKED,0);press(404);
+        {std::lock_guard lock(merged.mutex);check(!merged.show_seam);}
+        paint();check(pink(rect)==0);
+        SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);press(404);
+        {std::lock_guard lock(merged.mutex);check(merged.show_seam);}
+        paint();check(pink(rect)==lit);
+    }
+    {
+        unsigned overlap{};int vertical{};std::uint64_t revision{};
+        {std::lock_guard lock(merged.mutex);overlap=merged.overlap_pixels;vertical=merged.vertical_pixels;revision=merged.revision;}
+        for(int id=300;id<=304;++id)press(id);
+        std::lock_guard lock(merged.mutex);
+        check(merged.overlap_pixels==overlap && merged.vertical_pixels==vertical && merged.revision==revision && !merged.auto_requested && !merged.auto_busy);
+        check(!merged.position_refusal.empty() && !merged.pixels.bytes.empty());
+    }
+    paint();check(pink(picture_rect())>0);
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    // 2. A condition for the other mounting: C is not drawn, the reason is shown, requests still change nothing, the pair capture stays admitted.
+    fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(m2::MountOrientation::rotated_180),std::string(64,'b')};
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
+    {
+        std::lock_guard lock(merged.mutex);
+        check(merged.pixels.bytes.empty() && merged.error==FixedPreviewUnavailableText(m2::FixedCompositeSkip::orientation_differs));
+        check(merged.fixed_plan.skip && *merged.fixed_plan.skip==m2::FixedCompositeSkip::orientation_differs);
+    }
+    paint();
+    {
+        PixelRect lower{12,client.bottom/2+140,client.right-24,client.bottom/2-155};
+        check(pink(lower)==0);
+        std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
+        press(300);press(304);
+        std::lock_guard lock(merged.mutex);
+        check(merged.revision==revision && !merged.position_refusal.empty());
+    }
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    // 3. A damaged file: the same, with its own reason.
+    fixed_source={};fixed_source.reason=m2::FixedCompositeSkip::condition_invalid;
+    check(FixedConditionPresent());
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
+    {
+        std::lock_guard lock(merged.mutex);
+        check(merged.pixels.bytes.empty() && merged.error==FixedPreviewUnavailableText(m2::FixedCompositeSkip::condition_invalid));
+    }
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    // 4. No condition: the uncalibrated C stays, its position requests work, and no seam line is drawn.
+    fixed_source={};
+    check(!FixedConditionPresent());
+    check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::uncalibrated && !merged.pixels.bytes.empty();}));
+    paint();check(pink(picture_rect())==0);
+    {
+        unsigned overlap{};std::uint64_t revision{};
+        {std::lock_guard lock(merged.mutex);check(merged.mode==PreviewCMode::uncalibrated && !merged.pixels.bytes.empty());overlap=merged.overlap_pixels;revision=merged.revision;}
+        press(300);
+        std::lock_guard lock(merged.mutex);
+        check(merged.overlap_pixels+1==overlap && merged.revision>revision && merged.position_refusal.empty());
+    }
+    // The press cleared C's picture; once drawn again it is admitted for the pair capture as before.
+    check(start_worker_wait([]{return !merged.pixels.bytes.empty() && merged.rendered_revision==merged.revision;}));
+    check(capture_admitted());
+    stop_worker();rearm();ClearMerge();
+
+    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
+    fixed_source={};stopping=true;
+    Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
+}
 int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     registered_ids=ids;
     // Allocate before CreateWindow sends initial WM_PAINT/WM_SIZE.
@@ -663,7 +954,10 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     review_button=CreateWindowExW(0,L"BUTTON",L"撮影結果を見る",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(401),instance,nullptr);
     inspect_button=CreateWindowExW(0,L"BUTTON",L"拡大確認・再Merge",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(402),instance,nullptr);
     session_button=CreateWindowExW(0,L"BUTTON",L"ライブ停止",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(403),instance,nullptr);
-    if(!pair_button || !review_button || !inspect_button || !session_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);
+    // The seam line of the fixed composite C (#401): display only, on by default, enabled once C is drawn with a condition.
+    seam_button=CreateWindowExW(0,L"BUTTON",L"継ぎ目の線を表示",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,0,0,0,0,window,reinterpret_cast<HMENU>(404),instance,nullptr);
+    if(!pair_button || !review_button || !inspect_button || !session_button || !seam_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);
+    SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);EnableWindow(seam_button,FALSE);
     LayoutButtons(window);run_start=Clock::now();StartPreview();SetTimer(window,1,50,nullptr);
     // A hidden console launch can supply STARTF_USESHOWWINDOW/SW_HIDE. This
     // application is an explicitly requested interactive preview: show its
@@ -678,7 +972,10 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     if(capture_future.valid()){auto result=capture_future.get();all_sessions_passed=all_sessions_passed && result.capture.success && result.capture.closed;}
     if(state<0)all_sessions_passed=false;
     if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;}
-    if(!cleanup_only){std::lock_guard lock(merged.mutex);all_sessions_passed=all_sessions_passed && merged.painted>=5;Log("C final_merged_frames="+std::to_string(merged.frames)+" painted="+std::to_string(merged.painted)+" uncalibrated=1");}
+    if(!cleanup_only){std::lock_guard lock(merged.mutex);
+        // A C that is not drawn because the fixed condition cannot be applied is the shown behaviour, not a missing picture (#401).
+        all_sessions_passed=all_sessions_passed && (merged.painted>=5 || merged.mode==PreviewCMode::unavailable);
+        Log("C final_merged_frames="+std::to_string(merged.frames)+" painted="+std::to_string(merged.painted)+" uncalibrated=1");}
     if(capture_smoke)all_sessions_passed=all_sessions_passed && captures_saved==2 && preview_sessions==3;
     if(merge_smoke)all_sessions_passed=all_sessions_passed && merge_smoke_next==5;
     if(pair_smoke)all_sessions_passed=all_sessions_passed && pair_reviews==1 && captures_saved==2 && preview_sessions==2 && review_painted>0;
