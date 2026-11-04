@@ -125,35 +125,36 @@ std::vector<double> BoxRows(const std::vector<double>& v,unsigned radius){
     for(size_t k=0;k<v.size();++k){const auto a=k>radius?k-radius:0;const auto b=std::min(v.size(),k+radius+1);out[k]=prefix[b]-prefix[a];}
     return out;
 }
-} // namespace
-
-SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,const SeamBlendSettings& settings){
-    ValidateSeamBlendSettings(settings);
-    const auto frame=Prepare(a,b,parameters);
-    SeamBlendResult result;auto& record=result.record;record.settings=settings;
-    std::vector<double> sum_a,sum_b;
-    {
-        const auto band=SampleBand(a,b,frame);
-        record.seam_x=FindSeam(band,MeasureLocalRatio(band,2*settings.brightness_half_width_pixels),settings.edge_margin_pixels);
-        // Ratio of window sums: paper dominates, and the same ink is inside
-        // both windows while the residual is smaller than the window.
-        sum_a.assign(band.height,0);sum_b.assign(band.height,0);
-        for(unsigned y=0;y<band.height;++y){
-            const unsigned s=record.seam_x[y]-band.x0,hw=settings.brightness_half_width_pixels;
-            for(unsigned i=s>hw?s-hw:0;i<=std::min(band.width-1,s+hw);++i)
-                if(band.Valid(i,y)){sum_a[y]+=std::expm1(double(band.At(band.a,i,y)));sum_b[y]+=std::expm1(double(band.At(band.b,i,y)));}
-        }
-        const auto r=settings.brightness_smoothing_rows;sum_a=BoxRows(BoxRows(sum_a,r),r);sum_b=BoxRows(BoxRows(sum_b,r),r);
-        result.row_ratio.resize(band.height);double difference=0;
-        for(unsigned y=0;y<band.height;++y){
-            const double ratio=sum_a[y]>0 && sum_b[y]>0?sum_a[y]/sum_b[y]:1;result.row_ratio[y]=ratio;
-            const unsigned s=record.seam_x[y]-band.x0;
-            const double d=std::abs(std::expm1(double(band.At(band.a,s,y)))-ratio*std::expm1(double(band.At(band.b,s,y))));
-            difference+=d;record.difference_maximum=std::max(record.difference_maximum,d);
-        }
-        record.difference_mean=difference/band.height;
-        const auto [lo,hi]=std::minmax_element(result.row_ratio.begin(),result.row_ratio.end());record.ratio_minimum=*lo;record.ratio_maximum=*hi;
+// Brightness along a decided seam (one column per output row in record.seam_x,
+// inside the band): the A/B ratio of window sums per row, smoothed along rows.
+// Fills result.row_ratio and the record's difference and ratio fields. Shared
+// by the searched seam (RenderPairSeamCut) and the fixed seam.
+void MeasureAlongSeam(const Band& band,const SeamBlendSettings& settings,SeamBlendResult& result){
+    auto& record=result.record;
+    // Ratio of window sums: paper dominates, and the same ink is inside
+    // both windows while the residual is smaller than the window.
+    std::vector<double> sum_a(band.height,0),sum_b(band.height,0);
+    for(unsigned y=0;y<band.height;++y){
+        const unsigned s=record.seam_x[y]-band.x0,hw=settings.brightness_half_width_pixels;
+        for(unsigned i=s>hw?s-hw:0;i<=std::min(band.width-1,s+hw);++i)
+            if(band.Valid(i,y)){sum_a[y]+=std::expm1(double(band.At(band.a,i,y)));sum_b[y]+=std::expm1(double(band.At(band.b,i,y)));}
     }
+    const auto r=settings.brightness_smoothing_rows;sum_a=BoxRows(BoxRows(sum_a,r),r);sum_b=BoxRows(BoxRows(sum_b,r),r);
+    result.row_ratio.resize(band.height);double difference=0;
+    for(unsigned y=0;y<band.height;++y){
+        const double ratio=sum_a[y]>0 && sum_b[y]>0?sum_a[y]/sum_b[y]:1;result.row_ratio[y]=ratio;
+        const unsigned s=record.seam_x[y]-band.x0;
+        const double d=std::abs(std::expm1(double(band.At(band.a,s,y)))-ratio*std::expm1(double(band.At(band.b,s,y))));
+        difference+=d;record.difference_maximum=std::max(record.difference_maximum,d);
+    }
+    record.difference_mean=difference/band.height;
+    const auto [lo,hi]=std::minmax_element(result.row_ratio.begin(),result.row_ratio.end());record.ratio_minimum=*lo;record.ratio_maximum=*hi;
+}
+// Mixes A and B along record.seam_x with row_ratio (both set), as described in
+// seam_blend.hpp. Takes the partly filled result and returns it with the image
+// and the seam summary.
+SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame& frame,const SeamBlendSettings& settings,SeamBlendResult result){
+    auto& record=result.record;
     record.summary=SummarizeSeam(record.seam_x);
     const unsigned width=frame.plan.output_width,height=frame.plan.output_height;
     auto& output=result.image;output={width,height,std::vector<std::uint8_t>(static_cast<size_t>(render::PixelCount(width,height))*3)};
@@ -178,6 +179,79 @@ SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const rend
         }
     }
     return result;
+}
+// The columns seam-half..seam+half, half = ceil(width_pixels/2)-1 (the columns
+// with a blend weight strictly between 0 and 1), must lie in the band and be
+// covered by both A and B on every row.
+bool SeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
+    const std::uint64_t half=(blend_width-1)/2,first=std::uint64_t(band.x0),end=first+band.width;
+    if(column<first+half || std::uint64_t(column)+half>=end)return false;
+    for(unsigned y=0;y<band.height;++y)for(std::uint64_t c=column-half;c<=column+half;++c)
+        if(!band.Valid(static_cast<unsigned>(c-first),y))return false;
+    return true;
+}
+void RequireSeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
+    if(!SeamInOverlap(band,column,blend_width))throw std::invalid_argument("seam column is outside the overlap of A and B");
+}
+} // namespace
+
+SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,const SeamBlendSettings& settings){
+    ValidateSeamBlendSettings(settings);
+    const auto frame=Prepare(a,b,parameters);
+    SeamBlendResult result;auto& record=result.record;record.settings=settings;
+    {
+        const auto band=SampleBand(a,b,frame);
+        record.seam_x=FindSeam(band,MeasureLocalRatio(band,2*settings.brightness_half_width_pixels),settings.edge_margin_pixels);
+        MeasureAlongSeam(band,settings,result);
+    }
+    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+}
+
+SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    ValidateSeamBlendSettings(settings);
+    const auto frame=Prepare(a,b,parameters);
+    SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
+    {
+        const auto band=SampleBand(a,b,frame);
+        RequireSeamInOverlap(band,seam_column,settings.width_pixels);
+        record.seam_x.assign(band.height,seam_column);
+        MeasureAlongSeam(band,settings,result);
+    }
+    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+}
+
+bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
+    ValidateSeamBlendSettings(settings);
+    const auto frame=Prepare(a,b,parameters);
+    return SeamInOverlap(SampleBand(a,b,frame),seam_column,settings.width_pixels);
+}
+
+FixedSeamCondition ScaleFixedSeamCondition(const FixedSeamCondition& capture,std::uint32_t capture_width,std::uint32_t capture_height,
+    std::uint32_t view_width,std::uint32_t view_height){
+    if(!capture_width || !capture_height || !view_width || !view_height)throw std::invalid_argument("empty size for a seam condition");
+    const auto& p=capture.parameters;
+    if(p.layout!=StitchLayout::camera_a_left_camera_b_right)throw std::invalid_argument("seam condition needs A left and B right");
+    const auto from=render::PlanPairCanvas(capture_width,capture_height,capture_width,capture_height,p);
+    if(capture.seam_column>=from.output_width)throw std::invalid_argument("seam column is outside the output");
+    const double sx=double(view_width)/capture_width,sy=double(view_height)/capture_height;
+    const auto& m=p.camera_b_to_camera_a;
+    // S*H*S^-1 with S=diag(sx,sy,1): entry (i,j) is S_i*H_ij/S_j.
+    render::PairRenderParameters scaled{{m[0],m[1]*sx/sy,m[2]*sx,m[3]*sy/sx,m[4],m[5]*sy,m[6]/sx,m[7]/sy,m[8]},p.layout,{}};
+    const auto to=render::PlanPairCanvas(view_width,view_height,view_width,view_height,scaled);
+    // Global canvas coordinates of the capture window and of the seam column's left edge.
+    const double gx0=from.origin_x+p.crop.left,gy0=from.origin_y+p.crop.top;
+    const long long ox=std::llround(to.origin_x),oy=std::llround(to.origin_y);
+    // The window edges round inward, so no retained sample lies outside the scaled capture window.
+    const auto inward_start=[](double v){return static_cast<long long>(std::ceil(v));};
+    const auto inward_end=[](double v){return static_cast<long long>(std::floor(v));};
+    long long x0=std::max(inward_start(sx*gx0),ox),x1=std::min(inward_end(sx*(gx0+from.output_width)),ox+to.canvas_width);
+    long long y0=std::max(inward_start(sy*gy0),oy),y1=std::min(inward_end(sy*(gy0+from.output_height)),oy+to.canvas_height);
+    if(x1<=x0 || y1<=y0)throw std::invalid_argument("scaled crop removes the complete canvas");
+    scaled.crop={static_cast<std::uint32_t>(x0-ox),static_cast<std::uint32_t>(y0-oy),
+        static_cast<std::uint32_t>(ox+to.canvas_width-x1),static_cast<std::uint32_t>(oy+to.canvas_height-y1)};
+    const long long seam=std::llround(sx*(gx0+capture.seam_column))-x0;
+    if(seam<0 || seam>=x1-x0)throw std::invalid_argument("scaled seam column is outside the output");
+    return {scaled,static_cast<std::uint32_t>(seam)};
 }
 
 std::vector<SeamDisplacementProbe> ProbeSeamDisplacement(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,

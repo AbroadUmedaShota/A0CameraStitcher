@@ -76,6 +76,7 @@ struct SeamBlendRecord {
     SeamSummary summary;
     double difference_mean{},difference_maximum{},ratio_minimum{1},ratio_maximum{1};
     std::uint64_t saturation_limited_pixels{};
+    bool fixed_seam{}; // true for RenderPairFixedSeam: seam_x holds one column in every row
 };
 struct SeamBlendResult {
     render::BgrImage image;
@@ -87,6 +88,54 @@ struct SeamBlendResult {
 // pixel covered by both A and B (the seam needs the overlap on every row).
 [[nodiscard]] SeamBlendResult RenderPairSeamCut(const render::BgrImage& a,const render::BgrImage& b,
     const render::PairRenderParameters& parameters,const SeamBlendSettings& settings);
+
+// Vertical seam at a given column (#396, #398): the same blend as
+// RenderPairSeamCut with the seam at output column seam_column in every row
+// instead of a searched path. The caller passes the column (the column of the
+// fixed composition condition of #399, which a person changes in #403); this
+// function never moves it, so the seam does not depend on the image content. Camera, file and clock free;
+// deterministic. The brightness ratio is measured and
+// applied exactly as in RenderPairSeamCut (window sums of A and B around the
+// seam per row, smoothed along rows, multiplied into B, fading to 1 at the
+// right output edge), and the blend over width_pixels is the same. The record
+// has fixed_seam set and seam_x equal to seam_column in every row.
+// seam_column is an output pixel column (after the crop). The columns whose
+// blend weight is strictly between 0 and 1, seam_column +/- (ceil(width_pixels/2)-1),
+// must be covered by both A and B on every output row; otherwise this throws
+// std::invalid_argument and renders nothing. edge_margin_pixels is not used: it
+// keeps a searched path away from the rim of the overlap, whereas a column
+// given by the caller is validated here against the overlap itself (the value
+// is still copied into the record). Throws
+// std::invalid_argument also for the conditions of RenderPairSeamCut.
+[[nodiscard]] SeamBlendResult RenderPairFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+// Whether RenderPairFixedSeam accepts seam_column for these inputs, decided on
+// the same coverage test without rendering (it samples the overlap band only).
+// Throws std::invalid_argument for the other input conditions of
+// RenderPairFixedSeam (layout, buffers, settings, a row with no overlap), so
+// false means only that the column and its half blend width do not fit.
+[[nodiscard]] bool CanRenderFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+
+// A composition condition for a vertical seam: the pair mapping with its crop
+// and the seam column, all in the pixels of the image size it was made for.
+struct FixedSeamCondition {render::PairRenderParameters parameters;std::uint32_t seam_column{};};
+// Rescales a condition made for capture_width x capture_height frames (A and B
+// of that size) to view_width x view_height frames, assuming the view shows the
+// same field as the capture scaled by sx = view_width/capture_width and
+// sy = view_height/capture_height (a normalized-coordinate correspondence, not
+// a verified optical one). Pure: no image is read.
+// - The mapping is S*H*S^-1 with S = diag(sx,sy,1), so B lands exactly where
+//   the capture puts it, scaled.
+// - The crop window and the seam are scaled in global canvas coordinates and
+//   rounded to whole view pixels. The seam is within half a view pixel of sx
+//   times its capture position. The crop edges round inward and are clamped to
+//   the scaled canvas, so each moves by less than 2 view pixels and the window
+//   never reaches outside the scaled capture window.
+// Throws std::invalid_argument for empty sizes, an invalid mapping or canvas, or a seam
+// column outside the output of the capture condition or of the scaled one.
+[[nodiscard]] FixedSeamCondition ScaleFixedSeamCondition(const FixedSeamCondition& capture,
+    std::uint32_t capture_width,std::uint32_t capture_height,std::uint32_t view_width,std::uint32_t view_height);
 
 // Development diagnostic, not a quality measure: the offset between A and the
 // placed B around seam points, from the zero-mean correlation of luminance

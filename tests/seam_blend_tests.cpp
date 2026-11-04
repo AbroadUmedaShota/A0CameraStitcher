@@ -3,6 +3,7 @@
 #include "similarity_scene.hpp"
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -22,6 +23,14 @@ void Fill(BgrImage& image,unsigned x0,unsigned x1,unsigned y0,unsigned y1,std::u
 std::array<int,3> Pixel(const BgrImage& image,unsigned x,unsigned y){const auto i=(static_cast<size_t>(y)*image.width+x)*3;return {image.bgr[i],image.bgr[i+1],image.bgr[i+2]};}
 double Lum(const BgrImage& image,unsigned x,unsigned y){const auto p=Pixel(image,x,y);return p[0]*0.114+p[1]*0.587+p[2]*0.299;}
 render::PairRenderParameters Shift(double dx){return {{1,0,dx,0,1,0,0,0,1},a0::m2::StitchLayout::camera_a_left_camera_b_right,{}};}
+// FNV-1a over the image bytes, the seam columns and the bit patterns of the row ratios.
+std::uint64_t Digest(const SeamBlendResult& r){
+    std::uint64_t h=14695981039346656037ull;const auto mix=[&](std::uint64_t v,int bytes){for(int i=0;i<bytes;++i){h^=(v>>(8*i))&0xff;h*=1099511628211ull;}};
+    for(const auto v:r.image.bgr)mix(v,1);
+    for(const auto v:r.record.seam_x)mix(v,4);
+    for(const auto v:r.row_ratio){std::uint64_t bits{};std::memcpy(&bits,&v,sizeof bits);mix(bits,8);}
+    return h;
+}
 }
 
 int main(){
@@ -140,6 +149,198 @@ int main(){
         reject([&]{(void)RenderPairSeamCut(a,b,Shift(260),small);},"no overlap");
         reject([&]{(void)RenderPairSeamCut(a,b,Shift(120),{4,8,8,40000});},"invalid settings");
         auto broken=b;broken.bgr.pop_back();reject([&]{(void)RenderPairSeamCut(a,broken,Shift(120),small);},"broken buffer");
+
+        // Pinned outputs of RenderPairSeamCut (#398 split the path search from the blend; values taken before the split).
+        check(Digest(seam)==13560569947543128899ull && Digest(scene)==1709069572549631090ull && Digest(lit)==13321898565532633760ull &&
+            Digest(color)==2041195848238639772ull && Digest(clipped)==17039523872241258339ull && Digest(rotated)==2139992240002134470ull,
+            "RenderPairSeamCut output is unchanged by the split");
+        check(!seam.record.fixed_seam,"a searched seam is not marked fixed");
+
+        // ---- Fixed vertical seam (#396, #398) ----
+        // Flat A and B of equal luminance, B 100 columns to the right: both are present on columns 100..199.
+        {
+            const unsigned fw=200,fh=80,fcolumn=150;
+            const auto fa=Flat(fw,fh,{200,200,200}),fb=Flat(fw,fh,{100,200,238}); // 0.114*100+0.587*200+0.299*238 = 200
+            const auto fixed=RenderPairFixedSeam(fa,fb,Shift(100),fcolumn,small);
+            check(fixed.record.fixed_seam && fixed.record.seam_x.size()==fh && fixed.record.summary.x_minimum==fcolumn && fixed.record.summary.x_maximum==fcolumn,"fixed seam record");
+            bool same_column=true;for(const auto x:fixed.record.seam_x)same_column=same_column && x==fcolumn;
+            check(same_column && fixed.image.width==300 && fixed.image.height==fh,"every row uses the seam column; canvas equals the pair canvas");
+            check(fixed.record.settings.width_pixels==small.width_pixels && fixed.record.settings.edge_margin_pixels==small.edge_margin_pixels,"settings are recorded");
+            check(fixed.record.ratio_minimum>0.999 && fixed.record.ratio_maximum<1.001,"equal luminance gives ratio one");
+            // Blend width 4: weights 0.25, 0.5, 0.75 on columns seam-1..seam+1; A only left of that, B only right of it.
+            unsigned wrong=0;
+            for(unsigned y=0;y<fh;++y)for(unsigned x=0;x<300;++x){
+                const int d=static_cast<int>(x)-static_cast<int>(fcolumn);
+                const double t=d<=-2?0.0:d>=2?1.0:d/4.0+0.5;
+                const auto got=Pixel(fixed.image,x,y);
+                if(std::abs(got[0]-(200-100*t))>1 || std::abs(got[1]-200)>1 || std::abs(got[2]-(200+38*t))>1)++wrong;
+            }
+            check(!wrong,"left of the blend only A, right of it only B, mixed inside the blend width");
+            const auto again=RenderPairFixedSeam(fa,fb,Shift(100),fcolumn,small);
+            check(again.image.bgr==fixed.image.bgr && again.row_ratio==fixed.row_ratio && again.record.seam_x==fixed.record.seam_x,"fixed seam is deterministic");
+            // edge_margin_pixels is not applied: a column next to the rim of the overlap renders with a margin far larger than the overlap.
+            const auto rim=RenderPairFixedSeam(fa,fb,Shift(100),101,{4,5000,8,16});
+            check(rim.record.seam_x.front()==101 && rim.record.settings.edge_margin_pixels==5000,"edge margin does not restrict a fixed seam");
+            const auto rim_right=RenderPairFixedSeam(fa,fb,Shift(100),198,small);
+            check(rim_right.record.seam_x.back()==198,"a column next to the right rim of the overlap renders");
+
+            // Failure: the columns whose weight is strictly between 0 and 1 must be in the overlap (columns 100..199).
+            for(const std::uint32_t column:{0u,50u,99u,100u,199u,200u,299u,300u,4000000000u,0xffffffffu})
+                reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(100),column,small);},"seam column out of the overlap (width 4)");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(100),101,{5,8,8,16});},"half of an odd blend width leaves the overlap (101, width 5)");
+            check(RenderPairFixedSeam(fa,fb,Shift(100),102,{5,8,8,16}).record.seam_x.front()==102,"odd blend width: 102 is the first column");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(100),99,{1,8,8,16});},"blend width 1 needs the seam column itself");
+            check(RenderPairFixedSeam(fa,fb,Shift(100),100,{1,8,8,16}).record.seam_x.front()==100,"blend width 1 accepts the first overlap column");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(100),102,kSeamBlendDesign);},"design width 8 needs 3 columns on each side");
+            check(RenderPairFixedSeam(fa,fb,Shift(100),103,kSeamBlendDesign).record.seam_x.front()==103,"design width 8: 103 is the first column");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(100),fcolumn,{4,8,8,40000});},"fixed seam: invalid settings");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,vertical,fcolumn,small);},"fixed seam: top/bottom layout");
+            reject([&]{(void)RenderPairFixedSeam(fa,fb,Shift(260),fcolumn,small);},"fixed seam: no overlap");
+            auto fbroken=fb;fbroken.bgr.pop_back();reject([&]{(void)RenderPairFixedSeam(fa,fbroken,Shift(100),fcolumn,small);},"fixed seam: broken buffer");
+            // CanRenderFixedSeam agrees with RenderPairFixedSeam on every column around the overlap (columns 100..199).
+            bool agrees=true;
+            for(std::uint32_t column=90;column<=210;++column){
+                bool renders=true;try{(void)RenderPairFixedSeam(fa,fb,Shift(100),column,small);}catch(const std::invalid_argument&){renders=false;}
+                agrees=agrees && CanRenderFixedSeam(fa,fb,Shift(100),column,small)==renders && renders==(column>=101 && column<=198);
+            }
+            check(agrees,"CanRenderFixedSeam matches RenderPairFixedSeam; columns 101..198 fit blend width 4");
+            check(!CanRenderFixedSeam(fa,fb,Shift(100),0xffffffffu,small) && CanRenderFixedSeam(fa,fb,Shift(100),101,{4,5000,8,16}),"CanRenderFixedSeam: far column no, rim column yes");
+            reject([&]{(void)CanRenderFixedSeam(fa,fb,Shift(100),fcolumn,{4,8,8,40000});},"CanRenderFixedSeam: invalid settings");
+            reject([&]{(void)CanRenderFixedSeam(fa,fb,vertical,fcolumn,small);},"CanRenderFixedSeam: top/bottom layout");
+
+            // The same blend as the searched seam: when the search settles on a straight column, fixing that column gives the same output.
+            const auto ca2=Flat(200,80,{200,220,250}),cb2=Flat(200,80,{160,176,200});
+            const auto cut=RenderPairSeamCut(ca2,cb2,Shift(100),small);
+            bool straight=true;for(const auto x:cut.record.seam_x)straight=straight && x==cut.record.seam_x.front();
+            check(straight,"flat pair: the searched seam is a straight column");
+            const auto pinned=RenderPairFixedSeam(ca2,cb2,Shift(100),cut.record.seam_x.front(),small);
+            check(Digest(pinned)==Digest(cut) && pinned.record.difference_mean==cut.record.difference_mean && pinned.record.difference_maximum==cut.record.difference_maximum &&
+                pinned.record.ratio_minimum==cut.record.ratio_minimum && pinned.record.saturation_limited_pixels==cut.record.saturation_limited_pixels,"fixing the searched column reproduces RenderPairSeamCut");
+            check(pinned.record.fixed_seam && !cut.record.fixed_seam,"only the fixed render is marked fixed");
+        }
+
+        // The seam and the placement do not depend on the content: textures shifted by different amounts.
+        {
+            const unsigned nw=200,nh=64,column=150,dx=100;
+            const auto noise=[&](std::uint64_t seed,unsigned shift){
+                BgrImage image{nw,nh,std::vector<std::uint8_t>(static_cast<size_t>(nw)*nh*3)};similarity_scene::Lcg r{seed};
+                std::vector<std::uint8_t> base(static_cast<size_t>(nw)*nh);for(auto& v:base)v=static_cast<std::uint8_t>(60+r.Next(121));
+                for(unsigned y=0;y<nh;++y)for(unsigned x=0;x<nw;++x)for(int c=0;c<3;++c)image.bgr[(static_cast<size_t>(y)*nw+x)*3+c]=base[static_cast<size_t>(y)*nw+(x+shift)%nw];
+                return image;
+            };
+            // Expected pixel: the documented blend with the result's own row ratio.
+            const auto mismatches=[&](const BgrImage& a,const BgrImage& b,const SeamBlendResult& r){
+                unsigned wrong=0;const double seam_x=column,total=nw+dx;
+                for(unsigned y=0;y<nh;++y)for(unsigned x=0;x<total;++x){
+                    const double target=std::clamp((x-seam_x)/4+0.5,0.0,1.0);const bool ha=x<nw,hb=x>=dx;
+                    const double w=ha && hb?target:hb?1:0,gain=x<=seam_x?r.row_ratio[y]:r.row_ratio[y]+(1-r.row_ratio[y])*(x-seam_x)/(total-seam_x);
+                    for(int c=0;c<3;++c){
+                        const double va=ha?a.bgr[(static_cast<size_t>(y)*nw+x)*3+c]:0,vb=hb?b.bgr[(static_cast<size_t>(y)*nw+(x-dx))*3+c]:0;
+                        if(std::abs(Pixel(r.image,x,y)[c]-((1-w)*va+w*gain*vb))>1)++wrong;
+                    }
+                }
+                return wrong;
+            };
+            for(const auto& [sa_shift,sb_shift] : {std::pair{0u,0u},std::pair{7u,0u},std::pair{0u,11u},std::pair{29u,53u}}){
+                const auto a=noise(11,sa_shift),b=noise(23,sb_shift);const auto r=RenderPairFixedSeam(a,b,Shift(dx),column,small);
+                bool fixed_columns=r.record.seam_x.size()==nh;for(const auto x:r.record.seam_x)fixed_columns=fixed_columns && x==column;
+                check(fixed_columns && r.record.saturation_limited_pixels==0 && mismatches(a,b,r)==0,"a given column stays the seam whatever the content, and B stays where the mapping puts it");
+            }
+        }
+
+        // Brightness: registered scene, B uniformly 0.8; the ratio is the #368 window-sum ratio and removes the step at the seam.
+        {
+            const unsigned column=360;auto dimmed=exact_b;for(auto& v:dimmed.bgr)v=static_cast<std::uint8_t>(std::lround(v*0.8));
+            const auto r=RenderPairFixedSeam(sa,dimmed,p,column,small);
+            const auto lum=[&](const BgrImage& image,double x,double y){std::array<double,3> v{};render::SampleBilinear(image,x,y,v);return v[0]*0.114+v[1]*0.587+v[2]*0.299;};
+            std::vector<double> window_a(sh,0),window_b(sh,0);
+            for(unsigned y=0;y<sh;++y)for(unsigned x=column-small.brightness_half_width_pixels;x<=column+small.brightness_half_width_pixels;++x){window_a[y]+=lum(sa,x,y);window_b[y]+=lum(dimmed,x-240.0,y);}
+            const auto box=[&](const std::vector<double>& v){
+                const long radius=small.brightness_smoothing_rows;std::vector<double> out(v.size(),0);
+                for(long k=0;k<long(v.size());++k)for(long j=std::max(0L,k-radius);j<=std::min(long(v.size())-1,k+radius);++j)out[k]+=v[j];
+                return out;
+            };
+            const auto smooth_a=box(box(window_a)),smooth_b=box(box(window_b));double worst=0;
+            for(unsigned y=0;y<sh;++y)worst=std::max(worst,std::abs(r.row_ratio[y]/(smooth_a[y]/smooth_b[y])-1));
+            std::cout<<"fixed_seam_ratio_error="<<worst<<" ratio="<<r.record.ratio_minimum<<".."<<r.record.ratio_maximum<<'\n';
+            check(worst<1e-4,"ratio is the window-sum ratio smoothed along rows");
+            check(std::abs(r.record.ratio_minimum-1.25)<0.02 && std::abs(r.record.ratio_maximum-1.25)<0.02,"ratio follows the dimming");
+            double step=0,raw_step=0;unsigned n=0;
+            for(unsigned y=0;y<sh;++y)for(unsigned x=column+3;x<=column+6;++x){step+=std::abs(Lum(r.image,x,y)-lum(sa,x,y));raw_step+=std::abs(lum(dimmed,x-240.0,y)-lum(sa,x,y));++n;}
+            std::cout<<"fixed_seam_step="<<step/n<<" uncorrected="<<raw_step/n<<'\n';
+            check(step/n<3 && raw_step/n>20,"ratio removes the step at the fixed seam");
+        }
+
+        // The overlap changes from row to row (rotated B): a column outside it on one row fails, one inside every row renders.
+        {
+            const unsigned rw=480,rh=320;
+            const auto rotated_world=similarity_scene::MakeScene(rw,rh,260,20,23);
+            const auto ra=similarity_scene::ViewA(rotated_world,rw,rh),rb=similarity_scene::ViewB(rotated_world,rw,rh,241,3,2.0,1,1);
+            const auto rq=SimilarityReviewGeometry(241,3,2.0,1,rw,rh);
+            const auto rplan=render::PlanPairCanvas(rw,rh,rw,rh,rq);const auto rinverse=render::Invert(rq.camera_b_to_camera_a);
+            const double gx=rplan.origin_x+rq.crop.left,gy=rplan.origin_y+rq.crop.top;
+            unsigned max_first=0,min_last=~0u,min_first=~0u;
+            for(unsigned y=0;y<rplan.output_height;++y){
+                unsigned first=~0u,last=0;
+                for(unsigned x=0;x<rplan.output_width;++x){
+                    std::array<double,3> va{},vb{};render::Point s{};
+                    if(render::SampleBilinear(ra,gx+x,gy+y,va) && render::TryTransform(rinverse,{gx+x,gy+y},s) && render::SampleBilinear(rb,s.x,s.y,vb)){first=std::min(first,x);last=x;}
+                }
+                max_first=std::max(max_first,first);min_first=std::min(min_first,first);min_last=std::min(min_last,last);
+            }
+            std::cout<<"overlap first column "<<min_first<<".."<<max_first<<" last column from "<<min_last<<'\n';
+            check(max_first>=min_first+6 && min_last>=max_first+40,"rotated pair: the overlap edge moves between rows");
+            reject([&]{(void)RenderPairFixedSeam(ra,rb,rq,max_first-3,small);},"seam outside the overlap on some rows (left)");
+            reject([&]{(void)RenderPairFixedSeam(ra,rb,rq,min_last+3,small);},"seam outside the overlap on some rows (right)");
+            reject([&]{(void)RenderPairFixedSeam(ra,rb,rq,max_first,small);},"blend half outside the overlap on the tightest row");
+            check(!CanRenderFixedSeam(ra,rb,rq,max_first-3,small) && !CanRenderFixedSeam(ra,rb,rq,min_last+3,small) && !CanRenderFixedSeam(ra,rb,rq,max_first,small) &&
+                CanRenderFixedSeam(ra,rb,rq,max_first+1,small) && CanRenderFixedSeam(ra,rb,rq,min_last-1,small) && !CanRenderFixedSeam(ra,rb,rq,min_last,small),"CanRenderFixedSeam follows the tightest row");
+            const auto inside_rows=RenderPairFixedSeam(ra,rb,rq,max_first+1,small);
+            bool inside_columns=inside_rows.record.seam_x.size()==rplan.output_height;for(const auto x:inside_rows.record.seam_x)inside_columns=inside_columns && x==max_first+1;
+            check(inside_columns,"a column inside the overlap on every row renders with that column in every row");
+
+            // Scaling the condition to a smaller view (Live View size): the geometry corresponds at the scale ratio.
+            const unsigned column=(max_first+min_last)/2;const FixedSeamCondition capture{rq,column};
+            const auto same=ScaleFixedSeamCondition(capture,rw,rh,rw,rh);
+            check(same.parameters.camera_b_to_camera_a==rq.camera_b_to_camera_a && same.seam_column==column && same.parameters.crop.left==rq.crop.left &&
+                same.parameters.crop.top==rq.crop.top && same.parameters.crop.right==rq.crop.right && same.parameters.crop.bottom==rq.crop.bottom,"scale 1 gives the same condition");
+            const auto b_capture=render::TransformedBounds(rw,rh,rq.camera_b_to_camera_a);
+            for(const auto& [vw,vh] : {std::pair{240u,160u},std::pair{360u,240u},std::pair{320u,160u},std::pair{100u,64u}}){
+                const double sx=double(vw)/rw,sy=double(vh)/rh;const auto scaled=ScaleFixedSeamCondition(capture,rw,rh,vw,vh);
+                const auto vplan=render::PlanPairCanvas(vw,vh,vw,vh,scaled.parameters);
+                const auto b_view=render::TransformedBounds(vw,vh,scaled.parameters.camera_b_to_camera_a);
+                const double seam_capture=gx+column,seam_view=vplan.origin_x+scaled.parameters.crop.left+scaled.seam_column;
+                // B is placed exactly at the scale ratio.
+                const bool placed=std::abs(b_view.minimum_x-sx*b_capture.minimum_x)<1e-6 && std::abs(b_view.maximum_x-sx*b_capture.maximum_x)<1e-6 &&
+                    std::abs(b_view.minimum_y-sy*b_capture.minimum_y)<1e-6 && std::abs(b_view.maximum_y-sy*b_capture.maximum_y)<1e-6;
+                // The seam is within half a view pixel of its scaled position.
+                const bool seam_ok=std::abs(seam_view-sx*seam_capture)<=0.5+1e-9;
+                // The window never reaches outside the scaled capture window and its edges moved by less than 2 view pixels.
+                const double wx0=vplan.origin_x+scaled.parameters.crop.left,wx1=wx0+vplan.output_width,wy0=vplan.origin_y+scaled.parameters.crop.top,wy1=wy0+vplan.output_height;
+                const double ex0=wx0-sx*gx,ex1=sx*(gx+rplan.output_width)-wx1,ey0=wy0-sy*gy,ey1=sy*(gy+rplan.output_height)-wy1;
+                const bool window_ok=std::min({ex0,ex1,ey0,ey1})>=-1e-9 && std::max({ex0,ex1,ey0,ey1})<2;
+                std::cout<<"view "<<vw<<"x"<<vh<<" seam "<<seam_view<<" vs "<<sx*seam_capture<<" window edges moved "<<ex0<<" "<<ex1<<" "<<ey0<<" "<<ey1<<'\n';
+                check(placed && seam_ok && window_ok,"scaled condition keeps B, the seam and the window at the scale ratio");
+            }
+            // Rendering at 1/2 scale from box-downsampled frames: the scaled condition is a valid fixed seam of the view.
+            const auto half=[&](const BgrImage& image){
+                BgrImage out{rw/2,rh/2,std::vector<std::uint8_t>(static_cast<size_t>(rw/2)*(rh/2)*3)};
+                for(unsigned y=0;y<rh/2;++y)for(unsigned x=0;x<rw/2;++x)for(int c=0;c<3;++c){
+                    const auto at=[&](unsigned i,unsigned j){return int(image.bgr[(static_cast<size_t>(j)*rw+i)*3+c]);};
+                    out.bgr[(static_cast<size_t>(y)*(rw/2)+x)*3+c]=static_cast<std::uint8_t>((at(2*x,2*y)+at(2*x+1,2*y)+at(2*x,2*y+1)+at(2*x+1,2*y+1)+2)/4);
+                }
+                return out;
+            };
+            const auto view=ScaleFixedSeamCondition(capture,rw,rh,rw/2,rh/2);
+            const auto live=RenderPairFixedSeam(half(ra),half(rb),view.parameters,view.seam_column,small);
+            bool view_columns=!live.record.seam_x.empty();for(const auto x:live.record.seam_x)view_columns=view_columns && x==view.seam_column;
+            check(view_columns && live.record.fixed_seam,"the scaled condition renders as a fixed seam at the view size");
+            reject([&]{(void)ScaleFixedSeamCondition(capture,0,rh,240,160);},"scale: empty capture size");
+            reject([&]{(void)ScaleFixedSeamCondition(capture,rw,rh,240,0);},"scale: empty view size");
+            reject([&]{(void)ScaleFixedSeamCondition({rq,rplan.output_width},rw,rh,240,160);},"scale: seam column outside the capture output");
+            auto top_bottom=capture;top_bottom.parameters.layout=a0::m2::StitchLayout::camera_a_top_camera_b_bottom;
+            reject([&]{(void)ScaleFixedSeamCondition(top_bottom,rw,rh,240,160);},"scale: top/bottom layout");
+        }
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }
