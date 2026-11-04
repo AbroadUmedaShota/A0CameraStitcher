@@ -38,8 +38,8 @@ namespace a0::m2::experimental {
 // so a shift that is not a scale (shake, one pattern period) does not leak into
 // k when the tiles sit on one side of P. Only k is applied; d is recorded as
 // the shift the scale could not explain. The center P is decided in one place,
-// FixedScaleCenter (the owner is asked whether it should be B's own optical
-// center instead). The estimator's
+// FixedScaleCenter: the center of B's image moved into the output by the
+// fixed mapping (owner's decision, #396). The estimator's
 // own similarity fit stays a diagnostic. A tile is used when it is in the
 // estimator's consensus and its match lies within the estimator's search
 // window of where H puts it; a match a whole pattern period away (a repeated
