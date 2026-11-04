@@ -1,21 +1,145 @@
 // Pair transaction contracts (#389, #381): both shutters precede either import,
 // and the original-handling rules match the one-body-at-a-time flow. Synthetic
-// WPD channels only; no camera is touched.
+// WPD channels only; no camera is touched. The PC original persistence the pair
+// window runs after each import (#408) is tested on a private temporary folder.
 #include "wpd_still_fake.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/wpd_still_persist.hpp"
+#include <wincodec.h>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <thread>
 using namespace a0::phase0::experimental;
 namespace {
 using Clock=std::chrono::steady_clock;
+namespace fs=std::filesystem;
 int checks{},failures{};
 void Check(bool value){++checks;if(!value)++failures;}
 bool Contains(const std::string& text,std::string_view part){return text.find(part)!=std::string::npos;}
+// Requires a std::exception; returns its text (empty when nothing was thrown).
+template<class F>std::string Rejected(F f){
+    std::string what;bool rejected=false;
+    try{f();}catch(const std::exception& e){rejected=true;what=e.what();}
+    Check(rejected);return what;
+}
+// Parent of the per-run folder: A0_TEST_TMPDIR when set, else the system
+// temporary folder.
+fs::path TempParent(){
+    char* value=nullptr;std::size_t length=0;
+    if(_dupenv_s(&value,&length,"A0_TEST_TMPDIR")==0 && value!=nullptr){
+        const std::string text(value);std::free(value);
+        if(!text.empty())return fs::path(text);
+    }
+    return fs::temp_directory_path();
+}
+// A folder this run created. An existing folder is never reused or removed;
+// only the folder created here is removed at the end.
+class OwnedTempRoot {
+public:
+    OwnedTempRoot(){
+        static unsigned sequence{};
+        root_=TempParent()/("a0-wpd-still-persist-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(++sequence));
+        if(!fs::create_directories(root_))throw std::runtime_error("test folder already exists; not reused");
+    }
+    OwnedTempRoot(const OwnedTempRoot&)=delete;
+    OwnedTempRoot& operator=(const OwnedTempRoot&)=delete;
+    ~OwnedTempRoot(){std::error_code ignored;fs::remove_all(root_,ignored);}
+    const fs::path& Root()const{return root_;}
+private:
+    fs::path root_;
+};
+// A solid-colour JPEG encoded by WIC in memory, so it decodes in full.
+std::vector<unsigned char> EncodeSolidJpeg(std::uint32_t width,std::uint32_t height,unsigned char value){
+    using Microsoft::WRL::ComPtr;
+    const auto check=[](HRESULT hr){if(FAILED(hr))throw std::runtime_error("test JPEG encode failed");};
+    ComPtr<IWICImagingFactory> factory;check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
+    ComPtr<IStream> stream;check(CreateStreamOnHGlobal(nullptr,TRUE,&stream));
+    ComPtr<IWICBitmapEncoder> encoder;check(factory->CreateEncoder(GUID_ContainerFormatJpeg,nullptr,&encoder));
+    check(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));
+    ComPtr<IWICBitmapFrameEncode> frame;ComPtr<IPropertyBag2> properties;check(encoder->CreateNewFrame(&frame,&properties));
+    check(frame->Initialize(properties.Get()));check(frame->SetSize(width,height));
+    WICPixelFormatGUID format=GUID_WICPixelFormat24bppBGR;check(frame->SetPixelFormat(&format));
+    if(format!=GUID_WICPixelFormat24bppBGR)throw std::runtime_error("test JPEG pixel format refused");
+    std::vector<BYTE> pixels(static_cast<std::size_t>(width)*height*3U,value);
+    check(frame->WritePixels(height,width*3U,static_cast<UINT>(pixels.size()),pixels.data()));
+    check(frame->Commit());check(encoder->Commit());
+    STATSTG stat{};check(stream->Stat(&stat,STATFLAG_NONAME));
+    LARGE_INTEGER start{};check(stream->Seek(start,STREAM_SEEK_SET,nullptr));
+    std::vector<unsigned char> bytes(static_cast<std::size_t>(stat.cbSize.QuadPart));ULONG read{};
+    check(stream->Read(bytes.data(),static_cast<ULONG>(bytes.size()),&read));
+    if(read!=bytes.size())throw std::runtime_error("test JPEG read back failed");
+    return bytes;
+}
+std::vector<unsigned char> ReadAll(const fs::path& path){
+    std::ifstream stream(path,std::ios::binary);
+    return {std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>()};
+}
+WpdStillPayload Payload(const std::vector<unsigned char>& jpeg,std::uint32_t width,std::uint32_t height){
+    return {jpeg,{static_cast<std::uint32_t>(jpeg.size()),width,height},true};
+}
+// Every file below `directory` (none when it does not exist).
+std::vector<fs::path> FilesUnder(const fs::path& directory){
+    std::vector<fs::path> files;std::error_code error;
+    if(!fs::exists(directory,error))return files;
+    for(const auto& entry:fs::recursive_directory_iterator(directory))if(entry.is_regular_file())files.push_back(entry.path());
+    return files;
+}
+// #408: the window's PC original persistence for one body, on a private folder.
+void PersistContracts(){
+    OwnedTempRoot temp;
+    const auto future=Clock::now()+std::chrono::seconds(60);
+    const auto good=EncodeSolidJpeg(16,8,0x55);
+    Check(a0::phase0::IsValidJpeg(good));
+    const auto original_of=[](const a0::phase0::EvidenceWriter& evidence){return evidence.RunRoot()/"capture"/"CAM-A"/"original.jpg";};
+    // Decodable JPEG at the reported size: saved once, hash and size match.
+    // A second save for the same body is refused and leaves the first intact.
+    {a0::phase0::EvidenceWriter evidence(temp.Root(),"persist-saved","test");
+        const auto original=original_of(evidence);
+        const auto saved=PersistVerifiedWpdStill(evidence,"CAM-A",Payload(good,16,8),future);
+        Check(saved.success && !saved.closed && saved.error.empty() && saved.path==original);
+        Check(fs::exists(original) && ReadAll(original)==good && !fs::exists(original.string()+".partial"));
+        Check(saved.bytes==good.size() && saved.sha256==a0::phase0::Sha256Hex(good) && saved.sha256.size()==64);
+        const auto other=EncodeSolidJpeg(16,8,0xaa);Check(other!=good);
+        const auto what=Rejected([&]{(void)PersistVerifiedWpdStill(evidence,"CAM-A",Payload(other,16,8),future);});
+        Check(Contains(what,"overwrite") && ReadAll(original)==good);}
+    // Markers only, not a decodable image: refused before anything is written.
+    {a0::phase0::EvidenceWriter evidence(temp.Root(),"persist-undecodable","test");
+        const std::vector<unsigned char> broken{0xff,0xd8,1,2,3,4,0xff,0xd9};Check(a0::phase0::IsValidJpeg(broken));
+        (void)Rejected([&]{(void)PersistVerifiedWpdStill(evidence,"CAM-A",Payload(broken,16,8),future);});
+        Check(!fs::exists(original_of(evidence)) && FilesUnder(evidence.RunRoot()/"capture").empty());}
+    // Decodable, but not the size the camera reported: refused, nothing written.
+    {a0::phase0::EvidenceWriter evidence(temp.Root(),"persist-wrong-size","test");
+        (void)Rejected([&]{(void)PersistVerifiedWpdStill(evidence,"CAM-A",Payload(good,7360,4912),future);});
+        Check(!fs::exists(original_of(evidence)) && FilesUnder(evidence.RunRoot()/"capture").empty());}
+    // Deadline reached before the save, by the clock or by a past deadline: no
+    // original, no partial; the bytes are kept once in quarantine for diagnosis.
+    for(bool past_deadline:{false,true}){
+        a0::phase0::EvidenceWriter evidence(temp.Root(),past_deadline?"persist-past-deadline":"persist-clock-deadline","test");
+        const auto deadline=past_deadline?Clock::now()-std::chrono::seconds(1):future;
+        const std::function<Clock::time_point()> clock=past_deadline?std::function<Clock::time_point()>{}:[future]{return future+std::chrono::seconds(1);};
+        const auto what=Rejected([&]{(void)PersistVerifiedWpdStill(evidence,"CAM-A",Payload(good,16,8),deadline,clock);});
+        Check(Contains(what,"PC original persistence failed: transaction_watchdog"));
+        Check(!fs::exists(original_of(evidence)) && FilesUnder(evidence.RunRoot()/"capture").empty());
+        const auto kept=FilesUnder(evidence.RunRoot()/"quarantine"/"capture"/"CAM-A");
+        Check(kept.size()==1 && ReadAll(kept.front())==good);
+    }
+    // After the session closed: before the deadline nothing changes; at or past
+    // it the outcome is no longer a success and says why.
+    {const auto deadline=Clock::now();const VerifiedStillOriginal saved{true,true,"original.jpg",8,std::string(64,'a'),{},false};
+        auto before=saved;ApplyStillDeadline(before,deadline-std::chrono::milliseconds(1),deadline);
+        Check(before.success && before.error.empty() && before.path==saved.path && before.bytes==saved.bytes && before.sha256==saved.sha256);
+        auto at=saved;ApplyStillDeadline(at,deadline,deadline);
+        Check(!at.success && at.error=="; transaction deadline exceeded; PC bytes retained" && at.path==saved.path && at.bytes==saved.bytes);
+        auto after=saved;after.error="close failed";ApplyStillDeadline(after,deadline+std::chrono::seconds(1),deadline);
+        Check(!after.success && after.error=="close failed; transaction deadline exceeded; PC bytes retained");}
+}
 // Test-sized completion wait. Production uses kWpdStillCompletionWaitMax.
 const WpdStillCompletionWait kWait{std::chrono::milliseconds(60),std::chrono::milliseconds(2)};
 const char* Name(int i){return i==0?"A":"B";}
@@ -263,6 +387,7 @@ int main(){
             const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"ambiguous SDRAM object") && h.lane[0].persisted && r.originals[0].success);
             Check(!h.lane[1].persisted && h.lane[1].partial==h.lane[1].fake.jpeg);}
+        try{PersistContracts();}catch(const std::exception& error){Check(false);std::cerr<<"persist contracts: "<<error.what()<<"\n";}
     }
     CoUninitialize();std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }
