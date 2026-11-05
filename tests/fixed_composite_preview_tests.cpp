@@ -287,7 +287,7 @@ int main(){
             const auto refusal=FixedPreviewPositionRefusal();
             CHECK(refusal.find(L"変えません")!=std::wstring::npos && refusal.find(L"※未検証")!=std::wstring::npos);
             std::vector<std::wstring> reasons;
-            for(const auto skip:{FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap}){
+            for(const auto skip:{FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap,FixedCompositeSkip::profile_absent,FixedCompositeSkip::profile_differs}){
                 const auto text=FixedPreviewUnavailableText(skip);
                 CHECK(text.find(L"Cを描きません")!=std::wstring::npos);
                 CHECK(std::find(reasons.begin(),reasons.end(),text)==reasons.end());

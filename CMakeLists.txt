@@ -347,6 +347,22 @@ else()
     target_compile_options(a0_m2_rig_profile_v2 PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Fixed composite condition v2 (#405 W1): the lens-aware record that names a
+# calibrated draft rig profile by hash. Development only and unapproved; the
+# v1 library above is unchanged and this one builds on it.
+# W6 adds the shared output-to-camera mappings (a lens scale of camera B about a
+# fixed centre) and the creation checks that run the mapped fixed seam over every
+# output row.
+add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_maps.cpp src/m2/fixed_composite_creation.cpp src/m2/fixed_scale_correction_v2.cpp)
+target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include PRIVATE src/m2)
+target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_seam_blend a0_m2_render PRIVATE bcrypt)
+target_compile_definitions(a0_m2_fixed_composite_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
+if(MSVC)
+    target_compile_options(a0_m2_fixed_composite_v2 PRIVATE /W4 /permissive- /EHsc /utf-8)
+else()
+    target_compile_options(a0_m2_fixed_composite_v2 PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(a0_m2_offline_stitcher
     src/m2/offline_stitcher.cpp
     src/m2/stitch_job_manifest.cpp
@@ -1038,16 +1054,33 @@ if(BUILD_TESTING)
     # blend settings at view scale, seam fit, choice of C. Camera free.
     add_executable(a0_fixed_composite_preview_tests tests/fixed_composite_preview_tests.cpp)
     target_include_directories(a0_fixed_composite_preview_tests PRIVATE src/phase0/include src/common/include)
-    target_link_libraries(a0_fixed_composite_preview_tests PRIVATE a0_m2_fixed_composite a0_m2_seam_blend a0_m2_render)
+    target_link_libraries(a0_fixed_composite_preview_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_render)
     if(MSVC)
         target_compile_options(a0_fixed_composite_preview_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME preview_fixed_composite_contracts COMMAND a0_fixed_composite_preview_tests)
     set_tests_properties(preview_fixed_composite_contracts PROPERTIES TIMEOUT 600)
+    # Live C drawn with the lens-aware fixed composite condition v2 (#405 W5): mapping, table,
+    # grid and seam against the full-size mapping, the choice of C, the texts, and the v1 pin.
+    add_executable(a0_fixed_composite_preview_v2_tests tests/fixed_composite_preview_v2_tests.cpp)
+    target_include_directories(a0_fixed_composite_preview_v2_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_fixed_composite_preview_v2_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_preview_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME preview_fixed_composite_v2_contracts COMMAND a0_fixed_composite_preview_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(preview_fixed_composite_v2_contracts PROPERTIES TIMEOUT 900)
     add_executable(a0_seam_blend_tests tests/seam_blend_tests.cpp)
     target_link_libraries(a0_seam_blend_tests PRIVATE a0_m2_render a0_m2_seam_blend)
     add_test(NAME m2_seam_blend_contracts COMMAND a0_seam_blend_tests)
     set_tests_properties(m2_seam_blend_contracts PROPERTIES TIMEOUT 300)
+    # Fixed vertical seam on a pair of output-to-camera mappings (#405 W2): the pair
+    # mapping of RenderPair, a lens-distorted document mapping, a reduced output.
+    add_executable(a0_seam_blend_mapped_tests tests/seam_blend_mapped_tests.cpp)
+    target_link_libraries(a0_seam_blend_mapped_tests PRIVATE a0_m2_render a0_m2_seam_blend)
+    add_test(NAME m2_seam_blend_mapped_contracts COMMAND a0_seam_blend_mapped_tests)
+    set_tests_properties(m2_seam_blend_mapped_contracts PROPERTIES TIMEOUT 900)
     add_executable(a0_fixed_composite_condition_tests tests/fixed_composite_condition_tests.cpp)
     target_link_libraries(a0_fixed_composite_condition_tests PRIVATE a0_m2_fixed_composite)
     if(MSVC)
@@ -1086,7 +1119,7 @@ if(BUILD_TESTING)
             message(FATAL_ERROR "WPD dual preview requires an SDK-free build")
         endif()
         target_compile_definitions(a0_m2_offline_stitcher PRIVATE A0_ENABLE_UNCALIBRATED_REVIEW=1)
-        target_link_libraries(a0_m2_offline_stitcher PRIVATE a0_m2_overlap_estimation a0_m2_seam_blend a0_m2_fixed_composite)
+        target_link_libraries(a0_m2_offline_stitcher PRIVATE a0_m2_overlap_estimation a0_m2_seam_blend a0_m2_fixed_composite a0_m2_fixed_composite_v2)
         add_executable(a0_still_review_tests tests/still_review_tests.cpp)
         target_link_libraries(a0_still_review_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_phase0_core ole32 windowscodecs)
         target_compile_definitions(a0_still_review_tests PRIVATE NOMINMAX)
@@ -1095,6 +1128,19 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME still_review_contracts COMMAND a0_still_review_tests)
         set_tests_properties(still_review_contracts PROPERTIES TIMEOUT 1500)
+        # The JPEG path of the lens-aware fixed composite (#405 W4): v2 condition + profile, the real tile estimator,
+        # the v7 report. Full-size synthetic frames, no camera.
+        add_executable(a0_still_review_lens_tests tests/still_review_lens_tests.cpp)
+        target_include_directories(a0_still_review_lens_tests PRIVATE src/phase0/include)
+        target_link_libraries(a0_still_review_lens_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 ole32 windowscodecs)
+        target_compile_definitions(a0_still_review_lens_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_still_review_lens_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        # The second argument opens the v7 report it wrote in the inspector (--smoke), so the inspector is built first.
+        add_dependencies(a0_still_review_lens_tests A0CameraStitcher.StillReview)
+        add_test(NAME still_review_lens_contracts COMMAND a0_still_review_lens_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2" $<TARGET_FILE:A0CameraStitcher.StillReview>)
+        set_tests_properties(still_review_lens_contracts PROPERTIES TIMEOUT 3000)
         add_executable(a0_review_viewport_tests tests/review_viewport_tests.cpp)
         target_include_directories(a0_review_viewport_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_viewport_tests PRIVATE a0_m2_render)
@@ -1105,7 +1151,7 @@ if(BUILD_TESTING)
         add_test(NAME review_alignment_contracts COMMAND a0_review_alignment_tests)
         add_executable(A0CameraStitcher.StillReview src/phase0/experimental/still_review_main.cpp)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
-        target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite user32 gdi32 windowscodecs ole32 comdlg32)
+        target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 comdlg32)
         target_compile_definitions(A0CameraStitcher.StillReview PRIVATE UNICODE _UNICODE NOMINMAX)
         if(A0_BUILD_STITCH_EVAL)
             add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StillReview)
@@ -1124,7 +1170,7 @@ if(BUILD_TESTING)
         endif()
         add_executable(A0CameraStitcher.WpdDualPreview src/phase0/experimental/wpd_dual_preview_main.cpp)
         add_dependencies(A0CameraStitcher.WpdDualPreview A0CameraStitcher.StillReview)
-        target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
+        target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
         target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE UNICODE _UNICODE NOMINMAX)
         add_test(NAME preview_level_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --level-ui-smoke)
         set_tests_properties(preview_level_ui_contracts PROPERTIES TIMEOUT 15)
@@ -1402,6 +1448,48 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_rig_profile_v2_contracts COMMAND m2_rig_profile_v2_contracts
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+
+    add_executable(a0_fixed_composite_condition_v2_tests tests/fixed_composite_condition_v2_tests.cpp)
+    target_link_libraries(a0_fixed_composite_condition_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_condition_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_condition_v2_contracts COMMAND a0_fixed_composite_condition_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_condition_v2_contracts PROPERTIES TIMEOUT 60)
+
+    # Mappings, scale centre and the creation checks of the v2 condition (#405 W6).
+    add_executable(a0_fixed_composite_creation_tests tests/fixed_composite_creation_tests.cpp)
+    target_link_libraries(a0_fixed_composite_creation_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_creation_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_creation_contracts COMMAND a0_fixed_composite_creation_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_creation_contracts PROPERTIES TIMEOUT 600)
+
+    # The per-capture scale of the v2 composite (#405 W3): the fit in document mm, the
+    # tile frame, the decision against the limit, and the drawn correction. Camera and file free.
+    add_executable(a0_fixed_scale_correction_v2_tests tests/fixed_scale_correction_v2_tests.cpp)
+    target_link_libraries(a0_fixed_scale_correction_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_scale_correction_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_scale_correction_v2_contracts COMMAND a0_fixed_scale_correction_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_scale_correction_v2_contracts PROPERTIES TIMEOUT 600)
+
+    # The development entry that makes the v2 condition (#405 W6): refusals, no overwrite,
+    # the profile copy, the policy limit and the recorded mount orientation.
+    add_executable(a0_fixed_composite_tool_v2_tests tests/fixed_composite_tool_v2_tests.cpp)
+    target_include_directories(a0_fixed_composite_tool_v2_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_fixed_composite_tool_v2_tests PRIVATE a0_m2_fixed_composite_v2)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_tool_v2_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME m2_fixed_composite_tool_v2_contracts COMMAND a0_fixed_composite_tool_v2_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(m2_fixed_composite_tool_v2_contracts PROPERTIES TIMEOUT 600)
 
     add_executable(m2_document_render_contracts tests/document_render_tests.cpp)
     add_executable(m2_evaluation_render_conditions_contracts tests/evaluation_render_conditions_tests.cpp)

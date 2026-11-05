@@ -167,13 +167,16 @@ inline std::string_view StillAlignmentBasis(const AutomaticStillAlignment& a){
 // exceeded: over the limit, nothing applied (the gate fails it later).
 // not_estimated: no usable estimate, nothing applied. seam_outside_overlap: the
 // correction would leave the seam outside the overlap, nothing applied.
-enum class FixedScaleStatus {applied,exceeded,not_estimated,seam_outside_overlap};
+// output_uncovered (lens-aware v7 only, #405): the correction would leave an output pixel that
+// neither camera shows, nothing applied.
+enum class FixedScaleStatus {applied,exceeded,not_estimated,seam_outside_overlap,output_uncovered};
 constexpr std::string_view FixedScaleStatusCode(FixedScaleStatus v){
     switch(v){
     case FixedScaleStatus::applied:return "applied";
     case FixedScaleStatus::exceeded:return "exceeded";
     case FixedScaleStatus::not_estimated:return "not-estimated";
     case FixedScaleStatus::seam_outside_overlap:return "seam-outside-overlap";
+    case FixedScaleStatus::output_uncovered:return "output-uncovered";
     }
     return {};
 }
@@ -253,6 +256,57 @@ struct SavedFixedComposite {
     FixedScaleCorrection scale;
     FixedSimilarityDiagnostic diagnostic;
 };
+
+// The per-capture scale of the lens-aware fixed composite (#405 W3, DecideFixedScaleV2 in
+// fixed_scale_correction_v2.hpp) and what a v7 report records about it. It lives here, not
+// in that header, because the report types below hold it.
+struct FixedScaleCorrectionV2 {
+    FixedScaleStatus status{FixedScaleStatus::not_estimated};
+    FixedScaleReason reason{FixedScaleReason::no_tiles};
+    // From the condition record; no code default.
+    double limit_percent{};
+    // Present when a fit exists. difference_percent is |estimated*100-100|, the value compared with the limit.
+    std::optional<double> estimated_scale,difference_percent;
+    // The factor put into B's mapping: the estimate when applied, else 1.
+    double applied_scale{1};
+    // Fixed point of the correction: document mm, and the same point in output raster pixels
+    // (document point minus the raster's top left, over the pitch, minus half a pixel: the
+    // coordinates ScaledDocumentOutputToCamera takes its samples in).
+    render::Point center_mm{},center_output_pixels{};
+    unsigned used_tiles{};
+    // Rows of the estimator's tile grid that used tiles came from: how many distinct, and the
+    // first and last. Meaningful when used_tiles > 0. A short span means a short lever arm.
+    unsigned used_rows{},first_used_row{},last_used_row{};
+    // Residual of the fitted model (scale and free shift) over the used tiles.
+    FitResidual residual_mm,residual_output_pixels;
+    // t = k q + d: what the scale could not explain. Present with estimated_scale. Diagnostic
+    // only, never applied. A large value means B moved (shake, a pattern period) or the
+    // scale acts about B's own optical centre rather than about P.
+    render::Point unexplained_shift_mm{},unexplained_shift_output_pixels{};
+};
+
+// What a v7 report records about the lens-aware fixed composite it was made with (#405 W4).
+// The mapping itself is not recorded: it is the profile's, named here by hash and fingerprint,
+// with the condition's raster; the condition and the profile files hold the values. Everything
+// that can be derived from these fields is derived again on reading (still_review_report_impl.hpp).
+struct SavedFixedCompositeLens {
+    std::string condition_sha256;           // SHA-256 of the condition file used
+    std::string profile_file;               // the condition's plain file name for the profile
+    std::string profile_file_sha256,profile_fingerprint_sha256;
+    std::optional<std::string> profile_id;  // the profile's own identifier, when it has one
+    // The output raster of the condition (micrometres of the document plane, DPI, pixels); the
+    // JPEG is exactly this size and does not change with the capture.
+    render::OutputRaster raster{render::DocumentRegionUm{0,0,0,0},0,0,0};
+    std::uint32_t seam_column{};            // output pixel column of the raster
+    std::string seam_origin;                // "band-center-provisional" or "operator"
+    FixedPolicyLimit policy_limit;
+    FixedScaleCorrectionV2 scale;
+    // The #365 estimator's own summary for this capture (its tiles feed the scale; its fit is not used).
+    OverlapEstimateStatus estimate_status{OverlapEstimateStatus::undetermined};
+    SimilarityUndeterminedReason estimate_reason{SimilarityUndeterminedReason::no_tiles};
+    bool wide_search{};
+    unsigned tiles_searched{},tiles_matched{},tiles_agreed{};
+};
 // How far this capture's B sat from where the condition puts it: the estimate
 // minus the fixed translation, the rotation difference in degrees, the scale
 // as a ratio. Recomputed from recorded values; absent without an estimate.
@@ -263,6 +317,8 @@ inline std::optional<FixedMappingDelta> FixedDiagnosticDelta(const FixedSimilari
 }
 
 struct FixedCompositeCondition; // fixed_composite_condition.hpp
+struct FixedCompositeConditionV2; // fixed_composite_condition_v2.hpp
+struct FixedCompositeProfileBinding; // fixed_composite_condition_v2.hpp
 
 struct StillReviewRequest {
     std::filesystem::path camera_a_original,camera_b_original,output_directory;
@@ -291,10 +347,23 @@ struct StillReviewRequest {
     // SHA-256 of the exact file bytes the condition was read from.
     struct FixedComposite {const FixedCompositeCondition* condition{};std::string condition_sha256;FixedPolicyLimit policy_limit;};
     std::optional<FixedComposite> fixed_composite;
+    // #405 W4: compose with the lens-aware fixed composite condition (v2) and the profile it names,
+    // already verified by LoadFixedCompositeConditionAny. Both are owned by the caller and must outlive
+    // the call. Exclusive with fixed_composite, manual_revision, automatic_alignment and blend. The report
+    // is v7. The originals must be the profile's frame size.
+    struct FixedCompositeLens {
+        const FixedCompositeConditionV2* condition{};
+        const FixedCompositeProfileBinding* profile{};
+        std::string condition_sha256;
+        FixedPolicyLimit policy_limit;
+    };
+    std::optional<FixedCompositeLens> fixed_composite_lens;
 };
 // Why a fixed composite could not be made for a capture. The writer throws it
 // before any output exists, so the caller knows that only the originals remain.
-enum class FixedCompositeSkip {condition_absent,condition_invalid,orientation_differs,size_differs,seam_outside_overlap};
+// profile_absent / profile_differs (#405 W4): a lens-aware (v2) condition whose profile file is not
+// beside it, or is there but is not the one the condition names or cannot be used.
+enum class FixedCompositeSkip {condition_absent,condition_invalid,orientation_differs,size_differs,seam_outside_overlap,profile_absent,profile_differs};
 constexpr std::string_view FixedCompositeSkipCode(FixedCompositeSkip v){
     switch(v){
     case FixedCompositeSkip::condition_absent:return "condition-absent";
@@ -302,6 +371,8 @@ constexpr std::string_view FixedCompositeSkipCode(FixedCompositeSkip v){
     case FixedCompositeSkip::orientation_differs:return "orientation-differs";
     case FixedCompositeSkip::size_differs:return "size-differs";
     case FixedCompositeSkip::seam_outside_overlap:return "seam-outside-overlap";
+    case FixedCompositeSkip::profile_absent:return "profile-absent";
+    case FixedCompositeSkip::profile_differs:return "profile-differs";
     }
     return {};
 }
@@ -323,6 +394,9 @@ struct StillReviewResult {
     std::optional<SeamBlendRecord> blend;
     double blend_milliseconds{};
     std::optional<SavedFixedComposite> fixed_composite; // v6 reports only
+    // v7 only (#405 W4). alignment_milliseconds is then the scale estimate (prior, tiles, decision),
+    // blend_milliseconds the composite.
+    std::optional<SavedFixedCompositeLens> fixed_composite_lens;
 };
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
@@ -343,6 +417,10 @@ struct SavedStillReview {
     // fixed mapping; fixed_composite->scale.applied_scale is multiplied about
     // scale.center on top of it. crop and width/height are what was rendered.
     std::optional<SavedFixedComposite> fixed_composite;
+    // v7 reports only (#405 W4). translation_x/y, rotation_degrees, scale and crop carry nothing then
+    // (0, 0, 0, 1, empty): the mapping is the profile's. width/height are the condition's raster.
+    // A tool that places B by a similarity (re-Merge, the saved-condition maker) must refuse it.
+    std::optional<SavedFixedCompositeLens> fixed_composite_lens;
 };
 // StillReview manual fields (#382). They start at the geometry the report
 // actually rendered, so a re-Merge without edits keeps the parent geometry.
@@ -370,6 +448,11 @@ inline render::PairRenderParameters StillPixelReviewGeometry(int x,int y,std::ui
 // Camera-free, explicit-report loading. Verifies schema, false quality flags,
 // aliases, immutable input/output hashes/dimensions and immediate parent link.
 SavedStillReview LoadSavedStillReview(const std::filesystem::path& report);
+// A v7 report against the profile it names (the binding LoadFixedCompositeConditionAny returns): the
+// profile's hash, fingerprint and identifier, the raster, the centre of the scale correction, and, for
+// a provisional seam, the band middle must all be what the report says. The report alone cannot check
+// these (it does not carry the profile). Throws std::invalid_argument if the report is not v7 or differs.
+void VerifySavedFixedCompositeLens(const SavedStillReview& review,const FixedCompositeProfileBinding& profile);
 // Local, camera-free handoff. Uses the same strict reader and carries paths
 // only to the explicitly invoked development tool; never publish this JSON.
 std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& report);

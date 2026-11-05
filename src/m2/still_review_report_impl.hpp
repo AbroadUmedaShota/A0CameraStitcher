@@ -280,6 +280,156 @@ SeamBlendRecord ReadFixedSeamBlend(const ReviewValue& value,std::uint32_t seam_c
     if(b.difference_mean<0 || b.difference_mean>b.difference_maximum || b.ratio_minimum<=0 || b.ratio_minimum>b.ratio_maximum)ReviewReject();
     return b;
 }
+// #405 W4 v7: the lens-aware fixed composite. The mapping is the profile's and is not
+// recorded; the report names the condition and the profile by hash and carries the raster,
+// the seam column, and what this capture added (the scale decision and its estimate).
+// The seam is one vertical column of the raster, recorded once in fixedCompositeLens.seam;
+// the blend object keeps the measured brightness only, as in v6.
+// Everything that can be derived from the recorded fields is derived again on reading and a
+// disagreement is rejected; what needs the profile itself is VerifySavedFixedCompositeLens.
+constexpr long long kLensRegionUmMaximum=1'000'000'000;
+void WriteFixedCompositeLensJson(std::ostream& out,const SavedFixedCompositeLens& f){
+    const auto optional=[&](const std::optional<double>& v){if(v)out<<*v;else out<<"null";};
+    const auto text=[&](std::string_view v){out<<'"'<<ReviewJson::JsonEscape(v)<<'"';};
+    const auto point=[&](const render::Point& p){out<<"{\"x\":"<<p.x<<",\"y\":"<<p.y<<"}";};
+    const auto residual=[&](const FitResidual& r){out<<"{\"rms\":"<<r.rms<<",\"maximum\":"<<r.maximum<<"}";};
+    const auto& s=f.scale;const auto& g=f.raster.region_um;
+    out<<",\"fixedCompositeLens\":{\"condition\":{\"sha256\":\""<<f.condition_sha256<<"\"},\"profile\":{\"file\":";text(f.profile_file);
+    out<<",\"fileSha256\":\""<<f.profile_file_sha256<<"\",\"fingerprintSha256\":\""<<f.profile_fingerprint_sha256<<"\",\"profileId\":";
+    if(f.profile_id)text(*f.profile_id);else out<<"null";
+    out<<"},\"raster\":{\"regionUm\":{\"left\":"<<g.left<<",\"top\":"<<g.top<<",\"right\":"<<g.right<<",\"bottom\":"<<g.bottom
+        <<"},\"dpi\":"<<f.raster.dpi<<",\"widthPixels\":"<<f.raster.width_pixels<<",\"heightPixels\":"<<f.raster.height_pixels
+        <<"},\"seam\":{\"column\":"<<f.seam_column<<",\"origin\":\""<<f.seam_origin
+        <<"\"},\"scaleCorrection\":{\"status\":\""<<FixedScaleStatusCode(s.status)<<"\",\"reason\":\""<<FixedScaleReasonCode(s.reason)<<"\",\"limitPercent\":"<<s.limit_percent
+        <<",\"estimatedScale\":";optional(s.estimated_scale);out<<",\"differencePercent\":";optional(s.difference_percent);
+    out<<",\"appliedScale\":"<<s.applied_scale<<",\"center\":{\"mm\":";point(s.center_mm);out<<",\"outputPixels\":";point(s.center_output_pixels);
+    out<<"},\"usedTiles\":"<<s.used_tiles<<",\"usedRows\":{\"count\":"<<s.used_rows<<",\"first\":"<<s.first_used_row<<",\"last\":"<<s.last_used_row<<"},\"residual\":";
+    if(s.estimated_scale){
+        out<<"{\"mm\":";residual(s.residual_mm);out<<",\"outputPixels\":";residual(s.residual_output_pixels);
+        out<<"},\"unexplainedShift\":{\"mm\":";point(s.unexplained_shift_mm);out<<",\"outputPixels\":";point(s.unexplained_shift_output_pixels);out<<"}";
+    }else out<<"null,\"unexplainedShift\":null";
+    out<<",\"notice\":";text(FixedScaleNotice(s.status));
+    out<<"},\"policyLimit\":{\"check\":\""<<FixedPolicyCheckCode(f.policy_limit.check)<<"\",\"policyPercent\":";optional(f.policy_limit.policy_percent);
+    out<<",\"conditionPercent\":"<<s.limit_percent<<",\"notice\":";text(FixedPolicyNotice(f.policy_limit.check));
+    out<<"},\"estimate\":{\"estimator\":\"a0.overlap-similarity.v2\",\"status\":\""<<OverlapEstimateStatusCode(f.estimate_status)<<"\",\"reason\":\""<<SimilarityUndeterminedReasonCode(f.estimate_reason)
+        <<"\",\"initialPosition\":\""<<(f.wide_search?"still-wide-search":"fixed-mapping")<<"\",\"tiles\":{\"searched\":"<<f.tiles_searched<<",\"matched\":"<<f.tiles_matched<<",\"agreed\":"<<f.tiles_agreed<<"}}}";
+}
+render::Point ReviewPoint(const ReviewValue& v){
+    ReviewFields(v,{"x","y"});return {ReviewDouble(ReviewAt(v,"x")),ReviewDouble(ReviewAt(v,"y"))};
+}
+SavedFixedCompositeLens ReadFixedCompositeLens(const ReviewValue& value){
+    ReviewFields(value,{"condition","profile","raster","seam","scaleCorrection","policyLimit","estimate"});
+    SavedFixedCompositeLens f;
+    const auto& condition=ReviewAt(value,"condition");ReviewFields(condition,{"sha256"});f.condition_sha256=ReviewHash(ReviewAt(condition,"sha256"));
+    const auto& profile=ReviewAt(value,"profile");ReviewFields(profile,{"file","fileSha256","fingerprintSha256","profileId"});
+    f.profile_file=ReviewString(ReviewAt(profile,"file"));if(!IsFixedCompositeProfileFileName(f.profile_file))ReviewReject();
+    f.profile_file_sha256=ReviewHash(ReviewAt(profile,"fileSha256"));f.profile_fingerprint_sha256=ReviewHash(ReviewAt(profile,"fingerprintSha256"));
+    if(ReviewAt(profile,"profileId").kind!=ReviewJson::JsonKind::null_value){
+        f.profile_id=ReviewString(ReviewAt(profile,"profileId"));if(f.profile_id->size()>256)ReviewReject();
+    }
+    const auto& raster=ReviewAt(value,"raster");ReviewFields(raster,{"regionUm","dpi","widthPixels","heightPixels"});
+    const auto& region=ReviewAt(raster,"regionUm");ReviewFields(region,{"left","top","right","bottom"});
+    const auto um=[&](const char* field){return static_cast<std::int64_t>(ReviewSigned(ReviewAt(region,field),0,static_cast<int>(kLensRegionUmMaximum)));};
+    const auto left=um("left"),top=um("top"),right=um("right"),bottom=um("bottom");
+    f.raster=render::OutputRaster{render::DocumentRegionUm{left,top,right,bottom},static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(raster,"dpi"),65535)),
+        static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(raster,"widthPixels"),render::kMaximumImageDimension)),static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(raster,"heightPixels"),render::kMaximumImageDimension))};
+    // Micrometres and DPI against the pixel counts, exactly (ADR-0034).
+    try{render::ValidateOutputRaster(f.raster);}catch(const std::invalid_argument&){ReviewReject();}
+    const auto& seam=ReviewAt(value,"seam");ReviewFields(seam,{"column","origin"});
+    f.seam_column=static_cast<std::uint32_t>(ReviewUnsigned(ReviewAt(seam,"column"),render::kMaximumImageDimension));
+    f.seam_origin=ReviewString(ReviewAt(seam,"origin"));if(!ParseFixedSeamOrigin(f.seam_origin) || f.seam_column>=f.raster.width_pixels)ReviewReject();
+    // Estimate first: the scale decision is checked against it.
+    const auto& e=ReviewAt(value,"estimate");ReviewFields(e,{"estimator","status","reason","initialPosition","tiles"});
+    if(ReviewString(ReviewAt(e,"estimator"))!="a0.overlap-similarity.v2")ReviewReject();
+    const auto e_status=ReviewString(ReviewAt(e,"status"));
+    if(e_status==OverlapEstimateStatusCode(OverlapEstimateStatus::estimated_not_judged))f.estimate_status=OverlapEstimateStatus::estimated_not_judged;
+    else if(e_status==OverlapEstimateStatusCode(OverlapEstimateStatus::undetermined))f.estimate_status=OverlapEstimateStatus::undetermined;else ReviewReject();
+    const auto e_reason=ReviewString(ReviewAt(e,"reason"));bool e_known=false;
+    for(const auto v:{SimilarityUndeterminedReason::none,SimilarityUndeterminedReason::no_tiles,SimilarityUndeterminedReason::insufficient_tiles,SimilarityUndeterminedReason::outside_image,SimilarityUndeterminedReason::tied_starts})
+        if(e_reason==SimilarityUndeterminedReasonCode(v)){f.estimate_reason=v;e_known=true;}
+    const auto start=ReviewString(ReviewAt(e,"initialPosition"));
+    if(!e_known || (start!="fixed-mapping" && start!="still-wide-search") ||
+        (f.estimate_status==OverlapEstimateStatus::estimated_not_judged)!=(f.estimate_reason==SimilarityUndeterminedReason::none))ReviewReject();
+    f.wide_search=start=="still-wide-search";
+    const auto& tiles=ReviewAt(e,"tiles");ReviewFields(tiles,{"searched","matched","agreed"});
+    f.tiles_searched=static_cast<unsigned>(ReviewUnsigned(ReviewAt(tiles,"searched"),4096));f.tiles_matched=static_cast<unsigned>(ReviewUnsigned(ReviewAt(tiles,"matched"),f.tiles_searched));
+    f.tiles_agreed=static_cast<unsigned>(ReviewUnsigned(ReviewAt(tiles,"agreed"),f.tiles_matched));
+    const bool fitted=f.estimate_status==OverlapEstimateStatus::estimated_not_judged;
+    if(fitted && f.tiles_agreed<3)ReviewReject();
+    // The scale decision.
+    const auto& s=ReviewAt(value,"scaleCorrection");
+    ReviewFields(s,{"status","reason","limitPercent","estimatedScale","differencePercent","appliedScale","center","usedTiles","usedRows","residual","unexplainedShift","notice"});
+    auto& c=f.scale;bool known=false;const auto status=ReviewString(ReviewAt(s,"status"));
+    for(const auto v:{FixedScaleStatus::applied,FixedScaleStatus::exceeded,FixedScaleStatus::not_estimated,FixedScaleStatus::seam_outside_overlap,FixedScaleStatus::output_uncovered})
+        if(status==FixedScaleStatusCode(v)){c.status=v;known=true;}
+    const auto reason=ReviewString(ReviewAt(s,"reason"));bool reason_known=false;
+    for(const auto v:{FixedScaleReason::none,FixedScaleReason::no_tiles,FixedScaleReason::insufficient_tiles,FixedScaleReason::outside_image,FixedScaleReason::tied_starts,FixedScaleReason::too_few_tiles,FixedScaleReason::degenerate_fit})
+        if(reason==FixedScaleReasonCode(v)){c.reason=v;reason_known=true;}
+    if(!known || !reason_known)ReviewReject();
+    c.limit_percent=ReviewDouble(ReviewAt(s,"limitPercent"));c.estimated_scale=ReviewOptionalDouble(ReviewAt(s,"estimatedScale"));
+    c.difference_percent=ReviewOptionalDouble(ReviewAt(s,"differencePercent"));c.applied_scale=ReviewDouble(ReviewAt(s,"appliedScale"));
+    if(!(c.limit_percent>=0) || !(c.applied_scale>0) || c.estimated_scale.has_value()!=c.difference_percent.has_value())ReviewReject();
+    const double pitch=25.4/f.raster.dpi,left_mm=static_cast<double>(left)/1000.0,top_mm=static_cast<double>(top)/1000.0;
+    const auto& center=ReviewAt(s,"center");ReviewFields(center,{"mm","outputPixels"});
+    c.center_mm=ReviewPoint(ReviewAt(center,"mm"));c.center_output_pixels=ReviewPoint(ReviewAt(center,"outputPixels"));
+    // The same arithmetic as the writer's, from the recorded raster.
+    if(c.center_output_pixels.x!=(c.center_mm.x-left_mm)/pitch-0.5 || c.center_output_pixels.y!=(c.center_mm.y-top_mm)/pitch-0.5)ReviewReject();
+    c.used_tiles=static_cast<unsigned>(ReviewUnsigned(ReviewAt(s,"usedTiles"),4096));
+    const auto& rows=ReviewAt(s,"usedRows");ReviewFields(rows,{"count","first","last"});
+    c.used_rows=static_cast<unsigned>(ReviewUnsigned(ReviewAt(rows,"count"),4096));c.first_used_row=static_cast<unsigned>(ReviewUnsigned(ReviewAt(rows,"first"),4096));
+    c.last_used_row=static_cast<unsigned>(ReviewUnsigned(ReviewAt(rows,"last"),4096));
+    // Used tiles are agreed tiles; their rows are rows of the tile grid.
+    if(c.used_tiles>f.tiles_agreed || (c.used_tiles==0)!=(c.used_rows==0) || c.used_rows>c.used_tiles ||
+        (c.used_tiles==0 && (c.first_used_row || c.last_used_row)) || c.last_used_row<c.first_used_row || c.used_rows>c.last_used_row-c.first_used_row+1)ReviewReject();
+    const auto& residual=ReviewAt(s,"residual");
+    if(c.estimated_scale.has_value()==(residual.kind==ReviewJson::JsonKind::null_value))ReviewReject();
+    if(c.estimated_scale){
+        if(*c.estimated_scale<=0 || *c.difference_percent!=StillScaleDifferencePercent(*c.estimated_scale) || c.used_tiles<3 || c.used_rows<2)ReviewReject();
+        ReviewFields(residual,{"mm","outputPixels"});
+        c.residual_mm=ReviewResidual(ReviewAt(residual,"mm"));c.residual_output_pixels=ReviewResidual(ReviewAt(residual,"outputPixels"));
+        const auto& shift=ReviewAt(s,"unexplainedShift");ReviewFields(shift,{"mm","outputPixels"});
+        c.unexplained_shift_mm=ReviewPoint(ReviewAt(shift,"mm"));c.unexplained_shift_output_pixels=ReviewPoint(ReviewAt(shift,"outputPixels"));
+        if(c.residual_output_pixels.rms!=c.residual_mm.rms/pitch || c.residual_output_pixels.maximum!=c.residual_mm.maximum/pitch ||
+            c.unexplained_shift_output_pixels.x!=c.unexplained_shift_mm.x/pitch || c.unexplained_shift_output_pixels.y!=c.unexplained_shift_mm.y/pitch)ReviewReject();
+    }else if(ReviewAt(s,"unexplainedShift").kind!=ReviewJson::JsonKind::null_value)ReviewReject();
+    const bool estimated=c.estimated_scale.has_value();
+    switch(c.status){
+    case FixedScaleStatus::applied:
+        if(!estimated || c.reason!=FixedScaleReason::none || *c.difference_percent>c.limit_percent || c.applied_scale!=*c.estimated_scale)ReviewReject();break;
+    case FixedScaleStatus::exceeded:
+        if(!estimated || c.reason!=FixedScaleReason::none || *c.difference_percent<=c.limit_percent || c.applied_scale!=1)ReviewReject();break;
+    case FixedScaleStatus::seam_outside_overlap:
+    case FixedScaleStatus::output_uncovered:
+        if(!estimated || c.reason!=FixedScaleReason::none || *c.difference_percent>c.limit_percent || c.applied_scale!=1)ReviewReject();break;
+    case FixedScaleStatus::not_estimated:
+        if(estimated || c.reason==FixedScaleReason::none || c.applied_scale!=1)ReviewReject();break;
+    }
+    // The scale is fitted from this capture's estimate, so the two must agree.
+    if(estimated && !fitted)ReviewReject();
+    if(c.status==FixedScaleStatus::not_estimated){
+        if(fitted){
+            // Fitted but not estimated: too few tiles in the search window, or a fit that cannot be used.
+            const bool few=c.used_tiles<3 || c.used_rows<2;
+            if(c.reason==FixedScaleReason::too_few_tiles){if(!few)ReviewReject();}
+            else if(c.reason!=FixedScaleReason::degenerate_fit || few)ReviewReject();
+        }else{
+            const auto mapped=f.estimate_reason==SimilarityUndeterminedReason::no_tiles?FixedScaleReason::no_tiles:f.estimate_reason==SimilarityUndeterminedReason::insufficient_tiles?FixedScaleReason::insufficient_tiles:
+                f.estimate_reason==SimilarityUndeterminedReason::outside_image?FixedScaleReason::outside_image:FixedScaleReason::tied_starts;
+            if(c.reason!=mapped || c.used_tiles)ReviewReject();
+        }
+    }
+    ReviewExactText(ReviewAt(s,"notice"),FixedScaleNotice(c.status));
+    const auto& policy=ReviewAt(value,"policyLimit");ReviewFields(policy,{"check","policyPercent","conditionPercent","notice"});
+    const auto check=ReviewString(ReviewAt(policy,"check"));bool check_known=false;
+    for(const auto v:{FixedPolicyCheck::same,FixedPolicyCheck::differs,FixedPolicyCheck::policy_absent,FixedPolicyCheck::policy_unreadable,FixedPolicyCheck::policy_without_scale_limit})
+        if(check==FixedPolicyCheckCode(v)){f.policy_limit.check=v;check_known=true;}
+    f.policy_limit.policy_percent=ReviewOptionalDouble(ReviewAt(policy,"policyPercent"));
+    if(!check_known || ReviewDouble(ReviewAt(policy,"conditionPercent"))!=c.limit_percent || (f.policy_limit.policy_percent && *f.policy_limit.policy_percent<0))ReviewReject();
+    const auto expected_check=ComparePolicyLimit(c.limit_percent,f.policy_limit.policy_percent,f.policy_limit.check);
+    if(expected_check.check!=f.policy_limit.check || f.policy_limit.policy_percent.has_value()!=(f.policy_limit.check==FixedPolicyCheck::same || f.policy_limit.check==FixedPolicyCheck::differs))ReviewReject();
+    ReviewExactText(ReviewAt(policy,"notice"),FixedPolicyNotice(f.policy_limit.check));
+    return f;
+}
 SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto full=NormalizedAbsolute(path);if(full.filename()!=L"uncalibrated-review.json")ReviewReject();
     V2PathPins pins;pins.Pin(full);LockedReadFile file(full,false,true);const auto bytes=file.ReadAll(256*1024);
@@ -290,12 +440,16 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const bool automatic=schema=="a0.uncalibrated-still-review.v5";
     // v6 is the fixed composite (#400); its mapping comes from the condition, not from the live geometry.
     const bool fixed=schema=="a0.uncalibrated-still-review.v6";
+    // v7 is the lens-aware fixed composite (#405 W4): the mapping is a profile's, so there is no
+    // translation, adjustment or crop; the output is the condition's raster.
+    const bool lens=schema=="a0.uncalibrated-still-review.v7";
     const auto basis=automatic?ReviewString(ReviewAt(root,"geometryBasis")):std::string();
     const bool corrected=basis=="auto-still-similarity" || basis=="auto-still-rotation";
     if(automatic && !corrected && basis!="auto-still-translation" && basis!="live-preview")ReviewReject();
     // Optional in v1..v5: mountOrientation (absent is normal) and blend
     // (#368, absent is the linear feather).
-    if(fixed)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","fixedComposite","blend"},{"mountOrientation"});
+    if(lens)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","output","geometryBasis","fixedCompositeLens","blend"},{"mountOrientation"});
+    else if(fixed)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","fixedComposite","blend"},{"mountOrientation"});
     else if(automatic && corrected)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","automaticAlignment"},{"mountOrientation","blend"});
     else if(automatic)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","automaticAlignment"},{"mountOrientation","blend"});
     else if(similarity)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","parentReview","adjustment","crop"},{"mountOrientation","blend"});
@@ -323,9 +477,16 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto& source=ReviewAt(root,"sourceDimensions");ReviewFields(source,{"width","height"});
     record.source_width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"width"),render::kMaximumImageDimension));record.source_height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"height"),render::kMaximumImageDimension));
     const auto base=ScalePreviewReviewGeometry(record.geometry,record.source_width,record.source_height);
-    const auto& translation=ReviewAt(root,"translation");ReviewFields(translation,{"x","y"});
-    record.translation_x=ReviewSigned(ReviewAt(translation,"x"),1,32767);record.translation_y=ReviewSigned(ReviewAt(translation,"y"),-32767,32767);
-    if(!manual && !automatic && !fixed && (base.camera_b_to_camera_a[2]!=record.translation_x || base.camera_b_to_camera_a[5]!=record.translation_y))ReviewReject();
+    if(lens){
+        // The profile fixes the frame (cameraModel), so the originals are exactly that size.
+        if(record.source_width!=kD810SensorWidthPixels || record.source_height!=kD810SensorHeightPixels)ReviewReject();
+        if(ReviewString(ReviewAt(root,"geometryBasis"))!="fixed-composite-lens")ReviewReject();
+        record.fixed_composite_lens=ReadFixedCompositeLens(ReviewAt(root,"fixedCompositeLens"));
+    }else{
+        const auto& translation=ReviewAt(root,"translation");ReviewFields(translation,{"x","y"});
+        record.translation_x=ReviewSigned(ReviewAt(translation,"x"),1,32767);record.translation_y=ReviewSigned(ReviewAt(translation,"y"),-32767,32767);
+        if(!manual && !automatic && !fixed && (base.camera_b_to_camera_a[2]!=record.translation_x || base.camera_b_to_camera_a[5]!=record.translation_y))ReviewReject();
+    }
     if(automatic){
         record.automatic=ReadAutomaticAlignment(ReviewAt(root,"automaticAlignment"));const auto& m=*record.automatic;
         if(basis!=StillAlignmentBasis(m))ReviewReject();
@@ -343,19 +504,28 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
         if(ReviewString(ReviewAt(root,"geometryBasis"))!="fixed-composite")ReviewReject();
         record.fixed_composite=ReadFixedComposite(ReviewAt(root,"fixedComposite"),record.translation_x,record.translation_y,record.rotation_degrees,record.scale);
     }
-    const auto parameters=fixed?FixedCompositeScaledGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height,record.fixed_composite->scale.applied_scale):SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
-    record.crop=parameters.crop;
-    if(similarity || corrected || fixed){
-        const auto& crop=ReviewAt(root,"crop");ReviewFields(crop,{"left","top","right","bottom"});
-        if(ReviewUnsigned(ReviewAt(crop,"left"),32768)!=parameters.crop.left || ReviewUnsigned(ReviewAt(crop,"top"),32768)!=parameters.crop.top ||
-            ReviewUnsigned(ReviewAt(crop,"right"),32768)!=parameters.crop.right || ReviewUnsigned(ReviewAt(crop,"bottom"),32768)!=parameters.crop.bottom)ReviewReject();
+    std::uint32_t expected_width{},expected_height{};
+    if(lens){
+        // No placement: the JPEG is exactly the condition's raster.
+        expected_width=record.fixed_composite_lens->raster.width_pixels;expected_height=record.fixed_composite_lens->raster.height_pixels;
+    }else{
+        const auto parameters=fixed?FixedCompositeScaledGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height,record.fixed_composite->scale.applied_scale):SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
+        record.crop=parameters.crop;
+        if(similarity || corrected || fixed){
+            const auto& crop=ReviewAt(root,"crop");ReviewFields(crop,{"left","top","right","bottom"});
+            if(ReviewUnsigned(ReviewAt(crop,"left"),32768)!=parameters.crop.left || ReviewUnsigned(ReviewAt(crop,"top"),32768)!=parameters.crop.top ||
+                ReviewUnsigned(ReviewAt(crop,"right"),32768)!=parameters.crop.right || ReviewUnsigned(ReviewAt(crop,"bottom"),32768)!=parameters.crop.bottom)ReviewReject();
+        }
+        const auto plan=render::PlanPairCanvas(record.source_width,record.source_height,record.source_width,record.source_height,parameters);
+        expected_width=plan.output_width;expected_height=plan.output_height;
     }
-    const auto plan=render::PlanPairCanvas(record.source_width,record.source_height,record.source_width,record.source_height,parameters);
     const auto& output=ReviewAt(root,"output");ReviewFields(output,{"path","width","height","bytes","sha256"});
     if(ReviewString(ReviewAt(output,"path"))!="uncalibrated-review.jpg")ReviewReject();record.jpeg=full.parent_path()/L"uncalibrated-review.jpg";
     record.width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"width"),render::kMaximumImageDimension));record.height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"height"),render::kMaximumImageDimension));
-    if(record.width!=plan.output_width || record.height!=plan.output_height)ReviewReject();record.jpeg_bytes=ReviewUnsigned(ReviewAt(output,"bytes"),kMaximumCompressedJpegBytes);if(!record.jpeg_bytes)ReviewReject();record.jpeg_sha256=ReviewHash(ReviewAt(output,"sha256"));
-    if(fixed){
+    if(record.width!=expected_width || record.height!=expected_height)ReviewReject();record.jpeg_bytes=ReviewUnsigned(ReviewAt(output,"bytes"),kMaximumCompressedJpegBytes);if(!record.jpeg_bytes)ReviewReject();record.jpeg_sha256=ReviewHash(ReviewAt(output,"sha256"));
+    if(lens){
+        record.blend=ReadFixedSeamBlend(ReviewAt(root,"blend"),record.fixed_composite_lens->seam_column,record.width,record.height);
+    }else if(fixed){
         const auto fixed_base=SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
         const auto& f=*record.fixed_composite;const auto centre=FixedScaleCenter(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);
         if(f.seam_column>=record.width || f.scale.center.x!=centre.x || f.scale.center.y!=centre.y ||
@@ -391,6 +561,18 @@ SavedStillReview LoadSavedStillReview(const std::filesystem::path& path){
         if(ToLowerHex(snapshot.sha256)!=hash || snapshot.compressed.size()!=size || dimensions.width!=(i<2?record.source_width:record.width) || dimensions.height!=(i<2?record.source_height:record.height))ReviewReject();
     }
     VerifyReviewParent(record);return record;
+}
+void VerifySavedFixedCompositeLens(const SavedStillReview& record,const FixedCompositeProfileBinding& profile){
+    if(!record.fixed_composite_lens)ReviewReject();
+    const auto& f=*record.fixed_composite_lens;const auto& raster=profile.parameters.raster;const auto& g=f.raster.region_um;const auto& p=raster.region_um;
+    if(f.profile_file_sha256!=profile.profile_file_sha256 || f.profile_fingerprint_sha256!=profile.profile_fingerprint_sha256 || f.profile_id!=profile.profile_id)ReviewReject();
+    if(g.left!=p.left || g.top!=p.top || g.right!=p.right || g.bottom!=p.bottom || f.raster.dpi!=raster.dpi || f.raster.width_pixels!=raster.width_pixels || f.raster.height_pixels!=raster.height_pixels)ReviewReject();
+    try{
+        // The centre of the correction is the profile's, not a number the report is free to choose.
+        const auto center=FixedCompositeScaleCenterMm(profile.parameters.camera_b);
+        if(center.x!=f.scale.center_mm.x || center.y!=f.scale.center_mm.y)ReviewReject();
+        if(f.seam_origin=="band-center-provisional" && f.seam_column!=FixedCompositeProvisionalSeamColumn(profile.parameters))ReviewReject();
+    }catch(const std::invalid_argument&){ReviewReject();}
 }
 std::string DescribeSavedReviewEvaluationInputs(const std::filesystem::path& path){
     const auto record=LoadSavedStillReview(path);

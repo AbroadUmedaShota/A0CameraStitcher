@@ -6,7 +6,9 @@
 #include "a0/phase0/experimental/preview_back_buffer.hpp"
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
+#include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
+#include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
 #include <windowsx.h>
 #include <commdlg.h>
@@ -32,7 +34,9 @@ struct Loaded {review::SavedStillReview record;a0::m2::render::BgrImage image;};
 Loaded Load(const fs::path& path){auto record=review::LoadSavedStillReview(path);auto image=review::LoadStillReviewImage(record);return {std::move(record),std::move(image)};}
 struct Inspector {
     Loaded current;
+    // The decoded A/B of the manual tools. A lens-aware (v7) report has no manual tools, so none are decoded (#405 W4).
     std::array<a0::m2::render::BgrImage,2> sources;
+    bool lens{};unsigned lens_stage{};
     review::ReviewViewport viewport;
     std::array<HWND,33> buttons{};
     std::array<HWND,4> edits{};
@@ -70,7 +74,9 @@ struct Inspector {
     // #382 smoke: checked before the stages below, whose counters restart after it.
     unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
     review::StillAlignmentGeometry draft_parent_geometry{};std::optional<review::StillAlignmentGeometry> draft_estimate;
-    explicit Inspector(Loaded loaded,bool test):current(std::move(loaded)),sources(review::LoadStillReviewSources(current.record)),smoke(test){
+    explicit Inspector(Loaded loaded,bool test):current(std::move(loaded)),
+        sources(current.record.fixed_composite_lens?std::array<a0::m2::render::BgrImage,2>{}:review::LoadStillReviewSources(current.record)),
+        lens(current.record.fixed_composite_lens.has_value()),smoke(test){
         viewport={current.image.width,current.image.height,1,1,0,current.image.width/2.0,current.image.height/2.0};
         displayed_x=current.record.translation_x;displayed_y=current.record.translation_y;
         blend=current.record.blend?review::BlendMethod::seam_cut:review::BlendMethod::linear_feather;
@@ -80,7 +86,8 @@ struct Inspector {
         SetWindowTextW(buttons[31],blend==review::BlendMethod::seam_cut?L"合成: 継ぎ目":L"合成: 線形");
     }
     std::wstring BlendText() const {
-        const auto& b=current.record.blend;const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
+        const auto& b=current.record.blend;
+        if(lens)return a0::phase0::experimental::FixedCompositeLensDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n";const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
         if(current.record.fixed_composite)return a0::phase0::experimental::FixedCompositeDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
         if(!b)return L"合成（保存JPEG）: 線形 feather\r\n"+next;
         return L"合成（保存JPEG）: 継ぎ目で切替\r\n継ぎ目 x: "+std::to_wstring(b->summary.x_minimum)+L"〜"+std::to_wstring(b->summary.x_maximum)+L" px\r\n混ぜる幅: "+std::to_wstring(b->settings.width_pixels)+
@@ -88,6 +95,10 @@ struct Inspector {
     }
     bool Busy() const {return save.valid() || work_save.valid();}
     void EnableChanges(bool enabled){
+        if(lens){ // only the seam line is a tool of a lens-aware report
+            for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],FALSE);for(auto edit:edits)EnableWindow(edit,FALSE);
+            EnableWindow(buttons[30],enabled);return;
+        }
         for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],enabled);for(auto edit:edits)EnableWindow(edit,enabled);
         EnableWindow(buttons[32],enabled && review::EstimatedStillReviewGeometry(current.record));
     }
@@ -110,6 +121,7 @@ struct Inspector {
         EnableChanges(false);status=L"対応点・用途・調整値を別の作業ファイルへ保存しています…";InvalidateRect(window,nullptr,FALSE);
     }
     void RestoreWork(HWND window,const review::SavedReviewSession& session){
+        if(lens)throw std::invalid_argument("a lens-aware report has no manual work to restore");
         const auto& b=session.review;
         if(!review::ReviewSessionBelongsToPair(session,current.record))throw std::invalid_argument("work belongs to another original pair");
         auto baseline=Load(b.report);if(baseline.record.report_sha256!=session.state.review_report_sha256)throw std::invalid_argument("work baseline changed");
@@ -153,6 +165,7 @@ struct Inspector {
     // not apply enters them only through 「推定値を入力欄へ」, never on opening,
     // so a re-Merge that changes only the blend keeps the parent geometry.
     void InitialDraft(){
+        if(lens){status=a0::phase0::experimental::FixedCompositeLensLine(*current.record.fixed_composite_lens);EnableChanges(true);return;}
         SetDraft();const auto estimate=review::EstimatedStillReviewGeometry(current.record);EnableWindow(buttons[32],estimate.has_value());
         if(current.record.fixed_composite){status=a0::phase0::experimental::FixedCompositeLine(*current.record.fixed_composite);
             if(current.record.fixed_composite->scale.applied_scale!=1)status+=L" / "+a0::phase0::experimental::FixedScaleInputNote(current.record.fixed_composite->scale);return;}
@@ -191,6 +204,7 @@ struct Inspector {
     }
     void UpdateMeasurements(){
         if(!residual_text)return;
+        if(lens){SetWindowTextW(residual_text,BlendText().c_str());return;}
         const auto measured=review::MeasureReviewCorrespondences(points,preview_parameters,sources[0].width,sources[0].height);
         auto groups=[&](const auto& parameters){
             return GroupMetrics(review::ReviewPointRole::fitting,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting))+L"\r\n"+
@@ -370,6 +384,15 @@ struct Inspector {
         if(!smoke)return;
         auto click=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(100+index,BN_CLICKED),reinterpret_cast<LPARAM>(buttons[index]));};
         if(Clock::now()-started>std::chrono::seconds(210) || failed){failed=true;SendMessageW(window,WM_CLOSE,0,0);return;}
+        if(lens){
+            // A lens-aware report shows its saved JPEG, the seam line and the scale notes; nothing else is a tool.
+            if(lens_stage==0 && zoom_paints[0]){
+                wchar_t metrics[16384]{};GetWindowTextW(residual_text,metrics,static_cast<int>(std::size(metrics)));
+                if(std::wstring(metrics).find(L"倍率の補正")==std::wstring::npos)failed=true;
+                ++lens_stage;click(30);
+            }else if(lens_stage==1 && seam_pixels){++lens_stage;SendMessageW(window,WM_CLOSE,0,0);}
+            return;
+        }
         if(resume_smoke){
             if(mode_paints[1] && (points.empty() || marker_pixels) && verified_paints){
                 const auto fitting=review::MeasureReviewCorrespondences(points,preview_parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting);
@@ -504,7 +527,7 @@ struct Inspector {
         FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
         TextOutW(dc,550,98,L"X (px)",6);TextOutW(dc,735,98,L"Y (px)",6);TextOutW(dc,550,138,L"回転 (度)",6);TextOutW(dc,735,138,L"倍率 (倍)",6);
         const auto degrees=mode?draft_degrees:current.record.rotation_degrees,scale=mode?draft_scale:current.record.scale;
-        std::wstring summary=(mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(mode?draft_x:displayed_x)+L", "+std::to_wstring(mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
+        std::wstring summary=lens?L"保存JPEG（校正の写像） / "+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5):(mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(mode?draft_x:displayed_x)+L", "+std::to_wstring(mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
         summary+=current.record.geometry.orientation==review::MountOrientation::rotated_180?L"  取付: 180°回転（A/Bを回して表示・合成）":L"  取付: 通常";
         TextOutW(dc,12,218,summary.c_str(),static_cast<int>(summary.size()));
         const wchar_t* help=L"未校正・操作検証用 / 回転・倍率で周辺を切り取ります。差分は重なり部分のみ。比較不可の範囲は格子表示。";
@@ -652,6 +675,49 @@ int wmain(int argc,wchar_t** argv){
                 throw std::invalid_argument("explicit report required");
             std::cout<<review::DescribeSavedReviewEvaluationInputs(fs::path(argv[2]))<<std::endl;return 0;
         }
+        if(argc>=2 && std::wstring_view(argv[1])==L"--make-fixed-composite-condition-v2"){
+            // Development entry (#405 W6): a person names the draft rig profile, the settings folder,
+            // the output region (micrometres of the document plane) and the DPI. File-only, no window,
+            // never overwrites, never automatic. Without every one of them nothing is made.
+            SetConsoleOutputCP(CP_UTF8);
+            const auto usage=[]{
+                std::cout<<"fixed_composite_condition_v2_made=0 camera_operations=0\n"
+                    "usage: StillReview --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run]\n"<<std::flush;
+                return 2;
+            };
+            a0::phase0::experimental::FixedConditionV2Request request;
+            bool have_folder=false,have_region=false,have_dpi=false;
+            if(argc<3)return usage();
+            request.profile=fs::path(argv[2]);
+            for(int i=3;i<argc;++i){
+                const std::wstring_view flag(argv[i]);
+                if(flag==L"--dry-run" && !request.dry_run){request.dry_run=true;continue;}
+                if(i+1>=argc)return usage();
+                const std::wstring value(argv[++i]);
+                if(flag==L"--settings-folder" && !have_folder){request.settings_folder=fs::path(value);have_folder=true;}
+                else if(flag==L"--region-um" && !have_region){
+                    size_t at=0;
+                    for(int k=0;k<4;++k){
+                        const auto end=k<3?value.find(L',',at):value.size();
+                        if(end==std::wstring::npos || end==at || end-at>12)return usage();
+                        long long n{};
+                        for(auto j=at;j<end;++j){if(value[j]<L'0' || value[j]>L'9')return usage();n=n*10+(value[j]-L'0');}
+                        request.region_um[static_cast<size_t>(k)]=n;at=end+1;
+                    }
+                    have_region=true;
+                }else if(flag==L"--dpi" && !have_dpi){
+                    if(value.empty() || value.size()>5 || value.find_first_not_of(L"0123456789")!=std::wstring::npos)return usage();
+                    request.dpi=static_cast<std::uint32_t>(std::stoul(value));have_dpi=true;
+                }else return usage();
+            }
+            if(!have_folder || !have_region || !have_dpi)return usage();
+            const auto made=a0::phase0::experimental::MakeFixedCompositeConditionV2File(request,
+                [](const std::vector<unsigned char>& bytes){return a0::m2::experimental::FixedCompositeBytesSha256(bytes);},std::chrono::system_clock::now());
+            std::cout<<"fixed_composite_condition_v2_made="<<made.made<<" checked="<<made.checked<<" dry_run="<<request.dry_run<<" camera_operations=0\n"<<made.message<<'\n';
+            for(const auto& line:made.details)std::cout<<line<<'\n';
+            std::cout<<std::flush;
+            return (made.made || (made.checked && request.dry_run))?0:1;
+        }
         if(argc==5 && std::wstring_view(argv[1])==L"--make-fixed-composite-condition" && std::wstring_view(argv[3])==L"--settings-folder"){
             // Development entry (#400): a person names the saved review and the settings
             // folder. File-only, no window, never overwrites, never automatic.
@@ -682,7 +748,7 @@ int wmain(int argc,wchar_t** argv){
         const bool from_session=argc>=3 && std::wstring(argv[1])==L"--session";
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:std::wstring(argv[3])!=L"--smoke")))
-            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder>");
+            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder> | --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run]");
         // Opt out of Windows bitmap scaling so 100% is one physical display
         // pixel per saved image pixel, including on a scaled desktop.
         if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))throw std::runtime_error("per-monitor pixel display awareness unavailable");
@@ -710,7 +776,7 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"review_loaded=1 ui_window_visible="<<(IsWindowVisible(window)!=FALSE)<<" camera_operations=0\n"<<std::flush;
         MSG message{};BOOL result{};while((result=GetMessageW(&message,nullptr,0,0))>0){if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
         if(result<0)throw std::runtime_error("inspector message loop failed");
-        const bool pass=!app->failed && (!app->smoke || (app->resume_smoke?app->resume_verified && app->layout_verified:
+        const bool pass=!app->failed && (!app->smoke || (app->lens?app->lens_stage==2 && app->seam_pixels && app->layout_verified:app->resume_smoke?app->resume_verified && app->layout_verified:
             app->draft_verified && app->smoke_stage==11 && app->seam_pixels && app->current.record.blend && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
         std::cout<<"sessions_saved="<<app->sessions_saved<<" sessions_loaded="<<app->sessions_loaded<<" resume_verified="<<app->resume_verified<<'\n';
         std::cout<<"point_pairs="<<app->points.size()<<" point_picks="<<app->point_picks<<" point_proposals="<<app->point_proposals<<" point_applications="<<app->point_applications<<" point_undos="<<app->point_undos<<" outside_point_rejections="<<app->point_rejections<<" verified_marker_pixels="<<app->marker_pixels<<" point_role_changes="<<app->point_role_changes<<" unverified_displays="<<app->unverified_displays<<'\n';

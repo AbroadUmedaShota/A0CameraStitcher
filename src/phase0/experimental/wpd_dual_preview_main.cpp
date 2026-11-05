@@ -36,6 +36,8 @@
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
 #include "a0/phase0/experimental/preview_end_restart_probe.hpp"
 #include "a0/m2/experimental/still_review.hpp"
+#include "a0/m2/experimental/fixed_composite_selection.hpp"
+#include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
 
 using namespace a0::phase0;
 using namespace a0::phase0::experimental;

@@ -220,7 +220,7 @@ int main(){
         CHECK(FixedPolicyNotice(FixedPolicyCheck::same).empty());
         CHECK(!FixedPolicyNotice(FixedPolicyCheck::differs).empty() && !FixedPolicyNotice(FixedPolicyCheck::policy_absent).empty());
         CHECK(FixedScaleNotice(FixedScaleStatus::applied).empty() && !FixedScaleNotice(FixedScaleStatus::exceeded).empty());
-        for(const auto s:{FixedCompositeSkip::condition_absent,FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap})
+        for(const auto s:{FixedCompositeSkip::condition_absent,FixedCompositeSkip::condition_invalid,FixedCompositeSkip::orientation_differs,FixedCompositeSkip::size_differs,FixedCompositeSkip::seam_outside_overlap,FixedCompositeSkip::profile_absent,FixedCompositeSkip::profile_differs})
             CHECK(!FixedCompositeSkipText(s).empty() && !FixedCompositeSkipCode(s).empty());
 
         // End to end on a generated scene: the estimator's tiles, then the

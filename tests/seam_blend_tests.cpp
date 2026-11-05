@@ -3,6 +3,8 @@
 #include "similarity_scene.hpp"
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -23,6 +25,51 @@ void Fill(BgrImage& image,unsigned x0,unsigned x1,unsigned y0,unsigned y1,std::u
 std::array<int,3> Pixel(const BgrImage& image,unsigned x,unsigned y){const auto i=(static_cast<size_t>(y)*image.width+x)*3;return {image.bgr[i],image.bgr[i+1],image.bgr[i+2]};}
 double Lum(const BgrImage& image,unsigned x,unsigned y){const auto p=Pixel(image,x,y);return p[0]*0.114+p[1]*0.587+p[2]*0.299;}
 render::PairRenderParameters Shift(double dx){return {{1,0,dx,0,1,0,0,0,1},a0::m2::StitchLayout::camera_a_left_camera_b_right,{}};}
+// SHA-256 (FIPS 180-4) of a canonical byte serialization of a whole result: size, image bytes, every
+// record field (settings, seam columns, summary, difference/ratio fields, saturation count, fixed flag)
+// and the row ratios, all little-endian, doubles as their bit patterns.
+class Sha256 {
+public:
+    void Update(const std::uint8_t* data,size_t size){for(size_t i=0;i<size;++i){block_[used_++]=data[i];if(used_==64){Compress();used_=0;}}length_+=size;}
+    std::string Hex(){
+        const std::uint64_t bits=length_*8;const std::uint8_t one=0x80,zero=0;Update(&one,1);while(used_!=56)Update(&zero,1);
+        for(int i=7;i>=0;--i){const auto b=static_cast<std::uint8_t>(bits>>(8*i));Update(&b,1);}
+        std::string out;for(const auto v:h_){char text[9];std::snprintf(text,sizeof text,"%08x",v);out+=text;}return out;
+    }
+private:
+    static std::uint32_t Rotr(std::uint32_t v,int n){return (v>>n)|(v<<(32-n));}
+    void Compress(){
+        static const std::uint32_t k[64]={0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+        std::uint32_t w[64];
+        for(int i=0;i<16;++i)w[i]=std::uint32_t(block_[4*i])<<24|std::uint32_t(block_[4*i+1])<<16|std::uint32_t(block_[4*i+2])<<8|block_[4*i+3];
+        for(int i=16;i<64;++i){const auto s0=Rotr(w[i-15],7)^Rotr(w[i-15],18)^(w[i-15]>>3),s1=Rotr(w[i-2],17)^Rotr(w[i-2],19)^(w[i-2]>>10);w[i]=w[i-16]+s0+w[i-7]+s1;}
+        auto v=h_;
+        for(int i=0;i<64;++i){
+            const auto s1=Rotr(v[4],6)^Rotr(v[4],11)^Rotr(v[4],25),ch=(v[4]&v[5])^(~v[4]&v[6]),t1=v[7]+s1+ch+k[i]+w[i];
+            const auto s0=Rotr(v[0],2)^Rotr(v[0],13)^Rotr(v[0],22),maj=(v[0]&v[1])^(v[0]&v[2])^(v[1]&v[2]),t2=s0+maj;
+            v[7]=v[6];v[6]=v[5];v[5]=v[4];v[4]=v[3]+t1;v[3]=v[2];v[2]=v[1];v[1]=v[0];v[0]=t1+t2;
+        }
+        for(int i=0;i<8;++i)h_[i]+=v[i];
+    }
+    std::array<std::uint32_t,8> h_{0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    std::uint8_t block_[64]{};size_t used_{};std::uint64_t length_{};
+};
+std::string ResultSha256(const SeamBlendResult& r){
+    Sha256 sha;
+    const auto put=[&](std::uint64_t v,int bytes){std::uint8_t b[8];for(int i=0;i<bytes;++i)b[i]=static_cast<std::uint8_t>(v>>(8*i));sha.Update(b,static_cast<size_t>(bytes));};
+    const auto real=[&](double v){std::uint64_t bits{};std::memcpy(&bits,&v,sizeof bits);put(bits,8);};
+    const auto& rec=r.record;
+    put(r.image.width,4);put(r.image.height,4);put(r.image.bgr.size(),8);sha.Update(r.image.bgr.data(),r.image.bgr.size());
+    put(rec.settings.width_pixels,4);put(rec.settings.edge_margin_pixels,4);put(rec.settings.brightness_half_width_pixels,4);put(rec.settings.brightness_smoothing_rows,4);
+    put(rec.fixed_seam,1);put(rec.seam_x.size(),8);for(const auto v:rec.seam_x)put(v,4);
+    put(rec.summary.x_minimum,4);put(rec.summary.x_maximum,4);real(rec.summary.x_mean);
+    real(rec.difference_mean);real(rec.difference_maximum);real(rec.ratio_minimum);real(rec.ratio_maximum);put(rec.saturation_limited_pixels,8);
+    put(r.row_ratio.size(),8);for(const auto v:r.row_ratio)real(v);
+    return sha.Hex();
+}
 // FNV-1a over the image bytes, the seam columns and the bit patterns of the row ratios.
 std::uint64_t Digest(const SeamBlendResult& r){
     std::uint64_t h=14695981039346656037ull;const auto mix=[&](std::uint64_t v,int bytes){for(int i=0;i<bytes;++i){h^=(v>>(8*i))&0xff;h*=1099511628211ull;}};
@@ -340,6 +387,83 @@ int main(){
             reject([&]{(void)ScaleFixedSeamCondition({rq,rplan.output_width},rw,rh,240,160);},"scale: seam column outside the capture output");
             auto top_bottom=capture;top_bottom.parameters.layout=a0::m2::StitchLayout::camera_a_top_camera_b_bottom;
             reject([&]{(void)ScaleFixedSeamCondition(top_bottom,rw,rh,240,160);},"scale: top/bottom layout");
+        }
+
+        // ---- Pinned outputs (#405 W2): SHA-256 of the whole result of RenderPairSeamCut and RenderPairFixedSeam ----
+        // The values were taken from the code before the render path was generalized to pairs of
+        // output-to-camera mappings (#405 W2). They cover the image, every record field and the row ratios,
+        // for flat, drawing-like and noise inputs, a rotation with a scale, a saturating gain and the rim of
+        // the overlap. A change of any of them means a v1 output changed.
+        {
+            {Sha256 s;const std::uint8_t abc[3]={'a','b','c'};s.Update(abc,3);
+             check(s.Hex()=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA-256 of abc");}
+            const auto middle=[&](const BgrImage& ia,const BgrImage& ib,const render::PairRenderParameters& pr,const SeamBlendSettings& st){
+                const auto plan2=render::PlanPairCanvas(ia.width,ia.height,ib.width,ib.height,pr);
+                std::vector<std::uint32_t> ok;for(std::uint32_t c=0;c<plan2.output_width;++c)if(CanRenderFixedSeam(ia,ib,pr,c,st))ok.push_back(c);
+                return ok.empty()?0u:ok[ok.size()/2];
+            };
+            const auto condition_sha=[](const FixedSeamCondition& c){
+                Sha256 s;const auto put=[&](std::uint64_t v){std::uint8_t b[8];for(int i=0;i<8;++i)b[i]=static_cast<std::uint8_t>(v>>(8*i));s.Update(b,8);};
+                for(const auto v:c.parameters.camera_b_to_camera_a){std::uint64_t bits{};std::memcpy(&bits,&v,sizeof bits);put(bits);}
+                put(c.parameters.crop.left);put(c.parameters.crop.top);put(c.parameters.crop.right);put(c.parameters.crop.bottom);put(c.seam_column);return s.Hex();
+            };
+            const auto fa=Flat(200,80,{200,200,200}),fb=Flat(200,80,{100,200,238});
+            const auto ca2=Flat(200,80,{200,220,250}),cb2=Flat(200,80,{160,176,200});
+            const auto sa2=Flat(200,80,{250,250,250}),sb2=Flat(200,80,{180,200,240});
+            const auto noise_image=[](std::uint64_t seed,unsigned shift){
+                BgrImage image{200,64,std::vector<std::uint8_t>(static_cast<size_t>(200)*64*3)};similarity_scene::Lcg r{seed};
+                std::vector<std::uint8_t> base(static_cast<size_t>(200)*64);for(auto& v:base)v=static_cast<std::uint8_t>(60+r.Next(121));
+                for(unsigned y=0;y<64;++y)for(unsigned x=0;x<200;++x)for(int c=0;c<3;++c)image.bgr[(static_cast<size_t>(y)*200+x)*3+c]=base[static_cast<size_t>(y)*200+(x+shift)%200];
+                return image;
+            };
+            const unsigned rw=480,rh=320;
+            const auto ra=similarity_scene::ViewA(world,rw,rh),rb=similarity_scene::ViewB(world,rw,rh,241,3,2.0,1,1);const auto rq=SimilarityReviewGeometry(241,3,2.0,1,rw,rh);
+            const unsigned turned_column=middle(sa,turned,q,kSeamBlendDesign),rotated_column=middle(ra,rb,rq,small);
+            std::cout<<"pin columns turned="<<turned_column<<" rotated="<<rotated_column<<'\n';
+            check(turned_column==362 && rotated_column==363,"columns used by the pinned fixed-seam cases");
+            const FixedSeamCondition rotated_condition{rq,rotated_column};
+            const std::vector<std::pair<const char*,std::string>> pins{
+                {"cut corridor",ResultSha256(seam)},{"cut scene",ResultSha256(scene)},{"cut brightness",ResultSha256(lit)},
+                {"cut colour",ResultSha256(color)},{"cut saturation",ResultSha256(clipped)},{"cut rotated",ResultSha256(rotated)},
+                {"fixed flat",ResultSha256(RenderPairFixedSeam(fa,fb,Shift(100),150,small))},
+                {"fixed rim",ResultSha256(RenderPairFixedSeam(fa,fb,Shift(100),101,{4,5000,8,16}))},
+                {"fixed design width",ResultSha256(RenderPairFixedSeam(fa,fb,Shift(100),103,kSeamBlendDesign))},
+                {"fixed colour gain",ResultSha256(RenderPairFixedSeam(ca2,cb2,Shift(100),150,small))},
+                {"fixed saturation",ResultSha256(RenderPairFixedSeam(sa2,sb2,Shift(100),150,small))},
+                {"fixed noise",ResultSha256(RenderPairFixedSeam(noise_image(11,29),noise_image(23,53),Shift(100),150,small))},
+                {"fixed scene",ResultSha256(RenderPairFixedSeam(sa,exact_b,p,360,small))},
+                {"fixed dimmed",ResultSha256(RenderPairFixedSeam(sa,dim,p,360,kSeamBlendDesign))},
+                {"fixed rotation and scale",ResultSha256(RenderPairFixedSeam(sa,turned,q,turned_column,kSeamBlendDesign))},
+                {"fixed rotated world",ResultSha256(RenderPairFixedSeam(ra,rb,rq,rotated_column,small))},
+                {"scaled condition 1/2",condition_sha(ScaleFixedSeamCondition(rotated_condition,rw,rh,rw/2,rh/2))},
+                {"scaled condition 3/4",condition_sha(ScaleFixedSeamCondition(rotated_condition,rw,rh,360,240))},
+            };
+            const std::vector<std::pair<const char*,const char*>> expected{
+                {"cut corridor","a539058f450cfa9c02939783af9c13b521071e6b92cb9b788d3744390e34a1ab"},
+                {"cut scene","77cfe6874ceb32dd7487157f4c8f11f3beaac14c848198bcfa8cb581a23e786c"},
+                {"cut brightness","7b8337a0b701522bdfa8d03e1d718a4f54f6c35edb41f9c517f7ac92b2e1e225"},
+                {"cut colour","3a990b9ce0596eedfb4db09bdab89e94971b5b7c24c75854314168ee5fae31e8"},
+                {"cut saturation","1ab711dce6529c114de405faffc95543c1852d9cf6415c91dd4e637e55f61989"},
+                {"cut rotated","dcfbd3b2a76f95956175df295368781c74ec30212a5526089f3565ca1949cadc"},
+                {"fixed flat","142cd294e6119db46ae938d1271f083736f9519a7dee2189ea486b5dd7a4e9b3"},
+                {"fixed rim","f697ba861824c134844179d295d202b9295ff78e45184d9023400147b11ce519"},
+                {"fixed design width","e6bf1880b10f447299d884f02a80fd479970d4428aae610605f52c7461149a46"},
+                {"fixed colour gain","26bd8c8abe86c22e03b17435b6fdfa391c204a3d6b2f881d3f11f18dd41c197c"},
+                {"fixed saturation","ca40793f4fa4d06891378e18fe3f136e31486ec074326b5450da407bf9da8ee6"},
+                {"fixed noise","f8ce402dd3ad242bc381b41bab70e5c4df016e080834b5a5dd17621bdcc1e0bc"},
+                {"fixed scene","8af41b3370eb82912f90a1671547ba798cf7b0ec019faa3953d78eb389546bcb"},
+                {"fixed dimmed","81505018c0da5b018f928a5989b59a2eb003dd5f4d90db41b90b78994f0931d9"},
+                {"fixed rotation and scale","8ec75215cb0f6e60257775f876603e8fac1bf213e6942fb40fd4ba2b524c329d"},
+                {"fixed rotated world","eb06bb114574d1dcd745337d7908270a9fd0aebbce66fa8c5a43e01bf6192779"},
+                {"scaled condition 1/2","fb91c1df8d7b04760cf13b0350e04bfb9d8280b44a23c3681f7cd20ab2697949"},
+                {"scaled condition 3/4","59a1956a88669fa876a4cd4aabf523c5fecee6dd2054ed2ddc2b39aabd8eafb3"},
+            };
+            for(const auto& [name,hash] : pins){
+                const char* want=nullptr;for(const auto& [n,h] : expected)if(std::string(n)==name)want=h;
+                std::cout<<"pin \""<<name<<"\" "<<hash<<'\n';
+                check(want && hash==want,(std::string("pinned output unchanged: ")+name).c_str());
+            }
+            check(pins.size()==expected.size(),"every pin has an expected value");
         }
     }catch(const std::exception& e){++failures;std::cerr<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
