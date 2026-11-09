@@ -2,7 +2,10 @@
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/render.hpp"
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -38,6 +41,56 @@ inline void ValidateSeamBlendSettings(const SeamBlendSettings& s){
     if(!s.width_pixels || s.width_pixels>4096 || !s.brightness_half_width_pixels || s.brightness_half_width_pixels>4096 ||
         s.edge_margin_pixels>32768 || s.brightness_smoothing_rows>32768)throw std::invalid_argument("invalid seam blend settings");
 }
+// ---- Colour match of B to A (#415) ----
+// The fixed-seam renders below can match B to A in colour as well as in brightness. A is the
+// reference; B is multiplied, per channel, by
+//   1. a global gain, a constant over the whole of B, measured from the paper pixels of the
+//      overlap band (pixels that are not dark, flat and alike in both cameras; ink, edges and
+//      features that only one camera sees are left out), and
+//   2. a residual gain along the seam, measured per row in a window around the seam on the paper
+//      pixels of B after the global gain, smoothed along rows, applied in full at the seam and
+//      fading linearly to 1 at the right output edge (the fade of the earlier luminance ratio).
+// So the right of B keeps the global gain instead of returning to B's own colour, and the seam
+// carries the remaining local difference (vignetting, a difference in light across the page).
+// luminance_ratio is the earlier single luminance ratio (#368, #398), kept to compare against and
+// for the searched seam cut, which always uses it.
+enum class ColorMatchMode {luminance_ratio,rgb_paper};
+constexpr std::string_view ColorMatchModeCode(ColorMatchMode v){return v==ColorMatchMode::rgb_paper?"rgb-paper":"luminance-ratio";}
+struct ColorMatch {
+    ColorMatchMode mode{ColorMatchMode::rgb_paper};
+    // The largest ratio applied to a channel of B: the gain at the seam, global times residual, is kept
+    // in [1/limit, limit]. No value is chosen here (the owner decides it, #396 B5): absent means no limit,
+    // as for the luminance ratio, which was never limited.
+    std::optional<double> gain_limit;
+};
+inline constexpr ColorMatch kColorMatchLuminanceRatio{ColorMatchMode::luminance_ratio,std::nullopt};
+// Throws std::invalid_argument for a limit that is not finite or is below 1.
+inline void ValidateColorMatch(const ColorMatch& c){
+    if(c.gain_limit && (!std::isfinite(*c.gain_limit) || !(*c.gain_limit>=1.0)))throw std::invalid_argument("invalid colour gain limit");
+}
+// How the paper pixels are chosen. Design constants, not approved values (#415). The thresholds are
+// taken from the data of the band (quantiles and a median of that band); only the fractions below are
+// stated. A pixel is a paper pixel when, in both cameras, it is
+//  - not dark: its luminance is at least luminance_fraction times the luminance_quantile quantile of
+//    the band in that camera (ink and shadows are far below it; a surface of any colour passes, since
+//    the ratio of the two cameras per channel does not depend on the colour of the surface),
+//  - flat: the gradient of its log luminance is at most the gradient_quantile quantile of the band's
+//    gradients in that camera (the edge of a line, its antialiasing and a misregistered line are not),
+//  - not clipped: no channel is at or above clipped_level in either camera (a clipped channel does not
+//    show the ratio), and
+//  - consistent: the A/B ratio of each channel is within a factor of ratio_tolerance of the median ratio
+//    of the candidates (a feature that one camera sees and the other does not, a sticker, a hand, a
+//    reflection, has a ratio far from the page's).
+// minimum_cell_fraction: the global gain is measured only if the paper pixels are at least this
+// fraction of the cells covered by both cameras; otherwise it stays 1 and the record says so.
+// quantile_sample_cells: the quantiles and the median are taken from about this many cells, at a
+// fixed stride, which bounds the memory of a full-size band.
+struct PaperSelectionDesign {
+    double luminance_quantile{},luminance_fraction{},gradient_quantile{},minimum_cell_fraction{},clipped_level{},ratio_tolerance{};
+    unsigned quantile_sample_cells{};
+};
+inline constexpr PaperSelectionDesign kPaperSelectionDesign{0.9,0.4,0.5,1.0/64,254.5,1.25,1u<<20};
+
 struct SeamSummary {std::uint32_t x_minimum{},x_maximum{};double x_mean{};};
 // One column per output row; empty input is rejected.
 inline SeamSummary SummarizeSeam(const std::vector<std::uint32_t>& x){
@@ -68,9 +121,24 @@ inline std::vector<std::uint32_t> ExpandSeamSteps(std::uint32_t start,std::strin
     }
     return x;
 }
-// Recorded result. difference_*: |A - ratio*B| luminance (8-bit levels) on the
-// seam pixel of each row. ratio_*: the smoothed A/B ratio applied at the seam.
-// saturation_limited_pixels: B samples whose gain was lowered to stay <= 255.
+// The colour match of #415, per channel in B, G, R order. Default: the luminance ratio, nothing more.
+// measured_global: A/B over the paper pixels (1 if global_measured is false). global_gain: the gain
+// applied to B everywhere (measured_global kept within the limit). local_*: the range over rows of the
+// residual gain at the seam, after the limit. paper_cells / covered_cells: the paper pixels used and
+// the cells covered by both cameras in the band. local_limited_rows: rows whose residual hit the limit.
+struct ColorMatchRecord {
+    ColorMatchMode mode{ColorMatchMode::luminance_ratio};
+    bool gain_limit_set{};double gain_limit{};
+    bool global_measured{},global_limited{};
+    std::uint64_t paper_cells{},covered_cells{},local_limited_rows{};
+    std::array<double,3> measured_global{1,1,1},global_gain{1,1,1},local_minimum{1,1,1},local_maximum{1,1,1};
+};
+// Recorded result. difference_*: |A - gain*B| luminance (8-bit levels) on the
+// seam pixel of each row. ratio_*: the smoothed A/B ratio applied at the seam; for the
+// colour match, the luminance of B's paper after the per-channel gain at the seam over its own
+// luminance, which is the same quantity.
+// saturation_limited_pixels: B samples whose gain was lowered to stay <= 255 (for the colour match
+// all three channel gains are lowered together, so the hue of the match is kept).
 struct SeamBlendRecord {
     SeamBlendSettings settings;
     std::vector<std::uint32_t> seam_x;
@@ -78,15 +146,20 @@ struct SeamBlendRecord {
     double difference_mean{},difference_maximum{},ratio_minimum{1},ratio_maximum{1};
     std::uint64_t saturation_limited_pixels{};
     bool fixed_seam{}; // true for RenderPairFixedSeam: seam_x holds one column in every row
+    ColorMatchRecord color; // the luminance ratio unless a fixed-seam render matched the colour
 };
 struct SeamBlendResult {
     render::BgrImage image;
     SeamBlendRecord record;
     std::vector<double> row_ratio; // per output row, the gain applied to B at the seam
+    // Colour match only: per output row, the gain of each channel (B, G, R) applied to B at the seam,
+    // global times residual. Empty for the luminance ratio.
+    std::vector<std::array<double,3>> row_gain;
 };
 // Throws std::invalid_argument for a top/bottom layout, the same input
 // conditions as render::RenderPair, invalid settings, or an output row with no
 // pixel covered by both A and B (the seam needs the overlap on every row).
+// The searched seam cut always uses the luminance ratio.
 [[nodiscard]] SeamBlendResult RenderPairSeamCut(const render::BgrImage& a,const render::BgrImage& b,
     const render::PairRenderParameters& parameters,const SeamBlendSettings& settings);
 
@@ -100,6 +173,11 @@ struct SeamBlendResult {
 // seam per row, smoothed along rows, multiplied into B, fading to 1 at the
 // right output edge), and the blend over width_pixels is the same. The record
 // has fixed_seam set and seam_x equal to seam_column in every row.
+// color (#415): the default matches B to A per channel (see ColorMatch above); pass
+// kColorMatchLuminanceRatio for the luminance ratio described in this paragraph, which is then
+// byte-for-byte the output of #398. With A and B the same image at an integer offset both modes
+// give the same bytes. Throws std::invalid_argument for an invalid color. The same holds for
+// RenderMappedFixedSeam and RenderDocumentFixedSeam below.
 // seam_column is an output pixel column (after the crop). The columns whose
 // blend weight is strictly between 0 and 1, seam_column +/- (ceil(width_pixels/2)-1),
 // must be covered by both A and B on every output row; otherwise this throws
@@ -109,7 +187,7 @@ struct SeamBlendResult {
 // is still copied into the record). Throws
 // std::invalid_argument also for the conditions of RenderPairSeamCut.
 [[nodiscard]] SeamBlendResult RenderPairFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
-    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color={});
 // Whether RenderPairFixedSeam accepts seam_column for these inputs, decided on
 // the same coverage test without rendering (it samples the overlap band only).
 // Throws std::invalid_argument for the other input conditions of
@@ -167,7 +245,7 @@ struct MappedOverlapRow {std::uint32_t first{},end{};};
 // RenderPairFixedSeam. The record has fixed_seam set and seam_x equal to seam_column in every row.
 // Camera, file and clock free; deterministic for deterministic mappings.
 [[nodiscard]] SeamBlendResult RenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
-    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings);
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color={});
 // Whether RenderMappedFixedSeam accepts seam_column, decided on the same coverage test without
 // rendering. Throws for the other input conditions, so false means only that the column and its
 // half blend width do not fit.
@@ -176,7 +254,7 @@ struct MappedOverlapRow {std::uint32_t first{},end{};};
 // RenderMappedFixedSeam / CanRenderMappedFixedSeam on DocumentMappedFixedSeamInput(parameters).
 // seam_column is a column of the document raster (parameters.raster).
 [[nodiscard]] SeamBlendResult RenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
-    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
+    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color={});
 [[nodiscard]] bool CanRenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
     const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
 

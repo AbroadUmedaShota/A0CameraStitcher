@@ -724,6 +724,35 @@ int main(){
             reject_text("\"status\":\"applied\"","\"status\":\"exceeded\"");
             reject_text("\"status\":\"applied\"","\"status\":\"not-estimated\"");
             reject_text("\"origin\":\"band-center-provisional\"","\"origin\":\"operator-x\"");
+            // #415: the colour match is in the report, comes back whole, and the reader holds it to what the writer can have written.
+            {
+                check(text.find("\"colorMatch\":{\"mode\":\"rgb-paper\",\"gainLimit\":null,\"globalMeasured\":")!=std::string::npos && made.blend->color.mode==ColorMatchMode::rgb_paper);
+                const auto& w=made.blend->color;const auto& r=saved_fixed.blend->color;
+                check(r.mode==w.mode && r.gain_limit_set==w.gain_limit_set && r.global_measured==w.global_measured && r.global_limited==w.global_limited && r.paper_cells==w.paper_cells &&
+                    r.covered_cells==w.covered_cells && r.local_limited_rows==w.local_limited_rows && r.measured_global==w.measured_global && r.global_gain==w.global_gain &&
+                    r.local_minimum==w.local_minimum && r.local_maximum==w.local_maximum);
+                check(w.paper_cells>0 && w.paper_cells<=w.covered_cells && w.global_measured);
+                // A report written before #415 has no colorMatch object: it reads back as the luminance ratio.
+                {
+                    auto old_text=text;const auto from=old_text.find(",\"colorMatch\":{");const auto to=old_text.find('}',from);
+                    check(from!=std::string::npos && to!=std::string::npos);
+                    old_text.erase(from,to+1-from);
+                    fs::create_directories(damaged);fs::copy_file(made.jpeg,damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+                    {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<old_text;}
+                    const auto old_record=LoadSavedStillReview(damaged/"uncalibrated-review.json");
+                    check(old_record.blend && old_record.blend->color.mode==ColorMatchMode::luminance_ratio && old_record.blend->ratio_minimum==saved_fixed.blend->ratio_minimum);
+                }
+                reject_text("\"colorMatch\":{\"mode\":\"rgb-paper\"","\"colorMatch\":{\"mode\":\"luminance-ratio\"");
+                reject_text("\"colorMatch\":{","\"colorMatch\":{\"extra\":0,");
+                reject_text("\"globalMeasured\":true","\"globalMeasured\":1");
+                reject_text("\"globalMeasured\":true","\"globalMeasured\":false");
+                reject_text("\"globalLimited\":false","\"globalLimited\":true");
+                reject_text("\"gainLimit\":null","\"gainLimit\":0.5");
+                reject_text("\"paperCells\":"+std::to_string(w.paper_cells),"\"paperCells\":"+std::to_string(w.covered_cells+1));
+                reject_text("\"localLimitedRows\":0","\"localLimitedRows\":1");
+                reject_text("\"measuredGainBgr\":[","\"measuredGainBgr\":[-");
+                reject_text("\"globalGainBgr\":[","\"globalGainBgr\":[0,");
+            }
             reject_text("\"geometryBasis\":\"fixed-composite\"","\"geometryBasis\":\"auto-still-translation\"");
             reject_text("\"method\":\"fixed-seam\"","\"method\":\"seam-cut\"");
             reject_text("\"policyLimit\":{\"check\":\"same\"","\"policyLimit\":{\"check\":\"differs\"");

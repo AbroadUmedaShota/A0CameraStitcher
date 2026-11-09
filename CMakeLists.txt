@@ -1076,6 +1076,12 @@ if(BUILD_TESTING)
     target_link_libraries(a0_seam_blend_tests PRIVATE a0_m2_render a0_m2_seam_blend)
     add_test(NAME m2_seam_blend_contracts COMMAND a0_seam_blend_tests)
     set_tests_properties(m2_seam_blend_contracts PROPERTIES TIMEOUT 300)
+    # Colour match of B to A in the fixed-seam renders (#415): per-channel global and seam gains from the
+    # paper pixels. Synthetic pages only.
+    add_executable(a0_seam_color_match_tests tests/seam_color_match_tests.cpp)
+    target_link_libraries(a0_seam_color_match_tests PRIVATE a0_m2_render a0_m2_seam_blend)
+    add_test(NAME m2_seam_color_match_contracts COMMAND a0_seam_color_match_tests)
+    set_tests_properties(m2_seam_color_match_contracts PROPERTIES TIMEOUT 300)
     # Fixed vertical seam on a pair of output-to-camera mappings (#405 W2): the pair
     # mapping of RenderPair, a lens-distorted document mapping, a reduced output.
     add_executable(a0_seam_blend_mapped_tests tests/seam_blend_mapped_tests.cpp)
