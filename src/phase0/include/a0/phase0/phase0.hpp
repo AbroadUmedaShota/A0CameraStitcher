@@ -911,6 +911,13 @@ void PersistSingleIdentityV3(
 [[nodiscard]] std::vector<unsigned char> ExtractD810LiveViewJpeg(
     const std::vector<unsigned char>& frame_with_header);
 [[nodiscard]] std::string Sha256Hex(const std::vector<unsigned char>& bytes);
+
+// Creates `path` exclusively (CREATE_NEW), does not follow a reparse point,
+// writes through, and flushes before closing. Throws when anything already
+// exists at `path` or the parent directory is not a prepared local directory.
+void WriteBytesExclusive(
+    const std::filesystem::path& path,
+    const std::vector<unsigned char>& bytes);
 [[nodiscard]] std::optional<std::vector<std::string>> ParsePackedStringLabels(
     const std::vector<unsigned char>& bytes,
     std::size_t maximum_labels,

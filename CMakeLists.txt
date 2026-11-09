@@ -807,7 +807,8 @@ if(BUILD_TESTING)
     # Anonymized real-device responses replayed by the native contract tests (issue #231).
     set(A0_REPLAY_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/hardware-replay")
     add_executable(a0_phase0_tests tests/phase0_tests.cpp)
-    target_link_libraries(a0_phase0_tests PRIVATE a0_phase0_core)
+    # ole32/windowscodecs: the dual-capture tests encode a full-size JPEG with WIC.
+    target_link_libraries(a0_phase0_tests PRIVATE a0_phase0_core ole32 windowscodecs)
     if(MSVC)
         target_compile_options(a0_phase0_tests PRIVATE /W4 /permissive- /EHsc)
     endif()

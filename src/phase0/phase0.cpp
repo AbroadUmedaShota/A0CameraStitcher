@@ -322,6 +322,8 @@ void PrepareReparseFreeEvidenceDirectory(
     }
 }
 
+} // namespace
+
 void WriteBytesExclusive(const fs::path& path, const std::vector<unsigned char>& bytes) {
     std::error_code parent_error;
     if (!fs::is_directory(path.parent_path(), parent_error) || parent_error) {
@@ -380,6 +382,8 @@ void WriteBytesExclusive(const fs::path& path, const std::vector<unsigned char>&
         throw;
     }
 }
+
+namespace {
 
 class ActiveGuard {
 public:

@@ -3,6 +3,7 @@
 #endif
 #include <windows.h>
 #include <portabledevice.h>
+#include <wincodec.h>
 
 #include "a0/phase0/fake_camera_transport.hpp"
 #include "a0/phase0/nikon_sdk_transport.hpp"
@@ -2317,6 +2318,70 @@ void TestHybridCaptureTransactionIdOverride() {
     }
 }
 
+// Encodes a solid-colour JPEG with WIC. Used where the production code must
+// decode every pixel, so a marker-only stub is not acceptable input.
+std::vector<unsigned char> EncodeSolidJpegWithWic(std::uint32_t width, std::uint32_t height) {
+    const auto must = [](HRESULT result, const char* operation) {
+        if (FAILED(result)) throw std::runtime_error(std::string(operation) + " failed");
+    };
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool owns_com = SUCCEEDED(com);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) throw std::runtime_error("COM initialization failed");
+    std::vector<unsigned char> result;
+    try {
+        IWICImagingFactory* factory = nullptr;
+        IStream* stream = nullptr;
+        IWICBitmapEncoder* encoder = nullptr;
+        IWICBitmapFrameEncode* frame = nullptr;
+        IPropertyBag2* properties = nullptr;
+        const auto release_all = [&] {
+            if (properties) properties->Release();
+            if (frame) frame->Release();
+            if (encoder) encoder->Release();
+            if (stream) stream->Release();
+            if (factory) factory->Release();
+        };
+        try {
+            must(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&factory)), "create WIC factory");
+            must(CreateStreamOnHGlobal(nullptr, TRUE, &stream), "create memory stream");
+            must(factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder), "create JPEG encoder");
+            must(encoder->Initialize(stream, WICBitmapEncoderNoCache), "initialize encoder");
+            must(encoder->CreateNewFrame(&frame, &properties), "create frame");
+            must(frame->Initialize(properties), "initialize frame");
+            must(frame->SetSize(width, height), "set size");
+            WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+            must(frame->SetPixelFormat(&format), "set pixel format");
+            constexpr std::uint32_t rows_per_write = 64;
+            const std::uint32_t stride = width * 3U;
+            std::vector<unsigned char> rows(static_cast<std::size_t>(stride) * rows_per_write, 0x55U);
+            for (std::uint32_t top = 0; top < height; top += rows_per_write) {
+                const std::uint32_t count = std::min(rows_per_write, height - top);
+                must(frame->WritePixels(count, stride, stride * count, rows.data()), "write pixels");
+            }
+            must(frame->Commit(), "commit frame");
+            must(encoder->Commit(), "commit encoder");
+            LARGE_INTEGER zero{};
+            ULARGE_INTEGER end{};
+            must(stream->Seek(zero, STREAM_SEEK_END, &end), "seek end");
+            must(stream->Seek(zero, STREAM_SEEK_SET, nullptr), "seek start");
+            result.resize(static_cast<std::size_t>(end.QuadPart));
+            ULONG read = 0;
+            must(stream->Read(result.data(), static_cast<ULONG>(result.size()), &read), "read stream");
+            if (read != result.size()) throw std::runtime_error("short stream read");
+        } catch (...) {
+            release_all();
+            throw;
+        }
+        release_all();
+    } catch (...) {
+        if (owns_com) CoUninitialize();
+        throw;
+    }
+    if (owns_com) CoUninitialize();
+    return result;
+}
+
 void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
     const std::vector<unsigned char> expected_dimensions_jpeg{
         0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x08, 0x08, 0x13,
@@ -2326,10 +2391,16 @@ void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
     Check(!HasExpectedDualCaptureJpegDimensions({0xFF, 0xD8, 0x01, 0xFF, 0xD9}),
         "the DualCamera dimension parser must reject a JPEG without SOF dimensions");
 
+    // A real 7360x4912 JPEG that WIC can decode in full. The 14-byte stub above
+    // carries correct markers and SOF dimensions but no image data.
+    const std::vector<unsigned char> full_jpeg = EncodeSolidJpegWithWic(7360, 4912);
+    Check(IsValidJpeg(full_jpeg) && HasExpectedDualCaptureJpegDimensions(full_jpeg),
+        "the WIC-encoded fixture must pass the marker and dimension checks");
+
     {
         const auto root = NewTestRoot("dual-canonical-success");
         HybridWpdFake wpd;
-        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+        wpd.candidates = {{"private-object-id.jpg", full_jpeg,
             true, "cleanup-capability"}};
         HybridSdkFake sdk;
         EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-success", sdk.SdkVersion());
@@ -2347,7 +2418,7 @@ void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
         const std::vector<unsigned char> canonical_bytes{
             std::istreambuf_iterator<char>(canonical_input), std::istreambuf_iterator<char>()};
         canonical_input.close();
-        Check(canonical_bytes == expected_dimensions_jpeg,
+        Check(canonical_bytes == full_jpeg,
             "canonical original must exactly match the verified recovered bytes");
         Check(wpd.delete_attempts == 1 && wpd.delete_successes == 1 &&
                   result.camera_card_delete_succeeded && result.spool_empty_after_cleanup &&
@@ -2392,10 +2463,54 @@ void TestDualCaptureDimensionGateRetainsOriginalAndWpdObject() {
         fs::remove_all(root);
     }
 
+    // Markers, SOF dimensions and SHA-256 all pass, but the compressed data
+    // cannot be decoded. The card object must be retained and no canonical
+    // original or partial may be left behind.
+    const auto run_undecodable = [&](const char* name,
+                                     const std::vector<unsigned char>& bytes) {
+        const auto root = NewTestRoot(name);
+        HybridWpdFake wpd;
+        wpd.candidates = {{"private-object-id.jpg", bytes, true, "cleanup-capability"}};
+        HybridSdkFake sdk;
+        EvidenceWriter evidence(root / "artifacts", std::string("run-") + name, sdk.SdkVersion());
+        const fs::path canonical = root / "transaction" / "CAM-A" / "original.jpg";
+        const auto result = ExecuteHybridCaptureOnce(
+            wpd, wpd, sdk, sdk, evidence, "CAM-A", "wpd-a", "sdk-a", {}, {}, {},
+            std::nullopt, [&](const FrameEvidence& frame) {
+                PublishVerifiedDualCaptureCanonicalOriginal(
+                    frame, canonical, std::chrono::steady_clock::now() + std::chrono::seconds(60));
+            });
+        Check(result.error_category == "canonical_source_verification_failed",
+            std::string(name) + ": an undecodable source must be reported as a source verification failure");
+        check_failed_leg(result, wpd, sdk, name);
+        Check(!fs::exists(canonical) && !fs::exists(canonical.string() + ".partial"),
+            std::string(name) + ": an undecodable source must not create a canonical original or partial");
+        Check(fs::file_size(result.frames.front().path) == bytes.size(),
+            std::string(name) + ": the recovered PC evidence must keep the received bytes");
+        fs::remove_all(root);
+    };
+    run_undecodable("dual-marker-only-jpeg", expected_dimensions_jpeg);
+    {
+        // Keep SOI/EOI and the SOF dimensions but make every code-length count
+        // of the first Huffman table 0xFF. The marker and dimension checks
+        // still pass; the decoder rejects the table definition.
+        std::vector<unsigned char> damaged = full_jpeg;
+        std::size_t table = 0;
+        for (std::size_t index = 2; index + 1 < damaged.size(); ++index) {
+            if (damaged[index] == 0xFFU && damaged[index + 1] == 0xC4U) { table = index; break; }
+        }
+        Check(table != 0 && table + 5 + 16 < damaged.size(),
+            "the fixture must contain a Huffman table definition");
+        std::fill_n(damaged.begin() + static_cast<std::ptrdiff_t>(table + 5), 16, static_cast<unsigned char>(0xFF));
+        Check(IsValidJpeg(damaged) && HasExpectedDualCaptureJpegDimensions(damaged),
+            "the damaged fixture must still pass the marker and dimension checks");
+        run_undecodable("dual-damaged-huffman-jpeg", damaged);
+    }
+
     {
         const auto root = NewTestRoot("dual-canonical-exists");
         HybridWpdFake wpd;
-        wpd.candidates = {{"private-object-id.jpg", expected_dimensions_jpeg,
+        wpd.candidates = {{"private-object-id.jpg", full_jpeg,
             true, "cleanup-capability"}};
         HybridSdkFake sdk;
         EvidenceWriter evidence(root / "artifacts", "run-dual-canonical-exists", sdk.SdkVersion());

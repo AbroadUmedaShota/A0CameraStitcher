@@ -3,17 +3,21 @@
 #include "dual_hardware_capture_backend_internal.hpp"
 
 #include "a0/phase0/dual_hardware_camera_agent_store.hpp"
+#include "a0/phase0/pc_direct_capture.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -24,6 +28,85 @@ namespace {
 
 constexpr std::uint16_t kDualCaptureOriginalWidth = 7360U;
 constexpr std::uint16_t kDualCaptureOriginalHeight = 4912U;
+
+// Same bound as the single-camera verified-original reader and FullyDecodeJpeg.
+constexpr std::uintmax_t kDualCaptureMaximumJpegBytes = 256U * 1024U * 1024U;
+
+// Reads a regular file without following a reparse point. The handle is opened
+// with FILE_SHARE_READ only, so the file cannot be written or deleted while it
+// is being read. Returns false on any open, type, size, or read failure.
+bool ReadRegularFileNoReparse(
+    const fs::path& path,
+    std::vector<unsigned char>& bytes) noexcept {
+    try {
+        bytes.clear();
+        const HANDLE handle = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return false;
+        bool ok = false;
+        BY_HANDLE_FILE_INFORMATION information{};
+        LARGE_INTEGER size{};
+        if (GetFileInformationByHandle(handle, &information) &&
+            GetFileSizeEx(handle, &size) && size.QuadPart > 0 &&
+            static_cast<std::uint64_t>(size.QuadPart) <=
+                kDualCaptureMaximumJpegBytes &&
+            (information.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0) {
+            bytes.resize(static_cast<std::size_t>(size.QuadPart));
+            std::size_t offset = 0;
+            ok = true;
+            while (offset < bytes.size()) {
+                const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
+                    bytes.size() - offset,
+                    static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+                DWORD read = 0;
+                if (!ReadFile(handle, bytes.data() + offset, chunk, &read, nullptr) ||
+                    read == 0) {
+                    ok = false;
+                    break;
+                }
+                offset += read;
+            }
+        }
+        CloseHandle(handle);
+        if (!ok) bytes.clear();
+        return ok;
+    } catch (...) {
+        bytes.clear();
+        return false;
+    }
+}
+
+// Decodes every pixel with WIC. A JPEG that has valid markers and the expected
+// SOF dimensions but unusable structure (for example a damaged table or no
+// image data) fails here. WIC tolerates some damage inside the entropy-coded
+// data (for example a truncated scan), so a successful decode is necessary but
+// not proof of an intact stream. The decode failure is reported under the
+// caller's verification category; the decoder's own category is kept in the
+// message for diagnosis.
+void RequireFullDecode(
+    const std::vector<unsigned char>& bytes,
+    const char* category,
+    const char* subject) {
+    try {
+        (void)FullyDecodeJpeg(
+            bytes, kDualCaptureOriginalWidth, kDualCaptureOriginalHeight);
+    } catch (const TransportError& error) {
+        throw TransportError(
+            category,
+            std::string(subject) + " failed full decode (" + error.Category() + ")");
+    } catch (const std::exception&) {
+        throw TransportError(
+            category, std::string(subject) + " failed full decode");
+    }
+}
 
 std::string NormalizeSettingLabel(std::string_view label) {
     std::string normalized;
@@ -310,33 +393,34 @@ void PublishVerifiedDualCaptureCanonicalOriginal(
                              "Pair watchdog expired before canonical copy");
     }
 
-    std::ifstream input(frame.path, std::ios::binary);
-    const std::vector<unsigned char> bytes{
-        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    if (input.bad() || bytes.size() != frame.bytes || !IsValidJpeg(bytes) ||
+    std::vector<unsigned char> bytes;
+    if (!ReadRegularFileNoReparse(frame.path, bytes) ||
+        bytes.size() != frame.bytes || !IsValidJpeg(bytes) ||
         !HasExpectedDualCaptureJpegDimensions(bytes) ||
         Sha256Hex(bytes) != frame.sha256) {
         throw TransportError("canonical_source_verification_failed",
                              "Verified recovery source could not be revalidated");
     }
+    // Markers, dimensions and SHA-256 do not prove the compressed data is
+    // intact: the hash is computed over the received bytes. Decode every pixel
+    // before the card object can become eligible for deletion.
+    RequireFullDecode(bytes, "canonical_source_verification_failed",
+                      "Verified recovery source");
     const fs::path partial = canonical.string() + ".partial";
     if (fs::exists(partial)) {
         throw TransportError("canonical_partial_exists",
                              "A prior canonical partial requires manual review");
     }
-    {
-        std::ofstream output(partial, std::ios::binary | std::ios::out);
-        if (!output) {
-            throw TransportError("canonical_write_failed",
-                                 "Cannot create canonical original partial");
-        }
-        output.write(reinterpret_cast<const char*>(bytes.data()),
-                     static_cast<std::streamsize>(bytes.size()));
-        output.flush();
-        if (!output) {
-            throw TransportError("canonical_write_failed",
-                                 "Cannot flush canonical original partial");
-        }
+    if (std::chrono::steady_clock::now() >= deadline) {
+        throw TransportError("transaction_watchdog",
+                             "Pair watchdog expired before canonical write");
+    }
+    try {
+        // CREATE_NEW, write-through, no reparse point, flushed before close.
+        WriteBytesExclusive(partial, bytes);
+    } catch (const std::exception&) {
+        throw TransportError("canonical_write_failed",
+                             "Cannot write canonical original partial");
     }
     if (std::chrono::steady_clock::now() >= deadline) {
         throw TransportError("transaction_watchdog",
@@ -347,16 +431,17 @@ void PublishVerifiedDualCaptureCanonicalOriginal(
                                 std::system_category(),
                                 "Cannot atomically publish canonical original");
     }
-    std::ifstream persisted(canonical, std::ios::binary);
-    const std::vector<unsigned char> persisted_bytes{
-        std::istreambuf_iterator<char>(persisted), std::istreambuf_iterator<char>()};
-    if (persisted.bad() || persisted_bytes.size() != frame.bytes ||
+    std::vector<unsigned char> persisted_bytes;
+    if (!ReadRegularFileNoReparse(canonical, persisted_bytes) ||
+        persisted_bytes.size() != frame.bytes ||
         !IsValidJpeg(persisted_bytes) ||
         !HasExpectedDualCaptureJpegDimensions(persisted_bytes) ||
         Sha256Hex(persisted_bytes) != frame.sha256) {
         throw TransportError("canonical_verification_failed",
                              "Canonical original failed reread verification");
     }
+    RequireFullDecode(persisted_bytes, "canonical_verification_failed",
+                      "Canonical original");
 }
 
 bool HasExpectedDualCaptureJpegDimensions(
