@@ -184,4 +184,4 @@ Camera Agentは`%LOCALAPPDATA%\A0CameraStitcher\camera-agent\approved-single-cap
 
 ## 取扱い
 
-社内用privateリポジトリです。Nikon SDK、ライセンス対象資料、カメラ固有識別子、実写サンプル、顧客原稿、生成物、認証情報はコミットしません。
+このリポジトリとIssueは公開されています。Nikon SDK、ライセンス対象資料、カメラ固有識別子、実写サンプル、顧客原稿、生成物、認証情報はコミットしません。
