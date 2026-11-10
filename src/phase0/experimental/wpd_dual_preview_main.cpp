@@ -40,6 +40,9 @@
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+#include "a0/phase0/experimental/d810_settings_write_screen.hpp" // #416 stage B, only with A0_BUILD_WPD_SETTINGS_WRITE
+#endif
 
 using namespace a0::phase0;
 using namespace a0::phase0::experimental;
@@ -894,6 +897,11 @@ int RunIsolatedAStartDiagnostics(const std::array<std::wstring,2>& ids,bool insp
 }
 int main(int argc,char** argv){
     try{
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
+        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable)));
+        if(argc==2 && std::string(argv[1])=="--settings-write-ui-smoke")return RunSettingsWriteUiSmoke();
+#endif
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();

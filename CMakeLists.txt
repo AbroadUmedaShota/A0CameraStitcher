@@ -1239,9 +1239,23 @@ if(BUILD_TESTING)
         # the AGENTS.md exception is in place.
         option(A0_BUILD_WPD_SETTINGS_WRITE "Build the camera settings write path into the development preview (#416 stage B)" OFF)
         if(A0_BUILD_WPD_SETTINGS_WRITE)
+            message(WARNING "A0_BUILD_WPD_SETTINGS_WRITE=ON: the development preview carries the camera settings write path "
+                "(#416 stage B, ADR-0038; its window title and first log line say so). The fixed product table enables no row, "
+                "so it writes nothing until a reviewed table commit. Keep this OFF in any build used on the real bodies until "
+                "the AGENTS.md exception is in place.")
             target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
             target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE shell32)
+            # The screen of the write with the product table and a temporary record folder; opens no camera.
+            add_test(NAME preview_settings_write_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-write-ui-smoke)
+            set_tests_properties(preview_settings_write_ui_contracts PROPERTIES TIMEOUT 60)
+            set(a0_settings_write_binary_expect present)
+        else()
+            set(a0_settings_write_binary_expect absent)
         endif()
+        add_test(NAME preview_settings_write_binary_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_settings_write_binary_expect}"
+                -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
+        set_tests_properties(preview_settings_write_binary_contracts PROPERTIES TIMEOUT 30)
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()
