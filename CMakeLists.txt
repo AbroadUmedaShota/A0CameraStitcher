@@ -1039,8 +1039,10 @@ if(BUILD_TESTING)
     # Settings write (#416 stage B): item table, the fixed write table, plans, the write gate's sweep, the write
     # session and the operation record against synthetic bodies and a temporary folder. No device, no camera.
     # The test is not a product binary; the product's write path is behind A0_BUILD_WPD_SETTINGS_WRITE below.
+    # A0_SETTINGS_WRITE_TEST_TABLES lets the controller take the tables the tests build. Only this target defines it;
+    # elsewhere the controller is built from the fixed product table alone.
     add_executable(a0_d810_settings_write_tests tests/d810_settings_write_tests.cpp)
-    target_compile_definitions(a0_d810_settings_write_tests PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
+    target_compile_definitions(a0_d810_settings_write_tests PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1 A0_SETTINGS_WRITE_TEST_TABLES=1)
     target_link_libraries(a0_d810_settings_write_tests PRIVATE a0_wpd_live_view_transfer ole32 shell32 PortableDeviceGuids)
     if(MSVC)
         target_compile_options(a0_d810_settings_write_tests PRIVATE /W4 /permissive- /EHsc)

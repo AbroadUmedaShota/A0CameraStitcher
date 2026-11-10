@@ -318,6 +318,9 @@ struct FakeAccess final: D810SettingsCameraAccess {
 };
 
 // A folder with a file journal, two bodies and a controller over a table.
+// Bench(kProduct) builds the controller through the product entry point.
+struct ProductEntry {};
+inline constexpr ProductEntry kProduct{};
 struct Bench {
     fs::path folder = NewFolder();
     D810SettingsFileJournal file{folder};
@@ -333,10 +336,13 @@ struct Bench {
     std::chrono::milliseconds left{60000};
     std::vector<std::string> log;
     D810WriteRunOptions options;
-    explicit Bench(const D810WriteTable& t = kAdr38Table, int journal_ok = -1, bool on_disk = false): table(t) {
+    bool product = false;
+    explicit Bench(ProductEntry): Bench(kD810ProductWriteTable, -1, false, true) {}
+    explicit Bench(const D810WriteTable& t = kAdr38Table, int journal_ok = -1, bool on_disk = false, bool product_entry = false): table(t), product(product_entry) {
         journal = on_disk ? static_cast<D810SettingsJournal*>(&file) : &memory;
         if (journal_ok >= 0) failing = std::make_unique<FailingJournal>(*journal, journal_ok);
-        controller = std::make_unique<D810SettingsWriteController>(table, failing ? static_cast<D810SettingsJournal&>(*failing) : *journal, owner);
+        auto& used = failing ? static_cast<D810SettingsJournal&>(*failing) : *journal;
+        controller = product ? std::make_unique<D810SettingsWriteController>(used, owner) : std::make_unique<D810SettingsWriteController>(table, used, owner);
         access.bodies[0] = &a;
         access.bodies[1] = &b;
         options.may_continue = [this] { return go; };
@@ -346,7 +352,9 @@ struct Bench {
         options.now = [] { return std::string("2000-01-01T00:00:00Z"); };
     }
     // A fresh controller over the same folder: what a restart sees.
-    D810SettingsWriteController Restarted() { return D810SettingsWriteController(table, *journal, owner); }
+    D810SettingsWriteController Restarted() {
+        return product ? D810SettingsWriteController(*journal, owner) : D810SettingsWriteController(table, *journal, owner);
+    }
     D810PlanResult Copy(const std::optional<std::vector<D810WriteItem>>& only = std::nullopt) {
         return controller->PlanCopy(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), only);
     }
@@ -495,10 +503,44 @@ void ProductTable() {
     bad.rows[3] = bad.rows[2];
     check(D810WriteTableProblem(bad) != nullptr, "duplicate or missing row");
 }
+// The controller's table. Built outside this target (no A0_SETTINGS_WRITE_TEST_TABLES)
+// it has no constructor that takes a table (static_assert in the header) and checks its
+// table against the product rules; that check is D810ControllerTableProblem(table, false).
+void ControllerTables() {
+    static_assert(kD810ControllerTestTables, "the contract tests build the test-table constructor");
+    check(D810ControllerTableProblem(kD810ProductWriteTable, false) == nullptr && D810ControllerTableProblem(kAdr38Table, false) == nullptr, "product rules: product-shaped tables pass");
+    check(std::string(D810ControllerTableProblem(kAdr41Table, false)) == "chosen_values_before_adr0041", "product rules: chosen values refused");
+    auto cam_a = kAdr38Table;
+    for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == D810WriteItem::Iso) row.enabled = true;
+    check(std::string(D810ControllerTableProblem(cam_a, false)) == "cam_a_row_enabled", "product rules: a CAM-A row refused");
+    auto extra = kAdr38Table;
+    for (auto& row : extra.rows) if (row.camera == D810Camera::B && row.item == D810WriteItem::WhiteBalance) row.enabled = true;
+    check(std::string(D810ControllerTableProblem(extra, false)) == "extra_item_enabled", "product rules: an extra item refused");
+    check(D810ControllerTableProblem(kAdr41Table, true) == nullptr, "test tables: the ADR-0041 paths can be built");
+    auto broken = kAdr38Table;
+    broken.rows[0].code = 0x1234;
+    check(D810ControllerTableProblem(broken, true) != nullptr && D810ControllerTableProblem(broken, false) != nullptr, "an inconsistent table is refused either way");
+    {
+        // The product entry point holds the product table.
+        Bench bench(kProduct);
+        check(bench.controller->Status().enabled_rows == 0, "product entry: no row");
+        const auto copy = bench.Copy();
+        check(!copy.Ok() && copy.reasons[0] == "code_unconfirmed:iso_auto" && bench.Writes() == 0, "product entry: nothing can be planned");
+        check(bench.Restarted().Status().enabled_rows == 0, "product entry after a restart");
+    }
+    {
+        // The table is held by value: a temporary does not dangle.
+        MemoryJournal journal;
+        D810CameraOwnership owner;
+        D810SettingsWriteController controller(Adr38Table(), journal, owner);
+        auto overwrite = Adr41Table();
+        check(controller.Status().enabled_rows == 5 && D810EnabledRowCount(overwrite) == 16, "the temporary table was copied");
+    }
+}
 // Nothing at run time can widen the table: files that look like approvals, in
 // the record folder or next to it, change nothing.
 void FilesEnableNothing() {
-    Bench bench(kD810ProductWriteTable);
+    Bench bench(kProduct);
     for (const auto* name : {"capability.txt", "approval.txt", "table.txt", "enable.txt", "settings-write.ini"}) {
         WriteFile(bench.folder / name, "a0-d810-settings-capability 1\nitem=iso alias=CAM-B code=0x500f type=0x0004 getset=1\n"
             "feature=cam_a_write adr=ADR-0041 issue=416\nfeature=chosen_values adr=ADR-0041 issue=416\nenabled=all\nend count=1\n");
@@ -543,7 +585,7 @@ void CopyPlans() {
     { Bench bench; bench.b.props[0x5007].form = 0; bench.b.props[0x5007].values.clear(); refused(bench, "not_writable:aperture:CAM-B"); }
     { Bench bench; bench.b.props[0x5007].get_set = 0; refused(bench, "not_writable:aperture:CAM-B"); }
     { Bench bench; bench.b.props[0x5007].type = 6; refused(bench, "unreadable:aperture:CAM-B"); }
-    { Bench bench(kD810ProductWriteTable); refused(bench, "code_unconfirmed:iso_auto"); }
+    { Bench bench(kProduct); refused(bench, "code_unconfirmed:iso_auto"); }
     {
         // A row disabled: listed as skipped, the rest still planned.
         Bench bench(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
@@ -1398,6 +1440,7 @@ int main() {
     run("ValuesAndTable", ValuesAndTable);
     run("DescriptionRules", DescriptionRules);
     run("ProductTable", ProductTable);
+    run("ControllerTables", ControllerTables);
     run("FilesEnableNothing", FilesEnableNothing);
     run("CopyPlans", CopyPlans);
     run("ChosenPlans", ChosenPlans);

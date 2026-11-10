@@ -40,6 +40,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace a0::phase0::experimental {
@@ -799,16 +800,35 @@ struct D810WriteStatus {
     std::size_t enabled_rows{};
 };
 
+// Which tables a controller may be built with. Only the contract test target
+// defines A0_SETTINGS_WRITE_TEST_TABLES; there the controller also accepts the
+// tables the tests build (the ADR-0041 code paths included). Everywhere else
+// it is built from kD810ProductWriteTable alone, and that table must also pass
+// the product rules (CAM-B and the five ADR-0038 items only, no chosen values).
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+inline constexpr bool kD810ControllerTestTables = true;
+#else
+inline constexpr bool kD810ControllerTestTables = false;
+#endif
+inline const char* D810ControllerTableProblem(const D810WriteTable& table, bool test_tables) {
+    if (const auto problem = D810WriteTableProblem(table)) return problem;
+    return test_tables ? nullptr : D810ProductTableProblem(table);
+}
+
 // The entry points for the screen: plan, confirm, run, reread, status. There is
 // no other way in (no command line, no automation), no "undo" and no write of
 // an earlier value (ADR-0038 decision 7).
 class D810SettingsWriteController {
+    struct AnyTable {};
 public:
-    // `table` is kD810ProductWriteTable in the product. The tests pass their own.
+    // The product entry point: the fixed product table, nothing else.
+    D810SettingsWriteController(D810SettingsJournal& journal, D810CameraOwnership& owner):
+        D810SettingsWriteController(AnyTable{}, kD810ProductWriteTable, journal, owner) {}
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+    // Contract tests only: a table of their own.
     D810SettingsWriteController(const D810WriteTable& table, D810SettingsJournal& journal, D810CameraOwnership& owner):
-        table_(table), journal_(journal), owner_(owner) {
-        if (D810WriteTableProblem(table_)) table_valid_ = false;
-    }
+        D810SettingsWriteController(AnyTable{}, table, journal, owner) {}
+#endif
 
     // The record on disk is the authority; the in-memory block only adds to it.
     D810CaptureBlock Block() const { return StrongerD810Block(D810JournalBlock(journal_.Read()), memory_block_); }
@@ -889,6 +909,8 @@ public:
     }
 
 private:
+    D810SettingsWriteController(AnyTable, const D810WriteTable& table, D810SettingsJournal& journal, D810CameraOwnership& owner):
+        table_(table), table_valid_(D810ControllerTableProblem(table_, kD810ControllerTestTables) == nullptr), journal_(journal), owner_(owner) {}
     static bool WriteAllowed(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     const char* PlanRefusal() const {
         if (!table_valid_) return "invalid_table";
@@ -1084,12 +1106,18 @@ private:
         }
     };
 
-    const D810WriteTable& table_;
-    bool table_valid_{true};
+    // Held by value: a table passed as a temporary cannot dangle.
+    const D810WriteTable table_;
+    const bool table_valid_;
     D810SettingsJournal& journal_;
     D810CameraOwnership& owner_;
     std::optional<D810WritePlan> pending_, confirmed_;
     D810CaptureBlock memory_block_{D810CaptureBlock::None};
     std::uint64_t counter_{};
 };
+static_assert(std::is_constructible_v<D810SettingsWriteController, D810SettingsJournal&, D810CameraOwnership&>, "the product entry point");
+#if !defined(A0_SETTINGS_WRITE_TEST_TABLES)
+static_assert(!std::is_constructible_v<D810SettingsWriteController, const D810WriteTable&, D810SettingsJournal&, D810CameraOwnership&>,
+    "outside the contract tests a controller takes no table");
+#endif
 } // namespace a0::phase0::experimental

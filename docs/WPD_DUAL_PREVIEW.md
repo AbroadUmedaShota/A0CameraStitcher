@@ -205,6 +205,6 @@ CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シ�
 
 **画面への組み込み**（まだ。順番を決めて入れる）
 
-`A0_BUILD_WPD_SETTINGS_WRITE` をONにしたbuildだけで、`wpd_dual_preview_ui.hpp` の読み取りの表の横に置く。入口は `D810SettingsWriteController`（製品の表は `kD810ProductWriteTable`、記録は `OpenProductD810SettingsJournal()`、持ち主はLiveと撮影の経路と共有する1つの `D810CameraOwnership`）。画面に出す材料は `Status()`（止めの種類、撮影を許すか、写すを許すか、有効な行の数）と、計画の `steps`・`skipped`・`reasons` の符号、実行の `verdict`・`reason`。
+`A0_BUILD_WPD_SETTINGS_WRITE` をONにしたbuildだけで、`wpd_dual_preview_ui.hpp` の読み取りの表の横に置く。入口は `D810SettingsWriteController`（表は受け取らない。製品の入口のconstructorは内部で `kD810ProductWriteTable` を値で持ち、構築の時に製品の規則でも確かめる。表を受け取るconstructorは、試験のtargetだけが定義する `A0_SETTINGS_WRITE_TEST_TABLES` の内側にあり、ほかのbuildでは `static_assert` で無いことを固定する。記録は `OpenProductD810SettingsJournal()`、持ち主はLiveと撮影の経路と共有する1つの `D810CameraOwnership`）。画面に出す材料は `Status()`（止めの種類、撮影を許すか、写すを許すか、有効な行の数）と、計画の `steps`・`skipped`・`reasons` の符号、実行の `verdict`・`reason`。
 
 **試験**: `d810_settings_write_contracts`（表と値、製品の表、承認らしいファイルを置いても何も有効にならない、計画、gateの掃引（Armしたgateは全opcode×命令の種類×引数、ほかの状態は関係するopcode。Armは全code×値）、Armの条件、転送の順序と失敗、偽の本体での実行、記録と止め、読み直し）。
