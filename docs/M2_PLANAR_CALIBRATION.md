@@ -41,7 +41,7 @@
 
 ## 3. job（`a0.planar-calibration-job.v1`）
 
-全キー必須、未知キー・型違いを拒否し、既定値を補わない。64 KiB、深さ 8 以下。例は [samples/public/planar-calibration-job.v1.example.json](../samples/public/planar-calibration-job.v1.example.json)（架空の値。実機の条件ではない）。
+全キー必須（`distortionCoefficients` だけ任意）、未知キー・型違いを拒否し、数値の既定値を補わない。64 KiB、深さ 8 以下。例は [samples/public/planar-calibration-job.v1.example.json](../samples/public/planar-calibration-job.v1.example.json)（架空の値。実機の条件ではない）。
 
 | キー | 中身 |
 | --- | --- |
@@ -52,6 +52,10 @@
 | `seamOutputDpi` | 報告の継ぎ目の食い違いを出力の画素に直す DPI（整数、1〜65535、`outputRaster.dpi` と同じ範囲）。報告にだけ使い、profile の `outputRaster` は null のまま |
 | `nominalCameras` | カメラごとの `focalLengthMm`（レンズの公称値）、`sensorWidthMm`・`sensorHeightMm`（保存された向きの幅と高さ）。0 より大きく 10000 以下 |
 | `numericalPolicy` | `minimumTrainingViews`（1〜128、重なりの view は数えない）、`maxIterations`（1〜1000）、`relativeCostTolerance`・`relativeStepTolerance`（0〜1 の開区間）、`initialDamping`（> 0）、`maxUndistortionIterations`（1〜1000）、`undistortionTolerancePixels`（> 0）。後の 2 つは直線性の検査で歪みを除くときにだけ使う |
+
+| `distortionCoefficients`（任意） | 解く歪みの係数の名前の配列。`"k1"` `"k2"` `"k3"` `"p1"` `"p2"` を各 1 回まで、順序は問わない。`[]` は歪みを解かない。名前に無い係数は 0 に固定する（解かない）。2 台とも同じ選択。キーが無い、または 5 つ全部なら従来の 5 係数で、profile と報告のバイト列は選択の機能が入る前と同じ |
+
+選択で減らした模型でも profile の書式は変わらない（schema は 5 係数固定。固定した係数は 0 と書く）。解いていない係数があることは profile からは分からず、報告の `distortionModel` に残る（次節）。
 
 数値 policy は停止条件で、光学の合格線ではない。既存の draft job の `relativeSingularCutoff`（段階 2 の閉じた式で使う）は、この推定器に段階 2 が無いので持たない。`rigMeasurements` も持たない（profile では null。公称の焦点距離は測った値ではないので `lensFocalLengthMm` に入れない）。
 
@@ -76,7 +80,7 @@ K が公称値であることを書く欄は profile v2 に無い。v2 の形（
 
 ### 報告（`a0.planar-calibration-report.v1`）
 
-`result`（`draft-produced`/`no-profile`）、`rejection`（`unsupported-image-dimensions`、`planar-calibration-unavailable`、`validation-not-evaluated`、`overlap-placement-invalid`、`profile-metadata-invalid`）、`profileFingerprintSha256`、`sessionSha256` と session そのもの、`numericalPolicy`、`model`、`intrinsicsSource: "nominal-not-estimated"`、`nominalCameras`（宣言値と、そこから作った K）、`overlapViews`、`overlapPlacement`、`documentPlane`、`quality: "not-assessed"`。
+`result`（`draft-produced`/`no-profile`）、`rejection`（`unsupported-image-dimensions`、`planar-calibration-unavailable`、`validation-not-evaluated`、`overlap-placement-invalid`、`profile-metadata-invalid`）、`profileFingerprintSha256`、`sessionSha256` と session そのもの、`numericalPolicy`、`model`、`distortionModel`（`distortionCoefficients` で係数を減らした時だけ。`solvedCoefficients` と `fixedToZeroCoefficients`）、`intrinsicsSource: "nominal-not-estimated"`、`nominalCameras`（宣言値と、そこから作った K）、`overlapViews`、`overlapPlacement`、`documentPlane`、`quality: "not-assessed"`。
 
 `cameras[]` はカメラごとに:
 
@@ -127,6 +131,8 @@ ctest --test-dir build/planar -C Release -j 1 -R '^m2_planar_calibration_contrac
 - 公称の K がずれた場合: 真の焦点距離を 1 % 長く、主点を (±12, −8) px ずらし、画素に ±0.1 px の決まった揺らぎを足す。係数は比べず、validation の残差と写像の差が 1 px 未満であることを確かめる
 - 拒否: 未知のキー、欠けたキー、別の schema、不正な policy、文字列の数値、焦点距離 0、重なりの view が reference でない・別のカメラ・無い、training が足りない、validation が無い、`measuredAt` が観測より前、`coplanarConfirmed` が false・欠けている・文字列、`seamOutputDpi` が欠けている・0・65536・小数・文字列
 - 継ぎ目と覆う範囲: 真の写像では `seam.overlap` と `seam.checkerboardHeldOut` がほぼ 0（1e−6 mm）で、点の数が両台で検出された節点（市松は奇数の側）の数と一致する。CAM-B の写像に既知のずれを入れて `MeasureOverlapSeam` で測ると、0.5 mm の平行移動はすべての点で 0.5 mm、原点まわりの 0.1 % の拡大は試験の中で節点の座標から求めた平均・p95・最大と一致する（1e−6 mm）。`fitPointCells` は試験の中で session から数えた値と一致し、合計が `fitResidual` の点の数と同じ。隅の r² は公称の K の式と一致する
+
+- 係数の選択（`distortionCoefficients`）: 真のレンズが選んだ係数だけを持つ人工の観測（`k1,k2` / `k1` / `k1,k2,p1,p2`（指定順は `p2,k2,k1,p1`）/ `[]`）で、解いた係数が 1e−6 以内で戻り、解かない係数が厳密に 0 のまま、validation の残差が 1e−4 px 未満。5 係数のレンズに `k1` だけを選ぶと残りは 0 のままで、模型の誤りが fit の残差に出る。キー無しと 5 つ全部を並べた job が profile・報告ともに同じバイト列で、キー無しの報告に `distortionModel` が無い。未知の名前・重複・大文字・配列でない値・配列の中の数値・選択の隣の未知キーを拒否
 
 試験の閾値（1e−6、1e−4 px、1 px、0.1 mm）は試験の入力で、実写の合格線ではない。実行した結果（Debug・Release とも 71 チェック・失敗 0）:
 

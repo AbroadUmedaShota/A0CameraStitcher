@@ -529,6 +529,97 @@ void TestSeam() {
     }
 }
 
+// Coefficient selection (distortionCoefficients): the coefficients that are not
+// solved stay exactly 0, the solved ones return to the known values, and a job
+// without the key (or with all five) writes the bytes of the five-coefficient estimate.
+std::string SelectionOverride(const std::string& names) { return "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"distortionCoefficients\":" + names; }
+std::array<double, 5> CoefficientsOf(const JsonValue& camera_report) {
+    const auto& d = At(camera_report, "distortion");
+    return {Value(At(d, "k1")), Value(At(d, "k2")), Value(At(d, "k3")), Value(At(d, "p1")), Value(At(d, "p2"))};
+}
+void CheckSelection(const char* label, const std::string& names, const std::array<bool, 5>& solved,
+    const std::array<syn::DistortionSpec, 2>& truth_lens) {
+    auto scenario = MakeScenario(0, 1, 0, 0);
+    scenario.truth[0].d = truth_lens[0];
+    scenario.truth[1].d = truth_lens[1];
+    const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, SelectionOverride(names)));
+    Check(output.ok, std::string(label) + ": the reduced model produces a draft");
+    if (!output.ok) return;
+    const auto report = Tree(output.report_json);
+    Check(At(report, "distortionModel").kind == JsonKind::object, std::string(label) + ": the report records the model");
+    const auto& model = At(report, "distortionModel");
+    const char* const keys[5] = {"k1", "k2", "k3", "p1", "p2"};
+    std::vector<std::string> want_solved, want_fixed;
+    for (std::size_t j = 0; j < 5; ++j) (solved[j] ? want_solved : want_fixed).push_back(keys[j]);
+    const auto names_of = [](const JsonValue& list) { std::vector<std::string> out; for (const auto& item : list.array) out.push_back(item.string); return out; };
+    Check(names_of(At(model, "solvedCoefficients")) == want_solved && names_of(At(model, "fixedToZeroCoefficients")) == want_fixed,
+        std::string(label) + ": the report lists the solved and the fixed coefficients");
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& camera_report = At(report, "cameras").array[i];
+        const auto estimated = CoefficientsOf(camera_report);
+        const auto& t = truth_lens[i];
+        const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+        double worst = 0;
+        bool fixed_zero = true;
+        for (std::size_t j = 0; j < 5; ++j) {
+            if (solved[j]) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+            else fixed_zero = fixed_zero && estimated[j] == 0;
+        }
+        std::cout << label << ' ' << (i == 0 ? "CAM-A" : "CAM-B") << " solved coefficient error max=" << worst << '\n';
+        Check(fixed_zero, std::string(label) + ": coefficients that are not solved stay exactly 0");
+        Check(worst < 1e-6, std::string(label) + ": the solved coefficients return to the known values (1e-6, test input)");
+        Check(Value(At(At(camera_report, "heldOutResidual"), "rms")) < 1e-4, std::string(label) + ": held-out residual is about zero (1e-4 px, test input)");
+    }
+}
+void TestCoefficientSelection() {
+    // The lens has only the coefficients that are solved: they return, the rest is 0.
+    CheckSelection("k1,k2", "[\"k1\",\"k2\"]", {true, true, false, false, false}, {syn::DistortionSpec{-0.045, 0.09, 0, 0, 0}, syn::DistortionSpec{-0.052, 0.11, 0, 0, 0}});
+    CheckSelection("k1", "[\"k1\"]", {true, false, false, false, false}, {syn::DistortionSpec{-0.045, 0, 0, 0, 0}, syn::DistortionSpec{-0.052, 0, 0, 0, 0}});
+    CheckSelection("k1,k2,p1,p2", "[\"p2\",\"k2\",\"k1\",\"p1\"]", {true, true, false, true, true},
+        {syn::DistortionSpec{-0.045, 0.09, 0, 1.5e-4, -2e-4}, syn::DistortionSpec{-0.052, 0.11, 0, -1e-4, 1.2e-4}});
+    CheckSelection("none", "[]", {false, false, false, false, false}, {syn::DistortionSpec{0, 0, 0, 0, 0}, syn::DistortionSpec{0, 0, 0, 0, 0}});
+
+    // A coefficient left out stays 0 even when the lens has it (the fit then carries a model error).
+    {
+        const auto scenario = MakeScenario(0, 1, 0, 0);
+        const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, SelectionOverride("[\"k1\"]")));
+        const auto report = Tree(output.report_json);
+        bool zero = true;
+        double fit = 0;
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto& camera_report = At(report, "cameras").array[i];
+            if (At(camera_report, "distortion").kind != JsonKind::object) { zero = false; continue; }
+            const auto c = CoefficientsOf(camera_report);
+            zero = zero && c[1] == 0 && c[2] == 0 && c[3] == 0 && c[4] == 0 && c[0] != 0;
+            fit = std::max(fit, Value(At(At(camera_report, "fitResidual"), "rms")));
+        }
+        Check(zero && fit > 0.01, "k1 only on a lens with five coefficients: the rest stays 0 and the model error shows in the fit residual");
+    }
+
+    // No key and all five coefficients named are the same estimate, byte for byte.
+    {
+        const auto scenario = MakeScenario(0, 1, 0, 0);
+        const auto session = Session(scenario);
+        const auto plain = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto explicit_five = RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride("[\"k1\",\"k2\",\"k3\",\"p1\",\"p2\"]")));
+        Check(plain.ok && plain.profile_json == explicit_five.profile_json && plain.report_json == explicit_five.report_json,
+            "naming all five coefficients writes the same bytes as no selection");
+        Check(plain.report_json.find("distortionModel") == std::string::npos, "a job without a selection adds nothing to the report");
+        const auto reduced = RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride("[\"k1\",\"k2\",\"k3\"]")));
+        Check(reduced.report_json != plain.report_json && reduced.report_json.find("distortionModel") != std::string::npos,
+            "a reduced selection is recorded in the report");
+    }
+
+    // Rejections.
+    const auto scenario = MakeScenario(0, 1, 0, 0);
+    const auto session = Session(scenario);
+    for (const auto* bad : {"[\"k4\"]", "[\"k1\",\"k1\"]", "\"k1\"", "[1]", "[\"k1\",\"k2\",\"k3\",\"p1\",\"p2\",\"k1\"]", "{\"k1\":true}", "null", "[\"K1\"]"})
+        Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride(bad))); }, (std::string("distortionCoefficients ") + bad + " is refused").c_str());
+    const auto selected_job = Job(scenario, SelectionOverride("[\"k1\"]"));
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, selected_job.substr(0, selected_job.size() - 1) + ",\"extra\":1}"); },
+        "an unknown key next to the selection is refused");
+}
+
 // --write-fixture <new directory>: the inputs of the recovery scenario for a
 // manual end-to-end run (DraftCalibrator, SyntheticPairGenerator, StitchEval):
 // session.json, job.json, pair-spec.json (the true cameras on an A0 chart) and
@@ -565,6 +656,7 @@ int main(int argc, char** argv) {
         TestRecovery(argv[1]);
         TestNominalMismatch();
         TestSeam();
+        TestCoefficientSelection();
         TestRejections();
     } catch (const std::exception& error) {
         std::cerr << "exception: " << error.what() << '\n';

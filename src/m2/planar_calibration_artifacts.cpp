@@ -4,10 +4,12 @@
 #include "calibration_exact_predicates.hpp"
 #include "draft_calibration_json.hpp"
 
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 
 namespace a0::m2::calibration {
 namespace {
@@ -139,8 +141,10 @@ std::string Profile(const CalibrationObservationSession& session, const PlanarCa
 // object. No caller-controlled status/approval or automatic numerical defaults.
 [[noreturn]] void InvalidJob() { throw std::invalid_argument("planar calibration: invalid job"); }
 struct Failure { [[noreturn]] static void Fail(std::string_view, std::string_view) { InvalidJob(); } };
-void Keys(const JsonValue& value, std::initializer_list<const char*> names) {
-    if (value.kind != JsonKind::object || value.object.size() != names.size()) InvalidJob();
+// `optional_present` is the number of optional keys the caller found in `value`;
+// they are counted, so any other unknown key still fails the size check.
+void Keys(const JsonValue& value, std::initializer_list<const char*> names, std::size_t optional_present = 0) {
+    if (value.kind != JsonKind::object || value.object.size() != names.size() + optional_present) InvalidJob();
     for (const auto* name : names) if (!value.object.contains(name)) InvalidJob();
 }
 const JsonValue& At(const JsonValue& value, const char* key) {
@@ -159,6 +163,30 @@ std::uint32_t Integer(const JsonValue& value) {
     const double out = Number(value);
     if (out < 0 || out > 1000 || std::floor(out) != out) InvalidJob();
     return static_cast<std::uint32_t>(out);
+}
+// Names of the coefficients to solve, each at most once; an empty array solves none.
+SolvedCoefficients Coefficients(const JsonValue& value) {
+    if (value.kind != JsonKind::array || value.array.size() > 5) InvalidJob();
+    SolvedCoefficients out{false, false, false, false, false};
+    for (const auto& item : value.array) {
+        const auto name = Text(item);
+        bool* flag = name == "k1" ? &out.k1 : name == "k2" ? &out.k2 : name == "k3" ? &out.k3
+            : name == "p1" ? &out.p1 : name == "p2" ? &out.p2 : nullptr;
+        if (flag == nullptr || *flag) InvalidJob();
+        *flag = true;
+    }
+    return out;
+}
+// {"solvedCoefficients": [...], "fixedToZeroCoefficients": [...]}, in k1 k2 k3 p1 p2 order.
+std::string DistortionModelJson(const SolvedCoefficients& solved) {
+    const std::array<std::pair<const char*, bool>, 5> all{{{"k1", solved.k1}, {"k2", solved.k2}, {"k3", solved.k3}, {"p1", solved.p1}, {"p2", solved.p2}}};
+    std::string solved_names, fixed_names;
+    for (const auto& [name, selected] : all) {
+        auto& target = selected ? solved_names : fixed_names;
+        if (!target.empty()) target += ',';
+        target += Q(name);
+    }
+    return "{\"solvedCoefficients\":[" + solved_names + "],\"fixedToZeroCoefficients\":[" + fixed_names + "]}";
 }
 NominalCamera Nominal(const JsonValue& value) {
     Keys(value, {"focalLengthMm", "sensorWidthMm", "sensorHeightMm"});
@@ -217,7 +245,10 @@ DraftCalibrationArtifacts BuildPlanarCalibrationArtifacts(std::string_view json,
         + ",\"profileFingerprintSha256\":" + (out.ok ? Q(out.profile_fingerprint_sha256) : "null")
         + ",\"sessionSha256\":" + Q(Sha256(json)) + ",\"session\":" + std::string(json)
         + ",\"numericalPolicy\":" + PolicyJson(policy)
-        + ",\"model\":\"planar-rigid-placement-homography-brown-conrady-k1k2k3-p1p2\",\"intrinsicsSource\":\"nominal-not-estimated\",\"nominalCameras\":{";
+        + ",\"model\":\"planar-rigid-placement-homography-brown-conrady-k1k2k3-p1p2\""
+        // Only a reduced selection is recorded, so a job without the selection keeps its report bytes.
+        + (request.solved.All() ? std::string() : ",\"distortionModel\":" + DistortionModelJson(request.solved))
+        + ",\"intrinsicsSource\":\"nominal-not-estimated\",\"nominalCameras\":{";
     for (std::size_t i = 0; i < 2; ++i) {
         if (i) report += ',';
         const auto& group = session.Camera(i == 0 ? CameraAlias::CamA : CameraAlias::CamB);
@@ -256,8 +287,10 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
         else if (c == '}' || c == ']') { if (--depth < 0) InvalidJob(); }
     }
     const auto job = BasicJsonParser<Failure>(job_json).Parse();
+    // Optional: distortionCoefficients, the coefficients to solve (the others stay 0). Absent: all five.
+    const bool has_selection = job.kind == JsonKind::object && job.object.contains("distortionCoefficients");
     Keys(job, {"schemaVersion", "profileId", "provenanceId", "measuredAt", "documentPlane", "overlapViews", "overlapPlacement", "nominalCameras",
-        "numericalPolicy", "seamOutputDpi"});
+        "numericalPolicy", "seamOutputDpi"}, has_selection ? 1 : 0);
     if (Text(At(job, "schemaVersion")) != kPlanarCalibrationJobSchema) InvalidJob();
     const auto& plane = At(job, "documentPlane"); Keys(plane, {"orientation", "cameraOrder"});
     PlanarCalibrationMetadata metadata;
@@ -277,7 +310,8 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
     const auto& views = At(job, "overlapViews"); Keys(views, {"CAM-A", "CAM-B"});
     const auto& nominal = At(job, "nominalCameras"); Keys(nominal, {"CAM-A", "CAM-B"});
     const PlanarCalibrationRequest request{{Text(At(views, "CAM-A")), Text(At(views, "CAM-B"))},
-        {Nominal(At(nominal, "CAM-A")), Nominal(At(nominal, "CAM-B"))}};
+        {Nominal(At(nominal, "CAM-A")), Nominal(At(nominal, "CAM-B"))},
+        has_selection ? Coefficients(At(job, "distortionCoefficients")) : SolvedCoefficients{}};
     const auto& p = At(job, "numericalPolicy");
     Keys(p, {"minimumTrainingViews", "maxIterations", "relativeCostTolerance", "relativeStepTolerance", "initialDamping", "maxUndistortionIterations", "undistortionTolerancePixels"});
     const PlanarCalibrationPolicy policy{Integer(At(p, "minimumTrainingViews")), Integer(At(p, "maxIterations")), Number(At(p, "relativeCostTolerance")),

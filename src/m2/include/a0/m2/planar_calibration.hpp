@@ -30,9 +30,19 @@ struct NominalCamera {
     double sensor_height_mm; // stored-order height, finite, (0, 10000]
 };
 
+// Which Brown-Conrady coefficients the estimate solves for. A coefficient that
+// is not solved is fixed to 0 (the profile format keeps all five). The default
+// solves all five, which is the estimate before this selection existed.
+struct SolvedCoefficients {
+    bool k1 = true, k2 = true, k3 = true, p1 = true, p2 = true;
+    [[nodiscard]] bool All() const { return k1 && k2 && k3 && p1 && p2; }
+    friend bool operator==(const SolvedCoefficients&, const SolvedCoefficients&) = default;
+};
+
 struct PlanarCalibrationRequest {
     std::array<std::string, 2> overlap_view_ids; // CAM-A, then CAM-B: the same flat placement seen by both
     std::array<NominalCamera, 2> nominal;        // CAM-A, then CAM-B
+    SolvedCoefficients solved;                   // both cameras use the same selection
 };
 
 // Numerical stopping criteria only, not optical or quality thresholds. No defaults.
@@ -162,7 +172,8 @@ struct PlanarCalibrationResult {
 
 // The two cameras share only the overlap placement, which is fixed to T = I,
 // so their problems separate exactly and each is solved by one
-// Levenberg-Marquardt over H_c, the five coefficients and (theta, tx, ty) of
+// Levenberg-Marquardt over H_c, the solved coefficients (all five unless the
+// request selects fewer; the others stay 0) and (theta, tx, ty) of
 // every training view. Start: DLT of the overlap view for H_c, DLT of each
 // training view composed with H_c^-1 for its placement, zero distortion.
 // Validation views are held out: H_c and the coefficients are fixed, the

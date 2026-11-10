@@ -50,7 +50,12 @@ struct PlanarCalibrationMetadata {
     std::string_view observation_session_json, const PlanarCalibrationRequest& request,
     const PlanarCalibrationPolicy& policy, const PlanarCalibrationMetadata& metadata);
 
-// Strict, bounded job JSON (a0.planar-calibration-job.v1). Malformed jobs or
+// Strict, bounded job JSON (a0.planar-calibration-job.v1). The one optional
+// key, distortionCoefficients (array of "k1" "k2" "k3" "p1" "p2", each at most
+// once; [] solves none), selects the coefficients to solve; the others are
+// fixed to 0 and the report records `distortionModel`. Without the key, or with
+// all five, the output bytes are those of the five-coefficient estimate.
+// Malformed jobs or
 // sessions and invalid policies throw invalid_argument; estimation or
 // metadata failures return a diagnostic report with no profile.
 [[nodiscard]] DraftCalibrationArtifacts RunPlanarCalibrationJob(
