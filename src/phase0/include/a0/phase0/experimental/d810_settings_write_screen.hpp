@@ -156,6 +156,14 @@ struct D810WriteScreenView {
     std::vector<std::wstring> lines;
     bool confirmation{};
 };
+// How many lines of a view fit under its title in a window whose client area is `client_bottom` high (22 px a
+// line, from 30 px under the title to 84 px above the bottom, the title at the middle of the window plus 88 px).
+// The preview draws this many and offers the confirm button only when every line of a confirmation fits.
+inline std::size_t D810WriteViewVisibleLines(int client_bottom) {
+    const int first = client_bottom / 2 + 88 + 30, bottom = client_bottom - 84;
+    return bottom < first ? 0 : static_cast<std::size_t>((bottom - first) / 22);
+}
+inline bool D810WriteViewFits(const D810WriteScreenView& view, int client_bottom) { return view.lines.size() <= D810WriteViewVisibleLines(client_bottom); }
 // Closes are counted here: a camera that could not be closed holds the screen
 // (no further read, write or Live restart) as stage A does.
 class D810TrackedCameraAccess final: public D810SettingsCameraAccess {
@@ -206,6 +214,8 @@ public:
     bool Busy() const { return worker_.valid(); }
     bool CloseFailed() const { return close_failed_; }
     const D810WriteScreenView* View() const { return view_ ? &*view_ : nullptr; }
+    // The confirmation is up and the confirm button may be offered: whatever else the preview shows, it is drawn first.
+    bool ConfirmationShown() const { return step_ == D810WriteScreenStep::Confirming && view_ && view_->confirmation; }
     // The last event in one line, for the preview's status line. Empty when none.
     const std::wstring& StatusLine() const { return status_line_; }
 
@@ -224,7 +234,7 @@ public:
         case D810WriteScreenStep::ReadingForPlan: return L"両台の設定を読んでいます（読み取りのみ。A を閉じてから B を開きます）…";
         case D810WriteScreenStep::Writing: return L"CAM-B に書いています。終わるまでライブの再開・撮影はできません…";
         case D810WriteScreenStep::Rereading: return L"両台を読み直しています（読み取りのみ）…";
-        case D810WriteScreenStep::Confirming: return L"写す内容を確かめて、「書き込む（1回だけ）」か「やめる」を押してください。";
+        case D810WriteScreenStep::Confirming: return L"自動では元に戻りません。写す内容を確かめて、「書き込む（1回だけ）」か「やめる」を押してください。";
         case D810WriteScreenStep::Idle: break;
         }
         if (close_failed_) return L"カメラとの接続を閉じられませんでした。この画面を閉じて、本体・USB接続を確認してください。";
@@ -422,11 +432,12 @@ private:
         D810WriteScreenView view;
         view.confirmation = true;
         view.title = L"CAM-A の設定を CAM-B に写す前の確認（まだ何も書いていません）";
+        // The two notices of ADR-0038 decision 5 come first: a window too small for every line cuts the end.
+        view.lines.push_back(L"自動では元に戻りません。書く前の値に戻す時は、本体で操作してください。");
+        view.lines.push_back(L"書き込みは項目ごとに 1 回だけです。失敗しても再送しません。結果を確かめられない時は撮影を止めます。");
         view.lines.push_back(L"項目: CAM-B の今の値 → 書く値（CAM-A から読んだ値）");
         for (const auto& step : plan.steps) view.lines.push_back(L"  " + StepLine(step));
         AddSkipped(view.lines, plan);
-        view.lines.push_back(L"自動では元に戻りません。書く前の値に戻す時は、本体で操作してください。");
-        view.lines.push_back(L"書き込みは項目ごとに 1 回だけです。失敗しても再送しません。結果を確かめられない時は撮影を止めます。");
         view.lines.push_back(L"よければ「書き込む（1回だけ）」、やめる時は「やめる」を押してください。");
         status_line_ = L"写す内容を確かめてください（まだ何も書いていません）。";
         view_ = std::move(view);

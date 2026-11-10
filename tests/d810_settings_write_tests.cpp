@@ -9,7 +9,9 @@
 #include <condition_variable>
 #include <cstdio>
 #include <fstream>
+#include <intrin.h>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1698,6 +1700,113 @@ void ZeroByteReadsInTheWriteSession() {
         check(bench.access.opens[1] == 1 && bench.b.write_begins == 0, "the latch is down: B opened for the verification read only");
     }
 }
+// A read-only session (the read for a plan, the verification read of a run, the reread) does not trust its
+// answers once the watchdog's flag is up, even when the flag comes with the very last answer.
+void ReadOnlySessionsAfterCancel() {
+    FakeWriteBody probe = Body(333, 560, 100);
+    Snapshot(probe, "CAM-B");
+    check(!probe.trace.empty(), "probe: a read sends requests");
+    const std::string last = probe.trace.back();
+    const int per_read = static_cast<int>(probe.Count(last));
+    // The answer to the last request of the next read of CAM-B raises the flag.
+    const auto arm = [&](Bench& bench, const std::shared_ptr<std::atomic<bool>>& flag) {
+        auto seen = std::make_shared<int>(0);
+        bench.access.cancel[1] = flag;
+        bench.b.after = [flag, seen, last, per_read](const std::string& entry) { if (entry == last && ++*seen == per_read) flag->store(true); };
+    };
+    // A write left unknown, and the bodies equal again: a reread would release the block.
+    const auto held = [](Bench& bench) {
+        bench.b.end_reject[0x500d] = 0x2005;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Unknown && !bench.controller->CaptureAllowed(), "reread set up: a write left unknown");
+        bench.b.end_reject.clear();
+        for (const auto& [code, prop] : bench.a.props) bench.b.props[code].current = prop.current;
+    };
+    {
+        Bench bench;
+        held(bench);
+        const auto result = bench.controller->Reread(bench.access, bench.options);
+        check(result.complete && result.check.released && bench.controller->CaptureAllowed(), "reread control: equal bodies release the block");
+    }
+    {
+        Bench bench;
+        held(bench);
+        const int writes = bench.Writes();
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        arm(bench, flag);
+        const auto result = bench.controller->Reread(bench.access, bench.options);
+        check(flag->load() && bench.b.trace.back() == last, "reread: the flag came with the last answer, nothing was sent after it");
+        check(!result.complete && result.reason == "reread_incomplete" && !result.check.released, "reread: not complete after the flag");
+        check(bench.access.after_cancel[1] == 0 && bench.Writes() == writes, "reread: no request reached the body after the flag, no write");
+        check(bench.controller->Block() == D810CaptureBlock::Unknown && bench.Restarted().Block() == D810CaptureBlock::Unknown, "reread: the block is not changed");
+    }
+    {
+        Bench bench;
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        arm(bench, flag);
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(flag->load() && bench.b.trace.back() == last, "read for a plan: the flag came with the last answer");
+        check(!read.complete && read.reason == "read_incomplete:CAM-B", "read for a plan: not complete after the flag");
+        check(bench.access.after_cancel[1] == 0 && bench.Writes() == 0, "read for a plan: nothing after the flag, no write");
+    }
+    {
+        Bench bench;
+        const auto plan = bench.Copy(); // CAM-B is read directly here, not through the access
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        arm(bench, flag);
+        const auto run = bench.Run(plan);
+        check(flag->load() && bench.b.trace.back() == last, "verification read: the flag came with the last answer");
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && run.reason == "reread_incomplete:CAM-B", "verification read: not complete after the flag, nothing sent");
+        check(bench.Writes() == 0 && bench.access.after_cancel[1] == 0 && bench.controller->CaptureAllowed(), "verification read: nothing after the flag, no block");
+    }
+}
+// Execute runs the plan that was confirmed and no other.
+void ExecuteChecksThePlanNumber() {
+    Bench bench;
+    const auto plan = bench.Copy();
+    check(plan.Ok() && bench.controller->Confirm(plan.plan->id) == nullptr, "execute: confirmed");
+    const auto other = bench.controller->Execute(plan.plan->id ^ 1, bench.access, bench.options);
+    check(other.reason == "plan_not_confirmed" && other.sent == 0 && other.verdict == D810WriteVerdict::NotSent, "execute: another number is refused");
+    check(bench.Writes() == 0 && bench.access.opens[0] + bench.access.opens[1] == 0, "execute: another number opens nothing and writes nothing");
+    const auto own = bench.controller->Execute(plan.plan->id, bench.access, bench.options);
+    check(own.verdict == D810WriteVerdict::Match && own.sent == 3 && bench.Writes() == 3, "execute: the confirmed number still runs the plan, once");
+    const auto again = bench.controller->Execute(plan.plan->id, bench.access, bench.options);
+    check(again.reason == "plan_not_confirmed" && bench.Writes() == 3, "execute: and not twice");
+}
+// The time margin for the steps left against every budget, remaining time and step count around the 64-bit wrap,
+// compared with the exact product (budget x steps), not with a product that may wrap.
+void BudgetSweep() {
+    using ms = std::chrono::milliseconds;
+    const std::vector<std::vector<D810WriteItem>> subsets = {{D810WriteItem::Iso}, {D810WriteItem::Iso, D810WriteItem::Aperture},
+        {D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}};
+    const std::vector<long long> budgets = {1, 4999, 5000, 5001, 20000, 20001, 60000, 60001, 0x1fffffffffffffffLL, 0x2aaaaaaaaaaaaaaaLL, 0x2aaaaaaaaaaaaaabLL,
+        0x3fffffffffffffffLL, 0x5555555555555555LL, 0x5555555555555556LL, 0x7fffffffffffffffLL};
+    const std::vector<long long> remainings = {0, 1, 59999, 60000, 60001, std::numeric_limits<long long>::max(), -1, std::numeric_limits<long long>::min()};
+    int cases = 0, wrong = 0, sent_all = 0;
+    for (const auto& items : subsets)
+        for (const auto budget : budgets)
+            for (const auto remaining : remainings) {
+                auto table = kAdr38Table;
+                for (auto& row : table.rows) row.enabled = row.camera == D810Camera::B && std::find(items.begin(), items.end(), row.item) != items.end();
+                Bench bench(table);
+                bench.options.step_budget = ms(budget);
+                bench.left = ms(remaining);
+                const auto plan = bench.Copy();
+                if (!plan.Ok()) { ++wrong; continue; }
+                const auto steps = static_cast<unsigned long long>(plan.plan->steps.size());
+                unsigned long long high = 0;
+                const auto low = _umul128(static_cast<unsigned long long>(budget), steps, &high);
+                const bool enough = remaining >= 0 && high == 0 && low <= static_cast<unsigned long long>(remaining);
+                const auto run = bench.Run(plan);
+                ++cases;
+                if (enough) {
+                    ++sent_all;
+                    if (run.sent != static_cast<int>(steps)) ++wrong;
+                } else if (run.sent != 0 || bench.Writes() != 0 || run.reason != "deadline_margin") ++wrong;
+            }
+    check(cases == 360 && wrong == 0, "budget sweep: every case as the exact product says");
+    check(sent_all > 0 && sent_all < cases, "budget sweep: some cases send everything and some send nothing");
+}
 // --- The screen (D810SettingsWriteScreen), on a worker thread, with the tables of this target -----------------------
 struct BorrowedAccess final: D810SettingsCameraAccess {
     explicit BorrowedAccess(D810SettingsCameraAccess& inner): inner_(inner) {}
@@ -1881,6 +1990,96 @@ void ScreenCancelAndStop() {
         check(s.bench.Writes() == 1 && s.bench.b.write_ends == 1 && Shows(s.screen->View(), L"不明") && !s.screen->AdmitCapture(), "screen: stopped after the open write");
     }
 }
+// The confirmation: the two notices come first (a window too small for every line cuts the end), the confirm
+// button's lines must all fit, and the line above the buttons repeats that nothing is undone.
+void ScreenConfirmationOrder() {
+    ScreenBench s;
+    check(!s.screen->ConfirmationShown(), "confirmation: none before a copy");
+    check(s.Copy() && s.screen->ConfirmationShown(), "confirmation: shown after a copy");
+    const auto* view = s.screen->View();
+    check(view && view->lines.size() == 7, "confirmation: two notices, the header, three items and the closing line");
+    if (view && view->lines.size() >= 3) {
+        check(view->lines[0].find(L"自動では元に戻りません") == 0, "confirmation: the first line is that nothing is undone");
+        check(view->lines[1].find(L"項目ごとに 1 回だけです") != std::wstring::npos && view->lines[1].find(L"再送しません") != std::wstring::npos, "confirmation: the second is once, no resend");
+        check(view->lines[2].find(L"項目:") == 0, "confirmation: the items follow the notices");
+    }
+    check(s.screen->OfferText(true).find(L"自動では元に戻りません") != std::wstring::npos, "confirmation: the line above the buttons says it too");
+    check(D810WriteViewVisibleLines(100) == 0 && D810WriteViewVisibleLines(700) == 6 && D810WriteViewVisibleLines(960) == 12, "confirmation: lines that fit");
+    check(view && D810WriteViewFits(*view, 960) && !D810WriteViewFits(*view, 700), "confirmation: fits a 960 px client, not a 700 px one");
+    s.screen->DiscardPlan();
+    check(!s.screen->ConfirmationShown(), "confirmation: gone after the plan is discarded");
+    check(s.Copy() && s.Confirm() && !s.screen->ConfirmationShown(), "confirmation: gone after the run");
+}
+// The watchdog's flag at several points of a run: whatever was already sent stays unknown, nothing is sent after the
+// flag (not even an END), nothing is resent, and capture stays held also after a restart.
+void CancelAtThe(const char* name, const std::function<void(ScreenBench&, std::shared_ptr<std::atomic<bool>>)>& arm, int sent) {
+    ScreenBench s;
+    const auto flag = std::make_shared<std::atomic<bool>>(false);
+    s.bench.access.cancel[1] = flag;
+    arm(s, flag);
+    const std::string n = name;
+    check(s.Copy() && s.Confirm(), (n + ": run").c_str());
+    check(flag->load(), (n + ": the flag was raised").c_str());
+    check(s.bench.access.after_cancel[1] == 0, (n + ": nothing reached the body after the flag").c_str());
+    check(s.bench.Writes() == sent && s.bench.b.write_ends <= sent && NoResend(s.bench.b), (n + ": writes sent, no END after the flag, no resend").c_str());
+    check(Shows(s.screen->View(), L"不明") && !s.screen->AdmitCapture(), (n + ": unknown and held").c_str());
+    check(s.bench.controller->Block() == D810CaptureBlock::Unknown && s.bench.Restarted().Block() == D810CaptureBlock::Unknown, (n + ": held after a restart").c_str());
+}
+void ScreenCancelAtSevenPoints() {
+    CancelAtThe("mid WRITE_DATA of the first item", [](ScreenBench& s, auto flag) { s.bench.b.after = [flag](const std::string& e) { if (e == "write_data") flag->store(true); }; }, 1);
+    CancelAtThe("mid read back of the first item", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [&s, flag](const std::string& e) { if (e == "read" && s.bench.b.write_ends == 1) flag->store(true); }; }, 1);
+    CancelAtThe("begin of the first read back", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [&s, flag](const std::string& e) { if (e == "1014(500f)" && s.bench.b.write_ends == 1) flag->store(true); }; }, 1);
+    CancelAtThe("between items (END of the first read back)", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [&s, flag](const std::string& e) { if (e == "end" && s.bench.b.write_ends == 1) flag->store(true); }; }, 1);
+    CancelAtThe("begin of the second item", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [flag](const std::string& e) { if (e == "1016(500d)") flag->store(true); }; }, 2);
+    CancelAtThe("END of the second item", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [&s, flag](const std::string& e) { if (e == "write_end" && s.bench.b.write_ends == 1) flag->store(true); }; }, 2);
+    CancelAtThe("END of the last item", [](ScreenBench& s, auto flag) {
+        s.bench.b.after = [&s, flag](const std::string& e) { if (e == "write_end" && s.bench.b.write_ends == 2) flag->store(true); }; }, 3);
+    {
+        // CAM-A's flag during its verification read: nothing is sent, no block.
+        ScreenBench s;
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        s.bench.access.cancel[0] = flag;
+        int seen = 0;
+        s.bench.a.after = [&](const std::string& e) { if (e == "1014(500f)" && ++seen == 2) flag->store(true); }; // 1: the read for the plan, 2: the verification read
+        check(s.Copy() && s.Confirm(), "cancel of A: run");
+        check(flag->load() && s.bench.access.after_cancel[0] == 0 && s.bench.Writes() == 0, "cancel of A in its read: nothing sent, nothing after the flag");
+        check(s.screen->AdmitCapture(), "cancel of A in its read: nothing sent, no block");
+    }
+}
+// A record with a byte order mark is not read as a record: capture is held from the start (someone edited it by
+// hand). The same record with CRLF line ends is read as it is.
+void RecordWithByteOrderMark() {
+    const std::string op = "op=00000000000000a1";
+    const std::string plan = "a0sw1 " + op + " ev=plan t=2000-01-01T00:00:00Z source=copy steps=1";
+    const std::string step = "a0sw1 " + op + " ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040";
+    const std::string end = "a0sw1 " + op + " ev=end t=2000-01-01T00:00:00Z verdict=match sent=1 reason=none";
+    struct Row { const char* name; std::string text; D810CaptureBlock expect; };
+    const std::vector<Row> rows = {
+        {"with a byte order mark", std::string("\xEF\xBB\xBF") + plan + "\n" + step + "\n" + end + "\n", D810CaptureBlock::Unconfirmed},
+        {"with CRLF line ends", plan + "\r\n" + step + "\r\n" + end + "\r\n", D810CaptureBlock::None},
+    };
+    for (const auto& row : rows) {
+        Bench bench(kAdr38Table, -1, true);
+        WriteFile(bench.folder / "marker", "");
+        check(bench.file.Append("a0sw1 ev=reread t=2000-01-01T00:00:00Z verdict=match"), "record: the journal made its file");
+        fs::path record;
+        for (const auto& entry : fs::directory_iterator(bench.folder))
+            if (entry.path().filename() != "marker") record = entry.path();
+        check(!record.empty(), "record: found the journal's file");
+        WriteFile(record, row.text);
+        auto restarted = bench.Restarted();
+        D810SettingsWriteScreen screen(restarted, [&bench] { return std::make_unique<BorrowedAccess>(bench.access); }, {});
+        const std::string n = std::string("record ") + row.name;
+        check(screen.Status().block == row.expect, (n + ": the block").c_str());
+        check(screen.AdmitCapture() == (row.expect == D810CaptureBlock::None), (n + ": capture admission").c_str());
+        check(row.expect == D810CaptureBlock::None || !screen.CaptureRefusalText().empty(), (n + ": a refusal says why").c_str());
+    }
+}
 void OwnershipIsCompareAndSwap() {
     D810CameraOwnership owner;
     check(owner.TryAcquire(D810CameraUse::Settings) && !owner.TryAcquire(D810CameraUse::Live) && !owner.TryAcquire(D810CameraUse::Capture), "one owner");
@@ -1929,12 +2128,18 @@ int main() {
     run("StopsBeforeSending", StopsBeforeSending);
     run("WatchdogCancel", WatchdogCancel);
     run("ZeroByteReadsInTheWriteSession", ZeroByteReadsInTheWriteSession);
+    run("ReadOnlySessionsAfterCancel", ReadOnlySessionsAfterCancel);
+    run("ExecuteChecksThePlanNumber", ExecuteChecksThePlanNumber);
+    run("BudgetSweep", BudgetSweep);
     run("ScreenCopyFlow", ScreenCopyFlow);
     run("ScreenRefusals", ScreenRefusals);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);
     run("ScreenCancelAndStop", ScreenCancelAndStop);
+    run("ScreenConfirmationOrder", ScreenConfirmationOrder);
+    run("ScreenCancelAtSevenPoints", ScreenCancelAtSevenPoints);
+    run("RecordWithByteOrderMark", RecordWithByteOrderMark);
     run("OwnershipIsCompareAndSwap", OwnershipIsCompareAndSwap);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";

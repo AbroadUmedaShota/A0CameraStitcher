@@ -1016,15 +1016,16 @@ private:
         bool verified{};
     };
     // Open, read every table code with the read-only session, Close. After the
-    // watchdog's flag nothing more reaches the transport, not even an END.
+    // watchdog's flag nothing more reaches the transport, not even an END, and
+    // what was answered before it is not trusted: the read is not complete.
     CameraRead ReadCamera(D810SettingsCameraAccess& access, D810Camera camera, const D810WriteRunOptions& options) const {
         CameraRead out;
         auto opened = access.Open(camera);
         if (!opened.transport) return out;
         out.verified = D810BodyVerified(table_, opened.model, opened.firmware);
+        const auto cancelled = opened.cancelled;
         bool complete = false;
         try {
-            const auto cancelled = opened.cancelled;
             auto transport = [inner = std::move(opened.transport), cancelled](IPortableDeviceValues* request) {
                 if (D810CancelRaised(cancelled)) throw std::runtime_error("settings read cancelled");
                 return inner(request);
@@ -1035,7 +1036,7 @@ private:
             complete = out.read.Complete();
         } catch (...) {}
         const bool closed = access.Close(camera);
-        out.ok = complete && closed;
+        out.ok = complete && closed && !D810CancelRaised(cancelled);
         return out;
     }
 
