@@ -823,6 +823,12 @@ struct D810RereadResult {
     D810CaptureBlock block{D810CaptureBlock::None};
     std::string reason;
 };
+// The read step of a copy (ADR-0038 decision 5): both cameras, read-only.
+struct D810PlanRead {
+    bool complete{};
+    std::array<D810SettingsSnapshot, 2> snapshots; // CAM-A, CAM-B
+    std::string reason;
+};
 struct D810WriteStatus {
     D810CaptureBlock block{D810CaptureBlock::Unreadable};
     bool capture_allowed{};
@@ -884,6 +890,23 @@ public:
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
         return status;
+    }
+    // The read step of a copy (ADR-0038 decision 5): CAM-A, then CAM-B, each
+    // opened, read with the read-only session and closed. Sends no write and
+    // keeps no session open: the plan is then built with PlanCopy from these
+    // snapshots, and nothing is open while the operator decides.
+    D810PlanRead ReadForPlan(D810SettingsCameraAccess& access, const D810WriteRunOptions& options) {
+        D810PlanRead out;
+        if (!options.may_continue || !options.may_cleanup) { out.reason = "invalid_options"; return out; }
+        if (!owner_.TryAcquire(D810CameraUse::Settings)) { out.reason = "cameras_busy"; return out; }
+        struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
+        for (const auto camera : {D810Camera::A, D810Camera::B}) {
+            auto read = ReadCamera(access, camera, options);
+            if (!read.ok) { out.reason = std::string("read_incomplete:") + D810CameraAlias(camera); return out; }
+            out.snapshots[static_cast<std::size_t>(camera)] = std::move(read.read.readings);
+        }
+        out.complete = true;
+        return out;
     }
     // Build a plan from two fresh stage A reads. It replaces any plan not yet
     // run. `only`: the items the operator keeps (the rest are left out, their

@@ -2,6 +2,7 @@
 // stay off without their approval record). Synthetic bodies only: in-process WPD
 // value objects and files in a temporary folder. No device, no camera.
 #include "a0/phase0/experimental/wpd_settings_write.hpp"
+#include "a0/phase0/experimental/d810_settings_write_screen.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1697,6 +1698,189 @@ void ZeroByteReadsInTheWriteSession() {
         check(bench.access.opens[1] == 1 && bench.b.write_begins == 0, "the latch is down: B opened for the verification read only");
     }
 }
+// --- The screen (D810SettingsWriteScreen), on a worker thread, with the tables of this target -----------------------
+struct BorrowedAccess final: D810SettingsCameraAccess {
+    explicit BorrowedAccess(D810SettingsCameraAccess& inner): inner_(inner) {}
+    D810OpenedCamera Open(D810Camera camera) override { return inner_.Open(camera); }
+    bool Close(D810Camera camera) override { return inner_.Close(camera); }
+private:
+    D810SettingsCameraAccess& inner_;
+};
+struct ScreenBench {
+    Bench bench;
+    std::vector<std::string> log;
+    std::unique_ptr<D810SettingsWriteScreen> screen; // after bench: it is gone (and its worker joined) first
+    explicit ScreenBench(const D810WriteTable& table = kAdr38Table, bool on_disk = false): bench(table, -1, on_disk) { Make(); }
+    explicit ScreenBench(ProductEntry entry): bench(entry) { Make(); }
+    void Make() {
+        D810SettingsWriteScreen::Options options;
+        options.log = [this](const std::string& line) { log.push_back(line); };
+        options.now = [] { return std::string("2000-01-01T00:00:00Z"); };
+        screen = std::make_unique<D810SettingsWriteScreen>(*bench.controller, [this] { return std::make_unique<BorrowedAccess>(bench.access); }, options);
+    }
+    bool WaitIdle() {
+        for (int i = 0; i < 4000; ++i) {
+            screen->Poll();
+            if (!screen->Busy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    }
+    bool Copy() { return screen->RequestCopy(true) && WaitIdle(); }
+    bool Confirm() { return screen->ConfirmShownPlan(true) && WaitIdle(); }
+    bool Reread() { return screen->RequestReread(true) && WaitIdle(); }
+};
+bool Shows(const D810WriteScreenView* view, const std::wstring& part) {
+    if (!view) return false;
+    if (view->title.find(part) != std::wstring::npos) return true;
+    return std::any_of(view->lines.begin(), view->lines.end(), [&](const auto& line) { return line.find(part) != std::wstring::npos; });
+}
+void ScreenCopyFlow() {
+    ScreenBench s;
+    auto& screen = *s.screen;
+    check(screen.CopyOffered(true) && !screen.CopyOffered(false) && screen.Step() == D810WriteScreenStep::Idle, "screen: copy offered when the preview is ready");
+    // Copy: both read (A closed before B), the plan shown, nothing written, nothing confirmed.
+    check(s.Copy(), "screen: copy read");
+    check(screen.Step() == D810WriteScreenStep::Confirming && screen.View() && screen.View()->confirmation, "screen: the confirmation is shown");
+    check(s.bench.Writes() == 0 && s.bench.access.opens[0] == 1 && s.bench.access.opens[1] == 1 && !s.bench.access.overlap, "screen: read only, one at a time");
+    check(screen.Status().plan_pending && !screen.Status().plan_confirmed, "screen: the plan waits for the confirm button");
+    const auto* view = screen.View();
+    check(Shows(view, L"ISO感度: CAM-B の今の値 100 → 書く値 64"), "screen: item, B's value now, the value to write");
+    check(Shows(view, L"シャッター速度: CAM-B の今の値 1/30 s → 書く値 1/6 s") && Shows(view, L"絞り: CAM-B の今の値 F5.6 → 書く値 F8"), "screen: every step");
+    check(Shows(view, L"自動では元に戻りません") && Shows(view, L"1 回だけ") && Shows(view, L"再送しません"), "screen: no undo, once, no resend");
+    check(screen.ConfirmOffered(true) && !screen.ConfirmOffered(false) && !screen.CopyOffered(true), "screen: only confirm or discard now");
+    // The confirm button: written once, read back, matched.
+    check(s.Confirm(), "screen: confirmed and run");
+    check(screen.Step() == D810WriteScreenStep::Idle && Shows(screen.View(), L"一致") && s.bench.Writes() == 3 && NoResend(s.bench.b), "screen: matched");
+    check(s.bench.b.props[0x500f].current == 64 && s.bench.a.write_begins == 0, "screen: B now reads A's value, A untouched");
+    check(screen.AdmitCapture() && screen.Status().capture_allowed, "screen: capture admitted after a match");
+    check(!screen.ConfirmShownPlan(true) && s.bench.Writes() == 3, "screen: the plan was used once");
+    const bool logged = std::any_of(s.log.begin(), s.log.end(), [](const auto& line) { return line.find("settings_write_ui_result verdict=match sent=3") != std::string::npos; });
+    check(logged && std::none_of(s.log.begin(), s.log.end(), [](const auto& line) { return HasIdentifierShape(line); }), "screen: log without identifiers");
+}
+void ScreenRefusals() {
+    {
+        // The preview is not ready (Live, a capture, a read): nothing is read.
+        ScreenBench s;
+        check(!s.screen->RequestCopy(false) && !s.screen->RequestReread(false) && s.bench.access.opens[0] + s.bench.access.opens[1] == 0, "screen: not ready");
+    }
+    {
+        // The product table: no row, so copy cannot be pressed, and the reason says why.
+        ScreenBench s(kProduct);
+        check(s.screen->Status().enabled_rows == 0 && !s.screen->CopyOffered(true) && !s.screen->RequestCopy(true), "screen: product table, no copy");
+        const auto text = s.screen->OfferText(true);
+        check(text.find(L"押せません") != std::wstring::npos && text.find(L"番号（code）") != std::wstring::npos && text.find(L"確かめていない") != std::wstring::npos,
+            "screen: the reason names the unconfirmed codes and body");
+        check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: product table, nothing opened");
+    }
+    {
+        // Discard: nothing written, the plan gone.
+        ScreenBench s;
+        check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Confirming, "screen: plan shown");
+        s.screen->DiscardPlan();
+        check(s.screen->Step() == D810WriteScreenStep::Idle && !s.bench.controller->Status().plan_pending && Shows(s.screen->View(), L"やめました"), "screen: discarded");
+        check(!s.screen->ConfirmShownPlan(true) && s.bench.Writes() == 0, "screen: nothing to confirm after a discard");
+    }
+    {
+        // A Live restart or a new read clears a confirmation that was shown.
+        ScreenBench s;
+        check(s.Copy(), "screen: plan shown");
+        s.screen->ClearView();
+        check(!s.screen->View() && !s.bench.controller->Status().plan_pending && !s.screen->ConfirmShownPlan(true) && s.bench.Writes() == 0, "screen: cleared");
+    }
+    {
+        // CAM-A not in M: nothing to confirm, the operator is told what to do.
+        ScreenBench s;
+        s.bench.a.props[0x500e].current = 3;
+        check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Idle && Shows(s.screen->View(), L"写せません") && Shows(s.screen->View(), L"A の本体で M に"),
+            "screen: A not in M");
+        check(s.bench.Writes() == 0 && !s.bench.controller->Status().plan_pending, "screen: nothing planned");
+    }
+    {
+        // No difference: nothing to write.
+        ScreenBench s;
+        s.bench.b = Body(1667, 800, 64);
+        check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Idle && Shows(s.screen->View(), L"書くものはありません") && s.bench.Writes() == 0, "screen: no difference");
+    }
+    {
+        // A camera that does not open (the identity does not match): nothing written.
+        ScreenBench s;
+        s.bench.access.open_fail[1] = true;
+        check(s.Copy() && Shows(s.screen->View(), L"読めませんでした") && s.bench.Writes() == 0, "screen: B not opened");
+    }
+}
+void ScreenSkippedShown() {
+    // A row the table does not enable is listed as left out, with the reason, before confirming (Marin).
+    ScreenBench s(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
+    check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Confirming, "screen: plan with a row left out");
+    check(Shows(s.screen->View(), L"外した項目") && Shows(s.screen->View(), L"ISO感度: 表で無効の項目です"), "screen: skipped and why");
+    check(!Shows(s.screen->View(), L"ISO感度: CAM-B の今の値"), "screen: the skipped item is not a step");
+    check(s.Confirm() && s.bench.b.props[0x500f].current == 100 && s.bench.Writes() == 2, "screen: the skipped item was not written");
+}
+void ScreenBlockAndReread() {
+    ScreenBench s(kAdr38Table, true); // the record on disk
+    s.bench.b.apply_as[0x5007] = 1100;
+    check(s.Copy() && s.Confirm(), "screen: run");
+    check(Shows(s.screen->View(), L"不一致") && !s.screen->AdmitCapture() && s.screen->CaptureRefusalText().find(L"不一致") != std::wstring::npos, "screen: mismatch holds capture");
+    check(s.screen->CopyOffered(true) && s.screen->RereadOffered(true), "screen: after a mismatch a new copy or a reread may be made");
+    check(s.Reread() && Shows(s.screen->View(), L"違う項目") && Shows(s.screen->View(), L"絞り") && !s.screen->AdmitCapture(), "screen: reread finds the difference, still held");
+    check(s.bench.Writes() == 3, "screen: reread writes nothing");
+    s.bench.b.props[0x5007].current = 800;
+    check(s.Reread() && Shows(s.screen->View(), L"同じです") && s.screen->AdmitCapture(), "screen: equal on both: released");
+    check(s.bench.Restarted().CaptureAllowed(), "screen: released also after a restart");
+}
+void ScreenPartialFailure() {
+    // The first item matches, the second is refused at its END: unknown, the third never sent, capture held.
+    ScreenBench s;
+    s.bench.b.end_reject[0x500d] = 0x2005;
+    check(s.Copy() && s.Confirm(), "screen: run");
+    check(Shows(s.screen->View(), L"不明") && Shows(s.screen->View(), L"ISO感度: CAM-B の今の値 100 → 書く値 64 / 結果: 一致"), "screen: per item results");
+    check(Shows(s.screen->View(), L"シャッター速度: CAM-B の今の値 1/30 s → 書く値 1/6 s / 結果: 不明"), "screen: the failed item is unknown");
+    check(s.bench.b.begins_by_code.count(0x5007) == 0 && NoResend(s.bench.b), "screen: the rest not sent");
+    check(!s.screen->AdmitCapture() && !s.screen->CopyOffered(true) && s.screen->RereadOffered(true), "screen: unknown: only the reread is offered");
+}
+void ScreenCancelAndStop() {
+    {
+        // The watchdog's flag during WRITE_DATA, from another thread: unknown, no END, held.
+        ScreenBench s;
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        s.bench.access.cancel[1] = flag;
+        s.bench.b.after = [flag](const std::string& entry) { if (entry == "write_data") flag->store(true); };
+        check(s.Copy() && s.Confirm(), "screen: run");
+        check(s.bench.b.write_ends == 0 && s.bench.access.after_cancel[1] == 0 && Shows(s.screen->View(), L"不明") && !s.screen->AdmitCapture(), "screen: cancel: unknown, held");
+    }
+    {
+        // The window closes while the write runs: the stop flag ends it after the open write; capture held,
+        // no capture admitted and no other operation offered while it runs.
+        ScreenBench s;
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool entered = false, released = false;
+        s.bench.b.after = [&](const std::string& entry) {
+            if (entry != "write_end") return;
+            std::unique_lock lock(mutex);
+            if (entered) return;
+            entered = true;
+            wake.notify_all();
+            wake.wait(lock, [&] { return released; });
+        };
+        check(s.Copy() && s.screen->ConfirmShownPlan(true), "screen: run started");
+        {
+            std::unique_lock lock(mutex);
+            check(wake.wait_for(lock, std::chrono::seconds(30), [&] { return entered; }), "screen: the write reached its END");
+        }
+        check(s.screen->Busy() && !s.screen->AdmitCapture() && !s.screen->CopyOffered(true) && !s.screen->RereadOffered(true), "screen: busy: nothing else");
+        check(!s.screen->CaptureRefusalText().empty(), "screen: busy: the capture refusal says why");
+        s.screen->Stop();
+        {
+            std::lock_guard lock(mutex);
+            released = true;
+        }
+        wake.notify_all();
+        check(s.WaitIdle(), "screen: the worker ended");
+        check(s.bench.Writes() == 1 && s.bench.b.write_ends == 1 && Shows(s.screen->View(), L"不明") && !s.screen->AdmitCapture(), "screen: stopped after the open write");
+    }
+}
 void OwnershipIsCompareAndSwap() {
     D810CameraOwnership owner;
     check(owner.TryAcquire(D810CameraUse::Settings) && !owner.TryAcquire(D810CameraUse::Live) && !owner.TryAcquire(D810CameraUse::Capture), "one owner");
@@ -1745,6 +1929,12 @@ int main() {
     run("StopsBeforeSending", StopsBeforeSending);
     run("WatchdogCancel", WatchdogCancel);
     run("ZeroByteReadsInTheWriteSession", ZeroByteReadsInTheWriteSession);
+    run("ScreenCopyFlow", ScreenCopyFlow);
+    run("ScreenRefusals", ScreenRefusals);
+    run("ScreenSkippedShown", ScreenSkippedShown);
+    run("ScreenBlockAndReread", ScreenBlockAndReread);
+    run("ScreenPartialFailure", ScreenPartialFailure);
+    run("ScreenCancelAndStop", ScreenCancelAndStop);
     run("OwnershipIsCompareAndSwap", OwnershipIsCompareAndSwap);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";
