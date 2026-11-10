@@ -104,8 +104,14 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
     else if(choice.mode==PreviewCMode::unavailable)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(*plan.skip);
     Log(line.str());
 }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp)
+#endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(SettingsWriteBusy())return false; // a settings write or reread holds the cameras: no AF, no capture
+#endif
     return !stopping && !closing && !capture_pending && !capture_future.valid() && !settings_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
         Clock::now()-camera.last<std::chrono::seconds(2) && camera.focus_mailbox.Available();
 }
@@ -284,6 +290,9 @@ void MergeLoop(std::stop_token stop){
 }
 void StartPreview(){
     if(capture_future.valid() || settings_future.valid() || camera_workers[0].joinable() || camera_workers[1].joinable() || merge_worker.joinable())throw std::runtime_error("preview workers must be closed before restart");
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(SettingsWriteBusy())throw std::runtime_error("a settings write or reread holds the cameras");
+#endif
     stopping=false;camera_end_observed=false;ready_count=0;preview_joined=false;ClearMerge();DiscardSettingsView();
     if(!cleanup_only)LoadFixedSource(); // before the merge worker exists (#401)
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->id=registered_ids[i];cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
@@ -522,6 +531,9 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     }
     RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+48};
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(preview_joined && settings_write && settings_write->screen->ConfirmationShown() && DrawSettingsWrite(dc,client))return drawn; // never under the review
+#endif
     if(review_visible && !review_pixels.bytes.empty()){
         const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
         TextOutW(dc,12,client.bottom/2+88,title,lstrlenW(title));
@@ -650,6 +662,11 @@ void AdvanceCapture(HWND hwnd){
     }
     if(!preview_joined && cameras[0]->done && cameras[1]->done){
         const bool safe=FinishPreview();
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        // The start of the capture worker looks at the write again: a write or reread, or a held capture, drops it.
+        if(capture_pending && !closing && !SettingsWriteAdmitsCapture())capture_pending.reset();
+        else
+#endif
         if(capture_pending && !closing){
             const int index=*capture_pending;capture_pending.reset();
             if(safe){
@@ -703,6 +720,9 @@ void AdvanceCapture(HWND hwnd){
             Log("ui_capture_failed no_retry=1");
         }
     }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(closing && SettingsWriteHoldsWindow(hwnd))return; // a write or reread is waited for the same way
+#endif
     // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
     if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
 }
@@ -1340,7 +1360,7 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     if(capture_future.valid()){auto result=capture_future.get();all_sessions_passed=all_sessions_passed && result.capture.success && result.capture.closed;}
     if(state<0)all_sessions_passed=false;
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
-    if(capture_once_alias && all_sessions_passed && !SettingsWriteAdmitsCapture())return 1;
+    if(CaptureOnceHeld())return 1;
 #endif
     if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;}
     if(!cleanup_only){std::lock_guard lock(merged.mutex);

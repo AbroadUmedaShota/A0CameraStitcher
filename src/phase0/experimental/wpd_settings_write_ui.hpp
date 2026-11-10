@@ -119,6 +119,26 @@ bool settings_write_required=false;
 unsigned settings_write_refresh_ticks{};
 HWND settings_copy_button{},settings_reread_button{},settings_confirm_button{},settings_discard_button{};
 bool SettingsWriteBusy(){return settings_write && settings_write->screen->Busy();}
+// A confirmation is offered only when every one of its lines is drawn in the window as it is now (fail closed:
+// no client area, no confirm button).
+bool SettingsWriteViewFits(HWND window){
+    const auto* view=settings_write?settings_write->screen->View():nullptr;
+    if(!view || !view->confirmation)return true;
+    RECT rect{};
+    return window && GetClientRect(window,&rect) && D810WriteViewFits(*view,rect.bottom);
+}
+bool settings_write_wait_shown=false;
+// The window was asked to close while a write or reread still runs: it stays until the worker has closed its camera
+// (the operator must not unplug or switch off the body meanwhile), and says so.
+bool SettingsWriteHoldsWindow(HWND window){
+    if(!SettingsWriteBusy())return false;
+    if(!settings_write_wait_shown){
+        settings_write_wait_shown=true;
+        capture_status=L"設定の書き込み・読み直しの終わりを待っています。終わるまで USB を抜かず、本体の電源を切らないでください。";
+        SetWindowTextW(window,L"A0 - 設定の書き込みの終わりを待っています（USB を抜かないでください）");
+    }
+    return true;
+}
 void DiscardSettingsWriteView(){if(settings_write)settings_write->screen->ClearView();}
 void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){
     auto host=std::make_unique<SettingsWriteHost>();
@@ -177,6 +197,8 @@ bool SettingsWriteAdmitsCapture(){
     Log(std::string("ui_capture_refused_settings_write=1 block=")+D810CaptureBlockToken(screen.Status().block)+" busy="+std::to_string(screen.Busy())+" shutter_commands=0");
     return false;
 }
+// The one-shot capture of --capture-a / --capture-b, after the window ended: held while the record holds capture.
+bool CaptureOnceHeld(){return capture_once_alias && all_sessions_passed && !SettingsWriteAdmitsCapture();}
 // The buttons. Each handler checks the conditions again (the button state is not trusted).
 bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     if(!settings_write || code!=BN_CLICKED)return false;
@@ -189,6 +211,7 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     }
     // The confirm button is the only caller of the controller's Confirm.
     if(id==407 && control==settings_confirm_button){
+        if(!SettingsWriteViewFits(GetParent(control))){capture_status=L"確認の内容が窓に入りません。窓を大きくしてください。何も書いていません。";return true;}
         if(screen.ConfirmShownPlan(ready))capture_status=L"CAM-B に書いています（項目ごとに1回だけ）…";
         else capture_status=screen.StatusLine().empty()?screen.OfferText(ready):screen.StatusLine();
         return true;
@@ -207,6 +230,7 @@ void SettingsWriteTimer(){
     auto& screen=*settings_write->screen;
     if(closing)screen.Stop(); // Only set. The worker ends, closes its camera; the lease waits for it.
     if(screen.Poll()){
+        review_visible=false; // a finished plan or result is shown, not a picture asked for while it was being made
         capture_status=screen.StatusLine();
         if(screen.CloseFailed())settings_close_failed=true; // as stage A: no further read, write or Live restart
     }else if(!screen.Busy() && ++settings_write_refresh_ticks>=40){settings_write_refresh_ticks=0;screen.Refresh();}
@@ -214,7 +238,7 @@ void SettingsWriteTimer(){
     const bool confirming=screen.Step()==D810WriteScreenStep::Confirming;
     ShowSettingsWriteButton(settings_copy_button,shown,screen.CopyOffered(ready));
     ShowSettingsWriteButton(settings_reread_button,shown,screen.RereadOffered(ready));
-    ShowSettingsWriteButton(settings_confirm_button,shown && confirming,screen.ConfirmOffered(ready));
+    ShowSettingsWriteButton(settings_confirm_button,shown && confirming,screen.ConfirmOffered(ready) && SettingsWriteViewFits(GetParent(settings_confirm_button)));
     ShowSettingsWriteButton(settings_discard_button,shown && confirming,confirming && !screen.Busy());
     if(screen.Busy() || !screen.Status().capture_allowed){
         for(auto button:capture_buttons)if(button)EnableWindow(button,FALSE);
@@ -226,21 +250,23 @@ void SettingsWriteTimer(){
 bool DrawSettingsWrite(HDC dc,RECT client){
     if(!settings_write)return false;
     auto& screen=*settings_write->screen;
-    const auto offer=screen.OfferText(CanReadSettings());
+    auto offer=screen.OfferText(CanReadSettings());
+    const auto* view=screen.View();
+    if(view && view->confirmation && !D810WriteViewFits(*view,client.bottom))
+        offer=L"確認の内容が窓に入りません。窓を大きくすると「書き込む（1回だけ）」を押せます。";
     RECT offer_rect{12,client.bottom-80,client.right-12,client.bottom-44};
     SetTextColor(dc,screen.Status().capture_allowed?RGB(240,240,240):RGB(255,200,90));
     DrawTextW(dc,offer.c_str(),-1,&offer_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);
     SetTextColor(dc,RGB(240,240,240));
-    const auto* view=screen.View();
     if(!view)return false;
-    const int top=client.bottom/2+88,bottom=client.bottom-84;
+    const int top=client.bottom/2+88;
     SetTextColor(dc,view->confirmation?RGB(255,200,90):RGB(240,240,240));
     TextOutW(dc,12,top,view->title.c_str(),static_cast<int>(view->title.size()));
     SetTextColor(dc,RGB(240,240,240));
     int y=top+30;
-    for(const auto& line:view->lines){
-        if(y+22>bottom)break;
-        RECT area{12,y,client.right-12,y+22};DrawTextW(dc,line.c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);y+=22;
+    const auto visible=std::min(view->lines.size(),D810WriteViewVisibleLines(client.bottom));
+    for(std::size_t i=0;i<visible;++i){
+        RECT area{12,y,client.right-12,y+22};DrawTextW(dc,view->lines[i].c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);y+=22;
     }
     return true;
 }
@@ -259,6 +285,7 @@ void FinishSettingsWrite(){
 // nothing: it counts the calls and hands out no transport. No Discover, no device, no hardware lease.
 LRESULT CALLBACK WindowProc(HWND,UINT,WPARAM,LPARAM);
 void RequestCapture(int index);
+void StartPreview();
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client);
 class NoCameraSettingsAccess final:public D810SettingsCameraAccess {
 public:
@@ -267,6 +294,20 @@ public:
     bool Close(D810Camera)override{return false;}
 private:
     std::shared_ptr<std::atomic<int>> opens_;
+};
+// An access whose Open waits (at most 20 s) until released: a reread that has not ended. Opens nothing.
+class BlockingSettingsAccess final:public D810SettingsCameraAccess {
+public:
+    struct Gate {std::atomic<int> entered{};std::atomic<bool> release{};};
+    explicit BlockingSettingsAccess(std::shared_ptr<Gate> gate):gate_(std::move(gate)){}
+    D810OpenedCamera Open(D810Camera)override{
+        ++gate_->entered;
+        for(int i=0;i<4000 && !gate_->release.load();++i)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return {};
+    }
+    bool Close(D810Camera)override{return false;}
+private:
+    std::shared_ptr<Gate> gate_;
 };
 int RunSettingsWriteUiSmoke(){
     Log("settings_write_ui_synthetic=1 camera_operations=0");
@@ -328,6 +369,11 @@ int RunSettingsWriteUiSmoke(){
     capture_pending.reset();RequestCapture(0);
     check(capture_pending.has_value());
     capture_pending.reset();stopping=false;
+    // The one-shot capture (--capture-a / --capture-b) is held only by the record, and only when it was asked for.
+    const bool passed_before=all_sessions_passed;
+    capture_once_alias=0;check(!CaptureOnceHeld());
+    all_sessions_passed=false;check(!CaptureOnceHeld());
+    all_sessions_passed=passed_before;capture_once_alias.reset();
 
     // 2. A restart after a write that never wrote its end line: capture is held from the start.
     settings_write.reset();
@@ -341,6 +387,9 @@ int RunSettingsWriteUiSmoke(){
     screen=settings_write->screen.get();
     check(screen->Status().block==D810CaptureBlock::Unconfirmed && !screen->Status().capture_allowed);
     check(capture_status.find(L"未確認")!=std::wstring::npos);
+    capture_once_alias=1;check(CaptureOnceHeld());                    // --capture-b: held by the record
+    all_sessions_passed=false;check(!CaptureOnceHeld());              // a run that already failed does not reach it
+    all_sessions_passed=passed_before;capture_once_alias.reset();check(!CaptureOnceHeld());
     run_live();tick();
     check(!IsWindowEnabled(capture_buttons[0]) && !IsWindowEnabled(capture_buttons[1]) && !IsWindowEnabled(pair_button));
     for(int index=0;index<3;++index){capture_pending.reset();RequestCapture(index);check(!capture_pending.has_value());}
@@ -356,11 +405,72 @@ int RunSettingsWriteUiSmoke(){
     check(screen->View() && screen->View()->title.find(L"読み直しを最後まで終えられませんでした")!=std::wstring::npos);
     check(drawn_in(960/2+88,960/2+130)>50); // the result in place of C
 
-    // 4. The window closes: the stop flag is set and nothing is left running.
-    SendMessageW(window,WM_CLOSE,0,0);tick();
+    // 4. A reread that has not ended (its Open waits): the cameras are held against everything that could ask for
+    //    them. The backend and the restart are counting stand-ins, so that a missing guard cannot reach a camera.
+    settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+    auto gate=std::make_shared<BlockingSettingsAccess::Gate>();
+    InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),[gate]{return std::make_unique<BlockingSettingsAccess>(gate);});
+    screen=settings_write->screen.get();
+    const auto saved_backend=settings_backend;const auto saved_override=preview_restart_override;
+    unsigned backend_calls{},restarts{};
+    settings_backend=[&](int index,const std::wstring&,Clock::time_point,const std::atomic<bool>&){
+        ++backend_calls;SettingsCameraResult result;result.read.alias=index==0?"CAM-A":"CAM-B";MarkSettingsUnread(result,"not_started");return result;};
+    preview_restart_override=[&]{++restarts;};
+    const auto wait_entered=[&]{for(int i=0;i<1000 && gate->entered.load()<1;++i)std::this_thread::sleep_for(std::chrono::milliseconds(5));return gate->entered.load()>=1;};
+    const auto release_gate=[&]{gate->release.store(true);};
+    stop_live();tick();
+    check(CanReadSettings() && screen->RereadOffered(true) && !SettingsWriteBusy());
+    const auto sessions_before=preview_sessions,reads_before=settings_reads_started,restarts_before=manual_preview_restarts;
+    click(409,settings_reread_button);
+    check(wait_entered() && SettingsWriteBusy());
+    tick();
+    check(!CanReadSettings() && !CanRestartPreview());
+    click(403,session_button);click(405,settings_button);
+    check(restarts==0 && manual_preview_restarts==restarts_before && settings_reads_started==reads_before && backend_calls==0 && !settings_future.valid());
+    {   // StartPreview itself refuses (cleanup_only: a missing guard would start no camera and read no condition file)
+        const bool was_cleanup_only=cleanup_only;cleanup_only=true;
+        bool refused=false;
+        try{StartPreview();}catch(const std::runtime_error& error){refused=std::string(error.what()).find("settings write")!=std::string::npos;}
+        cleanup_only=was_cleanup_only;
+        check(refused && preview_sessions==sessions_before);
+    }
+    run_live();tick();   // the cameras look alive: still no AF, no capture
+    check(!CanFocus(*cameras[0]) && !CanFocus(*cameras[1]));
+    for(int index=0;index<3;++index){capture_pending.reset();RequestCapture(index);check(!capture_pending.has_value());}
+    check(!IsWindowEnabled(capture_buttons[0]) && !IsWindowEnabled(capture_buttons[1]) && !IsWindowEnabled(pair_button));
+    {   // A capture asked for before the write, whose Live sessions have just been joined: the worker is not started.
+        const bool passed_then=all_sessions_passed;
+        stop_live();preview_joined=false;capture_stop_requested=true;capture_pending=0;
+        tick();
+        check(preview_joined && !capture_pending.has_value() && !capture_future.valid() && capture_status.find(L"途中")!=std::wstring::npos);
+        capture_stop_requested=false;all_sessions_passed=passed_then;
+    }
+    stop_live();
+    review_pixels={1,1,{0,0,0,255}};review_visible=true; // a picture asked for while the reread runs
+    release_gate();
+    check(wait_idle());
+    check(!review_visible && screen->View() && drawn_in(960/2+88,960/2+130)>50); // the result is shown, not the picture
+    review_pixels={};
+
+    // 5. The window is asked to close while a reread runs: it stays until the worker has closed its camera.
+    gate->release.store(false);gate->entered.store(0);
+    tick();
+    check(CanReadSettings() && screen->RereadOffered(true));
+    click(409,settings_reread_button);
+    check(wait_entered() && SettingsWriteBusy());
+    SendMessageW(window,WM_CLOSE,0,0);
+    for(int i=0;i<10;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+    GetWindowTextW(window,caption,256);
+    check(closing && IsWindow(window) && SettingsWriteBusy() && std::wstring(caption).find(L"終わりを待っています")!=std::wstring::npos);
+    check(capture_status.find(L"USB を抜かず")!=std::wstring::npos);
+    release_gate();
+    bool window_gone=false;
+    for(int i=0;i<400 && !window_gone;++i){tick();window_gone=!IsWindow(window);if(!window_gone)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+    check(window_gone && !SettingsWriteBusy());
     check(closing && !SettingsWriteBusy());
     FinishSettingsWrite();
     if(IsWindow(window))DestroyWindow(window);
+    settings_backend=saved_backend;preview_restart_override=saved_override;
     settings_write.reset();
     std::filesystem::remove_all(folder,ignored);
     stopping=true;
