@@ -26,7 +26,7 @@ using Matrix3 = std::array<double, 9>;
 using Placement = std::array<double, 3>; // theta, tx, ty
 
 // Columns of one Jacobian row: H (8, h22 fixed to 1), the five coefficients, then theta, tx, ty.
-constexpr std::size_t kDistortionColumn = 8, kPlacementColumn = 13, kCameraColumns = 13, kColumns = 16;
+constexpr std::size_t kDistortionColumn = 8, kPlacementColumn = 13, kColumns = 16;
 constexpr double kMaximumNominalMm = 10000;
 
 bool InOpenUnitInterval(double value) { return std::isfinite(value) && value > 0 && value < 1; }
@@ -154,8 +154,8 @@ std::optional<Projection> Project(const PinholeIntrinsics& k, const Matrix3& h, 
 }
 
 // ---------------------------------------------------------------------------
-// Levenberg-Marquardt problem. theta = [h0..h7 | k1 k2 k3 p1 p2 | (theta, tx, ty) per placement].
-// The first thirteen are left out when the camera is fixed (held-out placement).
+// Levenberg-Marquardt problem. theta = [h0..h7 | solved ones of k1 k2 k3 p1 p2 | (theta, tx, ty) per placement].
+// The camera columns are left out when the camera is fixed (held-out placement).
 
 struct State {
     Matrix3 h; // h[8] == 1, not a parameter
@@ -167,13 +167,25 @@ struct View {
     std::optional<std::size_t> placement; // null: the overlap view, T = I
 };
 
+// Camera columns that are solved, in Jacobian order: H (0..7), then k1 k2 k3 p1 p2 (8..12)
+// when selected. A coefficient left out has no column, so the normal equations stay
+// positive definite and the coefficient stays at its start value, 0.
+std::vector<std::size_t> SolvedCameraColumns(const SolvedCoefficients& solved) {
+    std::vector<std::size_t> columns{0, 1, 2, 3, 4, 5, 6, 7};
+    const std::array<bool, 5> selected{solved.k1, solved.k2, solved.k3, solved.p1, solved.p2};
+    for (std::size_t j = 0; j < selected.size(); ++j) if (selected[j]) columns.push_back(kDistortionColumn + j);
+    return columns;
+}
+
 struct PlanarProblem {
     const PinholeIntrinsics& k;
     const std::vector<View>& views;
     bool fixed;
     std::size_t placement_count;
+    std::vector<std::size_t> camera_columns = SolvedCameraColumns({});
 
-    std::size_t Size() const { return (fixed ? 0 : kCameraColumns) + 3 * placement_count; }
+    std::size_t CameraSize() const { return fixed ? 0 : camera_columns.size(); }
+    std::size_t Size() const { return CameraSize() + 3 * placement_count; }
     std::optional<double> Evaluate(const State& state) const {
         double cost = 0;
         for (const auto& view : views) {
@@ -192,11 +204,11 @@ struct PlanarProblem {
         const std::size_t n = Size();
         a.assign(n * n, 0.0);
         g.assign(n, 0.0);
-        const std::size_t base = fixed ? 0 : kCameraColumns;
+        const std::size_t base = CameraSize();
         std::array<std::size_t, kColumns> local{}, global{};
         for (const auto& view : views) {
             std::size_t used = 0;
-            if (!fixed) for (std::size_t c = 0; c < kCameraColumns; ++c) { local[used] = c; global[used] = c; ++used; }
+            if (!fixed) for (std::size_t c = 0; c < camera_columns.size(); ++c) { local[used] = camera_columns[c]; global[used] = c; ++used; }
             if (view.placement) for (std::size_t c = 0; c < 3; ++c) {
                 local[used] = kPlacementColumn + c;
                 global[used] = base + 3 * *view.placement + c;
@@ -226,13 +238,16 @@ struct PlanarProblem {
         State next = current;
         std::size_t offset = 0;
         if (!fixed) {
-            for (std::size_t j = 0; j < 8; ++j) next.h[j] += delta[j];
-            next.d.k1 += delta[8];
-            next.d.k2 += delta[9];
-            next.d.k3 += delta[10];
-            next.d.p1 += delta[11];
-            next.d.p2 += delta[12];
-            offset = kCameraColumns;
+            for (std::size_t i = 0; i < camera_columns.size(); ++i) {
+                const std::size_t column = camera_columns[i];
+                if (column < kDistortionColumn) next.h[column] += delta[i];
+                else if (column == kDistortionColumn) next.d.k1 += delta[i];
+                else if (column == kDistortionColumn + 1) next.d.k2 += delta[i];
+                else if (column == kDistortionColumn + 2) next.d.k3 += delta[i];
+                else if (column == kDistortionColumn + 3) next.d.p1 += delta[i];
+                else next.d.p2 += delta[i];
+            }
+            offset = camera_columns.size();
         }
         for (std::size_t p = 0; p < next.placements.size(); ++p) for (std::size_t j = 0; j < 3; ++j) next.placements[p][j] += delta[offset + 3 * p + j];
         return next;
@@ -366,6 +381,20 @@ std::optional<Points> Gather(const CalibrationObservationSession& session, const
     }
     return points;
 }
+// True when the pixel is closer than `margin` to the nearest border of a
+// width x height image (sample centres run from 0 to width - 1 and height - 1).
+// A margin of 0 never excludes.
+bool NearImageEdge(double u, double v, std::uint32_t width, std::uint32_t height, double margin) {
+    if (!(margin > 0)) return false;
+    return std::min({u, v, (width - 1.0) - u, (height - 1.0) - v}) < margin;
+}
+// Removes the points near an image border; returns how many were removed.
+std::uint32_t DropNearImageEdge(Points& points, std::uint32_t width, std::uint32_t height, double margin) {
+    const auto before = points.size();
+    points.erase(std::remove_if(points.begin(), points.end(),
+        [&](const Correspondence& point) { return NearImageEdge(point.u, point.v, width, height, margin); }), points.end());
+    return static_cast<std::uint32_t>(before - points.size());
+}
 // DLT of chart -> (u, v), normalized to h22 = 1.
 std::optional<Matrix3> Homography(const Points& points) {
     std::vector<pose_detail::PlanarObservation> observations;
@@ -468,6 +497,8 @@ CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, 
         const auto& ids = f == 0 && overlap_point_ids ? *overlap_point_ids : members[fitted[f]]->used_point_ids;
         auto points = Gather(session, *members[fitted[f]], ids);
         if (!points) { out.views[fitted[f]].outcome = PlanarViewOutcome::NumericalFailure; return out; }
+        out.edge_excluded_points += DropNearImageEdge(*points, members[fitted[f]]->width_pixels, members[fitted[f]]->height_pixels,
+            request.edge_margin_pixels);
         views.push_back({std::move(*points), f == 0 ? std::nullopt : std::optional<std::size_t>{f - 1}});
     }
     const auto h_start = Homography(views[0].points);
@@ -480,7 +511,7 @@ CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, 
         start.placements.push_back(*placement);
     }
 
-    auto outcome = lm_detail::Run(PlanarProblem{k, views, false, training.size()}, std::move(start), policy);
+    auto outcome = lm_detail::Run(PlanarProblem{k, views, false, training.size(), SolvedCameraColumns(request.solved)}, std::move(start), policy);
     if (!outcome) return out;
     out.solver = outcome->record;
     if (outcome->record.stop_reason == SolverStopReason::MaximumIterations) { out.status = PlanarCameraStatus::SolverNonconvergence; return out; }
@@ -663,6 +694,7 @@ PlanarCameraCoverage Coverage(const CalibrationObservationSession& session, cons
         for (const auto& id : view.used_point_ids) {
             const auto pixel = pixels.find(id);
             if (pixel == pixels.end()) continue; // Parse guarantees a detected pixel
+            if (NearImageEdge(pixel->second.x, pixel->second.y, view.width_pixels, view.height_pixels, request.edge_margin_pixels)) continue;
             ++out.fit_point_cells[cell(pixel->second.y, view.height_pixels) * 4 + cell(pixel->second.x, view.width_pixels)];
         }
     }

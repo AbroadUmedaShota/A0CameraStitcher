@@ -575,6 +575,13 @@ if(BUILD_TESTING AND A0_BUILD_DRAFT_CALIBRATOR)
     add_test(NAME m2_planar_calibration_contracts
         COMMAND m2_planar_calibration_contracts $<TARGET_FILE:A0CameraStitcher.DraftCalibrator>)
     set_tests_properties(m2_planar_calibration_contracts PROPERTIES TIMEOUT 1200)
+
+    # Model comparison script (#374): synthetic scenario from --write-fixture. Needs PowerShell 7.5+.
+    add_test(NAME m2_planar_model_compare
+        COMMAND pwsh -NoProfile -File "${CMAKE_SOURCE_DIR}/tests/planar_model_compare_tests.ps1"
+            -CalibratorExecutable "$<TARGET_FILE:A0CameraStitcher.DraftCalibrator>"
+            -ContractsExecutable "$<TARGET_FILE:m2_planar_calibration_contracts>")
+    set_tests_properties(m2_planar_model_compare PROPERTIES TIMEOUT 1200)
 endif()
 if(BUILD_TESTING)
     add_executable(m2_calibration_view_geometry_contracts tests/calibration_view_geometry_tests.cpp)

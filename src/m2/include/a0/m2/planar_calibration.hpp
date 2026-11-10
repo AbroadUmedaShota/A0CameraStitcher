@@ -30,9 +30,24 @@ struct NominalCamera {
     double sensor_height_mm; // stored-order height, finite, (0, 10000]
 };
 
+// Which Brown-Conrady coefficients the estimate solves for. A coefficient that
+// is not solved is fixed to 0 (the profile format keeps all five). The default
+// solves all five, which is the estimate before this selection existed.
+struct SolvedCoefficients {
+    bool k1 = true, k2 = true, k3 = true, p1 = true, p2 = true;
+    [[nodiscard]] bool All() const { return k1 && k2 && k3 && p1 && p2; }
+    friend bool operator==(const SolvedCoefficients&, const SolvedCoefficients&) = default;
+};
+
 struct PlanarCalibrationRequest {
     std::array<std::string, 2> overlap_view_ids; // CAM-A, then CAM-B: the same flat placement seen by both
     std::array<NominalCamera, 2> nominal;        // CAM-A, then CAM-B
+    SolvedCoefficients solved;                   // both cameras use the same selection
+    // Observed points closer than this to an image border (pixels, in the view's own
+    // image, measured to the nearest of the four borders) are left out of the fit of the
+    // training and overlap views. 0 leaves out nothing, which is the estimate before this
+    // option existed. Validation views and the seam measures use every point.
+    double edge_margin_pixels = 0;               // finite, >= 0
 };
 
 // Numerical stopping criteria only, not optical or quality thresholds. No defaults.
@@ -154,6 +169,7 @@ struct CameraPlanarResult {
     std::optional<ResidualSummary> held_out_residual; // pooled over evaluated validation views
     Straightness fit_straightness;
     Straightness held_out_straightness;
+    std::uint32_t edge_excluded_points = 0;           // fit points (training and overlap) left out by edge_margin_pixels
 };
 
 struct PlanarCalibrationResult {
@@ -162,7 +178,8 @@ struct PlanarCalibrationResult {
 
 // The two cameras share only the overlap placement, which is fixed to T = I,
 // so their problems separate exactly and each is solved by one
-// Levenberg-Marquardt over H_c, the five coefficients and (theta, tx, ty) of
+// Levenberg-Marquardt over H_c, the solved coefficients (all five unless the
+// request selects fewer; the others stay 0) and (theta, tx, ty) of
 // every training view. Start: DLT of the overlap view for H_c, DLT of each
 // training view composed with H_c^-1 for its placement, zero distortion.
 // Validation views are held out: H_c and the coefficients are fixed, the

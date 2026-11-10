@@ -114,7 +114,10 @@ struct Scenario {
     double noise = 0;
 };
 
-std::string Session(const Scenario& scenario, bool drop_validation = false) {
+// edge_error_band > 0: in the training and reference views, every point whose true pixel is closer than
+// the band to an image border is observed 6 px right and 4 px down of where it is (a localized detection
+// error); validation views stay exact.
+std::string Session(const Scenario& scenario, bool drop_validation = false, double edge_error_band = 0) {
     std::string chart = "[";
     for (int r = 0; r < kRows; ++r) for (int c = 0; c < kColumns; ++c) {
         if (chart.size() > 1) chart += ',';
@@ -140,7 +143,10 @@ std::string Session(const Scenario& scenario, bool drop_validation = false) {
             auto& part = index % 2 == 0 ? pose : measurement;
             if (part.size() > 1) part += ',';
             part += id;
-            const double u = pixel->x + Wiggle(view_number, index, 0, scenario.noise), v = pixel->y + Wiggle(view_number, index, 1, scenario.noise);
+            const bool bad_edge = edge_error_band > 0 && view.role != "validation"
+                && std::min({pixel->x, pixel->y, kWidth - 1.0 - pixel->x, kHeight - 1.0 - pixel->y}) < edge_error_band;
+            const double u = pixel->x + Wiggle(view_number, index, 0, scenario.noise) + (bad_edge ? 6.0 : 0.0);
+            const double v = pixel->y + Wiggle(view_number, index, 1, scenario.noise) + (bad_edge ? 4.0 : 0.0);
             observations += "{\"pointId\":" + id + ",\"state\":\"detected\",\"pixel\":{\"x\":" + N(u) + ",\"y\":" + N(v) + "}}";
             ++index;
         }
@@ -529,6 +535,212 @@ void TestSeam() {
     }
 }
 
+// Coefficient selection (distortionCoefficients): the coefficients that are not
+// solved stay exactly 0, the solved ones return to the known values, and a job
+// without the key (or with all five) writes the bytes of the five-coefficient estimate.
+std::string SelectionOverride(const std::string& names) { return "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"distortionCoefficients\":" + names; }
+std::array<double, 5> CoefficientsOf(const JsonValue& camera_report) {
+    const auto& d = At(camera_report, "distortion");
+    return {Value(At(d, "k1")), Value(At(d, "k2")), Value(At(d, "k3")), Value(At(d, "p1")), Value(At(d, "p2"))};
+}
+void CheckSelection(const char* label, const std::string& names, const std::array<bool, 5>& solved,
+    const std::array<syn::DistortionSpec, 2>& truth_lens) {
+    auto scenario = MakeScenario(0, 1, 0, 0);
+    scenario.truth[0].d = truth_lens[0];
+    scenario.truth[1].d = truth_lens[1];
+    const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, SelectionOverride(names)));
+    Check(output.ok, std::string(label) + ": the reduced model produces a draft");
+    if (!output.ok) return;
+    const auto report = Tree(output.report_json);
+    Check(At(report, "distortionModel").kind == JsonKind::object, std::string(label) + ": the report records the model");
+    const auto& model = At(report, "distortionModel");
+    const char* const keys[5] = {"k1", "k2", "k3", "p1", "p2"};
+    std::vector<std::string> want_solved, want_fixed;
+    for (std::size_t j = 0; j < 5; ++j) (solved[j] ? want_solved : want_fixed).push_back(keys[j]);
+    const auto names_of = [](const JsonValue& list) { std::vector<std::string> out; for (const auto& item : list.array) out.push_back(item.string); return out; };
+    Check(names_of(At(model, "solvedCoefficients")) == want_solved && names_of(At(model, "fixedToZeroCoefficients")) == want_fixed,
+        std::string(label) + ": the report lists the solved and the fixed coefficients");
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& camera_report = At(report, "cameras").array[i];
+        const auto estimated = CoefficientsOf(camera_report);
+        const auto& t = truth_lens[i];
+        const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+        double worst = 0;
+        bool fixed_zero = true;
+        for (std::size_t j = 0; j < 5; ++j) {
+            if (solved[j]) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+            else fixed_zero = fixed_zero && estimated[j] == 0;
+        }
+        std::cout << label << ' ' << (i == 0 ? "CAM-A" : "CAM-B") << " solved coefficient error max=" << worst << '\n';
+        Check(fixed_zero, std::string(label) + ": coefficients that are not solved stay exactly 0");
+        Check(worst < 1e-6, std::string(label) + ": the solved coefficients return to the known values (1e-6, test input)");
+        Check(Value(At(At(camera_report, "heldOutResidual"), "rms")) < 1e-4, std::string(label) + ": held-out residual is about zero (1e-4 px, test input)");
+    }
+}
+void TestCoefficientSelection() {
+    // The lens has only the coefficients that are solved: they return, the rest is 0.
+    CheckSelection("k1,k2", "[\"k1\",\"k2\"]", {true, true, false, false, false}, {syn::DistortionSpec{-0.045, 0.09, 0, 0, 0}, syn::DistortionSpec{-0.052, 0.11, 0, 0, 0}});
+    CheckSelection("k1", "[\"k1\"]", {true, false, false, false, false}, {syn::DistortionSpec{-0.045, 0, 0, 0, 0}, syn::DistortionSpec{-0.052, 0, 0, 0, 0}});
+    CheckSelection("k1,k2,p1,p2", "[\"p2\",\"k2\",\"k1\",\"p1\"]", {true, true, false, true, true},
+        {syn::DistortionSpec{-0.045, 0.09, 0, 1.5e-4, -2e-4}, syn::DistortionSpec{-0.052, 0.11, 0, -1e-4, 1.2e-4}});
+    CheckSelection("none", "[]", {false, false, false, false, false}, {syn::DistortionSpec{0, 0, 0, 0, 0}, syn::DistortionSpec{0, 0, 0, 0, 0}});
+
+    // A coefficient left out stays 0 even when the lens has it (the fit then carries a model error).
+    {
+        const auto scenario = MakeScenario(0, 1, 0, 0);
+        const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, SelectionOverride("[\"k1\"]")));
+        const auto report = Tree(output.report_json);
+        bool zero = true;
+        double fit = 0;
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto& camera_report = At(report, "cameras").array[i];
+            if (At(camera_report, "distortion").kind != JsonKind::object) { zero = false; continue; }
+            const auto c = CoefficientsOf(camera_report);
+            zero = zero && c[1] == 0 && c[2] == 0 && c[3] == 0 && c[4] == 0 && c[0] != 0;
+            fit = std::max(fit, Value(At(At(camera_report, "fitResidual"), "rms")));
+        }
+        Check(zero && fit > 0.01, "k1 only on a lens with five coefficients: the rest stays 0 and the model error shows in the fit residual");
+    }
+
+    // No key and all five coefficients named are the same estimate, byte for byte.
+    {
+        const auto scenario = MakeScenario(0, 1, 0, 0);
+        const auto session = Session(scenario);
+        const auto plain = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto explicit_five = RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride("[\"k1\",\"k2\",\"k3\",\"p1\",\"p2\"]")));
+        Check(plain.ok && plain.profile_json == explicit_five.profile_json && plain.report_json == explicit_five.report_json,
+            "naming all five coefficients writes the same bytes as no selection");
+        Check(plain.report_json.find("distortionModel") == std::string::npos, "a job without a selection adds nothing to the report");
+        const auto reduced = RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride("[\"k1\",\"k2\",\"k3\"]")));
+        Check(reduced.report_json != plain.report_json && reduced.report_json.find("distortionModel") != std::string::npos,
+            "a reduced selection is recorded in the report");
+    }
+
+    // Rejections.
+    const auto scenario = MakeScenario(0, 1, 0, 0);
+    const auto session = Session(scenario);
+    for (const auto* bad : {"[\"k4\"]", "[\"k1\",\"k1\"]", "\"k1\"", "[1]", "[\"k1\",\"k2\",\"k3\",\"p1\",\"p2\",\"k1\"]", "{\"k1\":true}", "null", "[\"K1\"]"})
+        Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, SelectionOverride(bad))); }, (std::string("distortionCoefficients ") + bad + " is refused").c_str());
+    const auto selected_job = Job(scenario, SelectionOverride("[\"k1\"]"));
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, selected_job.substr(0, selected_job.size() - 1) + ",\"extra\":1}"); },
+        "an unknown key next to the selection is refused");
+}
+
+// Edge margin (edgeMarginPixels): observed points of the training and overlap views closer than the margin to an
+// image border are left out of the fit. A job without the key, or with 0, writes the bytes of the estimate that
+// uses every point.
+std::string MarginOverride(const std::string& value) { return "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"edgeMarginPixels\":" + value; }
+// Fit points (usedPointIds of the training and reference views) per camera: all of them, and those closer than `margin`
+// to a border of their observed pixel.
+struct EdgeCount { std::array<std::uint32_t, 2> total{}, near_edge{}; };
+EdgeCount CountNearEdge(const std::string& session_json, double margin) {
+    EdgeCount out;
+    const auto session = Tree(session_json);
+    for (const auto& view : At(session, "views").array) {
+        if (At(view, "role").string == "validation") continue;
+        const std::size_t camera = At(view, "camera").string == "CAM-A" ? 0 : 1;
+        std::map<std::string, std::array<double, 2>> pixels;
+        for (const auto& observation : At(view, "observations").array)
+            pixels[At(observation, "pointId").string] = {Value(At(At(observation, "pixel"), "x")), Value(At(At(observation, "pixel"), "y"))};
+        for (const auto& id : At(view, "usedPointIds").array) {
+            const auto& p = pixels.at(id.string);
+            ++out.total[camera];
+            if (std::min({p[0], p[1], kWidth - 1.0 - p[0], kHeight - 1.0 - p[1]}) < margin) ++out.near_edge[camera];
+        }
+    }
+    return out;
+}
+std::uint32_t Count(const JsonValue& value) { return static_cast<std::uint32_t>(Value(value)); }
+void TestEdgeMargin() {
+    const auto scenario = MakeScenario(0, 1, 0, 0);
+
+    // Absent and 0 are the same estimate, byte for byte; the report adds nothing.
+    {
+        const auto session = Session(scenario);
+        const auto plain = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto zero = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("0")));
+        Check(plain.ok && plain.profile_json == zero.profile_json && plain.report_json == zero.report_json,
+            "edgeMarginPixels 0 writes the same bytes as no margin");
+        Check(plain.report_json.find("edgeMargin") == std::string::npos, "a job without a margin adds nothing to the report");
+    }
+
+    // Exact observations: leaving points out keeps the coefficients, and the report counts what was left out.
+    {
+        const double margin = 300;
+        const auto session = Session(scenario);
+        const auto counts = CountNearEdge(session, margin);
+        const auto output = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("300")));
+        Check(output.ok, "exact observations with a 300 px margin produce a draft");
+        if (output.ok) {
+            const auto report = Tree(output.report_json);
+            const auto& model = At(report, "edgeMargin");
+            Check(Value(At(model, "marginPixels")) == margin, "the report records the margin");
+            Check(counts.near_edge[0] > 0 && counts.near_edge[1] > 0, "the test scenario has fit points near the border");
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto& camera_report = At(report, "cameras").array[i];
+                const auto excluded = Count(At(At(model, "excludedFitPoints"), i == 0 ? "CAM-A" : "CAM-B"));
+                Check(excluded == counts.near_edge[i], "the report counts the fit points left out (" + std::to_string(excluded) + ")");
+                Check(Count(At(At(camera_report, "fitResidual"), "pointCount")) == counts.total[i] - counts.near_edge[i],
+                    "the fit residual counts only the points that were used");
+                std::uint32_t cells = 0;
+                for (const auto& row : At(At(camera_report, "coverage"), "fitPointCells").array) for (const auto& cell : row.array) cells += Count(cell);
+                Check(cells == counts.total[i] - counts.near_edge[i], "the 4 x 4 cells count only the points that were used");
+                const auto estimated = CoefficientsOf(camera_report);
+                const auto& t = scenario.truth[i].d;
+                const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+                double worst = 0;
+                for (std::size_t j = 0; j < 5; ++j) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+                Check(worst < 1e-6, "exact observations: the coefficients still return to the known values (1e-6, test input)");
+            }
+        }
+    }
+
+    // A localized error at the border: it spoils the fit until the margin leaves those points out.
+    {
+        const double band = 150;
+        const auto session = Session(scenario, false, band);
+        const auto spoiled = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto trimmed = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("170")));
+        Check(spoiled.ok && trimmed.ok, "the border error scenario produces drafts with and without the margin");
+        if (spoiled.ok && trimmed.ok) {
+            const auto before = Tree(spoiled.report_json), after = Tree(trimmed.report_json);
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto fit_before = Value(At(At(At(before, "cameras").array[i], "fitResidual"), "rms"));
+                const auto fit_after = Value(At(At(At(after, "cameras").array[i], "fitResidual"), "rms"));
+                const auto held_after = Value(At(At(At(after, "cameras").array[i], "heldOutResidual"), "rms"));
+                std::cout << "edge error " << (i == 0 ? "CAM-A" : "CAM-B") << " fit rms " << fit_before << " -> " << fit_after << " held-out rms " << held_after << '\n';
+                Check(fit_before > 0.3, "without the margin the border error shows in the fit residual (> 0.3 px, test input)");
+                Check(fit_after < 1e-6, "with the margin the fit is exact again (1e-6 px, test input)");
+                Check(held_after < 1e-4, "with the margin the held-out residual is about zero (1e-4 px, test input)");
+                const auto estimated = CoefficientsOf(At(after, "cameras").array[i]);
+                const auto& t = scenario.truth[i].d;
+                const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+                double worst = 0;
+                for (std::size_t j = 0; j < 5; ++j) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+                Check(worst < 1e-6, "with the margin the coefficients return to the known values (1e-6, test input)");
+            }
+        }
+    }
+
+    // A margin that leaves nothing to fit is a diagnostic report without a profile, not a crash.
+    {
+        const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, MarginOverride("5000")));
+        Check(!output.ok && output.profile_json.empty(), "a margin that excludes every point produces no profile");
+    }
+
+    // Rejections.
+    const auto session = Session(scenario);
+    for (const auto* bad : {"-1", "\"100\"", "[100]", "null", "true", "100001", "1e30"})
+        Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, MarginOverride(bad))); }, (std::string("edgeMarginPixels ") + bad + " is refused").c_str());
+    const auto margin_job = Job(scenario, MarginOverride("100"));
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, margin_job.substr(0, margin_job.size() - 1) + ",\"extra\":1}"); },
+        "an unknown key next to the margin is refused");
+    // Both optional keys together.
+    const auto both = RunPlanarCalibrationJob(session, Job(scenario, "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"distortionCoefficients\":[\"k1\",\"k2\"],\"edgeMarginPixels\":100"));
+    Check(both.report_json.find("distortionModel") != std::string::npos && both.report_json.find("edgeMargin") != std::string::npos,
+        "the coefficient selection and the margin can be given together");
+}
+
 // --write-fixture <new directory>: the inputs of the recovery scenario for a
 // manual end-to-end run (DraftCalibrator, SyntheticPairGenerator, StitchEval):
 // session.json, job.json, pair-spec.json (the true cameras on an A0 chart) and
@@ -565,6 +777,8 @@ int main(int argc, char** argv) {
         TestRecovery(argv[1]);
         TestNominalMismatch();
         TestSeam();
+        TestCoefficientSelection();
+        TestEdgeMargin();
         TestRejections();
     } catch (const std::exception& error) {
         std::cerr << "exception: " << error.what() << '\n';
