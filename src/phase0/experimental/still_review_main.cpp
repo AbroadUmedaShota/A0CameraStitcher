@@ -22,6 +22,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <charconv>
 
 namespace {
@@ -34,13 +35,25 @@ std::wstring Number(double value){
 }
 struct Loaded {review::SavedStillReview record;a0::m2::render::BgrImage image;};
 Loaded Load(const fs::path& path){auto record=review::LoadSavedStillReview(path);auto image=review::LoadStillReviewImage(record);return {std::move(record),std::move(image)};}
+// The inspector's buttons in command order: button i is created with command id kFirstButtonId+i. To add a
+// button, append its label here, place it in Inspector::Layout and handle its id in Inspector::Command; the
+// button array, the WM_COMMAND range, the control-fit check and EnableChanges follow this list's size.
+constexpr int kFirstButtonId=100;
+constexpr std::array kButtonLabels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込",L"継ぎ目を表示",L"合成: 線形",L"推定値を入力欄へ",L"継ぎ目の上・中・下"};
+// #418 stage 0: the button that shows the seam's top, middle and bottom (display only).
+constexpr int kSeamCropsButton=33;
+static_assert(kSeamCropsButton+1==static_cast<int>(kButtonLabels.size()),"the seam crops button is the last label");
+constexpr const wchar_t* kSeamCropsOn=L"全体表示に戻る";
+constexpr const wchar_t* kSeamCropsOff=L"継ぎ目の上・中・下";
+// Top of each line of text above the image area (Paint draws them, VerifyControlLayout checks them against the buttons).
+constexpr int kSummaryTop=218,kHelpTop=242,kPointHelpTop=266;
 struct Inspector {
     Loaded current;
     // The decoded A/B of the manual tools. A lens-aware (v7) report has no manual tools, so none are decoded (#405 W4).
     std::array<a0::m2::render::BgrImage,2> sources;
     bool lens{};unsigned lens_stage{};
     review::ReviewViewport viewport;
-    std::array<HWND,34> buttons{};
+    std::array<HWND,kButtonLabels.size()> buttons{};
     std::array<HWND,4> edits{};
     HWND residual_text{};
     std::future<Loaded> save;
@@ -78,6 +91,8 @@ struct Inspector {
     static constexpr unsigned crop_gap=8,crop_label=24;
     bool seam_crops{},crops_smoke{};std::optional<review::SeamCrops> crops;std::string crops_for;unsigned crops_cell_w{},crops_cell_h{};
     unsigned crop_stage{},crop_paints{},crop_pixel_failures{},crop_seam_pixels{};
+    // #418 review: commands that act on the whole-image view return to it first; counted by the smoke.
+    unsigned crop_returns{},crop_guarded{};
     // #382 smoke: checked before the stages below, whose counters restart after it.
     unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
     review::StillAlignmentGeometry draft_parent_geometry{};std::optional<review::StillAlignmentGeometry> draft_estimate;
@@ -111,14 +126,34 @@ struct Inspector {
             L" px\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
     }
     bool Busy() const {return save.valid() || work_save.valid();}
+    // The crops are a display of the saved JPEG only. Every other command works on the whole-image view
+    // (zoom, comparison, point picking, re-Merge), so it first returns to that view; the crops never
+    // stay on screen while the view under them is the one that takes the clicks.
+    void LeaveSeamCrops(){
+        if(!seam_crops)return;
+        seam_crops=false;dragging=false;SetWindowTextW(buttons[kSeamCropsButton],kSeamCropsOff);
+        status=L"全体表示に戻しました。";++crop_returns;
+    }
+    // What each smoke run must have seen by the time its window closes (one function per run).
+    bool CropsSmokePassed() const {return crop_stage==4 && crop_paints>=2 && !crop_pixel_failures && crop_seam_pixels && layout_verified && crop_returns==4 && crop_guarded==1;}
+    bool LensSmokePassed() const {return lens_stage==2 && seam_pixels && layout_verified;}
+    bool ResumeSmokePassed() const {return resume_verified && layout_verified;}
+    bool ManualSmokePassed() const {
+        return draft_verified && smoke_stage==11 && seam_pixels && current.record.blend && saved==1 && conditions_loaded==1 && zoom_paints[0]>=2 && zoom_paints[1]>=2 && zoom_paints[2]>=1 && pan_events && mode_paints[1] && mode_paints[2] && mode_paints[3] && mode_paints[4] && point_picks==4 && points.size()==3 && point_proposals==4 && point_applications==1 && point_undos==1 && point_rejections==1 && marker_pixels && point_role_changes==2 && unverified_displays==2 && layout_verified && sessions_saved==1 && sessions_loaded==1;
+    }
+    bool SmokePassed() const {
+        if(failed)return false;
+        if(!smoke)return true;
+        return crops_smoke?CropsSmokePassed():lens?LensSmokePassed():resume_smoke?ResumeSmokePassed():ManualSmokePassed();
+    }
     void EnableChanges(bool enabled){
         if(lens){ // only the seam line is a tool of a lens-aware report
             for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],FALSE);for(auto edit:edits)EnableWindow(edit,FALSE);
-            EnableWindow(buttons[30],enabled);EnableWindow(buttons[33],TRUE);return;
+            EnableWindow(buttons[30],enabled);EnableWindow(buttons[kSeamCropsButton],TRUE);return;
         }
         for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],enabled);for(auto edit:edits)EnableWindow(edit,enabled);
         EnableWindow(buttons[32],enabled && review::EstimatedStillReviewGeometry(current.record));
-        EnableWindow(buttons[33],TRUE); // display only: usable while a save runs
+        EnableWindow(buttons[kSeamCropsButton],TRUE); // display only: usable while a save runs
     }
     // The cells are the display area split in three; a crop is at most one cell, at native size.
     bool EnsureCrops(){
@@ -255,7 +290,8 @@ struct Inspector {
         SetWindowTextW(residual_text,text.c_str());
     }
     void PickPoint(HWND window,int x,int y){
-        if(Busy() || closing || !pick_stage)return;
+        // The pixel under the pointer is a whole-image pixel; while the crops are on screen it is not the pixel shown there.
+        if(Busy() || closing || !pick_stage || seam_crops){if(seam_crops && pick_stage)++crop_guarded;return;}
         if(x<12 || y<image_top){++point_rejections;return;}
         const auto pixel=viewport.Pixel(static_cast<unsigned>(x-12),static_cast<unsigned>(y-image_top));
         const auto point=pixel?review::PickReviewSourcePoint({double((*pixel)[0]),double((*pixel)[1])},preview_parameters,sources[0].width,sources[0].height,pick_stage==2):std::nullopt;
@@ -362,15 +398,17 @@ struct Inspector {
         if(buttons[8])MoveWindow(buttons[8],535,12,125,30,TRUE);
         if(buttons[32])MoveWindow(buttons[32],670,12,155,30,TRUE);
         if(buttons[9])MoveWindow(buttons[9],835,12,185,30,TRUE);
-        if(buttons[33])MoveWindow(buttons[33],1010,222,170,30,TRUE);
+        // Below the summary and the help line (which run long), right of the point help line; the control-fit check measures all three.
+        if(buttons[kSeamCropsButton])MoveWindow(buttons[kSeamCropsButton],1010,kPointHelpTop-6,170,30,TRUE);
         viewport.view_width=static_cast<unsigned>(std::max(1L,r.right-350));
         viewport.view_height=static_cast<unsigned>(std::max(1L,r.bottom-(image_top+95)));viewport.Constrain();
         if(residual_text)MoveWindow(residual_text,r.right-326,image_top,314,viewport.view_height,TRUE);
     }
     void VerifyControlLayout(HWND window){
         RECT client{};GetClientRect(window,&client);bool valid=true;
+        std::array<RECT,kButtonLabels.size()> placed{};
         for(size_t i=0;i<buttons.size();++i){
-            RECT bounds{},inner{};GetWindowRect(buttons[i],&bounds);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&bounds),2);GetClientRect(buttons[i],&inner);
+            RECT bounds{},inner{};GetWindowRect(buttons[i],&bounds);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&bounds),2);GetClientRect(buttons[i],&inner);placed[i]=bounds;
             wchar_t text[256]{};const int length=GetWindowTextW(buttons[i],text,static_cast<int>(std::size(text)));
             const auto dc=GetDC(buttons[i]);const auto font=reinterpret_cast<HFONT>(SendMessageW(buttons[i],WM_GETFONT,0,0));
             const auto previous=SelectObject(dc,font?font:GetStockObject(SYSTEM_FONT));SIZE extent{};
@@ -379,6 +417,22 @@ struct Inspector {
                 valid=false;std::cout<<"button_layout_failure="<<i<<" text_width="<<extent.cx<<" button_width="<<inner.right<<'\n';
             }
         }
+        // The text lines above the image are drawn at the window's default font; none of their longest forms may run under a button.
+        // The summary is measured both as the saved JPEG and as the adjustment preview (the longer prefix).
+        const auto dc=GetDC(window);
+        const std::array<std::pair<std::wstring,int>,6> lines{{{SummaryText(0),kSummaryTop},{SummaryText(1),kSummaryTop},{HelpText(),kHelpTop},
+            {PointHelpText(0),kPointHelpTop},{PointHelpText(1),kPointHelpTop},{PointHelpText(2),kPointHelpTop}}};
+        for(const auto& [text,top]:lines){
+            SIZE extent{};
+            if(!GetTextExtentPoint32W(dc,text.c_str(),static_cast<int>(text.size()),&extent)){valid=false;continue;}
+            const RECT drawn{12,top,12+extent.cx,top+extent.cy};
+            if(drawn.right>client.right)valid=false;
+            for(size_t i=0;i<placed.size();++i){
+                RECT overlap{};
+                if(IntersectRect(&overlap,&drawn,&placed[i])){valid=false;std::cout<<"text_overlap_failure=button"<<i<<" line_top="<<top<<" text_right="<<drawn.right<<" button_left="<<placed[i].left<<'\n';}
+            }
+        }
+        ReleaseDC(window,dc);
         if(valid)++layout_verified;else failed=true;
     }
     void StartSave(HWND window){
@@ -420,19 +474,44 @@ struct Inspector {
         }
         if(closing && !Busy()){DestroyWindow(window);return;}
         if(!smoke)return;
-        auto click=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(100+index,BN_CLICKED),reinterpret_cast<LPARAM>(buttons[index]));};
+        auto click=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(kFirstButtonId+index,BN_CLICKED),reinterpret_cast<LPARAM>(buttons[static_cast<size_t>(index)]));};
         if(Clock::now()-started>std::chrono::seconds(210) || failed){failed=true;SendMessageW(window,WM_CLOSE,0,0);return;}
         if(crops_smoke){
             // #418 stage 0: off at the start; on shows the three crops (their pixels are compared in Paint and in full here);
             // the seam line is drawn over them; off returns to the whole image.
             if(crop_stage==0 && zoom_paints[0]){
                 if(seam_crops)failed=true;
-                ++crop_stage;click(33);if(!seam_crops)failed=true;
+                ++crop_stage;click(kSeamCropsButton);if(!seam_crops)failed=true;
             }else if(crop_stage==1 && crop_paints){
                 if(!CropsMatchComposite())failed=true;
                 ++crop_stage;if(!show_seam)click(30);
             }else if(crop_stage==2 && crop_seam_pixels){
-                ++crop_stage;click(33);if(seam_crops)failed=true;zoom_paints={};
+                ++crop_stage;
+                // Review H1: a command on the whole-image view (picking a point, zoom, a comparison, the jump to the seam)
+                // returns to that view first, so the next click is a click on the view that is shown.
+                const auto label_is=[&](const wchar_t* expected){wchar_t text[64]{};GetWindowTextW(buttons[kSeamCropsButton],text,static_cast<int>(std::size(text)));return std::wstring(text)==expected;};
+                for(const int id:{21,1,12,3}){
+                    if(!seam_crops)click(kSeamCropsButton);
+                    if(!seam_crops || !label_is(kSeamCropsOn))failed=true;
+                    const auto returns=crop_returns;click(id);
+                    if(seam_crops || !label_is(kSeamCropsOff) || crop_returns!=returns+1)failed=true;
+                    if(id==21){
+                        const auto rejections=point_rejections;
+                        SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(12+viewport.view_width/2,image_top+viewport.view_height/2));
+                        // The click reached the whole-image view's picking: it started the pair, or was refused for lying off the image.
+                        if(pick_stage!=2 && point_rejections!=rejections+1)failed=true;
+                        click(22);if(pick_stage || pending_a)failed=true;
+                    }
+                }
+                click(10);click(0);
+                // The guard behind it: with the crops on and a point pending (not reachable by the commands), a click records nothing.
+                {const auto guarded=crop_guarded;const auto count=points.size();
+                    seam_crops=true;pick_stage=1;
+                    SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(12+viewport.view_width/2,image_top+viewport.view_height/2));
+                    if(crop_guarded!=guarded+1 || pick_stage!=1 || pending_a || points.size()!=count)failed=true;
+                    seam_crops=false;pick_stage=0;}
+                click(kSeamCropsButton);if(!seam_crops)failed=true;
+                click(kSeamCropsButton);if(seam_crops)failed=true;zoom_paints={};
             }else if(crop_stage==3 && zoom_paints[0]){++crop_stage;SendMessageW(window,WM_CLOSE,0,0);}
             return;
         }
@@ -573,19 +652,26 @@ struct Inspector {
         }
         else if(smoke_stage==10 && zoom_paints[0]>=2 && mode_paints[0]>=2 && verified_paints>=9 && seam_pixels){++smoke_stage;SendMessageW(window,WM_CLOSE,0,0);}
     }
+    // The three lines of text above the image area. `view_mode` is the comparison mode (0 = the saved JPEG).
+    std::wstring SummaryText(int view_mode) const {
+        const auto degrees=view_mode?draft_degrees:current.record.rotation_degrees,scale=view_mode?draft_scale:current.record.scale;
+        std::wstring summary=lens?L"保存JPEG（校正の写像） / "+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5):(view_mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(view_mode?draft_x:displayed_x)+L", "+std::to_wstring(view_mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
+        summary+=current.record.geometry.orientation==review::MountOrientation::rotated_180?L"  取付: 180°回転（A/Bを回して表示・合成）":L"  取付: 通常";
+        return summary;
+    }
+    static std::wstring HelpText(){return L"未校正・操作検証用 / 回転・倍率で周辺を切り取ります。差分は重なり部分のみ。比較不可の範囲は格子表示。";}
+    std::wstring PointHelpText(int stage) const {
+        return stage==1?std::wstring(RoleName(next_point_role))+L"点: Aの目印を左クリック。移動は右ドラッグ。":stage==2?std::wstring(RoleName(next_point_role))+L"点: Bで同じ目印を左クリック。移動は右ドラッグ。":L"F=調整点、V=検証点（候補計算から除外）。2組以上の調整点に加え、離れた場所に検証点を指定してください。";
+    }
     void Paint(HWND window,HDC target){
         RECT r{};GetClientRect(window,&r);a0::phase0::experimental::PreviewBackBuffer frame(target,r.right,r.bottom);
         const auto dc=frame.DrawingContext();if(!dc)return;
         FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
         TextOutW(dc,550,98,L"X (px)",6);TextOutW(dc,735,98,L"Y (px)",6);TextOutW(dc,550,138,L"回転 (度)",6);TextOutW(dc,735,138,L"倍率 (倍)",6);
-        const auto degrees=mode?draft_degrees:current.record.rotation_degrees,scale=mode?draft_scale:current.record.scale;
-        std::wstring summary=lens?L"保存JPEG（校正の写像） / "+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5):(mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(mode?draft_x:displayed_x)+L", "+std::to_wstring(mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
-        summary+=current.record.geometry.orientation==review::MountOrientation::rotated_180?L"  取付: 180°回転（A/Bを回して表示・合成）":L"  取付: 通常";
-        TextOutW(dc,12,218,summary.c_str(),static_cast<int>(summary.size()));
-        const wchar_t* help=L"未校正・操作検証用 / 回転・倍率で周辺を切り取ります。差分は重なり部分のみ。比較不可の範囲は格子表示。";
-        TextOutW(dc,12,242,help,lstrlenW(help));
-        const std::wstring point_help=pick_stage==1?std::wstring(RoleName(next_point_role))+L"点: Aの目印を左クリック。移動は右ドラッグ。":pick_stage==2?std::wstring(RoleName(next_point_role))+L"点: Bで同じ目印を左クリック。移動は右ドラッグ。":L"F=調整点、V=検証点（候補計算から除外）。2組以上の調整点に加え、離れた場所に検証点を指定してください。";
-        TextOutW(dc,12,266,point_help.c_str(),static_cast<int>(point_help.size()));
+        const auto summary=SummaryText(mode),help=HelpText(),point_help=PointHelpText(pick_stage);
+        TextOutW(dc,12,kSummaryTop,summary.c_str(),static_cast<int>(summary.size()));
+        TextOutW(dc,12,kHelpTop,help.c_str(),static_cast<int>(help.size()));
+        TextOutW(dc,12,kPointHelpTop,point_help.c_str(),static_cast<int>(point_help.size()));
         if(r.right>350 && r.bottom>image_top+95 && seam_crops)PaintSeamCrops(dc);
         else if(r.right>350 && r.bottom>image_top+95){
             auto pixels=mode?review::CompareReviewBgra(sources[0],sources[1],preview_parameters,viewport,static_cast<review::ReviewComparison>(mode-1)):review::ReviewViewportBgra(current.image,viewport);
@@ -680,6 +766,8 @@ struct Inspector {
         RestoreDC(dc,state);
     }
     void Command(HWND window,int id){
+        // Only the seam line, the next re-Merge's blend and the crops button itself are meaningful over the crops.
+        if(id!=130 && id!=131 && id!=kFirstButtonId+kSeamCropsButton)LeaveSeamCrops();
         if(id>=100 && id<=103){
             if(id<103)viewport.zoom=id==100?0:id==101?1:2;
             else if(current.record.blend && !mode){
@@ -697,13 +785,13 @@ struct Inspector {
             status=!show_seam?L"継ぎ目の線を隠しました。":!current.record.blend?L"この保存結果は線形 feather の合成で、継ぎ目の線はありません。":mode?L"継ぎ目の線は「保存JPEG」の表示に重ねます。":L"保存JPEGの継ぎ目を桃色の線で表示しています（確認用）。";
             InvalidateRect(window,nullptr,FALSE);return;
         }
-        if(id==133){
+        if(id==kFirstButtonId+kSeamCropsButton){
             // Display only (#418 stage 0), so it needs neither a free inspector nor a loaded condition.
             if(pick_stage){status=L"対応点の指定中は切り替えられません。指定を終えるか取り消してください。";InvalidateRect(window,nullptr,FALSE);return;}
             if(!seam_crops && !review::SeamColumnAtRow(current.record,current.record.height/2)){
                 status=L"この保存結果には継ぎ目の列の記録がない（線形 feather の合成）ため、継ぎ目の上・中・下を並べられません。";InvalidateRect(window,nullptr,FALSE);return;
             }
-            seam_crops=!seam_crops;dragging=false;SetWindowTextW(buttons[33],seam_crops?L"全体表示に戻る":L"継ぎ目の上・中・下");
+            seam_crops=!seam_crops;dragging=false;SetWindowTextW(buttons[kSeamCropsButton],seam_crops?kSeamCropsOn:kSeamCropsOff);
             status=seam_crops?L"継ぎ目の上・中・下を原寸（保存JPEGの1画素＝画面の1画素）で並べています。左から上・中・下。「継ぎ目を表示」で桃色の線を重ねます。":L"全体表示に戻しました。";
             InvalidateRect(window,nullptr,FALSE);return;
         }
@@ -750,7 +838,8 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM w,LPARAM l){
     case WM_SIZE:app->Layout(window);InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_DPICHANGED:{const auto* suggested=reinterpret_cast<RECT*>(l);SetWindowPos(window,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
     case WM_COMMAND:
-        if(LOWORD(w)>=100 && LOWORD(w)<134 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[LOWORD(w)-100])app->Command(window,LOWORD(w));return 0;
+        {const int index=static_cast<int>(LOWORD(w))-kFirstButtonId;
+        if(index>=0 && index<static_cast<int>(app->buttons.size()) && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==app->buttons[static_cast<size_t>(index)])app->Command(window,LOWORD(w));return 0;}
     case WM_TIMER:app->Advance(window);return 0;
     case WM_LBUTTONDOWN:
         if(app->pick_stage){app->PickPoint(window,GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;}
@@ -880,10 +969,9 @@ int wmain(int argc,wchar_t** argv){
         if(!RegisterClassW(&wc))throw std::runtime_error("register inspector failed");
         auto window=CreateWindowExW(0,wc.lpszClassName,L"A0 保存画像の比較・位置/回転/倍率・再Merge（未校正）",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1440,1000,nullptr,nullptr,instance,app.get());
         if(!window)throw std::runtime_error("create inspector failed");
-        constexpr std::array<const wchar_t*,34> labels{L"全体表示",L"100%（等倍）",L"200%",L"継ぎ目へ",L"Bを左へ 1px",L"Bを右へ 1px",L"Bを上へ 1px",L"Bを下へ 1px",L"調整値を戻す",L"再Merge・条件保存",L"保存JPEG",L"半透明 50%",L"差分",L"Aのみ",L"Bのみ",L"回転 −0.05°",L"回転 ＋0.05°",L"倍率 −0.01%",L"倍率 ＋0.01%",L"保存条件を読込",L"入力値をプレビュー反映",L"対応点を追加",L"直前の点を取消",L"点を全消去",L"候補を計算",L"候補を適用",L"次の点: 調整用",L"直前の点の用途変更",L"作業を保存",L"作業を読込",L"継ぎ目を表示",L"合成: 線形",L"推定値を入力欄へ",L"継ぎ目の上・中・下"};
-        for(int i=0;i<static_cast<int>(labels.size());++i){
-            app->buttons[i]=CreateWindowExW(0,L"BUTTON",labels[i],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(100+i)),instance,nullptr);
-            if(!app->buttons[i])throw std::runtime_error("create inspector button failed");
+        for(int i=0;i<static_cast<int>(kButtonLabels.size());++i){
+            app->buttons[static_cast<size_t>(i)]=CreateWindowExW(0,L"BUTTON",kButtonLabels[static_cast<size_t>(i)],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFirstButtonId+i)),instance,nullptr);
+            if(!app->buttons[static_cast<size_t>(i)])throw std::runtime_error("create inspector button failed");
         }
         for(int i=0;i<4;++i){app->edits[i]=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(200+i)),instance,nullptr);if(!app->edits[i])throw std::runtime_error("create translation edit failed");}
         app->residual_text=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(300),instance,nullptr);
@@ -895,8 +983,7 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"review_loaded=1 ui_window_visible="<<(IsWindowVisible(window)!=FALSE)<<" camera_operations=0\n"<<std::flush;
         MSG message{};BOOL result{};while((result=GetMessageW(&message,nullptr,0,0))>0){if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
         if(result<0)throw std::runtime_error("inspector message loop failed");
-        const bool pass=!app->failed && (!app->smoke || (app->crops_smoke?app->crop_stage==4 && app->crop_paints>=2 && !app->crop_pixel_failures && app->crop_seam_pixels && app->layout_verified:app->lens?app->lens_stage==2 && app->seam_pixels && app->layout_verified:app->resume_smoke?app->resume_verified && app->layout_verified:
-            app->draft_verified && app->smoke_stage==11 && app->seam_pixels && app->current.record.blend && app->saved==1 && app->conditions_loaded==1 && app->zoom_paints[0]>=2 && app->zoom_paints[1]>=2 && app->zoom_paints[2]>=1 && app->pan_events && app->mode_paints[1] && app->mode_paints[2] && app->mode_paints[3] && app->mode_paints[4] && app->point_picks==4 && app->points.size()==3 && app->point_proposals==4 && app->point_applications==1 && app->point_undos==1 && app->point_rejections==1 && app->marker_pixels && app->point_role_changes==2 && app->unverified_displays==2 && app->layout_verified && app->sessions_saved==1 && app->sessions_loaded==1));
+        const bool pass=app->SmokePassed();
         std::cout<<"sessions_saved="<<app->sessions_saved<<" sessions_loaded="<<app->sessions_loaded<<" resume_verified="<<app->resume_verified<<'\n';
         std::cout<<"point_pairs="<<app->points.size()<<" point_picks="<<app->point_picks<<" point_proposals="<<app->point_proposals<<" point_applications="<<app->point_applications<<" point_undos="<<app->point_undos<<" outside_point_rejections="<<app->point_rejections<<" verified_marker_pixels="<<app->marker_pixels<<" point_role_changes="<<app->point_role_changes<<" unverified_displays="<<app->unverified_displays<<'\n';
         std::cout<<"overlay_paints="<<app->mode_paints[1]<<" difference_paints="<<app->mode_paints[2]<<" a_paints="<<app->mode_paints[3]<<" b_paints="<<app->mode_paints[4]<<" conditions_loaded="<<app->conditions_loaded<<" invalid_input_rejections="<<app->expected_rejections<<'\n';

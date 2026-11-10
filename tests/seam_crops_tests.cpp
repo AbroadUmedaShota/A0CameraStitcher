@@ -217,6 +217,12 @@ void Png(const fs::path& root){
     // A leftover partial file blocks as well and is not removed.
     { std::ofstream(root/"other.png.partial")<<"x"; }
     Check(Throws([&]{px::WriteBgrPngNoOverwrite(root/"other.png",Pattern(5,5));}) && !fs::exists(root/"other.png") && fs::exists(root/"other.png.partial"));
+    // The message of a leftover partial file names it (and not the output), and its bytes stay.
+    {std::string message;try{px::WriteBgrPngNoOverwrite(root/"other.png",Pattern(5,5));}catch(const std::exception& error){message=error.what();}
+        Check(message.find(".partial")!=std::string::npos && ReadBytes(root/"other.png.partial")==std::vector<char>{'x'});}
+    // The writer's own exclusive create (the one the rename follows): taken path -> the leftover error, bytes untouched.
+    Check(Throws([&]{px::seam_crops_detail::WriteNewFileDurably(root/"other.png.partial",{1,2,3});}) && ReadBytes(root/"other.png.partial")==std::vector<char>{'x'});
+    {const auto fresh=root/"fresh.bin";px::seam_crops_detail::WriteNewFileDurably(fresh,{1,2,3,4});Check(ReadBytes(fresh)==std::vector<char>{1,2,3,4});}
     // Only a .png, only into a folder that exists, only a real image.
     Check(Throws([&]{px::WriteBgrPngNoOverwrite(root/"sheet.jpg",Pattern(5,5));}) && !fs::exists(root/"sheet.jpg"));
     Check(Throws([&]{px::WriteBgrPngNoOverwrite(root/"missing"/"sheet.png",Pattern(5,5));}));
