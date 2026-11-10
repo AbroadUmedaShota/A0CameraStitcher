@@ -84,8 +84,31 @@ try {
     }
     Check (Test-Path (Join-Path $output 'k1-k2\draft\profile.json')) 'a reduced model writes its draft profile below its own folder'
 
+    # Edge margin: the job gets the key, the fit points near a border are counted per model.
+    $trimmedOut = Join-Path $root 'trimmed'
+    & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable `
+        -OutputDirectory $trimmedOut -Models 'k1-k2-k3-p1-p2' -SkipLeaveOneOut -EdgeMarginPixels 300 | Out-Null
+    Check ($LASTEXITCODE -eq 0) 'the comparison script runs with an edge margin'
+    $trimmed = Get-Content -LiteralPath (Join-Path $trimmedOut 'comparison.json') -Raw | ConvertFrom-Json -Depth 100
+    $trimmedModel = $trimmed.models.'k1-k2-k3-p1-p2'
+    Check ($trimmed.edgeMarginPixels -eq 300) 'the comparison records the edge margin'
+    Check ($trimmedModel.edgeExcludedFitPoints.'CAM-A' -gt 0 -and $trimmedModel.edgeExcludedFitPoints.'CAM-B' -gt 0) 'the model records the fit points left out near the border'
+    Check ($null -eq $full.edgeExcludedFitPoints) 'a run without a margin records no left-out points'
+    Check ($trimmedModel.metrics.cameras[0].fitResidual.n -lt $full.metrics.cameras[0].fitResidual.n) 'fewer fit points are used with the margin'
+    Check ([Math]::Abs($trimmedModel.metrics.cameras[0].coefficients.k1 - $full.metrics.cameras[0].coefficients.k1) -lt 1e-6) 'exact observations: the coefficients stay when points are left out (1e-6, test input)'
+
+    # Excluded views: the named training view is gone, so the job's minimum of training views is no longer met.
+    $droppedOut = Join-Path $root 'dropped'
+    & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable `
+        -OutputDirectory $droppedOut -Models 'k1-k2-k3-p1-p2' -SkipLeaveOneOut -ExcludeViews 'A-T1' | Out-Null
+    Check ($LASTEXITCODE -eq 0) 'the comparison script runs with an excluded view'
+    $dropped = Get-Content -LiteralPath (Join-Path $droppedOut 'comparison.json') -Raw | ConvertFrom-Json -Depth 100
+    Check (($dropped.excludedViews -join ',') -ceq 'A-T1' -and $dropped.models.'k1-k2-k3-p1-p2'.metrics.cameras[0].status -ceq 'insufficient-views') 'an excluded training view is removed from the session'
+
     # Refusals.
     $other = Join-Path $root 'other'
+    Refuses { & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable -OutputDirectory $other -Models none -SkipLeaveOneOut -ExcludeViews 'no-such-view'; if ($LASTEXITCODE) { throw 'exit' } } 'an unknown excluded view is refused'
+    Remove-Item -LiteralPath $other -Recurse -Force -ErrorAction SilentlyContinue
     Refuses { & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable -OutputDirectory $other -Models k2-k1 -SkipLeaveOneOut; if ($LASTEXITCODE) { throw 'exit' } } 'coefficients out of order are refused'
     Refuses { & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable -OutputDirectory $other -Models k4 -SkipLeaveOneOut; if ($LASTEXITCODE) { throw 'exit' } } 'an unknown coefficient is refused'
     Refuses { & pwsh -NoProfile -File $script -Session $session -PlanarJob $job -CalibratorExecutable $CalibratorExecutable -OutputDirectory $output -Models none -SkipLeaveOneOut; if ($LASTEXITCODE) { throw 'exit' } } 'an existing model folder is not overwritten'

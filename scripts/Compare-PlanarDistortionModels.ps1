@@ -29,6 +29,13 @@ residuals. It then measures two things the report does not carry:
    over the whole frame moves on the sheet, in output pixels at seamOutputDpi,
    against the same model's fit on the original roles.
 
+-EdgeMarginPixels (> 0) adds the job's edgeMarginPixels key to every run, so the
+observed points closer than that to an image border are left out of the fit
+(the number left out is recorded per model). -ExcludeViews drops the named views
+from the session before anything is run (for example a training view that
+repeats another placement); the session needs to keep the training views the
+job's minimumTrainingViews asks for.
+
 Everything is written below OutputDirectory (outside any git working tree: the
 session and the reports hold real measurements): <model>\draft\profile.json and
 calibration-report.json for every model, and comparison.json. Nothing is
@@ -43,6 +50,8 @@ param(
     [string[]]$Models = @('none', 'k1', 'k1-k2', 'k1-k2-k3', 'k1-k2-p1-p2', 'k1-k2-k3-p1-p2'),
     [switch]$SkipLeaveOneOut,
     [ValidateRange(1, 20)][int]$Bands = 3,
+    [ValidateRange(0, 100000)][double]$EdgeMarginPixels = 0,
+    [string[]]$ExcludeViews = @(),
     [switch]$KeepWork
 )
 
@@ -361,15 +370,33 @@ if (@($modelList.Name | Select-Object -Unique).Count -ne $modelList.Count) { thr
 foreach ($model in $modelList) { if ([IO.Directory]::Exists((Join-Path $output $model.Name))) { throw "The output for model '$($model.Name)' already exists." } }
 
 $jobText = [IO.File]::ReadAllText($jobPath, $utf8)
+if ($EdgeMarginPixels -gt 0) {
+    $trimmedJob = $jobText.TrimEnd()
+    if (-not $trimmedJob.EndsWith('}')) { throw 'The job is not a JSON object.' }
+    if ($trimmedJob.Contains('"edgeMarginPixels"')) { throw 'The base job already sets an edge margin.' }
+    $jobText = $trimmedJob.Substring(0, $trimmedJob.Length - 1) + ',"edgeMarginPixels":' + $EdgeMarginPixels.ToString('R', [Globalization.CultureInfo]::InvariantCulture) + '}'
+}
 $sessionObject = Read-Json $sessionPath
-$even = Get-CheckerboardEven $sessionObject
 $work = Join-Path $output 'work'
 if ([IO.Directory]::Exists($work)) { throw 'The work directory already exists.' }
 $null = New-Item -ItemType Directory -Path $work
+if ($ExcludeViews.Count -gt 0) {
+    $excludeList = @($ExcludeViews | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() })
+    foreach ($id in $excludeList) { $null = Get-ViewById $sessionObject $id }
+    $kept = [object[]]@($sessionObject.views | Where-Object { $excludeList -cnotcontains $_.viewId })
+    $reduced = [ordered]@{}
+    foreach ($property in $sessionObject.PSObject.Properties) { $reduced[$property.Name] = if ($property.Name -ceq 'views') { $kept } else { $property.Value } }
+    $sessionObject = [pscustomobject]$reduced
+    $sessionPath = Join-Path $work 'session-reduced.json'
+    Write-Text $sessionPath ($sessionObject | ConvertTo-Json -Depth 100 -Compress)
+}
+$even = Get-CheckerboardEven $sessionObject
 
 $comparison = [ordered]@{
     schema = 'a0.planar-distortion-model-comparison.v1'
     note = 'Report values only; no acceptance threshold is applied.'
+    edgeMarginPixels = $EdgeMarginPixels
+    excludedViews = [string[]]@($ExcludeViews | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() })
     models = [ordered]@{}
 }
 try {
@@ -386,6 +413,7 @@ try {
             solvedCoefficients = [string[]]@(if ($null -eq $model.Solved) { $coefficientNames } else { $model.Solved })
             exitCode = $exitCode
             profileProduced = [IO.File]::Exists((Join-Path $draft 'profile.json'))
+            edgeExcludedFitPoints = if ($null -ne $baseReport.PSObject.Properties['edgeMargin']) { $baseReport.edgeMargin.excludedFitPoints } else { $null }
             metrics = Get-ReportMetrics $baseReport
             seamBand = $null
             leaveOneOut = @()

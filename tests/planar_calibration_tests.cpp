@@ -114,7 +114,10 @@ struct Scenario {
     double noise = 0;
 };
 
-std::string Session(const Scenario& scenario, bool drop_validation = false) {
+// edge_error_band > 0: in the training and reference views, every point whose true pixel is closer than
+// the band to an image border is observed 6 px right and 4 px down of where it is (a localized detection
+// error); validation views stay exact.
+std::string Session(const Scenario& scenario, bool drop_validation = false, double edge_error_band = 0) {
     std::string chart = "[";
     for (int r = 0; r < kRows; ++r) for (int c = 0; c < kColumns; ++c) {
         if (chart.size() > 1) chart += ',';
@@ -140,7 +143,10 @@ std::string Session(const Scenario& scenario, bool drop_validation = false) {
             auto& part = index % 2 == 0 ? pose : measurement;
             if (part.size() > 1) part += ',';
             part += id;
-            const double u = pixel->x + Wiggle(view_number, index, 0, scenario.noise), v = pixel->y + Wiggle(view_number, index, 1, scenario.noise);
+            const bool bad_edge = edge_error_band > 0 && view.role != "validation"
+                && std::min({pixel->x, pixel->y, kWidth - 1.0 - pixel->x, kHeight - 1.0 - pixel->y}) < edge_error_band;
+            const double u = pixel->x + Wiggle(view_number, index, 0, scenario.noise) + (bad_edge ? 6.0 : 0.0);
+            const double v = pixel->y + Wiggle(view_number, index, 1, scenario.noise) + (bad_edge ? 4.0 : 0.0);
             observations += "{\"pointId\":" + id + ",\"state\":\"detected\",\"pixel\":{\"x\":" + N(u) + ",\"y\":" + N(v) + "}}";
             ++index;
         }
@@ -620,6 +626,121 @@ void TestCoefficientSelection() {
         "an unknown key next to the selection is refused");
 }
 
+// Edge margin (edgeMarginPixels): observed points of the training and overlap views closer than the margin to an
+// image border are left out of the fit. A job without the key, or with 0, writes the bytes of the estimate that
+// uses every point.
+std::string MarginOverride(const std::string& value) { return "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"edgeMarginPixels\":" + value; }
+// Fit points (usedPointIds of the training and reference views) per camera: all of them, and those closer than `margin`
+// to a border of their observed pixel.
+struct EdgeCount { std::array<std::uint32_t, 2> total{}, near_edge{}; };
+EdgeCount CountNearEdge(const std::string& session_json, double margin) {
+    EdgeCount out;
+    const auto session = Tree(session_json);
+    for (const auto& view : At(session, "views").array) {
+        if (At(view, "role").string == "validation") continue;
+        const std::size_t camera = At(view, "camera").string == "CAM-A" ? 0 : 1;
+        std::map<std::string, std::array<double, 2>> pixels;
+        for (const auto& observation : At(view, "observations").array)
+            pixels[At(observation, "pointId").string] = {Value(At(At(observation, "pixel"), "x")), Value(At(At(observation, "pixel"), "y"))};
+        for (const auto& id : At(view, "usedPointIds").array) {
+            const auto& p = pixels.at(id.string);
+            ++out.total[camera];
+            if (std::min({p[0], p[1], kWidth - 1.0 - p[0], kHeight - 1.0 - p[1]}) < margin) ++out.near_edge[camera];
+        }
+    }
+    return out;
+}
+std::uint32_t Count(const JsonValue& value) { return static_cast<std::uint32_t>(Value(value)); }
+void TestEdgeMargin() {
+    const auto scenario = MakeScenario(0, 1, 0, 0);
+
+    // Absent and 0 are the same estimate, byte for byte; the report adds nothing.
+    {
+        const auto session = Session(scenario);
+        const auto plain = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto zero = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("0")));
+        Check(plain.ok && plain.profile_json == zero.profile_json && plain.report_json == zero.report_json,
+            "edgeMarginPixels 0 writes the same bytes as no margin");
+        Check(plain.report_json.find("edgeMargin") == std::string::npos, "a job without a margin adds nothing to the report");
+    }
+
+    // Exact observations: leaving points out keeps the coefficients, and the report counts what was left out.
+    {
+        const double margin = 300;
+        const auto session = Session(scenario);
+        const auto counts = CountNearEdge(session, margin);
+        const auto output = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("300")));
+        Check(output.ok, "exact observations with a 300 px margin produce a draft");
+        if (output.ok) {
+            const auto report = Tree(output.report_json);
+            const auto& model = At(report, "edgeMargin");
+            Check(Value(At(model, "marginPixels")) == margin, "the report records the margin");
+            Check(counts.near_edge[0] > 0 && counts.near_edge[1] > 0, "the test scenario has fit points near the border");
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto& camera_report = At(report, "cameras").array[i];
+                const auto excluded = Count(At(At(model, "excludedFitPoints"), i == 0 ? "CAM-A" : "CAM-B"));
+                Check(excluded == counts.near_edge[i], "the report counts the fit points left out (" + std::to_string(excluded) + ")");
+                Check(Count(At(At(camera_report, "fitResidual"), "pointCount")) == counts.total[i] - counts.near_edge[i],
+                    "the fit residual counts only the points that were used");
+                std::uint32_t cells = 0;
+                for (const auto& row : At(At(camera_report, "coverage"), "fitPointCells").array) for (const auto& cell : row.array) cells += Count(cell);
+                Check(cells == counts.total[i] - counts.near_edge[i], "the 4 x 4 cells count only the points that were used");
+                const auto estimated = CoefficientsOf(camera_report);
+                const auto& t = scenario.truth[i].d;
+                const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+                double worst = 0;
+                for (std::size_t j = 0; j < 5; ++j) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+                Check(worst < 1e-6, "exact observations: the coefficients still return to the known values (1e-6, test input)");
+            }
+        }
+    }
+
+    // A localized error at the border: it spoils the fit until the margin leaves those points out.
+    {
+        const double band = 150;
+        const auto session = Session(scenario, false, band);
+        const auto spoiled = RunPlanarCalibrationJob(session, Job(scenario));
+        const auto trimmed = RunPlanarCalibrationJob(session, Job(scenario, MarginOverride("170")));
+        Check(spoiled.ok && trimmed.ok, "the border error scenario produces drafts with and without the margin");
+        if (spoiled.ok && trimmed.ok) {
+            const auto before = Tree(spoiled.report_json), after = Tree(trimmed.report_json);
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto fit_before = Value(At(At(At(before, "cameras").array[i], "fitResidual"), "rms"));
+                const auto fit_after = Value(At(At(At(after, "cameras").array[i], "fitResidual"), "rms"));
+                const auto held_after = Value(At(At(At(after, "cameras").array[i], "heldOutResidual"), "rms"));
+                std::cout << "edge error " << (i == 0 ? "CAM-A" : "CAM-B") << " fit rms " << fit_before << " -> " << fit_after << " held-out rms " << held_after << '\n';
+                Check(fit_before > 0.3, "without the margin the border error shows in the fit residual (> 0.3 px, test input)");
+                Check(fit_after < 1e-6, "with the margin the fit is exact again (1e-6 px, test input)");
+                Check(held_after < 1e-4, "with the margin the held-out residual is about zero (1e-4 px, test input)");
+                const auto estimated = CoefficientsOf(At(after, "cameras").array[i]);
+                const auto& t = scenario.truth[i].d;
+                const std::array<double, 5> truth{t.k1, t.k2, t.k3, t.p1, t.p2};
+                double worst = 0;
+                for (std::size_t j = 0; j < 5; ++j) worst = std::max(worst, std::abs(estimated[j] - truth[j]));
+                Check(worst < 1e-6, "with the margin the coefficients return to the known values (1e-6, test input)");
+            }
+        }
+    }
+
+    // A margin that leaves nothing to fit is a diagnostic report without a profile, not a crash.
+    {
+        const auto output = RunPlanarCalibrationJob(Session(scenario), Job(scenario, MarginOverride("5000")));
+        Check(!output.ok && output.profile_json.empty(), "a margin that excludes every point produces no profile");
+    }
+
+    // Rejections.
+    const auto session = Session(scenario);
+    for (const auto* bad : {"-1", "\"100\"", "[100]", "null", "true", "100001", "1e30"})
+        Rejects([&] { (void)RunPlanarCalibrationJob(session, Job(scenario, MarginOverride(bad))); }, (std::string("edgeMarginPixels ") + bad + " is refused").c_str());
+    const auto margin_job = Job(scenario, MarginOverride("100"));
+    Rejects([&] { (void)RunPlanarCalibrationJob(session, margin_job.substr(0, margin_job.size() - 1) + ",\"extra\":1}"); },
+        "an unknown key next to the margin is refused");
+    // Both optional keys together.
+    const auto both = RunPlanarCalibrationJob(session, Job(scenario, "\"seamOutputDpi\":180=\"seamOutputDpi\":180,\"distortionCoefficients\":[\"k1\",\"k2\"],\"edgeMarginPixels\":100"));
+    Check(both.report_json.find("distortionModel") != std::string::npos && both.report_json.find("edgeMargin") != std::string::npos,
+        "the coefficient selection and the margin can be given together");
+}
+
 // --write-fixture <new directory>: the inputs of the recovery scenario for a
 // manual end-to-end run (DraftCalibrator, SyntheticPairGenerator, StitchEval):
 // session.json, job.json, pair-spec.json (the true cameras on an A0 chart) and
@@ -657,6 +778,7 @@ int main(int argc, char** argv) {
         TestNominalMismatch();
         TestSeam();
         TestCoefficientSelection();
+        TestEdgeMargin();
         TestRejections();
     } catch (const std::exception& error) {
         std::cerr << "exception: " << error.what() << '\n';

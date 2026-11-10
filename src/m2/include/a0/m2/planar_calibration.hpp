@@ -43,6 +43,11 @@ struct PlanarCalibrationRequest {
     std::array<std::string, 2> overlap_view_ids; // CAM-A, then CAM-B: the same flat placement seen by both
     std::array<NominalCamera, 2> nominal;        // CAM-A, then CAM-B
     SolvedCoefficients solved;                   // both cameras use the same selection
+    // Observed points closer than this to an image border (pixels, in the view's own
+    // image, measured to the nearest of the four borders) are left out of the fit of the
+    // training and overlap views. 0 leaves out nothing, which is the estimate before this
+    // option existed. Validation views and the seam measures use every point.
+    double edge_margin_pixels = 0;               // finite, >= 0
 };
 
 // Numerical stopping criteria only, not optical or quality thresholds. No defaults.
@@ -164,6 +169,7 @@ struct CameraPlanarResult {
     std::optional<ResidualSummary> held_out_residual; // pooled over evaluated validation views
     Straightness fit_straightness;
     Straightness held_out_straightness;
+    std::uint32_t edge_excluded_points = 0;           // fit points (training and overlap) left out by edge_margin_pixels
 };
 
 struct PlanarCalibrationResult {

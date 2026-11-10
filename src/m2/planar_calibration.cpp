@@ -381,6 +381,20 @@ std::optional<Points> Gather(const CalibrationObservationSession& session, const
     }
     return points;
 }
+// True when the pixel is closer than `margin` to the nearest border of a
+// width x height image (sample centres run from 0 to width - 1 and height - 1).
+// A margin of 0 never excludes.
+bool NearImageEdge(double u, double v, std::uint32_t width, std::uint32_t height, double margin) {
+    if (!(margin > 0)) return false;
+    return std::min({u, v, (width - 1.0) - u, (height - 1.0) - v}) < margin;
+}
+// Removes the points near an image border; returns how many were removed.
+std::uint32_t DropNearImageEdge(Points& points, std::uint32_t width, std::uint32_t height, double margin) {
+    const auto before = points.size();
+    points.erase(std::remove_if(points.begin(), points.end(),
+        [&](const Correspondence& point) { return NearImageEdge(point.u, point.v, width, height, margin); }), points.end());
+    return static_cast<std::uint32_t>(before - points.size());
+}
 // DLT of chart -> (u, v), normalized to h22 = 1.
 std::optional<Matrix3> Homography(const Points& points) {
     std::vector<pose_detail::PlanarObservation> observations;
@@ -483,6 +497,8 @@ CameraPlanarResult EvaluateCamera(const CalibrationObservationSession& session, 
         const auto& ids = f == 0 && overlap_point_ids ? *overlap_point_ids : members[fitted[f]]->used_point_ids;
         auto points = Gather(session, *members[fitted[f]], ids);
         if (!points) { out.views[fitted[f]].outcome = PlanarViewOutcome::NumericalFailure; return out; }
+        out.edge_excluded_points += DropNearImageEdge(*points, members[fitted[f]]->width_pixels, members[fitted[f]]->height_pixels,
+            request.edge_margin_pixels);
         views.push_back({std::move(*points), f == 0 ? std::nullopt : std::optional<std::size_t>{f - 1}});
     }
     const auto h_start = Homography(views[0].points);
@@ -678,6 +694,7 @@ PlanarCameraCoverage Coverage(const CalibrationObservationSession& session, cons
         for (const auto& id : view.used_point_ids) {
             const auto pixel = pixels.find(id);
             if (pixel == pixels.end()) continue; // Parse guarantees a detected pixel
+            if (NearImageEdge(pixel->second.x, pixel->second.y, view.width_pixels, view.height_pixels, request.edge_margin_pixels)) continue;
             ++out.fit_point_cells[cell(pixel->second.y, view.height_pixels) * 4 + cell(pixel->second.x, view.width_pixels)];
         }
     }

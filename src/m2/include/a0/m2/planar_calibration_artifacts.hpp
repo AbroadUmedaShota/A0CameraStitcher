@@ -50,11 +50,16 @@ struct PlanarCalibrationMetadata {
     std::string_view observation_session_json, const PlanarCalibrationRequest& request,
     const PlanarCalibrationPolicy& policy, const PlanarCalibrationMetadata& metadata);
 
-// Strict, bounded job JSON (a0.planar-calibration-job.v1). The one optional
-// key, distortionCoefficients (array of "k1" "k2" "k3" "p1" "p2", each at most
-// once; [] solves none), selects the coefficients to solve; the others are
+// Strict, bounded job JSON (a0.planar-calibration-job.v1). Two optional keys.
+// distortionCoefficients (array of "k1" "k2" "k3" "p1" "p2", each at most
+// once; [] solves none) selects the coefficients to solve; the others are
 // fixed to 0 and the report records `distortionModel`. Without the key, or with
 // all five, the output bytes are those of the five-coefficient estimate.
+// edgeMarginPixels (number, 0..100000) leaves the observed points closer than
+// that to an image border out of the fit of the training and overlap views; the
+// report records `edgeMargin` with the number of points left out per camera.
+// Without the key, or with 0, the output bytes are those of the estimate that
+// uses every point.
 // Malformed jobs or
 // sessions and invalid policies throw invalid_argument; estimation or
 // metadata failures return a diagnostic report with no profile.

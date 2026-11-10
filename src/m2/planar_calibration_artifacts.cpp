@@ -188,6 +188,13 @@ std::string DistortionModelJson(const SolvedCoefficients& solved) {
     }
     return "{\"solvedCoefficients\":[" + solved_names + "],\"fixedToZeroCoefficients\":[" + fixed_names + "]}";
 }
+constexpr double kMaximumEdgeMarginPixels = 100000;
+// {"marginPixels": m, "excludedFitPoints": {"CAM-A": n, "CAM-B": n}}: the fit points (training and overlap views) left
+// out per camera; null counts when the estimate did not run.
+std::string EdgeMarginJson(double margin, const std::optional<PlanarCalibrationResult>& result) {
+    const auto count = [&](std::size_t i) { return result ? std::to_string(result->cameras[i].edge_excluded_points) : std::string("null"); };
+    return "{\"marginPixels\":" + Finite(margin) + ",\"excludedFitPoints\":{\"CAM-A\":" + count(0) + ",\"CAM-B\":" + count(1) + "}}";
+}
 NominalCamera Nominal(const JsonValue& value) {
     Keys(value, {"focalLengthMm", "sensorWidthMm", "sensorHeightMm"});
     return {Number(At(value, "focalLengthMm")), Number(At(value, "sensorWidthMm")), Number(At(value, "sensorHeightMm"))};
@@ -248,6 +255,8 @@ DraftCalibrationArtifacts BuildPlanarCalibrationArtifacts(std::string_view json,
         + ",\"model\":\"planar-rigid-placement-homography-brown-conrady-k1k2k3-p1p2\""
         // Only a reduced selection is recorded, so a job without the selection keeps its report bytes.
         + (request.solved.All() ? std::string() : ",\"distortionModel\":" + DistortionModelJson(request.solved))
+        // Likewise only a margin above 0 is recorded, with the number of fit points it left out per camera.
+        + (request.edge_margin_pixels > 0 ? ",\"edgeMargin\":" + EdgeMarginJson(request.edge_margin_pixels, result) : std::string())
         + ",\"intrinsicsSource\":\"nominal-not-estimated\",\"nominalCameras\":{";
     for (std::size_t i = 0; i < 2; ++i) {
         if (i) report += ',';
@@ -289,8 +298,12 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
     const auto job = BasicJsonParser<Failure>(job_json).Parse();
     // Optional: distortionCoefficients, the coefficients to solve (the others stay 0). Absent: all five.
     const bool has_selection = job.kind == JsonKind::object && job.object.contains("distortionCoefficients");
+    // Optional: edgeMarginPixels, observed points closer than this to an image border are left out of the fit. Absent or 0: none.
+    const bool has_margin = job.kind == JsonKind::object && job.object.contains("edgeMarginPixels");
     Keys(job, {"schemaVersion", "profileId", "provenanceId", "measuredAt", "documentPlane", "overlapViews", "overlapPlacement", "nominalCameras",
-        "numericalPolicy", "seamOutputDpi"}, has_selection ? 1 : 0);
+        "numericalPolicy", "seamOutputDpi"}, (has_selection ? 1 : 0) + (has_margin ? 1 : 0));
+    const double edge_margin = has_margin ? Number(At(job, "edgeMarginPixels")) : 0.0;
+    if (edge_margin < 0 || edge_margin > kMaximumEdgeMarginPixels) InvalidJob();
     if (Text(At(job, "schemaVersion")) != kPlanarCalibrationJobSchema) InvalidJob();
     const auto& plane = At(job, "documentPlane"); Keys(plane, {"orientation", "cameraOrder"});
     PlanarCalibrationMetadata metadata;
@@ -311,7 +324,7 @@ DraftCalibrationArtifacts RunPlanarCalibrationJob(std::string_view session, std:
     const auto& nominal = At(job, "nominalCameras"); Keys(nominal, {"CAM-A", "CAM-B"});
     const PlanarCalibrationRequest request{{Text(At(views, "CAM-A")), Text(At(views, "CAM-B"))},
         {Nominal(At(nominal, "CAM-A")), Nominal(At(nominal, "CAM-B"))},
-        has_selection ? Coefficients(At(job, "distortionCoefficients")) : SolvedCoefficients{}};
+        has_selection ? Coefficients(At(job, "distortionCoefficients")) : SolvedCoefficients{}, edge_margin};
     const auto& p = At(job, "numericalPolicy");
     Keys(p, {"minimumTrainingViews", "maxIterations", "relativeCostTolerance", "relativeStepTolerance", "initialDamping", "maxUndistortionIterations", "undistortionTolerancePixels"});
     const PlanarCalibrationPolicy policy{Integer(At(p, "minimumTrainingViews")), Integer(At(p, "maxIterations")), Number(At(p, "relativeCostTolerance")),
