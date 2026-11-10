@@ -111,6 +111,11 @@ struct FakeWriteBody {
     std::map<std::uint16_t, std::int64_t> apply_as;
     std::set<std::uint16_t> unreadable_after_write;
     std::map<std::uint16_t, int> begins_by_code;
+    // The n-th description read of a code (1-based, every read of the body
+    // counted) answers as a real body did in stage A: the begin succeeds, the
+    // data is 0 bytes, and the END is refused with 0x200A.
+    std::map<std::uint16_t, int> zero_at;
+    std::map<std::uint16_t, int> reads_of;
     int write_begins = 0, write_datas = 0, write_ends = 0, read_begins = 0, forbidden = 0;
     std::vector<std::string> trace;
     std::function<void(const std::string&)> after;
@@ -139,6 +144,10 @@ struct FakeWriteBody {
             else {
                 if (!props.count(code) || (unreadable_after_write.count(code) && begins_by_code[code] > 0)) return FinalReply(0x200a);
                 data_ = DescBytes(code);
+                if (zero_at.count(code) && ++reads_of[code] == zero_at[code]) {
+                    data_.clear();
+                    zero_ = true;
+                }
             }
             offset_ = 0;
             writing_ = false;
@@ -179,6 +188,7 @@ struct FakeWriteBody {
         }
         case SettingsCommandKind::EndDataTransfer: {
             note(writing_ ? "write_end" : "end");
+            if (!writing_ && zero_) { zero_ = false; return FinalReply(0x200a); }
             if (!writing_) return FinalReply();
             ++write_ends;
             writing_ = false;
@@ -199,7 +209,7 @@ private:
     Bytes data_, pending_;
     std::size_t offset_ = 0;
     std::uint16_t current_ = 0;
-    bool writing_ = false;
+    bool writing_ = false, zero_ = false;
 };
 const std::vector<std::int64_t> kShutters{125, 166, 250, 333, 500, 1000, 1667, 2500, 3333, 5000, 10000, 20000, 0xfffffffdLL, 0xffffffffLL};
 FakeWriteBody Body(std::int64_t shutter, std::int64_t aperture, std::int64_t iso) {
@@ -1653,6 +1663,40 @@ void WatchdogCancel() {
         check(bench.controller->CaptureAllowed(), "cancel in a read: nothing sent, no block");
     }
 }
+// A read in the write session answered as a real body answered stage A: begin
+// accepted, 0 bytes, END refused with 0x200A (Marin MEDIUM 4).
+void ZeroByteReadsInTheWriteSession() {
+    {
+        // Before the first write: not sent, nothing written, no block.
+        Bench bench;
+        bench.b.zero_at[0x500f] = 3; // 1: the plan's read, 2: the verification read, 3: the read before the write
+        const auto run = bench.CopyRun();
+        check(bench.b.reads_of[0x500f] == 3, "zero read before the write happened");
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && run.reason == "desc_unreadable" && bench.Writes() == 0, "zero read before the write: not sent");
+        check(bench.controller->CaptureAllowed(), "zero read before the write: no block");
+    }
+    {
+        // At the read back: unknown, capture held, nothing after.
+        Bench bench;
+        bench.b.zero_at[0x500f] = 4; // 4: the read back after the write
+        const auto run = bench.CopyRun();
+        check(run.sent == 1 && run.verdict == D810WriteVerdict::Unknown && run.reason == "result_unknown" && bench.b.write_begins == 1, "zero read back: unknown");
+        check(run.steps[0].verdict == D810WriteVerdict::Unknown && !run.steps[0].readback, "zero read back: no value read back");
+        check(!bench.controller->CaptureAllowed() && bench.Restarted().Block() == D810CaptureBlock::Unknown, "zero read back: capture held");
+    }
+    {
+        // The operation latch drops: CAM-A's read before its first write fails,
+        // so CAM-B is never opened for writing (an ADR-0041 table, both cameras).
+        Bench bench(kAdr41Table);
+        bench.a.zero_at[0x500f] = 3; // 1: the plan's read, 2: the verification read, 3: the read before the write
+        const auto plan = bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}});
+        check(plan.Ok() && plan.plan->Cameras().size() == 2, "a plan for both");
+        const auto run = bench.Run(plan);
+        check(bench.a.reads_of[0x500f] == 3, "zero read on A happened");
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && bench.Writes() == 0, "zero read on A: not sent");
+        check(bench.access.opens[1] == 1 && bench.b.write_begins == 0, "the latch is down: B opened for the verification read only");
+    }
+}
 void OwnershipIsCompareAndSwap() {
     D810CameraOwnership owner;
     check(owner.TryAcquire(D810CameraUse::Settings) && !owner.TryAcquire(D810CameraUse::Live) && !owner.TryAcquire(D810CameraUse::Capture), "one owner");
@@ -1700,6 +1744,7 @@ int main() {
     run("ChosenRuns", ChosenRuns);
     run("StopsBeforeSending", StopsBeforeSending);
     run("WatchdogCancel", WatchdogCancel);
+    run("ZeroByteReadsInTheWriteSession", ZeroByteReadsInTheWriteSession);
     run("OwnershipIsCompareAndSwap", OwnershipIsCompareAndSwap);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";
