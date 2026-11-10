@@ -157,7 +157,9 @@ struct D810WriteGateConfig {
 };
 // States. In the words of ADR-0038 decision 9: ReadBegun, ReadOpen and
 // ReadEnding are "ReadOpen"; WriteBegun and WriteOpen are "WriteBegun";
-// WriteSent and WriteEnding are "WriteSent".
+// WriteSent and WriteEnding are "WriteSent". ReadyPending waits for the reply
+// to DeviceReady (0x90C8): OK or 0x2019 (DeviceBusy, "not yet") returns to
+// Idle, anything else retires.
 enum class D810WriteGateState : std::uint8_t {
     Idle, ReadyPending, ReadBegun, ReadOpen, ReadEnding, WriteBegun, WriteOpen, WriteSent, WriteEnding, Retired,
 };
@@ -305,7 +307,8 @@ private:
         if (!D810WriteItemHasCode(D810WriteItemOf(D810WriteItem::IsoAuto), config_.iso_auto_code)) return false;
         for (const auto& entry : config_.entries) {
             const auto* spec = FindD810WriteItemByCode(entry.code);
-            if (!spec || !codes.insert(entry.code).second || !D810ValueFits(spec->type, entry.value)) return false;
+            // 0xD100 has no public source for its encoding; the table refuses it too.
+            if (!spec || entry.code == 0xd100 || !codes.insert(entry.code).second || !D810ValueFits(spec->type, entry.value)) return false;
             if (spec->fixed && entry.value != spec->fixed_value) return false;
             if (spec->item == D810WriteItem::IsoAuto && entry.code != config_.iso_auto_code) return false;
         }
@@ -792,7 +795,8 @@ struct D810RereadResult {
 struct D810WriteStatus {
     D810CaptureBlock block{D810CaptureBlock::Unreadable};
     bool capture_allowed{};
-    // A new plan may be made and run: no block, or a known mismatch.
+    // A new plan may be made and run: the table enables a row, and there is no
+    // block or only a known mismatch.
     bool write_allowed{};
     bool plan_pending{};
     bool plan_confirmed{};
@@ -837,10 +841,10 @@ public:
         D810WriteStatus status;
         status.block = Block();
         status.capture_allowed = status.block == D810CaptureBlock::None;
-        status.write_allowed = table_valid_ && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
+        status.enabled_rows = D810EnabledRowCount(table_);
+        status.write_allowed = table_valid_ && status.enabled_rows > 0 && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
-        status.enabled_rows = D810EnabledRowCount(table_);
         return status;
     }
     // Build a plan from two fresh stage A reads. It replaces any plan not yet

@@ -530,18 +530,18 @@ inline D810ReleaseCheck CheckD810Release(const D810SettingsSnapshot& a, const D8
         std::vector<std::uint16_t> codes;
         if (const auto confirmed = table.Code(item)) codes.push_back(confirmed);
         else for (std::size_t i = 0; i < spec.code_count; ++i) codes.push_back(spec.codes[i]);
-        bool compared = false, same = true, content = false;
+        bool compared = false, same = true, content = false, unreadable = false;
         for (const auto code : codes) {
             const auto* left = AvailableD810Reading(a, code);
             const auto* right = AvailableD810Reading(b, code);
             if (!left && !right && codes.size() > 1) continue;
-            if (!left || !right) { same = false; break; }
+            if (!left || !right) { unreadable = true; break; }
             compared = true;
             content |= D810WriteValueExcluded(spec, left->desc.current_value) || D810WriteValueExcluded(spec, right->desc.current_value);
             same &= left->desc.current_value == right->desc.current_value;
         }
         if (content) check.differences.push_back(std::string(spec.name) + ":content_dependent");
-        else if (!compared && same) check.differences.push_back(std::string(spec.name) + ":unreadable");
+        else if (unreadable || !compared) check.differences.push_back(std::string(spec.name) + ":unreadable");
         else if (!same) check.differences.push_back(spec.name);
     }
     check.released = check.differences.empty();
@@ -580,9 +580,16 @@ inline const char* D810CaptureBlockToken(D810CaptureBlock block) {
     }
     return "unreadable";
 }
+// The enum order is the strength order (None weakest, Unreadable strongest):
+// StrongerD810Block compares the values. A new value goes where its strength
+// is, and the static_assert below is updated with it.
 inline D810CaptureBlock StrongerD810Block(D810CaptureBlock left, D810CaptureBlock right) {
     return static_cast<std::uint8_t>(left) >= static_cast<std::uint8_t>(right) ? left : right;
 }
+static_assert(static_cast<int>(D810CaptureBlock::None) == 0 && static_cast<int>(D810CaptureBlock::Mismatch) == 1 &&
+        static_cast<int>(D810CaptureBlock::Unknown) == 2 && static_cast<int>(D810CaptureBlock::Unconfirmed) == 3 &&
+        static_cast<int>(D810CaptureBlock::Unreadable) == 4,
+    "capture block strength order");
 inline constexpr std::string_view kD810JournalPrefix = "a0sw1";
 inline std::string D810ValueField(const D810WriteItemSpec& spec, std::int64_t value) {
     const auto bytes = D810ValueBytes(spec.type);

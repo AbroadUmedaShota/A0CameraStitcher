@@ -524,6 +524,9 @@ void ControllerTables() {
         // The product entry point holds the product table.
         Bench bench(kProduct);
         check(bench.controller->Status().enabled_rows == 0, "product entry: no row");
+        check(!bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "no row enabled: copying is not offered");
+        Bench enabled;
+        check(enabled.controller->Status().write_allowed, "rows enabled, no block: copying is offered");
         const auto copy = bench.Copy();
         check(!copy.Ok() && copy.reasons[0] == "code_unconfirmed:iso_auto" && bench.Writes() == 0, "product entry: nothing can be planned");
         check(bench.Restarted().Status().enabled_rows == 0, "product entry after a restart");
@@ -803,7 +806,7 @@ void GateSweep() {
     writes = 0;
     check(Sweep(after, argument_sets, targeted, only_aperture, writes) == 6 && writes == 1, "after one write only the other code");
     // An invalid configuration retires the gate at once.
-    for (const auto& entries : std::vector<std::vector<D810WriteGateEntry>>{{{0xd200, 1}}, {{0x500e, 3}}, {{0xd054, 1}}, {{0x500f, 64}, {0x500f, 100}}, {{0x500f, 0x10000}}, {{0xd16a, 0}}}) {
+    for (const auto& entries : std::vector<std::vector<D810WriteGateEntry>>{{{0xd200, 1}}, {{0x500e, 3}}, {{0xd054, 1}}, {{0x500f, 64}, {0x500f, 100}}, {{0x500f, 0x10000}}, {{0xd16a, 0}}, {{0xd100, 1667}}}) {
         D810WriteGateConfig config;
         config.iso_auto_code = 0xd054;
         config.entries = entries;
@@ -1354,10 +1357,20 @@ void RereadReleases() {
         const auto result = other.controller->Reread(other.access, other.options);
         check(!result.complete && result.block == D810CaptureBlock::Unknown, "incomplete reread");
     }
+    {
+        // An item one side cannot read is named as unreadable, not as a difference.
+        auto a = Body(1667, 800, 64), b = Body(1667, 800, 64);
+        b.props.erase(0x5007);
+        const auto release = CheckD810Release(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), kAdr38Table);
+        check(!release.released && release.differences == std::vector<std::string>{"aperture:unreadable"}, "unreadable on one side");
+    }
 }
 void JournalStates() {
     const auto op = std::string("a0sw1 op=00000000000000aa ");
     check(ParseD810Journal("").block == D810CaptureBlock::None, "empty");
+    using B = D810CaptureBlock;
+    check(StrongerD810Block(B::None, B::Mismatch) == B::Mismatch && StrongerD810Block(B::Unknown, B::Mismatch) == B::Unknown &&
+        StrongerD810Block(B::Unknown, B::Unconfirmed) == B::Unconfirmed && StrongerD810Block(B::Unreadable, B::Unconfirmed) == B::Unreadable, "block strength");
     check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n").block == D810CaptureBlock::Unconfirmed, "plan without end");
     check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=not_sent sent=0 reason=x\n").block == D810CaptureBlock::None, "not sent");
     check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=not_sent sent=1 reason=x\n").block == D810CaptureBlock::Unconfirmed, "not_sent with sends is malformed");

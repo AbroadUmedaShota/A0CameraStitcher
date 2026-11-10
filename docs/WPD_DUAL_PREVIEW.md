@@ -185,7 +185,8 @@ CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シ�
 | 状態（ADR-0038決定9の呼び名） | 受け付ける物 | 次 |
 |---|---|---|
 | Idle | 0x90C8（引数なし）、0x1015（0xD1A2だけ）、0x1014（計画のcodeと0x500E・確定したISO自動のcode）、Armした組の0x1016 | 各状態へ |
-| ReadyPending／ReadBegun／ReadOpen／ReadEnding（ReadOpen） | 自分が開いた読み取りのREAD_DATAとEND | ENDが0x2001でデータがきれいならIdle（読んだ値を今の世代に記録）。それ以外はRetired |
+| ReadyPending | 0x90C8の応答の待ち（ほかの命令は通さない） | 0x2001か0x2019（DeviceBusy、「まだ」）ならIdle。それ以外の拒否・HRESULTの失敗はRetired |
+| ReadBegun／ReadOpen／ReadEnding（ReadOpen） | 自分が開いた読み取りのREAD_DATAとEND | beginの拒否・HRESULTの失敗はRetired。ENDが0x2001でデータがきれいならIdle（読んだ値を今の世代に記録）。それ以外はRetired |
 | WriteBegun／WriteOpen（WriteBegun） | 応答の後、そのcontextのWRITE_DATAを1回だけ（NUM_BYTES_TO_WRITE・要素数・中身が計画の値の符号化と完全一致） | 応答にcontextが無ければRetired |
 | WriteSent／WriteEnding（WriteSent） | WRITE_DATAの応答の後、そのcontextのENDだけ | ENDが0x2001でWRITE_DATAが全部書けていればIdle（世代を進める）。どんな拒否もRetired |
 | Retired | 開いていた転送のENDを1回だけ（watchdogのCancelの後は何も） | なし |
