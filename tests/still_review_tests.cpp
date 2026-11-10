@@ -752,6 +752,54 @@ int main(){
                 reject_text("\"localLimitedRows\":0","\"localLimitedRows\":1");
                 reject_text("\"measuredGainBgr\":[","\"measuredGainBgr\":[-");
                 reject_text("\"globalGainBgr\":[","\"globalGainBgr\":[0,");
+                // The fallback: a render whose global gain could not be measured used the luminance ratio and says so.
+                {
+                    const auto from=text.find("\"colorMatch\":{");const auto to=text.find('}',from);
+                    check(from!=std::string::npos && to!=std::string::npos && text.find("\"fallback\":null",from)<to);
+                    const auto object=text.substr(from,to+1-from);
+                    // Replaces the value of one field of the colourMatch object (an array runs to its ']').
+                    const auto set=[&](std::string s,const std::string& key,const std::string& value){
+                        const auto at=s.find("\""+key+"\":");check(at!=std::string::npos);
+                        const auto begin=at+key.size()+3;const auto end=s[begin]=='['?s.find(']',begin)+1:s.find_first_of(",}",begin);
+                        s.replace(begin,end-begin,value);return s;
+                    };
+                    const auto load_with=[&](const std::string& color_match){
+                        auto changed=text;changed.replace(from,to+1-from,color_match);
+                        fs::create_directories(damaged);fs::copy_file(made.jpeg,damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+                        {std::ofstream f(damaged/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);f<<changed;}
+                        return LoadSavedStillReview(damaged/"uncalibrated-review.json");
+                    };
+                    const auto reject_with=[&](const std::string& color_match){reject([&]{(void)load_with(color_match);});};
+                    const std::string unit="[1,1,1]";
+                    auto fallback=set(set(set(set(set(object,"globalMeasured","false"),"fallback","\"luminance-ratio\""),"measuredGainBgr",unit),"globalGainBgr",unit),"localMinimumBgr",unit);
+                    fallback=set(fallback,"localMaximumBgr",unit);
+                    const auto read_back=load_with(fallback);
+                    check(read_back.blend && read_back.blend->color.luminance_fallback && !read_back.blend->color.global_measured && read_back.blend->color.mode==ColorMatchMode::rgb_paper &&
+                        read_back.blend->color.global_gain==std::array<double,3>{1,1,1} && read_back.blend->color.local_limited_rows==0);
+                    check(!w.luminance_fallback && !r.luminance_fallback);
+                    // A not-measured global gain without the fallback, and a fallback of a measured one, cannot be written.
+                    reject_with(set(fallback,"fallback","null"));
+                    reject_with(set(object,"fallback","\"luminance-ratio\""));
+                    reject_with(set(fallback,"fallback","\"rgb-paper\""));
+                    reject_with(set(fallback,"fallback","1"));
+                    reject_with(set(fallback,"fallback","\"\""));
+                    // The fallback applies no colour gain: a gain, a range or a limited row that is not 1 or 0 is refused.
+                    reject_with(set(fallback,"globalGainBgr","[1.1,1,1]"));
+                    reject_with(set(fallback,"measuredGainBgr","[1,1.1,1]"));
+                    reject_with(set(fallback,"localMinimumBgr","[0.9,1,1]"));
+                    reject_with(set(fallback,"localMaximumBgr","[1,1,1.1]"));
+                    reject_with(set(fallback,"globalLimited","true"));
+                    reject_with(set(set(fallback,"gainLimit","1.5"),"localLimitedRows","1"));
+                    // A limit that was passed is kept with the fallback.
+                    check(load_with(set(fallback,"gainLimit","1.5")).blend->color.gain_limit==1.5);
+                    // Without a limit the global gain is the measured one and nothing was limited; a measured gain needs its paper pixels.
+                    const auto gain_begin=object.find("\"globalGainBgr\":[")+17;
+                    const auto raised="[9"+object.substr(gain_begin,object.find(']',gain_begin)-gain_begin)+"]";
+                    reject_with(set(set(object,"globalGainBgr",raised),"globalLimited","true"));
+                    reject_with(set(object,"globalLimited","true"));
+                    reject_with(set(object,"paperCells","0"));
+                    reject_with(set(set(object,"paperCells","0"),"fallback","\"luminance-ratio\""));
+                }
             }
             reject_text("\"geometryBasis\":\"fixed-composite\"","\"geometryBasis\":\"auto-still-translation\"");
             reject_text("\"method\":\"fixed-seam\"","\"method\":\"seam-cut\"");

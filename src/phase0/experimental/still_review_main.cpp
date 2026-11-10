@@ -92,7 +92,7 @@ struct Inspector {
         const auto& c=b->color;const auto fixed=[](double v){return a0::phase0::experimental::StillFixed(v,3);};
         std::wstring text=L"色の比 A/B（B・G・R。B 全体に掛ける）: ";
         if(c.global_measured)text+=fixed(c.global_gain[0])+L" / "+fixed(c.global_gain[1])+L" / "+fixed(c.global_gain[2])+L"（紙の画素 "+std::to_wstring(c.paper_cells)+L"）";
-        else text+=L"測れませんでした（紙の画素が足りない）";
+        else text+=L"測れませんでした（紙の画素が足りない、または白飛び）。色は合わせず、明るさの比だけで合わせています";
         return text+L"\r\n";
     }
     std::wstring BlendText() const {

@@ -313,8 +313,11 @@ PaperSums SumPaper(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f
 // record's colour, difference and ratio fields, result.row_ratio and result.row_gain. The residual is
 // A over B-after-the-global-gain on the paper pixels of the window, smoothed along rows as the luminance
 // ratio is; where a row has no paper pixel in reach it is 1.
+// When the global gain cannot be measured it returns no plan and leaves only the counts and the
+// fallback mark in record.color: the caller then renders with the luminance ratio, which still ties B
+// to A, rather than leave B with no ratio at all.
 template<class MapA,class MapB>
-ColorPlan MeasureColorMatch(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const SeamBlendSettings& settings,
+std::optional<ColorPlan> MeasureColorMatch(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const SeamBlendSettings& settings,
     const ColorMatch& color,SeamBlendResult& result){
     constexpr double weight[3]={0.114,0.587,0.299}; // B, G, R luminance weights, as Luminance()
     auto& record=result.record;auto& cm=record.color;
@@ -326,8 +329,9 @@ ColorPlan MeasureColorMatch(const BgrImage& a,const BgrImage& b,const Frame<MapA
     ColorPlan plan;
     const auto needed=std::max<std::uint64_t>(1,static_cast<std::uint64_t>(std::ceil(kPaperSelectionDesign.minimum_cell_fraction*static_cast<double>(cm.covered_cells))));
     cm.global_measured=sums.cells>=needed && sums.a[0]>0 && sums.a[1]>0 && sums.a[2]>0 && sums.b[0]>0 && sums.b[1]>0 && sums.b[2]>0;
+    if(!cm.global_measured){cm.luminance_fallback=true;return std::nullopt;}
     for(int c=0;c<3;++c){
-        if(cm.global_measured)cm.measured_global[c]=sums.a[c]/sums.b[c];
+        cm.measured_global[c]=sums.a[c]/sums.b[c];
         plan.global[c]=cm.measured_global[c];
         if(color.gain_limit){const auto kept=std::clamp(plan.global[c],1/limit,limit);if(kept!=plan.global[c]){plan.global[c]=kept;cm.global_limited=true;}}
         cm.global_gain[c]=plan.global[c];
@@ -424,8 +428,12 @@ SeamBlendResult RenderFixedOnBand(const BgrImage& a,const BgrImage& b,const Fram
     record.seam_x.assign(band.height,seam_column);
     if(color.mode==ColorMatchMode::rgb_paper){
         const auto plan=MeasureColorMatch(a,b,frame,band,settings,color,result);
-        band=Band{};
-        return ComposeAlongSeam(a,b,frame,settings,std::move(result),&plan);
+        if(plan){
+            band=Band{};
+            return ComposeAlongSeam(a,b,frame,settings,std::move(result),&*plan);
+        }
+        // The global gain is not measurable: fall through to the luminance ratio, which sets the
+        // difference and ratio fields and row_ratio itself. record.color keeps the counts and the mark.
     }
     MeasureAlongSeam(band,settings,result);
     band=Band{};

@@ -126,10 +126,13 @@ inline std::vector<std::uint32_t> ExpandSeamSteps(std::uint32_t start,std::strin
 // applied to B everywhere (measured_global kept within the limit). local_*: the range over rows of the
 // residual gain at the seam, after the limit. paper_cells / covered_cells: the paper pixels used and
 // the cells covered by both cameras in the band. local_limited_rows: rows whose residual hit the limit.
+// luminance_fallback: the global gain could not be measured (global_measured is false), so the render
+// used the luminance ratio, byte for byte as with kColorMatchLuminanceRatio, instead of leaving B
+// without a ratio; the gains and the local range are then 1 and row_gain is empty.
 struct ColorMatchRecord {
     ColorMatchMode mode{ColorMatchMode::luminance_ratio};
     bool gain_limit_set{};double gain_limit{};
-    bool global_measured{},global_limited{};
+    bool global_measured{},global_limited{},luminance_fallback{};
     std::uint64_t paper_cells{},covered_cells{},local_limited_rows{};
     std::array<double,3> measured_global{1,1,1},global_gain{1,1,1},local_minimum{1,1,1},local_maximum{1,1,1};
 };
@@ -176,7 +179,8 @@ struct SeamBlendResult {
 // color (#415): the default matches B to A per channel (see ColorMatch above); pass
 // kColorMatchLuminanceRatio for the luminance ratio described in this paragraph, which is then
 // byte-for-byte the output of #398. With A and B the same image at an integer offset both modes
-// give the same bytes. Throws std::invalid_argument for an invalid color. The same holds for
+// give the same bytes. When the paper pixels of the band cannot be measured the colour match
+// renders with the luminance ratio as well (record.color.luminance_fallback). Throws std::invalid_argument for an invalid color. The same holds for
 // RenderMappedFixedSeam and RenderDocumentFixedSeam below.
 // seam_column is an output pixel column (after the crop). The columns whose
 // blend weight is strictly between 0 and 1, seam_column +/- (ceil(width_pixels/2)-1),

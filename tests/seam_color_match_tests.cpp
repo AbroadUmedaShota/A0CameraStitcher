@@ -99,7 +99,7 @@ std::string Text(const Rgb& p) {
 bool SameRecord(const SeamBlendRecord& x, const SeamBlendRecord& y) {
     return x.seam_x == y.seam_x && x.difference_mean == y.difference_mean && x.difference_maximum == y.difference_maximum &&
         x.ratio_minimum == y.ratio_minimum && x.ratio_maximum == y.ratio_maximum && x.saturation_limited_pixels == y.saturation_limited_pixels &&
-        x.color.mode == y.color.mode && x.color.global_measured == y.color.global_measured && x.color.global_limited == y.color.global_limited &&
+        x.color.mode == y.color.mode && x.color.global_measured == y.color.global_measured && x.color.luminance_fallback == y.color.luminance_fallback && x.color.global_limited == y.color.global_limited &&
         x.color.paper_cells == y.color.paper_cells && x.color.covered_cells == y.color.covered_cells && x.color.local_limited_rows == y.color.local_limited_rows &&
         x.color.measured_global == y.color.measured_global && x.color.global_gain == y.color.global_gain &&
         x.color.local_minimum == y.color.local_minimum && x.color.local_maximum == y.color.local_maximum;
@@ -294,14 +294,33 @@ int main() {
                 "a channel that would pass 255 lowers the three gains together, keeping the hue of the match");
         }
 
-        // ---- Paper that cannot be measured: clipped in A ----
+        // ---- Paper that cannot be measured: clipped in A, the luminance ratio is used ----
         {
-            const auto fa = Flat(200, 80, {255, 255, 255}), fb = Flat(200, 80, {200, 210, 220});
-            const auto r = RenderPairFixedSeam(fa, fb, Shift(100), 150, small);
-            const auto& c = r.record.color;
-            check(!c.global_measured && c.paper_cells == 0 && c.covered_cells > 0 && c.global_gain == Rgb{1, 1, 1} && c.measured_global == Rgb{1, 1, 1},
-                "a clipped reference gives no measurement, and the global gain stays 1");
-            check(Pixel(r.image, 290, 40) == std::array<int, 3>{200, 210, 220}, "without a measurement B keeps its own colour");
+            for (const auto& clipped : {std::array<std::uint8_t, 3>{255, 255, 255}, std::array<std::uint8_t, 3>{255, 200, 200}}) {
+                const auto fa = Flat(200, 80, clipped), fb = Flat(200, 80, {200, 210, 220});
+                const auto r = RenderPairFixedSeam(fa, fb, Shift(100), 150, small);
+                const auto reference = RenderPairFixedSeam(fa, fb, Shift(100), 150, small, kColorMatchLuminanceRatio);
+                const auto& c = r.record.color;
+                check(!c.global_measured && c.luminance_fallback && c.paper_cells == 0 && c.covered_cells > 0 && c.global_gain == Rgb{1, 1, 1} && c.measured_global == Rgb{1, 1, 1} &&
+                    c.local_minimum == Rgb{1, 1, 1} && c.local_maximum == Rgb{1, 1, 1} && !c.global_limited && c.local_limited_rows == 0 && c.mode == ColorMatchMode::rgb_paper,
+                    "a clipped reference gives no measurement: the record says so, names the fallback, and every colour gain is 1");
+                check(r.image.bgr == reference.image.bgr && r.row_ratio == reference.row_ratio && r.row_gain.empty() && r.record.seam_x == reference.record.seam_x &&
+                    r.record.difference_mean == reference.record.difference_mean && r.record.difference_maximum == reference.record.difference_maximum &&
+                    r.record.ratio_minimum == reference.record.ratio_minimum && r.record.ratio_maximum == reference.record.ratio_maximum &&
+                    r.record.saturation_limited_pixels == reference.record.saturation_limited_pixels,
+                    "without a measurement the pixels are those of the luminance ratio, byte for byte");
+                check(Pixel(r.image, 155, 40) != std::array<int, 3>{200, 210, 220}, "without a measurement B is still tied to A beside the seam, not left as it is");
+                const auto mapped = RenderMappedFixedSeam(fa, fb, PairMappedFixedSeamInput(200, 80, 200, 80, Shift(100)), 150, small);
+                const auto mapped_reference = RenderMappedFixedSeam(fa, fb, PairMappedFixedSeamInput(200, 80, 200, 80, Shift(100)), 150, small, kColorMatchLuminanceRatio);
+                check(mapped.record.color.luminance_fallback && mapped.image.bgr == mapped_reference.image.bgr, "the mapped render falls back the same way");
+                ColorMatch limited;
+                limited.gain_limit = 1.5;
+                const auto with_limit = RenderPairFixedSeam(fa, fb, Shift(100), 150, small, limited);
+                check(with_limit.record.color.luminance_fallback && with_limit.record.color.gain_limit_set && with_limit.record.color.gain_limit == 1.5 && with_limit.image.bgr == reference.image.bgr,
+                    "the fallback records the limit that was passed");
+            }
+            const auto good = RenderPairFixedSeam(Flat(200, 80, {200, 200, 200}), Flat(200, 80, {100, 100, 100}), Shift(100), 150, small);
+            check(good.record.color.global_measured && !good.record.color.luminance_fallback, "a measured band does not fall back");
         }
 
         // ---- The limit ----

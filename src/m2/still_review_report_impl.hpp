@@ -136,7 +136,9 @@ void WriteColorMatchJson(std::ostream& out,const ColorMatchRecord& c){
     const auto triple=[&](const std::array<double,3>& v){out<<'['<<v[0]<<','<<v[1]<<','<<v[2]<<']';};
     out<<",\"colorMatch\":{\"mode\":\""<<ColorMatchModeCode(c.mode)<<"\",\"gainLimit\":";
     if(c.gain_limit_set)out<<c.gain_limit;else out<<"null";
-    out<<",\"globalMeasured\":"<<(c.global_measured?"true":"false")<<",\"paperCells\":"<<c.paper_cells<<",\"coveredCells\":"<<c.covered_cells<<",\"measuredGainBgr\":";triple(c.measured_global);
+    out<<",\"globalMeasured\":"<<(c.global_measured?"true":"false")<<",\"fallback\":";
+    if(c.luminance_fallback)out<<'"'<<ColorMatchModeCode(ColorMatchMode::luminance_ratio)<<'"';else out<<"null";
+    out<<",\"paperCells\":"<<c.paper_cells<<",\"coveredCells\":"<<c.covered_cells<<",\"measuredGainBgr\":";triple(c.measured_global);
     out<<",\"globalGainBgr\":";triple(c.global_gain);out<<",\"globalLimited\":"<<(c.global_limited?"true":"false")<<",\"localMinimumBgr\":";triple(c.local_minimum);
     out<<",\"localMaximumBgr\":";triple(c.local_maximum);out<<",\"localLimitedRows\":"<<c.local_limited_rows<<"}";
 }
@@ -282,11 +284,13 @@ std::array<double,3> ReviewGains(const ReviewValue& value){
     for(const auto v:g)if(!(v>0))ReviewReject();return g;
 }
 bool ReviewBoolean(const ReviewValue& value){if(value.kind!=ReviewJson::JsonKind::boolean)ReviewReject();return value.boolean;}
-// Every relation the writer guarantees is checked: without a global measurement the gains are 1; the
-// applied global gain is the measured one unless a limit is set and was hit; a limit bounds every
-// recorded gain (the global gain, and global times the residual range) and is at least 1.
+// Every relation the writer guarantees is checked: without a global measurement the render used the
+// luminance ratio (fallback "luminance-ratio") and every gain is 1, and a measurement needs the paper
+// pixels the writer requires; the applied global gain is the measured one unless a limit is set and was
+// hit (without a limit it is never changed); a limit bounds every recorded gain (the global gain, and
+// global times the residual range) and is at least 1.
 ColorMatchRecord ReadColorMatch(const ReviewValue& value,std::uint64_t cells_maximum,std::uint32_t rows){
-    ReviewFields(value,{"mode","gainLimit","globalMeasured","paperCells","coveredCells","measuredGainBgr","globalGainBgr","globalLimited","localMinimumBgr","localMaximumBgr","localLimitedRows"});
+    ReviewFields(value,{"mode","gainLimit","globalMeasured","fallback","paperCells","coveredCells","measuredGainBgr","globalGainBgr","globalLimited","localMinimumBgr","localMaximumBgr","localLimitedRows"});
     ColorMatchRecord c;
     if(ReviewString(ReviewAt(value,"mode"))!=ColorMatchModeCode(ColorMatchMode::rgb_paper))ReviewReject();
     c.mode=ColorMatchMode::rgb_paper;
@@ -308,6 +312,21 @@ ColorMatchRecord ReadColorMatch(const ReviewValue& value,std::uint64_t cells_max
     const bool kept=c.global_gain==c.measured_global;
     if(c.global_limited==kept)ReviewReject();
     if(c.local_limited_rows && !c.gain_limit_set)ReviewReject();
+    if(!c.gain_limit_set && (c.global_limited || !kept))ReviewReject();
+    const auto& fallback=ReviewAt(value,"fallback");
+    if(fallback.kind!=ReviewJson::JsonKind::null_value){
+        if(ReviewString(fallback)!=ColorMatchModeCode(ColorMatchMode::luminance_ratio))ReviewReject();
+        c.luminance_fallback=true;
+    }
+    // Fallback if and only if the global gain was not measured; the fallback render has no colour gains.
+    if(c.luminance_fallback==c.global_measured)ReviewReject();
+    if(c.luminance_fallback){
+        const std::array<double,3> unit{1,1,1};
+        if(c.global_limited || c.local_limited_rows || c.global_gain!=unit || c.local_minimum!=unit || c.local_maximum!=unit)ReviewReject();
+    }else{
+        const auto needed=std::max<std::uint64_t>(1,static_cast<std::uint64_t>(std::ceil(kPaperSelectionDesign.minimum_cell_fraction*static_cast<double>(c.covered_cells))));
+        if(c.paper_cells<needed)ReviewReject();
+    }
     return c;
 }
 SeamBlendRecord ReadFixedSeamBlend(const ReviewValue& value,std::uint32_t seam_column,std::uint32_t width,std::uint32_t height){
