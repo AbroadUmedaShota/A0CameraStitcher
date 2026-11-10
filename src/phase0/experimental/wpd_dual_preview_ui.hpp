@@ -118,11 +118,22 @@ bool LiveStoppedAndClosed(){
     return PreviewRestartAllowed(preview_joined,closing,cleanup_only,
         capture_pending.has_value() || capture_future.valid() || capture_restart_blocked,state);
 }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp): a settings write or reread also holds the cameras
+bool SettingsReadBusy(){return settings_future.valid() || SettingsWriteBusy();}
+#else
 bool SettingsReadBusy(){return settings_future.valid();}
+#endif
 bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed();}
 // Re-checked inside the handler, not only through the button state.
 bool CanReadSettings(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;}
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+void DiscardSettingsWriteView();
+void DiscardSettingsView(){settings_view.reset();DiscardSettingsWriteView();}
+#include "wpd_settings_write_ui.hpp"
+#else
 void DiscardSettingsView(){settings_view.reset();}
+#endif
 PairCycleObservation ObservePairCycle(){
     PairCycleObservation view{!all_sessions_passed || capture_restart_blocked,
         !capture_pending && !capture_future.valid() && !closing && !stopping,
@@ -317,6 +328,9 @@ void LayoutButtons(HWND hwnd){
     if(session_button)MoveWindow(session_button,std::max(12L,rect.right-430),rect.bottom/2+88,200,28,TRUE);
     if(settings_button)MoveWindow(settings_button,std::max(12L,rect.right-645),rect.bottom/2+88,200,28,TRUE);
     if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    LayoutSettingsWriteButtons(rect);
+#endif
 }
 void OpenSavedInspector(){
     if(review_path.empty())return;
@@ -516,6 +530,9 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         if(DrawPixels(dc,review_pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155))drawn[3]=1;
         return drawn;
     }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(preview_joined && DrawSettingsWrite(dc,client))return drawn;
+#endif
     // Both Live sessions are closed and a read finished: the settings table takes the place of C until Live restarts.
     if(settings_view && preview_joined){DrawSettingsView(dc,client);return drawn;}
     std::lock_guard lock(merged.mutex);
@@ -547,6 +564,9 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 void RequestCapture(int index){
     if(camera_end_restart_smoke)return; // This explicit lifecycle test never exposes.
     if(settings_future.valid())return; // No exposure while the settings are being read.
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(!SettingsWriteAdmitsCapture())return; // a settings write not confirmed holds every capture (ADR-0038 decision 8)
+#endif
     if(index<0 || index>2 || !CanFocus(*cameras[0]) || !CanFocus(*cameras[1]))return;
     if(index==2){std::lock_guard lock(merged.mutex);
         // C without a picture because the fixed condition cannot be applied (#401) does not stop the pair capture:
@@ -708,6 +728,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(id==402 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==inspect_button){
             try{OpenSavedInspector();}catch(const std::exception&){capture_status=L"拡大確認画面を開けませんでした。撮影結果は保存されています。";}return 0;
         }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        if(HandleSettingsWriteCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
+#endif
         if(id==405 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==settings_button){RequestSettingsRead();return 0;}
         if(id==403 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==session_button){
             if(SettingsReadBusy()){Log("ui_live_restart_refused=1 settings_read_in_progress=1");return 0;}
@@ -787,6 +810,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
         if(settings_button)EnableWindow(settings_button,CanReadSettings());
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        SettingsWriteTimer();
+#endif
         if(session_button){
             EnableWindow(session_button,CanRestartPreview() || (!preview_joined && CanFocus(*cameras[0]) && CanFocus(*cameras[1])));
             SetWindowTextW(session_button,preview_joined?L"ライブ再開":stopping?L"停止・切断中…":L"ライブ停止");
@@ -1290,6 +1316,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     settings_button=CreateWindowExW(0,L"BUTTON",L"両台の設定を読む",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(405),instance,nullptr);
     if(!pair_button || !review_button || !inspect_button || !session_button || !seam_button || !settings_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);EnableWindow(settings_button,FALSE);
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);EnableWindow(seam_button,FALSE);
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    CreateSettingsWriteControls(window,instance);InitProductSettingsWrite(); // before any session: a block left by an earlier run holds capture
+#endif
     LayoutButtons(window);run_start=Clock::now();StartPreview();SetTimer(window,1,50,nullptr);
     // A hidden console launch can supply STARTF_USESHOWWINDOW/SW_HIDE. This
     // application is an explicitly requested interactive preview: show its
@@ -1304,9 +1333,15 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     // The lease is released only after a running settings read has ended and closed its body.
     if(settings_stop)settings_stop->store(true);
     if(settings_future.valid()){auto outcome=settings_future.get();all_sessions_passed=all_sessions_passed && outcome.CleanClose();LogSettingsOutcome(outcome);}
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    FinishSettingsWrite(); // the stop flag, then the write or reread ends and closes its camera, before the lease goes
+#endif
     if(settings_close_failed)all_sessions_passed=false;
     if(capture_future.valid()){auto result=capture_future.get();all_sessions_passed=all_sessions_passed && result.capture.success && result.capture.closed;}
     if(state<0)all_sessions_passed=false;
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(capture_once_alias && all_sessions_passed && !SettingsWriteAdmitsCapture())return 1;
+#endif
     if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;}
     if(!cleanup_only){std::lock_guard lock(merged.mutex);
         // A C that is not drawn because the fixed condition cannot be applied is the shown behaviour, not a missing picture (#401).
