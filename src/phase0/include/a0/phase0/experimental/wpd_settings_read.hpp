@@ -14,6 +14,7 @@
 #include <WpdMtpExtensions.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <initializer_list>
 #include <optional>
@@ -108,12 +109,21 @@ inline std::optional<SettingsRequestShape> InspectSettingsRequest(IPortableDevic
     }
 }
 
-// The body answered with an MTP response code other than OK: both the dispatch and
-// the command succeeded and the code is present. A failed HRESULT, a missing
-// code or an exception is not an explicit refusal.
+// A response code the body uses to refuse a request: a 16 bit code in the
+// standard error range 0x2002..0x2FFF or the vendor range 0xA000..0xAFFF.
+// 0x2019 (DeviceBusy) is left out: it says the body could not take the request
+// now, not that a transfer is over.
+inline bool IsMtpRefusalCode(DWORD code) {
+    if (code == 0x2019) return false;
+    return (code >= 0x2002 && code <= 0x2fff) || (code >= 0xa000 && code <= 0xafff);
+}
+// The body answered with an MTP refusal code: both the dispatch and the command
+// succeeded and the code is present and in the range above. A failed HRESULT, a
+// missing code, a code outside the range (0, 0xFFFFFFFF, more than 16 bits), 0x2019
+// or an exception is not an explicit refusal.
 inline bool IsExplicitMtpRejection(const WpdLiveViewCommandResult& result) {
     return result.error == WpdLiveViewResultError::MtpRejected && result.dispatch_status == S_OK &&
-        result.command_status == S_OK && result.mtp_response != 0;
+        result.command_status == S_OK && IsMtpRefusalCode(result.mtp_response);
 }
 
 // --- The gate ----------------------------------------------------------------------
@@ -122,8 +132,9 @@ inline bool IsExplicitMtpRejection(const WpdLiveViewCommandResult& result) {
 // and the gate holds its context, taken from the begin reply), EndPending, and
 // Closed (after an ambiguous transport failure or an END that did not close the
 // transfer cleanly: nothing more). An END the body explicitly refused with an MTP
-// response code, for a transfer that delivered no data, is not ambiguous: the
-// transfer is over and the gate returns to Idle.
+// refusal code (IsExplicitMtpRejection), for a transfer that delivered no data, is
+// taken to mean the transfer is over and the gate returns to Idle. That is an
+// inference (unverified on a body), kept to the narrow code range above.
 class D810SettingsReadGate {
 public:
     bool Admit(IPortableDeviceValues* request) {
@@ -150,7 +161,8 @@ public:
             const auto end = InspectWpdLiveViewCommand(reply.status, reply.results.Get(), true);
             // A clean END reopens the gate. So does an explicit MTP refusal of the
             // END of a transfer that delivered nothing (a body that does not know
-            // the property answers so). Anything else stays closed.
+            // the property answers so; that this closes the transfer is inferred).
+            // Anything else stays closed.
             const bool reopen = !failed_ && (end.Ok() || (!transfer_dirty_ && IsExplicitMtpRejection(end)));
             state_ = reopen ? State::Idle : State::Closed;
             transfer_dirty_ = false;
@@ -223,7 +235,8 @@ public:
     bool Poisoned() const { return poisoned_; }
 
     // DeviceReady, then the Live state (must be off), then one description per
-    // table entry. Never sends a write, never retries an item.
+    // table entry. Never sends a write, never retries an item. One call per
+    // session: a second call sends nothing and reports every row as not_read.
     D810CameraSettingsRead ReadAll(const std::string& alias, const Log& log, std::span<const D810SettingSpec> specs = kD810SettingSpecs) {
         D810CameraSettingsRead out;
         out.alias = alias;
@@ -234,6 +247,8 @@ public:
             say(alias + " settings_read_stopped reason=" + reason);
             return out;
         };
+        if (read_all_called_) return stop("already_read", 0);
+        read_all_called_ = true;
         if (!may_continue_()) return stop("not_started", 0);
         const auto ready = DeviceReady();
         if (ready != Ready::Ok) return stop(ready == Ready::Interrupted ? "interrupted" : "device_not_ready", 0);
@@ -246,6 +261,11 @@ public:
             if (poisoned_ || !may_continue_()) return stop(poisoned_ ? "not_read_after_failure" : "interrupted", i);
             out.readings.push_back(ReadSetting(specs[i]));
             say(FormatD810SettingLogLine(alias, specs[i], out.readings.back()));
+            if (!stop_detail_.empty()) {
+                char head[48]{};
+                std::snprintf(head, sizeof head, " settings_stop code=0x%04x", static_cast<unsigned>(specs[i].code));
+                say(alias + head + stop_detail_);
+            }
             if (interrupted_) return stop("interrupted", i + 1);
         }
         return out;
@@ -311,7 +331,23 @@ private:
             result.begin_dispatched && result.received_bytes == 0 && result.end_attempted && result.end_result &&
             IsExplicitMtpRejection(*result.end_result);
     }
+    // What the END of a transfer that stopped the read looked like, in the words of
+    // the Live log (end_dispatch / end_command / end_mtp), plus the END error
+    // number. Empty when no END was attempted.
+    static std::string DescribeEnd(const WpdLiveViewTransferResult& result) {
+        std::string text;
+        char part[96]{};
+        if (result.end_result) {
+            std::snprintf(part, sizeof part, " end_dispatch=0x%lx end_command=0x%lx end_mtp=0x%lx",
+                static_cast<unsigned long>(result.end_result->dispatch_status), static_cast<unsigned long>(result.end_result->command_status),
+                static_cast<unsigned long>(result.end_result->mtp_response));
+            text += part;
+        }
+        if (result.end_error != WpdLiveViewTransferError::None) text += " end_error=" + std::to_string(static_cast<int>(result.end_error));
+        return text;
+    }
     D810SettingReading ReadSetting(const D810SettingSpec& spec) {
+        stop_detail_.clear();
         const auto code = spec.code;
         const auto result = Transfer([code] { return BuildSettingsPropDesc(code); }, kD810PropDescMaxBytes);
         if (!result.Ok()) {
@@ -333,14 +369,22 @@ private:
                 return UnavailableD810Setting(spec.id, "mtp_rejected_at_end", result.end_result->mtp_response);
             if (result.error == WpdLiveViewTransferError::PayloadLimitExceeded && result.end_confirmed)
                 return UnavailableD810Setting(spec.id, "too_large");
+            // The body opened a transfer, sent nothing (a short READ of an unknown
+            // size) and accepted the END: an empty answer, nothing is left open.
+            if (result.error == WpdLiveViewTransferError::EmptyPayload && result.received_bytes == 0 && result.end_confirmed && result.end_result)
+                return UnavailableD810Setting(spec.id, "empty_payload", result.end_result->mtp_response);
             // Anything else (an HRESULT failure, an exception, partial data, an END
             // that is not an explicit refusal) may have left a data phase in an
-            // unknown state, so nothing more is sent on this session.
+            // unknown state, so nothing more is sent on this session. The row keeps
+            // the MTP code of the failed command, or else that of the END, and the
+            // log line that follows it carries what the END answered.
             poisoned_ = true;
+            stop_detail_ = DescribeEnd(result);
+            const auto stop_mtp = result.command_failure ? result.command_failure->mtp_response : result.end_result ? result.end_result->mtp_response : 0u;
             if (result.error == WpdLiveViewTransferError::BeginRejected && result.command_failure &&
                 result.command_failure->error == WpdLiveViewResultError::CommandFailed)
-                return UnavailableD810Setting(spec.id, "command_failed", mtp);
-            return UnavailableD810Setting(spec.id, "transfer_failed_" + std::to_string(static_cast<int>(result.error)), mtp);
+                return UnavailableD810Setting(spec.id, "command_failed", stop_mtp);
+            return UnavailableD810Setting(spec.id, "transfer_failed_" + std::to_string(static_cast<int>(result.error)), stop_mtp);
         }
         const auto parsed = ParseD810PropDesc(result.payload, spec);
         D810SettingReading reading;
@@ -354,6 +398,7 @@ private:
     Transport transport_;
     std::function<bool()> may_continue_, may_cleanup_;
     D810SettingsReadGate gate_;
-    bool poisoned_{}, interrupted_{};
+    bool poisoned_{}, interrupted_{}, read_all_called_{};
+    std::string stop_detail_;
 };
 }

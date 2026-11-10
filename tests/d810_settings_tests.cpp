@@ -114,6 +114,9 @@ struct FakeBody {
     std::set<std::uint16_t> end_command_failed;  // END: the command HRESULT fails
     std::set<std::uint16_t> end_without_code;    // END: no MTP response code
     std::set<std::uint16_t> throw_on_end;        // END throws
+    std::set<std::uint16_t> read_command_failed; // READ_DATA: the command HRESULT fails
+    std::set<std::uint16_t> read_dispatch_failed; // READ_DATA: the dispatch HRESULT fails
+    std::map<std::uint16_t, DWORD> read_response; // property code -> MTP response code the READ_DATA answers with
     unsigned live = 0;
     DWORD ready_response = 0x2001;
     int busy_replies = 0;
@@ -157,6 +160,10 @@ struct FakeBody {
             ++reads;
             note("read");
             if (throw_on_read.count(current_)) throw std::runtime_error("transport failure");
+            if (read_command_failed.count(current_)) return CommandFailedReply();
+            if (read_dispatch_failed.count(current_)) return {E_FAIL, Reply()};
+            const auto read_refused = read_response.find(current_);
+            if (read_refused != read_response.end()) return FinalReply(read_refused->second);
             DWORD requested{};
             request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_TO_READ, &requested);
             auto count = std::min<std::size_t>(requested, data_.size() - offset_);
@@ -365,15 +372,16 @@ void SetArguments(IPortableDeviceValues* request, const std::vector<std::uint32_
     }
 }
 // The sweep from a gate in Idle: either a new one or one that came back to Idle
-// after a transfer ended.
-void SweepFromIdle(const D810SettingsReadGate& base, const std::vector<std::vector<std::uint32_t>>& argument_sets, std::size_t expected_admitted, bool table_codes) {
+// after a transfer ended. `opcodes` are the operation numbers tried.
+void SweepFromIdle(const D810SettingsReadGate& base, const std::vector<std::vector<std::uint32_t>>& argument_sets,
+    const std::vector<std::uint32_t>& opcodes, std::size_t expected_admitted) {
     std::size_t admitted = 0, probes = 0;
     for (const auto kind : {SettingsCommandKind::ExecuteWithoutData, SettingsCommandKind::ExecuteWithDataToRead, SettingsCommandKind::ExecuteWithDataToWrite}) {
         auto request = Make(kind, 0, {});
         check(InspectSettingsRequest(request.Get()) && InspectSettingsRequest(request.Get())->kind == kind, "kind detected");
         for (const auto& arguments : argument_sets) {
             SetArguments(request.Get(), arguments);
-            for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) {
+            for (const auto opcode : opcodes) {
                 request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE, opcode);
                 D810SettingsReadGate gate = base;
                 const bool got = gate.Admit(request.Get());
@@ -385,14 +393,13 @@ void SweepFromIdle(const D810SettingsReadGate& base, const std::vector<std::vect
     }
     // DeviceReady, the Live state, and the descriptions of 0x500d and 0xd16a.
     check(admitted == expected_admitted, "exactly the read-only operations are admitted");
-    check(probes == 3 * argument_sets.size() * 65536, "swept everything");
-    if (!table_codes) return;
-    // Every other table code, over every operation number and the read form.
+    check(probes == 3 * argument_sets.size() * opcodes.size(), "swept everything");
+    // Every other table code, over the same operation numbers and the read form.
     for (const auto& spec : kD810SettingSpecs) {
         if (spec.code == 0x500d || spec.code == 0xd16a) continue;
         auto request = Make(SettingsCommandKind::ExecuteWithDataToRead, 0, {spec.code});
         std::size_t accepted = 0;
-        for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) {
+        for (const auto opcode : opcodes) {
             request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE, opcode);
             D810SettingsReadGate gate = base;
             if (gate.Admit(request.Get())) { ++accepted; check(opcode == 0x1014, "only GetDevicePropDesc"); }
@@ -413,12 +420,19 @@ D810SettingsReadGate ReopenedGate() {
 }
 void GateSweep() {
     const std::vector<std::vector<std::uint32_t>> argument_sets{{}, {0xd1a2}, {0x500d}, {0x1016}, {0xd1a2, 0xd1a2}, {0xffffffffu}, {0xd16a}};
-    SweepFromIdle(D810SettingsReadGate{}, argument_sets, 4, true);
+    std::vector<std::uint32_t> every_opcode(0x10000);
+    for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) every_opcode[opcode] = opcode;
+    SweepFromIdle(D810SettingsReadGate{}, argument_sets, every_opcode, 4);
     // The gate that came back to Idle after a refused END admits exactly the same set.
+    // Idle's decision depends on the shape of the request and the state only, so this
+    // gate is swept over the operations the stage is about (the admitted ones, the write
+    // ones and the vendor ones) with every argument list, every command kind and every
+    // table code, not over all 65536 operation numbers (the Debug build is slow).
+    // If Idle's decision ever starts to read more state, this narrowed sweep is not enough.
+    const std::vector<std::uint32_t> targeted_opcodes{0x90c8, 0x1014, 0x1015, 0x1016, 0x90c7, 0x90c2, 0x9207, 0x9201, 0x9202, 0x9203, 0x9204, 0x90c0};
     const auto reopened = ReopenedGate();
     check(!reopened.Closed() && !reopened.TransferOpen(), "reopened gate is idle");
-    // (The Debug build is slow: a smaller set of argument lists, DeviceReady, one description and the write codes among them.)
-    SweepFromIdle(reopened, {{}, {0x500d}, {0x1016}}, 2, false);
+    SweepFromIdle(reopened, argument_sets, targeted_opcodes, 4);
     // Bits above 16 in the operation or an argument change the value: refused.
     for (const auto high : {0x00010000u, 0x80000000u, 0xffff0000u, 0x10000000u}) {
         for (const auto& [kind, opcode, argument] : std::vector<std::tuple<SettingsCommandKind, DWORD, DWORD>>{
@@ -515,14 +529,28 @@ void GateTransferOrder() {
         return gate;
     };
     {   // An explicit MTP refusal of the END of a transfer that delivered no data: back to Idle.
-        for (const DWORD code : {0x200au, 0x2019u, 0xa00bu}) {
+        // The codes are 0x2002..0x2FFF and 0xA000..0xAFFF, edges included, except 0x2019.
+        for (const DWORD code : {0x200au, 0xa00bu, 0x2002u, 0x2018u, 0x201au, 0x2fffu, 0xa000u, 0xafffu}) {
             auto gate = ended_with({ReadReplyOf(0)}, FinalReply(code));
             check(!gate.Closed() && !gate.TransferOpen(), "empty transfer, END refused: idle");
             check(!gate.Admit(ReadRequest(L"c1").Get()) && !gate.Admit(EndRequest(L"c1").Get()), "no read or END after the refused END");
             check(gate.Admit(begin().Get()), "a new operation after the refused END");
         }
-        check(!ended_with({}, FinalReply(0x2019)).Closed(), "no READ at all, END refused: idle");
+        check(!ended_with({}, FinalReply(0x200a)).Closed(), "no READ at all, END refused: idle");
         check(!ended_with({ReadReplyOf(0), ReadReplyOf(0)}, FinalReply(0x200a)).Closed(), "two empty READs, END refused: idle");
+    }
+    {   // A code that is not a refusal in the narrow sense keeps the gate closed, and nothing more goes out.
+        // 0x2019 is DeviceBusy; the rest are outside both ranges or wider than 16 bits.
+        for (const DWORD code : {0x2019u, 0xffffffffu, 0x00012001u, 0x0001u, 0x2000u, 0x3000u, 0x9fffu, 0xb000u, 0xffffu, 0x1000200au, 0x8000a00bu}) {
+            for (const bool with_read : {true, false}) {
+                auto gate = with_read ? ended_with({ReadReplyOf(0)}, FinalReply(code)) : ended_with({}, FinalReply(code));
+                check(gate.Closed() && !gate.TransferOpen(), "END code outside the refusal range: closed");
+                check(!gate.Admit(begin().Get()) && !gate.Admit(ReadRequest(L"c1").Get()) && !gate.Admit(EndRequest(L"c1").Get()), "nothing is admitted after it");
+            }
+        }
+        check(IsMtpRefusalCode(0x2002) && IsMtpRefusalCode(0x2fff) && IsMtpRefusalCode(0xa000) && IsMtpRefusalCode(0xafff) &&
+            !IsMtpRefusalCode(0x2001) && !IsMtpRefusalCode(0x2019) && !IsMtpRefusalCode(0) && !IsMtpRefusalCode(0x3000) && !IsMtpRefusalCode(0x9fff) &&
+            !IsMtpRefusalCode(0xb000) && !IsMtpRefusalCode(0x00012001u) && !IsMtpRefusalCode(0xffffffffu), "refusal code range");
     }
     {   // Everything else about a refused END keeps the gate closed.
         check(ended_with({ReadReplyOf(3)}, FinalReply(0x200a)).Closed(), "data received, END refused");
@@ -708,14 +736,14 @@ void RejectedAtEnd() {
         for (const auto& line : rows)
             if (line.id == D810SettingId::PictureControl) check(line.difference == D810Difference::Unknown && line.a_text == "unavailable (mtp_rejected_at_end)", "table shows the reason");
     }
-    {   // Size known, READ delivers nothing (incomplete payload), END answers 0x2019.
+    {   // Size known, READ delivers nothing (incomplete payload), END answers a vendor code.
         auto body = HappyBody();
         body.serve_limit[0x500b] = 0;
-        body.end_response[0x500b] = 0x2019;
+        body.end_response[0x500b] = 0xa00b;
         Rig rig(std::move(body));
         const auto read = rig.Run();
         const auto& row = Row(read, D810SettingId::Metering);
-        check(read.Complete() && !row.available && row.reason == "mtp_rejected_at_end" && row.mtp_response == 0x2019, "known size, empty READ");
+        check(read.Complete() && !row.available && row.reason == "mtp_rejected_at_end" && row.mtp_response == 0xa00b, "known size, empty READ");
         check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == 12, "later items read");
     }
     {   // Two items in a row.
@@ -728,53 +756,163 @@ void RejectedAtEnd() {
     }
 }
 // Cases in which the read stops at an item (Metering, the seventh entry of the table).
-void StopsAfterUncleanEnd(FakeBody body, const char* what, bool gate_closed = true) {
+// `row_mtp`: the MTP code the stopped row must carry. `end_text`: what the line after
+// the row must say about the END (empty: that no such line is written).
+std::string EndError(WpdLiveViewTransferError error) { return " end_error=" + std::to_string(static_cast<int>(error)); }
+void StopsAfterUncleanEnd(FakeBody body, const char* what, bool gate_closed, DWORD row_mtp, const std::string& end_text) {
     Rig rig(std::move(body));
     const auto read = rig.Run();
     check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), what);
     check(Row(read, D810SettingId::Metering).reason.rfind("transfer_failed_", 0) == 0, what);
     check(Row(read, D810SettingId::ExposureCompensation).reason == "not_read" && rig.body.CountOf("1014(") == 7, what);
     check(rig.session->Gate().Closed() == gate_closed && rig.body.ends == rig.body.begins && NoWrites(rig), what);
+    check(Row(read, D810SettingId::Metering).mtp_response == row_mtp, what);
+    char row_text[40];
+    std::snprintf(row_text, sizeof row_text, " mtp=0x%04x", static_cast<unsigned>(row_mtp));
+    check(LogHas(rig, std::string("CAM-B settings_desc code=0x500b unavailable reason=") + Row(read, D810SettingId::Metering).reason + row_text), what);
+    // The line after the row carries the answer to the END, in the Live log's words.
+    const std::string stop_line = "CAM-B settings_stop code=0x500b";
+    std::string found;
+    for (const auto& line : rig.log) if (line.rfind(stop_line, 0) == 0) found = line;
+    check(found == (end_text.empty() ? std::string() : stop_line + end_text), what);
+    check(!HasIdentifierShape(found), what);
 }
 void RejectedAtEndStopsWhenNotExplicitOrNotEmpty() {
-    {   // Data was received before the refusal.
+    using E = WpdLiveViewTransferError;
+    // What the line after the stopped row says about the END.
+    const auto end_text = [](unsigned long dispatch, unsigned long command, unsigned long mtp, E error) {
+        char text[96];
+        std::snprintf(text, sizeof text, " end_dispatch=0x%lx end_command=0x%lx end_mtp=0x%lx", dispatch, command, mtp);
+        return std::string(text) + (error == E::None ? std::string() : EndError(error));
+    };
+    {   // Data was received before the refusal. The row carries the END's code (no command failed before it).
         auto body = HappyBody();
         body.serve_limit[0x500b] = 3;
         body.end_response[0x500b] = 0x200a;
-        StopsAfterUncleanEnd(std::move(body), "partial data, END refused");
+        StopsAfterUncleanEnd(std::move(body), "partial data, END refused", true, 0x200a, end_text(0, 0, 0x200a, E::EndRejected));
     }
     {   // Size unknown and the data is complete, END refused: not an empty transfer.
         auto body = HappyBody();
         body.unknown_size.insert(0x500b);
         body.end_response[0x500b] = 0x200a;
-        StopsAfterUncleanEnd(std::move(body), "complete data, END refused");
+        StopsAfterUncleanEnd(std::move(body), "complete data, END refused", true, 0x200a, end_text(0, 0, 0x200a, E::EndRejected));
     }
-    {   // Empty and the END is accepted: nothing was refused, the payload is just empty.
-        auto body = HappyBody();
-        body.unknown_size.insert(0x500b);
-        body.serve_limit[0x500b] = 0;
-        // The gate saw a clean END and is idle, as before; the session stops anyway.
-        StopsAfterUncleanEnd(std::move(body), "empty, END accepted", false);
-    }
-    {   // Empty and the END fails at the command level (HRESULT), or has no code, or throws.
-        for (int variant = 0; variant < 3; ++variant) {
-            auto body = HappyBody();
-            body.serve_limit[0x500b] = 0;
-            if (variant == 0) body.end_command_failed.insert(0x500b);
-            if (variant == 1) body.end_without_code.insert(0x500b);
-            if (variant == 2) body.throw_on_end.insert(0x500b);
-            Rig rig(std::move(body));
-            const auto read = rig.Run();
-            check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), "END not an explicit refusal");
-            check(Row(read, D810SettingId::Metering).reason.rfind("transfer_failed_", 0) == 0 && Row(read, D810SettingId::ExposureCompensation).reason == "not_read", "END not an explicit refusal: reason and rest");
-            check(rig.body.CountOf("1014(") == 7 && rig.session->Gate().Closed() && NoWrites(rig), "END not an explicit refusal: nothing more asked");
+    {   // The END of an empty transfer is answered with a code that is not an explicit refusal:
+    // DeviceBusy, a value above 16 bits, the all-ones value. Not a closed transfer: stop.
+        for (const DWORD code : {0x2019u, 0xffffffffu, 0x00012001u}) {
+            for (const bool unknown_size : {true, false}) {
+                auto body = HappyBody();
+                if (unknown_size) body.unknown_size.insert(0x500b);
+                body.serve_limit[0x500b] = 0;
+                body.end_response[0x500b] = code;
+                StopsAfterUncleanEnd(std::move(body), "empty, END answered with a code outside the refusal range", true, code, end_text(0, 0, code, E::EndRejected));
+            }
         }
     }
-    {   // READ threw, the END was refused: the exception wins.
+    {   // Empty and the END fails at the command level (HRESULT), or has no code, or throws.
+        {
+            auto body = HappyBody();
+            body.serve_limit[0x500b] = 0;
+            body.end_command_failed.insert(0x500b);
+            StopsAfterUncleanEnd(std::move(body), "END command HRESULT failed", true, 0, end_text(0, static_cast<unsigned long>(E_FAIL), 0, E::EndRejected));
+        }
+        {
+            auto body = HappyBody();
+            body.serve_limit[0x500b] = 0;
+            body.end_without_code.insert(0x500b);
+            StopsAfterUncleanEnd(std::move(body), "END without a code", true, 0, end_text(0, 0, 0, E::EndRejected));
+        }
+        {   // No answer to the END exists: only the error number is written.
+            auto body = HappyBody();
+            body.serve_limit[0x500b] = 0;
+            body.throw_on_end.insert(0x500b);
+            StopsAfterUncleanEnd(std::move(body), "END threw", true, 0, EndError(E::DispatcherException));
+        }
+    }
+    {   // READ threw, the END was refused: the exception wins, the row still carries the END's code.
         auto body = HappyBody();
         body.throw_on_read.insert(0x500b);
         body.end_response[0x500b] = 0x200a;
-        StopsAfterUncleanEnd(std::move(body), "READ threw, END refused");
+        StopsAfterUncleanEnd(std::move(body), "READ threw, END refused", true, 0x200a, end_text(0, 0, 0x200a, E::EndRejected));
+    }
+    // A READ_DATA that failed (by MTP code or by HRESULT), then an END the body refused: stop.
+    // The row keeps the failed command's code when it has one.
+    {
+        auto body = HappyBody();
+        body.read_response[0x500b] = 0x2002;
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "READ answered with an MTP code, END refused", true, 0x2002, end_text(0, 0, 0x200a, E::EndRejected));
+    }
+    {
+        auto body = HappyBody();
+        body.read_command_failed.insert(0x500b);
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "READ command HRESULT failed, END refused", true, 0, end_text(0, 0, 0x200a, E::EndRejected));
+    }
+    {
+        auto body = HappyBody();
+        body.read_dispatch_failed.insert(0x500b);
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "READ dispatch failed, END refused", true, 0, end_text(0, 0, 0x200a, E::EndRejected));
+    }
+    {   // The same READ failure with an END the body accepted: the session stops all the same.
+        // (The gate saw a clean END and is idle, as before.)
+        auto body = HappyBody();
+        body.read_response[0x500b] = 0x2002;
+        StopsAfterUncleanEnd(std::move(body), "READ answered with an MTP code, END accepted", false, 0x2002, end_text(0, 0, 0x2001, E::None));
+    }
+}
+
+// The body opened a transfer, sent nothing (size unknown) and accepted the END: the item is
+// empty, nothing is left open, and the read goes on.
+void EmptyPayloadContinues() {
+    auto body = HappyBody();
+    body.unknown_size.insert(0x500b);
+    body.serve_limit[0x500b] = 0;
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    const auto& row = Row(read, D810SettingId::Metering);
+    check(read.Complete() && !rig.session->Poisoned() && !rig.session->Gate().Closed(), "an empty answer with an accepted END does not stop the read");
+    check(!row.available && row.reason == "empty_payload" && row.mtp_response == 0x2001, "reason and END code kept");
+    check(LogHas(rig, "CAM-B settings_desc code=0x500b unavailable reason=empty_payload mtp=0x2001"), "the row carries mtp=0x2001");
+    check(!LogHas(rig, "settings_stop"), "no stop line");
+    check(Row(read, D810SettingId::ExposureCompensation).available && Row(read, D810SettingId::NikonShutterSpeed).available, "items after it are read");
+    check(rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig) && rig.session->Gate().Rejected() == 0, "all twelve asked once, every transfer ended once");
+    const auto rows = CompareD810Settings(read.readings, read.readings);
+    for (const auto& line : rows)
+        if (line.id == D810SettingId::Metering) check(line.difference == D810Difference::Unknown && line.a_text == "unavailable (empty_payload)", "table shows the reason");
+}
+
+// One call per session.
+void ReadAllRunsOnce() {
+    {
+        Rig rig(HappyBody());
+        const auto first = rig.Run();
+        check(first.Complete(), "first call completes");
+        const auto sent = rig.body.trace.size();
+        const auto lines = rig.log.size();
+        const auto second = rig.Run();
+        check(!second.Complete() && second.stop_reason == "already_read" && second.readings.size() == kD810SettingSpecs.size(), "second call is refused");
+        for (const auto& reading : second.readings) check(!reading.available && reading.reason == "not_read", "every row not_read");
+        check(rig.body.trace.size() == sent && rig.session->Gate().Rejected() == 0, "nothing sent by the second call");
+        check(rig.log.size() == lines + 1 && rig.log.back() == "CAM-B settings_read_stopped reason=already_read", "the reason is logged");
+        check(first.Complete(), "the first result is unchanged");
+    }
+    {   // After a stopped read as well.
+        auto body = HappyBody();
+        body.throw_on_read.insert(0x500b);
+        Rig rig(std::move(body));
+        const auto first = rig.Run();
+        const auto sent = rig.body.trace.size();
+        const auto second = rig.Run();
+        check(!first.Complete() && second.stop_reason == "already_read" && rig.body.trace.size() == sent, "no new request after a stopped read");
+    }
+    {   // Not started (the deadline had passed) counts as the call.
+        Rig rig(HappyBody());
+        rig.go = false;
+        check(rig.Run().stop_reason == "not_started", "not started");
+        rig.go = true;
+        check(rig.Run().stop_reason == "already_read" && rig.body.trace.empty(), "the second call does not start a read");
     }
 }
 
@@ -935,6 +1073,8 @@ int main() {
     run("DeviceReadiness", DeviceReadiness);
     run("RejectedAtEnd", RejectedAtEnd);
     run("RejectedAtEndStopsWhenNotExplicitOrNotEmpty", RejectedAtEndStopsWhenNotExplicitOrNotEmpty);
+    run("EmptyPayloadContinues", EmptyPayloadContinues);
+    run("ReadAllRunsOnce", ReadAllRunsOnce);
     run("BeginCommandFailureStops", BeginCommandFailureStops);
     run("BeginMtpRejectionContinues", BeginMtpRejectionContinues);
     run("OversizeThenEnd", OversizeThenEnd);
