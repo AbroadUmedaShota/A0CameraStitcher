@@ -738,7 +738,9 @@ void GateSweep() {
     for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) every_opcode[opcode] = opcode;
     // The fresh and the prepared gate are swept over the operations the stage is about; Idle decides
     // from the request shape, the arm and the reads, and the armed gate below gets the full sweep.
-    const std::vector<std::uint32_t> targeted{0x1016, 0x1014, 0x1015, 0x90c8, 0x9207, 0x90c2, 0x90c0, 0x90c7, 0x1017, 0x9201, 0x1001, 0x1008, 0x100b, 0x9204};
+    // The read operations with a bit above 16 set are other operations and refused.
+    const std::vector<std::uint32_t> targeted{0x1016, 0x1014, 0x1015, 0x90c8, 0x9207, 0x90c2, 0x90c0, 0x90c7, 0x1017, 0x9201, 0x1001, 0x1008, 0x100b, 0x9204,
+        0x00011014, 0x80001015, 0x000190c8, 0x00011016};
     std::size_t writes = 0;
     // A fresh gate: the read operations only, no write.
     check(Sweep(D810SettingsWriteGate(Config()), argument_sets, targeted, ReadOnlyShape, writes) == 5, "fresh gate reads only");
@@ -1000,6 +1002,140 @@ void GateWriteOrder() {
         check(gate.Admit(GoodData().Get()), "data");
         gate.Cancelled();
         check(gate.Retired() && !gate.Admit(BuildWpdLiveViewEndTransfer(L"ctx-w").Get()), "cancel");
+    }
+}
+// A request of each command kind. `context` is used by the transfer kinds (and
+// set on the other command too, which must not matter).
+WpdValues KindRequest(SettingsCommandKind kind, const std::wstring& context) {
+    switch (kind) {
+    case SettingsCommandKind::ExecuteWithoutData: return BuildSettingsDeviceReady();
+    case SettingsCommandKind::ExecuteWithDataToRead: return BuildSettingsPropDesc(0x500f);
+    case SettingsCommandKind::ExecuteWithDataToWrite: return Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x500f});
+    case SettingsCommandKind::ReadData: return BuildWpdLiveViewRead(context, 16);
+    case SettingsCommandKind::WriteData: return GoodData(context.c_str());
+    case SettingsCommandKind::EndDataTransfer: return BuildWpdLiveViewEndTransfer(context);
+    default: {
+        WpdValues request;
+        CoCreateInstance(CLSID_PortableDeviceValues, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&request));
+        request->SetGuidValue(WPD_PROPERTY_COMMON_COMMAND_CATEGORY, WPD_COMMAND_COMMON_RESET_DEVICE.fmtid);
+        request->SetUnsignedIntegerValue(WPD_PROPERTY_COMMON_COMMAND_ID, WPD_COMMAND_COMMON_RESET_DEVICE.pid);
+        request->SetStringValue(WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT, context.c_str());
+        return request;
+    }
+    }
+}
+// Every command kind in every state of the state machine, with the gate's own
+// context and another one. Only the pairs of the state table pass; a refusal in
+// Idle drops the arm and stays Idle, any other refusal retires the gate and
+// leaves at most the one END of the open transfer.
+void GateStateSweep() {
+    const std::wstring own = L"ctx-own", other = L"ctx-other";
+    const auto begin = [] { return Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x500f}); };
+    const auto idle = ArmedGate();
+    auto read_open = ArmedGate();
+    check(read_open.Admit(BuildSettingsPropDesc(0x500f).Get()), "read begin");
+    read_open.Observe(ReadBeginReply(own, 16));
+    auto write_open = ArmedGate();
+    check(write_open.Admit(begin().Get()), "write begin");
+    write_open.Observe(WriteBeginReply(own));
+    auto write_sent = write_open;
+    check(write_sent.Admit(GoodData(own.c_str()).Get()), "data");
+    write_sent.Observe(WrittenReply(2));
+    auto retired = write_open;
+    check(!retired.Admit(GoodData(other.c_str()).Get()), "data of another transfer");
+    using S = D810WriteGateState;
+    using K = SettingsCommandKind;
+    check(idle.State() == S::Idle && idle.Armed() && read_open.State() == S::ReadOpen && write_open.State() == S::WriteOpen &&
+        write_sent.State() == S::WriteSent && retired.State() == S::Retired, "the five states");
+    const auto passes = [](S state, K kind, bool own_context) {
+        switch (state) {
+        case S::Idle: return kind == K::ExecuteWithoutData || kind == K::ExecuteWithDataToRead || kind == K::ExecuteWithDataToWrite;
+        case S::ReadOpen: return own_context && (kind == K::ReadData || kind == K::EndDataTransfer);
+        case S::WriteOpen: return own_context && kind == K::WriteData;
+        case S::WriteSent:
+        case S::Retired: return own_context && kind == K::EndDataTransfer;
+        default: return false;
+        }
+    };
+    const auto next = [](S state, K kind) {
+        switch (state) {
+        case S::Idle: return kind == K::ExecuteWithoutData ? S::ReadyPending : kind == K::ExecuteWithDataToRead ? S::ReadBegun : S::WriteBegun;
+        case S::ReadOpen: return kind == K::ReadData ? S::ReadOpen : S::ReadEnding;
+        case S::WriteOpen: return S::WriteSent;
+        case S::WriteSent: return S::WriteEnding;
+        default: return S::Retired;
+        }
+    };
+    std::size_t cases = 0, admitted = 0;
+    const D810SettingsWriteGate* const bases[] = {&idle, &read_open, &write_open, &write_sent, &retired};
+    for (const auto* base : bases) {
+        for (const auto kind : {K::ExecuteWithoutData, K::ExecuteWithDataToRead, K::ExecuteWithDataToWrite, K::ReadData, K::WriteData, K::EndDataTransfer, K::Other}) {
+            for (const bool own_context : {true, false}) {
+                ++cases;
+                auto gate = *base;
+                const auto state = base->State();
+                const bool got = gate.Admit(KindRequest(kind, own_context ? own : other).Get());
+                admitted += got;
+                check(got == passes(state, kind, own_context), "state sweep: admission");
+                check(gate.WritesSent() - base->WritesSent() == (got && kind == K::ExecuteWithDataToWrite ? 1u : 0u), "state sweep: only the armed begin counts as sent");
+                if (got) {
+                    check(gate.State() == next(state, kind), "state sweep: next state");
+                } else if (state == S::Idle) {
+                    check(gate.State() == S::Idle && !gate.Armed(), "state sweep: an Idle refusal drops the arm");
+                } else {
+                    check(gate.Retired(), "state sweep: any other refusal retires");
+                    // At most the one END of the open transfer, never one of another transfer.
+                    check(!gate.Admit(BuildWpdLiveViewEndTransfer(other).Get()), "state sweep: no END of another transfer");
+                    check(gate.Admit(BuildWpdLiveViewEndTransfer(own).Get()), "state sweep: the open transfer may be ended");
+                    check(!gate.Admit(BuildWpdLiveViewEndTransfer(own).Get()) && !gate.Admit(BuildSettingsLiveState().Get()), "state sweep: once, then nothing");
+                }
+            }
+        }
+    }
+    // Idle: the three executes with either context (6); ReadOpen: own READ_DATA and END (2);
+    // WriteOpen: own WRITE_DATA; WriteSent: own END; Retired: the own cleanup END.
+    check(cases == 70 && admitted == 11, "state sweep: 70 cases, 11 admitted");
+    {
+        // The END of a write before the data's reply was seen is refused.
+        auto gate = write_open;
+        check(gate.Admit(GoodData(own.c_str()).Get()), "data");
+        check(!gate.Admit(BuildWpdLiveViewEndTransfer(own).Get()) && gate.Retired(), "END before the data reply");
+    }
+}
+// Refusals and failures of a read begin and of DeviceReady retire the gate
+// (the read-only gate's "an explicit refusal returns to Idle" is not used).
+void GateFailureShapes() {
+    const std::vector<std::pair<const char*, WpdLiveViewExchange>> failures_of_a_reply{
+        {"0x2002", FinalReply(0x2002)},
+        {"0x2005", FinalReply(0x2005)},
+        {"0xa001", FinalReply(0xa001)},
+        {"dispatch HRESULT", WpdLiveViewExchange{E_FAIL, Reply()}},
+        {"command HRESULT", CommandFailedReply()},
+    };
+    const auto nothing_after = [](D810SettingsWriteGate& gate) {
+        return !gate.Admit(BuildSettingsPropDesc(0x500f).Get()) && !gate.Admit(BuildSettingsLiveState().Get()) && !gate.Admit(BuildSettingsDeviceReady().Get()) &&
+            !gate.Admit(Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x500f}).Get()) && gate.WritesSent() == 0;
+    };
+    for (const auto& [what, reply] : failures_of_a_reply) {
+        for (const bool live : {false, true}) {
+            auto gate = ArmedGate();
+            check(gate.Admit((live ? BuildSettingsLiveState() : BuildSettingsPropDesc(0x500f)).Get()), "read begin");
+            gate.Observe(reply);
+            check(gate.Retired() && !gate.Armed(), what);
+            check(nothing_after(gate), "nothing after a refused read begin");
+        }
+        D810SettingsWriteGate gate(Config());
+        check(gate.Admit(BuildSettingsDeviceReady().Get()) && gate.State() == D810WriteGateState::ReadyPending, "ready");
+        gate.Observe(reply);
+        check(gate.Retired(), what);
+        check(nothing_after(gate), "nothing after a refused ready");
+    }
+    // 0x2019 (DeviceBusy) is "not yet": back to Idle and asked again. OK: Idle.
+    for (const DWORD code : {0x2019u, 0x2001u}) {
+        D810SettingsWriteGate gate(Config());
+        check(gate.Admit(BuildSettingsDeviceReady().Get()), "ready");
+        gate.Observe(FinalReply(code));
+        check(gate.State() == D810WriteGateState::Idle && gate.Admit(BuildSettingsDeviceReady().Get()), "busy or ready: Idle");
     }
 }
 // The other gates still refuse every write shape (none of them is widened).
@@ -1447,6 +1583,8 @@ int main() {
     run("GateSweep", GateSweep);
     run("GateArmConditions", GateArmConditions);
     run("GateWriteOrder", GateWriteOrder);
+    run("GateStateSweep", GateStateSweep);
+    run("GateFailureShapes", GateFailureShapes);
     run("OtherGatesStillRefuseWrites", OtherGatesStillRefuseWrites);
     run("HappyCopy", HappyCopy);
     run("BodyAndConfirmation", BodyAndConfirmation);
