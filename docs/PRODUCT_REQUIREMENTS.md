@@ -110,7 +110,7 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - `FR-DATA-002`: 撮影トランザクション、カメラ別時刻、状態、ファイルサイズ、SHA-256、結果、エラーを記録する。
 - `FR-EXP-001`: `DualCamera`では合成JPEGを指定フォルダへ保存できる。`SingleCamera`では検証済み`7360×4912` canonical `original.jpg`をbyte-identicalな単一撮影出力として、操作者が選択したfixed-local folderへ明示保存できる。network、UNC、device path、ADS、removable、reparse chainを拒否し、合成済みとは表示しない。
 - `FR-UI-001`: 一画面の撮影ダッシュボードで、明示選択したmode、起動セッションの排他同意、modeが要求するcameraの接続・identity・設定・card・Live View状態、profile ID・版・期限、設置と自動補正可否、mode別処理進捗、撮影・合成・保存を分離した結果、赤Blocker・黄Caution・青Infoを表示できる。`SingleCamera`で非required cameraの不在をBlockerにしない。
-- `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。標準導線は「位置合わせ → 撮影 → 詳細確認 → 採用 → 次の原稿」とし、撮影後は結果確認へ移動して明示操作まで留まる。原画像は採用前に自動保存し、保存済み・合成完了・人の採用済みを分離する。採用記録の成功後だけ次の準備へ進み、撮り直しは旧画像を保持した新しい撮影IDで行う。CaptureRecoveryOnlyでは原画像の確認であり、合成・A0品質の採用とは扱わない。設置・校正、read-onlyカメラ設定、結果確認後の明示書き出し、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。画面配置・状態契約は[操作者画面仕様](OPERATOR_UI_SPEC.md#2026-09-21-改訂設計撮影ごとの詳細確認)に従う。本改訂は設計合意であり実装完了ではない。
+- `FR-UI-002`: `Ready`または`ReadyWithCorrection`の場合だけ追加確認なしの一回操作で撮影し、active transaction中のmode変更、競合操作、二重開始を禁止できる。標準導線は「位置合わせ → 撮影 → 詳細確認 → 採用 → 次の原稿」とし、撮影後は結果確認へ移動して明示操作まで留まる。原画像は採用前に自動保存し、保存済み・合成完了・人の採用済みを分離する。採用記録の成功後だけ次の準備へ進み、撮り直しは旧画像を保持した新しい撮影IDで行う。CaptureRecoveryOnlyでは原画像の確認であり、合成・A0品質の採用とは扱わない。設置・校正、read-onlyカメラ設定、結果確認後の明示書き出し、read-onlyの新規撮影準備を提供する。別job再合成は`DualCamera`だけに提供し、`SingleCamera`では`StitchOutcome=NotApplicable`として理由を表示する。画面配置・状態契約は[操作者画面仕様](OPERATOR_UI_SPEC.md#2026-09-21-改訂設計撮影ごとの詳細確認)に従う。本改訂は設計合意であり実装完了ではない。ADR-0038で改定（Accepted、#416）: 「read-onlyカメラ設定」から、`DualCamera`の本番の画面でCAM-Aの露出の5項目をCAM-Bへ写す操作だけを除く（ADR-0038の段C）。段Cの前提条件（本番の経路のWPD化の承認と受入ほか）が揃うまでは今の文面が効く。本文の書き換えは段Cを始める変更で行う。
 - `FR-UI-003`: 現行の一台選択式Live Viewの開始・停止、対象カメラ、接続状態、撮影前停止と撮影後再開の失敗を表示できる。ADR-0031 gateが未達の間、二台同時Live Viewは操作可能に見せない。gate達成後の二台表示では、左右各paneのalias・Live/停止・最終frame時刻を表示する。gate未達の間の二台モードの表示は`FR-LV-004`に従う。previewを原画像・合成入力として扱わない。
 
 ## 4. 非機能要件
@@ -144,6 +144,7 @@ PC直接保存を採用するには、撮影前SDRAM empty、exact-oneのpost-ba
 - 接続台数によるmode自動選択、`DualCamera`から`SingleCamera`への自動降格
 - 初期`SingleCamera`でD810二台を接続したまま片方だけを操作すること
 - 別契約が承認される前のアプリからの撮影設定write
+  - ADR-0038で改定（Accepted、#416）: ADR-0038を「別契約」とし、`DualCamera`でCAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO感度・シャッター速度・絞り）をCAM-Bへ写す書き込みだけを対象外から外す。製品の経路（段C）では段Cの前提条件が揃うまで今の文面が効く。ほかの撮影設定のwriteは対象外のまま。
 - existing cardのbulk deleteまたはformat
 - vendor operation（`0x9207`を含む）の実装・送信
 - 撮影ごとの自由なhomography再推定、補正結果によるリグプロファイルの自動学習・自動更新

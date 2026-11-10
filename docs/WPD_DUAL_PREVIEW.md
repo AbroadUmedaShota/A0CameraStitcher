@@ -2,6 +2,8 @@
 
 開発時の本人指示「いちいち止めないで良いので、2台同時ライブビューまで走りきってください」を本工程の実機実施承認とする。既存のA/B登録を使い、同一PC上のD810二台に独立したWPD接続を持つ開発用プレビューに限定する。従来の一台Live制限およびWPD session上限はこの工程だけ二台へ拡張する。ADR-0036全体の承認、映像Cの合成、製品への統合、撮影、設定書き込み、カード操作を意味しない。Nikon SDKは使わない。
 
+ADR-0038で改定（Accepted、#416）: この開発用プレビューの中で、CAM-Aの露出の設定（露出モードをMにする・ISO感度自動制御をOFFにする・ISO感度・シャッター速度・絞り）をCAM-Bへ写す書き込みを、ADR-0038の段Bとして認める。書き込みはライブビューのgateを広げず、専用のgateだけが通す。実装の前にADR-0038の段Bの前提条件（AGENTS.mdの改定、段Aの実機の読み取りでのcodeの確定ほか）が揃っている必要があり、それまでこのプレビューは設定を書かない。段Bの節（gate、記録、撮影の停止と解除）は実装の変更で足す。
+
 SDKなしの既存buildに `-DA0_BUILD_WPD_DUAL_PREVIEW=ON` を指定し、`cmake --build build/reference --config Release --target A0CameraStitcher.WpdDualPreview --parallel 1` でビルドする。BUILD_TESTINGも必要。既定はOFF。
 
 実行例: `build/reference/Release/A0CameraStitcher.WpdDualPreview.exe --seconds 60`。`--seconds 0` はウィンドウを閉じるまで表示する。Escまたは閉じる操作で両側停止処理を始める。描画は各側の最新フレームだけ、2秒以上更新が途切れた映像は非表示とする。
