@@ -757,8 +757,11 @@ struct D810WriteRunOptions {
     std::function<bool()> may_continue;
     // The session is still ours (END and Close after a deadline).
     std::function<bool()> may_cleanup;
-    // Time left in the write phase. A begin is passed only when at least
-    // `step_budget` per remaining step is left (both provisional).
+    // Time left in the write phase. Required by Execute: without it, or with a
+    // `step_budget` that is not positive, nothing is sent. A begin is passed
+    // only when at least `step_budget` per remaining step is left, checked
+    // before the reads of a step and again right before its begin (both values
+    // provisional).
     std::function<std::chrono::milliseconds()> remaining;
     std::chrono::milliseconds step_budget{5000};
     std::function<void(const std::string&)> log;
@@ -847,7 +850,10 @@ public:
         const D810WritePlan plan = std::move(*confirmed_);
         confirmed_.reset();
         pending_.reset();
-        if (!options.may_continue || !options.may_cleanup) { run.reason = "invalid_options"; return run; }
+        if (!options.may_continue || !options.may_cleanup || !options.remaining || options.step_budget <= std::chrono::milliseconds::zero()) {
+            run.reason = "invalid_options";
+            return run;
+        }
         if (const auto refusal = PlanRefusal()) { run.reason = refusal; return run; }
         if (const auto refusal = D810PlanTableRefusal(plan, table_); !refusal.empty()) { run.reason = refusal; return run; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { run.reason = "cameras_busy"; return run; }
@@ -951,6 +957,12 @@ private:
         bool unknown{}, mismatch{}, record_failed{};
 
         void Say(const std::string& line) const { if (options.log) options.log(line); }
+        // Enough time for step `i` and every step after it, on both cameras
+        // (ADR-0038 decision 10). `remaining` is checked present by Execute.
+        bool MarginLeft(std::size_t i) const {
+            const auto left = static_cast<long long>(plan.steps.size() - i);
+            return options.remaining() >= options.step_budget * left;
+        }
         bool Append(const std::string& line) {
             if (self.journal_.Append(line)) return true;
             record_failed = true;
@@ -1019,11 +1031,7 @@ private:
                 if (step.camera != camera) continue;
                 auto& outcome = run.steps[i];
                 if (!options.may_continue()) return "interrupted";
-                // The margin counts every step still to come, on both cameras.
-                if (options.remaining) {
-                    const auto left = static_cast<long long>(plan.steps.size() - i);
-                    if (options.remaining() < options.step_budget * left) return "deadline_margin";
-                }
+                if (!MarginLeft(i)) return "deadline_margin";
                 // Reads the gate requires in this generation: Live off, the
                 // preconditions, and the code itself (type, GetSet, form and
                 // value are checked from this description, not from the plan).
@@ -1036,6 +1044,8 @@ private:
                 const auto desc = session.ReadDesc(step.code);
                 if (!desc) return "desc_unreadable";
                 if (desc->current_value != step.before) return "changed_before_write";
+                // The reads take time: the margin is checked again right before the begin.
+                if (!MarginLeft(i)) return "deadline_margin";
                 const auto attempt = session.Write(step.code, step.value);
                 if (attempt.refused) return std::string("refused_") + attempt.refused;
                 outcome.sent = true;

@@ -1292,6 +1292,30 @@ void StopsBeforeSending() {
         const auto run = bench.CopyRun();
         check(run.sent == 0 && run.reason == "deadline_margin" && bench.Writes() == 0, "not enough time left");
     }
+    for (const int missing : {0, 1, 2}) {
+        // The time left is required (and the budget must be positive): without
+        // it nothing is read and nothing is sent.
+        Bench bench;
+        if (missing == 0) bench.options.remaining = nullptr;
+        if (missing == 1) bench.options.step_budget = std::chrono::milliseconds(0);
+        if (missing == 2) bench.options.step_budget = std::chrono::milliseconds(-1);
+        const auto plan = bench.Copy();
+        const auto reads = bench.a.read_begins + bench.b.read_begins;
+        const auto run = bench.Run(plan);
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && run.reason == "invalid_options", "no time left given: refused");
+        check(bench.Writes() == 0 && bench.a.read_begins + bench.b.read_begins == reads && bench.controller->CaptureAllowed(), "not even read, no block");
+    }
+    {
+        // The time left drops while the step's reads run: the check right
+        // before the begin stops it.
+        Bench bench;
+        const auto plan = bench.Copy();
+        check(bench.controller->Confirm(plan.plan->id) == nullptr, "confirm");
+        int seen = 0;
+        bench.b.after = [&](const std::string& entry) { if (entry == "1014(500f)" && ++seen == 2) bench.left = std::chrono::milliseconds(1000); };
+        const auto run = bench.controller->Execute(plan.plan->id, bench.access, bench.options);
+        check(seen == 2 && run.sent == 0 && run.reason == "deadline_margin" && bench.Writes() == 0, "margin checked again after the reads");
+    }
     {
         // The stop flag during the first write: its read back is not made, the
         // rest is not sent, the result is unknown.
