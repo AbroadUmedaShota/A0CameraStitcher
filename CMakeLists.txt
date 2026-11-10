@@ -1019,6 +1019,16 @@ if(BUILD_TESTING)
     target_link_libraries(a0_d810_preview_tests PRIVATE a0_wpd_live_view_codec ole32 PortableDeviceGuids)
     add_test(NAME d810_preview_contracts COMMAND a0_d810_preview_tests)
     set_tests_properties(d810_preview_contracts PROPERTIES TIMEOUT 15)
+    # Read-only camera settings (#416 stage A): table, property description parser, display, comparison,
+    # the read-only gate and the read flow against synthetic bodies. No device, no camera, and independent of
+    # A0_BUILD_WPD_DUAL_PREVIEW.
+    add_executable(a0_d810_settings_tests tests/d810_settings_tests.cpp)
+    target_link_libraries(a0_d810_settings_tests PRIVATE a0_wpd_live_view_transfer ole32 PortableDeviceGuids)
+    if(MSVC)
+        target_compile_options(a0_d810_settings_tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME d810_settings_contracts COMMAND a0_d810_settings_tests)
+    set_tests_properties(d810_settings_contracts PROPERTIES TIMEOUT 180)
     add_executable(a0_preview_back_buffer_tests tests/preview_back_buffer_tests.cpp)
     target_include_directories(a0_preview_back_buffer_tests PRIVATE src/phase0/include)
     target_compile_definitions(a0_preview_back_buffer_tests PRIVATE NOMINMAX)
@@ -1181,6 +1191,9 @@ if(BUILD_TESTING)
         # seam checkbox on synthetic frames and an in-memory condition. No camera, no settings file.
         add_test(NAME preview_fixed_c_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --fixed-c-ui-smoke)
         set_tests_properties(preview_fixed_c_ui_contracts PROPERTIES TIMEOUT 60)
+        # Read-only settings table (#416 stage A): the real window procedure with a synthetic backend.
+        add_test(NAME preview_settings_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-ui-smoke)
+        set_tests_properties(preview_settings_ui_contracts PROPERTIES TIMEOUT 60)
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()

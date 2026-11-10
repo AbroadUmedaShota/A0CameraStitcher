@@ -21,6 +21,7 @@ attempted hybridはWPD baseline timeoutとdatetime相関不成立によりReject
 | Live View状態・禁止maskの取得 | SDKで実装・実機確認済み | `sdk-status`はLive Viewを開始せず、設定を変更せずsessionを閉じる |
 | 静止画／動画セレクターの取得 | SDKで実装・実機確認済み | Enum表現を読み取り、`photo`を匿名記録する |
 | 露出・WB・画質等の取得 | 一台でPartial | `run-1786040075194-1`でJPEG Fine、L 7360×4912、S、1/6秒、F8、ISO 64、WB Preset 1を取得。focusはopaque値1、FileTypeはnot-advertised。設定writeなし、session close |
+| 二台の露出・WB等の並べた表示（#416 段A） | 実装済み（読み取りのみ・実機未確認） | WPD開発用プレビュー（`--settings-read-diagnostics`、「両台の設定を読む」）。PropDescで露出モード・シャッター速度・絞り・ISO・ISO自動・WB・測光・露出補正・ピクチャーコントロール・アクティブD-ライティングを読み、読めない項目はunavailableと理由を出す。0x1016は拒否のまま。詳細は [WPD_DUAL_PREVIEW.md](WPD_DUAL_PREVIEW.md) |
 | 露出・WB・画質等の変更 | 未実装 | Phase 0では人が固定する。書込実装・実機試験は別途承認して一項目ずつ行う |
 | 一台選択式Live View | Standalone合格、handoffはPartial | SDKで5分04秒・2,424 frame、停止・close・preview非保存と別プロセス再起動を確認。撮影を含む連続handoffは未合格 |
 | 二台同時Live View | 将来目標・技術gate待ち | ADR-0031のSDK capabilityと安全性証拠まで有効化しない |

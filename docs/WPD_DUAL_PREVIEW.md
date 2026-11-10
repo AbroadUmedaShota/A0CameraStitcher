@@ -99,3 +99,47 @@ PC-control mode 0/1の明示比較（mode 1後は0復元確認）とWPD event su
 新readの受付を最大2秒に制限する一方、各scalar transferとそのcleanupは元のStop 10秒deadline内に収め、より短い期限で正常data phaseを途中Cancelしない。Live0を観測したら待機を終える。Live1なら最大50ms間隔で再確認する。期間を超えたら従来のStop cleanupへ進み、未知値/read失敗は失敗として残す。元deadlineを延長せず、最後は従来のReady→一回Stop→Ready、全Stop barrier後Closeを維持する。追加のStart/自動再開/設定writeはない。
 
 修正前の実機ではB自動終了→相手A再開拒否と、A自動終了→相手B再開拒否が対応し、自動終了したAだけの再開は成功した。これはタイマー境界の競合仮説を支持するが内部原因の証明ではない。候補の実機結果は安定性報告の末尾へ記録する。
+
+### #416 読むだけの設定の表示（段A）
+
+左右の明るさ・色がそろわない原因を、本体を触らずに見るための表示。**読むだけ**で、設定の書き込み（0x1016）・「Aの設定をBへ写す」は含まない。実装は実機未確認（合成の本体での試験のみ）。
+
+**入口**
+
+- `--settings-read-diagnostics`: lease → Discover → A を開く（identityを登録と照合し直す）→ 読む → Close → B を同じ手順。両台を同時には開かない。`settings_read_diagnostics=1 shutter_commands=0 setting_writes=0 live_start_commands=0` を出し、項目ごとに `CAM-B settings_desc code=0x500d mtp=0x2001 type=0x0006 getset=1 form=2 count=N current=0x… first=0x… last=0x…` の形の行を出す。読めない項目は `unavailable reason=<token> mtp=0x…`（本体が返した型が分かれば `type=0x…` も付く）。最後に `settings_compare` 行（項目ごとの値と差）と `settings_read_diagnostics_result=PASS|FAIL` を出す。識別子・device ID・transfer context・生のbytesは出さない。
+- 画面の「両台の設定を読む」ボタン: 両台のLiveが停止・切断済みで再開できる状態の時だけ有効。押した処理の中でも同じ条件（`CanReadSettings`）を見直す。読み取り中は Live の再開・撮影・フォーカス操作・ほかの設定操作を受け付けない。結果はCAM-A／CAM-Bを並べた表（項目、Aの値、Bの値、差あり／同じ／比較不可）で、Cの表示の場所に出る。「ライブ再開」で表は消える。
+
+**読む項目**（`kD810SettingSpecs`。出典と型の照合は [PTP_PROTOCOL_REFERENCES.md](../third_party/PTP_PROTOCOL_REFERENCES.md)）
+
+| 表示 | code | 型 |
+| --- | --- | --- |
+| 露出モード | 0x500E | UINT16 |
+| シャッター速度 | 0x500D | UINT32 |
+| 絞り | 0x5007 | UINT16 |
+| ISO | 0x500F | UINT16 |
+| ISO感度自動制御 | 0xD054 | UINT8 |
+| ホワイトバランス | 0x5005 | UINT16 |
+| 測光 | 0x500B | UINT16 |
+| 露出補正 | 0x5010 | INT16 |
+| ピクチャーコントロール | 0xD200 | UINT8（※未照合） |
+| アクティブD-ライティング | 0xD14E | UINT8 |
+| （診断の行だけ）ISO自動の候補 | 0xD16A | UINT8 |
+| （診断の行だけ）Nikon のシャッター速度 | 0xD100 | UINT32 |
+
+名前を付けるのは公開資料で値の意味を確かめたものだけ（露出モード1〜4、WB 1〜7と0x8010〜0x8013、測光1〜4、ISO自動0/1）。それ以外は `raw 0x…` で出す。シャッター速度の分数は1/10000秒の値から丸めた表示用の値で、値が10未満の時は分数にせず `n/10000 s` と出す。文字列型の項目は表に入れない。
+
+**送信gate**（`D810SettingsReadGate`。既存の `AllowedD810PreviewRequest` などは広げていない）
+
+- 構造上書けない。0x1016、WITH_DATA_TO_WRITE、WRITE_DATA は形の検査で常に拒否し、書き込みの分岐は置いていない。
+- 通すのは 0x90C8（データ相なし・引数なし）、0x1015（引数は 0xD1A2 の1個だけ）、0x1014（引数1個で表のcode）、自分が開いた転送の context に限った READ_DATA と END_DATA_TRANSFER だけ。operation 番号と引数は32 bit全体で比べ、命令の種類（データ相なし／読み取り）も operation ごとに固定する。0x90C7 は通さない。
+- 転送が開いている間は、その転送の READ_DATA／END だけを通す（context は gate が begin の応答から持つ）。別の begin、DeviceReady、END の後の READ_DATA は拒否する。transportが例外を返した後は、開いている転送の END を除いて何も通さない。
+
+**PropDescの解析**（`ParseD810PropDesc`）: PTP標準の構造（code u16、型u16、GetSet u8、既定値、現在値、FormFlag u8、Range=min・max・step／Enum=個数u16と値）、little-endian。長さは計算した値と完全一致（不足・余りとも拒否）、上限4 KiB（※仮）。code は要求と一致、型は表の型と一致（違えば unavailable。合わせ込まない）。文字列型・配列型・64 bit以上は拒否。GetSet は0/1、FormFlag は0/1/2だけ。Range は min ≤ max（符号付きで比較）、step=0 は「書けない」扱い、Enum の個数は1〜1024（※仮）。
+
+**読み取りの流れ**（`WpdSettingsReadSession::ReadAll`）: DeviceReady（Busy 0x2019 の間は50ms間隔で期限まで）→ Live状態 0xD1A2 を読み、0以外なら止める（`live_view_on`）→ 表の全項目の 0x1014。本体がMTPエラーを返した項目（begin拒否）は `unavailable` として次へ進む。それ以外の転送の失敗はそのsessionでこれ以上送らない（残りは `not_read`）。期限・停止要求の後は開いている転送のENDとCloseだけで、各命令は1回だけ送る（再送しない）。
+
+**期限と停止**: 1回の読み取りに30秒（※仮）を1つ、I/Oが12秒止まったら `Cancel`（`StillLane` と同じ）。停止の旗は読み取り1回ごとの専用のもので、立てるだけで戻さない。ウィンドウを閉じる時（WM_CLOSE、有限実行の終了）は旗を立て、読み取りの終わりとCloseを待ってから窓とleaseを手放す。Closeできなかった時は読み直しも Live の再開も出さず、窓を閉じて本体・USB接続を確認する。
+
+**試験**: `d810_settings_contracts`（解析の境界、整形、比較、gateの掃引、転送の順序、偽の本体での読み取り）、`preview_settings_ui_contracts`（`--settings-ui-smoke`。合成のbackend）。既存の `d810_preview_contracts` にはWRITE_DATAと0x1016の拒否を足した。
+
+**実機で確かめること**（`--settings-read-diagnostics`）: 0x1014 の応答が `mtp=0x2001` か、0x500E／0x500D／0x5007 の getset と一覧（form=2 の first／last）、ISO感度自動制御が 0xD054 と 0xD16A のどちらに答えるか、0xD100 の有無、0xD200 の型、ISO・シャッター速度・WB・測光が本体の表示（EXIF）と一致するか、Live中は読まず `live_view_on` で止まること。

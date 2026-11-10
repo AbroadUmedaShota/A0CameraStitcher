@@ -6,6 +6,7 @@
 #include "a0/phase0/experimental/preview_shutdown.hpp"
 #include "a0/phase0/experimental/preview_lifecycle.hpp"
 #include "a0/phase0/experimental/wpd_still_capture.hpp"
+#include "a0/phase0/experimental/wpd_settings_read.hpp"
 #include "a0/phase0/hardware_process_lease.hpp"
 #include "a0/phase0/wpd_transport.hpp"
 #include "a0/phase0/pc_direct_capture.hpp"
@@ -13,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -315,6 +317,96 @@ VerifiedStillPair CaptureStillPairShutterFirst(const std::array<std::wstring,2>&
     steps.close=[&](int i,VerifiedStillOriginal& original){if(lanes[i])original=lanes[i]->Finish(original.error);};
     steps.log=[](const std::string& line){Log(line);};
     return CaptureStillPairShutterFirstOnce(steps,[]{return !capture_stop_requested.load();},deadline);
+}
+// Read-only camera settings (#416 stage A). One body at a time: open, check the
+// registered identity, DeviceReady, Live state, one property description per
+// table entry, Close. Only the read-only settings gate (wpd_settings_read.hpp)
+// stands between this function and the device: no property write, shutter,
+// Live View control or mode change exists on this path. A stalled call is
+// cancelled after 12 s as in StillLane; after the deadline or a stop request
+// only the Close remains.
+struct SettingsCameraResult {
+    D810CameraSettingsRead read;
+    bool clean_close{true}; // never opened, or Close returned S_OK
+};
+void MarkSettingsUnread(SettingsCameraResult& result,const char* reason){
+    result.read.stop_reason=reason;result.read.readings.clear();
+    for(const auto& spec:kD810SettingSpecs)result.read.readings.push_back(UnavailableD810Setting(spec.id,"not_read"));
+}
+SettingsCameraResult ReadCameraSettings(const std::wstring& id,const std::string& alias,Clock::time_point deadline,const std::atomic<bool>& stop){
+    SettingsCameraResult result;result.read.alias=alias;
+    if(stop.load() || Clock::now()>=deadline){MarkSettingsUnread(result,"not_started");return result;}
+    ComPtr<IPortableDevice> device;bool opened=false;
+    std::atomic<bool> busy{},cancelled{};std::atomic<ULONGLONG> tick{};std::jthread watchdog;
+    try{
+        device=Open(id,GENERIC_READ|GENERIC_WRITE);opened=true;
+        auto map_path=DefaultIdentityMapPath();map_path.replace_filename("camera-map-wpd.json");IdentityMap map(map_path);
+        if(map.FindAlias(Identity(device.Get()))!=std::optional<std::string>(alias))MarkSettingsUnread(result,"identity_mismatch");
+        else{
+            watchdog=std::jthread([&](std::stop_token token){
+                if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED))){cancelled=true;return;}
+                while(!token.stop_requested()){
+                    if(busy && GetTickCount64()-tick.load()>12000 && !cancelled.exchange(true)){
+                        Log(alias+" settings watchdog cancelling stalled I/O; lease retained");device->Cancel();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CoUninitialize();
+            });
+            WpdSettingsReadSession session([&](IPortableDeviceValues* request){
+                    WpdLiveViewExchange reply;tick=GetTickCount64();busy=true;
+                    reply.status=device->SendCommand(0,request,&reply.results);busy=false;return reply;
+                },
+                [&]{return !cancelled && !stop.load() && Clock::now()<deadline;},[&]{return opened;});
+            result.read=session.ReadAll(alias,[](const std::string& line){Log(line);});
+        }
+    }catch(const std::exception& error){
+        Log(alias+" settings_read_failure: "+error.what());
+        if(result.read.readings.empty())MarkSettingsUnread(result,opened?"exception":"open_failed");
+    }
+    if(opened){
+        tick=GetTickCount64();busy=true;const auto hr=device->Close();busy=false;
+        result.clean_close=hr==S_OK;opened=false;
+        Log(alias+" settings_session_closed="+std::to_string(result.clean_close));
+    }
+    if(watchdog.joinable()){watchdog.request_stop();watchdog.join();}
+    return result;
+}
+struct SettingsReadOutcome {
+    std::array<SettingsCameraResult,2> cameras;
+    bool CleanClose()const{return cameras[0].clean_close && cameras[1].clean_close;}
+    bool Complete()const{return cameras[0].read.Complete() && cameras[1].read.Complete();}
+};
+using SettingsBackend=std::function<SettingsCameraResult(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop)>;
+SettingsCameraResult RealSettingsBackend(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop){
+    return ReadCameraSettings(id,index==0?"CAM-A":"CAM-B",deadline,stop);
+}
+// A is read and closed before B is opened; the two are never open together.
+SettingsReadOutcome ReadBothSettings(const std::array<std::wstring,2>& ids,Clock::time_point deadline,const std::atomic<bool>& stop,const SettingsBackend& backend){
+    SettingsReadOutcome outcome;
+    for(int i=0;i<2;++i)outcome.cameras[i]=backend(i,ids[i],deadline,stop);
+    return outcome;
+}
+void LogSettingsOutcome(const SettingsReadOutcome& outcome){
+    for(const auto& camera:outcome.cameras){
+        const auto& read=camera.read;
+        Log(read.alias+" settings_read_result complete="+std::to_string(read.Complete())+" stop_reason="+(read.stop_reason.empty()?std::string("none"):read.stop_reason)+
+            " closed="+std::to_string(camera.clean_close)+" setting_writes=0");
+    }
+    const auto rows=CompareD810Settings(outcome.cameras[0].read.readings,outcome.cameras[1].read.readings);
+    for(const auto& row:rows)Log("settings_compare name="+row.name+" A=\""+row.a_text+"\" B=\""+row.b_text+"\" difference="+D810DifferenceToken(row.difference));
+    Log("settings_compare differences="+std::to_string(CountD810Differences(rows))+" setting_writes=0");
+}
+// Explicit read-only entry (#416): prints what each body answers for every table
+// code and the two diagnostic codes, so a person can compare against the camera.
+int RunSettingsReadDiagnostics(const std::array<std::wstring,2>& ids){
+    Log("settings_read_diagnostics=1 shutter_commands=0 setting_writes=0 live_start_commands=0");
+    const std::atomic<bool> stop{false};
+    const auto outcome=ReadBothSettings(ids,Clock::now()+std::chrono::seconds(30),stop,RealSettingsBackend);
+    LogSettingsOutcome(outcome);
+    const bool passed=outcome.Complete() && outcome.CleanClose();
+    Log(std::string("settings_read_diagnostics_result=")+(passed?"PASS":"FAIL")+" setting_writes=0");
+    return passed?0:1;
 }
 struct Pixels {UINT width{},height{};std::vector<BYTE> bytes;};
 Pixels Decode(IWICImagingFactory* factory,std::span<const unsigned char> jpeg){
@@ -805,6 +897,10 @@ int main(int argc,char** argv){
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--settings-ui-smoke")return RunSettingsUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--settings-read-diagnostics"){
+            ComScope com;HardwareProcessLease lease;return RunSettingsReadDiagnostics(Discover());
+        }
         if(argc==2 && std::string(argv[1])=="--isolated-a-start-diagnostics"){
             ComScope com;HardwareProcessLease lease;return RunIsolatedAStartDiagnostics(Discover());
         }
@@ -831,7 +927,7 @@ int main(int argc,char** argv){
             if(!requested_orientation)throw std::runtime_error("invalid mount orientation; use normal or rotated-180");
             args.resize(args.size()-2);
         }
-        if((args.size()!=3 && args.size()!=4) || args[1]!="--seconds")throw std::runtime_error("usage: A0CameraStitcher.WpdDualPreview --seconds 0..3600 [--focus-smoke|--af-prepare-smoke|--stop-live-only|--capture-a|--capture-b|--capture-smoke|--merge-smoke|--pair-smoke|--pair-cycle-smoke|--level-smoke|--restart-smoke|--camera-end-restart-smoke] [--mount-orientation normal|rotated-180]; or --capture-diagnostics / --capture-event-diagnostics / --pair-preflight-diagnostics / --isolated-a-start-diagnostics / --isolated-a-busy-frame-diagnostics / --camera-state-diagnostics (no shutter)");
+        if((args.size()!=3 && args.size()!=4) || args[1]!="--seconds")throw std::runtime_error("usage: A0CameraStitcher.WpdDualPreview --seconds 0..3600 [--focus-smoke|--af-prepare-smoke|--stop-live-only|--capture-a|--capture-b|--capture-smoke|--merge-smoke|--pair-smoke|--pair-cycle-smoke|--level-smoke|--restart-smoke|--camera-end-restart-smoke] [--mount-orientation normal|rotated-180]; or --capture-diagnostics / --capture-event-diagnostics / --pair-preflight-diagnostics / --isolated-a-start-diagnostics / --isolated-a-busy-frame-diagnostics / --camera-state-diagnostics / --settings-read-diagnostics (no shutter, no setting write)");
         size_t used{};run_seconds=std::stoi(args[2],&used);if(used!=args[2].size() || run_seconds<0 || run_seconds>3600)throw std::runtime_error("invalid duration");
         if(args.size()==4){
             const std::string mode=args[3];
