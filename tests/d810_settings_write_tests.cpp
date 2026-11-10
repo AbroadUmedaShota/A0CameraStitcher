@@ -1665,7 +1665,7 @@ void WatchdogCancel() {
     }
 }
 // A read in the write session answered as a real body answered stage A: begin
-// accepted, 0 bytes, END refused with 0x200A (Marin MEDIUM 4).
+// accepted, 0 bytes, END refused with 0x200A.
 void ZeroByteReadsInTheWriteSession() {
     {
         // Before the first write: not sent, nothing written, no block.
@@ -1810,7 +1810,7 @@ void ScreenRefusals() {
     }
 }
 void ScreenSkippedShown() {
-    // A row the table does not enable is listed as left out, with the reason, before confirming (Marin).
+    // A row the table does not enable is listed as left out, with the reason, before confirming.
     ScreenBench s(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
     check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Confirming, "screen: plan with a row left out");
     check(Shows(s.screen->View(), L"外した項目") && Shows(s.screen->View(), L"ISO感度: 表で無効の項目です"), "screen: skipped and why");

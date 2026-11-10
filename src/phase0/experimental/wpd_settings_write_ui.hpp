@@ -147,7 +147,7 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     settings_confirm_button=button(L"書き込む（1回だけ）",407);
     settings_discard_button=button(L"やめる",408);
     settings_reread_button=button(L"設定を読み直す",409);
-    // A build that contains the write path says so in its title (AZKi LOW 5).
+    // A build that contains the write path says so in its title.
     std::wstring title(512,L'\0');title.resize(static_cast<std::size_t>(GetWindowTextW(window,title.data(),static_cast<int>(title.size()))));
     SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
 }
