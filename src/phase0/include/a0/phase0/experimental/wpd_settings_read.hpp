@@ -108,11 +108,22 @@ inline std::optional<SettingsRequestShape> InspectSettingsRequest(IPortableDevic
     }
 }
 
+// The body answered with an MTP response code other than OK: both the dispatch and
+// the command succeeded and the code is present. A failed HRESULT, a missing
+// code or an exception is not an explicit refusal.
+inline bool IsExplicitMtpRejection(const WpdLiveViewCommandResult& result) {
+    return result.error == WpdLiveViewResultError::MtpRejected && result.dispatch_status == S_OK &&
+        result.command_status == S_OK && result.mtp_response != 0;
+}
+
 // --- The gate ----------------------------------------------------------------------
 // One instance belongs to one open session. States: Idle, BeginPending (a read
 // operation was admitted, its reply not yet seen), ReadOpen (a transfer is open
 // and the gate holds its context, taken from the begin reply), EndPending, and
-// Closed (after an ambiguous transport failure or a rejected END: nothing more).
+// Closed (after an ambiguous transport failure or an END that did not close the
+// transfer cleanly: nothing more). An END the body explicitly refused with an MTP
+// response code, for a transfer that delivered no data, is not ambiguous: the
+// transfer is over and the gate returns to Idle.
 class D810SettingsReadGate {
 public:
     bool Admit(IPortableDeviceValues* request) {
@@ -126,11 +137,23 @@ public:
             const auto begin = InspectWpdLiveViewTransferBegin(reply.status, reply.results.Get());
             // A context is kept even when the size hint was invalid, so the
             // transfer that exists can still be ended exactly once.
+            transfer_dirty_ = false;
             if (begin.context.empty()) state_ = State::Idle;
             else { context_ = begin.context; state_ = State::ReadOpen; }
+        } else if (state_ == State::ReadOpen) {
+            // The reply to a READ_DATA of the open transfer. Any data, or a reply
+            // that cannot be read, makes the transfer unclean.
+            const auto chunk = InspectWpdLiveViewReadChunk(reply.status, reply.results.Get(), WpdLiveViewMaxChunkBytes);
+            if (!chunk.result.Ok() || !chunk.bytes.empty()) transfer_dirty_ = true;
         } else if (state_ == State::EndPending) {
             context_.clear();
-            state_ = InspectWpdLiveViewCommand(reply.status, reply.results.Get(), true).Ok() && !failed_ ? State::Idle : State::Closed;
+            const auto end = InspectWpdLiveViewCommand(reply.status, reply.results.Get(), true);
+            // A clean END reopens the gate. So does an explicit MTP refusal of the
+            // END of a transfer that delivered nothing (a body that does not know
+            // the property answers so). Anything else stays closed.
+            const bool reopen = !failed_ && (end.Ok() || (!transfer_dirty_ && IsExplicitMtpRejection(end)));
+            state_ = reopen ? State::Idle : State::Closed;
+            transfer_dirty_ = false;
         }
     }
     // The transport threw: the request may or may not have reached the body.
@@ -169,6 +192,7 @@ private:
     std::wstring context_;
     std::size_t admitted_{}, rejected_{};
     bool failed_{};
+    bool transfer_dirty_{};
 };
 
 // --- One camera's read -----------------------------------------------------------------
@@ -280,6 +304,13 @@ private:
         if (result.payload.size() != 1) { poisoned_ = true; return {}; }
         return {static_cast<unsigned>(result.payload[0]), false};
     }
+    // Begin succeeded, no byte was received, the END was sent and the body
+    // answered it with an explicit MTP refusal.
+    static bool RejectedAtEnd(const WpdLiveViewTransferResult& result) {
+        return (result.error == WpdLiveViewTransferError::EmptyPayload || result.error == WpdLiveViewTransferError::IncompletePayload) &&
+            result.begin_dispatched && result.received_bytes == 0 && result.end_attempted && result.end_result &&
+            IsExplicitMtpRejection(*result.end_result);
+    }
     D810SettingReading ReadSetting(const D810SettingSpec& spec) {
         const auto code = spec.code;
         const auto result = Transfer([code] { return BuildSettingsPropDesc(code); }, kD810PropDescMaxBytes);
@@ -290,16 +321,25 @@ private:
                 poisoned_ = true;
                 return UnavailableD810Setting(spec.id, "interrupted", mtp);
             }
-            // The body refused the request and no transfer exists: later items
-            // can still be asked. Anything else may have left a data phase in
-            // an unknown state, so nothing more is sent on this session.
+            // The body refused the begin with an MTP code and no transfer exists:
+            // later items can still be asked.
             if (result.error == WpdLiveViewTransferError::BeginRejected && !result.end_attempted && result.command_failure &&
-                (result.command_failure->error == WpdLiveViewResultError::MtpRejected ||
-                    result.command_failure->error == WpdLiveViewResultError::CommandFailed))
-                return UnavailableD810Setting(spec.id, result.command_failure->error == WpdLiveViewResultError::MtpRejected ? "mtp_rejected" : "command_failed", mtp);
+                IsExplicitMtpRejection(*result.command_failure))
+                return UnavailableD810Setting(spec.id, "mtp_rejected", mtp);
+            // The body opened a transfer, delivered no data and refused its END
+            // with an MTP code (it does not know the property): the transfer is
+            // over, and the END code is kept in the row.
+            if (RejectedAtEnd(result))
+                return UnavailableD810Setting(spec.id, "mtp_rejected_at_end", result.end_result->mtp_response);
             if (result.error == WpdLiveViewTransferError::PayloadLimitExceeded && result.end_confirmed)
                 return UnavailableD810Setting(spec.id, "too_large");
+            // Anything else (an HRESULT failure, an exception, partial data, an END
+            // that is not an explicit refusal) may have left a data phase in an
+            // unknown state, so nothing more is sent on this session.
             poisoned_ = true;
+            if (result.error == WpdLiveViewTransferError::BeginRejected && result.command_failure &&
+                result.command_failure->error == WpdLiveViewResultError::CommandFailed)
+                return UnavailableD810Setting(spec.id, "command_failed", mtp);
             return UnavailableD810Setting(spec.id, "transfer_failed_" + std::to_string(static_cast<int>(result.error)), mtp);
         }
         const auto parsed = ParseD810PropDesc(result.payload, spec);

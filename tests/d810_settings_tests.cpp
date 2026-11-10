@@ -70,6 +70,20 @@ WpdLiveViewExchange BeginReply(const wchar_t* context, std::size_t total) {
     return {S_OK, result};
 }
 WpdLiveViewExchange FinalReply(DWORD mtp = 0x2001) { return {S_OK, Reply(true, mtp)}; }
+// The reply to a READ_DATA that delivered `count` bytes (at most 16).
+WpdLiveViewExchange ReadReplyOf(DWORD count) {
+    static const unsigned char bytes[16]{};
+    auto result = Reply();
+    result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ, count);
+    result->SetBufferValue(WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, const_cast<unsigned char*>(bytes), count);
+    return {S_OK, result};
+}
+// The dispatch succeeded and the command HRESULT failed.
+WpdLiveViewExchange CommandFailedReply() {
+    auto result = Reply();
+    result->SetErrorValue(WPD_PROPERTY_COMMON_HRESULT, E_FAIL);
+    return {S_OK, result};
+}
 // A request of a given command kind with an operation and 32 bit arguments.
 WpdValues Make(SettingsCommandKind kind, DWORD opcode, std::initializer_list<DWORD> arguments) {
     auto request = BuildSettingsExecute(kind == SettingsCommandKind::ExecuteWithDataToRead ? WpdLiveViewOperation::Frame : WpdLiveViewOperation::Start, opcode, arguments);
@@ -92,6 +106,14 @@ struct FakeBody {
     std::map<std::uint16_t, Bytes> descs;
     std::map<std::uint16_t, DWORD> reject;       // property code -> MTP response at the begin
     std::set<std::uint16_t> throw_on_read;       // property codes whose READ_DATA throws
+    std::map<std::uint16_t, DWORD> end_response; // property code -> MTP response at the END (instead of OK)
+    std::map<std::uint16_t, std::size_t> serve_limit; // property code -> bytes READ_DATA delivers in total
+    std::set<std::uint16_t> unknown_size;        // begin reports TOTAL_DATA_SIZE 0xFFFFFFFF
+    std::set<std::uint16_t> oversize;            // begin reports a size above the caller's cap
+    std::set<std::uint16_t> begin_command_failed; // begin: dispatch succeeds, the command HRESULT fails
+    std::set<std::uint16_t> end_command_failed;  // END: the command HRESULT fails
+    std::set<std::uint16_t> end_without_code;    // END: no MTP response code
+    std::set<std::uint16_t> throw_on_end;        // END throws
     unsigned live = 0;
     DWORD ready_response = 0x2001;
     int busy_replies = 0;
@@ -121,13 +143,15 @@ struct FakeBody {
                 current_ = code;
                 const auto rejected = reject.find(code);
                 if (rejected != reject.end()) { note(text); return FinalReply(rejected->second); }
+                if (begin_command_failed.count(code)) { note(text); return CommandFailedReply(); }
                 const auto found = descs.find(code);
                 if (found == descs.end()) { note(text); return FinalReply(0x200a); }
                 data_ = found->second;
             }
             offset_ = 0;
             note(text);
-            return BeginReply((L"fake-context-" + std::to_wstring(begins)).c_str(), data_.size());
+            const std::uint64_t total = oversize.count(current_) ? 5000 : unknown_size.count(current_) ? 0xffffffffULL : data_.size();
+            return BeginReply((L"fake-context-" + std::to_wstring(begins)).c_str(), total);
         }
         if (shape->kind == SettingsCommandKind::ReadData) {
             ++reads;
@@ -135,16 +159,23 @@ struct FakeBody {
             if (throw_on_read.count(current_)) throw std::runtime_error("transport failure");
             DWORD requested{};
             request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_TO_READ, &requested);
-            const auto count = std::min<std::size_t>(requested, data_.size() - offset_);
+            auto count = std::min<std::size_t>(requested, data_.size() - offset_);
+            const auto limit = serve_limit.find(current_);
+            if (limit != serve_limit.end()) count = std::min<std::size_t>(count, offset_ < limit->second ? limit->second - offset_ : 0);
+            static unsigned char none = 0;
             auto result = Reply();
             result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ, static_cast<DWORD>(count));
-            result->SetBufferValue(WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, data_.data() + offset_, static_cast<DWORD>(count));
+            result->SetBufferValue(WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, count ? data_.data() + offset_ : &none, static_cast<DWORD>(count));
             offset_ += count;
             return {S_OK, result};
         }
         ++ends;
         note("end");
-        return FinalReply();
+        if (throw_on_end.count(current_)) throw std::runtime_error("transport failure at END");
+        if (end_command_failed.count(current_)) return CommandFailedReply();
+        if (end_without_code.count(current_)) return {S_OK, Reply()};
+        const auto response = end_response.find(current_);
+        return FinalReply(response != end_response.end() ? response->second : 0x2001);
     }
     std::size_t CountOf(const std::string& prefix) const {
         return static_cast<std::size_t>(std::count_if(trace.begin(), trace.end(), [&](const std::string& entry) { return entry.rfind(prefix, 0) == 0; }));
@@ -170,11 +201,12 @@ FakeBody HappyBody() {
 struct Rig {
     FakeBody body;
     bool go = true;
+    bool cleanup = true;
     std::vector<std::string> log;
     std::unique_ptr<WpdSettingsReadSession> session;
     explicit Rig(FakeBody b): body(std::move(b)) {
         session = std::make_unique<WpdSettingsReadSession>(
-            [this](IPortableDeviceValues* request) { return body(request); }, [this] { return go; }, [] { return true; });
+            [this](IPortableDeviceValues* request) { return body(request); }, [this] { return go; }, [this] { return cleanup; });
     }
     D810CameraSettingsRead Run() { return session->ReadAll("CAM-B", [this](const std::string& line) { log.push_back(line); }); }
 };
@@ -332,8 +364,9 @@ void SetArguments(IPortableDeviceValues* request, const std::vector<std::uint32_
         collection->Add(&value);
     }
 }
-void GateSweep() {
-    const std::vector<std::vector<std::uint32_t>> argument_sets{{}, {0xd1a2}, {0x500d}, {0x1016}, {0xd1a2, 0xd1a2}, {0xffffffffu}, {0xd16a}};
+// The sweep from a gate in Idle: either a new one or one that came back to Idle
+// after a transfer ended.
+void SweepFromIdle(const D810SettingsReadGate& base, const std::vector<std::vector<std::uint32_t>>& argument_sets, std::size_t expected_admitted, bool table_codes) {
     std::size_t admitted = 0, probes = 0;
     for (const auto kind : {SettingsCommandKind::ExecuteWithoutData, SettingsCommandKind::ExecuteWithDataToRead, SettingsCommandKind::ExecuteWithDataToWrite}) {
         auto request = Make(kind, 0, {});
@@ -342,7 +375,7 @@ void GateSweep() {
             SetArguments(request.Get(), arguments);
             for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) {
                 request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE, opcode);
-                D810SettingsReadGate gate;
+                D810SettingsReadGate gate = base;
                 const bool got = gate.Admit(request.Get());
                 ++probes;
                 admitted += got;
@@ -351,8 +384,9 @@ void GateSweep() {
         }
     }
     // DeviceReady, the Live state, and the descriptions of 0x500d and 0xd16a.
-    check(admitted == 4, "exactly the read-only operations are admitted");
+    check(admitted == expected_admitted, "exactly the read-only operations are admitted");
     check(probes == 3 * argument_sets.size() * 65536, "swept everything");
+    if (!table_codes) return;
     // Every other table code, over every operation number and the read form.
     for (const auto& spec : kD810SettingSpecs) {
         if (spec.code == 0x500d || spec.code == 0xd16a) continue;
@@ -360,11 +394,31 @@ void GateSweep() {
         std::size_t accepted = 0;
         for (std::uint32_t opcode = 0; opcode <= 0xffff; ++opcode) {
             request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE, opcode);
-            D810SettingsReadGate gate;
+            D810SettingsReadGate gate = base;
             if (gate.Admit(request.Get())) { ++accepted; check(opcode == 0x1014, "only GetDevicePropDesc"); }
         }
         check(accepted == 1, "one operation per table code");
     }
+}
+// A gate that has seen a transfer with no data end with an explicit MTP refusal.
+D810SettingsReadGate ReopenedGate() {
+    D810SettingsReadGate gate;
+    gate.Admit(Make(SettingsCommandKind::ExecuteWithDataToRead, 0x1014, {0x500d}).Get());
+    gate.Observe(BeginReply(L"c1", 8));
+    gate.Admit(ReadRequest(L"c1").Get());
+    gate.Observe(ReadReplyOf(0));
+    gate.Admit(EndRequest(L"c1").Get());
+    gate.Observe(FinalReply(0x200a));
+    return gate;
+}
+void GateSweep() {
+    const std::vector<std::vector<std::uint32_t>> argument_sets{{}, {0xd1a2}, {0x500d}, {0x1016}, {0xd1a2, 0xd1a2}, {0xffffffffu}, {0xd16a}};
+    SweepFromIdle(D810SettingsReadGate{}, argument_sets, 4, true);
+    // The gate that came back to Idle after a refused END admits exactly the same set.
+    const auto reopened = ReopenedGate();
+    check(!reopened.Closed() && !reopened.TransferOpen(), "reopened gate is idle");
+    // (The Debug build is slow: a smaller set of argument lists, DeviceReady, one description and the write codes among them.)
+    SweepFromIdle(reopened, {{}, {0x500d}, {0x1016}}, 2, false);
     // Bits above 16 in the operation or an argument change the value: refused.
     for (const auto high : {0x00010000u, 0x80000000u, 0xffff0000u, 0x10000000u}) {
         for (const auto& [kind, opcode, argument] : std::vector<std::tuple<SettingsCommandKind, DWORD, DWORD>>{
@@ -449,13 +503,48 @@ void GateTransferOrder() {
         gate.Observe(FinalReply());
         check(gate.Closed() && !gate.Admit(ready().Get()), "closed after the failed transfer ended");
     }
-    {   // A refused END closes the gate.
+    // The END of a transfer. `reads` are the replies to the READ_DATA before it.
+    const auto ended_with = [&](const std::vector<WpdLiveViewExchange>& reads, const WpdLiveViewExchange& end, bool transport_failed = false) {
         D810SettingsReadGate gate;
         gate.Admit(begin().Get());
         gate.Observe(BeginReply(L"c1", 8));
+        for (const auto& reply : reads) { gate.Admit(ReadRequest(L"c1").Get()); gate.Observe(reply); }
+        if (transport_failed) gate.TransportFailed();
         gate.Admit(EndRequest(L"c1").Get());
-        gate.Observe(FinalReply(0x2019));
-        check(gate.Closed(), "END refused");
+        gate.Observe(end);
+        return gate;
+    };
+    {   // An explicit MTP refusal of the END of a transfer that delivered no data: back to Idle.
+        for (const DWORD code : {0x200au, 0x2019u, 0xa00bu}) {
+            auto gate = ended_with({ReadReplyOf(0)}, FinalReply(code));
+            check(!gate.Closed() && !gate.TransferOpen(), "empty transfer, END refused: idle");
+            check(!gate.Admit(ReadRequest(L"c1").Get()) && !gate.Admit(EndRequest(L"c1").Get()), "no read or END after the refused END");
+            check(gate.Admit(begin().Get()), "a new operation after the refused END");
+        }
+        check(!ended_with({}, FinalReply(0x2019)).Closed(), "no READ at all, END refused: idle");
+        check(!ended_with({ReadReplyOf(0), ReadReplyOf(0)}, FinalReply(0x200a)).Closed(), "two empty READs, END refused: idle");
+    }
+    {   // Everything else about a refused END keeps the gate closed.
+        check(ended_with({ReadReplyOf(3)}, FinalReply(0x200a)).Closed(), "data received, END refused");
+        check(ended_with({ReadReplyOf(0), ReadReplyOf(2)}, FinalReply(0x200a)).Closed(), "data after an empty READ, END refused");
+        check(ended_with({CommandFailedReply()}, FinalReply(0x200a)).Closed(), "READ failed, END refused");
+        check(ended_with({{E_FAIL, Reply()}}, FinalReply(0x200a)).Closed(), "READ dispatch failed, END refused");
+        check(ended_with({ReadReplyOf(0)}, FinalReply(0x200a), true).Closed(), "transport failure, END refused");
+        check(ended_with({ReadReplyOf(0)}, CommandFailedReply()).Closed(), "END command HRESULT failed");
+        check(ended_with({ReadReplyOf(0)}, {E_FAIL, Reply(true, 0x200a)}).Closed(), "END dispatch failed");
+        check(ended_with({ReadReplyOf(0)}, {S_OK, Reply()}).Closed(), "END without a response code");
+        check(ended_with({ReadReplyOf(0)}, FinalReply(0)).Closed(), "END response code zero");
+        check(!ended_with({ReadReplyOf(3)}, FinalReply(0x2001)).Closed(), "data received, END accepted: idle as before");
+    }
+    {   // The data flag does not carry over to the next transfer.
+        auto gate = ended_with({ReadReplyOf(3)}, FinalReply(0x2001));
+        gate.Admit(begin().Get());
+        gate.Observe(BeginReply(L"c2", 8));
+        gate.Admit(ReadRequest(L"c2").Get());
+        gate.Observe(ReadReplyOf(0));
+        gate.Admit(EndRequest(L"c2").Get());
+        gate.Observe(FinalReply(0x200a));
+        check(!gate.Closed(), "a clean transfer after a dirty one");
     }
     {   // WRITE_DATA and the write command are refused in every state.
         D810SettingsReadGate idle;
@@ -594,15 +683,233 @@ void DeviceReadiness() {
         check(read.stop_reason == "interrupted" && rig.body.CountOf("90c8") == 3, "deadline while busy");
     }
 }
-void SessionNeverReachesBodyWithWrites() {
-    // Even a transport that would accept anything is never handed a write-shaped request.
-    int reached = 0;
-    WpdSettingsReadSession session([&](IPortableDeviceValues*) { ++reached; return FinalReply(); }, [] { return true; }, [] { return true; });
-    check(!session.Gate().Closed(), "fresh gate");
-    D810SettingsReadGate gate;
-    for (const auto& request : {Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x500d}), WriteDataRequest(L"c1"), Make(SettingsCommandKind::ExecuteWithDataToRead, 0x1016, {0x500d})})
-        check(!gate.Admit(request.Get()), "write-shaped refused");
-    check(reached == 0, "transport untouched");
+// --- Refusals the body gives at the END of a transfer that carried no data -------------------------
+const D810SettingReading& Row(const D810CameraSettingsRead& read, D810SettingId id) { return *FindD810Reading(read.readings, id); }
+bool LogHas(const Rig& rig, const std::string& text) {
+    return std::any_of(rig.log.begin(), rig.log.end(), [&](const std::string& line) { return line.find(text) != std::string::npos; });
+}
+void RejectedAtEnd() {
+    {   // Size unknown, READ delivers nothing, END answers 0x200a: the item is unavailable and the rest is read.
+        auto body = HappyBody();
+        body.unknown_size.insert(0xd200);
+        body.serve_limit[0xd200] = 0;
+        body.end_response[0xd200] = 0x200a;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned() && !rig.session->Gate().Closed(), "refused END of an empty transfer does not stop the read");
+        const auto& row = Row(read, D810SettingId::PictureControl);
+        check(!row.available && row.reason == "mtp_rejected_at_end" && row.mtp_response == 0x200a, "reason and END code kept");
+        check(LogHas(rig, "CAM-B settings_desc code=0xd200 unavailable reason=mtp_rejected_at_end mtp=0x200a"), "the row carries mtp=0x200a");
+        check(Row(read, D810SettingId::ActiveDLighting).available && Row(read, D810SettingId::IsoAutoCandidate).available &&
+            Row(read, D810SettingId::NikonShutterSpeed).available, "items after it are read");
+        check(rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig), "all twelve asked once, every transfer ended once");
+        check(rig.session->Gate().Rejected() == 0, "nothing refused by the gate");
+        const auto rows = CompareD810Settings(read.readings, read.readings);
+        for (const auto& line : rows)
+            if (line.id == D810SettingId::PictureControl) check(line.difference == D810Difference::Unknown && line.a_text == "unavailable (mtp_rejected_at_end)", "table shows the reason");
+    }
+    {   // Size known, READ delivers nothing (incomplete payload), END answers 0x2019.
+        auto body = HappyBody();
+        body.serve_limit[0x500b] = 0;
+        body.end_response[0x500b] = 0x2019;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        const auto& row = Row(read, D810SettingId::Metering);
+        check(read.Complete() && !row.available && row.reason == "mtp_rejected_at_end" && row.mtp_response == 0x2019, "known size, empty READ");
+        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == 12, "later items read");
+    }
+    {   // Two items in a row.
+        auto body = HappyBody();
+        for (const std::uint16_t code : {std::uint16_t{0x500b}, std::uint16_t{0x5010}}) { body.serve_limit[code] = 0; body.end_response[code] = 0x200a; }
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !Row(read, D810SettingId::Metering).available && !Row(read, D810SettingId::ExposureCompensation).available &&
+            Row(read, D810SettingId::PictureControl).available && rig.body.CountOf("1014(") == 12, "two refusals in a row");
+    }
+}
+// Cases in which the read stops at an item (Metering, the seventh entry of the table).
+void StopsAfterUncleanEnd(FakeBody body, const char* what, bool gate_closed = true) {
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), what);
+    check(Row(read, D810SettingId::Metering).reason.rfind("transfer_failed_", 0) == 0, what);
+    check(Row(read, D810SettingId::ExposureCompensation).reason == "not_read" && rig.body.CountOf("1014(") == 7, what);
+    check(rig.session->Gate().Closed() == gate_closed && rig.body.ends == rig.body.begins && NoWrites(rig), what);
+}
+void RejectedAtEndStopsWhenNotExplicitOrNotEmpty() {
+    {   // Data was received before the refusal.
+        auto body = HappyBody();
+        body.serve_limit[0x500b] = 3;
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "partial data, END refused");
+    }
+    {   // Size unknown and the data is complete, END refused: not an empty transfer.
+        auto body = HappyBody();
+        body.unknown_size.insert(0x500b);
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "complete data, END refused");
+    }
+    {   // Empty and the END is accepted: nothing was refused, the payload is just empty.
+        auto body = HappyBody();
+        body.unknown_size.insert(0x500b);
+        body.serve_limit[0x500b] = 0;
+        // The gate saw a clean END and is idle, as before; the session stops anyway.
+        StopsAfterUncleanEnd(std::move(body), "empty, END accepted", false);
+    }
+    {   // Empty and the END fails at the command level (HRESULT), or has no code, or throws.
+        for (int variant = 0; variant < 3; ++variant) {
+            auto body = HappyBody();
+            body.serve_limit[0x500b] = 0;
+            if (variant == 0) body.end_command_failed.insert(0x500b);
+            if (variant == 1) body.end_without_code.insert(0x500b);
+            if (variant == 2) body.throw_on_end.insert(0x500b);
+            Rig rig(std::move(body));
+            const auto read = rig.Run();
+            check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), "END not an explicit refusal");
+            check(Row(read, D810SettingId::Metering).reason.rfind("transfer_failed_", 0) == 0 && Row(read, D810SettingId::ExposureCompensation).reason == "not_read", "END not an explicit refusal: reason and rest");
+            check(rig.body.CountOf("1014(") == 7 && rig.session->Gate().Closed() && NoWrites(rig), "END not an explicit refusal: nothing more asked");
+        }
+    }
+    {   // READ threw, the END was refused: the exception wins.
+        auto body = HappyBody();
+        body.throw_on_read.insert(0x500b);
+        body.end_response[0x500b] = 0x200a;
+        StopsAfterUncleanEnd(std::move(body), "READ threw, END refused");
+    }
+}
+
+// --- Begin failures ----------------------------------------------------------------------------------
+void BeginCommandFailureStops() {
+    // A failed HRESULT of the command (a session that went away, for one) is not a refusal by the body.
+    auto body = HappyBody();
+    body.begin_command_failed.insert(0x500b);
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), "command HRESULT failure stops the read");
+    check(Row(read, D810SettingId::Metering).reason == "command_failed" && !Row(read, D810SettingId::Metering).available, "reason kept");
+    check(Row(read, D810SettingId::ExposureCompensation).reason == "not_read" && rig.body.CountOf("1014(") == 7, "later items are not asked");
+    check(rig.body.ends == rig.body.begins - 1 && NoWrites(rig), "no transfer opened, no END");
+}
+void BeginMtpRejectionContinues() {
+    // The same position with an MTP refusal at the begin: the read goes on (unchanged).
+    auto body = HappyBody();
+    body.reject[0x500b] = 0x2002;
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    check(read.Complete() && Row(read, D810SettingId::Metering).reason == "mtp_rejected" && Row(read, D810SettingId::Metering).mtp_response == 0x2002 &&
+        rig.body.CountOf("1014(") == 12, "MTP refusal at the begin continues");
+}
+
+// --- Paths of the transfer that had no test ----------------------------------------------------------
+void OversizeThenEnd() {
+    {   // Larger than the cap: not read, the transfer is ended, the item is too_large and the read goes on.
+        auto body = HappyBody();
+        body.oversize.insert(0x500b);
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned(), "too large does not stop the read");
+        check(Row(read, D810SettingId::Metering).reason == "too_large" && !Row(read, D810SettingId::Metering).available, "too_large");
+        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == 12, "items after it are read");
+        check(rig.body.ends == rig.body.begins && NoWrites(rig), "the transfer was ended");
+        const auto at = std::find(rig.body.trace.begin(), rig.body.trace.end(), "1014(500b)");
+        check(at != rig.body.trace.end() && at + 1 != rig.body.trace.end() && *(at + 1) == "end", "no READ_DATA for the oversize item");
+    }
+    {   // The END of that transfer is refused: stop.
+        auto body = HappyBody();
+        body.oversize.insert(0x500b);
+        body.end_response[0x500b] = 0x200a;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(!read.Complete() && rig.session->Poisoned() && Row(read, D810SettingId::Metering).reason.rfind("transfer_failed_", 0) == 0 &&
+            Row(read, D810SettingId::ExposureCompensation).reason == "not_read" && rig.body.CountOf("1014(") == 7, "oversize and END refused: stop");
+    }
+}
+void CleanupNotAdmittedStops() {
+    // The session is no longer ours after the item was opened: the END is not sent, and nothing else is.
+    Rig rig(HappyBody());
+    rig.body.after = [&](const std::string& entry) { if (entry == "1014(5007)") rig.cleanup = false; };
+    const auto read = rig.Run();
+    check(!read.Complete() && read.stop_reason == "not_read_after_failure" && rig.session->Poisoned(), "stopped");
+    check(Row(read, D810SettingId::Aperture).reason.rfind("transfer_failed_", 0) == 0 && Row(read, D810SettingId::Iso).reason == "not_read", "reasons");
+    check(rig.body.ends == rig.body.begins - 1 && rig.body.CountOf("1014(") == 3 && rig.body.trace.back() == "read", "no END after the cleanup lost admission");
+    check(rig.session->Gate().TransferOpen() && NoWrites(rig), "the open transfer stays open, nothing more is sent");
+}
+void UnknownSizeEndsWithShortRead() {
+    // TOTAL_DATA_SIZE 0xFFFFFFFF: the payload ends at the first READ that returns less than asked.
+    auto body = HappyBody();
+    body.unknown_size = {0x500d, 0x500e};
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    check(read.Complete() && rig.body.ends == rig.body.begins && NoWrites(rig), "complete");
+    const auto& shutter = Row(read, D810SettingId::ShutterSpeed);
+    check(shutter.available && shutter.desc.current_value == 1667 && Row(read, D810SettingId::ExposureMode).available, "unknown-size items parse");
+    for (const auto& reading : read.readings) check(reading.available && reading.mtp_response == 0x2001, "available");
+}
+
+// --- Nothing write-shaped reaches a transport, whatever it is asked ----------------------------
+struct RecordingBody {
+    struct Seen { SettingsCommandKind kind; std::uint32_t opcode; std::vector<std::uint32_t> arguments; };
+    std::vector<Seen> seen;
+    std::size_t unreadable = 0;
+    FakeBody inner;
+    WpdLiveViewExchange operator()(IPortableDeviceValues* request) {
+        const auto shape = InspectSettingsRequest(request);
+        if (!shape) { ++unreadable; return FinalReply(); }
+        seen.push_back({shape->kind, shape->opcode, shape->arguments});
+        return inner(request);
+    }
+    std::size_t WriteShaped() const {
+        std::size_t count = 0;
+        for (const auto& entry : seen) {
+            const bool executes = entry.kind == SettingsCommandKind::ExecuteWithoutData || entry.kind == SettingsCommandKind::ExecuteWithDataToRead;
+            count += entry.kind == SettingsCommandKind::ExecuteWithDataToWrite || entry.kind == SettingsCommandKind::WriteData ||
+                entry.kind == SettingsCommandKind::Other || (executes && (entry.opcode == 0x1016 || entry.opcode == 0x9207 || entry.opcode == 0x90c2));
+        }
+        return count;
+    }
+    bool OnlyReadOperations() const {
+        for (const auto& entry : seen) {
+            if (entry.kind == SettingsCommandKind::ReadData || entry.kind == SettingsCommandKind::EndDataTransfer) continue;
+            if (!ShouldAdmit(entry.kind, entry.opcode, entry.arguments)) return false;
+        }
+        return true;
+    }
+};
+void SessionNeverSendsWrites() {
+    const auto run = [](FakeBody inner, std::span<const D810SettingSpec> specs, const char* what) {
+        RecordingBody recorder{{}, 0, std::move(inner)};
+        WpdSettingsReadSession session([&](IPortableDeviceValues* request) { return recorder(request); }, [] { return true; }, [] { return true; });
+        const auto read = session.ReadAll("CAM-A", nullptr, specs);
+        check(!recorder.seen.empty() && recorder.WriteShaped() == 0 && recorder.unreadable == 0 && recorder.inner.writes == 0, what);
+        check(recorder.OnlyReadOperations(), what);
+        check(read.readings.size() == specs.size(), what);
+        return std::make_pair(std::move(recorder), session.Gate().Rejected());
+    };
+    const std::span<const D810SettingSpec> table(kD810SettingSpecs);
+    {   // Every kind of body answer in one read: refusals, empty transfers, unknown sizes, oversize.
+        auto body = HappyBody();
+        body.reject[0x5007] = 0x2002;
+        body.serve_limit[0xd200] = 0; body.end_response[0xd200] = 0x200a;
+        body.unknown_size.insert(0x500d);
+        body.oversize.insert(0x500f);
+        const auto [recorder, rejected] = run(std::move(body), table, "mixed answers");
+        check(rejected == 0 && recorder.seen.size() > 12, "nothing refused by the gate, the whole table was asked");
+    }
+    {   // After a stop (an exception at a READ_DATA) nothing more goes out.
+        auto body = HappyBody();
+        body.throw_on_read.insert(0x500b);
+        const auto [recorder, rejected] = run(std::move(body), table, "after a failure");
+        check(recorder.seen.back().kind == SettingsCommandKind::EndDataTransfer, "only the END of the open transfer follows the failure");
+    }
+    {   // Table entries whose codes name a write or a vendor action are never sent: the gate refuses them.
+        std::array<D810SettingSpec, 3> bad{{
+            {D810SettingId::ExposureMode, 0x1016, D810ValueType::Uint16, "x", true},
+            {D810SettingId::ShutterSpeed, 0x9207, D810ValueType::Uint32, "y", true},
+            {D810SettingId::Aperture, 0x90c2, D810ValueType::Uint16, "z", true}}};
+        const auto [recorder, rejected] = run(HappyBody(), bad, "codes outside the table");
+        const bool described = std::any_of(recorder.seen.begin(), recorder.seen.end(), [](const auto& entry) { return entry.opcode == 0x1014 && entry.kind == SettingsCommandKind::ExecuteWithDataToRead; });
+        check(rejected >= 1 && !described && recorder.inner.CountOf("1014(") == 0, "no description request reached the body");
+    }
 }
 }
 
@@ -626,7 +933,14 @@ int main() {
     run("TransportFailure", TransportFailure);
     run("DeadlineAndStop", DeadlineAndStop);
     run("DeviceReadiness", DeviceReadiness);
-    run("SessionNeverReachesBodyWithWrites", SessionNeverReachesBodyWithWrites);
+    run("RejectedAtEnd", RejectedAtEnd);
+    run("RejectedAtEndStopsWhenNotExplicitOrNotEmpty", RejectedAtEndStopsWhenNotExplicitOrNotEmpty);
+    run("BeginCommandFailureStops", BeginCommandFailureStops);
+    run("BeginMtpRejectionContinues", BeginMtpRejectionContinues);
+    run("OversizeThenEnd", OversizeThenEnd);
+    run("CleanupNotAdmittedStops", CleanupNotAdmittedStops);
+    run("UnknownSizeEndsWithShortRead", UnknownSizeEndsWithShortRead);
+    run("SessionNeverSendsWrites", SessionNeverSendsWrites);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";
     CoUninitialize();

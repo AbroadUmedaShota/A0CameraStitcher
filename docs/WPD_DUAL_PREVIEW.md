@@ -132,11 +132,11 @@ PC-control mode 0/1の明示比較（mode 1後は0復元確認）とWPD event su
 
 - 構造上書けない。0x1016、WITH_DATA_TO_WRITE、WRITE_DATA は形の検査で常に拒否し、書き込みの分岐は置いていない。
 - 通すのは 0x90C8（データ相なし・引数なし）、0x1015（引数は 0xD1A2 の1個だけ）、0x1014（引数1個で表のcode）、自分が開いた転送の context に限った READ_DATA と END_DATA_TRANSFER だけ。operation 番号と引数は32 bit全体で比べ、命令の種類（データ相なし／読み取り）も operation ごとに固定する。0x90C7 は通さない。
-- 転送が開いている間は、その転送の READ_DATA／END だけを通す（context は gate が begin の応答から持つ）。別の begin、DeviceReady、END の後の READ_DATA は拒否する。transportが例外を返した後は、開いている転送の END を除いて何も通さない。
+- 転送が開いている間は、その転送の READ_DATA／END だけを通す（context は gate が begin の応答から持つ）。別の begin、DeviceReady、END の後の READ_DATA は拒否する。transportが例外を返した後は、開いている転送の END を除いて何も通さない。READ_DATA を1回も受けていない、または受けた応答がすべて0 bytes の転送で、END が MTP の応答コード（0x2001 以外）で明示的に拒否された時だけ、gate は Idle に戻る（本体が知らない code の問い合わせで起きる形）。データを1 byte でも受けた後の拒否、HRESULT の失敗、応答コードの欠落、transport の例外では Closed のまま。
 
 **PropDescの解析**（`ParseD810PropDesc`）: PTP標準の構造（code u16、型u16、GetSet u8、既定値、現在値、FormFlag u8、Range=min・max・step／Enum=個数u16と値）、little-endian。長さは計算した値と完全一致（不足・余りとも拒否）、上限4 KiB（※仮）。code は要求と一致、型は表の型と一致（違えば unavailable。合わせ込まない）。文字列型・配列型・64 bit以上は拒否。GetSet は0/1、FormFlag は0/1/2だけ。Range は min ≤ max（符号付きで比較）、step=0 は「書けない」扱い、Enum の個数は1〜1024（※仮）。
 
-**読み取りの流れ**（`WpdSettingsReadSession::ReadAll`）: DeviceReady（Busy 0x2019 の間は50ms間隔で期限まで）→ Live状態 0xD1A2 を読み、0以外なら止める（`live_view_on`）→ 表の全項目の 0x1014。本体がMTPエラーを返した項目（begin拒否）は `unavailable` として次へ進む。それ以外の転送の失敗はそのsessionでこれ以上送らない（残りは `not_read`）。期限・停止要求の後は開いている転送のENDとCloseだけで、各命令は1回だけ送る（再送しない）。
+**読み取りの流れ**（`WpdSettingsReadSession::ReadAll`）: DeviceReady（Busy 0x2019 の間は50ms間隔で期限まで）→ Live状態 0xD1A2 を読み、0以外なら止める（`live_view_on`）→ 表の全項目の 0x1014。次へ進むのは、本体が明示のMTP応答コードで答えた項目だけで、`unavailable` として残す。(1) begin の拒否（dispatch・command とも成功で応答コードが 0x2001 以外）は `mtp_rejected`。(2) begin は成功して context が返り、受け取った bytes が0のまま END を送り、その応答が dispatch・command とも成功で 0x2001 以外のコードだった場合は `mtp_rejected_at_end`（行に END のコードを残す）。(3) 大きさの上限超過（`too_large`）は END が成功した時。それ以外の転送の失敗はそのsessionでこれ以上送らない（残りの行は `not_read`、停止の理由は `not_read_after_failure`）。begin のWPD HRESULT の失敗（session切断など）は `command_failed` の行を残して止める。データを途中まで受けた後の拒否、END の応答コードの欠落、transportの例外も止める。期限・停止要求の後は開いている転送のENDとCloseだけで、各命令は1回だけ送る（再送しない）。
 
 **期限と停止**: 1回の読み取りに30秒（※仮）を1つ、I/Oが12秒止まったら `Cancel`（`StillLane` と同じ）。停止の旗は読み取り1回ごとの専用のもので、立てるだけで戻さない。ウィンドウを閉じる時（WM_CLOSE、有限実行の終了）は旗を立て、読み取りの終わりとCloseを待ってから窓とleaseを手放す。Closeできなかった時は読み直しも Live の再開も出さず、窓を閉じて本体・USB接続を確認する。
 
