@@ -129,12 +129,27 @@ SeamBlendRecord ReadSeamBlend(const ReviewValue& value,std::uint32_t width,std::
 // #400 v6: the fixed composite. The seam is one vertical column, recorded once
 // in fixedComposite.seam; the blend object keeps the measured brightness only.
 // Everything derivable is recomputed on read and a disagreement is rejected.
+// #415: the optional colorMatch object of the fixed-seam blend. Present when B was matched to A per
+// channel (mode rgb-paper); absent is the luminance ratio of #398, so a report written before #415 reads
+// back unchanged and one state has one report hash. Gains are in B, G, R order.
+void WriteColorMatchJson(std::ostream& out,const ColorMatchRecord& c){
+    const auto triple=[&](const std::array<double,3>& v){out<<'['<<v[0]<<','<<v[1]<<','<<v[2]<<']';};
+    out<<",\"colorMatch\":{\"mode\":\""<<ColorMatchModeCode(c.mode)<<"\",\"gainLimit\":";
+    if(c.gain_limit_set)out<<c.gain_limit;else out<<"null";
+    out<<",\"globalMeasured\":"<<(c.global_measured?"true":"false")<<",\"fallback\":";
+    if(c.luminance_fallback)out<<'"'<<ColorMatchModeCode(ColorMatchMode::luminance_ratio)<<'"';else out<<"null";
+    out<<",\"paperCells\":"<<c.paper_cells<<",\"coveredCells\":"<<c.covered_cells<<",\"measuredGainBgr\":";triple(c.measured_global);
+    out<<",\"globalGainBgr\":";triple(c.global_gain);out<<",\"globalLimited\":"<<(c.global_limited?"true":"false")<<",\"localMinimumBgr\":";triple(c.local_minimum);
+    out<<",\"localMaximumBgr\":";triple(c.local_maximum);out<<",\"localLimitedRows\":"<<c.local_limited_rows<<"}";
+}
 void WriteFixedSeamBlendJson(std::ostream& out,const SeamBlendRecord& b){
     const auto& s=b.settings;
     out<<",\"blend\":{\"method\":\"fixed-seam\",\"widthPixels\":"<<s.width_pixels<<",\"edgeMarginPixels\":"<<s.edge_margin_pixels
         <<",\"differenceMean\":"<<b.difference_mean<<",\"differenceMaximum\":"<<b.difference_maximum
         <<",\"brightness\":{\"windowHalfWidthPixels\":"<<s.brightness_half_width_pixels<<",\"smoothingRows\":"<<s.brightness_smoothing_rows
-        <<",\"ratioMinimum\":"<<b.ratio_minimum<<",\"ratioMaximum\":"<<b.ratio_maximum<<",\"saturationLimitedPixels\":"<<b.saturation_limited_pixels<<"}}";
+        <<",\"ratioMinimum\":"<<b.ratio_minimum<<",\"ratioMaximum\":"<<b.ratio_maximum<<",\"saturationLimitedPixels\":"<<b.saturation_limited_pixels<<"}";
+    if(b.color.mode==ColorMatchMode::rgb_paper)WriteColorMatchJson(out,b.color);
+    out<<"}";
 }
 void WriteFixedCompositeJson(std::ostream& out,const SavedFixedComposite& f,int fixed_x,int fixed_y,double fixed_rotation,double fixed_scale){
     const auto optional=[&](const std::optional<double>& v){if(v)out<<*v;else out<<"null";};
@@ -263,8 +278,59 @@ SavedFixedComposite ReadFixedComposite(const ReviewValue& value,int fixed_x,int 
     }
     return f;
 }
+std::array<double,3> ReviewGains(const ReviewValue& value){
+    if(value.kind!=ReviewJson::JsonKind::array || value.array.size()!=3)ReviewReject();
+    std::array<double,3> g{ReviewDouble(value.array[0]),ReviewDouble(value.array[1]),ReviewDouble(value.array[2])};
+    for(const auto v:g)if(!(v>0))ReviewReject();return g;
+}
+bool ReviewBoolean(const ReviewValue& value){if(value.kind!=ReviewJson::JsonKind::boolean)ReviewReject();return value.boolean;}
+// Every relation the writer guarantees is checked: without a global measurement the render used the
+// luminance ratio (fallback "luminance-ratio") and every gain is 1, and a measurement needs the paper
+// pixels the writer requires; the applied global gain is the measured one unless a limit is set and was
+// hit (without a limit it is never changed); a limit bounds every recorded gain (the global gain, and
+// global times the residual range) and is at least 1.
+ColorMatchRecord ReadColorMatch(const ReviewValue& value,std::uint64_t cells_maximum,std::uint32_t rows){
+    ReviewFields(value,{"mode","gainLimit","globalMeasured","fallback","paperCells","coveredCells","measuredGainBgr","globalGainBgr","globalLimited","localMinimumBgr","localMaximumBgr","localLimitedRows"});
+    ColorMatchRecord c;
+    if(ReviewString(ReviewAt(value,"mode"))!=ColorMatchModeCode(ColorMatchMode::rgb_paper))ReviewReject();
+    c.mode=ColorMatchMode::rgb_paper;
+    const auto& limit=ReviewAt(value,"gainLimit");
+    if(limit.kind!=ReviewJson::JsonKind::null_value){c.gain_limit_set=true;c.gain_limit=ReviewDouble(limit);if(!(c.gain_limit>=1.0))ReviewReject();}
+    c.global_measured=ReviewBoolean(ReviewAt(value,"globalMeasured"));c.global_limited=ReviewBoolean(ReviewAt(value,"globalLimited"));
+    c.covered_cells=ReviewUnsigned(ReviewAt(value,"coveredCells"),cells_maximum);c.paper_cells=ReviewUnsigned(ReviewAt(value,"paperCells"),c.covered_cells);
+    c.local_limited_rows=ReviewUnsigned(ReviewAt(value,"localLimitedRows"),rows);
+    c.measured_global=ReviewGains(ReviewAt(value,"measuredGainBgr"));c.global_gain=ReviewGains(ReviewAt(value,"globalGainBgr"));
+    c.local_minimum=ReviewGains(ReviewAt(value,"localMinimumBgr"));c.local_maximum=ReviewGains(ReviewAt(value,"localMaximumBgr"));
+    for(int k=0;k<3;++k){
+        if(c.local_minimum[k]>c.local_maximum[k])ReviewReject();
+        if(!c.global_measured && c.measured_global[k]!=1.0)ReviewReject();
+        if(c.gain_limit_set){
+            const double m=c.gain_limit;
+            if(c.global_gain[k]<1/m || c.global_gain[k]>m || c.local_minimum[k]*c.global_gain[k]<1/m*(1-1e-9) || c.local_maximum[k]*c.global_gain[k]>m*(1+1e-9))ReviewReject();
+        }
+    }
+    const bool kept=c.global_gain==c.measured_global;
+    if(c.global_limited==kept)ReviewReject();
+    if(c.local_limited_rows && !c.gain_limit_set)ReviewReject();
+    if(!c.gain_limit_set && (c.global_limited || !kept))ReviewReject();
+    const auto& fallback=ReviewAt(value,"fallback");
+    if(fallback.kind!=ReviewJson::JsonKind::null_value){
+        if(ReviewString(fallback)!=ColorMatchModeCode(ColorMatchMode::luminance_ratio))ReviewReject();
+        c.luminance_fallback=true;
+    }
+    // Fallback if and only if the global gain was not measured; the fallback render has no colour gains.
+    if(c.luminance_fallback==c.global_measured)ReviewReject();
+    if(c.luminance_fallback){
+        const std::array<double,3> unit{1,1,1};
+        if(c.global_limited || c.local_limited_rows || c.global_gain!=unit || c.local_minimum!=unit || c.local_maximum!=unit)ReviewReject();
+    }else{
+        const auto needed=std::max<std::uint64_t>(1,static_cast<std::uint64_t>(std::ceil(kPaperSelectionDesign.minimum_cell_fraction*static_cast<double>(c.covered_cells))));
+        if(c.paper_cells<needed)ReviewReject();
+    }
+    return c;
+}
 SeamBlendRecord ReadFixedSeamBlend(const ReviewValue& value,std::uint32_t seam_column,std::uint32_t width,std::uint32_t height){
-    ReviewFields(value,{"method","widthPixels","edgeMarginPixels","differenceMean","differenceMaximum","brightness"});
+    ReviewFields(value,{"method","widthPixels","edgeMarginPixels","differenceMean","differenceMaximum","brightness"},{"colorMatch"});
     if(ReviewString(ReviewAt(value,"method"))!="fixed-seam")ReviewReject();
     const auto& light=ReviewAt(value,"brightness");
     ReviewFields(light,{"windowHalfWidthPixels","smoothingRows","ratioMinimum","ratioMaximum","saturationLimitedPixels"});
@@ -274,6 +340,7 @@ SeamBlendRecord ReadFixedSeamBlend(const ReviewValue& value,std::uint32_t seam_c
     try{ValidateSeamBlendSettings(b.settings);}catch(const std::invalid_argument&){ReviewReject();}
     if(seam_column>=width)ReviewReject();
     b.fixed_seam=true;b.seam_x.assign(height,seam_column);b.summary=SummarizeSeam(b.seam_x);
+    if(value.object.contains("colorMatch"))b.color=ReadColorMatch(ReviewAt(value,"colorMatch"),static_cast<std::uint64_t>(width)*height,height);
     b.difference_mean=ReviewDouble(ReviewAt(value,"differenceMean"));b.difference_maximum=ReviewDouble(ReviewAt(value,"differenceMaximum"));
     b.ratio_minimum=ReviewDouble(ReviewAt(light,"ratioMinimum"));b.ratio_maximum=ReviewDouble(ReviewAt(light,"ratioMaximum"));
     b.saturation_limited_pixels=ReviewUnsigned(ReviewAt(light,"saturationLimitedPixels"),static_cast<std::uint64_t>(width)*height);

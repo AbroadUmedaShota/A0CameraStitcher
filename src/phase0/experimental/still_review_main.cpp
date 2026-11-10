@@ -85,10 +85,20 @@ struct Inspector {
         SetWindowTextW(buttons[30],show_seam?L"継ぎ目を隠す":L"継ぎ目を表示");
         SetWindowTextW(buttons[31],blend==review::BlendMethod::seam_cut?L"合成: 継ぎ目":L"合成: 線形");
     }
+    // #415: the gain that matches B to A per channel (B, G, R), when the saved composite recorded it.
+    std::wstring ColorText() const {
+        const auto& b=current.record.blend;
+        if(!b || b->color.mode!=review::ColorMatchMode::rgb_paper)return {};
+        const auto& c=b->color;const auto fixed=[](double v){return a0::phase0::experimental::StillFixed(v,3);};
+        std::wstring text=L"色の比 A/B（B・G・R。B 全体に掛ける）: ";
+        if(c.global_measured)text+=fixed(c.global_gain[0])+L" / "+fixed(c.global_gain[1])+L" / "+fixed(c.global_gain[2])+L"（紙の画素 "+std::to_wstring(c.paper_cells)+L"）";
+        else text+=L"測れませんでした（紙の画素が足りない、または白飛び）。色は合わせず、明るさの比だけで合わせています";
+        return text+L"\r\n";
+    }
     std::wstring BlendText() const {
         const auto& b=current.record.blend;
-        if(lens)return a0::phase0::experimental::FixedCompositeLensDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n";const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
-        if(current.record.fixed_composite)return a0::phase0::experimental::FixedCompositeDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;
+        if(lens)return a0::phase0::experimental::FixedCompositeLensDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText();const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
+        if(current.record.fixed_composite)return a0::phase0::experimental::FixedCompositeDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText()+next;
         if(!b)return L"合成（保存JPEG）: 線形 feather\r\n"+next;
         return L"合成（保存JPEG）: 継ぎ目で切替\r\n継ぎ目 x: "+std::to_wstring(b->summary.x_minimum)+L"〜"+std::to_wstring(b->summary.x_maximum)+L" px\r\n混ぜる幅: "+std::to_wstring(b->settings.width_pixels)+
             L" px\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+next;

@@ -224,11 +224,11 @@ int main(){
             CHECK(dark.record.seam_x==bright.record.seam_x && dark.image.width==bright.image.width && dark.image.height==bright.image.height);
             CHECK(Near(dark.record.ratio_maximum,2,0.05) && Near(bright.record.ratio_minimum,0.5,0.05));
             CHECK(bright.image.bgr==again.image.bgr && bright.record.seam_x==again.record.seam_x); // deterministic
-            // Right beside the seam B is matched to A in both cases; the far side fades back to B's own level.
+            // B is matched to A in both cases, beside the seam and, since the global gain stays (#415), at the far edge.
             const auto at=[&](const SeamBlendResult& r,unsigned x,unsigned y,unsigned c){return r.image.bgr[(static_cast<size_t>(y)*r.image.width+x)*3+c];};
             const unsigned row=plan.output_height/2,beside=plan.view.seam_column+plan.settings.width_pixels+1;
             CHECK(Near(at(dark,beside,row,0),100,6) && Near(at(bright,beside,row,0),100,6));
-            CHECK(at(dark,plan.output_width-1,row,0)<=60 && at(bright,plan.output_width-1,row,0)>=190);
+            CHECK(Near(at(dark,plan.output_width-1,row,0),100,6) && Near(at(bright,plan.output_width-1,row,0),100,6));
             // The inputs are untouched.
             CHECK(a.bgr==Flat(400,267,{100,100,100}).bgr);
         }

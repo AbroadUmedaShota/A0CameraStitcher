@@ -22,6 +22,18 @@ using a0::m2::render::BgrImage;
 namespace render = a0::m2::render;
 
 namespace {
+// The checks below are those of #368, #398 and #405: they assert the luminance ratio, the pinned outputs
+// included, so they call the renders with kColorMatchLuminanceRatio. The colour match of #415 is covered
+// by seam_color_match_tests.cpp.
+SeamBlendResult LegacyMappedSeam(const BgrImage& a, const BgrImage& b, const MappedFixedSeamInput& input, std::uint32_t column, const SeamBlendSettings& s) {
+    return RenderMappedFixedSeam(a, b, input, column, s, kColorMatchLuminanceRatio);
+}
+SeamBlendResult LegacyPairSeam(const BgrImage& a, const BgrImage& b, const render::PairRenderParameters& p, std::uint32_t column, const SeamBlendSettings& s) {
+    return RenderPairFixedSeam(a, b, p, column, s, kColorMatchLuminanceRatio);
+}
+SeamBlendResult LegacyDocumentSeam(const BgrImage& a, const BgrImage& b, const render::DocumentRenderParameters& p, std::uint32_t column, const SeamBlendSettings& s) {
+    return RenderDocumentFixedSeam(a, b, p, column, s, kColorMatchLuminanceRatio);
+}
 BgrImage Flat(unsigned w, unsigned h, std::array<std::uint8_t, 3> bgr) {
     BgrImage image{w, h, std::vector<std::uint8_t>(static_cast<size_t>(w) * h * 3)};
     for (size_t i = 0; i < image.bgr.size(); i += 3) for (int c = 0; c < 3; ++c) image.bgr[i + c] = bgr[c];
@@ -234,9 +246,9 @@ int main() {
                 {"rotated by two degrees", &sa, &rb, rq, 363, small},
             };
             for (const auto& c : cases) {
-                const auto reference = RenderPairFixedSeam(*c.a, *c.b, c.parameters, c.column, c.settings);
+                const auto reference = LegacyPairSeam(*c.a, *c.b, c.parameters, c.column, c.settings);
                 const auto input = PairMappedFixedSeamInput(c.a->width, c.a->height, c.b->width, c.b->height, c.parameters);
-                const auto mapped = RenderMappedFixedSeam(*c.a, *c.b, input, c.column, c.settings);
+                const auto mapped = LegacyMappedSeam(*c.a, *c.b, input, c.column, c.settings);
                 check(Identical(reference, mapped), (std::string("a pair mapping gives the bytes and the record of RenderPairFixedSeam: ") + c.name).c_str());
                 check(mapped.record.fixed_seam && mapped.image.width == input.width && mapped.image.height == input.height, "mapped fixed seam record and size");
             }
@@ -281,7 +293,7 @@ int main() {
             // Deterministic.
             {
                 const auto input = PairMappedFixedSeamInput(sw, sh, sw, sh, rq);
-                check(Identical(RenderMappedFixedSeam(sa, rb, input, 363, small), RenderMappedFixedSeam(sa, rb, input, 363, small)), "mapped render is deterministic");
+                check(Identical(LegacyMappedSeam(sa, rb, input, 363, small), LegacyMappedSeam(sa, rb, input, 363, small)), "mapped render is deterministic");
             }
         }
 
@@ -296,8 +308,8 @@ int main() {
             const render::CameraProjection ca{{1, 1, 0, 0}, {0, 0, 0, 0, 0}, {10, 0, -0.5 + 1e-9, 0, 10, -0.5 + 1e-9, 0, 0, 1}};
             const render::CameraProjection cb{{1, 1, 0, 0}, {0, 0, 0, 0, 0}, {10, 0, -100.5 + 1e-9, 0, 10, -0.5 + 1e-9, 0, 0, 1}};
             const render::DocumentRenderParameters document{raster, ca, cb, a0::m2::StitchLayout::camera_a_left_camera_b_right, render::Resampling::bilinear};
-            const auto vone = RenderPairFixedSeam(na, nb, Shift(100), 150, small);
-            const auto vtwo = RenderDocumentFixedSeam(na, nb, document, 150, small);
+            const auto vone = LegacyPairSeam(na, nb, Shift(100), 150, small);
+            const auto vtwo = LegacyDocumentSeam(na, nb, document, 150, small);
             int worst = 0;
             size_t different = 0;
             check(vone.image.width == vtwo.image.width && vone.image.height == vtwo.image.height, "zero-distortion document raster has the pair canvas size");
@@ -378,8 +390,8 @@ int main() {
         check(g_similarity.top > 3 * g_truth.top && g_similarity.bottom > 3 * g_truth.bottom, "similarity: A and B disagree at both ends of the seam");
 
         // Render through the document entry.
-        const auto sewn = RenderDocumentFixedSeam(photo_a, photo_b, truth, truth_column, settings);
-        const auto sewn_similarity = RenderPairFixedSeam(photo_a, photo_b, similarity, similarity_column, settings);
+        const auto sewn = LegacyDocumentSeam(photo_a, photo_b, truth, truth_column, settings);
+        const auto sewn_similarity = LegacyPairSeam(photo_a, photo_b, similarity, similarity_column, settings);
         std::cout << "seam difference |A - ratio*B| mean / maximum: document " << sewn.record.difference_mean << " / " << sewn.record.difference_maximum
             << "   similarity " << sewn_similarity.record.difference_mean << " / " << sewn_similarity.record.difference_maximum
             << "   ratio " << sewn.record.ratio_minimum << ".." << sewn.record.ratio_maximum << '\n';
@@ -388,8 +400,8 @@ int main() {
         check(sewn.record.difference_mean * 3 < sewn_similarity.record.difference_mean && sewn.record.difference_maximum < sewn_similarity.record.difference_maximum,
             "the seam of the document render differs less than the similarity's");
         check(sewn.record.ratio_minimum > 0.97 && sewn.record.ratio_maximum < 1.03, "equal paper in both cameras gives a brightness ratio near one");
-        check(Identical(sewn, RenderDocumentFixedSeam(photo_a, photo_b, truth, truth_column, settings)), "document render is deterministic");
-        check(Identical(sewn, RenderMappedFixedSeam(photo_a, photo_b, truth_input, truth_column, settings)), "the document entry is the mapped entry on its mappings");
+        check(Identical(sewn, LegacyDocumentSeam(photo_a, photo_b, truth, truth_column, settings)), "document render is deterministic");
+        check(Identical(sewn, LegacyMappedSeam(photo_a, photo_b, truth_input, truth_column, settings)), "the document entry is the mapped entry on its mappings");
 
         // One sampling of the raw pixels: left of the blend the output is A at the mapped position, right of it B times the gain.
         {
@@ -416,12 +428,12 @@ int main() {
             bool agrees = narrow.last > narrow.first + 10;
             for (const std::uint32_t column : {narrow.first - 1, narrow.first, narrow.last, narrow.last + 1}) {
                 bool renders = true;
-                try { (void)RenderDocumentFixedSeam(photo_a, photo_b, truth, column, small); } catch (const std::invalid_argument&) { renders = false; }
+                try { (void)LegacyDocumentSeam(photo_a, photo_b, truth, column, small); } catch (const std::invalid_argument&) { renders = false; }
                 agrees = agrees && CanRenderDocumentFixedSeam(photo_a, photo_b, truth, column, small) == renders && renders == (column >= narrow.first && column <= narrow.last);
             }
             check(agrees, "CanRenderDocumentFixedSeam agrees with RenderDocumentFixedSeam; the columns are those with half a blend width of both cameras on every row");
-            reject([&] { (void)RenderDocumentFixedSeam(photo_a, photo_b, truth, 0, small); }, "a seam column left of the overlap fails");
-            reject([&] { (void)RenderDocumentFixedSeam(photo_a, photo_b, truth, truth_input.width - 1, small); }, "a seam column right of the overlap fails");
+            reject([&] { (void)LegacyDocumentSeam(photo_a, photo_b, truth, 0, small); }, "a seam column left of the overlap fails");
+            reject([&] { (void)LegacyDocumentSeam(photo_a, photo_b, truth, truth_input.width - 1, small); }, "a seam column right of the overlap fails");
             // The band is the brute-force run of every row, and each row is one run.
             const auto rows = MappedFixedSeamBand(photo_a, photo_b, truth_input);
             bool same = rows.size() == raster.height_pixels;
@@ -475,8 +487,8 @@ int main() {
                 if (!live_column && CanRenderMappedFixedSeam(live_a, live_b, live, c, live_settings)) live_column = c;
             }
             check(live_column && std::abs(double(live_column) - target) <= 2, "a reduced seam column can be sewn within two columns of the scaled column");
-            const auto reduced = RenderMappedFixedSeam(live_a, live_b, live, live_column, live_settings);
-            const auto full = RenderMappedFixedSeam(photo_a, photo_b, truth_input, truth_column, kSeamBlendDesign);
+            const auto reduced = LegacyMappedSeam(live_a, live_b, live, live_column, live_settings);
+            const auto full = LegacyMappedSeam(photo_a, photo_b, truth_input, truth_column, kSeamBlendDesign);
             // The full-size render, reduced by the same box filter, against the reduced render, near the seam.
             const auto distance = [&](const SeamBlendResult& other) {
                 double sum = 0;
@@ -490,7 +502,7 @@ int main() {
                 return sum / n;
             };
             const auto off = CanRenderMappedFixedSeam(live_a, live_b, live_off, live_column, live_settings)
-                ? RenderMappedFixedSeam(live_a, live_b, live_off, live_column, live_settings) : reduced;
+                ? LegacyMappedSeam(live_a, live_b, live_off, live_column, live_settings) : reduced;
             const double agree = distance(reduced), disagree = distance(off);
             std::cout << "reduced vs full-size render near the seam: mean absolute difference " << agree << " levels; with B one reduced pixel off " << disagree << '\n';
             check(reduced.image.width == live.width && reduced.image.height == live.height && reduced.record.fixed_seam, "reduced render size");
@@ -501,41 +513,41 @@ int main() {
         {
             const auto fa = Flat(200, 80, {200, 200, 200}), fb = Flat(200, 80, {100, 200, 238});
             const auto input = PairMappedFixedSeamInput(200, 80, 200, 80, Shift(100));
-            check(RenderMappedFixedSeam(fa, fb, input, 150, small).record.seam_x.front() == 150, "a flat pair renders through its mappings");
+            check(LegacyMappedSeam(fa, fb, input, 150, small).record.seam_x.front() == 150, "a flat pair renders through its mappings");
             // The columns whose weight is strictly between 0 and 1 must be covered by both cameras.
             for (const std::uint32_t column : {0u, 50u, 99u, 100u, 199u, 200u, 299u, 300u, 4000000000u, 0xffffffffu})
-                reject([&] { (void)RenderMappedFixedSeam(fa, fb, input, column, small); }, "mapped: seam column out of the overlap (width 4)");
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, input, 150, {4, 8, 8, 40000}); }, "mapped: invalid settings");
+                reject([&] { (void)LegacyMappedSeam(fa, fb, input, column, small); }, "mapped: seam column out of the overlap (width 4)");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, input, 150, {4, 8, 8, 40000}); }, "mapped: invalid settings");
             auto broken = fb;
             broken.bgr.pop_back();
-            reject([&] { (void)RenderMappedFixedSeam(fa, broken, input, 150, small); }, "mapped: broken buffer");
+            reject([&] { (void)LegacyMappedSeam(fa, broken, input, 150, small); }, "mapped: broken buffer");
             reject([&] { (void)MappedFixedSeamBand(fa, broken, input); }, "mapped band: broken buffer");
             auto no_b = input;
             no_b.camera_b = nullptr;
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, no_b, 150, small); }, "mapped: missing mapping");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, no_b, 150, small); }, "mapped: missing mapping");
             auto empty = input;
             empty.width = 0;
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, empty, 150, small); }, "mapped: empty output");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, empty, 150, small); }, "mapped: empty output");
             auto huge = input;
             huge.width = 100000;
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, huge, 150, small); }, "mapped: output too large");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, huge, 150, small); }, "mapped: output too large");
             reject([&] { (void)CanRenderMappedFixedSeam(fa, fb, input, 150, {4, 8, 8, 40000}); }, "mapped can: invalid settings");
             // No row covered by both.
             auto disjoint = input;
             disjoint.camera_b = [](render::Point, render::Point& raw) { raw = {-5, -5}; return true; };
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, disjoint, 150, small); }, "mapped: no overlap");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, disjoint, 150, small); }, "mapped: no overlap");
             // A non-finite position is an error, not a missing sample.
             auto not_finite = input;
             not_finite.camera_b = [](render::Point p, render::Point& raw) { raw = {p.x - 100, p.y}; if (p.x == 150 && p.y == 40) raw.x = std::numeric_limits<double>::quiet_NaN(); return true; };
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, not_finite, 150, small); }, "mapped: a non-finite mapped position fails");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, not_finite, 150, small); }, "mapped: a non-finite mapped position fails");
             // An output pixel covered by neither camera outside the overlap.
             auto wider = input;
             wider.width = 310;
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, wider, 150, small); }, "mapped: an uncovered output pixel fails");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, wider, 150, small); }, "mapped: an uncovered output pixel fails");
             // A covered row that is not one run.
             auto holed = input;
             holed.camera_b = [base = input.camera_b](render::Point p, render::Point& raw) { return !(p.y == 30 && p.x >= 140 && p.x < 144) && base(p, raw); };
-            reject([&] { (void)RenderMappedFixedSeam(fa, fb, holed, 150, small); }, "mapped: a row with a hole in its overlap fails");
+            reject([&] { (void)LegacyMappedSeam(fa, fb, holed, 150, small); }, "mapped: a row with a hole in its overlap fails");
             reject([&] { (void)CanRenderMappedFixedSeam(fa, fb, holed, 150, small); }, "mapped can: a row with a hole in its overlap fails");
             check(MappedFixedSeamBand(fa, fb, holed)[30].first == 100, "the band reports the run that holds the first covered column");
             // Document entry: unsupported layout and kernel, projection that does not validate.
@@ -548,7 +560,7 @@ int main() {
             reject([&] { (void)DocumentMappedFixedSeamInput({tiny, ok, ok, a0::m2::StitchLayout::camera_a_left_camera_b_right, render::Resampling::bicubic_catmull_rom}); }, "document: bicubic kernel");
             const render::CameraProjection folded{{1, 1, 0, 0}, {0, 0, 0, 0, 0}, {10, 0, 0, 0, 10, 0, -1, 0, 1}};
             reject([&] { (void)DocumentMappedFixedSeamInput({tiny, ok, folded, a0::m2::StitchLayout::camera_a_left_camera_b_right, render::Resampling::bilinear}); }, "document: projective denominator not positive over the raster");
-            reject([&] { (void)RenderDocumentFixedSeam(ra, ra, {tiny, ok, ok, a0::m2::StitchLayout::camera_a_left_camera_b_right, render::Resampling::bicubic_catmull_rom}, 15, small); }, "document render: bicubic kernel");
+            reject([&] { (void)LegacyDocumentSeam(ra, ra, {tiny, ok, ok, a0::m2::StitchLayout::camera_a_left_camera_b_right, render::Resampling::bicubic_catmull_rom}, 15, small); }, "document render: bicubic kernel");
         }
     } catch (const std::exception& e) { ++failures; std::cerr << e.what() << '\n'; }
     std::cout << checks << " checks, " << failures << " failures\n";

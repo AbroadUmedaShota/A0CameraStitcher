@@ -228,11 +228,146 @@ void MeasureAlongSeam(const Band& band,const SeamBlendSettings& settings,SeamBle
     record.difference_mean=difference/band.height;
     const auto [lo,hi]=std::minmax_element(result.row_ratio.begin(),result.row_ratio.end());record.ratio_minimum=*lo;record.ratio_maximum=*hi;
 }
+// ---- Colour match of B to A (#415) ----
+// The gain applied to B is, per channel, global[c] * (residual[y][c] at the seam, fading to 1 at the
+// right output edge). See ColorMatch in seam_blend.hpp.
+struct ColorPlan {
+    std::array<double,3> global{1,1,1};
+    std::vector<std::array<double,3>> residual; // per output row, at the seam
+};
+// Per camera, the lowest log luminance and the highest gradient of a paper pixel.
+struct PaperLevels {float floor_a{},floor_b{};double ceiling_a{},ceiling_b{};};
+// Value at quantile q of v (v is reordered). Deterministic: it is the value of one order statistic.
+template<class T> T QuantileOf(std::vector<T>& v,double q){
+    const auto k=static_cast<size_t>(q*static_cast<double>(v.size()-1));
+    std::nth_element(v.begin(),v.begin()+static_cast<std::ptrdiff_t>(k),v.end());return v[k];
+}
+// The levels from a fixed-stride sample of the cells covered by both cameras. A band with no covered
+// cell never reaches here (SampleBandColumns rejects a row without one).
+PaperLevels MeasurePaperLevels(const Band& band,std::uint64_t& covered){
+    const auto& d=kPaperSelectionDesign;covered=0;
+    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i)covered+=band.Valid(i,y)?1u:0u;
+    const std::uint64_t stride=std::max<std::uint64_t>(1,covered/d.quantile_sample_cells);
+    std::vector<float> la,lb;std::vector<double> ga,gb;std::uint64_t k=0;
+    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i){
+        if(!band.Valid(i,y) || k++%stride)continue;
+        la.push_back(band.At(band.a,i,y));lb.push_back(band.At(band.b,i,y));
+        ga.push_back(band.Gradient(band.a,i,y));gb.push_back(band.Gradient(band.b,i,y));
+    }
+    if(la.empty())throw std::invalid_argument("seam blend has no cell covered by both cameras");
+    const auto floor_of=[&](std::vector<float>& v){return static_cast<float>(std::log1p(d.luminance_fraction*std::expm1(static_cast<double>(QuantileOf(v,d.luminance_quantile)))));};
+    return {floor_of(la),floor_of(lb),QuantileOf(ga,d.gradient_quantile),QuantileOf(gb,d.gradient_quantile)};
+}
+bool IsPaper(const Band& band,const PaperLevels& t,unsigned i,unsigned y){
+    return band.Valid(i,y) && band.At(band.a,i,y)>=t.floor_a && band.At(band.b,i,y)>=t.floor_b &&
+        band.Gradient(band.a,i,y)<=t.ceiling_a && band.Gradient(band.b,i,y)<=t.ceiling_b;
+}
+// Sums of A and of B per channel over the paper pixels: of the whole band, and per row in the window
+// around that row's seam. See PaperSelectionDesign for what a paper pixel is. The median ratio that the
+// last criterion compares with is taken from a strided sample of the pixels that meet the others.
+struct PaperSums {
+    std::array<double,3> a{},b{};std::uint64_t cells{};
+    std::array<std::vector<double>,3> row_a,row_b;
+};
+template<class MapA,class MapB>
+PaperSums SumPaper(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const PaperLevels& levels,
+    const std::vector<std::uint32_t>& seam_x,unsigned half_window){
+    const auto& d=kPaperSelectionDesign;
+    // A sample of both cameras at a band cell that is not clipped and has a positive value in every channel.
+    const auto sample=[&](unsigned i,unsigned y,std::array<double,3>& pa,std::array<double,3>& pb){
+        if(!frame.A(a,band.x0+i,y,pa) || !frame.B(b,band.x0+i,y,pb))return false;
+        if(std::max({pa[0],pa[1],pa[2],pb[0],pb[1],pb[2]})>=d.clipped_level)return false;
+        return std::min({pa[0],pa[1],pa[2],pb[0],pb[1],pb[2]})>0;
+    };
+    std::uint64_t candidates=0;
+    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i)candidates+=IsPaper(band,levels,i,y)?1u:0u;
+    const std::uint64_t stride=std::max<std::uint64_t>(1,candidates/d.quantile_sample_cells);
+    std::array<std::vector<double>,3> ratio;std::uint64_t k=0;
+    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i){
+        if(!IsPaper(band,levels,i,y) || k++%stride)continue;
+        std::array<double,3> pa{},pb{};
+        if(sample(i,y,pa,pb))for(int c=0;c<3;++c)ratio[c].push_back(pa[c]/pb[c]);
+    }
+    std::array<double,3> lowest{0,0,0},highest{0,0,0}; // no candidate: nothing is kept
+    if(!ratio[0].empty())for(int c=0;c<3;++c){const double median=QuantileOf(ratio[c],0.5);lowest[c]=median/d.ratio_tolerance;highest[c]=median*d.ratio_tolerance;}
+    PaperSums sums;for(int c=0;c<3;++c){sums.row_a[c].assign(band.height,0);sums.row_b[c].assign(band.height,0);}
+    for(unsigned y=0;y<band.height;++y){
+        const unsigned s=seam_x[y]-band.x0,first=s>half_window?s-half_window:0,last=std::min(band.width-1,s+half_window);
+        for(unsigned i=band.c0[y];i<band.c1[y];++i){
+            if(!IsPaper(band,levels,i,y))continue;
+            std::array<double,3> pa{},pb{};
+            if(!sample(i,y,pa,pb))continue;
+            bool consistent=true;
+            for(int c=0;c<3;++c){const double r=pa[c]/pb[c];consistent=consistent && r>=lowest[c] && r<=highest[c];}
+            if(!consistent)continue;
+            ++sums.cells;
+            for(int c=0;c<3;++c){
+                sums.a[c]+=pa[c];sums.b[c]+=pb[c];
+                if(i>=first && i<=last){sums.row_a[c][y]+=pa[c];sums.row_b[c][y]+=pb[c];}
+            }
+        }
+    }
+    return sums;
+}
+// Measures the global and the residual gains of B along record.seam_x (inside the band) and fills the
+// record's colour, difference and ratio fields, result.row_ratio and result.row_gain. The residual is
+// A over B-after-the-global-gain on the paper pixels of the window, smoothed along rows as the luminance
+// ratio is; where a row has no paper pixel in reach it is 1.
+// When the global gain cannot be measured it returns no plan and leaves only the counts and the
+// fallback mark in record.color: the caller then renders with the luminance ratio, which still ties B
+// to A, rather than leave B with no ratio at all.
+template<class MapA,class MapB>
+std::optional<ColorPlan> MeasureColorMatch(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const SeamBlendSettings& settings,
+    const ColorMatch& color,SeamBlendResult& result){
+    constexpr double weight[3]={0.114,0.587,0.299}; // B, G, R luminance weights, as Luminance()
+    auto& record=result.record;auto& cm=record.color;
+    cm.mode=ColorMatchMode::rgb_paper;cm.gain_limit_set=color.gain_limit.has_value();cm.gain_limit=color.gain_limit.value_or(0);
+    const double limit=color.gain_limit.value_or(0);
+    const auto levels=MeasurePaperLevels(band,cm.covered_cells);
+    auto sums=SumPaper(a,b,frame,band,levels,record.seam_x,settings.brightness_half_width_pixels);
+    cm.paper_cells=sums.cells;
+    ColorPlan plan;
+    const auto needed=std::max<std::uint64_t>(1,static_cast<std::uint64_t>(std::ceil(kPaperSelectionDesign.minimum_cell_fraction*static_cast<double>(cm.covered_cells))));
+    cm.global_measured=sums.cells>=needed && sums.a[0]>0 && sums.a[1]>0 && sums.a[2]>0 && sums.b[0]>0 && sums.b[1]>0 && sums.b[2]>0;
+    if(!cm.global_measured){cm.luminance_fallback=true;return std::nullopt;}
+    for(int c=0;c<3;++c){
+        cm.measured_global[c]=sums.a[c]/sums.b[c];
+        plan.global[c]=cm.measured_global[c];
+        if(color.gain_limit){const auto kept=std::clamp(plan.global[c],1/limit,limit);if(kept!=plan.global[c]){plan.global[c]=kept;cm.global_limited=true;}}
+        cm.global_gain[c]=plan.global[c];
+    }
+    const auto r=settings.brightness_smoothing_rows;
+    for(int c=0;c<3;++c){sums.row_a[c]=BoxRows(BoxRows(sums.row_a[c],r),r);sums.row_b[c]=BoxRows(BoxRows(sums.row_b[c],r),r);}
+    plan.residual.assign(band.height,{1,1,1});result.row_gain.resize(band.height);result.row_ratio.resize(band.height);
+    cm.local_minimum={1,1,1};cm.local_maximum={1,1,1};double difference=0;
+    for(unsigned y=0;y<band.height;++y){
+        bool limited=false;double numerator=0,denominator=0;
+        for(int c=0;c<3;++c){
+            double residual=sums.row_a[c][y]>0 && sums.row_b[c][y]>0?sums.row_a[c][y]/(plan.global[c]*sums.row_b[c][y]):1;
+            if(color.gain_limit){const auto kept=std::clamp(residual,1/(limit*plan.global[c]),limit/plan.global[c]);limited=limited || kept!=residual;residual=kept;}
+            plan.residual[y][c]=residual;result.row_gain[y][c]=plan.global[c]*residual;
+            numerator+=weight[c]*result.row_gain[y][c]*sums.row_b[c][y];denominator+=weight[c]*sums.row_b[c][y];
+            cm.local_minimum[c]=y?std::min(cm.local_minimum[c],residual):residual;cm.local_maximum[c]=y?std::max(cm.local_maximum[c],residual):residual;
+        }
+        cm.local_limited_rows+=limited?1u:0u;
+        result.row_ratio[y]=denominator>0?numerator/denominator:weight[0]*result.row_gain[y][0]+weight[1]*result.row_gain[y][1]+weight[2]*result.row_gain[y][2];
+        // The difference at the seam pixel: luminance of A against B after the gain applied there.
+        std::array<double,3> pa{},pb{};
+        if(frame.A(a,record.seam_x[y],y,pa) && frame.B(b,record.seam_x[y],y,pb)){
+            const double d=std::abs(Luminance(pa)-(weight[0]*result.row_gain[y][0]*pb[0]+weight[1]*result.row_gain[y][1]*pb[1]+weight[2]*result.row_gain[y][2]*pb[2]));
+            difference+=d;record.difference_maximum=std::max(record.difference_maximum,d);
+        }
+    }
+    record.difference_mean=difference/band.height;
+    const auto [lo,hi]=std::minmax_element(result.row_ratio.begin(),result.row_ratio.end());record.ratio_minimum=*lo;record.ratio_maximum=*hi;
+    return plan;
+}
 // Mixes A and B along record.seam_x with row_ratio (both set), as described in
 // seam_blend.hpp. Takes the partly filled result and returns it with the image
-// and the seam summary.
+// and the seam summary. With a ColorPlan the gain of B is the per-channel one of the plan; row_ratio
+// is then a record only.
 template<class MapA,class MapB>
-SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const SeamBlendSettings& settings,SeamBlendResult result){
+SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const SeamBlendSettings& settings,SeamBlendResult result,const ColorPlan* color=nullptr){
     auto& record=result.record;
     record.summary=SummarizeSeam(record.seam_x);
     const unsigned width=frame.width,height=frame.height;
@@ -249,6 +384,18 @@ SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame
             else{ha=frame.A(a,x,y,pa);hb=frame.B(b,x,y,pb);}
             if(!ha && !hb)throw std::invalid_argument("approved crop contains an uncovered output pixel");
             const double w=ha && hb?target:hb?1:0;
+            if(color){
+                // Global gain times the residual, which fades to 1 to the right of the seam. When a channel of B
+                // would pass 255 the three gains are lowered together, so the hue of the match stays.
+                std::array<double,3> gain{};const auto& residual=color->residual[y];
+                for(int c=0;c<3;++c)gain[c]=color->global[c]*(x<=seam?residual[c]:residual[c]+(1-residual[c])*(x-seam)/fade);
+                if(w>0){
+                    const double peak=std::max({pb[0]*gain[0],pb[1]*gain[1],pb[2]*gain[2]});
+                    if(peak>255){const double scale=255/peak;for(auto& g:gain)g*=scale;++record.saturation_limited_pixels;}
+                }
+                for(int c=0;c<3;++c)row[x*3+c]=static_cast<std::uint8_t>(std::clamp(std::lround((1-w)*pa[c]+w*gain[c]*pb[c]),0L,255L));
+                continue;
+            }
             double gain=x<=seam?ratio:ratio+(1-ratio)*(x-seam)/fade;
             if(w>0 && gain>1){
                 const double peak=std::max({pb[0],pb[1],pb[2]});
@@ -272,6 +419,26 @@ bool SeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
 void RequireSeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
     if(!SeamInOverlap(band,column,blend_width))throw std::invalid_argument("seam column is outside the overlap of A and B");
 }
+// The render of a fixed seam on a decided band, for the pair mapping and for mapped pairs alike.
+template<class MapA,class MapB>
+SeamBlendResult RenderFixedOnBand(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,Band band,std::uint32_t seam_column,
+    const SeamBlendSettings& settings,const ColorMatch& color){
+    SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
+    RequireSeamInOverlap(band,seam_column,settings.width_pixels);
+    record.seam_x.assign(band.height,seam_column);
+    if(color.mode==ColorMatchMode::rgb_paper){
+        const auto plan=MeasureColorMatch(a,b,frame,band,settings,color,result);
+        if(plan){
+            band=Band{};
+            return ComposeAlongSeam(a,b,frame,settings,std::move(result),&*plan);
+        }
+        // The global gain is not measurable: fall through to the luminance ratio, which sets the
+        // difference and ratio fields and row_ratio itself. record.color keeps the counts and the mark.
+    }
+    MeasureAlongSeam(band,settings,result);
+    band=Band{};
+    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+}
 } // namespace
 
 SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,const SeamBlendSettings& settings){
@@ -286,17 +453,10 @@ SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const rend
     return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result));
 }
 
-SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    ValidateSeamBlendSettings(settings);
+SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
+    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);
     const auto prepared=Prepare(a,b,parameters);
-    SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
-    {
-        const auto band=SampleBand(a,b,prepared);
-        RequireSeamInOverlap(band,seam_column,settings.width_pixels);
-        record.seam_x.assign(band.height,seam_column);
-        MeasureAlongSeam(band,settings,result);
-    }
-    return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result));
+    return RenderFixedOnBand(a,b,prepared.frame,SampleBand(a,b,prepared),seam_column,settings,color);
 }
 
 bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
@@ -327,17 +487,10 @@ std::vector<MappedOverlapRow> MappedFixedSeamBand(const BgrImage& a,const BgrIma
     return OverlapRows(PrepareMapped(a,b,input),a,b);
 }
 
-SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    ValidateSeamBlendSettings(settings);
+SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
+    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);
     const auto frame=PrepareMapped(a,b,input);
-    SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
-    {
-        const auto band=SampleMappedBand(a,b,frame);
-        RequireSeamInOverlap(band,seam_column,settings.width_pixels);
-        record.seam_x.assign(band.height,seam_column);
-        MeasureAlongSeam(band,settings,result);
-    }
-    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+    return RenderFixedOnBand(a,b,frame,SampleMappedBand(a,b,frame),seam_column,settings,color);
 }
 
 bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){
@@ -345,8 +498,8 @@ bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFi
     return SeamInOverlap(SampleMappedBand(a,b,PrepareMapped(a,b,input)),seam_column,settings.width_pixels);
 }
 
-SeamBlendResult RenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    return RenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings);
+SeamBlendResult RenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
+    return RenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings,color);
 }
 
 bool CanRenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){

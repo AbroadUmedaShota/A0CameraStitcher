@@ -123,7 +123,9 @@ fs::path CopyOf(const fs::path& folder,const std::string& name){
 // ---- a scene on the sheet, seen by both the full-size capture and the live view ----
 // Bars of a distinct level at known sheet X, painted through the cameras of the profile: a document
 // sample is projected to its raw pixel and that pixel (scaled to the live view where needed) is set.
-constexpr std::uint8_t kBase=100,kBarLevel=250;
+// The paper is not darker than 0.4 of the bars (kPaperSelectionDesign.luminance_fraction): a page whose
+// bars are 2.5 times brighter than its paper, in a band where they cover a tenth of the cells, is not a page.
+constexpr std::uint8_t kBase=140,kBarLevel=250;
 constexpr unsigned kThreshold=175;
 struct Bar {double x0,x1;};
 constexpr Bar kBarA{548,553};            // camera A only
@@ -175,9 +177,17 @@ void V1IsPinned(){
     const auto plan=PlanFixedPreview(condition,MountOrientation::normal,320,214);
     CHECK(!plan.skip && !plan.lens_aware && !plan.mapped);
     const auto drawn=RenderFixedPreview(plan,Textured(320,214,1),Textured(320,214,2));
-    // The bytes of the v1 C before the lens-aware C was added (Debug and Release agree).
     CHECK(plan.output_width==481 && plan.output_height==212 && plan.view.seam_column==241);
-    CHECK(HashOfImage(drawn.image)=="fbe92c281b6686e4b5ba50e4dd6054d4c7096a96d16cb27674376abeb1441d47");
+    // The bytes of the v1 C before the lens-aware C was added (Debug and Release agree), which the luminance
+    // ratio still draws. C now matches B to A per channel (#415): the same frames, a different picture.
+    const auto before=RenderPairFixedSeam(Textured(320,214,1),Textured(320,214,2),plan.view.parameters,plan.view.seam_column,plan.settings,kColorMatchLuminanceRatio);
+    CHECK(HashOfImage(before.image)=="fbe92c281b6686e4b5ba50e4dd6054d4c7096a96d16cb27674376abeb1441d47");
+    const auto matched=RenderPairFixedSeam(Textured(320,214,1),Textured(320,214,2),plan.view.parameters,plan.view.seam_column,plan.settings);
+    CHECK(drawn.image.bgr==matched.image.bgr && drawn.record.color.mode==ColorMatchMode::rgb_paper);
+    // The two frames are unrelated textures, not a page seen twice, so the gains are whatever the paper selection
+    // makes of them (about 1.15 in each channel here); the pin below holds the colour match to those bytes.
+    CHECK(drawn.record.color.global_measured && Near(drawn.record.color.global_gain[1],1.15,0.01));
+    CHECK(HashOfImage(drawn.image)=="6ff236fa9b758e3a2443c8abaf0f72657b63e254b3158e09d2541b364a65151e");
 }
 
 void Grid(){
@@ -459,7 +469,9 @@ void States(const fs::path& normal_folder,const fs::path& rotated_folder){
         const auto choice=ChoosePreviewC(v1,MountOrientation::normal,320,214);
         CHECK(choice.mode==PreviewCMode::fixed_composite && !choice.plan.lens_aware && !choice.plan.mapped);
         CHECK(choice.plan.view.seam_column==241);
-        CHECK(HashOfImage(RenderFixedPreview(choice.plan,Textured(320,214,1),Textured(320,214,2)).image)=="fbe92c281b6686e4b5ba50e4dd6054d4c7096a96d16cb27674376abeb1441d47");
+        CHECK(HashOfImage(RenderPairFixedSeam(Textured(320,214,1),Textured(320,214,2),choice.plan.view.parameters,choice.plan.view.seam_column,choice.plan.settings,kColorMatchLuminanceRatio).image)==
+            "fbe92c281b6686e4b5ba50e4dd6054d4c7096a96d16cb27674376abeb1441d47");
+        CHECK(HashOfImage(RenderFixedPreview(choice.plan,Textured(320,214,1),Textured(320,214,2)).image)=="6ff236fa9b758e3a2443c8abaf0f72657b63e254b3158e09d2541b364a65151e");
         fs::remove_all(folder);
     }
 }
@@ -479,15 +491,16 @@ void Frames(const FixedPreviewSource& source){
     CHECK(bright.image.bgr==again.image.bgr && bright.record.seam_x==again.record.seam_x); // deterministic
     const auto at=[&](const SeamBlendResult& r,unsigned x,unsigned y,unsigned c){return r.image.bgr[(static_cast<size_t>(y)*r.image.width+x)*3+c];};
     const unsigned row=plan.output_height/2,beside=plan.view.seam_column+plan.settings.width_pixels+1;
-    // B is brought towards A by the measured ratio, fading linearly back to B's own level at the right edge.
+    // B is brought to A by the global gain, which stays to the right edge, times the residual at the seam, which
+    // fades linearly to 1 (#415).
     const auto expected=[&](const SeamBlendResult& r,double b,unsigned x){
-        const double ratio=r.row_ratio[row],fade=double(plan.output_width)-plan.view.seam_column;
-        return b*(ratio+(1-ratio)*(x-double(plan.view.seam_column))/fade);
+        const double global=r.record.color.global_gain[0],residual=r.row_gain[row][0]/global,fade=double(plan.output_width)-plan.view.seam_column;
+        return b*global*(residual+(1-residual)*(x-double(plan.view.seam_column))/fade);
     };
     CHECK(Near(dark.row_ratio[row],2,0.05) && Near(bright.row_ratio[row],0.5,0.05));
     CHECK(Near(at(dark,beside,row,0),expected(dark,50,beside),2.5) && Near(at(bright,beside,row,0),expected(bright,200,beside),2.5));
     CHECK(Near(at(dark,plan.view.seam_column+1,row,0),expected(dark,50,plan.view.seam_column+1),2.5) && Near(at(dark,plan.view.seam_column+1,row,0),100,10));
-    CHECK(at(dark,plan.output_width-1,row,0)<=60 && at(bright,plan.output_width-1,row,0)>=190);
+    CHECK(Near(at(dark,plan.output_width-1,row,0),100,6) && Near(at(bright,plan.output_width-1,row,0),100,6));
     CHECK(a.bgr==Flat(400,267,100).bgr); // the inputs are untouched
     // A plan made again from the same file draws the same picture.
     const auto second=ChoosePreviewC(source,MountOrientation::normal,400,267);
@@ -544,7 +557,7 @@ void Measure(const FixedPreviewSource& source){
         const auto live=LiveView(source.loaded_v2->profile.parameters,view.first,view.second,MountOrientation::normal);
         const double sx=view.first/7360.0,sy=view.second/4912.0;
         const auto direct=LiveViewMappedInput(source.loaded_v2->profile.parameters,plan.grid,sx,sy,view.first,view.second,false);
-        std::vector<double> table_ms,direct_ms;
+        std::vector<double> table_ms,direct_ms,luminance_ms;
         for(int i=0;i<15;++i){
             auto t0=std::chrono::steady_clock::now();
             (void)RenderFixedPreview(plan,live.a,live.b);
@@ -552,10 +565,13 @@ void Measure(const FixedPreviewSource& source){
             t0=std::chrono::steady_clock::now();
             (void)RenderMappedFixedSeam(live.a,live.b,direct,plan.view.seam_column,plan.settings);
             direct_ms.push_back(MillisecondsSince(t0));
+            t0=std::chrono::steady_clock::now();
+            (void)RenderMappedFixedSeam(live.a,live.b,direct,plan.view.seam_column,plan.settings,kColorMatchLuminanceRatio);
+            luminance_ms.push_back(MillisecondsSince(t0));
         }
         std::cout<<"measure "<<view.first<<'x'<<view.second<<": grid "<<plan.output_width<<'x'<<plan.output_height<<" ("<<plan.output_width*plan.output_height<<" px), plan with table "
             <<plan_ms<<" ms, frame with table "<<MedianMilliseconds(table_ms)<<" ms, frame with direct mapping "<<MedianMilliseconds(direct_ms)
-            <<" ms, table "<<(plan.output_width*plan.output_height*sizeof(render::Point)*2)/1024<<" KiB\n";
+            <<" ms (luminance ratio of before #415 "<<MedianMilliseconds(luminance_ms)<<" ms), table "<<(plan.output_width*plan.output_height*sizeof(render::Point)*2)/1024<<" KiB\n";
     }
     // A region of the size of the whole sheet (the fixture cameras reach from 0 to 1175 mm across): the grid of a real rig.
     {
@@ -570,7 +586,7 @@ void Measure(const FixedPreviewSource& source){
             const auto live=LiveView(sheet.profile.parameters,view.first,view.second,MountOrientation::normal);
             const double sx=view.first/7360.0,sy=view.second/4912.0;
             const auto direct=LiveViewMappedInput(sheet.profile.parameters,plan.grid,sx,sy,view.first,view.second,false);
-            std::vector<double> table_ms,direct_ms;
+            std::vector<double> table_ms,direct_ms,luminance_ms;
             for(int i=0;i<7;++i){
                 auto t0=std::chrono::steady_clock::now();
                 (void)RenderFixedPreview(plan,live.a,live.b);
@@ -578,10 +594,13 @@ void Measure(const FixedPreviewSource& source){
                 t0=std::chrono::steady_clock::now();
                 (void)RenderMappedFixedSeam(live.a,live.b,direct,plan.view.seam_column,plan.settings);
                 direct_ms.push_back(MillisecondsSince(t0));
+                t0=std::chrono::steady_clock::now();
+                (void)RenderMappedFixedSeam(live.a,live.b,direct,plan.view.seam_column,plan.settings,kColorMatchLuminanceRatio);
+                luminance_ms.push_back(MillisecondsSince(t0));
             }
             std::cout<<"measure sheet "<<view.first<<'x'<<view.second<<": grid "<<plan.output_width<<'x'<<plan.output_height<<" ("<<plan.output_width*plan.output_height<<" px), plan with table "
                 <<plan_ms<<" ms, frame with table "<<MedianMilliseconds(table_ms)<<" ms, frame with direct mapping "<<MedianMilliseconds(direct_ms)
-                <<" ms, table "<<(plan.output_width*plan.output_height*sizeof(render::Point)*2)/1024<<" KiB, seam shift "<<plan.seam_shift<<'\n';
+                <<" ms (luminance ratio of before #415 "<<MedianMilliseconds(luminance_ms)<<" ms), table "<<(plan.output_width*plan.output_height*sizeof(render::Point)*2)/1024<<" KiB, seam shift "<<plan.seam_shift<<'\n';
         }
     }
     // The earlier C for reference.
@@ -591,6 +610,10 @@ void Measure(const FixedPreviewSource& source){
         std::vector<double> ms;
         for(int i=0;i<15;++i){const auto t0=std::chrono::steady_clock::now();(void)RenderFixedPreview(v1,a,b);ms.push_back(MillisecondsSince(t0));}
         std::cout<<"measure v1 640x427: output "<<v1.output_width<<'x'<<v1.output_height<<", frame "<<MedianMilliseconds(ms)<<" ms\n";
+        // The luminance ratio of before #415 on the same frames, to see what the colour match adds.
+        std::vector<double> before;
+        for(int i=0;i<15;++i){const auto t0=std::chrono::steady_clock::now();(void)RenderPairFixedSeam(a,b,v1.view.parameters,v1.view.seam_column,v1.settings,kColorMatchLuminanceRatio);before.push_back(MillisecondsSince(t0));}
+        std::cout<<"measure v1 640x427 luminance ratio: frame "<<MedianMilliseconds(before)<<" ms\n";
     }
 }
 }
