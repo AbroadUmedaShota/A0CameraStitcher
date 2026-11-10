@@ -699,7 +699,9 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
         if (fields[1] == "ev=reread") {
             const auto verdict = fields.size() == 4 ? D810FieldValue(fields[3], "verdict") : std::nullopt;
             if (!verdict || !D810FieldValue(fields[2], "t") || (*verdict != "match" && *verdict != "mismatch")) { malformed(); continue; }
-            open_op.reset();
+            // An operation without its end line counts as unconfirmed first, so
+            // a mismatching reread leaves a mismatch, never no block.
+            close_open();
             if (*verdict == "match") state.block = D810CaptureBlock::None;
             else if (state.block != D810CaptureBlock::None) state.block = D810CaptureBlock::Mismatch;
             continue;

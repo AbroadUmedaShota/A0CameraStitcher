@@ -1183,6 +1183,30 @@ void JournalStates() {
     check(ParseD810Journal("a0sw1 op=00000000000000aa ev=pl").block == D810CaptureBlock::Unconfirmed, "torn line");
     check(ParseD810Journal("a0sw1 op=00000000000000aa ev=pl\na0sw1 ev=reread t=x verdict=match\n").block == D810CaptureBlock::None, "torn line released");
     check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=mismatch sent=1 reason=x\na0sw1 ev=reread t=x verdict=mismatch\n").block == D810CaptureBlock::Mismatch, "mismatch stays");
+    // An operation without its end line, then a mismatching reread: the block
+    // becomes a known mismatch, it is not dropped.
+    const auto open_then_reread = op + "ev=plan t=x source=copy steps=1 digest=0\n" + op +
+        "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\na0sw1 ev=reread t=x verdict=mismatch\n";
+    check(ParseD810Journal(open_then_reread).block == D810CaptureBlock::Mismatch, "unended operation then mismatching reread stays blocked");
+    check(ParseD810Journal(open_then_reread + "a0sw1 ev=reread t=x verdict=match\n").block == D810CaptureBlock::None, "a matching reread releases it");
+    {
+        // A crash during a write, a restart, then a reread that finds A and B
+        // still different: capture stays blocked, also after another restart.
+        Bench bench(kAdr38Table, -1, true);
+        WriteFile(bench.file.Path(), op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\n");
+        auto restarted = bench.Restarted();
+        check(restarted.Block() == D810CaptureBlock::Unconfirmed, "restart: unconfirmed");
+        const auto reread = restarted.Reread(bench.access, bench.options);
+        check(reread.complete && !reread.check.released, "reread finds the difference");
+        check(reread.block == D810CaptureBlock::Mismatch && restarted.Block() == D810CaptureBlock::Mismatch && !restarted.CaptureAllowed(), "unconfirmed becomes mismatch, still blocked");
+        check(bench.Restarted().Block() == D810CaptureBlock::Mismatch && !bench.Restarted().CaptureAllowed(), "still blocked after another restart");
+        check(bench.Writes() == 0, "reread sends no write");
+        bench.b = Body(1667, 800, 64);
+        auto again = bench.Restarted();
+        const auto released = again.Reread(bench.access, bench.options);
+        check(released.check.released && released.block == D810CaptureBlock::None && again.CaptureAllowed(), "no difference: released");
+        check(bench.Restarted().CaptureAllowed(), "release survives a restart");
+    }
     {
         // Crash after the plan line: the next start is blocked as unconfirmed.
         Bench bench(kAdr38Table, -1, true);
