@@ -134,7 +134,7 @@ ctest --test-dir build/planar -C Release -j 1 -R '^m2_planar_calibration_contrac
 
 - 係数の選択（`distortionCoefficients`）: 真のレンズが選んだ係数だけを持つ人工の観測（`k1,k2` / `k1` / `k1,k2,p1,p2`（指定順は `p2,k2,k1,p1`）/ `[]`）で、解いた係数が 1e−6 以内で戻り、解かない係数が厳密に 0 のまま、validation の残差が 1e−4 px 未満。5 係数のレンズに `k1` だけを選ぶと残りは 0 のままで、模型の誤りが fit の残差に出る。キー無しと 5 つ全部を並べた job が profile・報告ともに同じバイト列で、キー無しの報告に `distortionModel` が無い。未知の名前・重複・大文字・配列でない値・配列の中の数値・選択の隣の未知キーを拒否
 
-試験の閾値（1e−6、1e−4 px、1 px、0.1 mm）は試験の入力で、実写の合格線ではない。実行した結果（Debug・Release とも 71 チェック・失敗 0）:
+試験の閾値（1e−6、1e−4 px、1 px、0.1 mm）は試験の入力で、実写の合格線ではない。実行した結果（Release は 120 チェック・失敗 0、Debug も CTest 合格。係数の選択の試験を足す前は 71）:
 
 | 項目 | CAM-A | CAM-B |
 | --- | --- | --- |
@@ -176,3 +176,19 @@ build/planar/Release/A0CameraStitcher.StitchEval.exe --profile-file <d>/profile.
 - 継ぎ目の食い違いは、重なりの view に写った範囲でしか測れない。`overlap` は fit に入った点での値で、`checkerboardHeldOut` も同じ view の隣の節点なので、継ぎ目の帯の上端と下端や、重なりの view が覆わない所の食い違いは表さない。帯の端にまたがせた置き方で測るのは #385 の撮り足し
 - 物理性で落ちる（`invalid-distortion`）経路は、人工の正常な観測からは起きないので、この試験では通っていない。判定の式は既存のレンズ推定と同じものを使っている
 - 公称の K を使うので、係数そのものは真のレンズの係数ではない。profile の K と係数は組で使う
+
+## 8. 係数を減らした模型の比較（道具）
+
+`scripts/Compare-PlanarDistortionModels.ps1`（PowerShell 7.5 以上）。同じ session と job に対して、`distortionCoefficients` を変えた模型ごとに `DraftCalibrator` を流し、報告から継ぎ目・残差・直線性・係数を表にする。模型の名前は解く係数をハイフンでつないだもの（`none`、`k1`、`k1-k2`、`k1-k2-k3`、`k1-k2-p1-p2`、`k1-k2-k3-p1-p2`。係数は k1 k2 k3 p1 p2 の順。5 つ全部の模型は選択キー無しで流す）。
+
+```powershell
+pwsh -NoProfile -File scripts/Compare-PlanarDistortionModels.ps1 -Session <session.json> -PlanarJob <planar-calibration-job.json> `
+  -CalibratorExecutable <A0CameraStitcher.DraftCalibrator.exe> -OutputDirectory <git の作業ツリーの外のフォルダ>
+```
+
+出力は `<模型名>\draft\profile.json`・`calibration-report.json` と `comparison.json`。実写の session と報告を含むので、出力先が git の作業ツリーの中なら拒否する。設定フォルダには何も書かない。`comparison.json` には報告に無い次の 2 つが入る。合格線は付けない。
+
+- `seamBand`: 両台の重なりの view で検出された節点を、帯の軸（`CAM-A-left-CAM-B-right` なら用紙の y）で等幅に `-Bands` 個（既定 3）に分け、各部分の点数・位置の平均・食い違い（平均・p95・最大、出力 px）・A から B を引いた符号付きの平均（dx・dy）を出す。計算は報告の `seam.overlap` と同じ式で、全体の平均・p95・最大の報告との差（`reportOverlapDifference`）を一緒に記録する。測れるのは重なりの view が写した範囲だけ
+- `leaveOneOut`（`-SkipLeaveOneOut` で省略）: カメラごと・training の view ごとに、その view とそのカメラの validation の view の役割を入れ替え（validation だった view は検出した全点で training に、training だった view は検出した全点を市松で pose と measurement に分けて validation に）、同じ模型で当て直す。係数、入れ替えた view の held-out 残差、継ぎ目、写像の揺れ（画面全体の 9 × 7 の格子の raw 画素が用紙の上でどれだけ動くか。元の役割の当て直しとの差、出力 px）を記録し、`leaveOneOutSummary` に平均・最小・最大・幅を出す
+
+試験は `tests/planar_model_compare_tests.ps1`（CTest 名 `m2_planar_model_compare`）。人工の観測（5 係数すべてを持つレンズ）で、5 係数の模型が既知の値に戻ること、帯の計算が報告の継ぎ目と一致すること、入れ替えた当て直しでも係数と写像が動かないこと、減らした模型で固定した係数が 0 のままで模型の誤りが残差に出ること、5 係数の模型の出力が選択なしの実行とバイト一致すること、不正な模型名と作業ツリーの中の出力先を拒否することを確かめる。
